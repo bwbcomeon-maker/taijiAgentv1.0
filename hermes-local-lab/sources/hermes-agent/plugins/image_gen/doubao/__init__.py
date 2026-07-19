@@ -193,6 +193,16 @@ class DoubaoImageGenProvider(ImageGenProvider):
             )
 
         raw_binding = kwargs.get("_runtime_binding")
+        reauth_guard = kwargs.get("_reauth_guard")
+        if raw_binding is not None and not callable(reauth_guard):
+            return error_response(
+                error="Doubao request authorization guard is missing.",
+                error_type="configuration_error",
+                provider=self.name,
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         try:
             api_key = (
                 require_image_gen_request_binding(
@@ -246,6 +256,7 @@ class DoubaoImageGenProvider(ImageGenProvider):
             prompt=prompt,
             aspect_ratio=aspect,
             secrets=(api_key,),
+            reauth_guard=reauth_guard,
         )
         if request_error:
             return request_error
@@ -270,6 +281,7 @@ class DoubaoImageGenProvider(ImageGenProvider):
             provider="doubao",
             extra={"size": size},
             save_image=save_url_image,
+            reauth_guard=reauth_guard,
         )
 
 

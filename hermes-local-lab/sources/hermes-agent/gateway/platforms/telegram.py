@@ -12,7 +12,6 @@ import dataclasses
 import json
 import logging
 import os
-import tempfile
 import html as _html
 import re
 from datetime import datetime, timezone
@@ -86,7 +85,7 @@ from gateway.platforms.telegram_network import (
     discover_fallback_ips,
     parse_fallback_ip_env,
 )
-from utils import atomic_replace
+from agent.provider_credentials import mutate_config_strict
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -1295,67 +1294,52 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[%s] Config file not found at %s, cannot persist thread_id", self.name, config_path)
                 return
 
-            import yaml as _yaml
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = _yaml.safe_load(f) or {}
-
-            # Navigate to platforms.telegram.extra.dm_topics, creating the path
-            # when a named delivery target asks us to create a topic that was
-            # not predeclared in config.yaml.
-            platforms = config.setdefault("platforms", {})
-            telegram_config = platforms.setdefault("telegram", {})
-            extra = telegram_config.setdefault("extra", {})
-            dm_topics = extra.setdefault("dm_topics", [])
-
             changed = False
-            matching_chat_entry = None
-            for chat_entry in dm_topics:
-                try:
-                    chat_matches = int(chat_entry.get("chat_id", 0)) == int(chat_id)
-                except (TypeError, ValueError):
-                    chat_matches = False
-                if not chat_matches:
-                    continue
-                matching_chat_entry = chat_entry
-                for t in chat_entry.setdefault("topics", []):
-                    if t.get("name") == topic_name:
-                        if replace_existing or not t.get("thread_id"):
-                            if t.get("thread_id") != thread_id:
-                                t["thread_id"] = thread_id
-                                changed = True
-                        break
-                else:
-                    chat_entry.setdefault("topics", []).append(
-                        {"name": topic_name, "thread_id": thread_id}
-                    )
-                    changed = True
-                break
 
-            if matching_chat_entry is None:
-                dm_topics.append({
-                    "chat_id": chat_id,
-                    "topics": [{"name": topic_name, "thread_id": thread_id}],
-                })
-                changed = True
+            def _mutate(config: dict) -> None:
+                nonlocal changed
+
+                # Navigate to platforms.telegram.extra.dm_topics, creating the
+                # path when a named delivery target asks us to create a topic
+                # that was not predeclared in config.yaml.
+                platforms = config.setdefault("platforms", {})
+                telegram_config = platforms.setdefault("telegram", {})
+                extra = telegram_config.setdefault("extra", {})
+                dm_topics = extra.setdefault("dm_topics", [])
+
+                matching_chat_entry = None
+                for chat_entry in dm_topics:
+                    try:
+                        chat_matches = int(chat_entry.get("chat_id", 0)) == int(chat_id)
+                    except (TypeError, ValueError):
+                        chat_matches = False
+                    if not chat_matches:
+                        continue
+                    matching_chat_entry = chat_entry
+                    for topic in chat_entry.setdefault("topics", []):
+                        if topic.get("name") == topic_name:
+                            if replace_existing or not topic.get("thread_id"):
+                                if topic.get("thread_id") != thread_id:
+                                    topic["thread_id"] = thread_id
+                                    changed = True
+                            break
+                    else:
+                        chat_entry.setdefault("topics", []).append(
+                            {"name": topic_name, "thread_id": thread_id}
+                        )
+                        changed = True
+                    break
+
+                if matching_chat_entry is None:
+                    dm_topics.append({
+                        "chat_id": chat_id,
+                        "topics": [{"name": topic_name, "thread_id": thread_id}],
+                    })
+                    changed = True
+
+            mutate_config_strict(_mutate, config_path=config_path)
 
             if changed:
-                fd, tmp_path = tempfile.mkstemp(
-                    dir=str(config_path.parent),
-                    suffix=".tmp",
-                    prefix=".config_",
-                )
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        _yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    atomic_replace(tmp_path, config_path)
-                except BaseException:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    raise
                 logger.info(
                     "[%s] Persisted thread_id=%s for topic '%s' in config.yaml",
                     self.name, thread_id, topic_name,

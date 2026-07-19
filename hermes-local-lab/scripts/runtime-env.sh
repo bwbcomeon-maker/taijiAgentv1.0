@@ -80,12 +80,28 @@ if [ "${TAIJI_AGENT_SYNC_PACKAGED_CONFIG:-${TAIJI_AGENT_SYNC_FEATURE_VISIBILITY:
   _taiji_target_config="$TAIJI_RUNTIME_HOME/config.yaml"
   if [ -f "$_taiji_packaged_config" ]; then
     if [ -x "$AGENT_DIR/venv/bin/python" ]; then
-      "$AGENT_DIR/venv/bin/python" "$LAB_DIR/scripts/sync-packaged-config.py" "$_taiji_packaged_config" "$_taiji_target_config" || true
+      _taiji_config_python="$AGENT_DIR/venv/bin/python"
+    elif [ -x "$AGENT_DIR/.venv/bin/python" ]; then
+      _taiji_config_python="$AGENT_DIR/.venv/bin/python"
     elif command -v python3 >/dev/null 2>&1; then
-      python3 "$LAB_DIR/scripts/sync-packaged-config.py" "$_taiji_packaged_config" "$_taiji_target_config" || true
+      _taiji_config_python="$(command -v python3)"
+    else
+      /usr/bin/printf '%s\n' \
+        "Taiji Agent could not find Python for packaged config synchronization." \
+        >&2
+      return 1 2>/dev/null || exit 1
+    fi
+    if ! "$_taiji_config_python" \
+      "$LAB_DIR/scripts/sync-packaged-config.py" \
+      "$_taiji_packaged_config" \
+      "$_taiji_target_config"; then
+      /usr/bin/printf '%s\n' \
+        "Taiji Agent could not synchronize the packaged runtime config." \
+        >&2
+      return 1 2>/dev/null || exit 1
     fi
   fi
-  unset _taiji_packaged_config _taiji_target_config
+  unset _taiji_config_python _taiji_packaged_config _taiji_target_config
 fi
 
 # Treat dotenv files as data only. No line is sourced or evaluated, so command

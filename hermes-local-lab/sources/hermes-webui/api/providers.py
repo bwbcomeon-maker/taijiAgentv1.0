@@ -837,6 +837,30 @@ def _write_env_file(
     )
 
 
+def _provider_key_capability_epochs(
+    config_data: dict[str, Any],
+    provider_id: str,
+    *,
+    env_values: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Return active capabilities whose effective legacy key is changing."""
+    from agent.image_gen_verification import (
+        capability_epochs_for_secret_env,
+    )
+
+    env_var = _PROVIDER_ENV_VAR.get(
+        str(provider_id or "").strip().lower(),
+        "",
+    )
+    if not env_var:
+        return ()
+    return capability_epochs_for_secret_env(
+        config_data,
+        env_var,
+        env_values=env_values,
+    )
+
+
 def _provider_has_key(provider_id: str) -> bool:
     """Check whether a provider has a configured API key.
 
@@ -2000,10 +2024,34 @@ def _set_provider_key_locked(
         if len(api_key) < 8:
             return {"ok": False, "error": "API key appears too short."}
 
-    env_path = config_path.parent / ".env"
     try:
-        _write_env_file(
-            env_path,
+        from agent.image_gen_verification import (
+            bump_capability_config_epochs,
+        )
+        from agent.provider_credentials import (
+            load_credential_snapshot,
+            mutate_config_env_strict,
+        )
+
+        snapshot = load_credential_snapshot(config_path)
+        capabilities = (
+            _provider_key_capability_epochs(
+                snapshot.config,
+                provider_id,
+                env_values=snapshot.env,
+            )
+            if snapshot.env.get(env_var) != api_key
+            else ()
+        )
+
+        def advance_epochs(config_data: dict[str, Any]) -> None:
+            bump_capability_config_epochs(
+                config_data,
+                *capabilities,
+            )
+
+        mutate_config_env_strict(
+            advance_epochs,
             {env_var: api_key},
             config_path=config_path,
         )
@@ -2061,14 +2109,10 @@ def remove_provider_key(provider_id: str) -> dict[str, Any]:
     for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
         env_updates[alias] = None
 
-    def clean_config(config_data: dict[str, Any]) -> None:
-        nonlocal changed
-        changed = _remove_provider_key_fields(config_data, provider_id)
-
     try:
         with credential_transaction(config_path):
+            snapshot = load_credential_snapshot(config_path)
             if provider_id in {"opencode-zen", "opencode-go"}:
-                snapshot = load_credential_snapshot(config_path)
                 shared_value = snapshot.env.get("OPENCODE_API_KEY")
                 if not _provider_value_counts_as_api_key(
                     provider_id,
@@ -2100,6 +2144,45 @@ def remove_provider_key(provider_id: str) -> dict[str, Any]:
                     # deleting the shared alias in the same disk/process
                     # transaction.
                     env_updates[remaining_env_var] = str(shared_value).strip()
+            from agent.image_gen_verification import (
+                bump_capability_config_epochs,
+                capability_epochs_for_secret_env,
+            )
+
+            changed_env_keys = tuple(
+                key
+                for key, desired in env_updates.items()
+                if (
+                    (desired is None and key in snapshot.env)
+                    or (
+                        desired is not None
+                        and snapshot.env.get(key) != desired
+                    )
+                )
+            )
+            capabilities = tuple(
+                dict.fromkeys(
+                    capability
+                    for key in changed_env_keys
+                    for capability in capability_epochs_for_secret_env(
+                        snapshot.config,
+                        key,
+                        env_values=snapshot.env,
+                    )
+                )
+            )
+
+            def clean_config(config_data: dict[str, Any]) -> None:
+                nonlocal changed
+                changed = _remove_provider_key_fields(
+                    config_data,
+                    provider_id,
+                )
+                bump_capability_config_epochs(
+                    config_data,
+                    *capabilities,
+                )
+
             if config_path.exists():
                 mutate_config_env_strict(
                     clean_config,

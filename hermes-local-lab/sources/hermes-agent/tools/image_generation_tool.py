@@ -26,6 +26,7 @@ import os
 import datetime
 import threading
 import uuid
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from agent.image_gen_verification import (
@@ -1153,6 +1154,86 @@ def _read_configured_image_provider():
     return None
 
 
+def _capture_image_gen_request_binding(
+    *,
+    authorization_fingerprint: str = "",
+    authorization_generation: str = "",
+):
+    """Capture one private image Provider binding from the active runtime."""
+    try:
+        from agent.image_gen_verification import (
+            ImageGenRequestBinding,
+            active_custom_provider_identity,
+            authorize_image_gen_request_binding,
+            image_gen_fingerprint_from_material,
+            image_gen_runtime_context,
+            image_gen_secret_value,
+            resolve_image_gen_material,
+        )
+        from agent.provider_credentials import load_credential_config
+
+        context = image_gen_runtime_context()
+        config_data = load_credential_config(context.config_path)
+        image_cfg = config_data.get("image_gen")
+        if not isinstance(image_cfg, dict):
+            return None
+        resolved = resolve_image_gen_material(
+            image_cfg,
+            config_data=config_data,
+        )
+        effective_cfg = resolved.image_cfg
+        provider = resolved.provider
+        model = str(effective_cfg.get("model") or "").strip()
+        credential_ref = str(
+            effective_cfg.get("credential_ref") or ""
+        ).strip()
+        api_key = image_gen_secret_value(
+            provider,
+            credential_ref,
+            resolved.config_data,
+            config_path=context.config_path,
+        )
+        material_fingerprint = image_gen_fingerprint_from_material(
+            resolved,
+            profile=context.profile,
+            secret_value=api_key,
+        )
+        provider_config = active_custom_provider_identity(
+            provider,
+            resolved.config_data,
+        )
+    except (ImportError, OSError, TypeError, ValueError):
+        return None
+    if (
+        not resolved.effective_config_resolved
+        or not provider
+        or not model
+        or not api_key
+    ):
+        return None
+    expected_fingerprint = str(
+        authorization_fingerprint or material_fingerprint
+    ).strip()
+    expected_generation = str(authorization_generation or "").strip()
+    if (
+        expected_fingerprint != material_fingerprint
+        or not expected_generation
+    ):
+        return None
+    binding = ImageGenRequestBinding(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        runtime_identity=resolved.runtime_identity,
+        _provider_config=provider_config,
+    )
+    return authorize_image_gen_request_binding(
+        binding,
+        authorization_fingerprint=expected_fingerprint,
+        authorization_generation=expected_generation,
+    )
+
+
 def _same_authorization_snapshot(
     expected: Dict[str, Any],
 ) -> bool:
@@ -1168,12 +1249,101 @@ def _same_authorization_snapshot(
         and current.get("schema_version") == expected.get("schema_version")
         and str(current.get("fingerprint") or "")
         == str(expected.get("fingerprint") or "")
+        and str(current.get("_authorization_generation") or "")
+        == str(expected.get("_authorization_generation") or "")
         and str(current.get("status") or "") == "verified"
         and str(current.get("status") or "")
         == str(expected.get("status") or "")
         and bool(current.get("available"))
         and bool(current.get("available")) == bool(expected.get("available"))
+        and str(current.get("provider") or "")
+        == str(expected.get("provider") or "")
+        and str(current.get("model") or "")
+        == str(expected.get("model") or "")
     )
+
+
+def _private_binding_to_plain(value: Any) -> Any:
+    """Copy only frozen request-local material into a short-lived provider."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _private_binding_to_plain(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, tuple):
+        return [
+            _private_binding_to_plain(child)
+            for child in value
+        ]
+    if isinstance(value, frozenset):
+        return sorted(
+            (_private_binding_to_plain(child) for child in value),
+            key=str,
+        )
+    return value
+
+
+def _image_boundary_failure(
+    error_code: str,
+    message: str,
+    *,
+    diagnostic_id: str | None = None,
+) -> str:
+    """Return one redacted, stable Provider-boundary failure contract."""
+    return json.dumps(
+        {
+            "success": False,
+            "image": None,
+            "status": "blocked",
+            "error": str(message or "图像生成请求未通过安全门禁。"),
+            "error_code": str(error_code or "provider_boundary_error"),
+            "error_type": str(error_code or "provider_boundary_error"),
+            "diagnostic_id": str(diagnostic_id or uuid.uuid4().hex),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _authorized_image_request_binding(
+    route_decision: Any,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[Any | None, str]:
+    """Match one private binding to the exact frozen route generation."""
+    from agent.image_gen_verification import (
+        ImageGenRequestBinding,
+        image_gen_request_binding_matches_authorization,
+    )
+
+    binding = getattr(route_decision, "_request_binding", None)
+    if not isinstance(binding, ImageGenRequestBinding):
+        return None, "image_binding_required"
+    expected_fingerprint = str(
+        getattr(route_decision, "authorization_fingerprint", "") or ""
+    )
+    expected_generation = str(
+        getattr(route_decision, "authorization_generation", "") or ""
+    )
+    if (
+        not expected_fingerprint
+        or not expected_generation
+        or not image_gen_request_binding_matches_authorization(
+            binding,
+            authorization_fingerprint=expected_fingerprint,
+            authorization_generation=expected_generation,
+        )
+        or binding.provider != str(provider or "").strip().lower()
+        or binding.model != str(model or "").strip()
+    ):
+        return None, "capability_binding_mismatch"
+    return binding, ""
+
+
+class _ImageProviderAuthorizationError(RuntimeError):
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
 
 
 def _dispatch_to_plugin_provider(
@@ -1181,6 +1351,7 @@ def _dispatch_to_plugin_provider(
     aspect_ratio: str,
     *,
     runtime_snapshot: Dict[str, Any] | None = None,
+    route_decision: Any = None,
 ):
     """Route the call to a plugin-registered provider when one is selected.
 
@@ -1207,28 +1378,72 @@ def _dispatch_to_plugin_provider(
         if isinstance(runtime_snapshot, dict)
         else _read_configured_image_model()
     )
+    request_binding = None
+    if route_decision is not None:
+        request_binding, binding_error = _authorized_image_request_binding(
+            route_decision,
+            provider=configured,
+            model=str(configured_model or ""),
+        )
+        if binding_error:
+            return _image_boundary_failure(
+                binding_error,
+                (
+                    "图像生成请求缺少固定 Provider 授权，请重新发起请求。"
+                    if binding_error == "image_binding_required"
+                    else "图像生成请求绑定与当前授权代次不一致，请重新发起请求。"
+                ),
+            )
+    elif isinstance(runtime_snapshot, dict):
+        return _image_boundary_failure(
+            "image_binding_required",
+            "图像生成请求缺少固定 Provider 授权，请重新发起请求。",
+        )
 
     try:
         # Import locally so plugin discovery isn't triggered just by
         # importing this module (tests rely on that).
         if configured.startswith("custom:"):
             from agent.custom_image_providers import (
-                build_configured_custom_image_provider,
+                ConfigurableOpenAIImageProvider,
             )
 
-            provider = build_configured_custom_image_provider(
-                configured,
-                _load_image_gen_full_config(),
+            provider_config = (
+                getattr(request_binding, "provider_config", None)
+                if request_binding is not None
+                else None
             )
+            if not isinstance(provider_config, Mapping) or not provider_config:
+                return _image_boundary_failure(
+                    "provider_configuration_invalid",
+                    "固定的外部图片模型配置不完整，请重新保存并验证。",
+                )
+            provider = ConfigurableOpenAIImageProvider(
+                _private_binding_to_plain(provider_config)
+            )
+            if provider.name != configured:
+                return _image_boundary_failure(
+                    "capability_binding_mismatch",
+                    "外部图片模型绑定与当前授权目标不一致，请重新发起请求。",
+                )
         else:
             from agent.image_gen_registry import get_provider
             from hermes_cli.plugins import _ensure_plugins_discovered
 
             _ensure_plugins_discovered()
             provider = get_provider(configured)
-    except Exception as exc:
-        logger.debug("image_gen plugin dispatch skipped: %s", exc)
-        return None
+    except Exception:
+        diagnostic_id = uuid.uuid4().hex
+        logger.warning(
+            "Image Provider construction failed "
+            "diagnostic_id=%s error_code=provider_configuration_invalid",
+            diagnostic_id,
+        )
+        return _image_boundary_failure(
+            "provider_configuration_invalid",
+            "图像生成 Provider 配置无法构造，请重新保存并验证。",
+            diagnostic_id=diagnostic_id,
+        )
 
     if provider is None and not configured.startswith("custom:"):
         try:
@@ -1237,56 +1452,105 @@ def _dispatch_to_plugin_provider(
             # a forced refresh before surfacing a missing-provider error.
             _ensure_plugins_discovered(force=True)
             provider = get_provider(configured)
-        except Exception as exc:
-            logger.debug("image_gen plugin force-refresh skipped: %s", exc)
+        except Exception:
+            provider = None
 
     if provider is None:
-        return json.dumps({
-            "success": False,
-            "image": None,
-            "error": (
-                "当前图像生成服务未注册或不可用，请在太极智能体中重新选择图像生成服务。"
-            ),
-            "error_type": "provider_not_registered",
-        })
+        return _image_boundary_failure(
+            "provider_not_registered",
+            "当前图像生成服务未注册或不可用，请在太极智能体中重新选择图像生成服务。",
+        )
 
+    # Provider discovery and request-local construction may execute arbitrary
+    # plugin code. Reauthorize again at the last seam before Provider I/O.
     if isinstance(runtime_snapshot, dict) and not _same_authorization_snapshot(
         runtime_snapshot
     ):
-        return json.dumps(
-            {
-                "success": False,
-                "image": None,
-                "error": "图像生成授权状态已变化，请重新发起请求。",
-                "error_code": "capability_caller_stale",
-                "error_type": "capability_caller_stale",
-            },
-            ensure_ascii=False,
+        return _image_boundary_failure(
+            "capability_caller_stale",
+            "图像生成授权状态已变化，请重新发起请求。",
         )
+    if route_decision is not None:
+        request_binding, binding_error = _authorized_image_request_binding(
+            route_decision,
+            provider=configured,
+            model=str(configured_model or ""),
+        )
+        if binding_error:
+            return _image_boundary_failure(
+                binding_error,
+                "图像生成请求绑定与当前授权代次不一致，请重新发起请求。",
+            )
+
+    def _reauth_guard() -> None:
+        if isinstance(runtime_snapshot, dict) and not _same_authorization_snapshot(
+            runtime_snapshot
+        ):
+            raise _ImageProviderAuthorizationError(
+                "capability_caller_stale"
+            )
+        if route_decision is None:
+            raise _ImageProviderAuthorizationError(
+                "image_binding_required"
+            )
+        _binding, current_binding_error = (
+            _authorized_image_request_binding(
+                route_decision,
+                provider=configured,
+                model=str(configured_model or ""),
+            )
+        )
+        if current_binding_error:
+            raise _ImageProviderAuthorizationError(
+                current_binding_error
+            )
+        from agent.image_runtime import (
+            emit_capability_route_event_at_provider_io,
+        )
+
+        emit_capability_route_event_at_provider_io(route_decision)
 
     try:
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
         if configured_model:
             kwargs["model"] = configured_model
+        if route_decision is not None:
+            if not bool(
+                getattr(
+                    provider,
+                    "_supports_pinned_image_request_binding",
+                    False,
+                )
+            ):
+                return _image_boundary_failure(
+                    "image_binding_unsupported",
+                    "当前图像生成 Provider 不支持固定请求授权。",
+                )
+            kwargs["_runtime_binding"] = request_binding
+            kwargs["_reauth_guard"] = _reauth_guard
         result = provider.generate(**kwargs)
-    except Exception as exc:
-        logger.warning(
-            "Image gen provider '%s' raised: %s",
-            getattr(provider, "name", "?"), exc,
+    except _ImageProviderAuthorizationError as exc:
+        return _image_boundary_failure(
+            exc.error_code,
+            "图像生成授权状态已变化，请重新发起请求。",
         )
-        return json.dumps({
-            "success": False,
-            "image": None,
-            "error": f"Provider '{getattr(provider, 'name', '?')}' error: {exc}",
-            "error_type": "provider_exception",
-        })
+    except Exception:
+        diagnostic_id = uuid.uuid4().hex
+        logger.warning(
+            "Image Provider request failed "
+            "diagnostic_id=%s error_code=provider_exception",
+            diagnostic_id,
+        )
+        return _image_boundary_failure(
+            "provider_exception",
+            "图像生成 Provider 请求失败，请根据诊断编号排查。",
+            diagnostic_id=diagnostic_id,
+        )
     if not isinstance(result, dict):
-        return json.dumps({
-            "success": False,
-            "image": None,
-            "error": "Provider returned a non-dict result",
-            "error_type": "provider_contract",
-        })
+        return _image_boundary_failure(
+            "provider_contract",
+            "图像生成 Provider 返回了无效响应。",
+        )
     return json.dumps(result)
 
 
@@ -1298,21 +1562,35 @@ def _handle_image_generate(args, **kw):
     from agent.image_gen_verification import (
         CAPABILITY_VERIFICATION_SCHEMA_VERSION,
     )
-    from agent.image_runtime import verification_runtime_snapshot
+    from agent.image_runtime import (
+        build_capability_route_decision,
+        verification_runtime_snapshot,
+    )
 
     runtime_snapshot = verification_runtime_snapshot("image_generation")
     caller_fingerprint = str(
         kw.get("caller_capability_fingerprint") or ""
     )
+    caller_generation = str(
+        kw.get("caller_capability_generation") or ""
+    )
     current_fingerprint = str(runtime_snapshot.get("fingerprint") or "")
+    current_generation = str(
+        runtime_snapshot.get("_authorization_generation") or ""
+    )
     authorized = bool(
         runtime_snapshot.get("schema_version")
         == CAPABILITY_VERIFICATION_SCHEMA_VERSION
         and runtime_snapshot.get("status") == "verified"
         and runtime_snapshot.get("available")
         and current_fingerprint
+        and current_generation
     )
-    if not authorized or caller_fingerprint != current_fingerprint:
+    if (
+        not authorized
+        or caller_fingerprint != current_fingerprint
+        or caller_generation != current_generation
+    ):
         error_code = "capability_caller_stale"
         return json.dumps(
             {
@@ -1325,12 +1603,24 @@ def _handle_image_generate(args, **kw):
             ensure_ascii=False,
         )
 
+    route_decision = build_capability_route_decision(
+        "image_generation",
+        snapshot=runtime_snapshot,
+        route="provider",
+        tool_call_id=str(kw.get("tool_call_id") or ""),
+        request_binding=_capture_image_gen_request_binding(
+            authorization_fingerprint=current_fingerprint,
+            authorization_generation=current_generation,
+        ),
+    )
+
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
     dispatched = _dispatch_to_plugin_provider(
         prompt,
         aspect_ratio,
         runtime_snapshot=runtime_snapshot,
+        route_decision=route_decision,
     )
     if dispatched is not None:
         return dispatched

@@ -96,8 +96,10 @@ class TestConfigFilePermissions(unittest.TestCase):
             self.assertEqual(file_mode, 0o600)
 
     def test_save_env_value_sets_0600(self):
+        config_path = Path(self.tmpdir) / "config.yaml"
         env_path = Path(self.tmpdir) / ".env"
-        with patch("hermes_cli.config.get_env_path", return_value=env_path), \
+        with patch("hermes_cli.config.get_config_path", return_value=config_path), \
+             patch("hermes_cli.config.get_env_path", return_value=env_path), \
              patch("hermes_cli.config.ensure_hermes_home"):
             from hermes_cli.config import save_env_value
             save_env_value("TEST_KEY", "test_value")

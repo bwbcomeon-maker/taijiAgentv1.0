@@ -399,13 +399,20 @@ class TestBuildNativeMultimodalMessage:
         assert sanitized[1] == {'role': 'assistant', 'content': 'It is a chart.'}
         assert sanitized[2] == {'role': 'user', 'content': 'and this image?'}
 
-    def test_native_image_mode_keeps_historical_image_url_parts(self):
+    def test_native_image_mode_keeps_historical_image_url_parts(
+        self,
+        monkeypatch,
+    ):
         """Vision-capable/native mode keeps existing multimodal history intact."""
         content = [
             {'type': 'text', 'text': 'describe'},
             {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAA='}},
         ]
         cfg = {'agent': {'image_input_mode': 'native'}}
+        monkeypatch.setattr(
+            "api.streaming._resolve_image_input_mode",
+            lambda *_args, **_kwargs: "native",
+        )
 
         sanitized = _sanitize_messages_for_api([{'role': 'user', 'content': content}], cfg=cfg)
 

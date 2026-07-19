@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -389,3 +391,259 @@ def test_status_constants_match_historical_strings():
     assert mod.STATUS_CONFLICT == "conflict"
     assert mod.STATUS_ERROR == "error"
     assert mod.STATUS_ARCHIVED == "archived"
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Canonical config/.env transaction
+# ───────────────────────────────────────────────────────────────────────
+def test_execute_keeps_main_config_and_env_unchanged_when_a_late_step_fails(
+    tmp_path,
+    monkeypatch,
+):
+    mod = _load()
+    source = tmp_path / "openclaw"
+    source.mkdir()
+    workspace = tmp_path / "active-workspace"
+    workspace.mkdir()
+    (source / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "workspace": str(workspace),
+                        "model": "openrouter/new-model",
+                    }
+                },
+                "logging": {"level": "debug"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hermes"
+    target.mkdir()
+    config_path = target / "config.yaml"
+    env_path = target / ".env"
+    config_before = (
+        "model:\n"
+        "  default: openrouter/old-model\n"
+        "unrelated:\n"
+        "  keep: true\n"
+    )
+    env_before = "KEEP_ME=original\n"
+    config_path.write_text(config_before, encoding="utf-8")
+    env_path.write_text(env_before, encoding="utf-8")
+
+    migrator = mod.Migrator(
+        source_root=source,
+        target_root=target,
+        execute=True,
+        workspace_target=None,
+        overwrite=True,
+        migrate_secrets=False,
+        output_dir=target / "migration-report",
+        selected_options={
+            "messaging-settings",
+            "model-config",
+            "logging-config",
+        },
+    )
+
+    def fail_after_config_and_env_are_planned(_config=None):
+        raise RuntimeError("late migration failure")
+
+    monkeypatch.setattr(
+        migrator,
+        "migrate_logging_config",
+        fail_after_config_and_env_are_planned,
+    )
+
+    with pytest.raises(RuntimeError, match="late migration failure"):
+        migrator.migrate()
+
+    assert config_path.read_text(encoding="utf-8") == config_before
+    assert env_path.read_text(encoding="utf-8") == env_before
+
+
+def test_execute_publishes_main_config_and_env_once_with_precise_secret_epochs(
+    tmp_path,
+    monkeypatch,
+):
+    mod = _load()
+    source = tmp_path / "openclaw"
+    source.mkdir()
+    (source / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "models": {
+                    "providers": {
+                        "dashscope": {
+                            "apiKey": "new-dashscope-secret",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hermes"
+    target.mkdir()
+    config_path = target / "config.yaml"
+    env_path = target / ".env"
+    config_path.write_text(
+        "_taiji_profile_incarnation: stable-profile-incarnation\n"
+        "_taiji_capability_epochs:\n"
+        "  vision: 4\n"
+        "  image_generation: 9\n"
+        "auxiliary:\n"
+        "  vision:\n"
+        "    provider: alibaba\n"
+        "    model: qwen3-vl-plus\n"
+        "image_gen:\n"
+        "  provider: dashscope\n"
+        "  model: qwen-image-plus\n"
+        "unrelated:\n"
+        "  keep: true\n",
+        encoding="utf-8",
+    )
+    env_path.write_text(
+        "DASHSCOPE_API_KEY=old-dashscope-secret\n"
+        "KEEP_ME=original\n",
+        encoding="utf-8",
+    )
+
+    from agent import provider_credentials
+
+    publish_calls = []
+    real_publish = provider_credentials.mutate_config_env_strict
+
+    def count_real_publish(*args, **kwargs):
+        publish_calls.append((args, kwargs))
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        provider_credentials,
+        "mutate_config_env_strict",
+        count_real_publish,
+    )
+
+    migrator = mod.Migrator(
+        source_root=source,
+        target_root=target,
+        execute=True,
+        workspace_target=None,
+        overwrite=True,
+        migrate_secrets=True,
+        output_dir=target / "migration-report",
+        selected_options={"full-providers"},
+    )
+    migrator.migrate()
+
+    assert len(publish_calls) == 1
+    persisted = mod.load_yaml_file(config_path)
+    assert persisted["_taiji_profile_incarnation"] == "stable-profile-incarnation"
+    assert persisted["_taiji_capability_epochs"] == {
+        "vision": 5,
+        "image_generation": 10,
+    }
+    assert persisted["unrelated"] == {"keep": True}
+    env_text = env_path.read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY=new-dashscope-secret" in env_text
+    assert "KEEP_ME=original" in env_text
+
+    publish_calls.clear()
+    same_value_migrator = mod.Migrator(
+        source_root=source,
+        target_root=target,
+        execute=True,
+        workspace_target=None,
+        overwrite=True,
+        migrate_secrets=True,
+        output_dir=target / "migration-report-same-value",
+        selected_options={"full-providers"},
+    )
+    same_value_migrator.migrate()
+
+    assert publish_calls == []
+    persisted_again = mod.load_yaml_file(config_path)
+    assert persisted_again["_taiji_capability_epochs"] == {
+        "vision": 5,
+        "image_generation": 10,
+    }
+
+
+def test_execute_rejects_same_key_env_change_while_migration_is_staging(
+    tmp_path,
+):
+    """A migration must not overwrite a newer canonical secret write."""
+    mod = _load()
+    source = tmp_path / "openclaw"
+    source.mkdir()
+    (source / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "models": {
+                    "providers": {
+                        "dashscope": {
+                            "apiKey": "migration-secret",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hermes"
+    target.mkdir()
+    config_path = target / "config.yaml"
+    env_path = target / ".env"
+    config_before = (
+        "_taiji_profile_incarnation: stable-profile-incarnation\n"
+        "_taiji_capability_epochs:\n"
+        "  vision: 41\n"
+        "  image_generation: 41\n"
+        "auxiliary:\n"
+        "  vision:\n"
+        "    provider: alibaba\n"
+        "    model: qwen3-vl-plus\n"
+        "image_gen:\n"
+        "  provider: dashscope\n"
+        "  model: qwen-image-plus\n"
+        "unrelated:\n"
+        "  keep: true\n"
+    )
+    config_path.write_text(config_before, encoding="utf-8")
+    env_path.write_text(
+        "DASHSCOPE_API_KEY=initial-secret\n"
+        "KEEP_ME=original\n",
+        encoding="utf-8",
+    )
+
+    migrator = mod.Migrator(
+        source_root=source,
+        target_root=target,
+        execute=True,
+        workspace_target=None,
+        overwrite=True,
+        migrate_secrets=True,
+        output_dir=target / "migration-report",
+        selected_options={"full-providers"},
+    )
+
+    from agent.provider_credentials import mutate_env_unique
+
+    mutate_env_unique(
+        {"DASHSCOPE_API_KEY": "concurrent-secret"},
+        config_path=config_path,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="changed while OpenClaw migration was staging",
+    ):
+        migrator.migrate()
+
+    assert config_path.read_text(encoding="utf-8") == config_before
+    assert env_path.read_text(encoding="utf-8") == (
+        "DASHSCOPE_API_KEY=concurrent-secret\n"
+        "KEEP_ME=original\n"
+    )

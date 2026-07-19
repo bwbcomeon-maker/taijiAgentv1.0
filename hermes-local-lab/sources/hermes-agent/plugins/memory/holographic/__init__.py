@@ -130,20 +130,34 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.hermes-memory-store."""
+        import copy
         from pathlib import Path
-        config_path = Path(hermes_home) / "config.yaml"
-        try:
-            import yaml
-            existing = {}
-            if config_path.exists():
-                with open(config_path, encoding="utf-8-sig") as f:
-                    existing = yaml.safe_load(f) or {}
-            existing.setdefault("plugins", {})
-            existing["plugins"]["hermes-memory-store"] = values
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(existing, f, default_flow_style=False)
-        except Exception:
-            pass
+        from agent.provider_credentials import mutate_config_strict
+        from hermes_constants import (
+            get_config_path as get_active_config_path,
+            get_hermes_home as get_active_hermes_home,
+        )
+
+        requested_home = Path(hermes_home).expanduser()
+        active_home = get_active_hermes_home().expanduser()
+        config_path = (
+            get_active_config_path()
+            if requested_home.resolve() == active_home.resolve()
+            else requested_home / "config.yaml"
+        )
+        plugin_values = copy.deepcopy(values)
+
+        def update_plugin_config(current: dict) -> None:
+            plugins = current.get("plugins")
+            if not isinstance(plugins, dict):
+                plugins = {}
+                current["plugins"] = plugins
+            plugins["hermes-memory-store"] = plugin_values
+
+        mutate_config_strict(
+            update_plugin_config,
+            config_path=config_path,
+        )
 
     def get_config_schema(self):
         from hermes_constants import display_hermes_home

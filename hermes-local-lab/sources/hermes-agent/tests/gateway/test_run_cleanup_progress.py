@@ -30,6 +30,21 @@ from gateway.session import SessionSource
 # ---------------------------------------------------------------------------
 
 
+def _capability_bound_factory(agent_cls):
+    """Construct a fake with the runtime identity production AIAgent binds."""
+
+    def _factory(*args, **kwargs):
+        from agent.image_runtime import capture_capability_runtime_generation
+
+        agent = agent_cls(*args, **kwargs)
+        agent._capability_runtime_identity = (
+            capture_capability_runtime_generation().identity
+        )
+        return agent
+
+    return _factory
+
+
 class CleanupCaptureAdapter(BasePlatformAdapter):
     """Adapter that records every delete_message call for inspection."""
 
@@ -163,7 +178,7 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = agent_cls
+    fake_run_agent.AIAgent = _capability_bound_factory(agent_cls)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
     import tools.terminal_tool  # noqa: F401 — register tool emoji
 

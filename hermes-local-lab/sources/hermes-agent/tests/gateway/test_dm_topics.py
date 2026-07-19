@@ -10,6 +10,7 @@ Covers:
 """
 
 import asyncio
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,25 @@ from gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
+    telegram_module = sys.modules.get("telegram")
+    module_file = getattr(telegram_module, "__file__", None)
+    if isinstance(module_file, (str, bytes, os.PathLike)):
+        return
+
+    # Earlier test modules may have installed a MagicMock in sys.modules.
+    # Prefer the real SDK when it is installed, and reload the adapter so its
+    # module-level ParseMode/ChatType bindings come from the same SDK.
+    for module_name in tuple(sys.modules):
+        if module_name == "telegram" or module_name.startswith("telegram."):
+            sys.modules.pop(module_name, None)
+    try:
+        importlib.import_module("telegram")
+    except ImportError:
+        pass
+    else:
+        sys.modules.pop("gateway.platforms.telegram", None)
+        return
+
     telegram_mod = MagicMock()
     telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
 
@@ -405,12 +425,12 @@ def test_persist_dm_topic_thread_id_preserves_config_on_write_failure(tmp_path):
 
     adapter = _make_adapter()
 
-    def fail_dump(*args, **kwargs):
-        raise RuntimeError("boom")
-
     with patch.object(Path, "home", return_value=tmp_path), \
          patch.dict(os.environ, {"HERMES_HOME": str(tmp_path / ".hermes")}), \
-         patch("yaml.dump", side_effect=fail_dump):
+         patch(
+             "gateway.platforms.telegram.mutate_config_strict",
+             side_effect=RuntimeError("boom"),
+         ):
         adapter._persist_dm_topic_thread_id(111, "General", 999)
 
     assert config_file.read_text(encoding="utf-8") == original_text
@@ -668,10 +688,8 @@ def test_build_message_event_preserves_true_dm_topic_thread_id():
 
 # ── _build_message_event: group_topics skill binding ──
 
-# The telegram mock sets sys.modules["telegram.constants"] = telegram_mod (root mock),
-# so `from telegram.constants import ChatType` in telegram.py resolves to
-# telegram_mod.ChatType — not telegram_mod.constants.ChatType.  We must use
-# the same ChatType object the production code sees so equality checks work.
+# Use the same ChatType object the adapter imported so enum and fallback-mock
+# environments exercise identical equality semantics.
 from telegram.constants import ChatType as _ChatType  # noqa: E402
 
 

@@ -2832,6 +2832,74 @@ def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> 
     return parsed
 
 
+def _save_config_updates(
+    updates: Dict[str, Any],
+    *,
+    batch: bool,
+) -> bool:
+    """Persist one or more config values through one credential transaction."""
+    if not updates:
+        logger.error("Failed to save config: no updates supplied")
+        return False
+
+    user_config_path = _hermes_home / "config.yaml"
+    project_config_path = Path(__file__).parent / "cli-config.yaml"
+    config_path = (
+        user_config_path
+        if user_config_path.exists()
+        else project_config_path
+    )
+
+    try:
+        # Package-manager-owned configuration must be rejected before this
+        # legacy CLI path creates a directory, lock, or replacement file.
+        from hermes_cli.config import (
+            ManagedConfigurationError,
+            _secure_file,
+            get_managed_system_for_config,
+        )
+
+        managed_system = get_managed_system_for_config(config_path)
+        if managed_system is not None:
+            action = ", ".join(updates)
+            raise ManagedConfigurationError(
+                f"set {action}",
+                managed_system,
+            )
+
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Serialize with every credential/config writer. The round-trip writer
+        # applies a batch in memory and performs one atomic replacement.
+        from agent.image_gen_verification import (
+            reconcile_capability_config_epochs,
+        )
+        from agent.provider_credentials import credential_transaction
+        from utils import atomic_roundtrip_yaml_update
+
+        with credential_transaction(config_path):
+            if batch:
+                atomic_roundtrip_yaml_update(
+                    config_path,
+                    updates,
+                    config_reconciler=reconcile_capability_config_epochs,
+                )
+            else:
+                key_path, value = next(iter(updates.items()))
+                atomic_roundtrip_yaml_update(
+                    config_path,
+                    key_path,
+                    value,
+                    config_reconciler=reconcile_capability_config_epochs,
+                )
+
+        _secure_file(config_path, credential_target=True)
+        return True
+    except Exception as e:
+        logger.error("Failed to save config: %s", e)
+        return False
+
+
 def save_config_value(key_path: str, value: any) -> bool:
     """
     Save a value to the active config file at the specified key path.
@@ -2847,30 +2915,27 @@ def save_config_value(key_path: str, value: any) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    # Use the same precedence as load_cli_config: user config first, then project config
-    user_config_path = _hermes_home / 'config.yaml'
-    project_config_path = Path(__file__).parent / 'cli-config.yaml'
-    config_path = user_config_path if user_config_path.exists() else project_config_path
-    
-    try:
-        # Ensure parent directory exists (for ~/.hermes/config.yaml on first use)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Save back atomically while preserving comments, ordering, quotes, and
-        # readable Unicode in user-edited config.yaml.
-        from utils import atomic_roundtrip_yaml_update
-        atomic_roundtrip_yaml_update(config_path, key_path, value)
-        
-        # Enforce owner-only permissions on config files (contain API keys)
-        try:
-            os.chmod(config_path, 0o600)
-        except (OSError, NotImplementedError):
-            pass
-        
+    return _save_config_updates({key_path: value}, batch=False)
+
+
+def save_config_values(updates: Dict[str, Any]) -> bool:
+    """Atomically persist related config values as one all-or-nothing batch."""
+    return _save_config_updates(dict(updates), batch=True)
+
+
+def _persist_global_model_switch(result) -> bool:
+    """Persist a model/provider switch without allowing a partial commit."""
+    updates = {"model.default": result.new_model}
+    if result.provider_changed:
+        updates["model.provider"] = result.target_provider
+    if save_config_values(updates):
+        _cprint("    Saved to config.yaml (--global)")
         return True
-    except Exception as e:
-        logger.error("Failed to save config: %s", e)
-        return False
+    _cprint(
+        "    ⚠ Failed to save config.yaml; "
+        "model switch is session only."
+    )
+    return False
 
 
 
@@ -4760,7 +4825,13 @@ class HermesCLI:
         API call is marked accordingly.
         """
         from hermes_cli.models import resolve_fast_mode_overrides
+        from agent.image_runtime import (
+            capture_capability_runtime_generation,
+        )
 
+        capability_generation = (
+            capture_capability_runtime_generation()
+        )
         runtime = {
             "api_key": self.api_key,
             "base_url": self.base_url,
@@ -4780,7 +4851,9 @@ class HermesCLI:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                capability_generation.cache_identity,
             ),
+            "capability_generation": capability_generation,
         }
 
         service_tier = getattr(self, "service_tier", None)
@@ -4794,6 +4867,21 @@ class HermesCLI:
             overrides = None
         route["request_overrides"] = overrides
         return route
+
+    def _resolve_image_input_route(
+        self,
+        cfg: dict,
+        *,
+        generation=None,
+    ):
+        from agent.image_runtime import resolve_image_input_route
+
+        return resolve_image_input_route(
+            (self.provider or "").strip(),
+            (self.model or "").strip(),
+            cfg,
+            generation=generation,
+        )
 
     def _install_tool_callbacks(self) -> None:
         """Install tool callbacks that need the live prompt UI."""
@@ -4830,7 +4918,15 @@ class HermesCLI:
         except Exception:
             pass
 
-    def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, request_overrides: dict | None = None) -> bool:
+    def _init_agent(
+        self,
+        *,
+        model_override: str = None,
+        runtime_override: dict = None,
+        request_overrides: dict | None = None,
+        capability_generation=None,
+        route_signature=None,
+    ) -> bool:
         """
         Initialize the agent on first use.
         When resuming a session, restores conversation history from SQLite.
@@ -4839,6 +4935,18 @@ class HermesCLI:
             bool: True if successful, False otherwise
         """
         if self.agent is not None:
+            if capability_generation is not None and (
+                not capability_generation.stable
+                or getattr(
+                    self.agent,
+                    "_capability_runtime_identity",
+                    None,
+                )
+                != capability_generation.identity
+            ):
+                self.agent = None
+                self._active_agent_route_signature = None
+                return False
             return True
 
         _prepare_deferred_agent_startup()
@@ -4996,6 +5104,20 @@ class HermesCLI:
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
             )
+            if capability_generation is not None and (
+                not capability_generation.stable
+                or getattr(
+                    self.agent,
+                    "_capability_runtime_identity",
+                    None,
+                )
+                != capability_generation.identity
+            ):
+                self.agent = None
+                self._active_agent_route_signature = None
+                raise RuntimeError(
+                    "capability runtime changed during agent construction"
+                )
             # Store reference for atexit memory provider shutdown
             global _active_agent_ref
             _active_agent_ref = self.agent
@@ -5003,12 +5125,21 @@ class HermesCLI:
             # sequences aren't garbled by patch_stdout's StdoutProxy (#2262).
             self.agent._print_fn = _cprint
             self._active_agent_route_signature = (
-                effective_model,
-                runtime.get("provider"),
-                runtime.get("base_url"),
-                runtime.get("api_mode"),
-                runtime.get("command"),
-                tuple(runtime.get("args") or ()),
+                route_signature
+                if route_signature is not None
+                else (
+                    effective_model,
+                    runtime.get("provider"),
+                    runtime.get("base_url"),
+                    runtime.get("api_mode"),
+                    runtime.get("command"),
+                    tuple(runtime.get("args") or ()),
+                    *(
+                        (capability_generation.cache_identity,)
+                        if capability_generation is not None
+                        else ()
+                    ),
+                )
             )
 
             # Force-create DB row on /title intent, then apply title.
@@ -5025,6 +5156,8 @@ class HermesCLI:
                     # Keep _pending_title so it can be retried after row creation succeeds
             return True
         except Exception as e:
+            self.agent = None
+            self._active_agent_route_signature = None
             ChatConsole().print(f"[bold red]Failed to initialize agent: {e}[/]")
             return False
     
@@ -5785,7 +5918,15 @@ class HermesCLI:
         elif _is_termux_environment():
             _cprint(f"  {_DIM}Tip: type your next message, or run hermes chat -q --image {_termux_example_image_path(image_path.name)} \"What do you see?\"{_RST}")
 
-    def _preprocess_images_with_vision(self, text: str, images: list, *, announce: bool = True) -> str:
+    def _preprocess_images_with_vision(
+        self,
+        text: str,
+        images: list,
+        *,
+        announce: bool = True,
+        route_decision=None,
+        capability_generation=None,
+    ) -> str:
         """Analyze attached images via the vision tool and return enriched text.
 
         Instead of embedding raw base64 ``image_url`` content parts in the
@@ -5798,8 +5939,17 @@ class HermesCLI:
         image later with ``vision_analyze`` if needed.
         """
         import asyncio as _asyncio
+        from agent.image_runtime import (
+            capture_frozen_vision_request_binding,
+        )
         from tools.vision_tools import vision_analyze_tool
 
+        request_binding = capture_frozen_vision_request_binding(
+            route_decision,
+            generation=capability_generation,
+        )
+        vision_provider = str(route_decision.provider or "").strip()
+        vision_model = str(route_decision.model or "").strip()
         analysis_prompt = (
             "Describe everything visible in this image in thorough detail. "
             "Include any text, code, data, objects, people, layout, colors, "
@@ -5815,7 +5965,14 @@ class HermesCLI:
                 _cprint(f"  {_DIM}👁️  analyzing {img_path.name} ({size_kb}KB)...{_RST}")
             try:
                 result_json = _asyncio.run(
-                    vision_analyze_tool(image_url=str(img_path), user_prompt=analysis_prompt)
+                    vision_analyze_tool(
+                        image_url=str(img_path),
+                        user_prompt=analysis_prompt,
+                        provider=vision_provider,
+                        model=vision_model,
+                        strict_target=True,
+                        _runtime_binding=request_binding,
+                    )
                 )
                 result = json.loads(result_json)
                 if result.get("success"):
@@ -5828,21 +5985,19 @@ class HermesCLI:
                     if announce:
                         _cprint(f"  {_DIM}✓ image analyzed{_RST}")
                 else:
-                    enriched_parts.append(
-                        f"[The user attached an image but it couldn't be analyzed. "
-                        f"You can try examining it with vision_analyze using "
-                        f"image_url: {img_path}]"
-                    )
                     if announce:
-                        _cprint(f"  {_DIM}⚠ vision analysis failed — path included for retry{_RST}")
+                        _cprint(f"  {_DIM}⚠ vision analysis failed; this turn was stopped{_RST}")
+                    raise RuntimeError(
+                        str(
+                            result.get("error_code")
+                            or result.get("reason_code")
+                            or "vision_analysis_failed"
+                        )
+                    )
             except Exception as e:
-                enriched_parts.append(
-                    f"[The user attached an image but analysis failed ({e}). "
-                    f"You can try examining it with vision_analyze using "
-                    f"image_url: {img_path}]"
-                )
                 if announce:
-                    _cprint(f"  {_DIM}⚠ vision analysis error — path included for retry{_RST}")
+                    _cprint(f"  {_DIM}⚠ vision analysis error; this turn was stopped{_RST}")
+                raise RuntimeError("vision_analysis_failed") from e
 
         # Combine: vision descriptions first, then the user's original text
         user_text = text if isinstance(text, str) and text else ""
@@ -7501,10 +7656,7 @@ class HermesCLI:
         if result.warning_message:
             _cprint(f"    ⚠ {result.warning_message}")
         if persist_global:
-            save_config_value("model.default", result.new_model)
-            if result.provider_changed:
-                save_config_value("model.provider", result.target_provider)
-            _cprint("    Saved to config.yaml (--global)")
+            _persist_global_model_switch(result)
         else:
             _cprint("    (session only — add --global to persist)")
 
@@ -7750,10 +7902,7 @@ class HermesCLI:
 
         # Persistence
         if persist_global:
-            save_config_value("model.default", result.new_model)
-            if result.provider_changed:
-                save_config_value("model.provider", result.target_provider)
-            _cprint("    Saved to config.yaml (--global)")
+            _persist_global_model_switch(result)
         else:
             _cprint("    (session only — add --global to persist)")
 
@@ -9745,16 +9894,26 @@ class HermesCLI:
             self.show_reasoning = True
             if self.agent:
                 self.agent.reasoning_callback = self._current_reasoning_callback()
-            save_config_value("display.show_reasoning", True)
-            _cprint(f"  {_ACCENT}✓ Reasoning display: ON (saved){_RST}")
+            if save_config_value("display.show_reasoning", True):
+                _cprint(f"  {_ACCENT}✓ Reasoning display: ON (saved){_RST}")
+            else:
+                _cprint(
+                    f"  {_ACCENT}⚠ Reasoning display: ON for this "
+                    f"session only (failed to save config){_RST}"
+                )
             _cprint(f"  {_DIM}  Model thinking will be shown during and after each response.{_RST}")
             return
         if arg in {"hide", "off"}:
             self.show_reasoning = False
             if self.agent:
                 self.agent.reasoning_callback = self._current_reasoning_callback()
-            save_config_value("display.show_reasoning", False)
-            _cprint(f"  {_ACCENT}✓ Reasoning display: OFF (saved){_RST}")
+            if save_config_value("display.show_reasoning", False):
+                _cprint(f"  {_ACCENT}✓ Reasoning display: OFF (saved){_RST}")
+            else:
+                _cprint(
+                    f"  {_ACCENT}⚠ Reasoning display: OFF for this "
+                    f"session only (failed to save config){_RST}"
+                )
             return
 
         # Effort level change
@@ -10627,6 +10786,17 @@ class HermesCLI:
         stacked line to scrollback on tool.completed so users can see the
         full history of tool calls (not just the current one in the spinner).
         """
+        if event_type == "capability_route":
+            from agent.image_runtime import (
+                project_capability_route_progress_event,
+            )
+
+            public_event = project_capability_route_progress_event(
+                kwargs.get("route_event")
+            )
+            if public_event is not None:
+                self._last_capability_route_event = public_event
+            return
         if event_type == "tool.completed":
             self._tool_start_time = 0.0
             # Print stacked scrollback line for "all" / "new" modes
@@ -11653,6 +11823,10 @@ class HermesCLI:
             model_override=turn_route["model"],
             runtime_override=turn_route["runtime"],
             request_overrides=turn_route.get("request_overrides"),
+            capability_generation=turn_route.get(
+                "capability_generation"
+            ),
+            route_signature=turn_route["signature"],
         ):
             return None
         
@@ -11666,18 +11840,27 @@ class HermesCLI:
             try:
                 from agent.image_routing import (
                     build_native_content_parts,
-                    decide_image_input_mode,
                 )
                 from hermes_cli.config import load_config
 
-                _img_mode = decide_image_input_mode(
-                    (self.provider or "").strip(),
-                    (self.model or "").strip(),
+                _image_route = self._resolve_image_input_route(
                     load_config(),
+                    generation=turn_route.get("capability_generation"),
                 )
+                _img_mode = _image_route.mode
             except Exception as _img_exc:
-                logging.debug("image_routing decision failed, defaulting to text: %s", _img_exc)
-                _img_mode = "text"
+                logging.warning("image_routing decision failed closed: %s", _img_exc)
+                _cprint(
+                    f"  {_DIM}⚠ 图片能力状态读取失败，本轮请求已停止 "
+                    f"(runtime_config_changed_during_snapshot){_RST}"
+                )
+                return None
+            if _img_mode == "blocked":
+                _cprint(
+                    f"  {_DIM}⚠ 当前图片能力不可用，本轮请求已停止 "
+                    f"({_image_route.reason_code}){_RST}"
+                )
+                return None
 
             if _img_mode == "native":
                 try:
@@ -11699,19 +11882,28 @@ class HermesCLI:
                         )
                         message = _parts
                     else:
-                        # All images unreadable — fall back to text enrichment.
-                        message = self._preprocess_images_with_vision(
-                            message if isinstance(message, str) else "", images
+                        _cprint(
+                            f"  {_DIM}⚠ 图片附件无法安全读取，本轮请求已停止{_RST}"
                         )
+                        return None
                 except Exception as _img_exc:
-                    logging.warning("native image attach failed, falling back to text: %s", _img_exc)
-                    message = self._preprocess_images_with_vision(
-                        message if isinstance(message, str) else "", images
+                    logging.warning("native image attach failed closed: %s", _img_exc)
+                    _cprint(
+                        f"  {_DIM}⚠ 图片附件处理失败，本轮请求已停止{_RST}"
                     )
+                    return None
             else:
-                message = self._preprocess_images_with_vision(
-                    message if isinstance(message, str) else "", images
-                )
+                try:
+                    message = self._preprocess_images_with_vision(
+                        message if isinstance(message, str) else "",
+                        images,
+                        route_decision=_image_route,
+                        capability_generation=turn_route.get(
+                            "capability_generation"
+                        ),
+                    )
+                except Exception:
+                    return None
 
         # Expand @ context references (e.g. @file:main.py, @diff, @folder:src/)
         if isinstance(message, str) and "@" in message:
@@ -15169,6 +15361,7 @@ def main(
             cli.tool_progress_mode = "off"
             if cli._ensure_runtime_credentials():
                 effective_query: Any = query
+                turn_route = cli._resolve_turn_agent_config(query)
                 if single_query_images or single_query_image_urls:
                     # Honour the same image-routing decision used by the
                     # interactive path. With a vision-capable model (incl.
@@ -15182,16 +15375,29 @@ def main(
                         from agent.image_routing import (
                             build_native_content_parts as _build_parts,  # noqa: F811
                         )
-                        from agent.image_routing import decide_image_input_mode
                         from hermes_cli.config import load_config
 
-                        _img_mode = decide_image_input_mode(
-                            (cli.provider or "").strip(),
-                            (cli.model or "").strip(),
+                        _image_route = cli._resolve_image_input_route(
                             load_config(),
+                            generation=turn_route.get(
+                                "capability_generation"
+                            ),
                         )
+                        _img_mode = _image_route.mode
                     except Exception:
-                        _img_mode = "text"
+                        _img_mode = "blocked"
+                        _image_route = None
+
+                    if _img_mode == "blocked":
+                        _reason = (
+                            getattr(_image_route, "reason_code", "")
+                            or "runtime_config_changed_during_snapshot"
+                        )
+                        _cprint(
+                            f"Image capability unavailable; request stopped "
+                            f"({_reason})"
+                        )
+                        return 1
 
                     if _img_mode == "native" and _build_parts is not None:
                         try:
@@ -15203,33 +15409,38 @@ def main(
                             if any(p.get("type") == "image_url" for p in _parts):
                                 effective_query = _parts
                             else:
-                                # All images unreadable — text fallback.
-                                # ``_preprocess_images_with_vision`` only knows
-                                # about local files; URLs would be lost there,
-                                # so keep the original query text intact when
-                                # only URLs were supplied.
-                                if single_query_images:
-                                    effective_query = cli._preprocess_images_with_vision(
-                                        query, single_query_images, announce=False,
-                                    )
-                        except Exception:
-                            if single_query_images:
-                                effective_query = cli._preprocess_images_with_vision(
-                                    query, single_query_images, announce=False,
+                                _cprint(
+                                    "Image attachment unreadable; request stopped"
                                 )
+                                return 1
+                        except Exception:
+                            _cprint(
+                                "Image attachment processing failed; request stopped"
+                            )
+                            return 1
                     elif single_query_images:
-                        effective_query = cli._preprocess_images_with_vision(
-                            query,
-                            single_query_images,
-                            announce=False,
-                        )
-                turn_route = cli._resolve_turn_agent_config(effective_query)
+                        try:
+                            effective_query = cli._preprocess_images_with_vision(
+                                query,
+                                single_query_images,
+                                announce=False,
+                                route_decision=_image_route,
+                                capability_generation=turn_route.get(
+                                    "capability_generation"
+                                ),
+                            )
+                        except Exception:
+                            return 1
                 if turn_route["signature"] != cli._active_agent_route_signature:
                     cli.agent = None
                 if cli._init_agent(
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],
                     request_overrides=turn_route.get("request_overrides"),
+                    capability_generation=turn_route.get(
+                        "capability_generation"
+                    ),
+                    route_signature=turn_route["signature"],
                 ):
                     cli.agent.quiet_mode = True
                     cli.agent.suppress_status_output = True

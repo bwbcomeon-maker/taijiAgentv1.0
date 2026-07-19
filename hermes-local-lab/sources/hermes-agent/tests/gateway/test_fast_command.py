@@ -22,6 +22,14 @@ class _CapturingAgent:
     def __init__(self, *args, **kwargs):
         type(self).last_init = dict(kwargs)
         self.tools = []
+        from agent.image_runtime import (
+            capture_capability_runtime_generation,
+        )
+
+        generation = capture_capability_runtime_generation()
+        self._capability_runtime_identity = (
+            generation.identity if generation.stable else None
+        )
 
     def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
         type(self).last_run = {

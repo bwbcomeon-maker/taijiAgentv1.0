@@ -65,6 +65,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -547,6 +548,8 @@ def _copy_dist_payload(
     target: Path,
     manifest: DistributionManifest,
     preserve_config: bool,
+    *,
+    new_incarnation: bool = False,
 ) -> None:
     """Copy distribution-owned files from *staged* into *target*.
 
@@ -557,6 +560,7 @@ def _copy_dist_payload(
     """
     target.mkdir(parents=True, exist_ok=True)
 
+    config_written = False
     for entry in staged.iterdir():
         name = entry.name
 
@@ -567,6 +571,44 @@ def _copy_dist_payload(
             continue
         if name == "config.yaml" and preserve_config and (target / "config.yaml").exists():
             # Leave user's config.yaml alone on update
+            continue
+        if name == "config.yaml":
+            import yaml
+
+            from agent.image_gen_verification import (
+                CAPABILITY_PROFILE_INCARNATION_KEY,
+                capability_profile_incarnation,
+                reconcile_capability_config_epochs,
+            )
+            from agent.provider_credentials import mutate_config_strict
+
+            loaded = yaml.safe_load(
+                entry.read_text(encoding="utf-8")
+            ) or {}
+            if not isinstance(loaded, dict):
+                raise DistributionError(
+                    "distribution config.yaml must contain a mapping"
+                )
+            replacement = loaded
+
+            def publish_config(current: dict[str, Any]) -> None:
+                desired = dict(replacement)
+                reconcile_capability_config_epochs(current, desired)
+                if (
+                    new_incarnation
+                    or not capability_profile_incarnation(desired)
+                ):
+                    desired[CAPABILITY_PROFILE_INCARNATION_KEY] = (
+                        uuid.uuid4().hex
+                    )
+                current.clear()
+                current.update(desired)
+
+            mutate_config_strict(
+                publish_config,
+                config_path=target / "config.yaml",
+            )
+            config_written = True
             continue
 
         dest = target / name
@@ -589,6 +631,10 @@ def _copy_dist_payload(
 
     # Make sure the manifest on disk reflects resolved name + source
     write_manifest(target, manifest)
+    if new_incarnation and not config_written:
+        from hermes_cli.profiles import _mint_profile_incarnation
+
+        _mint_profile_incarnation(target)
 
 
 def _bootstrap_user_dirs(target: Path) -> None:
@@ -631,6 +677,7 @@ def install_distribution(
             plan.target_dir,
             plan.manifest,
             preserve_config=False,
+            new_incarnation=True,
         )
 
         if create_alias:

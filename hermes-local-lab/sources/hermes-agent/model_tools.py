@@ -882,6 +882,7 @@ def handle_function_call(
     enabled_tools: Optional[List[str]] = None,
     skip_pre_tool_call_hook: bool = False,
     caller_capability_fingerprint: Optional[str] = None,
+    caller_capability_generation: Optional[str] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -997,6 +998,10 @@ def handle_function_call(
                 dispatch_kwargs["caller_capability_fingerprint"] = (
                     caller_capability_fingerprint
                 )
+                dispatch_kwargs["caller_capability_generation"] = (
+                    caller_capability_generation
+                )
+                dispatch_kwargs["tool_call_id"] = tool_call_id or ""
             result = registry.dispatch(
                 function_name,
                 function_args,

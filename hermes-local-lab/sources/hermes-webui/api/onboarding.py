@@ -981,19 +981,52 @@ def apply_onboarding_setup(body: dict) -> dict:
 
     cfg["model"] = model_cfg
 
-    from agent.provider_credentials import mutate_config_env_strict
-
-    desired_config = cfg
-
-    def replace_config(current: dict) -> None:
-        current.clear()
-        current.update(desired_config)
-
-    mutate_config_env_strict(
-        replace_config,
-        {provider_meta["env_var"]: api_key} if api_key else {},
-        config_path=config_path,
+    from agent.image_gen_verification import (
+        bump_capability_config_epochs,
+        capability_epochs_for_secret_env,
     )
+    from agent.provider_credentials import (
+        credential_transaction,
+        load_credential_snapshot,
+        mutate_config_env_strict,
+    )
+
+    env_updates = (
+        {provider_meta["env_var"]: api_key}
+        if api_key
+        else {}
+    )
+    desired_model = dict(model_cfg)
+    with credential_transaction(config_path):
+        snapshot = load_credential_snapshot(config_path)
+        changed_env_keys = tuple(
+            key
+            for key, value in env_updates.items()
+            if snapshot.env.get(key) != value
+        )
+
+        def replace_config(current: dict) -> None:
+            capabilities = {
+                capability
+                for key in changed_env_keys
+                for capability in capability_epochs_for_secret_env(
+                    current,
+                    key,
+                    env_values=snapshot.env,
+                )
+            }
+            current["model"] = dict(desired_model)
+            if capabilities:
+                bump_capability_config_epochs(
+                    current,
+                    *sorted(capabilities),
+                )
+
+        mutate_config_env_strict(
+            replace_config,
+            env_updates,
+            config_path=config_path,
+        )
 
     # Reload the hermes_cli provider/config cache so the next streaming call
     # picks up the new key without requiring a server restart.

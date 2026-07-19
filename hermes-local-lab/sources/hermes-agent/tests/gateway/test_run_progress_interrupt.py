@@ -22,6 +22,21 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.session import SessionSource
 
 
+def _capability_bound_factory(agent_cls):
+    """Construct a fake with the runtime identity production AIAgent binds."""
+
+    def _factory(*args, **kwargs):
+        from agent.image_runtime import capture_capability_runtime_generation
+
+        agent = agent_cls(*args, **kwargs)
+        agent._capability_runtime_identity = (
+            capture_capability_runtime_generation().identity
+        )
+        return agent
+
+    return _factory
+
+
 class ProgressCaptureAdapter(BasePlatformAdapter):
     def __init__(self, platform=Platform.TELEGRAM):
         super().__init__(PlatformConfig(enabled=True, token="***"), platform)
@@ -139,7 +154,7 @@ async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = agent_cls
+    fake_run_agent.AIAgent = _capability_bound_factory(agent_cls)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = ProgressCaptureAdapter()

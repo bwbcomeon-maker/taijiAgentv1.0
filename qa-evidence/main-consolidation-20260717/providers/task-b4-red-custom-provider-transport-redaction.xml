@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="0.176" timestamp="2026-07-19T17:24:52.618374+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_custom_image_transport_exception_redacts_bound_secret_and_endpoint" time="0.104"><failure message="KeyError: 'error_code'">tests/tools/test_provider_boundary_adversarial.py:357: in test_custom_image_transport_exception_redacts_bound_secret_and_endpoint
+    assert result["error_code"] == "custom_provider_request_failed"
+           ^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'error_code'</failure></testcase></testsuite></testsuites>

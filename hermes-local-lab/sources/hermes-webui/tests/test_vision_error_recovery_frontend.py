@@ -3,12 +3,16 @@
 from pathlib import Path
 import json
 import re
+import shutil
 import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 UI = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 VISION_TYPES = (
@@ -78,6 +82,62 @@ def test_recovery_card_never_renders_descriptor_paths_and_settings_is_reachable(
     settings_body = _function_body(MESSAGES, "openVisionRecognitionSettings")
     assert "switchSettingsSection('models')" in settings_body
     assert "toggleModelConfigSection('visionConfigEdit',true)" in settings_body
+    assert "_visionSettingsReturnFocus" in settings_body
+    assert "visionConfigCredential" in settings_body
+    assert ".focus()" in settings_body
+    assert "restoreVisionRecognitionSettingsFocus" in MESSAGES
+
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    close_body = _function_body(panels, "_hideSettingsPanel")
+    assert "restoreVisionRecognitionSettingsFocus" in close_body
+
+
+def test_capability_route_metadata_is_visible_with_actual_route_and_reason():
+    assert "function _capabilityRouteMetadataText" in UI
+    assert "capability_route_events" in UI
+    assert "data-capability-route" in UI
+    route_body = _function_body(UI, "_capabilityRouteMetadataText")
+    assert "reason_code" in route_body
+    assert "route" in route_body
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_capability_route_metadata_deduplicates_replay_and_keeps_public_truth():
+    driver = f"""
+{_function_body(MESSAGES, "_normalizeCapabilityRouteEvent")}
+{_function_body(MESSAGES, "_capabilityRouteEventKey")}
+{_function_body(MESSAGES, "_mergeCapabilityRouteEvent")}
+{_function_body(UI, "_capabilityRouteMetadataText")}
+const event={{
+ schema_version:1,
+ capability:'image_generation',
+ status:'verified',
+ reason_code:'ready',
+ route:'provider',
+ provider:'custom:test-provider',
+ model:'image-model-v1',
+ tool_call_id:'call-1',
+ private_secret:'must-not-survive',
+}};
+let events=_mergeCapabilityRouteEvent([],event);
+events=_mergeCapabilityRouteEvent(events,event);
+process.stdout.write(JSON.stringify({{events,text:_capabilityRouteMetadataText(events[0])}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", driver],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    payload = json.loads(result.stdout)
+    assert len(payload["events"]) == 1
+    assert "private_secret" not in payload["events"][0]
+    assert payload["events"][0]["route"] == "provider"
+    assert payload["events"][0]["reason_code"] == "ready"
+    assert "路由 provider" in payload["text"]
+    assert "原因 ready" in payload["text"]
+    assert "test-provider / image-model-v1" in payload["text"]
 
 
 def test_persisted_vision_error_rehydrates_recovery_actions_after_reload():

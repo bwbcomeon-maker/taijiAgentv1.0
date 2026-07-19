@@ -3,6 +3,9 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
+import hermes_cli.env_loader as env_loader
 from hermes_cli.env_loader import load_hermes_dotenv
 
 
@@ -18,6 +21,84 @@ def test_user_env_overrides_stale_shell_values(tmp_path, monkeypatch):
 
     assert loaded == [env_file]
     assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
+
+
+def test_user_env_cannot_override_group_shared_transaction_policy(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    home.chmod(0o2770)
+    env_file = home / ".env"
+    env_file.write_text(
+        "HERMES_CREDENTIAL_GROUP_SHARED=0\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o640)
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+
+    loaded = load_hermes_dotenv(hermes_home=home)
+
+    assert loaded == [env_file]
+    assert os.environ["HERMES_CREDENTIAL_GROUP_SHARED"] == "1"
+
+
+def test_user_env_repair_never_projects_group_shared_transaction_policy(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    home.chmod(0o2770)
+    env_file = home / ".env"
+    env_file.write_bytes(b"HERMES_CREDENTIAL_GROUP_SHARED=0\x00\n")
+    env_file.chmod(0o640)
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+    observed_values: list[str | None] = []
+    original_load = env_loader._load_dotenv_with_fallback
+
+    def observe_policy_before_dotenv(*args, **kwargs):
+        observed_values.append(
+            os.environ.get("HERMES_CREDENTIAL_GROUP_SHARED")
+        )
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(
+        env_loader,
+        "_load_dotenv_with_fallback",
+        observe_policy_before_dotenv,
+    )
+
+    loaded = load_hermes_dotenv(hermes_home=home)
+
+    assert loaded == [env_file]
+    assert observed_values == ["1"]
+    assert os.environ["HERMES_CREDENTIAL_GROUP_SHARED"] == "1"
+
+
+def test_external_secret_failure_restores_group_shared_transaction_policy(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+
+    def fail_after_overriding_policy(_home_path):
+        os.environ["HERMES_CREDENTIAL_GROUP_SHARED"] = "0"
+        raise RuntimeError("simulated external secret failure")
+
+    monkeypatch.setattr(
+        env_loader,
+        "_apply_external_secret_sources",
+        fail_after_overriding_policy,
+    )
+
+    with pytest.raises(RuntimeError, match="external secret failure"):
+        load_hermes_dotenv(hermes_home=home)
+
+    assert os.environ["HERMES_CREDENTIAL_GROUP_SHARED"] == "1"
 
 
 def test_taiji_runtime_home_is_default_user_env(tmp_path, monkeypatch):

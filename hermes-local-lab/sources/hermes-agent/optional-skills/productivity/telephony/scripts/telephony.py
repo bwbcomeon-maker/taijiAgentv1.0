@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,7 +31,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html import escape as xml_escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 TWILIO_API_BASE = "https://api.twilio.com/2010-04-01/Accounts"
 VAPI_API_BASE = "https://api.vapi.ai"
@@ -60,6 +61,12 @@ class TelephonyError(RuntimeError):
     """Domain-specific failure surfaced to the skill/user."""
 
 
+class _StateCommitError(OSError):
+    """State was replaced, but post-commit durability confirmation failed."""
+
+    state_committed = True
+
+
 @dataclass
 class OwnedTwilioNumber:
     sid: str
@@ -82,6 +89,10 @@ def _config_path() -> Path:
 
 def _state_path() -> Path:
     return _hermes_home() / "telephony_state.json"
+
+
+def _state_config_path(state_file: Path) -> Path:
+    return state_file.parent / "config.yaml"
 
 
 def _load_root_config() -> dict[str, Any]:
@@ -142,65 +153,204 @@ def _env_or_config(env_key: str, *config_paths: tuple[str, ...], default: str = 
     return _config_lookup(*config_paths, default=default)
 
 
-def _load_state(path: Path | None = None) -> dict[str, Any]:
-    state_file = path or _state_path()
+def _load_state_unlocked(state_file: Path) -> dict[str, Any]:
     if not state_file.exists():
         return {"version": STATE_VERSION}
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data.setdefault("version", STATE_VERSION)
-            return data
-    except Exception:
-        pass
-    return {"version": STATE_VERSION}
+        data = json.loads(state_file.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise TelephonyError(
+            f"Cannot read telephony state safely: {state_file}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise TelephonyError(
+            f"Telephony state must be a JSON object: {state_file}"
+        )
+    data.setdefault("version", STATE_VERSION)
+    return data
+
+
+def _load_state(path: Path | None = None) -> dict[str, Any]:
+    from agent import provider_credentials
+
+    state_file = (path or _state_path()).expanduser()
+    with provider_credentials.credential_transaction(
+        _state_config_path(state_file)
+    ):
+        return _load_state_unlocked(state_file)
+
+
+def _enforce_active_credential_file_policy(
+    path: Path,
+    *,
+    label: str,
+) -> None:
+    from agent import provider_credentials
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    file_fd = os.open(path, flags)
+    try:
+        provider_credentials._enforce_active_credential_fd_policy(
+            file_fd,
+            path,
+            expected_mode=provider_credentials._credential_data_mode(),
+            label=label,
+        )
+    finally:
+        os.close(file_fd)
+
+
+def _atomic_write_state_unlocked(
+    state: dict[str, Any],
+    state_file: Path,
+) -> None:
+    from agent import provider_credentials
+
+    payload = (
+        json.dumps(state, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    file_fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{state_file.name}.",
+        suffix=".tmp",
+        dir=state_file.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        provider_credentials._enforce_active_credential_fd_policy(
+            file_fd,
+            state_file,
+            expected_mode=provider_credentials._credential_data_mode(),
+            label="telephony state",
+        )
+        with os.fdopen(file_fd, "wb") as handle:
+            file_fd = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, state_file)
+        try:
+            if os.name == "posix":
+                directory_fd = os.open(
+                    state_file.parent,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except Exception as exc:
+            raise _StateCommitError(str(exc)) from exc
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        temporary_path.unlink(missing_ok=True)
 
 
 def _save_state(state: dict[str, Any], path: Path | None = None) -> Path:
-    state_file = path or _state_path()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    from agent import provider_credentials
+
+    state_file = (path or _state_path()).expanduser()
+    with provider_credentials.credential_transaction(
+        _state_config_path(state_file)
+    ):
+        _atomic_write_state_unlocked(state, state_file)
     return state_file
 
 
-def _quote_env_value(value: str) -> str:
-    if re.fullmatch(r"[A-Za-z0-9_./:+@-]+", value):
-        return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+def _mutate_state(
+    mutator: Callable[[dict[str, Any]], None],
+    path: Path | None = None,
+) -> dict[str, Any]:
+    from agent import provider_credentials
+
+    state_file = (path or _state_path()).expanduser()
+    with provider_credentials.credential_transaction(
+        _state_config_path(state_file)
+    ):
+        state = _load_state_unlocked(state_file)
+        mutator(state)
+        _atomic_write_state_unlocked(state, state_file)
+        return state
 
 
 def _upsert_env_file(updates: dict[str, str], env_path: Path | None = None) -> Path:
-    path = env_path or _env_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        lines = path.read_text(encoding="utf-8").splitlines()
-    else:
-        lines = []
+    from agent import provider_credentials
 
-    seen: set[str] = set()
-    new_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            new_lines.append(line)
-            continue
-        key, _, _rest = line.partition("=")
-        key = key.strip()
-        if key in updates:
-            new_lines.append(f"{key}={_quote_env_value(str(updates[key]))}")
-            seen.add(key)
-        else:
-            new_lines.append(line)
-
-    if new_lines and new_lines[-1].strip():
-        new_lines.append("")
-    for key, value in updates.items():
-        if key not in seen:
-            new_lines.append(f"{key}={_quote_env_value(str(value))}")
-
-    path.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+    path = (env_path or _env_path()).expanduser()
+    if path.name != ".env":
+        raise ValueError("telephony credentials must target the canonical .env")
+    config_path = path.parent / "config.yaml"
+    with provider_credentials.credential_transaction(config_path):
+        provider_credentials.load_credential_snapshot(config_path)
+        provider_credentials.mutate_env_unique(
+            {key: str(value) for key, value in updates.items()},
+            config_path=config_path,
+        )
+        if path.exists():
+            _enforce_active_credential_file_policy(
+                path,
+                label="telephony env",
+            )
     return path
+
+
+def _remember_state_and_env(
+    mutator: Callable[[dict[str, Any]], None],
+    *,
+    env_updates: dict[str, str],
+    save_env: bool,
+    state_path: Path | None,
+    env_path: Path | None,
+) -> None:
+    from agent import provider_credentials
+
+    state_file = (state_path or _state_path()).expanduser()
+    if not save_env:
+        _mutate_state(mutator, state_file)
+        return
+
+    target_env_path = (env_path or _env_path()).expanduser()
+    if target_env_path != state_file.parent / ".env":
+        raise ValueError(
+            "telephony state and env must share the same Hermes home"
+        )
+    config_path = _state_config_path(state_file)
+    with provider_credentials.credential_transaction(config_path):
+        state = _load_state_unlocked(state_file)
+        mutator(state)
+        snapshot = provider_credentials.load_credential_snapshot(
+            config_path
+        )
+        previous_values = {
+            key: snapshot.env[key] if key in snapshot.env else None
+            for key in env_updates
+        }
+
+        def rollback_env() -> None:
+            try:
+                provider_credentials.mutate_env_unique(
+                    previous_values,
+                    config_path=config_path,
+                    expected_values=env_updates,
+                )
+            except BaseException as rollback_error:
+                raise TelephonyError(
+                    "Telephony env rollback failed after remember failure"
+                ) from rollback_error
+
+        try:
+            _upsert_env_file(env_updates, target_env_path)
+        except BaseException:
+            rollback_env()
+            raise
+        try:
+            _atomic_write_state_unlocked(state, state_file)
+        except BaseException as state_error:
+            if getattr(state_error, "state_committed", False):
+                raise
+            rollback_env()
+            raise
 
 
 def _normalize_phone(number: str) -> str:
@@ -335,24 +485,26 @@ def _remember_twilio_number(
     state_path: Path | None = None,
     env_path: Path | None = None,
 ) -> dict[str, Any]:
-    state = _load_state(state_path)
-    twilio_state = state.setdefault("twilio", {})
-    twilio_state["default_phone_number"] = phone_number
-    if phone_sid:
-        twilio_state["default_phone_sid"] = phone_sid
-    _save_state(state, state_path)
-
-    saved_env_keys: list[str] = []
-    if save_env:
-        updates = {"TWILIO_PHONE_NUMBER": phone_number}
+    def mutate(state: dict[str, Any]) -> None:
+        twilio_state = state.setdefault("twilio", {})
+        twilio_state["default_phone_number"] = phone_number
         if phone_sid:
-            updates["TWILIO_PHONE_NUMBER_SID"] = phone_sid
-        _upsert_env_file(updates, env_path)
-        saved_env_keys = sorted(updates)
+            twilio_state["default_phone_sid"] = phone_sid
+
+    updates = {"TWILIO_PHONE_NUMBER": phone_number}
+    if phone_sid:
+        updates["TWILIO_PHONE_NUMBER_SID"] = phone_sid
+    _remember_state_and_env(
+        mutate,
+        env_updates=updates,
+        save_env=save_env,
+        state_path=state_path,
+        env_path=env_path,
+    )
 
     return {
         "state_path": str(state_path or _state_path()),
-        "saved_env_keys": saved_env_keys,
+        "saved_env_keys": sorted(updates) if save_env else [],
     }
 
 
@@ -363,19 +515,22 @@ def _remember_vapi_number(
     state_path: Path | None = None,
     env_path: Path | None = None,
 ) -> dict[str, Any]:
-    state = _load_state(state_path)
-    vapi_state = state.setdefault("vapi", {})
-    vapi_state["phone_number_id"] = phone_number_id
-    _save_state(state, state_path)
+    def mutate(state: dict[str, Any]) -> None:
+        vapi_state = state.setdefault("vapi", {})
+        vapi_state["phone_number_id"] = phone_number_id
 
-    saved_env_keys: list[str] = []
-    if save_env:
-        _upsert_env_file({"VAPI_PHONE_NUMBER_ID": phone_number_id}, env_path)
-        saved_env_keys = ["VAPI_PHONE_NUMBER_ID"]
+    updates = {"VAPI_PHONE_NUMBER_ID": phone_number_id}
+    _remember_state_and_env(
+        mutate,
+        env_updates=updates,
+        save_env=save_env,
+        state_path=state_path,
+        env_path=env_path,
+    )
 
     return {
         "state_path": str(state_path or _state_path()),
-        "saved_env_keys": saved_env_keys,
+        "saved_env_keys": ["VAPI_PHONE_NUMBER_ID"] if save_env else [],
     }
 
 
@@ -729,9 +884,18 @@ def _twilio_inbox(
 
     if mark_seen and message_rows:
         last_seen_sid, last_seen_date = _checkpoint_for_messages(message_rows)
-        twilio_state["last_inbound_message_sid"] = last_seen_sid
-        twilio_state["last_inbound_message_date"] = last_seen_date
-        _save_state(state, state_path)
+
+        def remember_checkpoint(current_state: dict[str, Any]) -> None:
+            current_twilio_state = current_state.setdefault("twilio", {})
+            current_twilio_state["last_inbound_message_sid"] = (
+                last_seen_sid
+            )
+            current_twilio_state["last_inbound_message_date"] = (
+                last_seen_date
+            )
+
+        state = _mutate_state(remember_checkpoint, state_path)
+        twilio_state = state.setdefault("twilio", {})
 
     return {
         "success": True,

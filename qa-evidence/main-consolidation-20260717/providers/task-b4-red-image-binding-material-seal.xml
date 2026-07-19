@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="4" skipped="0" tests="4" time="0.184" timestamp="2026-07-19T17:32:40.017493+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_forged_or_tampered_image_binding_fails_before_provider_io[bare_same_fingerprint]" time="0.096"><failure message="AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []&#10;  &#10;  Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}&#10;  Use -v to get more diff">tests/tools/test_provider_boundary_adversarial.py:282: in test_forged_or_tampered_image_binding_fails_before_provider_io
+    assert provider_io == []
+E   AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []
+E
+E     Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_forged_or_tampered_image_binding_fails_before_provider_io[secret]" time="0.003"><failure message="AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []&#10;  &#10;  Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}&#10;  Use -v to get more diff">tests/tools/test_provider_boundary_adversarial.py:282: in test_forged_or_tampered_image_binding_fails_before_provider_io
+    assert provider_io == []
+E   AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []
+E
+E     Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_forged_or_tampered_image_binding_fails_before_provider_io[endpoint]" time="0.001"><failure message="AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []&#10;  &#10;  Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}&#10;  Use -v to get more diff">tests/tools/test_provider_boundary_adversarial.py:282: in test_forged_or_tampered_image_binding_fails_before_provider_io
+    assert provider_io == []
+E   AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []
+E
+E     Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_forged_or_tampered_image_binding_fails_before_provider_io[provider_config]" time="0.001"><failure message="AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []&#10;  &#10;  Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}&#10;  Use -v to get more diff">tests/tools/test_provider_boundary_adversarial.py:282: in test_forged_or_tampered_image_binding_fails_before_provider_io
+    assert provider_io == []
+E   AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []
+E
+E     Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}
+E     Use -v to get more diff</failure></testcase></testsuite></testsuites>

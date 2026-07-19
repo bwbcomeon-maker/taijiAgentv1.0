@@ -1,6 +1,7 @@
 """Coverage for the Settings model configuration panel."""
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +13,17 @@ INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 NODE = shutil.which("node")
+
+
+def _top_level_js_function_body(source: str, name: str) -> str:
+    match = re.search(
+        rf"(?m)^(?:async\s+)?function\s+{re.escape(name)}\s*\(",
+        source,
+    )
+    assert match, f"{name}() not found"
+    next_match = re.search(r"(?m)^(?:async\s+)?function\s+", source[match.end() :])
+    end = match.end() + next_match.start() if next_match else len(source)
+    return source[match.start() : end]
 
 
 _CUSTOM_VISION_PROVIDER_DRIVER = r"""
@@ -60,7 +72,8 @@ let _customVisionProviderReturnFocus=null;
 let _modelConfigData={vision:{provider:'alibaba',model:'qwen3-vl-plus'},vision_providers:[{id:'alibaba'},
  {id:'custom:relay',name:'Relay Vision',custom:true,base_url:'https://relay.example.com/v1',models:[{id:'relay-vl'}],default_model:'relay-vl',transport:'openai_chat_completions'},
  {id:'custom:other',name:'Other Vision',custom:true,base_url:'https://other.example.com/v1',models:[{id:'other-vl'}],default_model:'other-vl',transport:'openai_chat_completions'}]};
-for(const name of ['_modelConfigCustomVisionRows','_customVisionProviderDraftId','_resetCustomVisionProviderForm',
+for(const name of ['_runtimeRefreshWarningText','_runtimeRefreshOutcome','_handleRuntimeRefreshOutcome',
+ '_modelConfigCustomVisionRows','_customVisionProviderDraftId','_resetCustomVisionProviderForm',
  '_customVisionProviderPayload','_customVisionProviderDraftIdentity','_setCustomVisionProviderBusy',
  'openCustomVisionProviderEditor','closeCustomVisionProviderEditor','saveCustomVisionProviderConfig',
  'deleteCustomVisionProviderConfig']) eval(extractFunc(name));
@@ -457,6 +470,9 @@ const api=async(url,options)=>{
  }
  if(url==='/api/vision/test'){
   if(scenario==='advanced-change'||scenario==='late-invalidated') return pendingVision;
+  if(scenario==='vision-test-refresh-pending') return {ok:true,status:'verified',provider:'alibaba',
+   model:elements.alibabaQuickVisionModel.value,message:'vision ok',refresh_pending:true,
+   warnings:['vision_verification_refresh_pending']};
   if(scenario==='wrong-identity') return {ok:true,status:'verified',provider:'other',model:'wrong-vl',message:'wrong target'};
   if(scenario==='superseded') return {ok:false,status:'configured_unverified',provider:'alibaba',model:elements.alibabaQuickVisionModel.value,error_code:'vision_probe_superseded',message:'superseded'};
   return {ok:true,status:'verified',provider:'alibaba',model:elements.alibabaQuickVisionModel.value,message:'vision ok'};
@@ -484,7 +500,8 @@ const deletePlatformCredential=()=>{};
 const _discardImageCapabilityProviderDrafts=()=>{
  for(const capability of ['vision','image']) for(const key of Object.keys(_imageCapabilityProviderDrafts[capability])) delete _imageCapabilityProviderDrafts[capability][key];
 };
-for(const name of ['_modelConfigKeyLabel','_modelConfigProviderRows','_modelConfigProviderById','_setDatalistOptions',
+for(const name of ['_runtimeRefreshWarningText','_runtimeRefreshOutcome','_handleRuntimeRefreshOutcome',
+ '_modelConfigKeyLabel','_modelConfigProviderRows','_modelConfigProviderById','_setDatalistOptions',
  '_setModelConfigText','_setModelConfigStatusBadge','_modelConfigProviderDisplay','_modelConfigImageProviderRow',
  '_modelConfigVisionProviderRow','_formatModelConfigProvider','_providerCredentialFamily','_providerSupportsNamedCredential',
  '_syncPlatformCredentialSurface','_credentialUsageLabel','_renderPlatformCredentials','_renderCapabilityCredentialOptions',
@@ -652,7 +669,8 @@ const api=(url,options)=>{
  if(url.startsWith('/api/provider-credentials/')&&apiMode==='delete') return deletePromise;
  throw new Error('unexpected '+url);
 };
-for(const name of ['_setFieldError','_setPlatformCredentialActionsBusy','_platformCredentialSessionIsCurrent',
+for(const name of ['_runtimeRefreshWarningText','_runtimeRefreshOutcome','_handleRuntimeRefreshOutcome',
+ '_setFieldError','_setPlatformCredentialActionsBusy','_platformCredentialSessionIsCurrent',
  '_applyProviderCredentialResult','savePlatformCredential','deletePlatformCredential']) eval(extractFunc(name));
 
 async function run(){
@@ -989,6 +1007,74 @@ def test_model_config_js_calls_expected_endpoints():
     assert "/api/image-gen/config" in PANELS_JS
     assert "/api/model/auxiliary" in PANELS_JS
     assert "/api/model/set" in PANELS_JS
+
+
+def test_every_model_and_provider_mutation_handles_runtime_refresh_truth():
+    """Committed config is not the same as a refreshed runtime."""
+    guarded_functions = (
+        "_saveProviderKey",
+        "savePlatformCredential",
+        "saveCustomVisionProviderConfig",
+        "saveCustomImageProviderConfig",
+        "saveMainModelConfig",
+        "saveVisionConfig",
+        "testVisionConfig",
+        "saveImageGenConfig",
+        "testImageGenConfig",
+        "saveAndVerifyAlibabaImageCapabilities",
+    )
+
+    assert "function _handleRuntimeRefreshOutcome" in PANELS_JS
+    for function_name in guarded_functions:
+        body = _top_level_js_function_body(PANELS_JS, function_name)
+        assert "_handleRuntimeRefreshOutcome" in body, (
+            f"{function_name} must handle refresh_pending/warnings before success UI"
+        )
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_runtime_refresh_warning_never_uses_green_success_and_stays_actionable():
+    driver = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[1],'utf8');
+function extractFunc(name){
+ const re=new RegExp('function\\s+'+name+'\\s*\\(');
+ const start=source.search(re);if(start<0)throw new Error(name+' missing');
+ let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}
+ return source.slice(start,i);
+}
+const status={textContent:'',dataset:{},attrs:{},setAttribute(k,v){this.attrs[k]=v;}};
+const $=id=>id==='runtimeStatus'?status:null;
+const toasts=[];
+const showToast=(message,duration,tone)=>toasts.push({message,duration,tone});
+for(const name of ['_runtimeRefreshWarningText','_runtimeRefreshOutcome',
+ '_handleRuntimeRefreshOutcome']) eval(extractFunc(name));
+const pending=_handleRuntimeRefreshOutcome({
+ refresh_pending:true,
+ warnings:['runtime_config_refresh_pending','models_cache_refresh_pending']
+},{savedLabel:'主模型配置',statusId:'runtimeStatus'});
+const ready=_handleRuntimeRefreshOutcome({
+ refresh_pending:false,warnings:[]
+},{savedLabel:'主模型配置',statusId:'runtimeStatus'});
+process.stdout.write(JSON.stringify({pending,ready,status,toasts}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", driver, str(ROOT / "static" / "panels.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["pending"]["pending"] is True
+    assert payload["ready"]["pending"] is False
+    assert "已写入本机" in payload["status"]["textContent"]
+    assert "刷新状态" in payload["status"]["textContent"]
+    assert "生效" in payload["status"]["textContent"]
+    assert payload["status"]["dataset"]["state"] == "warn"
+    assert payload["toasts"][-1]["tone"] == "warning"
+    assert all(item["tone"] != "success" for item in payload["toasts"])
 
 
 def test_model_config_secret_inputs_start_empty():
@@ -1479,6 +1565,19 @@ def test_alibaba_quick_config_stops_before_probe_when_runtime_refresh_is_pending
     assert result["visionStatus"] == "识图：刷新后再验证"
     assert result["imageStatus"] == "生图：刷新后再验证"
     assert result["state"] == "warn"
+    assert result["secret"] == ""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_alibaba_quick_probe_refresh_pending_never_advances_to_green(tmp_path):
+    result = _run_alibaba_quick_config(tmp_path, "vision-test-refresh-pending")
+    assert [call["url"] for call in result["calls"]] == [
+        "/api/image-capabilities/alibaba",
+        "/api/vision/test",
+    ]
+    assert result["state"] == "warn"
+    assert "刷新" in result["summary"]
+    assert "已验证" not in result["summary"]
     assert result["secret"] == ""
 
 

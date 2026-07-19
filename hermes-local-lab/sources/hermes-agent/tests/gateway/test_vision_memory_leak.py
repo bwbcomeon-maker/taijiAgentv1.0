@@ -11,6 +11,7 @@ provider boundary, not in this shared gateway path.
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -27,22 +28,54 @@ def gateway_runner():
     return _Stub()
 
 
+@pytest.fixture
+def frozen_vision_route(monkeypatch):
+    from agent import image_runtime
+
+    generation = object()
+    route = SimpleNamespace(
+        provider="aux-provider",
+        model="aux-model",
+    )
+    binding = object()
+    monkeypatch.setattr(
+        image_runtime,
+        "capture_frozen_vision_request_binding",
+        lambda decision, *, generation=None: (
+            binding
+            if decision is route and generation is not None
+            else (_ for _ in ()).throw(AssertionError("wrong frozen route"))
+        ),
+    )
+    return route, generation, binding
+
+
 def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.new_event_loop().run_until_complete(coro)
 
 
 class TestEnrichMessageWithVision:
-    def test_clean_description_passes_through(self, gateway_runner):
+    def test_clean_description_passes_through(
+        self, gateway_runner, frozen_vision_route
+    ):
         """Vision output without leaked memory is embedded unchanged."""
         fake_result = json.dumps({
             "success": True,
             "analysis": "A photograph of a sunset over the ocean.",
         })
+        route, generation, _binding = frozen_vision_route
         with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)):
-            out = _run(gateway_runner._enrich_message_with_vision("caption", ["/tmp/img.jpg"]))
+            out = _run(gateway_runner._enrich_message_with_vision(
+                "caption",
+                ["/tmp/img.jpg"],
+                route_decision=route,
+                capability_generation=generation,
+            ))
         assert "sunset over the ocean" in out
 
-    def test_memory_context_fence_stripped(self, gateway_runner):
+    def test_memory_context_fence_stripped(
+        self, gateway_runner, frozen_vision_route
+    ):
         """<memory-context>...</memory-context> fenced block is scrubbed."""
         leaked = (
             "<memory-context>\n"
@@ -53,14 +86,22 @@ class TestEnrichMessageWithVision:
             "A photograph of a cat."
         )
         fake_result = json.dumps({"success": True, "analysis": leaked})
+        route, generation, _binding = frozen_vision_route
         with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)):
-            out = _run(gateway_runner._enrich_message_with_vision("caption", ["/tmp/img.jpg"]))
+            out = _run(gateway_runner._enrich_message_with_vision(
+                "caption",
+                ["/tmp/img.jpg"],
+                route_decision=route,
+                capability_generation=generation,
+            ))
         assert "photograph of a cat" in out
         assert "<memory-context>" not in out
         assert "User details and preferences" not in out
         assert "System note" not in out
 
-    def test_fenced_leak_stripped_plugin_header_preserved(self, gateway_runner):
+    def test_fenced_leak_stripped_plugin_header_preserved(
+        self, gateway_runner, frozen_vision_route
+    ):
         """The fenced wrapper is stripped; plugin-specific text outside the
         fence (e.g. a "## Honcho Context" header) is left to the plugin layer.
         Gateway core stays plugin-agnostic."""
@@ -73,8 +114,14 @@ class TestEnrichMessageWithVision:
             "A photograph of a dog."
         )
         fake_result = json.dumps({"success": True, "analysis": leaked})
+        route, generation, _binding = frozen_vision_route
         with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)):
-            out = _run(gateway_runner._enrich_message_with_vision("caption", ["/tmp/img.jpg"]))
+            out = _run(gateway_runner._enrich_message_with_vision(
+                "caption",
+                ["/tmp/img.jpg"],
+                route_decision=route,
+                capability_generation=generation,
+            ))
         assert "photograph of a dog" in out
         assert "fenced leak" not in out
         assert "<memory-context>" not in out

@@ -6655,6 +6655,17 @@ function _gatewayProviderName(provider){
   if(!text)return'';
   return text.replace(/^custom:/,'').replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
 }
+function _capabilityRouteMetadataText(routeEvent){
+  const event=routeEvent&&typeof routeEvent==='object'?routeEvent:{};
+  const capabilityLabels={vision:'看图识别',image_generation:'生成图片'};
+  const capability=capabilityLabels[String(event.capability||'')]||String(event.capability||'图片能力');
+  const route=String(event.route||'unknown');
+  const reason=String(event.reason_code||'unknown');
+  const provider=String(event.provider||'').replace(/^custom:/,'');
+  const model=String(event.model||'');
+  const target=[provider,model].filter(Boolean).join(' / ');
+  return `${capability}：路由 ${route}；原因 ${reason}${target?`；目标 ${target}`:''}`;
+}
 function _gatewayRoutingLabel(routing){
   if(!routing)return'';
   const provider=_gatewayProviderName(routing.used_provider||routing.provider);
@@ -9464,7 +9475,7 @@ function _isRecoveryControlMessage(m){
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
-  return !!(msgContent(m)||m.vision_recovery||(Array.isArray(m.artifacts)&&m.artifacts.length)||(Array.isArray(m.artifact_errors)&&m.artifact_errors.length)||(Array.isArray(m.image_generation_events)&&m.image_generation_events.length));
+  return !!(msgContent(m)||m.vision_recovery||(Array.isArray(m.artifacts)&&m.artifacts.length)||(Array.isArray(m.artifact_errors)&&m.artifact_errors.length)||(Array.isArray(m.image_generation_events)&&m.image_generation_events.length)||(Array.isArray(m.capability_route_events)&&m.capability_route_events.length));
 }
 
 function _visionRecoveryCardHtml(recovery){
@@ -10221,6 +10232,7 @@ function _messageRenderCacheSignature(){
     add(Array.isArray(m.artifacts)?JSON.stringify(m.artifacts):'');
     add(Array.isArray(m.artifact_errors)?JSON.stringify(m.artifact_errors):'');
     add(Array.isArray(m.image_generation_events)?JSON.stringify(m.image_generation_events):'');
+    add(Array.isArray(m.capability_route_events)?JSON.stringify(m.capability_route_events):'');
     add(msgContent(m));
     if(Array.isArray(m.content)){
       add('content-array');
@@ -12393,6 +12405,9 @@ function renderMessages(options){
       const gatewayText=_formatGatewayModelLabel(S.session&&S.session.model||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
+      const capabilityRouteTexts=(Array.isArray(msg.capability_route_events)?msg.capability_route_events:[])
+        .map(_capabilityRouteMetadataText)
+        .filter(Boolean);
       const hasTurnUsage=!!msg._turnUsage;
       const publicActivityForMessage=!isActivityDetailsVisible()&&(
         assistantThinking.has(mi)||
@@ -12405,13 +12420,20 @@ function renderMessages(options){
       )
       );
       const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!capabilityRouteTexts.length) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-capability-route-inline')) continue;
       const fragments=[];
+      for(const routeText of capabilityRouteTexts){
+        const routeChip=document.createElement('span');
+        routeChip.className='msg-gateway-inline msg-capability-route-inline';
+        routeChip.setAttribute('data-capability-route','1');
+        routeChip.textContent=routeText;
+        fragments.push(routeChip);
+      }
       if(modelWarningText){
         const warning=document.createElement('span');
         warning.className='msg-model-warning-inline';

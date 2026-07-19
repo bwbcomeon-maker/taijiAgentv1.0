@@ -13,6 +13,31 @@ HERMES_CFG="${HERMES_HOME_DIR}/config.yaml"
 MCP_PORT=40404
 MCP_ENDPOINT="http://localhost:${MCP_PORT}/mcp"
 
+choose_hermes_python() {
+    local script_dir repo_root candidate hermes_bin
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    repo_root="$(cd "${script_dir}/../../../.." && pwd)"
+    hermes_bin="$(command -v hermes 2>/dev/null || true)"
+
+    for candidate in \
+        "${HERMES_PYTHON:-}" \
+        "${repo_root}/.venv/bin/python" \
+        "${repo_root}/venv/bin/python" \
+        "${hermes_bin:+$(dirname "$hermes_bin")/python3}" \
+        "$(command -v python3 2>/dev/null || true)"
+    do
+        if [[ -n "$candidate" && -x "$candidate" ]] \
+          && "$candidate" -c 'import agent.provider_credentials' >/dev/null 2>&1
+        then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+
+    echo "A Hermes Python environment with agent.provider_credentials is required." >&2
+    return 1
+}
+
 manual_steps=()
 
 echo -e "\n${CYAN}═══ twozero MCP for TouchDesigner — Setup ═══${NC}\n"
@@ -47,32 +72,52 @@ fi
 if [[ ! -f "$HERMES_CFG" ]]; then
     echo -e " ${FAIL} Hermes config not found at ${HERMES_CFG}"
     manual_steps+=("Create ${HERMES_CFG} with twozero_td MCP server entry")
-elif grep -q 'twozero_td' "$HERMES_CFG" 2>/dev/null; then
-    echo -e " ${OK} twozero_td MCP entry exists in Hermes config"
+elif hermes_python="$(choose_hermes_python)" && update_status=$(
+    "$hermes_python" - "$HERMES_CFG" "$MCP_ENDPOINT" 2>/dev/null <<'PY'
+import sys
+from pathlib import Path
+
+from agent.provider_credentials import mutate_config_strict
+
+
+config_path = Path(sys.argv[1])
+endpoint = sys.argv[2]
+state = {"added": False}
+
+
+def update(config):
+    servers = config.get("mcp_servers")
+    if servers is None:
+        servers = {}
+        config["mcp_servers"] = servers
+    elif not isinstance(servers, dict):
+        raise ValueError("mcp_servers config must be a mapping")
+
+    existing = servers.get("twozero_td")
+    if existing is None:
+        servers["twozero_td"] = {
+            "url": endpoint,
+            "timeout": 120,
+            "connect_timeout": 60,
+        }
+        state["added"] = True
+    elif not isinstance(existing, dict):
+        raise ValueError("twozero_td config must be a mapping")
+
+
+mutate_config_strict(update, config_path=config_path)
+print("added" if state["added"] else "existing")
+PY
+); then
+    if [[ "$update_status" == "added" ]]; then
+        echo -e " ${OK} twozero_td MCP entry added to config"
+        manual_steps+=("Restart Hermes session to pick up config change")
+    else
+        echo -e " ${OK} twozero_td MCP entry exists in Hermes config"
+    fi
 else
-    echo -e " ${WARN} Adding twozero_td MCP entry to Hermes config..."
-    python3 -c "
-import yaml, sys, copy
-
-cfg_path = '$HERMES_CFG'
-with open(cfg_path, 'r') as f:
-    cfg = yaml.safe_load(f) or {}
-
-if 'mcp_servers' not in cfg:
-    cfg['mcp_servers'] = {}
-
-if 'twozero_td' not in cfg['mcp_servers']:
-    cfg['mcp_servers']['twozero_td'] = {
-        'url': '${MCP_ENDPOINT}',
-        'timeout': 120,
-        'connect_timeout': 60
-    }
-    with open(cfg_path, 'w') as f:
-        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
-" 2>/dev/null && echo -e " ${OK} twozero_td MCP entry added to config" \
-              || { echo -e " ${FAIL} Could not update config (is PyYAML installed?)"; \
-                   manual_steps+=("Add twozero_td MCP entry to ${HERMES_CFG} manually"); }
-    manual_steps+=("Restart Hermes session to pick up config change")
+    echo -e " ${FAIL} Could not update config through the canonical Hermes writer"
+    manual_steps+=("Add twozero_td MCP entry to ${HERMES_CFG} manually")
 fi
 
 # ── 4. Test if MCP port is responding ──

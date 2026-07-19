@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "qa:config": "node qa/config-page-behavior.cjs"
   },
   "dependencies": {
     "@nous-research/ui": "0.18.2",

@@ -17,6 +17,80 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def verified_image_routes(monkeypatch):
+    """Keep downstream attachment tests focused on post-authorization logic.
+
+    The production router now requires persisted B3 verification.  These
+    tests exercise attachment ordering, redaction, cancellation, and
+    multimodal construction, so they explicitly provide an already-verified
+    route instead of silently relying on config strings as authorization.
+    """
+    from types import SimpleNamespace
+    import api.streaming as streaming
+    from agent import image_runtime
+
+    request_binding = SimpleNamespace()
+
+    def resolve(cfg, **_kwargs):
+        config = cfg if isinstance(cfg, dict) else {}
+        agent_cfg = (
+            config.get("agent")
+            if isinstance(config.get("agent"), dict)
+            else {}
+        )
+        if agent_cfg.get("image_input_mode") == "native":
+            return SimpleNamespace(
+                mode="native",
+                reason_code="main_model_supports_vision",
+                status="verified",
+                provider="main-provider",
+                model="main-model",
+            )
+        auxiliary = (
+            config.get("auxiliary")
+            if isinstance(config.get("auxiliary"), dict)
+            else {}
+        )
+        vision = (
+            auxiliary.get("vision")
+            if isinstance(auxiliary.get("vision"), dict)
+            else {}
+        )
+        if vision.get("provider") and vision.get("model"):
+            return SimpleNamespace(
+                mode="text",
+                reason_code="auxiliary_vision_verified",
+                status="verified",
+                provider="aux-provider",
+                model="aux-model",
+            )
+        return SimpleNamespace(
+            mode="blocked",
+            reason_code="capability_unavailable",
+            status="unavailable",
+            provider="",
+            model="",
+        )
+
+    monkeypatch.setattr(streaming, "get_webui_image_input_route", resolve)
+    monkeypatch.setattr(
+        image_runtime,
+        "capture_frozen_vision_request_binding",
+        lambda *_args, **_kwargs: request_binding,
+    )
+    return request_binding
+
+
+def _bind_fake_agent_capability_identity(agent) -> None:
+    from agent.image_runtime import capture_capability_runtime_generation
+
+    generation = capture_capability_runtime_generation()
+    agent._capability_runtime_identity = (
+        generation.identity if generation.stable else None
+    )
+
+
 def _make_zip(path: Path, members: dict[str, str]) -> None:
     with zipfile.ZipFile(path, "w") as zf:
         for name, text in members.items():
@@ -158,7 +232,7 @@ def test_native_image_mode_keeps_image_for_multimodal_without_text_notice(tmp_pa
     assert "未配置视觉理解能力" not in result.text_context
 
 
-def test_webui_image_auto_mode_respects_supports_vision_false():
+def test_webui_image_auto_mode_fails_closed_without_verified_auxiliary_state():
     from api.streaming import _resolve_image_input_mode
 
     cfg = {
@@ -166,7 +240,7 @@ def test_webui_image_auto_mode_respects_supports_vision_false():
         "model": {"provider": "deepseek", "default": "deepseek-v4-pro", "supports_vision": False},
     }
 
-    assert _resolve_image_input_mode(cfg) == "text"
+    assert _resolve_image_input_mode(cfg) == "blocked"
 
 
 def _text_vision_config() -> dict:
@@ -186,8 +260,47 @@ def _text_vision_config() -> dict:
     }
 
 
-def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
+def test_prepare_document_only_attachment_does_not_require_image_route(
     tmp_path, monkeypatch
+):
+    import api.streaming as streaming
+
+    attachment_root = tmp_path / "attachments"
+    session_dir = attachment_root / "session-a"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+    document = session_dir / "manual.txt"
+    document.write_text("document-only-body", encoding="utf-8")
+    monkeypatch.setattr(
+        streaming,
+        "get_webui_image_input_route",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("document-only turns must not resolve image routes")
+        ),
+    )
+
+    result = streaming.prepare_webui_chat_input(
+        "summarize",
+        [
+            {
+                "name": document.name,
+                "ref": document.name,
+                "mime": "text/plain",
+                "is_image": False,
+            }
+        ],
+        workspace=str(tmp_path / "workspace"),
+        session_id="session-a",
+        cfg={},
+    )
+
+    assert isinstance(result, str)
+    assert "document-only-body" in result
+    assert result.endswith("summarize")
+
+
+def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
+    tmp_path, monkeypatch, verified_image_routes
 ):
     from api.streaming import prepare_webui_chat_input
     from tools import vision_tools
@@ -202,8 +315,8 @@ def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
 
     calls = []
 
-    async def fake_vision_analyze_tool(*, image_url, user_prompt, model=None):
-        calls.append((image_url, user_prompt, model))
+    async def fake_vision_analyze_tool(**kwargs):
+        calls.append(kwargs)
         return json.dumps({"success": True, "analysis": f"analysis-{len(calls)}"})
 
     monkeypatch.setattr(vision_tools, "vision_analyze_tool", fake_vision_analyze_tool)
@@ -222,9 +335,21 @@ def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
     )
 
     assert isinstance(result, str)
-    assert [Path(call[0]).name for call in calls] == ["first.png", "second.png"]
-    assert all(call[2] is None for call in calls)
-    assert all("[敏感信息已隐藏]" in call[1] for call in calls)
+    assert [Path(call["image_url"]).name for call in calls] == [
+        "first.png",
+        "second.png",
+    ]
+    assert all(call["provider"] == "aux-provider" for call in calls)
+    assert all(call["model"] == "aux-model" for call in calls)
+    assert all(call["strict_target"] is True for call in calls)
+    assert all(
+        call["_runtime_binding"] is verified_image_routes
+        for call in calls
+    )
+    assert all(
+        "[敏感信息已隐藏]" in call["user_prompt"]
+        for call in calls
+    )
     assert result.index("analysis-1") < result.index("analysis-2")
     assert "compare them" in result
     assert str(session_dir) not in result
@@ -233,7 +358,7 @@ def test_prepare_webui_chat_input_uses_auxiliary_vision_once_per_image_in_order(
 
 
 def test_prepare_webui_chat_input_force_redacts_vision_credentials_before_main_model(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, verified_image_routes
 ):
     from api.streaming import prepare_webui_chat_input
     from tools import vision_tools
@@ -278,7 +403,7 @@ def test_prepare_webui_chat_input_force_redacts_vision_credentials_before_main_m
 
 
 def test_vision_provider_warning_logs_only_safe_category_and_diagnostic_id(
-    tmp_path, monkeypatch, caplog
+    tmp_path, monkeypatch, caplog, verified_image_routes
 ):
     from api.streaming import WebUIChatInputError, prepare_webui_chat_input
     from tools import vision_tools
@@ -321,7 +446,7 @@ def test_vision_provider_warning_logs_only_safe_category_and_diagnostic_id(
     ],
 )
 def test_prepare_webui_chat_input_blocks_failed_or_empty_vision_result(
-    tmp_path, monkeypatch, vision_result
+    tmp_path, monkeypatch, vision_result, verified_image_routes
 ):
     from api.streaming import WebUIChatInputError, prepare_webui_chat_input
     from tools import vision_tools
@@ -355,7 +480,7 @@ def test_prepare_webui_chat_input_blocks_failed_or_empty_vision_result(
 
 
 def test_prepare_webui_chat_input_blocks_vision_exception_and_stops_later_images(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, verified_image_routes
 ):
     from api.streaming import WebUIChatInputError, prepare_webui_chat_input
     from tools import vision_tools
@@ -421,7 +546,7 @@ def test_prepare_webui_chat_input_requires_auxiliary_vision_for_text_mode(
 
 
 def test_prepare_webui_chat_input_preserves_document_and_vision_context(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, verified_image_routes
 ):
     from api.streaming import prepare_webui_chat_input
     from tools import vision_tools
@@ -458,7 +583,7 @@ def test_prepare_webui_chat_input_preserves_document_and_vision_context(
 
 
 def test_prepare_webui_chat_input_keeps_native_images_as_multimodal_parts(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, verified_image_routes
 ):
     from api.streaming import prepare_webui_chat_input
 
@@ -488,7 +613,7 @@ def test_prepare_webui_chat_input_keeps_native_images_as_multimodal_parts(
 
 
 def test_legacy_cancellation_after_first_auxiliary_image_skips_second_and_main_model(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, verified_image_routes
 ):
     import api.config as config
     import api.models as models
@@ -525,6 +650,7 @@ def test_legacy_cancellation_after_first_auxiliary_image_skips_second_and_main_m
             self.session_completion_tokens = 0
             self.session_estimated_cost_usd = 0
             self._last_error = None
+            _bind_fake_agent_capability_identity(self)
 
         def run_conversation(self, **kwargs):
             run_calls.append(kwargs)
@@ -602,7 +728,7 @@ def test_legacy_cancellation_after_first_auxiliary_image_skips_second_and_main_m
 
 
 def test_legacy_vision_failure_survives_session_reload_with_user_turn_and_typed_error(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, verified_image_routes
 ):
     import api.config as config
     import api.models as models
@@ -641,6 +767,7 @@ def test_legacy_vision_failure_survives_session_reload_with_user_turn_and_typed_
             self.session_completion_tokens = 0
             self.session_estimated_cost_usd = 0
             self._last_error = None
+            _bind_fake_agent_capability_identity(self)
 
         def run_conversation(self, **kwargs):
             run_calls.append(kwargs)

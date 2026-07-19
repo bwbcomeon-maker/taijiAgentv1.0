@@ -1613,7 +1613,8 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,
                  pre_tool_block_checked: bool = False,
-                 caller_capability_fingerprint: Optional[str] = None) -> str:
+                 caller_capability_fingerprint: Optional[str] = None,
+                 caller_capability_generation: Optional[str] = None) -> str:
     """Invoke a single tool and return the result string. No display logic.
 
     Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
@@ -1710,6 +1711,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         ):
             dispatch_kwargs["caller_capability_fingerprint"] = (
                 caller_capability_fingerprint
+            )
+            dispatch_kwargs["caller_capability_generation"] = (
+                caller_capability_generation
             )
         with public_chat_guard(getattr(agent, "platform", None) == "webui"):
             return _ra().handle_function_call(

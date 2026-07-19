@@ -6,8 +6,16 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from gateway.config import PlatformConfig
+from gateway.platforms import wecom_callback
 from gateway.platforms.wecom_callback import WecomCallbackAdapter
 from gateway.platforms.wecom_crypto import WXBizMsgCrypt
+
+
+@pytest.fixture(autouse=True)
+def _controlled_xml_parser(monkeypatch):
+    """Unit-test trusted fixtures without weakening the production parser gate."""
+
+    monkeypatch.setattr(wecom_callback, "ET", ET)
 
 
 def _app(name="test-app", corp_id="ww1234567890", agent_id="1000002"):

@@ -746,7 +746,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home
-from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
+from utils import atomic_json_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hermes_home()
 
 # Load environment variables from ~/.hermes/.env first.
@@ -1449,6 +1449,68 @@ def _load_gateway_config() -> dict:
     except Exception:
         logger.debug("Could not load gateway config from %s", config_path)
     return {}
+
+
+def _set_gateway_config_value(
+    key_path: str,
+    value: Any,
+    *,
+    config_path: Optional[Path] = None,
+) -> dict:
+    """Set one dot-separated config value against the latest locked config."""
+    from agent.provider_credentials import mutate_config_strict
+
+    keys = [part for part in key_path.split(".") if part]
+    if not keys:
+        raise ValueError("config key path must not be empty")
+    target_path = config_path or (_hermes_home / "config.yaml")
+
+    def _set_value(user_config: dict[str, Any]) -> None:
+        current = user_config
+        for key in keys[:-1]:
+            if not isinstance(current.get(key), dict):
+                current[key] = {}
+            current = current[key]
+        current[keys[-1]] = value
+
+    return mutate_config_strict(
+        _set_value,
+        config_path=target_path,
+    )
+
+
+def _persist_gateway_model_switch(
+    result: Any,
+    *,
+    config_path: Optional[Path] = None,
+) -> dict:
+    """Persist a global model switch against the latest locked config."""
+    from agent.provider_credentials import mutate_config_strict
+
+    target_path = config_path or (_hermes_home / "config.yaml")
+
+    def _set_model(user_config: dict[str, Any]) -> None:
+        raw_model = user_config.get("model")
+        if isinstance(raw_model, dict):
+            model_cfg = raw_model
+        elif isinstance(raw_model, str) and raw_model.strip():
+            model_cfg = {"default": raw_model.strip()}
+            user_config["model"] = model_cfg
+        else:
+            model_cfg = {}
+            user_config["model"] = model_cfg
+
+        model_cfg["default"] = result.new_model
+        model_cfg["provider"] = result.target_provider
+        if result.base_url:
+            model_cfg["base_url"] = result.base_url
+        else:
+            model_cfg.pop("base_url", None)
+
+    return mutate_config_strict(
+        _set_model,
+        config_path=target_path,
+    )
 
 
 def _load_gateway_runtime_config() -> dict:
@@ -7930,6 +7992,7 @@ class GatewayRunner:
         event: MessageEvent,
         source: SessionSource,
         history: List[Dict[str, Any]],
+        capability_generation=None,
     ) -> Optional[str]:
         """Prepare inbound event text for the agent.
 
@@ -7994,7 +8057,15 @@ class GatewayRunner:
             if image_paths:
                 # Decide routing: native (attach pixels) vs text (vision_analyze
                 # pre-run + prepend description).  See agent/image_routing.py.
-                _img_mode = self._decide_image_input_mode()
+                _image_route = self._decide_image_input_route(
+                    generation=capability_generation,
+                )
+                _img_mode = _image_route.mode
+                if _img_mode == "blocked":
+                    raise RuntimeError(
+                        "image_capability_blocked:"
+                        f"{_image_route.reason_code}"
+                    )
                 if _img_mode == "native":
                     # Defer attachment to the run_conversation call site.
                     pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
@@ -8014,6 +8085,8 @@ class GatewayRunner:
                     message_text = await self._enrich_message_with_vision(
                         message_text,
                         image_paths,
+                        route_decision=_image_route,
+                        capability_generation=capability_generation,
                     )
 
             if audio_paths:
@@ -8776,10 +8849,18 @@ class GatewayRunner:
         # attachments (documents, audio, etc.) are not sent to the vision
         # tool even when they appear in the same message.
         # -----------------------------------------------------------------
+        from agent.image_runtime import (
+            capture_capability_runtime_generation,
+        )
+
+        capability_generation = (
+            capture_capability_runtime_generation()
+        )
         message_text = await self._prepare_inbound_message_text(
             event=event,
             source=source,
             history=history,
+            capability_generation=capability_generation,
         )
         if message_text is None:
             return
@@ -8815,6 +8896,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                capability_generation=capability_generation,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -10538,32 +10620,10 @@ class GatewayRunner:
         # Persist to config if --global
         if persist_global:
             try:
-                if config_path.exists():
-                    with open(config_path, encoding="utf-8") as f:
-                        cfg = yaml.safe_load(f) or {}
-                else:
-                    cfg = {}
-                # Coerce scalar/None ``model:`` into a dict before mutation —
-                # otherwise ``cfg.setdefault("model", {})`` returns the existing
-                # scalar and the next assignment raises
-                # ``TypeError: 'str' object does not support item assignment``.
-                # Reproduces when ``config.yaml`` has ``model: <name>`` (flat
-                # string) instead of the proper nested ``model: {default: ...}``.
-                raw_model = cfg.get("model")
-                if isinstance(raw_model, dict):
-                    model_cfg = raw_model
-                elif isinstance(raw_model, str) and raw_model.strip():
-                    model_cfg = {"default": raw_model.strip()}
-                    cfg["model"] = model_cfg
-                else:
-                    model_cfg = {}
-                    cfg["model"] = model_cfg
-                model_cfg["default"] = result.new_model
-                model_cfg["provider"] = result.target_provider
-                if result.base_url:
-                    model_cfg["base_url"] = result.base_url
-                from hermes_cli.config import save_config
-                save_config(cfg)
+                _persist_gateway_model_switch(
+                    result,
+                    config_path=config_path,
+                )
             except Exception as e:
                 logger.warning("Failed to persist model switch: %s", e)
 
@@ -10641,17 +10701,32 @@ class GatewayRunner:
         if errors:
             return "❌ " + "\n❌ ".join(errors)
 
-        # Load + persist via the same helpers used for /model and /yolo
+        # Read the current state for validation and status rendering.  The
+        # actual write must be a node-level mutation against the latest
+        # locked config so a concurrent unrelated update cannot be lost.
         try:
-            from hermes_cli.config import load_config, save_config
+            from hermes_cli.config import load_config
         except Exception as exc:
             return f"❌ Could not load config: {exc}"
         cfg = load_config()
 
+        def persist_runtime(config_snapshot: dict[str, Any]) -> None:
+            latest = _set_gateway_config_value(
+                "model.openai_runtime",
+                new_value,
+            )
+            # ``crs.apply`` subsequently migrates Codex plugin settings from
+            # this object.  Refresh it to the committed latest state instead
+            # of leaving the stale pre-lock snapshot in memory.
+            config_snapshot.clear()
+            config_snapshot.update(latest)
+
         result = crs.apply(
             cfg,
             new_value,
-            persist_callback=(save_config if new_value is not None else None),
+            persist_callback=(
+                persist_runtime if new_value is not None else None
+            ),
         )
 
         # On a real change, evict the cached agent so the new runtime takes
@@ -10708,10 +10783,11 @@ class GatewayRunner:
 
         if args in {"none", "default", "neutral"}:
             try:
-                if "agent" not in config or not isinstance(config.get("agent"), dict):
-                    config["agent"] = {}
-                config["agent"]["system_prompt"] = ""
-                atomic_yaml_write(config_path, config)
+                _set_gateway_config_value(
+                    "agent.system_prompt",
+                    "",
+                    config_path=config_path,
+                )
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
             self._ephemeral_system_prompt = ""
@@ -10721,10 +10797,11 @@ class GatewayRunner:
 
             # Write to config.yaml, same pattern as CLI save_config_value.
             try:
-                if "agent" not in config or not isinstance(config.get("agent"), dict):
-                    config["agent"] = {}
-                config["agent"]["system_prompt"] = new_prompt
-                atomic_yaml_write(config_path, config)
+                _set_gateway_config_value(
+                    "agent.system_prompt",
+                    new_prompt,
+                    config_path=config_path,
+                )
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
 
@@ -11816,11 +11893,58 @@ class GatewayRunner:
                         image_paths.append(path)
                 if image_paths:
                     try:
-                        enriched_prompt = await self._enrich_message_with_vision(
-                            prompt, image_paths,
+                        from agent.image_routing import (
+                            build_native_content_parts,
                         )
+
+                        _image_route = self._decide_image_input_route(
+                            generation=turn_route.get(
+                                "capability_generation"
+                            ),
+                        )
+                        if _image_route.mode == "blocked":
+                            raise RuntimeError(
+                                "image_capability_blocked:"
+                                f"{_image_route.reason_code}"
+                            )
+                        if _image_route.mode == "native":
+                            enriched_prompt, _skipped = (
+                                build_native_content_parts(
+                                    prompt,
+                                    image_paths,
+                                )
+                            )
+                            if not any(
+                                isinstance(part, dict)
+                                and part.get("type") == "image_url"
+                                for part in enriched_prompt
+                            ):
+                                raise RuntimeError(
+                                    "image_attachment_unreadable"
+                                )
+                        else:
+                            enriched_prompt = (
+                                await self._enrich_message_with_vision(
+                                    prompt,
+                                    image_paths,
+                                    route_decision=_image_route,
+                                    capability_generation=turn_route.get(
+                                        "capability_generation"
+                                    ),
+                                )
+                            )
                     except Exception as e:
                         logger.warning("Background task vision enrichment failed: %s", e)
+                        await adapter.send(
+                            source.chat_id,
+                            (
+                                f"❌ Background task {task_id} failed: "
+                                "image capability changed before vision "
+                                "Provider dispatch."
+                            ),
+                            metadata=_thread_metadata,
+                        )
+                        return
 
             def run_sync():
                 agent = AIAgent(
@@ -11941,8 +12065,6 @@ class GatewayRunner:
             /reasoning show|on               Show model reasoning in responses
             /reasoning hide|off              Hide model reasoning from responses
         """
-        import yaml
-
         raw_args = event.get_command_args().strip()
         args, persist_global = self._parse_reasoning_command_args(raw_args)
         config_path = _hermes_home / "config.yaml"
@@ -11956,18 +12078,11 @@ class GatewayRunner:
         def _save_config_key(key_path: str, value):
             """Save a dot-separated key to config.yaml."""
             try:
-                user_config = {}
-                if config_path.exists():
-                    with open(config_path, encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-                keys = key_path.split(".")
-                current = user_config
-                for k in keys[:-1]:
-                    if k not in current or not isinstance(current[k], dict):
-                        current[k] = {}
-                    current = current[k]
-                current[keys[-1]] = value
-                atomic_yaml_write(config_path, user_config)
+                _set_gateway_config_value(
+                    key_path,
+                    value,
+                    config_path=config_path,
+                )
                 return True
             except Exception as e:
                 logger.error("Failed to save config key %s: %s", key_path, e)
@@ -12047,7 +12162,6 @@ class GatewayRunner:
 
     async def _handle_fast_command(self, event: MessageEvent) -> str:
         """Handle /fast — mirror the CLI Priority Processing toggle in gateway chats."""
-        import yaml
         from hermes_cli.models import model_supports_fast_mode
 
         args = event.get_command_args().strip().lower()
@@ -12062,18 +12176,11 @@ class GatewayRunner:
         def _save_config_key(key_path: str, value):
             """Save a dot-separated key to config.yaml."""
             try:
-                user_config = {}
-                if config_path.exists():
-                    with open(config_path, encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-                keys = key_path.split(".")
-                current = user_config
-                for k in keys[:-1]:
-                    if k not in current or not isinstance(current[k], dict):
-                        current[k] = {}
-                    current = current[k]
-                current[keys[-1]] = value
-                atomic_yaml_write(config_path, user_config)
+                _set_gateway_config_value(
+                    key_path,
+                    value,
+                    config_path=config_path,
+                )
                 return True
             except Exception as e:
                 logger.error("Failed to save config key %s: %s", key_path, e)
@@ -12160,15 +12267,11 @@ class GatewayRunner:
 
         # Save to display.platforms.<platform>.tool_progress
         try:
-            if "display" not in user_config or not isinstance(user_config.get("display"), dict):
-                user_config["display"] = {}
-            display = user_config["display"]
-            if "platforms" not in display or not isinstance(display.get("platforms"), dict):
-                display["platforms"] = {}
-            if platform_key not in display["platforms"] or not isinstance(display["platforms"].get(platform_key), dict):
-                display["platforms"][platform_key] = {}
-            display["platforms"][platform_key]["tool_progress"] = new_mode
-            atomic_yaml_write(config_path, user_config)
+            _set_gateway_config_value(
+                f"display.platforms.{platform_key}.tool_progress",
+                new_mode,
+                config_path=config_path,
+            )
             return (
                 f"{descriptions[new_mode]}\n"
                 + t("gateway.verbose.saved_suffix", platform=platform_key)
@@ -12236,13 +12339,11 @@ class GatewayRunner:
 
         # --- write global flag ---------------------------------------------
         try:
-            if not isinstance(user_config.get("display"), dict):
-                user_config["display"] = {}
-            display = user_config["display"]
-            if not isinstance(display.get("runtime_footer"), dict):
-                display["runtime_footer"] = {}
-            display["runtime_footer"]["enabled"] = new_state
-            atomic_yaml_write(config_path, user_config)
+            _set_gateway_config_value(
+                "display.runtime_footer.enabled",
+                new_state,
+                config_path=config_path,
+            )
         except Exception as e:
             logger.warning("Failed to save runtime_footer.enabled: %s", e)
             return t("gateway.config_save_failed", error=e)
@@ -14635,7 +14736,7 @@ class GatewayRunner:
         ctx = copy_context()
         return await loop.run_in_executor(None, ctx.run, func, *args)
 
-    def _decide_image_input_mode(self) -> str:
+    def _decide_image_input_route(self, *, generation=None):
         """Resolve the image-input routing for the currently active model.
 
         Returns ``"native"`` (attach pixels on the user turn) or ``"text"``
@@ -14645,23 +14746,30 @@ class GatewayRunner:
         The active provider/model are read from config.yaml so the decision
         tracks ``/model`` switches automatically on the next message.
         """
-        try:
-            from agent.image_routing import decide_image_input_mode
-            from agent.auxiliary_client import _read_main_model, _read_main_provider
-            from hermes_cli.config import load_config
+        from agent.auxiliary_client import _read_main_model, _read_main_provider
+        from agent.image_runtime import resolve_image_input_route
+        from hermes_cli.config import load_config
 
-            cfg = load_config()
-            provider = _read_main_provider()
-            model = _read_main_model()
-            return decide_image_input_mode(provider, model, cfg)
-        except Exception as exc:
-            logger.debug("image_routing: decision failed, falling back to text — %s", exc)
-            return "text"
+        cfg = load_config()
+        provider = _read_main_provider()
+        model = _read_main_model()
+        return resolve_image_input_route(
+            provider,
+            model,
+            cfg,
+            generation=generation,
+        )
+
+    def _decide_image_input_mode(self) -> str:
+        return self._decide_image_input_route().mode
 
     async def _enrich_message_with_vision(
         self,
         user_text: str,
         image_paths: List[str],
+        *,
+        route_decision=None,
+        capability_generation=None,
     ) -> str:
         """
         Auto-analyze user-attached images with the vision tool and prepend
@@ -14679,9 +14787,18 @@ class GatewayRunner:
         Returns:
             The enriched message string with vision descriptions prepended.
         """
-        from tools.vision_tools import vision_analyze_tool
+        from agent.image_runtime import (
+            capture_frozen_vision_request_binding,
+        )
         from agent.memory_manager import sanitize_context
+        from tools.vision_tools import vision_analyze_tool
 
+        request_binding = capture_frozen_vision_request_binding(
+            route_decision,
+            generation=capability_generation,
+        )
+        vision_provider = str(route_decision.provider or "").strip()
+        vision_model = str(route_decision.model or "").strip()
         analysis_prompt = (
             "Describe everything visible in this image in thorough detail. "
             "Include any text, code, data, objects, people, layout, colors, "
@@ -14695,6 +14812,10 @@ class GatewayRunner:
                 result_json = await vision_analyze_tool(
                     image_url=path,
                     user_prompt=analysis_prompt,
+                    provider=vision_provider,
+                    model=vision_model,
+                    strict_target=True,
+                    _runtime_binding=request_binding,
                 )
                 result = json.loads(result_json)
                 if result.get("success"):
@@ -14706,18 +14827,16 @@ class GatewayRunner:
                         f"image_url: {path} ~]"
                     )
                 else:
-                    enriched_parts.append(
-                        "[The user sent an image but I couldn't quite see it "
-                        "this time (>_<) You can try looking at it yourself "
-                        f"with vision_analyze using image_url: {path}]"
+                    raise RuntimeError(
+                        str(
+                            result.get("error_code")
+                            or result.get("reason_code")
+                            or "vision_analysis_failed"
+                        )
                     )
             except Exception as e:
                 logger.error("Vision auto-analysis error: %s", e)
-                enriched_parts.append(
-                    f"[The user sent an image but something went wrong when I "
-                    f"tried to look at it~ You can try examining it yourself "
-                    f"with vision_analyze using image_url: {path}]"
-                )
+                raise RuntimeError("vision_analysis_failed") from e
 
         # Combine: vision descriptions first, then the user's original text
         if enriched_parts:
@@ -15119,7 +15238,12 @@ class GatewayRunner:
     )
 
     @classmethod
-    def _extract_cache_busting_config(cls, user_config: dict | None) -> dict:
+    def _extract_cache_busting_config(
+        cls,
+        user_config: dict | None,
+        *,
+        capability_generation=None,
+    ) -> dict:
         """Pull values that must bust the cached agent.
 
         Returns a flat dict keyed by 'section.key'.  Missing config keys and
@@ -15146,6 +15270,24 @@ class GatewayRunner:
             out["tools.registry_generation"] = getattr(registry, "_generation", None)
         except Exception:
             out["tools.registry_generation"] = None
+        try:
+            from agent.image_runtime import (
+                capture_capability_runtime_generation,
+            )
+
+            generation = (
+                capability_generation
+                or capture_capability_runtime_generation()
+            )
+            out["image.capability_runtime_generation"] = (
+                generation.cache_identity
+            )
+        except Exception:
+            out["image.capability_runtime_generation"] = (
+                False,
+                (),
+                (),
+            )
 
         # Honcho identity-mapping keys live in honcho.json, not user_config.
         # HonchoSessionManager freezes the resolved peer_name / ai_peer /
@@ -15170,6 +15312,30 @@ class GatewayRunner:
             out["honcho.user_peer_aliases"] = None
 
         return out
+
+    @staticmethod
+    def _agent_matches_capability_cache(
+        agent: Any,
+        cache_keys: dict | None,
+    ) -> bool:
+        cache_identity = (cache_keys or {}).get(
+            "image.capability_runtime_generation"
+        )
+        if (
+            not isinstance(cache_identity, (tuple, list))
+            or len(cache_identity) != 3
+            or not cache_identity[0]
+        ):
+            return False
+        expected_identity = (
+            tuple(cache_identity[1]),
+            tuple(cache_identity[2]),
+        )
+        return getattr(
+            agent,
+            "_capability_runtime_identity",
+            None,
+        ) == expected_identity
 
     @staticmethod
     def _agent_config_signature(
@@ -15921,6 +16087,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        capability_generation=None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -16024,6 +16191,13 @@ class GatewayRunner:
         
         # Queue for progress messages (thread-safe)
         progress_queue = queue.Queue() if tool_progress_enabled else None
+        # Normal run completion must be a graceful, producer-closed flush.
+        # Cancelling the sender to signal EOF races with its throttling sleeps:
+        # depending on exactly where cancellation lands, the already-dequeued
+        # line and the queue tail can be abandoned.  The producer (run_sync)
+        # has returned before this event is set, so no new progress can arrive
+        # after the sender observes an empty queue.
+        progress_stop_event = asyncio.Event()
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
@@ -16052,6 +16226,25 @@ class GatewayRunner:
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
+            if event_type == "capability_route":
+                from agent.image_runtime import (
+                    project_capability_route_progress_event,
+                )
+
+                public_event = project_capability_route_progress_event(
+                    kwargs.get("route_event")
+                )
+                if public_event is not None:
+                    events = getattr(
+                        self,
+                        "_capability_route_events",
+                        None,
+                    )
+                    if events is None:
+                        events = {}
+                        self._capability_route_events = events
+                    events[session_key] = public_event
+                return
             if not progress_queue or not _run_still_current():
                 return
 
@@ -16378,8 +16571,18 @@ class GatewayRunner:
 
                     if await _roll_progress_overflow_if_needed():
                         _last_edit_ts = time.monotonic()
-                        await asyncio.sleep(0.3)
-                        if _run_still_current():
+                        if not progress_stop_event.is_set():
+                            try:
+                                await asyncio.wait_for(
+                                    progress_stop_event.wait(),
+                                    timeout=0.3,
+                                )
+                            except asyncio.TimeoutError:
+                                pass
+                        if (
+                            not progress_stop_event.is_set()
+                            and _run_still_current()
+                        ):
                             await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
                         continue
 
@@ -16389,11 +16592,17 @@ class GatewayRunner:
                     # instead of reacting to 429s.)
                     _now = time.monotonic()
                     _remaining = _PROGRESS_EDIT_INTERVAL - (_now - _last_edit_ts)
-                    if _remaining > 0:
+                    if _remaining > 0 and not progress_stop_event.is_set():
                         # Wait out the throttle interval, then loop back to
                         # drain any additional queued messages before sending
                         # a single batched edit.
-                        await asyncio.sleep(_remaining)
+                        try:
+                            await asyncio.wait_for(
+                                progress_stop_event.wait(),
+                                timeout=_remaining,
+                            )
+                        except asyncio.TimeoutError:
+                            pass
                         continue
 
                     if not _run_still_current():
@@ -16464,15 +16673,45 @@ class GatewayRunner:
                     _last_edit_ts = time.monotonic()
 
                     # Restore typing indicator
-                    await asyncio.sleep(0.3)
-                    if _run_still_current():
+                    if not progress_stop_event.is_set():
+                        try:
+                            await asyncio.wait_for(
+                                progress_stop_event.wait(),
+                                timeout=0.3,
+                            )
+                        except asyncio.TimeoutError:
+                            pass
+                    if (
+                        not progress_stop_event.is_set()
+                        and _run_still_current()
+                    ):
                         await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
 
                 except queue.Empty:
-                    await asyncio.sleep(0.3)
+                    if progress_stop_event.is_set():
+                        if can_edit and progress_lines and progress_msg_id:
+                            await _roll_progress_overflow_if_needed()
+                        if can_edit and progress_lines and progress_msg_id:
+                            try:
+                                await _edit_progress_message(
+                                    progress_msg_id,
+                                    _progress_text(progress_lines),
+                                )
+                            except Exception:
+                                pass
+                        return
+                    try:
+                        await asyncio.wait_for(
+                            progress_stop_event.wait(),
+                            timeout=0.3,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
                 except asyncio.CancelledError:
-                    # Drain remaining queued messages
-                    while not progress_queue.empty():
+                    # Best-effort fallback for exceptional cancellation.  The
+                    # normal completion path uses progress_stop_event instead,
+                    # so cancellation is no longer the queue's EOF signal.
+                    while True:
                         try:
                             raw = progress_queue.get_nowait()
                             if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
@@ -16498,6 +16737,8 @@ class GatewayRunner:
                             else:
                                 progress_lines.append(raw)
                                 await _roll_progress_overflow_if_needed()
+                        except queue.Empty:
+                            break
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)
@@ -16764,6 +17005,10 @@ class GatewayRunner:
                 )
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            _cache_keys = self._extract_cache_busting_config(
+                user_config,
+                capability_generation=capability_generation,
+            )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -16773,7 +17018,7 @@ class GatewayRunner:
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
-                cache_keys=self._extract_cache_busting_config(user_config),
+                cache_keys=_cache_keys,
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
             )
@@ -16783,7 +17028,14 @@ class GatewayRunner:
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     cached = _cache.get(session_key)
-                    if cached and cached[1] == _sig:
+                    if (
+                        cached
+                        and cached[1] == _sig
+                        and self._agent_matches_capability_cache(
+                            cached[0],
+                            _cache_keys,
+                        )
+                    ):
                         agent = cached[0]
                         # Refresh LRU order so the cap enforcement evicts
                         # truly-oldest entries, not the one we just used.
@@ -16829,6 +17081,13 @@ class GatewayRunner:
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
+                if not self._agent_matches_capability_cache(
+                    agent,
+                    _cache_keys,
+                ):
+                    raise RuntimeError(
+                        "capability runtime changed during agent construction"
+                    )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
                         _cache[session_key] = (agent, _sig)
@@ -16837,7 +17096,11 @@ class GatewayRunner:
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
-            agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
+            # Keep the callback installed even when visible tool-progress
+            # bubbles are disabled: capability_route is a runtime audit event,
+            # while the callback itself suppresses ordinary progress without
+            # a queue.
+            agent.tool_progress_callback = progress_callback
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
@@ -18004,6 +18267,13 @@ class GatewayRunner:
                 # new message).
 
                 updated_history = result.get("messages", history)
+                from agent.image_runtime import (
+                    capture_capability_runtime_generation,
+                )
+
+                followup_capability_generation = (
+                    capture_capability_runtime_generation()
+                )
                 next_source = source
                 next_message = pending
                 next_message_id = None
@@ -18020,6 +18290,9 @@ class GatewayRunner:
                         event=pending_event,
                         source=next_source,
                         history=updated_history,
+                        capability_generation=(
+                            followup_capability_generation
+                        ),
                     )
                     if next_message is None:
                         return result
@@ -18050,12 +18323,28 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    capability_generation=(
+                        followup_capability_generation
+                    ),
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:
-            # Stop progress sender, interrupt monitor, and notification task
+            # run_sync has returned, so close the producer side and let the
+            # progress sender consume the queue tail deterministically.  A
+            # cancellation-driven EOF is timing-dependent and can lose lines.
             if progress_task:
-                progress_task.cancel()
+                progress_stop_event.set()
+                try:
+                    await asyncio.wait_for(progress_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
+                progress_task = None
+
+            # Stop interrupt monitor and notification task.
             interrupt_monitor.cancel()
             _notify_task.cancel()
 

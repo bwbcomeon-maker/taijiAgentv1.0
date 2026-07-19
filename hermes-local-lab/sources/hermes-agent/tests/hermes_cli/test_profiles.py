@@ -13,6 +13,11 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import yaml
+
+from agent.image_gen_verification import (
+    CAPABILITY_PROFILE_INCARNATION_KEY,
+)
 
 from hermes_cli.profiles import (
     normalize_profile_name,
@@ -158,6 +163,10 @@ class TestCreateProfile:
         for subdir in ["memories", "sessions", "skills", "skins", "logs",
                         "plans", "workspace", "cron"]:
             assert (profile_dir / subdir).is_dir(), f"Missing subdir: {subdir}"
+        config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
 
     def test_duplicate_raises_file_exists(self, profile_env):
         create_profile("coder", no_alias=True)
@@ -182,7 +191,11 @@ class TestCreateProfile:
 
         profile_dir = create_profile("coder", clone_config=True, no_alias=True)
 
-        assert (profile_dir / "config.yaml").read_text() == "model: test"
+        config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert config["model"] == "test"
+        assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
         assert (profile_dir / ".env").read_text() == "KEY=val"
         assert (profile_dir / "SOUL.md").read_text() == "Be helpful."
 
@@ -219,7 +232,11 @@ class TestCreateProfile:
 
         # Content should be copied
         assert (profile_dir / "memories" / "note.md").read_text() == "remember this"
-        assert (profile_dir / "config.yaml").read_text() == "model: gpt-4"
+        config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert config["model"] == "gpt-4"
+        assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
         # Runtime files should be stripped
         assert not (profile_dir / "gateway.pid").exists()
         assert not (profile_dir / "gateway_state.json").exists()
@@ -294,7 +311,11 @@ class TestCreateProfile:
         assert not (profile_dir / "skills" / "my-skill" / "module.pyo").exists()
         # All profile data must be present
         assert (profile_dir / "skills" / "my-skill" / "SKILL.md").read_text() == "skill"
-        assert (profile_dir / "config.yaml").read_text() == "model: gpt-4"
+        config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert config["model"] == "gpt-4"
+        assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
         assert (profile_dir / ".env").read_text() == "KEY=val"
         assert (profile_dir / "state.db").read_text() == "sessions-data"
         assert (profile_dir / "sessions").exists()
@@ -304,10 +325,50 @@ class TestCreateProfile:
         """Clone config gracefully skips files that don't exist in source."""
         profile_dir = create_profile("coder", clone_config=True, no_alias=True)
         # No error; optional files just not copied
-        assert not (profile_dir / "config.yaml").exists()
+        config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
         assert not (profile_dir / ".env").exists()
         # SOUL.md is always seeded with the default even when clone source lacks it
         assert (profile_dir / "SOUL.md").exists()
+
+    def test_clone_and_same_name_recreate_mint_fresh_incarnations(
+        self,
+        profile_env,
+    ):
+        default_home = profile_env / ".hermes"
+        (default_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    CAPABILITY_PROFILE_INCARNATION_KEY: "source-incarnation",
+                    "model": "gpt-4",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        first_dir = create_profile(
+            "coder",
+            clone_config=True,
+            no_alias=True,
+        )
+        first = yaml.safe_load(
+            (first_dir / "config.yaml").read_text(encoding="utf-8")
+        )[CAPABILITY_PROFILE_INCARNATION_KEY]
+        delete_profile("coder", yes=True)
+        second_dir = create_profile(
+            "coder",
+            clone_config=True,
+            no_alias=True,
+        )
+        second = yaml.safe_load(
+            (second_dir / "config.yaml").read_text(encoding="utf-8")
+        )[CAPABILITY_PROFILE_INCARNATION_KEY]
+
+        assert first not in {"", "source-incarnation"}
+        assert second not in {"", "source-incarnation"}
+        assert second != first
 
 
 # ===================================================================
@@ -769,6 +830,9 @@ class TestExportImport:
         create_profile("coder", no_alias=True)
         profile_dir = get_profile_dir("coder")
         (profile_dir / "marker.txt").write_text("hello")
+        original_incarnation = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )[CAPABILITY_PROFILE_INCARNATION_KEY]
 
         archive_path = tmp_path / "export" / "coder.tar.gz"
         archive_path.parent.mkdir(parents=True, exist_ok=True)
@@ -782,6 +846,10 @@ class TestExportImport:
         imported = import_profile(str(archive_path), name="coder")
         assert imported.is_dir()
         assert (imported / "marker.txt").read_text() == "hello"
+        imported_incarnation = yaml.safe_load(
+            (imported / "config.yaml").read_text(encoding="utf-8")
+        )[CAPABILITY_PROFILE_INCARNATION_KEY]
+        assert imported_incarnation != original_incarnation
 
     def test_import_to_existing_name_raises(self, profile_env, tmp_path):
         create_profile("coder", no_alias=True)
@@ -1052,7 +1120,11 @@ class TestExportImport:
 
         imported = import_profile(str(archive), name="backup")
         assert imported.is_dir()
-        assert (imported / "config.yaml").read_text() == "model: opus"
+        config = yaml.safe_load(
+            (imported / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert config["model"] == "opus"
+        assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
         assert (imported / "memories" / "MEMORY.md").read_text() == "important fact"
 
 
@@ -1243,7 +1315,11 @@ class TestEdgeCases:
         target_dir = create_profile(
             "target", clone_from="source", clone_config=True, no_alias=True,
         )
-        assert (target_dir / "config.yaml").read_text() == "model: cloned"
+        config = yaml.safe_load(
+            (target_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert config["model"] == "cloned"
+        assert config[CAPABILITY_PROFILE_INCARNATION_KEY]
         assert (target_dir / ".env").read_text() == "SECRET=yes"
 
     def test_delete_clears_active_profile(self, profile_env):

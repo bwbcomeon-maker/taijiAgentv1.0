@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import base64
-import binascii
 import logging
 import re
+import uuid
 from typing import Any, Dict, Iterable, List, Optional, cast
 from urllib.parse import unquote, urlsplit
 
@@ -57,6 +57,36 @@ _MODEL_RE = re.compile(r"^[^\s]+$")
 _LEGACY_API_KEY_ENV_MARKER_KEY = "_legacy_api_key_env_read_compat"
 _LEGACY_API_KEY_ENV_MARKER = object()
 _MISSING = object()
+
+
+def _diagnostic_provider_failure(
+    *,
+    error_code: str,
+    error: str,
+    provider: str,
+    model: str,
+    prompt: str,
+    aspect_ratio: str,
+) -> dict[str, Any]:
+    """Return one stable Provider failure without serializing raw exceptions."""
+    diagnostic_id = uuid.uuid4().hex
+    logger.warning(
+        "Custom image Provider failed "
+        "diagnostic_id=%s error_code=%s",
+        diagnostic_id,
+        error_code,
+    )
+    failure = error_response(
+        error=error,
+        error_type="api_error",
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        aspect_ratio=aspect_ratio,
+    )
+    failure["error_code"] = error_code
+    failure["diagnostic_id"] = diagnostic_id
+    return failure
 
 
 def _path_has_unsafe_endpoint_shape(path: str) -> bool:
@@ -635,6 +665,16 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
         raw_binding = kwargs.get("_runtime_binding")
+        reauth_guard = kwargs.get("_reauth_guard")
+        if raw_binding is not None and not callable(reauth_guard):
+            return error_response(
+                error="外部图片模型请求缺少授权复核。",
+                error_type="configuration_error",
+                provider=provider,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         try:
             api_key = (
                 require_image_gen_request_binding(
@@ -667,6 +707,8 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
         if response_format != "auto":
             payload["response_format"] = response_format
 
+        if reauth_guard is not None:
+            reauth_guard()
         try:
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -696,11 +738,10 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
                 status_code = int(response.status_code)
                 body = read_bounded_json(response)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Custom image provider request failed", exc_info=True)
             reason = self._transport_error_reason(exc)
-            return error_response(
+            return _diagnostic_provider_failure(
+                error_code="custom_provider_request_failed",
                 error=f"外部图片模型请求失败：{reason}",
-                error_type="api_error",
                 provider=provider,
                 model=model,
                 prompt=prompt,
@@ -724,12 +765,14 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
         revised_prompt = str(first.get("revised_prompt") or "").strip() if first else ""
         prefix = self._cache_prefix(model)
         if b64:
+            if reauth_guard is not None:
+                reauth_guard()
             try:
                 path = save_b64_image(b64, prefix=prefix)
-            except (ValueError, OSError, binascii.Error) as exc:
-                return error_response(
-                    error=f"外部图片生成结果保存失败：{exc}",
-                    error_type="io_error",
+            except Exception:  # noqa: BLE001
+                return _diagnostic_provider_failure(
+                    error_code="custom_provider_result_io_failed",
+                    error="外部图片生成结果保存失败，请根据诊断编号排查。",
                     provider=provider,
                     model=model,
                     prompt=prompt,
@@ -737,6 +780,8 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
                 )
             image_ref = str(path)
         elif url:
+            if reauth_guard is not None:
+                reauth_guard()
             try:
                 image_ref = str(
                     save_url_image(
@@ -746,10 +791,10 @@ class ConfigurableOpenAIImageProvider(ImageGenProvider):
                         trusted_proxy_profile=trusted_proxy_profile or None,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001
-                return error_response(
-                    error=f"外部图片生成结果下载失败：{exc}",
-                    error_type="io_error",
+            except Exception:  # noqa: BLE001
+                return _diagnostic_provider_failure(
+                    error_code="custom_provider_result_io_failed",
+                    error="外部图片生成结果下载失败，请根据诊断编号排查。",
                     provider=provider,
                     model=model,
                     prompt=prompt,

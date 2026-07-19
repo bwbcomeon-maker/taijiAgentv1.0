@@ -47,11 +47,31 @@
     generatedConfigFile = pkgs.writeText "hermes-config.yaml" configJson;
     configFile = if cfg.configFile != null then cfg.configFile else generatedConfigFile;
 
-    configMergeScript = pkgs.callPackage ./configMergeScript.nix { };
+    configMergeScript = pkgs.callPackage ./configMergeScript.nix {
+      python = "${effectivePackage.hermesVenv}/bin/python3";
+    };
 
-    # Generate .env from non-secret environment attrset
-    envFileContent = lib.concatStringsSep "\n" (
-      lib.mapAttrsToList (k: v: "${k}=${v}") cfg.environment
+    # The canonical activation writer validates these inputs first, then
+    # publishes config.yaml and (when declared) .env under one transaction.
+    managesEnvironment =
+      cfg.environment != { } || cfg.environmentFiles != [ ];
+    environmentJson = pkgs.writeText "hermes-environment.json" (
+      builtins.toJSON cfg.environment
+    );
+    configWriterArgs = lib.concatStringsSep " " (
+      lib.optional (cfg.configFile != null) "--replace"
+      ++ lib.optionals managesEnvironment [
+        "--env-json"
+        (lib.escapeShellArg "${environmentJson}")
+      ]
+      ++ builtins.concatLists (map (file: [
+        "--env-file"
+        (lib.escapeShellArg file)
+      ]) cfg.environmentFiles)
+      ++ [
+        (lib.escapeShellArg "${configFile}")
+        (lib.escapeShellArg "${cfg.stateDir}/.hermes/config.yaml")
+      ]
     );
     # Build documents derivation (from 0xrsydn)
     documentDerivation = pkgs.runCommand "hermes-documents" { } (
@@ -117,13 +137,23 @@
       chown "$HERMES_UID:$HERMES_GID" "$TARGET_HOME"
       chmod 0750 "$TARGET_HOME"
 
-      # Ensure HERMES_HOME is owned by the target user.
-      # Use find instead of chown -R: chown strips the setgid bit (kernel
-      # behavior), destroying the 2770 permissions the NixOS activation
-      # script sets for group access by hostUsers.  Only touch files with
-      # wrong ownership so correctly-owned dirs keep their permission bits.
+      # Preserve canonical credential files created by root or a trusted host
+      # user. Cross-owner ownership is intentional in group-shared mode, and
+      # changing a live lock/journal/stage can race an active host transaction.
+      # Other legacy state still migrates to the service identity.
       if [ -n "''${HERMES_HOME:-}" ] && [ -d "$HERMES_HOME" ]; then
-        find "$HERMES_HOME" \! -user "$HERMES_UID" -exec chown "$HERMES_UID:$HERMES_GID" {} +
+        find "$HERMES_HOME" \
+          -type f \
+          \! -user "$HERMES_UID" \
+          \! \( \
+            -name "config.yaml" \
+            -o -name ".env" \
+            -o -name ".taiji-credential-transaction.lock" \
+            -o -name ".taiji-credential-pair-intent.json" \
+            -o -name ".taiji-credential-pair-abort.json" \
+            -o -name ".taiji-credential-*.stage" \
+          \) \
+          -exec chown "$HERMES_UID:$HERMES_GID" {} +
       fi
 
       # ── Provision apt packages (first boot only, cached in writable layer) ──
@@ -186,7 +216,7 @@
     # Package and entrypoint use stable symlinks (current-package, current-entrypoint)
     # so they can update without recreation. Env vars go through $HERMES_HOME/.env.
     containerIdentity = builtins.hashString "sha256" (builtins.toJSON {
-      schema = 4; # bump when identity inputs change (4: Node 18→22 via NodeSource)
+      schema = 5; # 5: group-shared credential transaction policy
       image = cfg.container.image;
       extraVolumes = cfg.container.extraVolumes;
       extraOptions = cfg.container.extraOptions;
@@ -222,7 +252,11 @@
       group = mkOption {
         type = types.str;
         default = "hermes";
-        description = "System group running the gateway.";
+        description = ''
+          System group running the gateway. Members are full credential
+          administrators: the shared 2770 state directory and 0640 credential
+          files let them read and atomically replace provider secrets.
+        '';
       };
 
       createUser = mkOption {
@@ -649,6 +683,7 @@
       (lib.mkIf cfg.addToSystemPackages {
         environment.systemPackages = [ effectivePackage ];
         environment.variables.HERMES_HOME = "${cfg.stateDir}/.hermes";
+        environment.variables.HERMES_CREDENTIAL_GROUP_SHARED = "1";
       })
 
       # ── Host user group membership ─────────────────────────────────────
@@ -711,6 +746,7 @@
           "d ${cfg.stateDir}/.hermes/logs   2770 ${cfg.user} ${cfg.group} - -"
           "d ${cfg.stateDir}/.hermes/memories 2770 ${cfg.user} ${cfg.group} - -"
           "d ${cfg.stateDir}/.hermes/plugins 2770 ${cfg.user} ${cfg.group} - -"
+          "d ${cfg.stateDir}/.hermes/profiles 2770 ${cfg.user} ${cfg.group} - -"
           "d ${cfg.stateDir}/home           0750 ${cfg.user} ${cfg.group} - -"
           "d ${cfg.workingDirectory}         2770 ${cfg.user} ${cfg.group} - -"
         ];
@@ -739,16 +775,26 @@
             find "${cfg.stateDir}/.hermes/$_subdir" -type f \
               -exec chmod g+rw {} + 2>/dev/null || true
           done
+          mkdir -p "${cfg.stateDir}/.hermes/profiles"
+          chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/.hermes/profiles"
+          chmod 2770 "${cfg.stateDir}/.hermes/profiles"
 
-          # Merge Nix settings into existing config.yaml.
-          # Preserves user-added keys (skills, streaming, etc.); Nix keys win.
-          # If configFile is user-provided (not generated), overwrite instead of merge.
-          ${if cfg.configFile != null then ''
-            install -o ${cfg.user} -g ${cfg.group} -m 0640 -D ${configFile} ${cfg.stateDir}/.hermes/config.yaml
-          '' else ''
-            ${configMergeScript} ${generatedConfigFile} ${cfg.stateDir}/.hermes/config.yaml
+          # Publish declarative config and optional environment as one canonical
+          # state transition. Generated settings merge; configFile replaces.
+          HERMES_CREDENTIAL_GROUP_SHARED=1 \
+            ${configMergeScript} \
+            --run-as-uid "$(${pkgs.coreutils}/bin/id -u ${cfg.user})" \
+            --run-as-gid "$(${pkgs.coreutils}/bin/id -g ${cfg.user})" \
+            ${configWriterArgs}
+          if [ -e ${lib.escapeShellArg "${cfg.stateDir}/.hermes/config.yaml"} ]; then
             chown ${cfg.user}:${cfg.group} ${cfg.stateDir}/.hermes/config.yaml
             chmod 0640 ${cfg.stateDir}/.hermes/config.yaml
+          fi
+          ${lib.optionalString managesEnvironment ''
+            if [ -e ${lib.escapeShellArg "${cfg.stateDir}/.hermes/.env"} ]; then
+              chown ${cfg.user}:${cfg.group} ${cfg.stateDir}/.hermes/.env
+              chmod 0640 ${cfg.stateDir}/.hermes/.env
+            fi
           ''}
 
           # Managed mode marker (so interactive shells also detect NixOS management)
@@ -820,23 +866,6 @@
             ''}
           ''}
 
-          # Seed .env from Nix-declared environment + environmentFiles.
-          # Hermes reads $HERMES_HOME/.env at startup via load_hermes_dotenv(),
-          # so this is the single source of truth for both native and container mode.
-          ${lib.optionalString (cfg.environment != {} || cfg.environmentFiles != []) ''
-            ENV_FILE="${cfg.stateDir}/.hermes/.env"
-            install -o ${cfg.user} -g ${cfg.group} -m 0640 /dev/null "$ENV_FILE"
-            cat > "$ENV_FILE" <<'HERMES_NIX_ENV_EOF'
-    ${envFileContent}
-    HERMES_NIX_ENV_EOF
-            ${lib.concatStringsSep "\n" (map (f: ''
-              if [ -f "${f}" ]; then
-                echo "" >> "$ENV_FILE"
-                cat "${f}" >> "$ENV_FILE"
-              fi
-            '') cfg.environmentFiles)}
-          ''}
-
           # Link documents into workspace
           ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: _value: ''
             install -o ${cfg.user} -g ${cfg.group} -m 0640 ${documentDerivation}/${name} ${cfg.workingDirectory}/${name}
@@ -873,6 +902,7 @@
           environment = {
             HOME = cfg.stateDir;
             HERMES_HOME = "${cfg.stateDir}/.hermes";
+            HERMES_CREDENTIAL_GROUP_SHARED = "1";
             HERMES_MANAGED = "true";
             MESSAGING_CWD = cfg.workingDirectory;
           };
@@ -969,6 +999,7 @@
                 --env HERMES_UID="$HERMES_UID" \
                 --env HERMES_GID="$HERMES_GID" \
                 --env HERMES_HOME=${containerDataDir}/.hermes \
+                --env HERMES_CREDENTIAL_GROUP_SHARED=1 \
                 --env HERMES_MANAGED=true \
                 --env HOME=${containerHomeDir} \
                 --env MESSAGING_CWD=${containerWorkDir} \

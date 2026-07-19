@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="2.111" timestamp="2026-07-19T15:58:43.709827+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_pure_text_history_does_not_read_image_capability_state" time="1.483"><failure message="AssertionError: assert ['resolved'] == []&#10;  &#10;  Left contains one more item: 'resolved'&#10;  Use -v to get more diff">self = &lt;tests.test_native_image_attachments.TestBuildNativeMultimodalMessage object at 0x10c5d0350&gt;
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10c5f2710&gt;
+
+    def test_pure_text_history_does_not_read_image_capability_state(
+        self,
+        monkeypatch,
+    ):
+        """Pure text replay must not consult mutable image capability state."""
+        calls = []
+        monkeypatch.setattr(
+            "api.streaming._resolve_image_input_mode",
+            lambda *_args, **_kwargs: calls.append("resolved") or "text",
+        )
+        history = [
+            {
+                "role": "user",
+                "content": "hello",
+                "attachments": [{"name": "notes.txt"}],
+                "timestamp": 123,
+            },
+            {"role": "assistant", "content": "hi"},
+        ]
+
+        sanitized = _sanitize_messages_for_api(
+            history,
+            cfg={"agent": {"image_input_mode": "text"}},
+        )
+
+&gt;       assert calls == []
+E       AssertionError: assert ['resolved'] == []
+E
+E         Left contains one more item: 'resolved'
+E         Use -v to get more diff
+
+tests/test_native_image_attachments.py:354: AssertionError</failure></testcase></testsuite></testsuites>

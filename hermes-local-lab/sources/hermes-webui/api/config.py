@@ -459,13 +459,18 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     writes the real target of a symlink, so damage is never silently erased and
     a configured indirection is preserved.
     """
+    from agent.image_gen_verification import (
+        reconcile_capability_config_epochs,
+    )
     from agent.provider_credentials import mutate_config_strict
 
     replacement = copy.deepcopy(config_data)
 
     def replace(current: dict) -> None:
+        desired = copy.deepcopy(replacement)
+        reconcile_capability_config_epochs(current, desired)
         current.clear()
-        current.update(copy.deepcopy(replacement))
+        current.update(desired)
 
     mutate_config_strict(replace, config_path=Path(config_path))
 

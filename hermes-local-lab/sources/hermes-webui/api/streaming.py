@@ -56,7 +56,6 @@ from api.brand_privacy import (
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.attachment_context import (
     build_attachment_context,
-    has_configured_vision,
     resolve_attachment_path,
 )
 from api.metering import meter
@@ -1246,56 +1245,87 @@ def _is_valid_image(path: Path, mime: str) -> bool:
     return False
 
 
-def _resolve_image_input_mode(cfg: dict, *, provider: str | None = None, model: str | None = None) -> str:
-    """Return ``"native"`` or ``"text"`` based on config, mirroring
-    ``agent/image_routing.py:decide_image_input_mode``.
+def get_vision_runtime_state() -> dict:
+    """Return the single B3-gated auxiliary vision snapshot."""
+    from agent.image_runtime import verification_runtime_snapshot
 
-    The agent has this logic, but the WebUI's ``_build_native_multimodal_message``
-    was unconditionally embedding images as native ``image_url`` parts, completely
-    bypassing ``image_input_mode``.  This caused silent failures when the main model
-    does not support images and the fallback model is also text-only (#21160-related).
-    """
-    agent_cfg = cfg.get("agent") or {}
-    mode = str(agent_cfg.get("image_input_mode", "auto") or "auto").strip().lower()
-    if mode not in ("auto", "native", "text"):
-        mode = "auto"
+    return verification_runtime_snapshot("vision")
 
-    if mode == "native":
-        return "native"
-    if mode == "text":
-        return "text"
 
-    try:
-        from agent.image_routing import decide_image_input_mode
+def image_capability_runtime_fingerprint(generation=None):
+    """Return the combined private generation used by WebUI agent caching."""
+    if generation is None:
+        from agent.image_runtime import capture_capability_runtime_generation
 
-        model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
-        resolved_provider = provider or str(model_cfg.get("provider") or "").strip()
-        resolved_model = model or str(
-            model_cfg.get("default")
-            or model_cfg.get("model")
-            or model_cfg.get("name")
-            or ""
-        ).strip()
-        decided = decide_image_input_mode(resolved_provider, resolved_model, cfg)
-        if decided in ("native", "text"):
-            return decided
-    except Exception as exc:
-        logger.debug("WebUI image routing capability lookup failed: %s", exc)
+        generation = capture_capability_runtime_generation()
+    return generation.cache_identity
 
-    # auto: if auxiliary.vision is explicitly configured → text mode
-    # (user opted into a dedicated vision backend)
-    aux = cfg.get("auxiliary") or {}
-    vision = aux.get("vision") or {}
-    provider = str(vision.get("provider") or "").strip().lower()
-    model_name = str(vision.get("model") or "").strip()
-    base_url = str(vision.get("base_url") or "").strip()
-    if provider not in ("", "auto") or model_name or base_url:
-        return "text"
 
-    # No explicit vision config, no model-capability lookup available in WebUI.
-    # Default to native — the agent's ``_strip_images_from_messages`` guard will
-    # strip images on rejection and retry as text.
-    return "native"
+def _agent_matches_capability_generation(agent, generation) -> bool:
+    return bool(
+        generation is not None
+        and generation.stable
+        and getattr(agent, "_capability_runtime_identity", None)
+        == generation.identity
+    )
+
+
+def _require_agent_capability_generation(agent, generation):
+    """Reject a newly built Agent unless it matches this frozen WebUI turn."""
+    if not _agent_matches_capability_generation(agent, generation):
+        raise RuntimeError(
+            "capability runtime changed during agent construction"
+        )
+    return agent
+
+
+def get_webui_image_input_route(
+    cfg: dict,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    generation=None,
+):
+    """Resolve one WebUI image route from the shared B4 contract."""
+    from agent.image_runtime import resolve_image_input_route
+
+    config = cfg if isinstance(cfg, dict) else {}
+    model_cfg = (
+        config.get("model")
+        if isinstance(config.get("model"), dict)
+        else {}
+    )
+    resolved_provider = provider or str(
+        model_cfg.get("provider") or ""
+    ).strip()
+    resolved_model = model or str(
+        model_cfg.get("default")
+        or model_cfg.get("model")
+        or model_cfg.get("name")
+        or ""
+    ).strip()
+    return resolve_image_input_route(
+        resolved_provider,
+        resolved_model,
+        config,
+        generation=generation,
+    )
+
+
+def _resolve_image_input_mode(
+    cfg: dict,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    generation=None,
+) -> str:
+    """Return the shared route mode, including fail-closed ``blocked``."""
+    return get_webui_image_input_route(
+        cfg,
+        provider=provider,
+        model=model,
+        generation=generation,
+    ).mode
 
 
 class WebUIChatInputError(Exception):
@@ -1315,17 +1345,23 @@ def _raise_if_webui_input_cancelled(cancel_check) -> None:
         raise WebUIChatInputCancelled()
 
 
-def _vision_input_error(error_type: str) -> WebUIChatInputError:
+def _vision_input_error(
+    error_type: str,
+    *,
+    reason_code: str = "",
+) -> WebUIChatInputError:
     if error_type == "vision_configuration_error":
         return WebUIChatInputError({
             "label": "图片理解能力未配置",
             "type": "vision_configuration_error",
+            "reason_code": reason_code or "vision_not_configured",
             "message": "当前主模型不能直接识图，且尚未配置辅助视觉模型。",
             "hint": "请在模型配置中启用辅助视觉模型后重试，或切换到支持图片输入的主模型。",
         })
     return WebUIChatInputError({
         "label": "图片分析失败",
         "type": "vision_analysis_error",
+        "reason_code": reason_code or "vision_analysis_failed",
         "message": "辅助视觉模型未能完成图片分析，本轮请求已停止。",
         "hint": "请检查辅助视觉模型配置、网络和账号状态后重试。",
     })
@@ -1351,6 +1387,8 @@ def _enrich_webui_images_with_vision(
     user_text: str,
     image_items: list[dict[str, str]],
     *,
+    route_decision=None,
+    capability_generation=None,
     cancel_check=None,
 ) -> str:
     """Pre-analyze uploaded images for text-mode image routing.
@@ -1362,9 +1400,18 @@ def _enrich_webui_images_with_vision(
         return user_text
 
     async def _run() -> str:
+        from agent.image_runtime import (
+            capture_frozen_vision_request_binding,
+        )
         from tools.vision_tools import vision_analyze_tool
         from agent.memory_manager import sanitize_context
 
+        request_binding = capture_frozen_vision_request_binding(
+            route_decision,
+            generation=capability_generation,
+        )
+        vision_provider = str(route_decision.provider or "").strip()
+        vision_model = str(route_decision.model or "").strip()
         prompt = (
             "Describe everything visible in this image in thorough detail. "
             "Include any text, code, data, objects, people, layout, colors, "
@@ -1380,7 +1427,14 @@ def _enrich_webui_images_with_vision(
             if not path:
                 raise _vision_input_error("vision_analysis_error")
             try:
-                result_json = await vision_analyze_tool(image_url=path, user_prompt=prompt)
+                result_json = await vision_analyze_tool(
+                    image_url=path,
+                    user_prompt=prompt,
+                    provider=vision_provider,
+                    model=vision_model,
+                    strict_target=True,
+                    _runtime_binding=request_binding,
+                )
                 _raise_if_webui_input_cancelled(cancel_check)
                 result = json.loads(result_json)
                 analysis = _sanitize_auxiliary_vision_analysis(
@@ -1424,6 +1478,7 @@ def prepare_webui_chat_input(
     model: str | None = None,
     workspace_ctx: str = "",
     cancel_check=None,
+    capability_generation=None,
 ):
     """Prepare one WebUI turn before selecting the Legacy or Gateway transport.
 
@@ -1436,15 +1491,47 @@ def prepare_webui_chat_input(
     if not attachments:
         return workspace_ctx + text
 
-    image_mode = _resolve_image_input_mode(cfg, provider=provider, model=model)
-    vision_available = has_configured_vision(cfg)
+    # Classify and validate the attachments before consulting image
+    # capability state. Document-only turns must remain independent from the
+    # vision gate; otherwise an unconfigured image provider can incorrectly
+    # block ordinary text/PDF/DOCX context ingestion.
     attachment_context = build_attachment_context(
         attachments,
         workspace=workspace,
         session_id=session_id,
         cfg=cfg,
-        image_mode=image_mode,
-        vision_available=vision_available,
+        image_mode="native",
+        vision_available=True,
+    )
+    if not attachment_context.image_items:
+        if attachment_context.text_context:
+            text = f"{attachment_context.text_context}\n\n{text}".strip()
+        return _build_native_multimodal_message(
+            workspace_ctx,
+            text,
+            attachments,
+            workspace,
+            session_id=session_id,
+            cfg=cfg,
+            provider=provider,
+            model=model,
+            image_mode="native",
+        )
+
+    route_decision = get_webui_image_input_route(
+        cfg,
+        provider=provider,
+        model=model,
+        generation=capability_generation,
+    )
+    image_mode = route_decision.mode
+    if image_mode == "blocked":
+        raise _vision_input_error(
+            "vision_configuration_error",
+            reason_code=route_decision.reason_code,
+        )
+    vision_available = bool(
+        image_mode != "text" or route_decision.status == "verified"
     )
     if image_mode == "text" and attachment_context.image_items:
         if not vision_available:
@@ -1452,6 +1539,8 @@ def prepare_webui_chat_input(
         text = _enrich_webui_images_with_vision(
             text,
             attachment_context.image_items,
+            route_decision=route_decision,
+            capability_generation=capability_generation,
             cancel_check=cancel_check,
         )
     if attachment_context.text_context:
@@ -1466,6 +1555,7 @@ def prepare_webui_chat_input(
         cfg=cfg,
         provider=provider,
         model=model,
+        image_mode=image_mode,
     )
     if image_mode == "native" and attachment_context.image_items:
         native_count = sum(
@@ -1492,6 +1582,7 @@ def _build_native_multimodal_message(
     cfg: dict = None,
     provider: str | None = None,
     model: str | None = None,
+    image_mode: str | None = None,
 ):
     """Build native multimodal content parts for current-turn image uploads.
 
@@ -1508,7 +1599,18 @@ def _build_native_multimodal_message(
         return workspace_ctx + msg_text
 
     # ── Check image_input_mode before embedding anything ──
-    if cfg is not None and _resolve_image_input_mode(cfg, provider=provider, model=model) == "text":
+    if image_mode is None and cfg is not None:
+        image_mode = _resolve_image_input_mode(
+            cfg,
+            provider=provider,
+            model=model,
+        )
+    if image_mode == "blocked":
+        raise _vision_input_error(
+            "vision_configuration_error",
+            reason_code="capability_unavailable",
+        )
+    if image_mode == "text":
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
@@ -2726,7 +2828,12 @@ def _is_reasoning_only_assistant_message(msg) -> bool:
     return _content_has_reasoning_only_parts(content)
 
 
-def _sanitize_messages_for_api(messages, *, cfg: dict = None):
+def _sanitize_messages_for_api(
+    messages,
+    *,
+    cfg: dict = None,
+    capability_generation=None,
+):
     """Return a deep copy of messages with only API-safe fields.
 
     The webui stores extra metadata on messages (attachments, timestamp, _ts)
@@ -2800,9 +2907,16 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         )
         if has_native_images:
             if strip_native_images is None:
-                strip_native_images = (
-                    _resolve_image_input_mode(cfg) == "text"
+                _history_image_mode = _resolve_image_input_mode(
+                    cfg,
+                    generation=capability_generation,
                 )
+                if _history_image_mode == "blocked":
+                    raise _vision_input_error(
+                        "vision_configuration_error",
+                        reason_code="capability_unavailable",
+                    )
+                strip_native_images = _history_image_mode == "text"
             if strip_native_images:
                 sanitized['content'] = (
                     _strip_native_image_parts_from_content(content)
@@ -4961,6 +5075,21 @@ def _run_agent_streaming(
                         _emit_reasoning_delta(reason_text)
                     return
 
+                if event_type == 'capability_route':
+                    from agent.image_runtime import (
+                        project_capability_route_progress_event,
+                    )
+
+                    _public_route_event = (
+                        project_capability_route_progress_event(
+                            cb_kwargs.get('route_event')
+                        )
+                    )
+                    if _public_route_event is None:
+                        return
+                    put('capability_route', _public_route_event)
+                    return
+
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the
                 # same tool. Prefer the structured path when it is supported so
@@ -5387,11 +5516,22 @@ def _run_agent_streaming(
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
 
+            from agent.image_runtime import (
+                capture_capability_runtime_generation,
+            )
+
+            _capability_generation = (
+                capture_capability_runtime_generation()
+            )
+
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             if ephemeral:
-                agent = _AIAgent(**_agent_kwargs)
+                agent = _require_agent_capability_generation(
+                    _AIAgent(**_agent_kwargs),
+                    _capability_generation,
+                )
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
                 import hashlib as _hashlib
@@ -5413,6 +5553,9 @@ def _run_agent_streaming(
                     sorted(_toolsets) if _toolsets else [],
                     _reasoning_config or {},
                     _public_prefill_context_status(_prefill_context),
+                    image_capability_runtime_fingerprint(
+                        _capability_generation
+                    ),
                     # #1897: profile_home is part of the agent's identity because
                     # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
                     # at construction time, sourced from HERMES_HOME. Same-session
@@ -5429,7 +5572,16 @@ def _run_agent_streaming(
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
                         _cached_agent = _cached[0]
-                        if _cached_agent_matches_session(_cached_agent, session_id):
+                        if (
+                            _cached_agent_matches_session(
+                                _cached_agent,
+                                session_id,
+                            )
+                            and _agent_matches_capability_generation(
+                                _cached_agent,
+                                _capability_generation,
+                            )
+                        ):
                             agent = _cached_agent
                             SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                             logger.debug('[webui] Reusing cached agent for session %s', session_id)
@@ -5512,7 +5664,10 @@ def _run_agent_streaming(
                     if hasattr(agent, '_interrupt_message'):
                         agent._interrupt_message = None
                 else:
-                    agent = _AIAgent(**_agent_kwargs)
+                    agent = _require_agent_capability_generation(
+                        _AIAgent(**_agent_kwargs),
+                        _capability_generation,
+                    )
                     # Register the new agent with the memory lifecycle so
                     # its commit_memory_session() can be found later.
                     try:
@@ -5687,6 +5842,7 @@ def _run_agent_streaming(
                     model=model,
                     workspace_ctx=workspace_ctx,
                     cancel_check=cancel_event.is_set,
+                    capability_generation=_capability_generation,
                 )
             except WebUIChatInputCancelled:
                 if _checkpoint_stop is not None:
@@ -5725,6 +5881,7 @@ def _run_agent_streaming(
             canonical_history = _sanitize_messages_for_api(
                 _previous_context_messages,
                 cfg=_cfg,
+                capability_generation=_capability_generation,
             )
             from api.turn_envelope import TurnEnvelope
 
@@ -5962,7 +6119,10 @@ def _run_agent_streaming(
                             _agent_kwargs['provider'] = resolved_provider
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
-                            agent = _AIAgent(**_agent_kwargs)
+                            agent = _require_agent_capability_generation(
+                                _AIAgent(**_agent_kwargs),
+                                _capability_generation,
+                            )
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
@@ -5976,7 +6136,13 @@ def _run_agent_streaming(
                                 _heal_result = agent.run_conversation(
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
-                                    conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                                    conversation_history=_sanitize_messages_for_api(
+                                        _previous_context_messages,
+                                        cfg=_cfg,
+                                        capability_generation=(
+                                            _capability_generation
+                                        ),
+                                    ),
                                     task_id=session_id,
                                     persist_user_message=persist_msg_text,
                                 )
@@ -7104,7 +7270,10 @@ def _run_agent_streaming(
                     _heal_kwargs['provider'] = resolved_provider
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
-                    _heal_agent = _AIAgent(**_heal_kwargs)
+                    _heal_agent = _require_agent_capability_generation(
+                        _AIAgent(**_heal_kwargs),
+                        _capability_generation,
+                    )
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
@@ -7117,7 +7286,13 @@ def _run_agent_streaming(
                         _heal_result = _heal_agent.run_conversation(
                             user_message=user_message,
                             system_message=workspace_system_msg,
-                            conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                            conversation_history=_sanitize_messages_for_api(
+                                _previous_context_messages,
+                                cfg=_cfg,
+                                capability_generation=(
+                                    _capability_generation
+                                ),
+                            ),
                             task_id=session_id,
                             persist_user_message=persist_msg_text,
                         )

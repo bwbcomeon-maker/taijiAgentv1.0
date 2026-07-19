@@ -15,9 +15,11 @@ This module provides:
 import copy
 import hashlib
 import logging
+import math
 import os
 import platform
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -156,6 +158,58 @@ def _reject_denylisted_env_var(key: str) -> None:
         )
 
 _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
+
+_LOADED_CONFIG_SNAPSHOT_LIMIT = 64
+_LOADED_CONFIG_SNAPSHOTS: Dict[
+    str,
+    Tuple[str, Dict[str, Any], Dict[str, Any]],
+] = {}
+_RAW_CONFIG_SNAPSHOTS: Dict[str, Tuple[str, bool, str]] = {}
+
+
+@dataclass(frozen=True, repr=False)
+class ConfigSnapshot:
+    """One editable config draft plus opaque three-way-merge provenance."""
+
+    config: Dict[str, Any]
+    token: str
+
+    def __repr__(self) -> str:
+        return "ConfigSnapshot(config=<redacted>, token=<redacted>)"
+
+
+@dataclass(frozen=True, repr=False)
+class RawConfigSnapshot:
+    """One exact raw-YAML draft plus opaque compare-and-swap provenance."""
+
+    yaml_text: str
+    token: str | None
+    editable: bool
+    blocked_reason: str | None = None
+    blocked_code: str | None = None
+
+    def __repr__(self) -> str:
+        return "RawConfigSnapshot(yaml_text=<redacted>, token=<redacted>)"
+
+
+class _LoadedConfigSnapshot(dict):
+    """Dict-compatible runtime config with non-serialised direct-save metadata."""
+
+    __slots__ = ("_save_token",)
+
+    def __init__(self, values: Dict[str, Any], save_token: str):
+        super().__init__(values)
+        self._save_token = save_token
+
+    def __deepcopy__(self, memo):
+        copied = type(self)(
+            copy.deepcopy(dict(self), memo),
+            self._save_token,
+        )
+        memo[id(self)] = copied
+        return copied
+
+
 # path -> (mtime_ns, size, normalized raw config, referenced-env digest,
 #          expanded config).
 # load_config() returns a deepcopy of the cached value when the file
@@ -236,6 +290,11 @@ import yaml
 from hermes_cli.colors import Colors, color
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, LEGACY_DEFAULT_SOUL_MD
 
+yaml.SafeDumper.add_representer(
+    _LoadedConfigSnapshot,
+    lambda dumper, data: dumper.represent_dict(dict.items(data)),
+)
+
 
 # =============================================================================
 # Managed mode (NixOS declarative config)
@@ -250,19 +309,51 @@ _MANAGED_SYSTEM_NAMES = {
 }
 
 
-def get_managed_system() -> Optional[str]:
-    """Return the package manager owning this install, if any."""
+def _managed_system_from_env() -> Optional[str]:
+    """Return the explicit package manager signal, if configured."""
     raw = os.getenv("HERMES_MANAGED", "").strip()
-    if raw:
-        normalized = raw.lower()
-        if normalized in _MANAGED_TRUE_VALUES:
-            return "NixOS"
-        return _MANAGED_SYSTEM_NAMES.get(normalized, raw)
+    if not raw:
+        return None
+    normalized = raw.lower()
+    if normalized in _MANAGED_TRUE_VALUES:
+        return "NixOS"
+    return _MANAGED_SYSTEM_NAMES.get(normalized, raw)
 
-    managed_marker = get_hermes_home() / ".managed"
-    if managed_marker.exists():
+
+def _managed_marker_candidates(config_path: Path) -> tuple[Path, ...]:
+    """Return bounded logical/physical marker locations for a config target."""
+    logical_path = Path(config_path).expanduser()
+    logical_parent = logical_path.parent
+    physical_parent = Path(os.path.realpath(logical_path)).parent
+    candidates: list[Path] = []
+    for parent in (logical_parent, physical_parent):
+        candidates.append(parent / ".managed")
+        if parent.parent.name == "profiles":
+            candidates.append(parent.parent.parent / ".managed")
+    return tuple(dict.fromkeys(candidates))
+
+
+def get_managed_system_for_config(
+    config_path: Path | str | None = None,
+) -> Optional[str]:
+    """Return the owner of the exact config target, if it is managed.
+
+    A named profile inherits the marker at its Hermes root.  Both logical and
+    resolved paths are checked so a symlink cannot bypass the boundary.
+    """
+    explicit = _managed_system_from_env()
+    if explicit is not None:
+        return explicit
+
+    target = Path(config_path) if config_path is not None else get_config_path()
+    if any(marker.exists() for marker in _managed_marker_candidates(target)):
         return "NixOS"
     return None
+
+
+def get_managed_system() -> Optional[str]:
+    """Return the package manager owning the active config, if any."""
+    return get_managed_system_for_config()
 
 
 def is_managed() -> bool:
@@ -273,6 +364,11 @@ def is_managed() -> bool:
     script, so interactive shells also see it).
     """
     return get_managed_system() is not None
+
+
+def is_managed_config(config_path: Path | str | None = None) -> bool:
+    """Check whether the exact configuration target is package-managed."""
+    return get_managed_system_for_config(config_path) is not None
 
 
 _NIX_UPDATE_MSG = "Update your Nix flake input and rebuild (e.g. nix flake update, nixos-rebuild, or home-manager switch)"
@@ -406,9 +502,12 @@ def format_docker_update_message() -> str:
     return _DOCKER_UPDATE_MESSAGE
 
 
-def format_managed_message(action: str = "modify this Hermes installation") -> str:
+def format_managed_message(
+    action: str = "modify this Hermes installation",
+    managed_system: Optional[str] = None,
+) -> str:
     """Build a user-facing error for managed installs."""
-    managed_system = get_managed_system() or "a package manager"
+    managed_system = managed_system or get_managed_system() or "a package manager"
     raw = os.getenv("HERMES_MANAGED", "").strip().lower()
 
     if managed_system == "NixOS":
@@ -433,6 +532,44 @@ def format_managed_message(action: str = "modify this Hermes installation") -> s
         f"Cannot {action}: this Hermes installation is managed by {managed_system}.\n"
         "Use your package manager to upgrade or reinstall Hermes."
     )
+
+
+class ManagedConfigurationError(RuntimeError):
+    """Machine-detectable rejection for package-manager-owned state."""
+
+    code = "managed_configuration"
+
+    def __init__(
+        self,
+        action: str,
+        managed_system: Optional[str] = None,
+    ):
+        self.action = action
+        self.managed_system = managed_system or get_managed_system()
+        super().__init__(
+            format_managed_message(action, self.managed_system)
+        )
+
+
+class ConfigurationConflictError(RuntimeError):
+    """A stale loaded snapshot conflicts with a concurrent disk mutation."""
+
+    code = "configuration_conflict"
+
+    def __init__(self, path: tuple[Any, ...]):
+        self.path = path
+        rendered_path = ".".join(str(part) for part in path) or "<root>"
+        super().__init__(
+            "Configuration changed concurrently at "
+            f"{rendered_path}; reload the configuration and retry"
+        )
+
+
+class WebConfigValidationError(ValueError):
+    """Reject an unsafe browser-originated configuration without echoing it."""
+
+    code = "invalid_web_configuration"
+
 
 def managed_error(action: str = "modify configuration"):
     """Print user-friendly error for managed mode."""
@@ -527,16 +664,52 @@ def _credential_files_locked(func):
     return locked
 
 
+def _reject_managed_write(action):
+    """Reject a managed write before creating/acquiring mutable state."""
+
+    def decorate(func):
+        @wraps(func)
+        def guarded(*args, **kwargs):
+            if is_managed():
+                resolved_action = (
+                    action(*args, **kwargs)
+                    if callable(action)
+                    else action
+                )
+                raise ManagedConfigurationError(str(resolved_action))
+            return func(*args, **kwargs)
+
+        return guarded
+
+    return decorate
+
+
 def get_project_root() -> Path:
     """Get the project installation directory."""
     return Path(__file__).parent.parent.resolve()
 
+
+def _same_physical_path(left: Path, right: Path) -> bool:
+    return os.path.realpath(left) == os.path.realpath(right)
+
+
+def _credential_access_policy():
+    from agent.provider_credentials import (
+        _active_credential_access_policy,
+    )
+
+    return _active_credential_access_policy()
+
+
 def _secure_dir(path):
-    """Set directory to owner-only access (0700 by default). No-op on Windows.
+    """Set a local directory to its configured secure mode.
 
     Skipped in managed mode — the NixOS module sets group-readable
     permissions (0750) so interactive users in the hermes group can
     share state with the gateway service.
+
+    The credential root remains 2770 while the explicit group-shared
+    credential policy is active. Other local state directories stay private.
 
     The mode can be overridden via the HERMES_HOME_MODE environment variable
     (e.g. HERMES_HOME_MODE=0701) for deployments where a web server (nginx,
@@ -546,11 +719,21 @@ def _secure_dir(path):
     """
     if is_managed():
         return
-    try:
-        mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
-        mode = int(mode_str, 8) if mode_str else 0o700
-    except ValueError:
-        mode = 0o700
+    is_credential_root = _same_physical_path(
+        Path(path).expanduser(),
+        get_hermes_home().expanduser(),
+    )
+    if (
+        is_credential_root
+        and _credential_access_policy().group_shared
+    ):
+        mode = 0o2770
+    else:
+        try:
+            mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
+            mode = int(mode_str, 8) if mode_str else 0o700
+        except ValueError:
+            mode = 0o700
     try:
         os.chmod(path, mode)
     except (OSError, NotImplementedError):
@@ -582,8 +765,8 @@ def _is_container() -> bool:
     return False
 
 
-def _secure_file(path):
-    """Set file to owner-only read/write (0600). No-op on Windows.
+def _secure_file(path, *, credential_target: bool = False):
+    """Apply the correct private or canonical credential file mode.
 
     Skipped in managed mode — the NixOS activation script sets
     group-readable permissions (0640) on config files.
@@ -591,11 +774,30 @@ def _secure_file(path):
     Skipped in containers — Docker/Podman volume mounts often need broader
     permissions.  Set HERMES_SKIP_CHMOD=1 to force-skip on other systems.
     """
-    if is_managed() or _is_container():
+    if is_managed():
         return
+    expanded_path = Path(path).expanduser()
+    is_canonical_credential = credential_target or any(
+        _same_physical_path(expanded_path, candidate.expanduser())
+        for candidate in (get_config_path(), get_env_path())
+    )
+    access_policy = (
+        _credential_access_policy()
+        if is_canonical_credential
+        else None
+    )
+    if _is_container() and not (
+        access_policy is not None and access_policy.group_shared
+    ):
+        return
+    mode = (
+        access_policy.data_mode
+        if access_policy is not None and access_policy.group_shared
+        else 0o600
+    )
     try:
         if os.path.exists(str(path)):
-            os.chmod(path, 0o600)
+            os.chmod(path, mode)
     except (OSError, NotImplementedError):
         pass
 
@@ -4469,6 +4671,188 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _loaded_config_snapshot_base(
+    token: str | None,
+    *,
+    projected: bool = False,
+) -> Dict[str, Any]:
+    """Resolve an explicit draft token or fail closed."""
+    if not isinstance(token, str) or not token:
+        raise ConfigurationConflictError(("<snapshot>",))
+    snapshot = _LOADED_CONFIG_SNAPSHOTS.get(token)
+    path_key = str(get_config_path())
+    if snapshot is None or snapshot[0] != path_key:
+        raise ConfigurationConflictError(("<snapshot>",))
+    return copy.deepcopy(snapshot[2] if projected else snapshot[1])
+
+
+def get_config_snapshot_base(
+    token: str | None,
+    *,
+    projected: bool = False,
+) -> Dict[str, Any]:
+    """Return a defensive copy of one registered draft base."""
+    with _CONFIG_LOCK:
+        return _loaded_config_snapshot_base(token, projected=projected)
+
+
+def _register_loaded_config_snapshot(
+    values: Dict[str, Any],
+    *,
+    projected_values: Dict[str, Any] | None = None,
+) -> str:
+    """Register one immutable revision base and return its opaque token."""
+    path_key = str(get_config_path())
+    draft_values = values if projected_values is None else projected_values
+    for token, (
+        registered_path,
+        base,
+        registered_draft,
+    ) in _LOADED_CONFIG_SNAPSHOTS.items():
+        if (
+            registered_path == path_key
+            and _merge_values_equal(base, values)
+            and _merge_values_equal(registered_draft, draft_values)
+        ):
+            return token
+    token = secrets.token_urlsafe(24)
+    _LOADED_CONFIG_SNAPSHOTS[token] = (
+        path_key,
+        copy.deepcopy(values),
+        copy.deepcopy(draft_values),
+    )
+    while len(_LOADED_CONFIG_SNAPSHOTS) > _LOADED_CONFIG_SNAPSHOT_LIMIT:
+        expired_token = next(iter(_LOADED_CONFIG_SNAPSHOTS))
+        _LOADED_CONFIG_SNAPSHOTS.pop(expired_token)
+    return token
+
+
+def _raw_config_state(path: Path) -> Tuple[bool, str]:
+    from agent.provider_credentials import (
+        _MAX_CREDENTIAL_CONFIG_BYTES,
+        _read_optional_bytes,
+    )
+
+    exists, payload = _read_optional_bytes(
+        path,
+        max_bytes=_MAX_CREDENTIAL_CONFIG_BYTES,
+        label="config",
+    )
+    return exists, hashlib.sha256(payload).hexdigest()
+
+
+def _register_raw_config_snapshot(
+    path: Path,
+    exists: bool,
+    digest: str,
+) -> str:
+    path_key = str(path)
+    for token, state in _RAW_CONFIG_SNAPSHOTS.items():
+        if state == (path_key, exists, digest):
+            return token
+    token = secrets.token_urlsafe(24)
+    _RAW_CONFIG_SNAPSHOTS[token] = (path_key, exists, digest)
+    while len(_RAW_CONFIG_SNAPSHOTS) > _LOADED_CONFIG_SNAPSHOT_LIMIT:
+        expired_token = next(iter(_RAW_CONFIG_SNAPSHOTS))
+        _RAW_CONFIG_SNAPSHOTS.pop(expired_token)
+    return token
+
+
+def _validate_raw_config_snapshot(token: str | None) -> None:
+    if not isinstance(token, str) or not token:
+        raise ConfigurationConflictError(("<snapshot>",))
+    expected = _RAW_CONFIG_SNAPSHOTS.get(token)
+    path = get_config_path()
+    if expected is None or expected[0] != str(path):
+        raise ConfigurationConflictError(("<snapshot>",))
+    try:
+        current_state = _raw_config_state(path)
+    except ValueError:
+        raise ConfigurationConflictError(("<raw-config>",)) from None
+    if current_state != expected[1:]:
+        raise ConfigurationConflictError(("<raw-config>",))
+
+
+_CONFIG_MERGE_MISSING = object()
+_NO_CONFIG_SNAPSHOT = object()
+_NO_RAW_CONFIG_SNAPSHOT = object()
+
+
+def _merge_values_equal(left: Any, right: Any) -> bool:
+    if left is _CONFIG_MERGE_MISSING or right is _CONFIG_MERGE_MISSING:
+        return left is right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return (
+            left.keys() == right.keys()
+            and all(
+                _merge_values_equal(left[key], right[key])
+                for key in left
+            )
+        )
+    if isinstance(left, list):
+        return (
+            len(left) == len(right)
+            and all(
+                _merge_values_equal(left_item, right_item)
+                for left_item, right_item in zip(left, right)
+            )
+        )
+    if isinstance(left, float) and math.isnan(left) and math.isnan(right):
+        return True
+    return left == right
+
+
+def _copy_merge_value(value: Any) -> Any:
+    if value is _CONFIG_MERGE_MISSING:
+        return _CONFIG_MERGE_MISSING
+    return copy.deepcopy(value)
+
+
+def _merge_loaded_config_changes(
+    base: Any,
+    desired: Any,
+    current: Any,
+    *,
+    _path: tuple[Any, ...] = (),
+) -> Any:
+    """Apply a loaded snapshot's caller edits to the current config.
+
+    Unchanged subtrees come from ``current``; changed scalar/list values come
+    from ``desired``; dict additions and deletions are applied recursively.
+    This is deliberately a three-way merge, not a last-writer-wins merge.
+    """
+    if _merge_values_equal(desired, base):
+        return _copy_merge_value(current)
+    if _merge_values_equal(current, base):
+        return _copy_merge_value(desired)
+    if _merge_values_equal(desired, current):
+        return _copy_merge_value(desired)
+    if (
+        isinstance(base, dict)
+        and isinstance(desired, dict)
+        and isinstance(current, dict)
+    ):
+        result = copy.deepcopy(current)
+        ordered_keys = dict.fromkeys(
+            (*current.keys(), *desired.keys(), *base.keys())
+        )
+        for key in ordered_keys:
+            merged_value = _merge_loaded_config_changes(
+                base.get(key, _CONFIG_MERGE_MISSING),
+                desired.get(key, _CONFIG_MERGE_MISSING),
+                current.get(key, _CONFIG_MERGE_MISSING),
+                _path=(*_path, key),
+            )
+            if merged_value is _CONFIG_MERGE_MISSING:
+                result.pop(key, None)
+            else:
+                result[key] = merged_value
+        return result
+    raise ConfigurationConflictError(_path)
+
+
 def _expand_env_vars(
     obj,
     *,
@@ -4573,6 +4957,19 @@ def _items_by_unique_name(items):
     return indexed
 
 
+def _is_named_item_list(items: Any) -> bool:
+    """Return whether every non-empty list item has a string ``name``."""
+    return (
+        isinstance(items, list)
+        and bool(items)
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            for item in items
+        )
+    )
+
+
 def _preserve_env_ref_templates(current, raw, loaded_expanded=None):
     """Restore raw ``${VAR}`` templates when a value is otherwise unchanged.
 
@@ -4635,6 +5032,434 @@ def _preserve_env_ref_templates(current, raw, loaded_expanded=None):
         ]
 
     return current
+
+
+_WEB_CONFIG_REDACTED = "<redacted>"
+_WEB_CONFIG_REDACTED_KEY_PREFIX = "<redacted-key:"
+_WEB_CONFIG_REDACTED_ID_PREFIX = "<redacted-id:"
+_WEB_CONFIG_IDENTITY_KEY = secrets.token_bytes(32)
+
+
+def _validate_web_json_tree(value: Any) -> None:
+    """Reject YAML values that cannot cross the Web JSON boundary safely."""
+    value_type = type(value)
+    if value is None or value_type in (str, bool, int):
+        return
+    if value_type is float:
+        if math.isfinite(value):
+            return
+        raise WebConfigValidationError(
+            "Web configuration must contain only JSON-compatible values"
+        )
+    if value_type is list:
+        for item in value:
+            _validate_web_json_tree(item)
+        return
+    if value_type is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise WebConfigValidationError(
+                    "Web configuration mapping keys must be strings"
+                )
+            _validate_web_json_tree(item)
+        return
+    raise WebConfigValidationError(
+        "Web configuration must contain only JSON-compatible values"
+    )
+
+
+def _is_web_env_reference(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"\${[^}]+}", value) is not None
+    )
+
+
+def _has_literal_credential_content(value: Any) -> bool:
+    """Detect credential-shaped scalar content independent of its field name."""
+    if (
+        not isinstance(value, str)
+        or value == ""
+        or _is_web_env_reference(value)
+        or value == _WEB_CONFIG_REDACTED
+    ):
+        return False
+    from agent.redact import redact_sensitive_text
+
+    return redact_sensitive_text(value, force=True) != value
+
+
+def _is_web_redacted_key(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"<redacted-key:\d+>", value) is not None
+    )
+
+
+def _is_web_redacted_identity(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"<redacted-id:[0-9a-f]{32}>", value) is not None
+    )
+
+
+def _opaque_web_identity(
+    value: str,
+    *,
+    occupied: set[str],
+    generated: set[str],
+) -> str:
+    """Create a stable process-local identity that cannot reveal its input."""
+    counter = 0
+    while True:
+        material = value if counter == 0 else f"{value}\0{counter}"
+        digest = hashlib.blake2b(
+            material.encode("utf-8"),
+            key=_WEB_CONFIG_IDENTITY_KEY,
+            digest_size=16,
+        ).hexdigest()
+        candidate = f"{_WEB_CONFIG_REDACTED_ID_PREFIX}{digest}>"
+        if candidate not in occupied and candidate not in generated:
+            return candidate
+        counter += 1
+
+
+def _projected_web_named_list_identities(
+    value: List[Dict[str, Any]],
+    *,
+    sensitive_context: bool,
+) -> List[str] | None:
+    """Project unique list names to collision-free opaque browser identities."""
+    if _items_by_unique_name(value) is None:
+        return None
+    occupied = {item["name"] for item in value}
+    generated: set[str] = set()
+    projected_names = []
+    for item in value:
+        runtime_name = item["name"]
+        if (
+            sensitive_context
+            or _has_literal_credential_content(runtime_name)
+        ):
+            projected_name = _opaque_web_identity(
+                runtime_name,
+                occupied=occupied,
+                generated=generated,
+            )
+            generated.add(projected_name)
+        else:
+            projected_name = runtime_name
+        projected_names.append(projected_name)
+    return projected_names
+
+
+def _projected_web_mapping_keys(value: Dict[str, Any]) -> Dict[str, str]:
+    """Map collision-free browser keys back to their exact runtime keys."""
+    occupied = set(value)
+    projected_to_runtime: Dict[str, str] = {}
+    next_placeholder = 1
+    for runtime_key in value:
+        projected_key = runtime_key
+        if _has_literal_credential_content(runtime_key):
+            while True:
+                candidate = (
+                    f"{_WEB_CONFIG_REDACTED_KEY_PREFIX}"
+                    f"{next_placeholder}>"
+                )
+                next_placeholder += 1
+                if (
+                    candidate not in occupied
+                    and candidate not in projected_to_runtime
+                ):
+                    projected_key = candidate
+                    break
+        projected_to_runtime[projected_key] = runtime_key
+    return projected_to_runtime
+
+
+def _redact_web_config_literals(
+    value: Any,
+    *,
+    field: str = "",
+    sensitive_context: bool = False,
+) -> Any:
+    from agent.credential_persistence import is_secret_payload_key
+
+    is_sensitive = sensitive_context or is_secret_payload_key(field)
+    if (
+        not isinstance(value, (dict, list))
+        and (is_sensitive or _has_literal_credential_content(value))
+    ):
+        if value is None or value == "":
+            return copy.deepcopy(value)
+        if _is_web_env_reference(value):
+            return value
+        return _WEB_CONFIG_REDACTED
+    if isinstance(value, dict):
+        return {
+            projected_key: _redact_web_config_literals(
+                value[runtime_key],
+                field=runtime_key,
+                sensitive_context=is_sensitive,
+            )
+            for projected_key, runtime_key in (
+                _projected_web_mapping_keys(value).items()
+            )
+        }
+    if isinstance(value, list):
+        projected_names = _projected_web_named_list_identities(
+            value,
+            sensitive_context=is_sensitive,
+        )
+        projected_items = [
+            _redact_web_config_literals(
+                item,
+                field=field,
+                sensitive_context=is_sensitive,
+            )
+            for item in value
+        ]
+        if projected_names is not None:
+            for item, projected_name in zip(
+                projected_items,
+                projected_names,
+            ):
+                item["name"] = projected_name
+        return projected_items
+    return copy.deepcopy(value)
+
+
+def _validate_web_secret_inputs(
+    desired: Any,
+    projected_base: Any = _CONFIG_MERGE_MISSING,
+    *,
+    field: str = "",
+    sensitive_context: bool = False,
+) -> None:
+    """Reject literal secrets and unbound redaction placeholders from Web drafts."""
+    from agent.credential_persistence import is_secret_payload_key
+
+    is_sensitive = sensitive_context or is_secret_payload_key(field)
+    if isinstance(desired, dict):
+        base = projected_base if isinstance(projected_base, dict) else {}
+        for key, item in desired.items():
+            if _has_literal_credential_content(key):
+                raise WebConfigValidationError(
+                    "Web configuration cannot contain literal credential values"
+                )
+            if _is_web_redacted_key(key) and key not in base:
+                raise WebConfigValidationError(
+                    "Web configuration cannot contain unbound redacted keys"
+                )
+            _validate_web_secret_inputs(
+                item,
+                base.get(key, _CONFIG_MERGE_MISSING),
+                field=str(key),
+                sensitive_context=is_sensitive,
+            )
+        return
+    if isinstance(desired, list):
+        base = projected_base if isinstance(projected_base, list) else []
+        desired_by_name = _items_by_unique_name(desired)
+        base_by_name = _items_by_unique_name(base)
+        if desired_by_name is not None and base_by_name is not None:
+            for item in desired:
+                _validate_web_secret_inputs(
+                    item,
+                    base_by_name.get(
+                        item["name"],
+                        _CONFIG_MERGE_MISSING,
+                    ),
+                    field=field,
+                    sensitive_context=is_sensitive,
+                )
+            return
+        if _is_named_item_list(desired) or _is_named_item_list(base):
+            if _merge_values_equal(desired, base):
+                return
+            # Duplicate/missing identities make positional matching unsafe:
+            # edits or reordering could otherwise bind public fields to the
+            # wrong hidden credentials.
+            raise WebConfigValidationError(
+                "Named configuration items cannot be safely matched"
+            )
+        if desired_by_name is not None or base_by_name is not None:
+            # Empty/mixed structural transitions are not safe identity
+            # authority for redaction placeholders.
+            for item in desired:
+                _validate_web_secret_inputs(
+                    item,
+                    _CONFIG_MERGE_MISSING,
+                    field=field,
+                    sensitive_context=is_sensitive,
+                )
+            return
+        for index, item in enumerate(desired):
+            _validate_web_secret_inputs(
+                item,
+                (
+                    base[index]
+                    if index < len(base)
+                    else _CONFIG_MERGE_MISSING
+                ),
+                field=field,
+                sensitive_context=is_sensitive,
+            )
+        return
+    if desired is None or desired == "":
+        return
+    if _is_web_redacted_identity(desired):
+        if desired == projected_base:
+            return
+        raise WebConfigValidationError(
+            "Web configuration cannot contain unbound redacted identities"
+        )
+    if _is_web_env_reference(desired):
+        return
+    if desired == _WEB_CONFIG_REDACTED:
+        if projected_base == _WEB_CONFIG_REDACTED:
+            return
+        raise WebConfigValidationError(
+            "Web configuration cannot contain literal credential values"
+        )
+    if not is_sensitive and not _has_literal_credential_content(desired):
+        return
+    raise WebConfigValidationError(
+        "Web configuration cannot contain literal credential values"
+    )
+
+
+def validate_web_config_draft(
+    desired: Dict[str, Any],
+    snapshot_token: str | None,
+) -> Dict[str, Any]:
+    """Validate one browser draft and return its immutable projected base."""
+    _validate_web_json_tree(desired)
+    projected_base = get_config_snapshot_base(
+        snapshot_token,
+        projected=True,
+    )
+    if any(str(key).startswith("_") for key in desired):
+        raise WebConfigValidationError(
+            "Web configuration cannot modify protected internal fields"
+        )
+    _validate_web_secret_inputs(desired, projected_base)
+    return projected_base
+
+
+def _project_web_config(
+    runtime_config: Dict[str, Any],
+    raw_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    _validate_web_json_tree(runtime_config)
+    _validate_web_json_tree(raw_config)
+    templated = _preserve_env_ref_templates(
+        runtime_config,
+        raw_config,
+        runtime_config,
+    )
+    return _redact_web_config_literals(templated)
+
+
+def _rehydrate_projected_config(
+    projected_base: Any,
+    desired: Any,
+    runtime_base: Any,
+) -> Any:
+    """Apply safe-draft edits without persisting placeholders as credentials."""
+    if _merge_values_equal(desired, projected_base):
+        return copy.deepcopy(runtime_base)
+    if (
+        isinstance(projected_base, dict)
+        and isinstance(desired, dict)
+        and isinstance(runtime_base, dict)
+    ):
+        projected_to_runtime = _projected_web_mapping_keys(runtime_base)
+        runtime_to_projected = {
+            runtime_key: projected_key
+            for projected_key, runtime_key in projected_to_runtime.items()
+        }
+        result: Dict[str, Any] = {
+            runtime_key: copy.deepcopy(value)
+            for runtime_key, value in runtime_base.items()
+            if runtime_to_projected[runtime_key] not in projected_base
+        }
+        for projected_key in desired:
+            if projected_key not in projected_base:
+                result[projected_key] = copy.deepcopy(
+                    desired[projected_key]
+                )
+                continue
+            runtime_key = projected_to_runtime.get(
+                projected_key,
+                projected_key,
+            )
+            result[runtime_key] = _rehydrate_projected_config(
+                projected_base[projected_key],
+                desired[projected_key],
+                runtime_base.get(
+                    runtime_key,
+                    _CONFIG_MERGE_MISSING,
+                ),
+            )
+        return result
+    if (
+        isinstance(projected_base, list)
+        and isinstance(desired, list)
+        and isinstance(runtime_base, list)
+    ):
+        projected_by_name = _items_by_unique_name(projected_base)
+        desired_by_name = _items_by_unique_name(desired)
+        if (
+            projected_by_name is not None
+            and desired_by_name is not None
+            and _is_named_item_list(runtime_base)
+            and len(projected_base) == len(runtime_base)
+        ):
+            runtime_by_projected_name = {
+                projected_item["name"]: runtime_item
+                for projected_item, runtime_item in zip(
+                    projected_base,
+                    runtime_base,
+                )
+            }
+            if len(runtime_by_projected_name) != len(projected_base):
+                raise WebConfigValidationError(
+                    "Named configuration items cannot be safely matched"
+                )
+            return [
+                (
+                    copy.deepcopy(item)
+                    if item["name"] not in projected_by_name
+                    else _rehydrate_projected_config(
+                        projected_by_name[item["name"]],
+                        item,
+                        runtime_by_projected_name.get(
+                            item["name"],
+                            _CONFIG_MERGE_MISSING,
+                        ),
+                    )
+                )
+                for item in desired
+            ]
+        if (
+            _is_named_item_list(projected_base)
+            or _is_named_item_list(desired)
+            or _is_named_item_list(runtime_base)
+        ):
+            raise WebConfigValidationError(
+                "Named configuration items cannot be safely matched"
+            )
+        if len(projected_base) == len(desired) == len(runtime_base):
+            return [
+                _rehydrate_projected_config(projected, item, runtime)
+                for projected, item, runtime in zip(
+                    projected_base,
+                    desired,
+                    runtime_base,
+                )
+            ]
+    return copy.deepcopy(desired)
 
 
 def _normalize_root_model_keys(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -4783,7 +5608,162 @@ def load_config() -> Dict[str, Any]:
     defensive deepcopy — that path matters in agent-loop hot spots like
     ``get_provider_request_timeout`` which is called once per API turn.
     """
-    return _load_config_impl(want_deepcopy=True)
+    values = _load_config_impl(want_deepcopy=True)
+    with _CONFIG_LOCK:
+        token = _register_loaded_config_snapshot(values)
+    return _LoadedConfigSnapshot(values, token)
+
+
+def load_config_snapshot() -> ConfigSnapshot:
+    """Load one editable plain-dict draft with explicit merge provenance."""
+    loaded = load_config()
+    return ConfigSnapshot(
+        config=dict(loaded),
+        token=loaded._save_token,
+    )
+
+
+def load_web_config_snapshot() -> ConfigSnapshot:
+    """Load a secret-safe Web draft with server-side runtime provenance."""
+    raw = read_raw_config()
+    # Validate the raw tree before ``load_config()`` normalizes known
+    # sections. Tagged YAML containers such as ``!!set`` can otherwise fail
+    # inside normalization before the Web boundary can return a safe error.
+    _validate_web_json_tree(raw)
+    runtime = load_config()
+    projected = {
+        key: value
+        for key, value in _project_web_config(dict(runtime), raw).items()
+        if not key.startswith("_")
+    }
+    with _CONFIG_LOCK:
+        token = _register_loaded_config_snapshot(
+            dict(runtime),
+            projected_values=projected,
+        )
+    return ConfigSnapshot(config=projected, token=token)
+
+
+def parse_raw_config_yaml(yaml_text: str) -> Dict[str, Any]:
+    """Strictly parse and secret-check one bounded raw Web draft."""
+    from agent.provider_credentials import (
+        _MAX_CREDENTIAL_CONFIG_BYTES,
+        _parse_config_bytes,
+    )
+
+    try:
+        payload = yaml_text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("raw config must be valid UTF-8") from exc
+    if len(payload) > _MAX_CREDENTIAL_CONFIG_BYTES:
+        raise ValueError("raw config exceeds maximum size")
+    parsed = _parse_config_bytes(payload)
+    _validate_web_json_tree(parsed)
+    if _raw_config_has_literal_credentials(parsed, yaml_text):
+        raise WebConfigValidationError(
+            "Raw YAML cannot contain literal credential values"
+        )
+    return parsed
+
+
+def _raw_config_has_literal_credentials(
+    parsed: Dict[str, Any],
+    yaml_text: str,
+) -> bool:
+    projected = _redact_web_config_literals(parsed)
+    from agent.redact import redact_sensitive_text
+
+    return (
+        not _merge_values_equal(parsed, projected)
+        or redact_sensitive_text(yaml_text, force=True) != yaml_text
+    )
+
+
+@_credential_files_locked
+def load_raw_config_snapshot() -> RawConfigSnapshot:
+    """Load exact YAML text with an opaque compare-and-swap token."""
+    with _CONFIG_LOCK:
+        from agent.provider_credentials import (
+            _MAX_CREDENTIAL_CONFIG_BYTES,
+            _parse_config_bytes,
+            _read_optional_bytes,
+        )
+
+        path = get_config_path()
+        try:
+            exists, payload = _read_optional_bytes(
+                path,
+                max_bytes=_MAX_CREDENTIAL_CONFIG_BYTES,
+                label="config",
+            )
+        except ValueError as exc:
+            reason = (
+                "Raw YAML editing is unavailable because config.yaml exceeds "
+                "the maximum size."
+                if "exceeds maximum size" in str(exc)
+                else (
+                    "Raw YAML editing is unavailable because config.yaml "
+                    "cannot be read safely. Fix it outside the Web UI."
+                )
+            )
+            return RawConfigSnapshot(
+                yaml_text="",
+                token=None,
+                editable=False,
+                blocked_reason=reason,
+                blocked_code=(
+                    "too_large"
+                    if "exceeds maximum size" in str(exc)
+                    else "unsafe_file"
+                ),
+            )
+        try:
+            yaml_text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return RawConfigSnapshot(
+                yaml_text="",
+                token=None,
+                editable=False,
+                blocked_reason=(
+                    "Raw YAML editing is unavailable because config.yaml is "
+                    "not valid UTF-8. Fix it outside the Web UI."
+                ),
+                blocked_code="invalid_utf8",
+            )
+        blocked_reason: str | None = None
+        blocked_code: str | None = None
+        try:
+            parsed = _parse_config_bytes(payload)
+            _validate_web_json_tree(parsed)
+        except ValueError:
+            blocked_reason = (
+                "Raw YAML editing is unavailable because the file cannot be "
+                "safely inspected for credentials. Fix it outside the Web UI."
+            )
+            blocked_code = "unsafe_yaml"
+        else:
+            if _raw_config_has_literal_credentials(parsed, yaml_text):
+                blocked_reason = (
+                    "Raw YAML editing is disabled because config.yaml contains "
+                    "literal credential values. Move them to environment "
+                    "references before using the Web editor."
+                )
+                blocked_code = "literal_credentials"
+        if blocked_reason is not None:
+            return RawConfigSnapshot(
+                yaml_text="",
+                token=None,
+                editable=False,
+                blocked_reason=blocked_reason,
+                blocked_code=blocked_code,
+            )
+        digest = hashlib.sha256(payload).hexdigest()
+        token = _register_raw_config_snapshot(path, exists, digest)
+        return RawConfigSnapshot(
+            yaml_text=yaml_text,
+            token=token,
+            editable=True,
+        )
 
 
 def load_config_readonly() -> Dict[str, Any]:
@@ -4981,31 +5961,112 @@ _COMMENTED_SECTIONS = """
 """
 
 
+@_reject_managed_write("save configuration")
 @_credential_files_locked
-def save_config(config: Dict[str, Any]):
+def save_config(
+    config: Dict[str, Any],
+    *,
+    snapshot_token: Any = _NO_CONFIG_SNAPSHOT,
+    raw_snapshot_token: Any = _NO_RAW_CONFIG_SNAPSHOT,
+):
     """Save configuration to ~/.hermes/config.yaml."""
     with _CONFIG_LOCK:
         if is_managed():
-            managed_error("save configuration")
-            return
+            raise ManagedConfigurationError("save configuration")
+        if (
+            snapshot_token is not _NO_CONFIG_SNAPSHOT
+            and raw_snapshot_token is not _NO_RAW_CONFIG_SNAPSHOT
+        ):
+            raise ValueError(
+                "snapshot_token and raw_snapshot_token are mutually exclusive"
+            )
+        if raw_snapshot_token is not _NO_RAW_CONFIG_SNAPSHOT:
+            _validate_raw_config_snapshot(raw_snapshot_token)
+        from agent.image_gen_verification import (
+            reconcile_capability_config_epochs,
+        )
         from agent.provider_credentials import load_credential_config
         from utils import atomic_yaml_write
 
         ensure_hermes_home()
         config_path = get_config_path()
-        current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-        normalized = current_normalized
+        direct_token = (
+            config._save_token
+            if isinstance(config, _LoadedConfigSnapshot)
+            else None
+        )
+        if snapshot_token is not _NO_CONFIG_SNAPSHOT:
+            loaded_base = _loaded_config_snapshot_base(snapshot_token)
+            projected_base = _loaded_config_snapshot_base(
+                snapshot_token,
+                projected=True,
+            )
+        elif direct_token is not None:
+            loaded_base = _loaded_config_snapshot_base(direct_token)
+            projected_base = _loaded_config_snapshot_base(
+                direct_token,
+                projected=True,
+            )
+        elif raw_snapshot_token is not _NO_RAW_CONFIG_SNAPSHOT:
+            loaded_base = None
+            projected_base = None
+        else:
+            # Legacy non-Web writers may still provide a complete plain dict.
+            # Web writes explicitly pass snapshot_token (including None), so
+            # missing/unknown Web provenance continues to fail closed above.
+            loaded_base = None
+            projected_base = None
+        config_payload = copy.deepcopy(dict(config))
+        if loaded_base is not None and projected_base is not None:
+            config_payload = _rehydrate_projected_config(
+                projected_base,
+                config_payload,
+                loaded_base,
+            )
+        current_normalized = _normalize_root_model_keys(
+            _normalize_max_turns_config(config_payload)
+        )
         raw_existing = _normalize_root_model_keys(
             _normalize_max_turns_config(
                 load_credential_config(config_path),
             )
         )
+        if loaded_base is None:
+            normalized_runtime = current_normalized
+        else:
+            base_normalized = _normalize_root_model_keys(
+                _normalize_max_turns_config(loaded_base)
+            )
+            current_disk = _normalize_root_model_keys(
+                _normalize_max_turns_config(
+                    _deep_merge(
+                        copy.deepcopy(DEFAULT_CONFIG),
+                        raw_existing,
+                    )
+                )
+            )
+            current_env_snapshot = _referenced_env_snapshot(current_disk)
+            current_disk_expanded = _expand_env_vars(
+                current_disk,
+                env_snapshot=current_env_snapshot,
+            )
+            normalized_runtime = _merge_loaded_config_changes(
+                base_normalized,
+                current_normalized,
+                current_disk_expanded,
+            )
+        normalized = normalized_runtime
         if raw_existing:
             normalized = _preserve_env_ref_templates(
                 normalized,
                 raw_existing,
-                _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path)),
+                (
+                    current_disk_expanded
+                    if loaded_base is not None
+                    else _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path))
+                ),
             )
+        reconcile_capability_config_epochs(raw_existing, normalized)
 
         # Build optional commented-out sections for features that are off by
         # default or only relevant when explicitly configured.
@@ -5028,7 +6089,18 @@ def save_config(config: Dict[str, Any]):
             extra_content="".join(parts) if parts else None,
         )
         _secure_file(config_path)
-        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
+        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(
+            normalized_runtime
+        )
+        if isinstance(config, _LoadedConfigSnapshot):
+            # Advance only this mutable draft after a successful write.  The
+            # old registry entry remains immutable for independent drafts.
+            merged_runtime = copy.deepcopy(normalized_runtime)
+            config.clear()
+            config.update(merged_runtime)
+            config._save_token = _register_loaded_config_snapshot(
+                normalized_runtime
+            )
 
 
 @_credential_files_locked
@@ -5080,6 +6152,7 @@ def load_env() -> Dict[str, str]:
         for line in lines:
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
+                line = re.sub(r"^export\s+", "", line)
                 key, _, value = line.partition('=')
                 env_vars[key.strip()] = value.strip().strip('"\'')
 
@@ -5169,6 +6242,7 @@ def _sanitize_env_lines(lines: list) -> list:
     return sanitized
 
 
+@_reject_managed_write("sanitize credentials")
 @_credential_files_locked
 def sanitize_env_file() -> int:
     """Read, sanitize, and rewrite ~/.hermes/.env in place.
@@ -5198,19 +6272,61 @@ def sanitize_env_file() -> int:
         fixes = sum(1 for a, b in zip(original_lines, sanitized) if a != b)
         fixes += abs(len(sanitized) - len(original_lines))
 
-    fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix=".tmp", prefix=".env_")
-    try:
-        with os.fdopen(fd, "w", **write_kw) as f:
-            f.writelines(sanitized)
-            f.flush()
-            os.fsync(f.fileno())
-        atomic_replace(tmp_path, env_path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    from dotenv import dotenv_values
+    from io import StringIO
+
+    def parsed_values(lines: list[str]) -> dict[str, str]:
+        values = dotenv_values(
+            stream=StringIO("".join(lines)),
+            interpolate=False,
+        )
+        return {
+            str(key): str(value or "")
+            for key, value in values.items()
+            if key is not None
+        }
+
+    before_values = parsed_values(original_lines)
+    after_values = parsed_values(sanitized)
+    changed_keys = tuple(
+        sorted(
+            key
+            for key in set(before_values) | set(after_values)
+            if before_values.get(key) != after_values.get(key)
+        )
+    )
+    from agent.image_gen_verification import (
+        bump_capability_config_epochs,
+        capability_epochs_for_secret_env,
+    )
+    from agent.provider_credentials import (
+        replace_config_env_payload_strict,
+    )
+
+    def advance_repaired_capability_epochs(
+        config_data: dict[str, Any],
+    ) -> None:
+        capabilities = {
+            capability
+            for key in changed_keys
+            for capability in capability_epochs_for_secret_env(
+                config_data,
+                key,
+                env_values=before_values,
+            )
+        }
+        if capabilities:
+            bump_capability_config_epochs(
+                config_data,
+                *sorted(capabilities),
+            )
+
+    replace_config_env_payload_strict(
+        advance_repaired_capability_epochs,
+        "".join(sanitized).encode(write_kw["encoding"]),
+        config_path=get_config_path(),
+        env_keys=changed_keys,
+    )
     _secure_file(env_path)
     invalidate_env_cache()
     return fixes
@@ -5256,12 +6372,12 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     return sanitized
 
 
+@_reject_managed_write(lambda key, _value: f"set {key}")
 @_credential_files_locked
 def save_env_value(key: str, value: str):
     """Save or update a value in ~/.hermes/.env."""
     if is_managed():
-        managed_error(f"set {key}")
-        return
+        raise ManagedConfigurationError(f"set {key}")
     if not _ENV_VAR_NAME_RE.match(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     _reject_denylisted_env_var(key)
@@ -5276,48 +6392,100 @@ def save_env_value(key: str, value: str):
     # The outer credential transaction makes this sanitize → mutate sequence
     # one serialized operation across CLI/WebUI processes.
     sanitize_env_file()
-    from agent.provider_credentials import mutate_env_unique
-
-    mutate_env_unique(
-        {key: value},
-        config_path=config_path,
+    from agent.image_gen_verification import (
+        bump_capability_config_epochs,
+        capability_epochs_for_secret_env,
     )
+    from agent.provider_credentials import (
+        load_credential_config,
+        mutate_config_env_strict,
+        mutate_env_unique,
+    )
+
+    snapshot_config = load_credential_config(config_path)
+    snapshot_env = load_env()
+    actual_change = snapshot_env.get(key) != value
+    capabilities = (
+        capability_epochs_for_secret_env(
+            snapshot_config,
+            key,
+            env_values=snapshot_env,
+        )
+        if actual_change
+        else ()
+    )
+    if capabilities:
+        def advance_capability_epochs(config_data: dict[str, Any]) -> None:
+            bump_capability_config_epochs(
+                config_data,
+                *capabilities,
+            )
+
+        mutate_config_env_strict(
+            advance_capability_epochs,
+            {key: value},
+            config_path=config_path,
+        )
+    else:
+        mutate_env_unique(
+            {key: value},
+            config_path=config_path,
+        )
     _secure_file(env_path)
     invalidate_env_cache()
 
 
+@_reject_managed_write(lambda key: f"remove {key}")
 @_credential_files_locked
 def remove_env_value(key: str) -> bool:
     """Remove a key from ~/.hermes/.env and os.environ.
 
     Returns True if the key was found and removed, False otherwise.
     """
-    if is_managed():
-        managed_error(f"remove {key}")
-        return False
     if not _ENV_VAR_NAME_RE.match(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     config_path = get_config_path()
     env_path = get_env_path()
     sanitize_env_file()
-    if env_path.exists():
-        try:
-            raw_lines = env_path.read_text(encoding="utf-8-sig").splitlines()
-        except (OSError, UnicodeError) as exc:
-            raise ValueError("credential env cannot be read safely") from exc
-        found = any(
-            line.strip().startswith(f"{key}=")
-            for line in raw_lines
-            if line.strip() and not line.strip().startswith("#")
+    from agent.image_gen_verification import (
+        bump_capability_config_epochs,
+        capability_epochs_for_secret_env,
+    )
+    from agent.provider_credentials import (
+        load_credential_config,
+        mutate_config_env_strict,
+        mutate_env_unique,
+    )
+
+    snapshot_config = load_credential_config(config_path)
+    snapshot_env = load_env()
+    found = actual_change = key in snapshot_env
+    capabilities = (
+        capability_epochs_for_secret_env(
+            snapshot_config,
+            key,
+            env_values=snapshot_env,
+        )
+        if actual_change
+        else ()
+    )
+    if capabilities:
+        def advance_capability_epochs(config_data: dict[str, Any]) -> None:
+            bump_capability_config_epochs(
+                config_data,
+                *capabilities,
+            )
+
+        mutate_config_env_strict(
+            advance_capability_epochs,
+            {key: None},
+            config_path=config_path,
         )
     else:
-        found = False
-    from agent.provider_credentials import mutate_env_unique
-
-    mutate_env_unique(
-        {key: None},
-        config_path=config_path,
-    )
+        mutate_env_unique(
+            {key: None},
+            config_path=config_path,
+        )
     if env_path.exists():
         _secure_file(env_path)
     invalidate_env_cache()
@@ -5332,9 +6500,6 @@ def _save_anthropic_env_pair(
     if save_fn is not None:
         for key, value in updates.items():
             save_fn(key, value)
-        return
-    if is_managed():
-        managed_error("update Anthropic credentials")
         return
     ensure_hermes_home()
     normalized = {
@@ -5354,6 +6519,7 @@ def _save_anthropic_env_pair(
     invalidate_env_cache()
 
 
+@_reject_managed_write("update Anthropic credentials")
 @_credential_files_locked
 def save_anthropic_oauth_token(value: str, save_fn=None):
     """Persist an Anthropic OAuth/setup token and clear the API-key slot."""
@@ -5366,6 +6532,7 @@ def save_anthropic_oauth_token(value: str, save_fn=None):
     )
 
 
+@_reject_managed_write("update Anthropic credentials")
 @_credential_files_locked
 def use_anthropic_claude_code_credentials(save_fn=None):
     """Use Claude Code's own credential files instead of persisting env tokens."""
@@ -5378,6 +6545,7 @@ def use_anthropic_claude_code_credentials(save_fn=None):
     )
 
 
+@_reject_managed_write("update Anthropic credentials")
 @_credential_files_locked
 def save_anthropic_api_key(value: str, save_fn=None):
     """Persist an Anthropic API key and clear the OAuth/setup-token slot."""
@@ -5391,7 +6559,17 @@ def save_anthropic_api_key(value: str, save_fn=None):
 
 
 def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
-    save_env_value(key, value)
+    try:
+        save_env_value(key, value)
+    except ManagedConfigurationError as exc:
+        return {
+            "success": False,
+            "stored_as": key,
+            "validated": False,
+            "reason": exc.code,
+            "error_code": exc.code,
+            "message": str(exc),
+        }
     return {
         "success": True,
         "stored_as": key,
@@ -5616,7 +6794,7 @@ def show_config():
 
 
 def edit_config():
-    """Open config file in user's editor."""
+    """Edit a staged copy, then validate and atomically publish it."""
     if is_managed():
         managed_error("edit configuration")
         return
@@ -5651,16 +6829,67 @@ def edit_config():
         print(f"  {config_path}")
         return
     
-    print(f"Opening {config_path} in {editor}...")
-    subprocess.run([editor, str(config_path)])
+    from agent.image_gen_verification import (
+        reconcile_capability_config_epochs,
+    )
+    from agent.provider_credentials import (
+        load_credential_config,
+        mutate_config_strict,
+    )
+
+    baseline = load_credential_config(config_path)
+    fd, staged_name = tempfile.mkstemp(
+        dir=str(config_path.parent),
+        prefix=".config-edit-",
+        suffix=".yaml",
+    )
+    staged_path = Path(staged_name)
+    try:
+        with os.fdopen(fd, "wb") as staged_file:
+            staged_file.write(config_path.read_bytes())
+            staged_file.flush()
+            os.fsync(staged_file.fileno())
+
+        print(f"Opening staged config in {editor}...")
+        result = subprocess.run([editor, str(staged_path)])
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"editor exited with status {result.returncode}"
+            )
+        edited = load_credential_config(staged_path)
+
+        def publish(current: dict[str, Any]) -> None:
+            if current != baseline:
+                raise RuntimeError(
+                    "config changed while the editor was open; "
+                    "your staged edit was not published"
+                )
+            desired = copy.deepcopy(edited)
+            reconcile_capability_config_epochs(current, desired)
+            current.clear()
+            current.update(desired)
+
+        mutate_config_strict(
+            publish,
+            config_path=config_path,
+        )
+    finally:
+        staged_path.unlink(missing_ok=True)
 
 
+@_reject_managed_write(lambda key, _value: f"set {key}")
 @_credential_files_locked
 def set_config_value(key: str, value: str):
     """Set a configuration value."""
-    if is_managed():
-        managed_error("set configuration values")
-        return
+    internal_roots = {
+        "_taiji_capability_epochs",
+        "_taiji_profile_incarnation",
+    }
+    if key.split(".", 1)[0] in internal_roots:
+        raise ValueError(
+            f"{key!r} is internal capability metadata and cannot be set "
+            "directly"
+        )
     # Check if it's an API key (goes to .env)
     api_keys = [
         'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_TOOLS_OPENAI_KEY',
@@ -5729,7 +6958,13 @@ def set_config_value(key: str, value: str):
     )
 
     def _mutate_user_config(user_config):
+        from agent.image_gen_verification import (
+            reconcile_capability_config_epochs,
+        )
+
+        previous = copy.deepcopy(user_config)
         _set_nested(user_config, key, value)
+        reconcile_capability_config_epochs(previous, user_config)
 
     if key in _config_to_env_sync:
         mutate_config_env_strict(
@@ -5772,7 +7007,11 @@ def config_command(args):
             print("  hermes config set terminal.backend docker")
             print("  hermes config set OPENROUTER_API_KEY sk-or-...")
             sys.exit(1)
-        set_config_value(key, value)
+        try:
+            set_config_value(key, value)
+        except ManagedConfigurationError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from None
     
     elif subcmd == "path":
         print(get_config_path())

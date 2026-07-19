@@ -1,7 +1,10 @@
 """Tests for save_config_value() in cli.py — atomic write behavior."""
 
+from contextlib import contextmanager
+import stat
+from unittest.mock import ANY, MagicMock
+
 import yaml
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,7 +33,41 @@ class TestSaveConfigValueAtomic:
         from cli import save_config_value
         save_config_value("display.skin", "mono")
 
-        mock_update.assert_called_once_with(config_env, "display.skin", "mono")
+        mock_update.assert_called_once_with(
+            config_env,
+            "display.skin",
+            "mono",
+            config_reconciler=ANY,
+        )
+
+    def test_joins_shared_credential_transaction(
+        self,
+        config_env,
+        monkeypatch,
+    ):
+        """Single-key writes must serialize with WebUI and credential writers."""
+        events = []
+
+        @contextmanager
+        def fake_transaction(config_path):
+            events.append(("enter", config_path))
+            try:
+                yield
+            finally:
+                events.append(("exit", config_path))
+
+        monkeypatch.setattr(
+            "agent.provider_credentials.credential_transaction",
+            fake_transaction,
+        )
+
+        from cli import save_config_value
+
+        assert save_config_value("display.skin", "mono") is True
+        assert events == [
+            ("enter", config_env),
+            ("exit", config_env),
+        ]
 
     def test_preserves_existing_keys(self, config_env):
         """Writing a new key must not clobber existing config entries."""
@@ -76,6 +113,52 @@ class TestSaveConfigValueAtomic:
         result = yaml.safe_load(config_env.read_text())
         assert result["model"]["default"] == "doubao-pro"
         assert result["custom_providers"][0]["api_key"] == "${TU_ZI_API_KEY}"
+
+    def test_capability_change_advances_epoch_in_same_write(
+        self,
+        config_env,
+    ):
+        """Capability settings and their generation must commit together."""
+        config_env.write_text(
+            yaml.safe_dump(
+                {
+                    "auxiliary": {
+                        "vision": {
+                            "provider": "alibaba",
+                            "model": "qwen3-vl-plus",
+                        }
+                    },
+                    "_taiji_capability_epochs": {
+                        "vision": 7,
+                        "image_generation": 11,
+                    },
+                    "_taiji_profile_incarnation": "incarnation-current",
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from cli import save_config_value
+
+        assert (
+            save_config_value(
+                "auxiliary.vision.provider",
+                "custom:vision-lab",
+            )
+            is True
+        )
+
+        result = yaml.safe_load(config_env.read_text(encoding="utf-8"))
+        assert result["auxiliary"]["vision"]["provider"] == "custom:vision-lab"
+        assert result["_taiji_capability_epochs"] == {
+            "vision": 8,
+            "image_generation": 11,
+        }
+        assert (
+            result["_taiji_profile_incarnation"]
+            == "incarnation-current"
+        )
 
     def test_preserves_comments_after_config_mutation(self, config_env):
         """CLI config writes should not strip existing user comments."""
@@ -132,3 +215,37 @@ class TestSaveConfigValueAtomic:
 
         assert result is False
         assert config_env.read_text() == original_content
+
+    def test_rejects_managed_write_before_creating_mutable_state(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Managed installations must fail closed before creating a home or lock."""
+        managed_home = tmp_path / "managed-home"
+        monkeypatch.setattr("cli._hermes_home", managed_home)
+        monkeypatch.setenv("HERMES_HOME", str(managed_home))
+        monkeypatch.setenv("HERMES_MANAGED", "nixos")
+
+        from cli import save_config_value
+
+        assert save_config_value("display.skin", "mono") is False
+        assert not managed_home.exists()
+
+    def test_preserves_group_shared_mode_after_single_value_write(
+        self,
+        config_env,
+        monkeypatch,
+    ):
+        """A CLI mutation must not downgrade canonical shared config to 0600."""
+        home = config_env.parent
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+        monkeypatch.delenv("HERMES_MANAGED", raising=False)
+        home.chmod(0o2770)
+        config_env.chmod(0o640)
+
+        from cli import save_config_value
+
+        assert save_config_value("display.skin", "mono") is True
+        assert stat.S_IMODE(config_env.stat().st_mode) == 0o640

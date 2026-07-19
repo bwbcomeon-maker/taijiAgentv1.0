@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import yaml
 
 from hermes_cli.config import (
     DEFAULT_CONFIG,
@@ -124,6 +125,53 @@ class TestWebServerEndpoints:
         assert "version" in data
         assert "hermes_home" in data
         assert "active_sessions" in data
+
+    @pytest.mark.parametrize(
+        ("method", "path", "payload"),
+        [
+            ("put", "/api/config", {"config": {"model": "test/model"}}),
+            (
+                "put",
+                "/api/env",
+                {"key": "TEST_API_KEY", "value": "secret"},
+            ),
+            (
+                "put",
+                "/api/config/raw",
+                {"yaml_text": "model: test/model\n"},
+            ),
+        ],
+    )
+    def test_managed_mode_writes_return_conflict_not_false_success(
+        self,
+        monkeypatch,
+        method,
+        path,
+        payload,
+    ):
+        monkeypatch.setenv("HERMES_MANAGED", "nixos")
+
+        response = getattr(self.client, method)(path, json=payload)
+
+        assert response.status_code == 409
+        assert response.json()["error_code"] == "managed_configuration"
+        assert "managed by NixOS" in response.json()["detail"]
+
+    def test_managed_mode_env_delete_returns_conflict_not_not_found(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("HERMES_MANAGED", "nixos")
+
+        response = self.client.request(
+            "DELETE",
+            "/api/env",
+            json={"key": "TEST_API_KEY"},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error_code"] == "managed_configuration"
+        assert "managed by NixOS" in response.json()["detail"]
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
@@ -431,17 +479,572 @@ class TestConfigRoundTrip:
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
-    def test_get_config_no_internal_keys(self):
-        """GET /api/config should not expose _config_version or _model_meta."""
-        config = self.client.get("/api/config").json()
+    def _get_draft(self):
+        payload = self.client.get("/api/config/draft").json()
+        return payload["config"], payload["snapshot_token"]
+
+    def test_get_config_uses_separate_opaque_snapshot_envelope(self):
+        """GET keeps merge provenance outside the exportable config object."""
+        payload = self.client.get("/api/config/draft").json()
+        assert set(payload) == {"config", "snapshot_token"}
+        config = payload["config"]
         internal = [k for k in config if k.startswith("_")]
-        assert not internal, f"Internal keys leaked to frontend: {internal}"
+        assert internal == []
+        token = payload["snapshot_token"]
+        assert isinstance(token, str)
+        assert len(token) >= 24
+        assert token not in json.dumps(config)
+        assert "_config_version" not in config
+        assert "_model_meta" not in config
+
+    def test_get_config_keeps_legacy_read_shape_without_secrets(self):
+        payload = self.client.get("/api/config").json()
+
+        assert "config" not in payload
+        assert "snapshot_token" not in payload
+        assert isinstance(payload.get("model"), str)
+
+    @pytest.mark.parametrize("token", [None, "unknown-worker-token"])
+    def test_put_config_without_valid_snapshot_fails_closed(self, token):
+        body = {"config": {"model": "must-not-write"}}
+        if token is not None:
+            body["snapshot_token"] = token
+
+        response = self.client.put("/api/config", json=body)
+
+        assert response.status_code == 409
+        payload = response.json()
+        assert payload["error_code"] == "configuration_conflict"
+        assert payload["path"] == ["<snapshot>"]
+        assert token is None or token not in json.dumps(payload)
 
     def test_get_config_model_is_string(self):
         """GET /api/config should normalize model dict to a string."""
-        config = self.client.get("/api/config").json()
+        config, _token = self._get_draft()
         assert isinstance(config.get("model"), str), \
             f"model should be string, got {type(config.get('model'))}"
+
+    def test_get_config_and_exportable_payload_never_include_literal_secrets(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        literal_secret = "literal-secret-must-stay-server-side"
+        auth_secret = "literal-auth-token-must-stay-server-side"
+        nested_secret = "nested-credential-must-stay-server-side"
+        get_config_path().write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {"max_turns": 10},
+                    "service": {
+                        "secret_key": literal_secret,
+                        "auth_token": auth_secret,
+                        "api_token": 123456,
+                        "credentials": {"openrouter": nested_secret},
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        config, token = self._get_draft()
+        serialized = json.dumps(config)
+        legacy_serialized = json.dumps(
+            self.client.get("/api/config").json()
+        )
+
+        assert literal_secret not in serialized
+        assert auth_secret not in serialized
+        assert nested_secret not in serialized
+        assert literal_secret not in legacy_serialized
+        assert auth_secret not in legacy_serialized
+        assert nested_secret not in legacy_serialized
+        assert "123456" not in legacy_serialized
+        assert token not in serialized
+        assert config["service"]["secret_key"] == "<redacted>"
+        assert config["service"]["auth_token"] == "<redacted>"
+        assert config["service"]["api_token"] == "<redacted>"
+        assert config["service"]["credentials"]["openrouter"] == "<redacted>"
+
+        config["agent"]["max_turns"] = 11
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+        assert response.status_code == 200
+        saved = yaml.safe_load(
+            get_config_path().read_text(encoding="utf-8")
+        )
+        assert saved["service"]["secret_key"] == literal_secret
+        assert saved["service"]["auth_token"] == auth_secret
+        assert saved["service"]["api_token"] == 123456
+        assert saved["service"]["credentials"]["openrouter"] == nested_secret
+
+    def test_get_config_redacts_secret_content_under_nonstandard_field_name(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        literal_secret = "sk-proj-web-content-boundary-1234567890"
+        get_config_path().write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {"max_turns": 10},
+                    "service": {"value": literal_secret},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        config, token = self._get_draft()
+        legacy = self.client.get("/api/config").json()
+
+        assert literal_secret not in json.dumps(config)
+        assert literal_secret not in json.dumps(legacy)
+        assert config["service"]["value"] == "<redacted>"
+        config["agent"]["max_turns"] = 11
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(
+            get_config_path().read_text(encoding="utf-8")
+        )
+        assert saved["service"]["value"] == literal_secret
+        assert saved["agent"]["max_turns"] == 11
+
+    def test_put_config_rejects_secret_content_under_nonstandard_field_name(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            "agent:\n  max_turns: 10\n",
+            encoding="utf-8",
+        )
+        before = config_path.read_bytes()
+        config, token = self._get_draft()
+        client_literal = "sk-proj-client-content-boundary-1234567890"
+        config["service"] = {"other_value": client_literal}
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert client_literal not in response.text
+
+    def test_put_config_allows_env_reference_under_nonstandard_field_name(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            "agent:\n  max_turns: 10\n",
+            encoding="utf-8",
+        )
+        config, token = self._get_draft()
+        config["service"] = {"other_value": "${WEB_SAFE_OTHER_VALUE}"}
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["service"]["other_value"] == "${WEB_SAFE_OTHER_VALUE}"
+
+    def test_get_config_redacts_secret_content_used_as_mapping_key(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        literal_key = "sk-proj-existing-key-material-1234567890"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {"max_turns": 10},
+                    "service": {literal_key: {"enabled": True}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        config, token = self._get_draft()
+        legacy = self.client.get("/api/config").json()
+
+        assert literal_key not in json.dumps(config)
+        assert literal_key not in json.dumps(legacy)
+        projected_keys = list(config["service"])
+        assert len(projected_keys) == 1
+        assert projected_keys[0].startswith("<redacted-key:")
+        config["agent"]["max_turns"] = 11
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["service"][literal_key] == {"enabled": True}
+        assert saved["agent"]["max_turns"] == 11
+
+    def test_put_config_rejects_secret_content_used_as_new_mapping_key(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            "agent:\n  max_turns: 10\nservice: {}\n",
+            encoding="utf-8",
+        )
+        before = config_path.read_bytes()
+        config, token = self._get_draft()
+        client_literal_key = "sk-proj-client-key-material-1234567890"
+        config["service"][client_literal_key] = "must-not-persist"
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert client_literal_key not in response.text
+
+    def test_mapping_key_redaction_avoids_placeholder_collisions(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        first_literal_key = "sk-proj-first-key-material-1234567890"
+        second_literal_key = "sk-proj-second-key-material-1234567890"
+        reserved_looking_key = "<redacted-key:1>"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {"max_turns": 10},
+                    "service": {
+                        reserved_looking_key: "ordinary-value",
+                        first_literal_key: "first-value",
+                        second_literal_key: "second-value",
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        config, token = self._get_draft()
+        serialized = json.dumps(config)
+        projected_service = config["service"]
+
+        assert first_literal_key not in serialized
+        assert second_literal_key not in serialized
+        assert len(projected_service) == 3
+        assert len(set(projected_service)) == 3
+        assert reserved_looking_key in projected_service
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["service"] == {
+            reserved_looking_key: "ordinary-value",
+            first_literal_key: "first-value",
+            second_literal_key: "second-value",
+        }
+
+    @pytest.mark.parametrize(
+        "yaml_text",
+        [
+            (
+                "agent:\n"
+                "  max_turns: 10\n"
+                "service:\n"
+                "  value: !!binary |\n"
+                "    c2stcHJvai1iaW5hcnktbWF0ZXJpYWwtMTIzNDU2Nzg5MA==\n"
+            ),
+            "agent:\n  max_turns: 10\nservice:\n  1: value\n",
+            "agent: !!set {alpha: null}\n",
+        ],
+    )
+    def test_form_config_rejects_non_json_safe_yaml_without_echo(
+        self,
+        yaml_text,
+    ):
+        from hermes_cli.config import get_config_path
+
+        literal_secret = "sk-proj-binary-material-1234567890"
+        get_config_path().write_text(yaml_text, encoding="utf-8")
+
+        response = self.client.get("/api/config/draft")
+
+        assert response.status_code == 400
+        assert literal_secret not in response.text
+        assert response.json()["error_code"] == "invalid_web_configuration"
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            (
+                "/api/config",
+                {"config": "sk-proj-invalid-body-echo-1234567890"},
+            ),
+            (
+                "/api/config",
+                {
+                    "config": {},
+                    "snapshot_token": [
+                        "sk-proj-invalid-body-echo-1234567890"
+                    ],
+                },
+            ),
+            (
+                "/api/config/raw",
+                {
+                    "yaml_text": [
+                        "sk-proj-invalid-body-echo-1234567890"
+                    ],
+                },
+            ),
+        ],
+    )
+    def test_request_validation_never_echoes_invalid_credential_input(
+        self,
+        path,
+        body,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: original\n", encoding="utf-8")
+        before = config_path.read_bytes()
+
+        response = self.client.put(path, json=body)
+
+        assert response.status_code == 422
+        assert (
+            "sk-proj-invalid-body-echo-1234567890"
+            not in response.text
+        )
+        detail = response.json()["detail"]
+        assert isinstance(detail, list)
+        assert detail
+        assert all(
+            {"loc", "msg", "type"} <= set(error)
+            and "input" not in error
+            for error in detail
+        )
+        assert config_path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        ("mutate", "client_literal"),
+        [
+            (
+                lambda config, literal: config["service"].__setitem__(
+                    "secret_key",
+                    literal,
+                ),
+                "edited-literal-must-not-persist",
+            ),
+            (
+                lambda config, literal: config.setdefault(
+                    "new_service",
+                    {},
+                ).__setitem__("api_key", literal),
+                "new-literal-must-not-persist",
+            ),
+        ],
+    )
+    def test_put_config_rejects_client_literal_secret_without_echoing_it(
+        self,
+        mutate,
+        client_literal,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            (
+                "agent:\n"
+                "  max_turns: 10\n"
+                "service:\n"
+                "  secret_key: original-server-secret\n"
+            ),
+            encoding="utf-8",
+        )
+        before = config_path.read_bytes()
+        config, token = self._get_draft()
+        mutate(config, client_literal)
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert client_literal not in response.text
+
+    def test_put_config_allows_new_sensitive_env_reference(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            "agent:\n  max_turns: 10\n",
+            encoding="utf-8",
+        )
+        config, token = self._get_draft()
+        config["new_service"] = {
+            "api_key": "${WEB_SAFE_NEW_API_KEY}",
+        }
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert (
+            saved["new_service"]["api_key"]
+            == "${WEB_SAFE_NEW_API_KEY}"
+        )
+
+    def test_put_config_rejects_internal_root_injection(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            (
+                "_config_version: 9\n"
+                "_taiji_capability_epochs:\n"
+                "  vision: 7\n"
+                "agent:\n"
+                "  max_turns: 10\n"
+            ),
+            encoding="utf-8",
+        )
+        before = config_path.read_bytes()
+        config, token = self._get_draft()
+        config["_config_version"] = 999
+        config["_taiji_capability_epochs"] = {"vision": 999}
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert "999" not in response.text
+
+    def test_web_round_trip_preserves_hidden_internal_roots(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "_config_version": 9,
+                    "_taiji_capability_epochs": {"vision": 7},
+                    "auxiliary": {
+                        "vision": DEFAULT_CONFIG["auxiliary"]["vision"],
+                    },
+                    "agent": {"max_turns": 10},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        config, token = self._get_draft()
+        assert "_config_version" not in config
+        assert "_taiji_capability_epochs" not in config
+        config["agent"]["max_turns"] = 11
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["_config_version"] == 9
+        assert saved["_taiji_capability_epochs"] == {"vision": 7}
+
+    def test_put_config_token_fails_after_server_snapshot_registry_reset(self):
+        from hermes_cli.config import (
+            _LOADED_CONFIG_SNAPSHOTS,
+            get_config_path,
+        )
+
+        config_path = get_config_path()
+        config_path.write_text(
+            "agent:\n  max_turns: 10\n",
+            encoding="utf-8",
+        )
+        config, token = self._get_draft()
+        before = config_path.read_bytes()
+        _LOADED_CONFIG_SNAPSHOTS.clear()
+        config["agent"]["max_turns"] = 11
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["path"] == ["<snapshot>"]
+        assert config_path.read_bytes() == before
+
+    def test_put_config_token_fails_after_snapshot_registry_eviction(self):
+        from hermes_cli.config import (
+            _LOADED_CONFIG_SNAPSHOT_LIMIT,
+            get_config_path,
+        )
+
+        config_path = get_config_path()
+        config_path.write_text("revision: -1\n", encoding="utf-8")
+        stale_config, stale_token = self._get_draft()
+        for revision in range(_LOADED_CONFIG_SNAPSHOT_LIMIT):
+            config_path.write_text(
+                f"revision: {revision}\n",
+                encoding="utf-8",
+            )
+            self._get_draft()
+        before = config_path.read_bytes()
+        stale_config["agent"]["max_turns"] = 91
+
+        response = self.client.put(
+            "/api/config",
+            json={
+                "config": stale_config,
+                "snapshot_token": stale_token,
+            },
+        )
+
+        assert response.status_code == 409
+        assert response.json()["path"] == ["<snapshot>"]
+        assert config_path.read_bytes() == before
 
     def test_round_trip_preserves_model_subkeys(self):
         """Save and reload should not lose model.provider, model.base_url, etc."""
@@ -462,26 +1065,431 @@ class TestConfigRoundTrip:
         original_keys = set(before["model"].keys())
 
         # GET → PUT unchanged
-        web_config = self.client.get("/api/config").json()
+        web_config, token = self._get_draft()
         assert isinstance(web_config.get("model"), str), "GET should normalize model to string"
 
-        self.client.put("/api/config", json={"config": web_config})
+        self.client.put(
+            "/api/config",
+            json={"config": web_config, "snapshot_token": token},
+        )
 
         after = load_config()
         assert isinstance(after.get("model"), dict), "model should still be a dict after save"
         assert set(after["model"].keys()) >= original_keys, \
             f"Lost model subkeys: {original_keys - set(after['model'].keys())}"
 
+    def test_round_trip_preserves_env_template_and_concurrent_update_after_rotation(
+        self,
+        monkeypatch,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        original_secret = "web-secret-at-load-time"
+        rotated_secret = "web-secret-after-rotation"
+        raw = {
+            "agent": {"max_turns": 10},
+            "model": {
+                "default": "test/main-model",
+                "provider": "openrouter",
+            },
+            "custom_providers": [
+                {
+                    "name": "rotating-provider",
+                    "api_key": "${WEB_ROTATING_PROVIDER_API_KEY}",
+                    "model": "test/model",
+                }
+            ],
+        }
+        config_path.write_text(
+            yaml.safe_dump(raw, sort_keys=False),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(
+            "WEB_ROTATING_PROVIDER_API_KEY",
+            original_secret,
+        )
+
+        web_config, token = self._get_draft()
+        assert (
+            web_config["custom_providers"][0]["api_key"]
+            == "${WEB_ROTATING_PROVIDER_API_KEY}"
+        )
+        assert original_secret not in json.dumps(web_config)
+
+        concurrent = {
+            **raw,
+            "concurrent_unrelated": {"kept": True},
+        }
+        config_path.write_text(
+            yaml.safe_dump(concurrent, sort_keys=False),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(
+            "WEB_ROTATING_PROVIDER_API_KEY",
+            rotated_secret,
+        )
+        web_config["agent"]["max_turns"] = 37
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": web_config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agent"]["max_turns"] == 37
+        assert saved["concurrent_unrelated"] == {"kept": True}
+        assert (
+            saved["custom_providers"][0]["api_key"]
+            == "${WEB_ROTATING_PROVIDER_API_KEY}"
+        )
+        persisted_text = config_path.read_text(encoding="utf-8")
+        assert original_secret not in persisted_text
+        assert rotated_secret not in persisted_text
+
+    def test_named_secret_list_reorder_preserves_secret_identity(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        raw = {
+            "agent": {"max_turns": 10},
+            "custom_providers": [
+                {
+                    "name": "alpha",
+                    "api_key": "server-alpha-secret",
+                    "model": "alpha/model",
+                },
+                {
+                    "name": "beta",
+                    "api_key": "server-beta-secret",
+                    "model": "beta/model",
+                },
+            ],
+        }
+        config_path.write_text(
+            yaml.safe_dump(raw, sort_keys=False),
+            encoding="utf-8",
+        )
+        config, token = self._get_draft()
+        assert [
+            item["api_key"] for item in config["custom_providers"]
+        ] == ["<redacted>", "<redacted>"]
+        config["custom_providers"] = list(
+            reversed(config["custom_providers"])
+        )
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        by_name = {
+            item["name"]: item for item in saved["custom_providers"]
+        }
+        assert by_name["alpha"]["api_key"] == "server-alpha-secret"
+        assert by_name["beta"]["api_key"] == "server-beta-secret"
+
+    def test_named_list_reorder_uses_opaque_identity_for_secret_names(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        alpha_name = "sk-proj-alpha-name-material-1234567890"
+        beta_name = "sk-proj-beta-name-material-1234567890"
+        alpha_key = "server-alpha-secret"
+        beta_key = "server-beta-secret"
+        raw = {
+            "agent": {"max_turns": 10},
+            "custom_providers": [
+                {
+                    "name": alpha_name,
+                    "api_key": alpha_key,
+                    "model": "alpha/model",
+                },
+                {
+                    "name": beta_name,
+                    "api_key": beta_key,
+                    "model": "beta/model",
+                },
+            ],
+        }
+        config_path.write_text(
+            yaml.safe_dump(raw, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        config, token = self._get_draft()
+        serialized = json.dumps(config)
+        projected_names = [
+            item["name"] for item in config["custom_providers"]
+        ]
+        legacy_names = [
+            item["name"]
+            for item in self.client.get("/api/config").json()[
+                "custom_providers"
+            ]
+        ]
+
+        assert len(set(projected_names)) == 2
+        assert legacy_names == projected_names
+        assert all(
+            name.startswith("<redacted-id:")
+            for name in projected_names
+        )
+        for secret in (alpha_name, beta_name, alpha_key, beta_key):
+            assert secret not in serialized
+            assert secret not in token
+        config["custom_providers"].reverse()
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 200
+        assert all(
+            secret not in response.text
+            for secret in (alpha_name, beta_name, alpha_key, beta_key)
+        )
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["custom_providers"] == [
+            {
+                "name": beta_name,
+                "api_key": beta_key,
+                "model": "beta/model",
+            },
+            {
+                "name": alpha_name,
+                "api_key": alpha_key,
+                "model": "alpha/model",
+            },
+        ]
+
+    def test_ambiguous_secret_named_list_reorder_fails_closed(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        duplicate_name = "sk-proj-duplicate-name-material-1234567890"
+        raw = {
+            "agent": {"max_turns": 10},
+            "custom_providers": [
+                {
+                    "name": duplicate_name,
+                    "api_key": "server-first-secret",
+                    "model": "first/model",
+                },
+                {
+                    "name": duplicate_name,
+                    "api_key": "server-second-secret",
+                    "model": "second/model",
+                },
+            ],
+        }
+        config_path.write_text(
+            yaml.safe_dump(raw, sort_keys=False),
+            encoding="utf-8",
+        )
+        before = config_path.read_bytes()
+        config, token = self._get_draft()
+        config["custom_providers"].reverse()
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert duplicate_name not in response.text
+        assert "server-first-secret" not in response.text
+        assert "server-second-secret" not in response.text
+
+    @pytest.mark.parametrize("mutation", ["rename", "new", "duplicate"])
+    def test_named_secret_list_rejects_placeholder_without_same_identity(
+        self,
+        mutation,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {"max_turns": 10},
+                    "custom_providers": [
+                        {
+                            "name": "original",
+                            "api_key": "server-original-secret",
+                            "model": "test/model",
+                        },
+                        {
+                            "name": "other",
+                            "api_key": "server-other-secret",
+                            "model": "other/model",
+                        },
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        before = config_path.read_bytes()
+        config, token = self._get_draft()
+        if mutation == "rename":
+            config["custom_providers"][0]["name"] = "replacement"
+        elif mutation == "new":
+            config["custom_providers"].append(
+                {
+                    "name": "new-provider",
+                    "api_key": "<redacted>",
+                    "model": "new/model",
+                }
+            )
+        else:
+            config["custom_providers"][1]["name"] = "original"
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert "<redacted>" not in config_path.read_text(encoding="utf-8")
+
+    def test_round_trip_reports_conflict_without_overwriting_same_field(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            yaml.safe_dump(
+                {"agent": {"max_turns": 10}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        web_config, token = self._get_draft()
+        web_config["agent"]["max_turns"] = 42
+        concurrent = {"agent": {"max_turns": 99}}
+        config_path.write_text(
+            yaml.safe_dump(concurrent, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": web_config, "snapshot_token": token},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error_code"] == "configuration_conflict"
+        assert response.json()["path"] == ["agent", "max_turns"]
+        assert "agent.max_turns" in response.json()["detail"]
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == concurrent
+
+    def test_conflict_path_never_echoes_redacted_runtime_mapping_key(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        literal_key = "sk-proj-conflict-key-material-1234567890"
+        original = {
+            "agent": {"max_turns": 10},
+            "service": {literal_key: {"enabled": True}},
+        }
+        config_path.write_text(
+            yaml.safe_dump(original, sort_keys=False),
+            encoding="utf-8",
+        )
+        config, token = self._get_draft()
+        projected_key = next(iter(config["service"]))
+        config["service"][projected_key]["enabled"] = False
+        concurrent = {
+            "agent": {"max_turns": 10},
+            "service": {literal_key: {"enabled": "external"}},
+        }
+        config_path.write_text(
+            yaml.safe_dump(concurrent, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        response = self.client.put(
+            "/api/config",
+            json={"config": config, "snapshot_token": token},
+        )
+        payload = response.json()
+
+        assert response.status_code == 409
+        assert payload["error_code"] == "configuration_conflict"
+        assert payload["path"] == ["service", "<redacted>", "enabled"]
+        assert literal_key not in response.text
+        assert config_path.read_text(encoding="utf-8") == yaml.safe_dump(
+            concurrent,
+            sort_keys=False,
+        )
+
+    def test_each_web_draft_keeps_its_own_snapshot_token(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {"max_turns": 10},
+                    "display": {"skin": "default"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        first_draft, first_token = self._get_draft()
+
+        concurrent = {
+            "agent": {"max_turns": 99},
+            "display": {"skin": "default"},
+        }
+        config_path.write_text(
+            yaml.safe_dump(concurrent, sort_keys=False),
+            encoding="utf-8",
+        )
+        _second_draft, second_token = self._get_draft()
+        assert first_token != second_token
+
+        first_draft["display"]["skin"] = "compact"
+        response = self.client.put(
+            "/api/config",
+            json={
+                "config": first_draft,
+                "snapshot_token": first_token,
+            },
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agent"]["max_turns"] == 99
+        assert saved["display"]["skin"] == "compact"
+
     def test_edit_model_name_preserved(self):
         """Changing the model string should update model.default on disk."""
         from hermes_cli.config import load_config
 
-        web_config = self.client.get("/api/config").json()
+        web_config, token = self._get_draft()
         original_model = web_config["model"]
 
         # Change model
         web_config["model"] = "test/editing-model"
-        self.client.put("/api/config", json={"config": web_config})
+        edit_response = self.client.put(
+            "/api/config",
+            json={"config": web_config, "snapshot_token": token},
+        )
+        assert edit_response.status_code == 200
 
         after = load_config()
         if isinstance(after.get("model"), dict):
@@ -490,14 +1498,19 @@ class TestConfigRoundTrip:
             assert after["model"] == "test/editing-model"
 
         # Restore
+        web_config, token = self._get_draft()
         web_config["model"] = original_model
-        self.client.put("/api/config", json={"config": web_config})
+        restore_response = self.client.put(
+            "/api/config",
+            json={"config": web_config, "snapshot_token": token},
+        )
+        assert restore_response.status_code == 200
 
     def test_edit_nested_value(self):
         """Editing a nested config value should persist correctly."""
         from hermes_cli.config import load_config
 
-        web_config = self.client.get("/api/config").json()
+        web_config, token = self._get_draft()
         original_turns = web_config.get("agent", {}).get("max_turns")
 
         # Change max_turns
@@ -505,18 +1518,27 @@ class TestConfigRoundTrip:
             web_config["agent"] = {}
         web_config["agent"]["max_turns"] = 42
 
-        self.client.put("/api/config", json={"config": web_config})
+        edit_response = self.client.put(
+            "/api/config",
+            json={"config": web_config, "snapshot_token": token},
+        )
+        assert edit_response.status_code == 200
 
         after = load_config()
         assert after.get("agent", {}).get("max_turns") == 42
 
         # Restore
+        web_config, token = self._get_draft()
         web_config["agent"]["max_turns"] = original_turns
-        self.client.put("/api/config", json={"config": web_config})
+        restore_response = self.client.put(
+            "/api/config",
+            json={"config": web_config, "snapshot_token": token},
+        )
+        assert restore_response.status_code == 200
 
     def test_schema_types_match_config_values(self):
         """Every schema field should have a matching-type value in the config."""
-        config = self.client.get("/api/config").json()
+        config, _token = self._get_draft()
         schema_resp = self.client.get("/api/config/schema").json()
         schema = schema_resp["fields"]
 
@@ -934,22 +1956,361 @@ class TestNewEndpoints:
     def test_config_raw_get(self):
         resp = self.client.get("/api/config/raw")
         assert resp.status_code == 200
-        assert "yaml" in resp.json()
+        assert set(resp.json()) == {
+            "yaml",
+            "snapshot_token",
+            "editable",
+            "blocked_reason",
+            "blocked_code",
+        }
+        assert resp.json()["editable"] is True
+        assert resp.json()["blocked_reason"] is None
+        assert resp.json()["blocked_code"] is None
+        assert len(resp.json()["snapshot_token"]) >= 24
+
+    def test_config_raw_get_blocks_literal_secret_without_returning_content(
+        self,
+    ):
+        from hermes_cli.config import get_config_path
+
+        literal_secret = "raw-literal-secret-must-not-reach-dom"
+        get_config_path().write_text(
+            yaml.safe_dump(
+                {
+                    "service": {
+                        "credentials": {
+                            "openrouter": literal_secret,
+                        }
+                    }
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        resp = self.client.get("/api/config/raw")
+        payload = resp.json()
+
+        assert resp.status_code == 200
+        assert payload["editable"] is False
+        assert payload["snapshot_token"] is None
+        assert payload["yaml"] == ""
+        assert literal_secret not in json.dumps(payload)
+        assert "literal credential" in payload["blocked_reason"]
+        assert payload["blocked_code"] == "literal_credentials"
+
+    def test_config_raw_get_blocks_invalid_utf8_without_returning_bytes(self):
+        from hermes_cli.config import get_config_path
+
+        get_config_path().write_bytes(b"\xff\xfeSECRET-BYTES")
+
+        resp = self.client.get("/api/config/raw")
+        payload = resp.json()
+
+        assert resp.status_code == 200
+        assert payload["editable"] is False
+        assert payload["snapshot_token"] is None
+        assert payload["yaml"] == ""
+        assert "SECRET-BYTES" not in json.dumps(payload)
+        assert "valid UTF-8" in payload["blocked_reason"]
+        assert payload["blocked_code"] == "invalid_utf8"
+
+    def test_config_raw_get_blocks_duplicate_key_secret_shadowing(self):
+        from hermes_cli.config import get_config_path
+
+        literal_secret = "duplicate-shadow-opaque-material"
+        get_config_path().write_text(
+            (
+                "service:\n"
+                "  credentials:\n"
+                f"    openrouter: {literal_secret}\n"
+                "service:\n"
+                "  label: safe\n"
+            ),
+            encoding="utf-8",
+        )
+
+        resp = self.client.get("/api/config/raw")
+        payload = resp.json()
+
+        assert resp.status_code == 200
+        assert payload["editable"] is False
+        assert payload["snapshot_token"] is None
+        assert payload["yaml"] == ""
+        assert literal_secret not in json.dumps(payload)
+        assert "safely inspected" in payload["blocked_reason"]
+        assert payload["blocked_code"] == "unsafe_yaml"
+
+    @pytest.mark.parametrize(
+        "yaml_text",
+        [
+            (
+                "service:\n"
+                "  value: !!binary |\n"
+                "    c2stcHJvai1iaW5hcnktbWF0ZXJpYWwtMTIzNDU2Nzg5MA==\n"
+            ),
+            "service:\n  created: 2026-07-20\n",
+            "service:\n  features: !!set {alpha: null}\n",
+            "service:\n  ratio: .nan\n",
+            "service:\n  1: value\n",
+        ],
+    )
+    def test_config_raw_get_blocks_non_json_safe_yaml(self, yaml_text):
+        from hermes_cli.config import get_config_path
+
+        literal_secret = "sk-proj-binary-material-1234567890"
+        get_config_path().write_text(yaml_text, encoding="utf-8")
+
+        response = self.client.get("/api/config/raw")
+        payload = response.json()
+
+        assert response.status_code == 200
+        assert payload["editable"] is False
+        assert payload["snapshot_token"] is None
+        assert payload["yaml"] == ""
+        assert payload["blocked_code"] == "unsafe_yaml"
+        assert literal_secret not in json.dumps(payload)
+
+    def test_config_raw_get_blocks_oversized_file_without_reading_it_into_ui(
+        self,
+    ):
+        from agent.provider_credentials import _MAX_CREDENTIAL_CONFIG_BYTES
+        from hermes_cli.config import get_config_path
+
+        get_config_path().write_bytes(
+            b"#" * (_MAX_CREDENTIAL_CONFIG_BYTES + 1)
+        )
+
+        resp = self.client.get("/api/config/raw")
+        payload = resp.json()
+
+        assert resp.status_code == 200
+        assert payload["editable"] is False
+        assert payload["snapshot_token"] is None
+        assert payload["yaml"] == ""
+        assert "maximum size" in payload["blocked_reason"]
+        assert payload["blocked_code"] == "too_large"
 
     def test_config_raw_put_valid(self):
+        from hermes_cli.config import get_config_path
+
+        snapshot = self.client.get("/api/config/raw").json()
         resp = self.client.put(
             "/api/config/raw",
-            json={"yaml_text": "model: test\ntoolsets:\n  - all\n"},
+            json={
+                "yaml_text": "model: test\ntoolsets:\n  - all\n",
+                "snapshot_token": snapshot["snapshot_token"],
+            },
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+        saved = yaml.safe_load(
+            get_config_path().read_text(encoding="utf-8")
+        )
+        assert saved["model"] == "test"
+        assert saved["toolsets"] == ["all"]
 
     def test_config_raw_put_invalid(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: original\n", encoding="utf-8")
+        before = config_path.read_bytes()
+        client_payload = "- this-is-client-only"
+        snapshot = self.client.get("/api/config/raw").json()
         resp = self.client.put(
             "/api/config/raw",
-            json={"yaml_text": "- this is a list not a dict"},
+            json={
+                "yaml_text": client_payload,
+                "snapshot_token": snapshot["snapshot_token"],
+            },
         )
         assert resp.status_code == 400
+        assert config_path.read_bytes() == before
+        assert "this-is-client-only" not in resp.text
+
+    @pytest.mark.parametrize(
+        "client_payload",
+        [
+            (
+                "service:\n"
+                "  value: !!binary |\n"
+                "    c2stcHJvai1iaW5hcnktbWF0ZXJpYWwtMTIzNDU2Nzg5MA==\n"
+            ),
+            "service:\n  created: 2026-07-20\n",
+            "service:\n  features: !!set {alpha: null}\n",
+            "service:\n  ratio: .inf\n",
+            "service:\n  1: value\n",
+        ],
+    )
+    def test_config_raw_put_rejects_non_json_safe_yaml(
+        self,
+        client_payload,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: original\n", encoding="utf-8")
+        before = config_path.read_bytes()
+        snapshot = self.client.get("/api/config/raw").json()
+
+        response = self.client.put(
+            "/api/config/raw",
+            json={
+                "yaml_text": client_payload,
+                "snapshot_token": snapshot["snapshot_token"],
+            },
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert "sk-proj-binary-material-1234567890" not in response.text
+
+    def test_config_raw_put_rejects_duplicate_mapping_keys(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: original\n", encoding="utf-8")
+        snapshot = self.client.get("/api/config/raw").json()
+        duplicate = "model: first\nmodel: second\n"
+
+        resp = self.client.put(
+            "/api/config/raw",
+            json={
+                "yaml_text": duplicate,
+                "snapshot_token": snapshot["snapshot_token"],
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "duplicate mapping" in resp.json()["detail"]
+        assert config_path.read_text(encoding="utf-8") == "model: original\n"
+
+    def test_config_raw_put_rejects_oversized_payload(self):
+        from agent.provider_credentials import _MAX_CREDENTIAL_CONFIG_BYTES
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: original\n", encoding="utf-8")
+        snapshot = self.client.get("/api/config/raw").json()
+
+        resp = self.client.put(
+            "/api/config/raw",
+            json={
+                "yaml_text": (
+                    "#" * (_MAX_CREDENTIAL_CONFIG_BYTES + 1)
+                ),
+                "snapshot_token": snapshot["snapshot_token"],
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "maximum size" in resp.json()["detail"]
+        assert config_path.read_text(encoding="utf-8") == "model: original\n"
+
+    @pytest.mark.parametrize(
+        ("yaml_text", "client_literal"),
+        [
+            (
+                (
+                    "service:\n"
+                    "  credentials:\n"
+                    "    openrouter: raw-new-secret\n"
+                ),
+                "raw-new-secret",
+            ),
+            (
+                "service:\n  api_token: 123456\n",
+                "123456",
+            ),
+            (
+                (
+                    "service:\n"
+                    "  other_value: sk-proj-raw-content-1234567890\n"
+                ),
+                "sk-proj-raw-content-1234567890",
+            ),
+        ],
+    )
+    def test_config_raw_put_rejects_literal_credentials_without_echo(
+        self,
+        yaml_text,
+        client_literal,
+    ):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: original\n", encoding="utf-8")
+        before = config_path.read_bytes()
+        snapshot = self.client.get("/api/config/raw").json()
+
+        response = self.client.put(
+            "/api/config/raw",
+            json={
+                "yaml_text": yaml_text,
+                "snapshot_token": snapshot["snapshot_token"],
+            },
+        )
+
+        assert response.status_code == 400
+        assert config_path.read_bytes() == before
+        assert client_literal not in response.text
+
+    def test_config_raw_put_allows_sensitive_env_reference(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: original\n", encoding="utf-8")
+        snapshot = self.client.get("/api/config/raw").json()
+
+        response = self.client.put(
+            "/api/config/raw",
+            json={
+                "yaml_text": (
+                    "service:\n"
+                    "  api_key: ${RAW_SAFE_API_KEY}\n"
+                ),
+                "snapshot_token": snapshot["snapshot_token"],
+            },
+        )
+
+        assert response.status_code == 200
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["service"]["api_key"] == "${RAW_SAFE_API_KEY}"
+
+    def test_config_raw_put_rejects_concurrent_disk_change(self):
+        from hermes_cli.config import get_config_path
+
+        config_path = get_config_path()
+        config_path.write_text("model: draft-base\n", encoding="utf-8")
+        snapshot = self.client.get("/api/config/raw").json()
+        concurrent = "model: concurrent\n"
+        config_path.write_text(concurrent, encoding="utf-8")
+
+        resp = self.client.put(
+            "/api/config/raw",
+            json={
+                "yaml_text": "model: stale-editor\n",
+                "snapshot_token": snapshot["snapshot_token"],
+            },
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["error_code"] == "configuration_conflict"
+        assert resp.json()["path"] == ["<raw-config>"]
+        assert config_path.read_text(encoding="utf-8") == concurrent
+
+    @pytest.mark.parametrize("token", [None, "unknown-worker-token"])
+    def test_config_raw_put_without_valid_snapshot_fails_closed(self, token):
+        body = {"yaml_text": "model: must-not-write\n"}
+        if token is not None:
+            body["snapshot_token"] = token
+
+        resp = self.client.put("/api/config/raw", json=body)
+
+        assert resp.status_code == 409
+        assert resp.json()["path"] == ["<snapshot>"]
+        assert token is None or token not in json.dumps(resp.json())
 
     def test_analytics_usage(self):
         resp = self.client.get("/api/analytics/usage?days=7")
@@ -1090,17 +2451,21 @@ class TestModelContextLength:
     def test_denormalize_writes_context_length_into_model_dict(self):
         """denormalize should write model_context_length back into model dict."""
         from hermes_cli.web_server import _denormalize_config_from_web
-        from hermes_cli.config import save_config
+        from hermes_cli.config import load_web_config_snapshot, save_config
 
         # Set up disk config with model as a dict
         save_config({
             "model": {"default": "anthropic/claude-opus-4.6", "provider": "openrouter"}
         })
 
-        result = _denormalize_config_from_web({
-            "model": "anthropic/claude-opus-4.6",
-            "model_context_length": 100000,
-        })
+        snapshot = load_web_config_snapshot()
+        result = _denormalize_config_from_web(
+            {
+                "model": "anthropic/claude-opus-4.6",
+                "model_context_length": 100000,
+            },
+            snapshot.token,
+        )
         assert isinstance(result["model"], dict)
         assert result["model"]["context_length"] == 100000
         assert "model_context_length" not in result  # virtual field removed
@@ -1108,7 +2473,7 @@ class TestModelContextLength:
     def test_denormalize_zero_removes_context_length(self):
         """denormalize with model_context_length=0 should remove context_length key."""
         from hermes_cli.web_server import _denormalize_config_from_web
-        from hermes_cli.config import save_config
+        from hermes_cli.config import load_web_config_snapshot, save_config
 
         save_config({
             "model": {
@@ -1118,25 +2483,33 @@ class TestModelContextLength:
             }
         })
 
-        result = _denormalize_config_from_web({
-            "model": "anthropic/claude-opus-4.6",
-            "model_context_length": 0,
-        })
+        snapshot = load_web_config_snapshot()
+        result = _denormalize_config_from_web(
+            {
+                "model": "anthropic/claude-opus-4.6",
+                "model_context_length": 0,
+            },
+            snapshot.token,
+        )
         assert isinstance(result["model"], dict)
         assert "context_length" not in result["model"]
 
     def test_denormalize_upgrades_bare_string_to_dict(self):
         """denormalize should upgrade bare string model to dict when context_length set."""
         from hermes_cli.web_server import _denormalize_config_from_web
-        from hermes_cli.config import save_config
+        from hermes_cli.config import load_web_config_snapshot, save_config
 
         # Disk has model as bare string
         save_config({"model": "anthropic/claude-sonnet-4"})
 
-        result = _denormalize_config_from_web({
-            "model": "anthropic/claude-sonnet-4",
-            "model_context_length": 65000,
-        })
+        snapshot = load_web_config_snapshot()
+        result = _denormalize_config_from_web(
+            {
+                "model": "anthropic/claude-sonnet-4",
+                "model_context_length": 65000,
+            },
+            snapshot.token,
+        )
         assert isinstance(result["model"], dict)
         assert result["model"]["default"] == "anthropic/claude-sonnet-4"
         assert result["model"]["context_length"] == 65000
@@ -1144,29 +2517,37 @@ class TestModelContextLength:
     def test_denormalize_bare_string_stays_string_when_zero(self):
         """denormalize should keep bare string model as string when context_length=0."""
         from hermes_cli.web_server import _denormalize_config_from_web
-        from hermes_cli.config import save_config
+        from hermes_cli.config import load_web_config_snapshot, save_config
 
         save_config({"model": "anthropic/claude-sonnet-4"})
 
-        result = _denormalize_config_from_web({
-            "model": "anthropic/claude-sonnet-4",
-            "model_context_length": 0,
-        })
+        snapshot = load_web_config_snapshot()
+        result = _denormalize_config_from_web(
+            {
+                "model": "anthropic/claude-sonnet-4",
+                "model_context_length": 0,
+            },
+            snapshot.token,
+        )
         assert result["model"] == "anthropic/claude-sonnet-4"
 
     def test_denormalize_coerces_string_context_length(self):
         """denormalize should handle string model_context_length from frontend."""
         from hermes_cli.web_server import _denormalize_config_from_web
-        from hermes_cli.config import save_config
+        from hermes_cli.config import load_web_config_snapshot, save_config
 
         save_config({
             "model": {"default": "test/model", "provider": "openrouter"}
         })
 
-        result = _denormalize_config_from_web({
-            "model": "test/model",
-            "model_context_length": "32000",
-        })
+        snapshot = load_web_config_snapshot()
+        result = _denormalize_config_from_web(
+            {
+                "model": "test/model",
+                "model_context_length": "32000",
+            },
+            snapshot.token,
+        )
         assert isinstance(result["model"], dict)
         assert result["model"]["context_length"] == 32000
 
@@ -2444,3 +3825,80 @@ class TestDashboardPluginStaticAssetAllowlist:
         # — never 200.
         assert resp.status_code in (403, 404)
 
+
+class TestConfigPageStateContracts:
+    """Fast supplemental contracts; browser behavior runs in web/qa."""
+
+    @staticmethod
+    def _source(relative_path: str) -> str:
+        project_root = Path(__file__).parents[2]
+        return (project_root / relative_path).read_text(encoding="utf-8")
+
+    def test_initial_config_failure_has_visible_retry_state(self):
+        source = self._source("web/src/pages/ConfigPage.tsx")
+
+        assert "configLoadError" in source
+        assert "handleRetryInitialConfig" in source
+        assert "fetchConfigDependencies" in source
+        assert "t.config.retryConfigLoad" in source
+        assert "if (config && schema) return;" in source
+        assert "setSchema(null)" in source
+
+    def test_raw_policy_block_and_transport_error_are_separate_states(self):
+        source = self._source("web/src/pages/ConfigPage.tsx")
+
+        assert "yamlBlockedCode" in source
+        assert "yamlBlockedFallback" in source
+        assert "yamlLoadError" in source
+        assert "t.config.retryRawLoad" in source
+        assert "rawBlockedLiteralCredentials" in source
+        assert "setYamlBlockedCode(null)" in source
+        assert "setYamlLoadError(true)" in source
+        yaml_actions = source[
+            source.index("{yamlMode ? ("):
+            source.index(
+                "\n          ) : (",
+                source.index("{yamlMode ? ("),
+            )
+        ]
+        assert "{!yamlBlockedMessage && (" in yaml_actions
+        assert "onClick={handleYamlSave}" in yaml_actions
+
+    def test_conflict_reload_requires_explicit_discard_confirmation(self):
+        source = self._source("web/src/pages/ConfigPage.tsx")
+
+        assert "confirmReloadDraft" in source
+        assert "t.config.reloadDiscard" in source
+        assert "t.config.reloadDiscardTitle" in source
+        assert "t.config.reloadDiscardDescription" in source
+        assert "<ConfirmDialog" in source
+        assert "window.confirm" not in source
+
+    def test_save_success_is_reported_before_refresh_attempt(self):
+        source = self._source("web/src/pages/ConfigPage.tsx")
+        save_call = source.index(
+            "await api.saveConfig(config, configSnapshotToken)"
+        )
+        success_toast = source.index(
+            "showToast(t.config.configSaved, \"success\")",
+            save_call,
+        )
+        refresh_call = source.index(
+            "await api.getConfigDraft()",
+            success_toast,
+        )
+
+        assert save_call < success_toast < refresh_call
+
+    def test_async_responses_are_revision_and_generation_guarded(self):
+        source = self._source("web/src/pages/ConfigPage.tsx")
+        qa_source = self._source("web/qa/config-page-behavior.cjs")
+
+        assert "configRevisionRef" in source
+        assert "configRequestGenerationRef" in source
+        assert "yamlRevisionRef" in source
+        assert "yamlRequestGenerationRef" in source
+        assert "revisionAtSave !== configRevisionRef.current" in source
+        assert "revisionAtSave !== yamlRevisionRef.current" in source
+        assert "testConcurrentEditSurvivesSave" in qa_source
+        assert "testRapidYamlToggleIgnoresOldResponse" in qa_source

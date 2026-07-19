@@ -439,6 +439,45 @@ class TestCmdMigrate:
         captured = capsys.readouterr()
         assert "Could not load migration script" in captured.out
 
+    def test_preview_failure_does_not_precreate_main_config(self, tmp_path):
+        openclaw_dir = tmp_path / ".openclaw"
+        openclaw_dir.mkdir()
+        config_path = tmp_path / "config.yaml"
+        args = Namespace(
+            source=str(openclaw_dir),
+            dry_run=True,
+            preset="full",
+            overwrite=False,
+            migrate_secrets=False,
+            workspace_target=None,
+            skill_conflict="skip",
+            yes=False,
+        )
+
+        with (
+            patch.object(
+                claw_mod,
+                "_find_migration_script",
+                return_value=tmp_path / "s.py",
+            ),
+            patch.object(
+                claw_mod,
+                "_load_migration_module",
+                side_effect=RuntimeError("preview unavailable"),
+            ),
+            patch.object(
+                claw_mod,
+                "get_config_path",
+                return_value=config_path,
+            ),
+            patch.object(claw_mod, "save_config") as mock_save,
+            patch.object(claw_mod, "load_config", return_value={}),
+        ):
+            claw_mod._cmd_migrate(args)
+
+        mock_save.assert_not_called()
+        assert not config_path.exists()
+
     def test_full_preset_does_not_enable_secrets_silently(self, tmp_path, capsys):
         """The 'full' preset must NOT auto-enable migrate_secrets.
 

@@ -342,6 +342,28 @@ export const en: Translations = {
     failedToLoadRaw: "Failed to load raw config",
     configImported: "Config imported — review and save",
     invalidJson: "Invalid JSON file",
+    configLoadFailed: "Failed to load configuration.",
+    loadingConfig: "Loading configuration",
+    retryConfigLoad: "Retry loading configuration",
+    retryRawLoad: "Retry loading raw YAML",
+    reloadDiscard: "Reload and discard local changes",
+    reloadDiscardTitle: "Reload and discard local changes?",
+    reloadDiscardDescription:
+      "Discard the local draft and reload from disk? This cannot be undone.",
+    reloadDiscardConfirm: "Reload & discard",
+    resetDescription:
+      "{count} field(s) will be reset to their default values.",
+    rawBlockedLiteralCredentials:
+      "Raw YAML editing is disabled because config.yaml contains literal credential values. Move them to environment references before using the Web editor.",
+    rawBlockedInvalidUtf8:
+      "Raw YAML editing is unavailable because config.yaml is not valid UTF-8. Fix it outside the Web UI.",
+    rawBlockedUnsafeYaml:
+      "Raw YAML editing is unavailable because the file cannot be safely inspected for credentials. Fix it outside the Web UI.",
+    rawBlockedTooLarge:
+      "Raw YAML editing is unavailable because config.yaml exceeds the maximum size.",
+    rawBlockedUnsafeFile:
+      "Raw YAML editing is unavailable because config.yaml cannot be read safely. Fix it outside the Web UI.",
+    rawBlockedUnknown: "Raw YAML editing is currently unavailable.",
     categories: {
       general: "General",
       agent: "Agent",

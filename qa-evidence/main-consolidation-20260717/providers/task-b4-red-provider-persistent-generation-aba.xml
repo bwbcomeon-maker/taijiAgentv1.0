@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="2" time="0.195" timestamp="2026-07-19T17:39:28.309566+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_image_old_a_binding_cannot_revive_after_persisted_a_b_a" time="0.090"><failure message="AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []&#10;  &#10;  Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}&#10;  Use -v to get more diff">tests/tools/test_provider_boundary_adversarial.py:272: in test_image_old_a_binding_cannot_revive_after_persisted_a_b_a
+    assert provider_io == []
+E   AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []
+E
+E     Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_vision_old_a_binding_cannot_revive_after_persisted_a_b_a" time="0.014"><failure message="AssertionError: assert [{'max_tokens...': True, ...}] == []&#10;  &#10;  Left contains one more item: {'max_tokens': 2000, 'messages': [{'content': [{'text': 'reject revived A binding', 'type': 'text'}, {'image_url': {'u...base64,iVBORw0KGgphYmE='}, 'type': 'image_url'}], 'role': 'user'}], 'model': 'qwen3-vl-plus', 'no_fallback': True, ...}&#10;  Use -v to get more diff">tests/tools/test_provider_boundary_adversarial.py:864: in test_vision_old_a_binding_cannot_revive_after_persisted_a_b_a
+    assert provider_io == []
+E   AssertionError: assert [{'max_tokens...': True, ...}] == []
+E
+E     Left contains one more item: {'max_tokens': 2000, 'messages': [{'content': [{'text': 'reject revived A binding', 'type': 'text'}, {'image_url': {'u...base64,iVBORw0KGgphYmE='}, 'type': 'image_url'}], 'role': 'user'}], 'model': 'qwen3-vl-plus', 'no_fallback': True, ...}
+E     Use -v to get more diff</failure></testcase></testsuite></testsuites>

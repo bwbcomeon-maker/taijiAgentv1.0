@@ -20,6 +20,7 @@ import os
 import random
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any, Optional
 
 from agent.display import (
@@ -62,6 +63,18 @@ def _ra():
     return run_agent
 
 
+def _capability_route_scope(agent: Any, function_name: str, tool_call_id: str):
+    """Bind route egress only around the real image tool invocation."""
+    if function_name != "image_generate":
+        return nullcontext()
+    from agent.image_runtime import capability_route_event_scope
+
+    return capability_route_event_scope(
+        getattr(agent, "tool_progress_callback", None),
+        tool_call_id=str(tool_call_id or ""),
+    )
+
+
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
@@ -76,9 +89,25 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             caller_capability_fingerprint = str(
                 getattr(agent, "_image_capability_fingerprint", "") or ""
             )
+            caller_capability_generation = str(
+                getattr(
+                    agent,
+                    "_image_capability_authorization_generation",
+                    "",
+                )
+                or ""
+            )
     else:
         caller_capability_fingerprint = str(
             getattr(agent, "_image_capability_fingerprint", "") or ""
+        )
+        caller_capability_generation = str(
+            getattr(
+                agent,
+                "_image_capability_authorization_generation",
+                "",
+            )
+            or ""
         )
 
     # ── Pre-flight: interrupt check ──────────────────────────────────
@@ -244,15 +273,21 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 pass
         start = time.time()
         try:
-            result = agent._invoke_tool(
+            with _capability_route_scope(
+                agent,
                 function_name,
-                function_args,
-                effective_task_id,
                 tool_call.id,
-                messages=messages,
-                pre_tool_block_checked=True,
-                caller_capability_fingerprint=caller_capability_fingerprint,
-            )
+            ):
+                result = agent._invoke_tool(
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                    tool_call.id,
+                    messages=messages,
+                    pre_tool_block_checked=True,
+                    caller_capability_fingerprint=caller_capability_fingerprint,
+                    caller_capability_generation=caller_capability_generation,
+                )
         except Exception as tool_error:
             result = f"Error executing tool '{function_name}': {tool_error}"
             logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
@@ -485,9 +520,25 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             caller_capability_fingerprint = str(
                 getattr(agent, "_image_capability_fingerprint", "") or ""
             )
+            caller_capability_generation = str(
+                getattr(
+                    agent,
+                    "_image_capability_authorization_generation",
+                    "",
+                )
+                or ""
+            )
     else:
         caller_capability_fingerprint = str(
             getattr(agent, "_image_capability_fingerprint", "") or ""
+        )
+        caller_capability_generation = str(
+            getattr(
+                agent,
+                "_image_capability_authorization_generation",
+                "",
+            )
+            or ""
         )
     for i, tool_call in enumerate(assistant_message.tool_calls, 1):
         # SAFETY: check interrupt BEFORE starting each tool.
@@ -769,22 +820,29 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             try:
                 from agent.brand_safety import public_chat_guard
 
-                with public_chat_guard(getattr(agent, "platform", None) == "webui"):
-                    function_result = _ra().handle_function_call(
-                        function_name, function_args, effective_task_id,
-                        tool_call_id=tool_call.id,
-                        session_id=agent.session_id or "",
-                        enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                        skip_pre_tool_call_hook=True,
-                        **(
-                            {
-                                "caller_capability_fingerprint":
-                                    caller_capability_fingerprint
-                            }
-                            if function_name == "image_generate"
-                            else {}
-                        ),
-                    )
+                with _capability_route_scope(
+                    agent,
+                    function_name,
+                    tool_call.id,
+                ):
+                    with public_chat_guard(getattr(agent, "platform", None) == "webui"):
+                        function_result = _ra().handle_function_call(
+                            function_name, function_args, effective_task_id,
+                            tool_call_id=tool_call.id,
+                            session_id=agent.session_id or "",
+                            enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
+                            skip_pre_tool_call_hook=True,
+                            **(
+                                {
+                                    "caller_capability_fingerprint":
+                                        caller_capability_fingerprint,
+                                    "caller_capability_generation":
+                                        caller_capability_generation,
+                                }
+                                if function_name == "image_generate"
+                                else {}
+                            ),
+                        )
                 _spinner_result = function_result
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
@@ -800,22 +858,29 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             try:
                 from agent.brand_safety import public_chat_guard
 
-                with public_chat_guard(getattr(agent, "platform", None) == "webui"):
-                    function_result = _ra().handle_function_call(
-                        function_name, function_args, effective_task_id,
-                        tool_call_id=tool_call.id,
-                        session_id=agent.session_id or "",
-                        enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                        skip_pre_tool_call_hook=True,
-                        **(
-                            {
-                                "caller_capability_fingerprint":
-                                    caller_capability_fingerprint
-                            }
-                            if function_name == "image_generate"
-                            else {}
-                        ),
-                    )
+                with _capability_route_scope(
+                    agent,
+                    function_name,
+                    tool_call.id,
+                ):
+                    with public_chat_guard(getattr(agent, "platform", None) == "webui"):
+                        function_result = _ra().handle_function_call(
+                            function_name, function_args, effective_task_id,
+                            tool_call_id=tool_call.id,
+                            session_id=agent.session_id or "",
+                            enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
+                            skip_pre_tool_call_hook=True,
+                            **(
+                                {
+                                    "caller_capability_fingerprint":
+                                        caller_capability_fingerprint,
+                                    "caller_capability_generation":
+                                        caller_capability_generation,
+                                }
+                                if function_name == "image_generate"
+                                else {}
+                            ),
+                        )
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)

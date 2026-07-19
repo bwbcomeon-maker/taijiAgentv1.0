@@ -994,8 +994,9 @@ def _run_model_migration(tmp_path: Path, openclaw_json: dict) -> dict:
         overwrite=True,
         migrate_secrets=False,
         output_dir=target / "migration-report",
+        selected_options={"model-config"},
     )
-    migrator.migrate_model_config()
+    migrator.migrate()
 
     cfg_path = target / "config.yaml"
     if not cfg_path.exists():

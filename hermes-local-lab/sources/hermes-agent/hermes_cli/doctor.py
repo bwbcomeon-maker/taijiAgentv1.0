@@ -564,15 +564,31 @@ def run_doctor(args):
         else:
             check_fail(f"{_DHH}/.env file missing")
             if should_fix:
-                env_path.parent.mkdir(parents=True, exist_ok=True)
-                env_path.touch()
-                # .env holds API keys — restrict to owner-only access from
-                # creation. touch() obeys umask which is commonly 0o022,
-                # leaving the file world-readable; tighten explicitly.
-                try:
-                    os.chmod(str(env_path), 0o600)
-                except OSError:
-                    pass
+                from agent.provider_credentials import (
+                    _active_credential_access_policy,
+                    credential_transaction,
+                )
+
+                access_policy = _active_credential_access_policy()
+                parent_existed = env_path.parent.exists()
+                env_path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                    mode=(
+                        0o2770
+                        if access_policy.group_shared
+                        else 0o700
+                    ),
+                )
+                if access_policy.group_shared and not parent_existed:
+                    env_path.parent.chmod(0o2770)
+                env_path.touch(mode=access_policy.data_mode)
+                env_path.chmod(access_policy.data_mode)
+                if access_policy.group_shared:
+                    with credential_transaction(
+                        HERMES_HOME / "config.yaml"
+                    ):
+                        pass
                 check_ok(f"Created empty {_DHH}/.env")
                 check_info("Run 'hermes setup' to configure API keys")
                 fixed_count += 1
@@ -808,25 +824,43 @@ def run_doctor(args):
                     "(should be under 'model:' section)"
                 )
                 if should_fix:
-                    # Coerce scalar/None ``model:`` into a dict before mutation —
-                    # ``setdefault("model", {})`` would return an existing scalar
-                    # and then ``model_section[k] = ...`` would raise TypeError.
-                    raw_model = raw_config.get("model")
-                    if isinstance(raw_model, dict):
-                        model_section = raw_model
-                    elif isinstance(raw_model, str) and raw_model.strip():
-                        model_section = {"default": raw_model.strip()}
-                        raw_config["model"] = model_section
-                    else:
-                        model_section = {}
-                        raw_config["model"] = model_section
-                    for k in stale_root_keys:
-                        if not model_section.get(k):
-                            model_section[k] = raw_config.pop(k)
+                    from agent.provider_credentials import (
+                        mutate_config_strict,
+                    )
+
+                    def migrate_stale_model_keys(
+                        current: dict,
+                    ) -> None:
+                        current_stale_keys = [
+                            key
+                            for key in ("provider", "base_url")
+                            if key in current
+                            and isinstance(current[key], str)
+                        ]
+                        raw_model = current.get("model")
+                        if isinstance(raw_model, dict):
+                            model_section = raw_model
+                        elif (
+                            isinstance(raw_model, str)
+                            and raw_model.strip()
+                        ):
+                            model_section = {
+                                "default": raw_model.strip()
+                            }
+                            current["model"] = model_section
                         else:
-                            raw_config.pop(k)
-                    from utils import atomic_yaml_write
-                    atomic_yaml_write(config_path, raw_config)
+                            model_section = {}
+                            current["model"] = model_section
+                        for key in current_stale_keys:
+                            if not model_section.get(key):
+                                model_section[key] = current.pop(key)
+                            else:
+                                current.pop(key)
+
+                    mutate_config_strict(
+                        migrate_stale_model_keys,
+                        config_path=config_path,
+                    )
                     check_ok("Migrated stale root-level keys into model section")
                     fixed_count += 1
                 else:

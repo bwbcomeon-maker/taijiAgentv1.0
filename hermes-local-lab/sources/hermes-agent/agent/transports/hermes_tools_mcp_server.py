@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -105,8 +106,8 @@ EXPOSED_TOOLS: tuple[str, ...] = (
 )
 
 
-def _capture_image_handler_fingerprint() -> str:
-    """Freeze one fail-closed image caller identity for an MCP handler."""
+def _capture_image_handler_authorization() -> tuple[str, str]:
+    """Capture one fail-closed image caller identity for an MCP request."""
     try:
         from agent.image_runtime import (
             capture_capability_runtime_generation,
@@ -114,10 +115,18 @@ def _capture_image_handler_fingerprint() -> str:
 
         generation = capture_capability_runtime_generation()
     except Exception:
-        return ""
+        return "", ""
     if not generation.stable:
-        return ""
-    return str(generation.image_generation[1] or "")
+        return "", ""
+    return (
+        str(generation.image_generation[1] or ""),
+        str(generation.image_generation[4] or ""),
+    )
+
+
+def _capture_image_handler_fingerprint() -> str:
+    """Compatibility wrapper for callers that only inspect the fingerprint."""
+    return _capture_image_handler_authorization()[0]
 
 
 def _build_server() -> Any:
@@ -178,19 +187,27 @@ def _build_server() -> Any:
             tool_name: str,
             tool_description: str,
         ):
-            caller_fingerprint = (
-                _capture_image_handler_fingerprint()
-                if tool_name == "image_generate"
-                else ""
-            )
-
             def _dispatch(**kwargs: Any) -> str:
                 try:
                     dispatch_kwargs = {}
                     if tool_name == "image_generate":
+                        # The MCP server and handler are long-lived. Capture the
+                        # current combined generation per request so a config
+                        # or verification A→B→A transition cannot leave this
+                        # closure permanently stale. Both values come from the
+                        # same atomic generation object.
+                        caller_fingerprint, caller_generation = (
+                            _capture_image_handler_authorization()
+                        )
+                        dispatch_kwargs["tool_call_id"] = (
+                            f"mcp-{uuid.uuid4().hex}"
+                        )
                         dispatch_kwargs[
                             "caller_capability_fingerprint"
                         ] = caller_fingerprint
+                        dispatch_kwargs[
+                            "caller_capability_generation"
+                        ] = caller_generation
                     return handle_function_call(
                         tool_name,
                         kwargs or {},

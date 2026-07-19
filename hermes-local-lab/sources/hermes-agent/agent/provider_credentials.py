@@ -113,11 +113,16 @@ _CREDENTIAL_LOCK_NAME = ".taiji-credential-transaction.lock"
 _CREDENTIAL_JOURNAL_NAME = ".taiji-credential-pair-intent.json"
 _CREDENTIAL_ABORT_JOURNAL_NAME = ".taiji-credential-pair-abort.json"
 _CREDENTIAL_JOURNAL_SCHEMA = "taiji-credential-pair-intent/v1"
+_CREDENTIAL_GROUP_SHARED_JOURNAL_SCHEMA = (
+    "taiji-credential-pair-intent/v2"
+)
+_CREDENTIAL_GROUP_SHARED_ENV = "HERMES_CREDENTIAL_GROUP_SHARED"
 _MAX_CREDENTIAL_CONFIG_BYTES = 4 * 1024 * 1024
 _MAX_CREDENTIAL_ENV_BYTES = 1024 * 1024
 _MAX_CREDENTIAL_JOURNAL_BYTES = 64 * 1024
 _MAX_CREDENTIAL_STAGE_BYTES = _MAX_CREDENTIAL_CONFIG_BYTES
 _CREDENTIAL_ORPHAN_STAGE_GRACE_SECONDS = 5 * 60
+_LEGACY_PRIVATE_TARGET_MODES = frozenset({0o600, 0o640, 0o644})
 _CREDENTIAL_ORPHAN_STAGE_RE = re.compile(
     r"^\.taiji-credential-.+-[0-9a-f]{32}\.stage$"
 )
@@ -149,12 +154,21 @@ class _CredentialCompareAndSwapError(CredentialRecoveryError):
 
 
 @dataclass(frozen=True)
+class _CredentialAccessPolicy:
+    group_shared: bool
+    lock_mode: int
+    data_mode: int
+    artifact_mode: int
+
+
+@dataclass(frozen=True)
 class _CredentialTransactionSpec:
     logical_config_path: Path
     config_target: Path
     env_path: Path
     env_target: Path
     resource_roots: tuple[Path, ...]
+    access_policy: _CredentialAccessPolicy
 
 
 @dataclass(frozen=True)
@@ -163,6 +177,7 @@ class _CredentialResourceHandle:
     directory_fd: int
     device: int
     inode: int
+    group_id: int
 
 
 def _current_process_env_value(key: str) -> object:
@@ -291,6 +306,54 @@ def _supports_exact_posix_modes() -> bool:
     return _os.name == "posix" and callable(getattr(_os, "fchmod", None))
 
 
+def _credential_access_policy_from_env() -> _CredentialAccessPolicy:
+    raw_value = _os.environ.get(_CREDENTIAL_GROUP_SHARED_ENV)
+    if raw_value in {None, "", "0"}:
+        return _CredentialAccessPolicy(
+            group_shared=False,
+            lock_mode=0o600,
+            data_mode=0o600,
+            artifact_mode=0o600,
+        )
+    if raw_value != "1":
+        raise CredentialRecoveryError(
+            f"{_CREDENTIAL_GROUP_SHARED_ENV} must be exactly 0 or 1"
+        )
+    if _os.name != "posix":
+        raise CredentialRecoveryError(
+            "group-shared credential transactions require POSIX"
+        )
+    return _CredentialAccessPolicy(
+        group_shared=True,
+        lock_mode=0o660,
+        data_mode=0o640,
+        artifact_mode=0o640,
+    )
+
+
+def _active_credential_access_policy() -> _CredentialAccessPolicy:
+    policy = getattr(
+        _CREDENTIAL_TRANSACTION_STATE,
+        "access_policy",
+        None,
+    )
+    if isinstance(policy, _CredentialAccessPolicy):
+        return policy
+    return _credential_access_policy_from_env()
+
+
+def _credential_lock_mode() -> int:
+    return _active_credential_access_policy().lock_mode
+
+
+def _credential_data_mode() -> int:
+    return _active_credential_access_policy().data_mode
+
+
+def _credential_artifact_mode() -> int:
+    return _active_credential_access_policy().artifact_mode
+
+
 def _credential_platform_name() -> str:
     return sys.platform
 
@@ -309,7 +372,9 @@ def _require_secure_pair_transaction_platform() -> None:
 def _set_fd_mode_if_supported(file_fd: int, mode: int) -> None:
     fchmod = getattr(_os, "fchmod", None)
     if callable(fchmod):
-        fchmod(file_fd, mode)
+        current_mode = stat.S_IMODE(_os.fstat(file_fd).st_mode)
+        if current_mode != mode:
+            fchmod(file_fd, mode)
 
 
 class _StrictSafeLoader(yaml.SafeLoader):
@@ -391,11 +456,32 @@ def _physical_credential_path(path: Path) -> Path:
 def _credential_transaction_spec(
     config_path: Path | None = None,
 ) -> _CredentialTransactionSpec:
-    if int(getattr(_CREDENTIAL_TRANSACTION_STATE, "depth", 0)):
+    transaction_depth = int(
+        getattr(_CREDENTIAL_TRANSACTION_STATE, "depth", 0)
+    )
+    if transaction_depth:
         _assert_active_resource_dirs_unchanged()
+        access_policy = getattr(
+            _CREDENTIAL_TRANSACTION_STATE,
+            "access_policy",
+            None,
+        )
+        if not isinstance(access_policy, _CredentialAccessPolicy):
+            raise RuntimeError(
+                "active credential transaction has no access policy"
+            )
+    else:
+        access_policy = _credential_access_policy_from_env()
     logical_config_path = _credential_config_path(config_path)
     config_target = _physical_credential_path(logical_config_path)
-    config_target.parent.mkdir(parents=True, exist_ok=True)
+    config_parent_existed = config_target.parent.exists()
+    config_target.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+        mode=(0o2770 if access_policy.group_shared else 0o777),
+    )
+    if access_policy.group_shared and not config_parent_existed:
+        config_target.parent.chmod(0o2770)
     env_path = config_target.parent / ".env"
     if _os.path.lexists(env_path) and not env_path.exists():
         raise ValueError("credential env cannot be read safely")
@@ -431,6 +517,7 @@ def _credential_transaction_spec(
         env_path=env_path,
         env_target=env_target,
         resource_roots=resource_roots,
+        access_policy=access_policy,
     )
 
 
@@ -445,8 +532,56 @@ def _credential_target_bindings(
     }
 
 
+def _validate_shared_credential_resource_root(
+    resource_root: Path,
+    root_stat: _os.stat_result,
+    access_policy: _CredentialAccessPolicy,
+) -> None:
+    if not access_policy.group_shared:
+        return
+    root_mode = stat.S_IMODE(root_stat.st_mode)
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or root_mode != 0o2770
+    ):
+        raise CredentialRecoveryError(
+            "shared credential resource root must be a 2770 setgid directory"
+        )
+    effective_uid = (
+        _os.geteuid()
+        if callable(getattr(_os, "geteuid", None))
+        else None
+    )
+    if effective_uid == 0:
+        return
+    trusted_groups = {
+        group_id
+        for group_id in (
+            (
+                _os.getegid()
+                if callable(getattr(_os, "getegid", None))
+                else None
+            ),
+            (
+                _os.getgid()
+                if callable(getattr(_os, "getgid", None))
+                else None
+            ),
+        )
+        if group_id is not None
+    }
+    getgroups = getattr(_os, "getgroups", None)
+    if callable(getgroups):
+        trusted_groups.update(getgroups())
+    if root_stat.st_gid not in trusted_groups:
+        raise CredentialRecoveryError(
+            "shared credential resource root group is not trusted"
+        )
+
+
 def _open_credential_resource_handle(
     resource_root: Path,
+    access_policy: _CredentialAccessPolicy,
 ) -> _CredentialResourceHandle:
     if _os.name != "posix":
         try:
@@ -459,11 +594,17 @@ def _open_credential_resource_handle(
             raise CredentialRecoveryError(
                 "credential resource root is not a directory"
             )
+        _validate_shared_credential_resource_root(
+            resource_root,
+            path_stat,
+            access_policy,
+        )
         return _CredentialResourceHandle(
             path=resource_root,
             directory_fd=-1,
             device=path_stat.st_dev,
             inode=path_stat.st_ino,
+            group_id=path_stat.st_gid,
         )
     flags = _os.O_RDONLY | getattr(_os, "O_CLOEXEC", 0)
     flags |= getattr(_os, "O_DIRECTORY", 0)
@@ -486,11 +627,17 @@ def _open_credential_resource_handle(
             raise CredentialRecoveryError(
                 "credential resource directory changed while being pinned"
             )
+        _validate_shared_credential_resource_root(
+            resource_root,
+            opened_stat,
+            access_policy,
+        )
         return _CredentialResourceHandle(
             path=resource_root,
             directory_fd=directory_fd,
             device=opened_stat.st_dev,
             inode=opened_stat.st_ino,
+            group_id=opened_stat.st_gid,
         )
     except BaseException:
         _os.close(directory_fd)
@@ -521,6 +668,22 @@ def _assert_credential_resource_handle_unchanged(
         raise CredentialRecoveryError(
             "credential resource directory changed after lock acquisition"
         )
+    access_policy = _active_credential_access_policy()
+    _validate_shared_credential_resource_root(
+        handle.path,
+        opened_stat,
+        access_policy,
+    )
+    if (
+        access_policy.group_shared
+        and (
+            opened_stat.st_gid != handle.group_id
+            or path_stat.st_gid != handle.group_id
+        )
+    ):
+        raise CredentialRecoveryError(
+            "shared credential resource root group changed"
+        )
 
 
 def _assert_active_resource_dirs_unchanged() -> None:
@@ -539,6 +702,7 @@ def _open_credential_lock_file(
     resource_root: Path,
     resource_handle: _CredentialResourceHandle,
     open_flags: int,
+    lock_mode: int,
 ) -> int:
     """Open the pinned lock, tolerating one Darwin concurrent-create loser."""
 
@@ -547,13 +711,13 @@ def _open_credential_lock_file(
             return _os.open(
                 _CREDENTIAL_LOCK_NAME,
                 flags,
-                0o600,
+                lock_mode,
                 dir_fd=resource_handle.directory_fd,
             )
         return _os.open(
             resource_root / _CREDENTIAL_LOCK_NAME,
             flags,
-            0o600,
+            lock_mode,
         )
 
     try:
@@ -589,6 +753,76 @@ def _active_resource_handle_for_target(
     if not isinstance(handles, dict):
         return None
     return handles.get(Path(target_path).parent)
+
+
+def _enforce_credential_fd_policy(
+    file_fd: int,
+    *,
+    access_policy: _CredentialAccessPolicy,
+    expected_group_id: int,
+    expected_mode: int,
+    label: str,
+) -> None:
+    if access_policy.group_shared:
+        file_stat = _os.fstat(file_fd)
+        if file_stat.st_gid != expected_group_id:
+            fchown = getattr(_os, "fchown", None)
+            if not callable(fchown):
+                raise CredentialRecoveryError(
+                    f"shared credential {label} group cannot be enforced"
+                )
+            try:
+                fchown(file_fd, -1, expected_group_id)
+            except OSError as exc:
+                raise CredentialRecoveryError(
+                    f"shared credential {label} group is not trusted"
+                ) from exc
+    try:
+        _set_fd_mode_if_supported(file_fd, expected_mode)
+    except OSError as exc:
+        raise CredentialRecoveryError(
+            f"credential {label} mode cannot be enforced"
+        ) from exc
+    if access_policy.group_shared:
+        verified_stat = _os.fstat(file_fd)
+        if (
+            verified_stat.st_gid != expected_group_id
+            or stat.S_IMODE(verified_stat.st_mode) != expected_mode
+        ):
+            raise CredentialRecoveryError(
+                f"shared credential {label} policy was not applied"
+            )
+
+
+def _enforce_active_credential_fd_policy(
+    file_fd: int,
+    target_path: Path,
+    *,
+    expected_mode: int,
+    label: str,
+) -> None:
+    access_policy = _active_credential_access_policy()
+    handle = _active_resource_handle_for_target(target_path)
+    if handle is None:
+        if access_policy.group_shared:
+            raise CredentialRecoveryError(
+                f"shared credential {label} is outside the pinned roots"
+            )
+        _enforce_credential_fd_policy(
+            file_fd,
+            access_policy=access_policy,
+            expected_group_id=_os.fstat(file_fd).st_gid,
+            expected_mode=expected_mode,
+            label=label,
+        )
+        return
+    _enforce_credential_fd_policy(
+        file_fd,
+        access_policy=access_policy,
+        expected_group_id=handle.group_id,
+        expected_mode=expected_mode,
+        label=label,
+    )
 
 
 def _open_active_target(
@@ -768,7 +1002,10 @@ def credential_transaction(config_path: Path | None = None):
         try:
             for resource_root in spec.resource_roots:
                 resource_handles[resource_root] = (
-                    _open_credential_resource_handle(resource_root)
+                    _open_credential_resource_handle(
+                        resource_root,
+                        spec.access_policy,
+                    )
                 )
             open_flags = _os.O_CREAT | _os.O_RDWR
             open_flags |= getattr(_os, "O_CLOEXEC", 0)
@@ -779,6 +1016,7 @@ def credential_transaction(config_path: Path | None = None):
                     resource_root,
                     resource_handle,
                     open_flags,
+                    spec.access_policy.lock_mode,
                 )
                 try:
                     lock_stat = _os.fstat(lock_fd)
@@ -789,7 +1027,13 @@ def credential_transaction(config_path: Path | None = None):
                         raise OSError(
                             "credential transaction lock must be a regular file"
                         )
-                    _set_fd_mode_if_supported(lock_fd, 0o600)
+                    _enforce_credential_fd_policy(
+                        lock_fd,
+                        access_policy=spec.access_policy,
+                        expected_group_id=resource_handle.group_id,
+                        expected_mode=spec.access_policy.lock_mode,
+                        label="transaction lock",
+                    )
                     _lock_file_descriptor(lock_fd)
                 except BaseException:
                     _os.close(lock_fd)
@@ -806,8 +1050,12 @@ def credential_transaction(config_path: Path | None = None):
                 _credential_target_bindings(spec)
             )
             _CREDENTIAL_TRANSACTION_STATE.spec = spec
+            _CREDENTIAL_TRANSACTION_STATE.access_policy = (
+                spec.access_policy
+            )
             try:
                 _assert_active_credential_targets_unchanged()
+                _normalize_shared_credential_targets(spec)
                 _CREDENTIAL_TRANSACTION_STATE.last_recovery = (
                     _recover_pending_transaction_unlocked(
                         lock_root,
@@ -823,6 +1071,7 @@ def credential_transaction(config_path: Path | None = None):
                 _CREDENTIAL_TRANSACTION_STATE.resource_handles = None
                 _CREDENTIAL_TRANSACTION_STATE.target_bindings = None
                 _CREDENTIAL_TRANSACTION_STATE.spec = None
+                _CREDENTIAL_TRANSACTION_STATE.access_policy = None
                 _CREDENTIAL_TRANSACTION_STATE.last_recovery = None
         finally:
             for lock_fd in reversed(lock_fds):
@@ -1352,14 +1601,62 @@ def _existing_target_mode(path: Path, *, default: int = 0o600) -> int:
             follow_symlinks=False,
         )
     except FileNotFoundError:
-        return default
+        access_policy = _active_credential_access_policy()
+        return (
+            access_policy.data_mode
+            if access_policy.group_shared
+            else default
+        )
     except OSError as exc:
         raise ValueError(f"credential target cannot be inspected: {path.name}") from exc
     if not stat.S_ISREG(target_stat.st_mode):
         raise ValueError("credential target is not a regular file")
     if target_stat.st_nlink != 1:
         raise ValueError("credential target is hard-linked")
-    return stat.S_IMODE(target_stat.st_mode)
+    target_mode = stat.S_IMODE(target_stat.st_mode)
+    access_policy = _active_credential_access_policy()
+    if access_policy.group_shared:
+        if target_mode != access_policy.data_mode:
+            raise CredentialRecoveryError(
+                "shared credential target mode is inconsistent"
+            )
+        return access_policy.data_mode
+    return target_mode
+
+
+def _normalize_shared_credential_targets(
+    spec: _CredentialTransactionSpec,
+) -> None:
+    if not spec.access_policy.group_shared:
+        return
+    flags = _os.O_RDONLY | getattr(_os, "O_CLOEXEC", 0)
+    flags |= getattr(_os, "O_NOFOLLOW", 0)
+    for target_path in (spec.config_target, spec.env_target):
+        try:
+            target_fd = _open_active_target(target_path, flags)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise CredentialRecoveryError(
+                "shared credential target cannot be opened safely"
+            ) from exc
+        try:
+            target_stat = _os.fstat(target_fd)
+            if (
+                not stat.S_ISREG(target_stat.st_mode)
+                or target_stat.st_nlink != 1
+            ):
+                raise CredentialRecoveryError(
+                    "shared credential target is not a private regular file"
+                )
+            _enforce_active_credential_fd_policy(
+                target_fd,
+                target_path,
+                expected_mode=spec.access_policy.data_mode,
+                label=target_path.name,
+            )
+        finally:
+            _os.close(target_fd)
 
 
 def _credential_payload_limit(path: Path) -> tuple[int, str]:
@@ -1396,9 +1693,15 @@ def _stage_credential_bytes(
     flags = _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL
     flags |= getattr(_os, "O_CLOEXEC", 0)
     flags |= getattr(_os, "O_NOFOLLOW", 0)
-    stage_fd = _open_active_target(stage_path, flags, 0o600)
+    stage_mode = _credential_artifact_mode()
+    stage_fd = _open_active_target(stage_path, flags, stage_mode)
     try:
-        _set_fd_mode_if_supported(stage_fd, 0o600)
+        _enforce_active_credential_fd_policy(
+            stage_fd,
+            stage_path,
+            expected_mode=stage_mode,
+            label="transaction stage",
+        )
         view = memoryview(payload)
         while view:
             written = _os.write(stage_fd, view)
@@ -1462,7 +1765,12 @@ def _replace_credential_stage(
             error_type=CredentialRecoveryError,
         )
         staged_digest = _sha256_bytes(stage_payload)
-        _set_fd_mode_if_supported(stage_fd, mode)
+        _enforce_active_credential_fd_policy(
+            stage_fd,
+            stage_path,
+            expected_mode=mode,
+            label="transaction stage",
+        )
         _os.fsync(stage_fd)
 
         target_identity: tuple[int, int] | None = None
@@ -1503,7 +1811,12 @@ def _replace_credential_stage(
                 )
             # If the process dies after the exchange, the before image is
             # itself a private recovery stage.
-            _set_fd_mode_if_supported(target_fd, 0o600)
+            _enforce_active_credential_fd_policy(
+                target_fd,
+                real_target,
+                expected_mode=_credential_artifact_mode(),
+                label="recovery stage",
+            )
             _os.fsync(target_fd)
         elif expected_exists is not False:
             raise _CredentialCompareAndSwapError(
@@ -1653,7 +1966,12 @@ def _replace_credential_stage(
                     "credential target changed after replace "
                     "(changed after atomic replace)"
                 )
-            _set_fd_mode_if_supported(verified_target_fd, mode)
+            _enforce_active_credential_fd_policy(
+                verified_target_fd,
+                real_target,
+                expected_mode=mode,
+                label=label,
+            )
             _os.fsync(verified_target_fd)
         finally:
             _os.close(verified_target_fd)
@@ -1736,18 +2054,30 @@ def _read_stage_bytes(
         ) from exc
     try:
         stage_stat = _os.fstat(stage_fd)
+        access_policy = _active_credential_access_policy()
+        effective_allowed_modes = (
+            {access_policy.artifact_mode, 0o600}
+            if access_policy.group_shared
+            else (allowed_modes or {access_policy.artifact_mode})
+        )
         if (
             not stat.S_ISREG(stage_stat.st_mode)
             or stage_stat.st_nlink != 1
             or (
                 _supports_exact_posix_modes()
                 and stat.S_IMODE(stage_stat.st_mode)
-                not in (allowed_modes or {0o600})
+                not in effective_allowed_modes
             )
         ):
             raise CredentialRecoveryError(
                 "credential transaction stage is not a private regular file"
             )
+        _enforce_active_credential_fd_policy(
+            stage_fd,
+            stage_path,
+            expected_mode=access_policy.artifact_mode,
+            label="transaction stage",
+        )
         if stage_stat.st_size > max_bytes:
             raise CredentialRecoveryError(
                 "credential stage exceeds maximum size"
@@ -1781,24 +2111,16 @@ def _write_credential_journal(
         raise CredentialRecoveryError(
             "pending credential transaction must be recovered first"
         )
-    payload = json.dumps(
-        manifest,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    if len(payload) > _MAX_CREDENTIAL_JOURNAL_BYTES:
-        raise CredentialRecoveryError(
-            "credential intent exceeds maximum size"
-        )
+    payload = _credential_journal_payload(manifest)
     flags = _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL
     flags |= getattr(_os, "O_CLOEXEC", 0)
     flags |= getattr(_os, "O_NOFOLLOW", 0)
+    journal_mode = _credential_artifact_mode()
     try:
         journal_fd = _open_active_target(
             journal_path,
             flags,
-            0o600,
+            journal_mode,
         )
     except OSError as exc:
         raise CredentialRecoveryError(
@@ -1813,7 +2135,12 @@ def _write_credential_journal(
             raise CredentialRecoveryError(
                 "credential transaction intent is unsafe"
             )
-        _set_fd_mode_if_supported(journal_fd, 0o600)
+        _enforce_active_credential_fd_policy(
+            journal_fd,
+            journal_path,
+            expected_mode=journal_mode,
+            label="transaction intent",
+        )
         view = memoryview(payload)
         while view:
             written = _os.write(journal_fd, view)
@@ -1835,9 +2162,28 @@ def _write_credential_journal(
     _fsync_directory(lock_root)
 
 
+def _credential_journal_payload(manifest: Mapping[str, Any]) -> bytes:
+    payload = json.dumps(
+        manifest,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > _MAX_CREDENTIAL_JOURNAL_BYTES:
+        raise CredentialRecoveryError(
+            "credential intent exceeds maximum size"
+        )
+    return payload
+
+
 def _read_credential_journal_path(
     journal_path: Path,
-) -> dict[str, Any] | None:
+) -> tuple[
+    dict[str, Any],
+    bool,
+    tuple[int, int],
+    str,
+] | None:
     flags = _os.O_RDONLY | getattr(_os, "O_CLOEXEC", 0)
     flags |= getattr(_os, "O_NOFOLLOW", 0)
     try:
@@ -1850,17 +2196,35 @@ def _read_credential_journal_path(
         ) from exc
     try:
         journal_stat = _os.fstat(journal_fd)
+        access_policy = _active_credential_access_policy()
+        journal_mode = access_policy.artifact_mode
+        observed_mode = stat.S_IMODE(journal_stat.st_mode)
+        journal_identity = (journal_stat.st_dev, journal_stat.st_ino)
+        legacy_private_mode = (
+            access_policy.group_shared and observed_mode == 0o600
+        )
+        allowed_modes = {journal_mode}
+        if access_policy.group_shared:
+            allowed_modes.add(0o600)
         if (
             not stat.S_ISREG(journal_stat.st_mode)
             or journal_stat.st_nlink != 1
             or (
                 _supports_exact_posix_modes()
-                and stat.S_IMODE(journal_stat.st_mode) != 0o600
+                and observed_mode not in allowed_modes
             )
         ):
             raise CredentialRecoveryError(
                 "credential transaction intent is not a private regular file"
             )
+        _enforce_active_credential_fd_policy(
+            journal_fd,
+            journal_path,
+            expected_mode=(
+                observed_mode if legacy_private_mode else journal_mode
+            ),
+            label="transaction intent",
+        )
         if journal_stat.st_size > _MAX_CREDENTIAL_JOURNAL_BYTES:
             raise CredentialRecoveryError(
                 "credential intent exceeds maximum size"
@@ -1883,18 +2247,31 @@ def _read_credential_journal_path(
         raise CredentialRecoveryError(
             "credential transaction intent must be a mapping"
         )
-    return manifest
+    return (
+        manifest,
+        legacy_private_mode,
+        journal_identity,
+        _sha256_bytes(payload),
+    )
 
 
 def _read_credential_journal(lock_root: Path) -> dict[str, Any] | None:
-    return _read_credential_journal_path(
+    pending = _read_credential_journal_path(
         _credential_journal_path(lock_root)
     )
+    return None if pending is None else pending[0]
 
 
 def _read_pending_transaction_journal(
     lock_root: Path,
-) -> tuple[str, Path, dict[str, Any]] | None:
+) -> tuple[
+    str,
+    Path,
+    dict[str, Any],
+    bool,
+    tuple[int, int],
+    str,
+] | None:
     intent_path = _credential_journal_path(lock_root)
     abort_path = _credential_abort_journal_path(lock_root)
     intent = _read_credential_journal_path(intent_path)
@@ -1904,10 +2281,146 @@ def _read_pending_transaction_journal(
             "credential transaction has conflicting durable decisions"
         )
     if abort is not None:
-        return "abort", abort_path, abort
+        return "abort", abort_path, *abort
     if intent is not None:
-        return "commit", intent_path, intent
+        return "commit", intent_path, *intent
     return None
+
+
+def _journal_migration_stage_path(
+    journal_path: Path,
+    transaction_id: str,
+) -> Path:
+    return (
+        journal_path.parent
+        / (
+            f".taiji-credential-{journal_path.name}-"
+            f"{transaction_id}.stage"
+        )
+    )
+
+
+def _cleanup_journal_migration_stage(
+    journal_path: Path,
+    transaction_id: str,
+) -> None:
+    stage_path = _journal_migration_stage_path(
+        journal_path,
+        transaction_id,
+    )
+    try:
+        stage_stat = _stat_active_target(
+            stage_path,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(stage_stat.st_mode)
+        or stage_stat.st_nlink != 1
+        or stat.S_IMODE(stage_stat.st_mode) not in {0o600, 0o640}
+    ):
+        raise CredentialRecoveryError(
+            "credential journal migration stage is unsafe"
+        )
+    _unlink_active_target(stage_path)
+    _fsync_directory(stage_path.parent)
+
+
+def _migrate_legacy_credential_journal(
+    journal_path: Path,
+    manifest: dict[str, Any],
+    *,
+    expected_identity: tuple[int, int],
+    expected_sha256: str,
+) -> None:
+    transaction_id = str(manifest["transaction_id"])
+    payload = _credential_journal_payload(manifest)
+    stage_path = _journal_migration_stage_path(
+        journal_path,
+        transaction_id,
+    )
+    try:
+        prepared_stage, real_target = _stage_credential_bytes(
+            journal_path,
+            payload,
+            transaction_id=transaction_id,
+        )
+    except FileExistsError:
+        prepared_stage = stage_path
+        staged_payload = _read_stage_bytes(
+            prepared_stage,
+            max_bytes=_MAX_CREDENTIAL_JOURNAL_BYTES,
+        )
+        if staged_payload != payload:
+            raise CredentialRecoveryError(
+                "credential journal migration stage changed"
+            )
+        real_target = journal_path
+    if prepared_stage != stage_path or real_target != journal_path:
+        raise CredentialRecoveryError(
+            "credential journal migration target changed"
+        )
+
+    flags = _os.O_RDONLY | getattr(_os, "O_CLOEXEC", 0)
+    flags |= getattr(_os, "O_NOFOLLOW", 0)
+    journal_fd = _open_active_target(journal_path, flags)
+    try:
+        journal_stat = _os.fstat(journal_fd)
+        current_payload = _read_fd_bounded(
+            journal_fd,
+            max_bytes=_MAX_CREDENTIAL_JOURNAL_BYTES,
+            label="intent",
+            error_type=CredentialRecoveryError,
+        )
+        if (
+            not stat.S_ISREG(journal_stat.st_mode)
+            or journal_stat.st_nlink != 1
+            or stat.S_IMODE(journal_stat.st_mode) != 0o600
+            or (journal_stat.st_dev, journal_stat.st_ino)
+            != expected_identity
+            or _sha256_bytes(current_payload) != expected_sha256
+        ):
+            raise CredentialRecoveryError(
+                "credential journal changed during legacy migration"
+            )
+    finally:
+        _os.close(journal_fd)
+
+    stage_stat = _stat_active_target(
+        stage_path,
+        follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISREG(stage_stat.st_mode)
+        or stage_stat.st_nlink != 1
+        or stat.S_IMODE(stage_stat.st_mode) != 0o640
+    ):
+        raise CredentialRecoveryError(
+            "credential journal migration stage is unsafe"
+        )
+    previous_expectation = getattr(
+        _CREDENTIAL_TRANSACTION_STATE,
+        "exchange_expectation",
+        None,
+    )
+    _CREDENTIAL_TRANSACTION_STATE.exchange_expectation = (
+        stage_path,
+        journal_path,
+        (stage_stat.st_dev, stage_stat.st_ino),
+        expected_identity,
+    )
+    try:
+        _atomic_exchange_entries(stage_path, journal_path)
+    finally:
+        _CREDENTIAL_TRANSACTION_STATE.exchange_expectation = (
+            previous_expectation
+        )
+    _fsync_directory(journal_path.parent)
+    _cleanup_journal_migration_stage(
+        journal_path,
+        transaction_id,
+    )
 
 
 def _publish_abort_decision(lock_root: Path) -> Path:
@@ -1932,6 +2445,8 @@ def _publish_abort_decision(lock_root: Path) -> Path:
 def _validated_credential_manifest(
     lock_root: Path,
     manifest: dict[str, Any],
+    *,
+    legacy_private_mode: bool = False,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     expected_manifest_keys = {
         "schema",
@@ -1943,7 +2458,13 @@ def _validated_credential_manifest(
         raise CredentialRecoveryError(
             "credential transaction intent has unknown fields"
         )
-    if manifest["schema"] != _CREDENTIAL_JOURNAL_SCHEMA:
+    access_policy = _active_credential_access_policy()
+    supported_schemas = {_CREDENTIAL_JOURNAL_SCHEMA}
+    if access_policy.group_shared and not legacy_private_mode:
+        supported_schemas.add(
+            _CREDENTIAL_GROUP_SHARED_JOURNAL_SCHEMA
+        )
+    if manifest["schema"] not in supported_schemas:
         raise CredentialRecoveryError(
             "credential transaction intent schema is unsupported"
         )
@@ -2044,13 +2565,35 @@ def _validated_credential_manifest(
             raise CredentialRecoveryError(
                 "credential transaction digest is invalid"
             )
-        if type(mode) is not int or not 0 <= mode <= 0o777:
+        invalid_mode = (
+            type(mode) is not int
+            or (
+                access_policy.group_shared
+                and legacy_private_mode
+                and mode not in _LEGACY_PRIVATE_TARGET_MODES
+            )
+            or (
+                access_policy.group_shared
+                and not legacy_private_mode
+                and mode != access_policy.data_mode
+            )
+            or (
+                not access_policy.group_shared
+                and not 0 <= mode <= 0o777
+            )
+        )
+        if invalid_mode:
             raise CredentialRecoveryError(
                 "credential transaction target mode is invalid"
             )
         validated.append(
             {
                 **raw_target,
+                "mode": (
+                    access_policy.data_mode
+                    if access_policy.group_shared and legacy_private_mode
+                    else mode
+                ),
                 "logical_path": logical_path,
                 "real_path": real_path,
                 "stage_path": stage_path,
@@ -2126,7 +2669,10 @@ def _cleanup_stale_orphan_stages(
         # root has enough evidence for safe orphan deletion.
         roots_and_handles = [(lock_root, lock_handle)]
     else:
-        resource_handle = _open_credential_resource_handle(lock_root)
+        resource_handle = _open_credential_resource_handle(
+            lock_root,
+            _active_credential_access_policy(),
+        )
         roots_and_handles = [(lock_root, resource_handle)]
     now = time.time()
     owner_id = (
@@ -2134,6 +2680,8 @@ def _cleanup_stale_orphan_stages(
         if callable(getattr(_os, "geteuid", None))
         else None
     )
+    access_policy = _active_credential_access_policy()
+    expected_stage_mode = access_policy.artifact_mode
     try:
         for root, resource_handle in roots_and_handles:
             removed = False
@@ -2160,9 +2708,16 @@ def _cleanup_stale_orphan_stages(
                 if (
                     not stat.S_ISREG(initial_stat.st_mode)
                     or initial_stat.st_nlink != 1
-                    or stat.S_IMODE(initial_stat.st_mode) != 0o600
+                    or stat.S_IMODE(initial_stat.st_mode)
+                    != expected_stage_mode
                     or (
-                        owner_id is not None
+                        access_policy.group_shared
+                        and initial_stat.st_gid
+                        != resource_handle.group_id
+                    )
+                    or (
+                        not access_policy.group_shared
+                        and owner_id is not None
                         and initial_stat.st_uid != owner_id
                     )
                     or now - initial_stat.st_mtime
@@ -2184,9 +2739,16 @@ def _cleanup_stale_orphan_stages(
                     if (
                         not stat.S_ISREG(opened_stat.st_mode)
                         or opened_stat.st_nlink != 1
-                        or stat.S_IMODE(opened_stat.st_mode) != 0o600
+                        or stat.S_IMODE(opened_stat.st_mode)
+                        != expected_stage_mode
                         or (
-                            owner_id is not None
+                            access_policy.group_shared
+                            and opened_stat.st_gid
+                            != resource_handle.group_id
+                        )
+                        or (
+                            not access_policy.group_shared
+                            and owner_id is not None
                             and opened_stat.st_uid != owner_id
                         )
                         or (
@@ -2263,11 +2825,40 @@ def _recover_pending_transaction_unlocked(
         )
         return "not_needed"
     _require_secure_pair_transaction_platform()
-    decision, journal_path, manifest = pending
-    _, env_keys, targets = _validated_credential_manifest(
+    (
+        decision,
+        journal_path,
+        manifest,
+        legacy_private_mode,
+        journal_identity,
+        journal_sha256,
+    ) = pending
+    transaction_id, env_keys, targets = _validated_credential_manifest(
         lock_root,
         manifest,
+        legacy_private_mode=legacy_private_mode,
     )
+    if legacy_private_mode:
+        migrated_manifest = copy.deepcopy(manifest)
+        migrated_manifest["schema"] = (
+            _CREDENTIAL_GROUP_SHARED_JOURNAL_SCHEMA
+        )
+        for target in migrated_manifest["targets"]:
+            target["mode"] = _active_credential_access_policy().data_mode
+        _migrate_legacy_credential_journal(
+            journal_path,
+            migrated_manifest,
+            expected_identity=journal_identity,
+            expected_sha256=journal_sha256,
+        )
+    elif (
+        manifest["schema"]
+        == _CREDENTIAL_GROUP_SHARED_JOURNAL_SCHEMA
+    ):
+        _cleanup_journal_migration_stage(
+            journal_path,
+            transaction_id,
+        )
     if decision == "abort":
         _recover_abort_transaction_unlocked(
             lock_root,
@@ -2336,7 +2927,12 @@ def _recover_pending_transaction_unlocked(
                 raise CredentialRecoveryError(
                     f"credential {target['name']} target is unsafe"
                 )
-            _set_fd_mode_if_supported(target_fd, target["mode"])
+            _enforce_active_credential_fd_policy(
+                target_fd,
+                Path(target["real_path"]),
+                expected_mode=int(target["mode"]),
+                label=str(target["name"]),
+            )
             _os.fsync(target_fd)
         except (NotImplementedError, OSError) as exc:
             if _supports_exact_posix_modes():
@@ -2389,7 +2985,10 @@ def _stage_digest_if_present(
         return None
     payload = _read_stage_bytes(
         stage_path,
-        allowed_modes={0o600, int(target["mode"])},
+        allowed_modes={
+            _credential_artifact_mode(),
+            int(target["mode"]),
+        },
         max_bytes=min(
             _MAX_CREDENTIAL_STAGE_BYTES,
             _manifest_target_limit(target),
@@ -2498,7 +3097,12 @@ def _restore_target_mode_and_sync(
             raise CredentialRecoveryError(
                 f"credential {target['name']} rollback target is unsafe"
             )
-        _set_fd_mode_if_supported(target_fd, int(target["mode"]))
+        _enforce_active_credential_fd_policy(
+            target_fd,
+            Path(target["real_path"]),
+            expected_mode=int(target["mode"]),
+            label=str(target["name"]),
+        )
         _os.fsync(target_fd)
     finally:
         _os.close(target_fd)
@@ -2654,7 +3258,7 @@ def _commit_config_env_pair(
                 "before_exists": env_exists,
                 "before_payload": env_before,
                 "target_payload": env_target,
-                "mode": 0o600,
+                "mode": _credential_data_mode(),
             },
         ],
         env_keys=env_keys,
@@ -2700,7 +3304,11 @@ def _commit_credential_targets(
         _write_credential_journal(
             lock_root,
             {
-                "schema": _CREDENTIAL_JOURNAL_SCHEMA,
+                "schema": (
+                    _CREDENTIAL_GROUP_SHARED_JOURNAL_SCHEMA
+                    if _active_credential_access_policy().group_shared
+                    else _CREDENTIAL_JOURNAL_SCHEMA
+                ),
                 "transaction_id": transaction_id,
                 "env_keys": env_keys,
                 "targets": prepared,
@@ -2850,12 +3458,28 @@ def _mutated_env_bytes(
     return rendered_text.encode("utf-8"), applied
 
 
+def _reject_managed_credential_write(
+    action: str,
+    config_path: Path | None = None,
+) -> None:
+    """Fail closed before low-level writers create transaction state."""
+    from hermes_cli.config import (
+        ManagedConfigurationError,
+        get_managed_system_for_config,
+    )
+
+    managed_system = get_managed_system_for_config(config_path)
+    if managed_system is not None:
+        raise ManagedConfigurationError(action, managed_system)
+
+
 def mutate_config_strict(
     mutator: Callable[[dict[str, Any]], Any],
     *,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Strictly mutate config.yaml and atomically replace its real target."""
+    _reject_managed_credential_write("modify configuration", config_path)
     with credential_transaction(config_path) as spec:
         original_exists, original_bytes = _read_optional_bytes(
             spec.config_target
@@ -2893,6 +3517,41 @@ def mutate_config_strict(
         return copy.deepcopy(mutated)
 
 
+def seed_config_payload_strict(
+    config_payload: bytes,
+    *,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Create a missing config from validated bytes through the shared lock.
+
+    This is intentionally limited to first-write seeding so callers can retain
+    comments in packaged templates without introducing another read/modify/
+    write path for existing user configuration.
+    """
+    _reject_managed_credential_write("seed configuration", config_path)
+    if not isinstance(config_payload, bytes):
+        raise ValueError("credential config payload must be bytes")
+    if len(config_payload) > _MAX_CREDENTIAL_CONFIG_BYTES:
+        raise ValueError("credential config exceeds maximum size")
+    parsed = _parse_config_bytes(config_payload)
+
+    with credential_transaction(config_path) as spec:
+        config_exists, _config_before = _read_optional_bytes(
+            spec.config_target
+        )
+        if config_exists:
+            raise FileExistsError(spec.logical_config_path)
+        if config_payload:
+            _atomic_write_credential_bytes(
+                spec.logical_config_path,
+                config_payload,
+                mode=_credential_data_mode(),
+                expected_exists=False,
+                expected_sha256=_sha256_bytes(b""),
+            )
+        return copy.deepcopy(parsed)
+
+
 def mutate_env_unique(
     updates: Mapping[str, str | None],
     *,
@@ -2900,6 +3559,7 @@ def mutate_env_unique(
     expected_values: Mapping[str, str | None] | None = None,
 ) -> dict[str, bool]:
     """Atomically mutate selected .env keys while rejecting other duplicates."""
+    _reject_managed_credential_write("modify credentials", config_path)
     with credential_transaction(config_path) as spec:
         env_exists, original = _read_optional_bytes(spec.env_target)
         payload, applied = _mutated_env_bytes(
@@ -2916,7 +3576,7 @@ def mutate_env_unique(
             _atomic_write_credential_bytes(
                 spec.env_path,
                 payload,
-                mode=0o600,
+                mode=_credential_data_mode(),
                 expected_exists=env_exists,
                 expected_sha256=_sha256_bytes(original),
                 env_keys=projection_keys,
@@ -2934,8 +3594,18 @@ def mutate_config_env_strict(
     env_updates: Mapping[str, str | None],
     *,
     config_path: Path | None = None,
+    expected_env_values: Mapping[str, str | None] | None = None,
 ) -> CredentialSnapshot:
-    """Mutate config and .env through one durable roll-forward intent."""
+    """Mutate config and .env through one durable roll-forward intent.
+
+    When ``expected_env_values`` is provided, every updated key must still
+    match the caller's snapshot.  A same-key concurrent write aborts the whole
+    config/.env transaction instead of being silently overwritten.
+    """
+    _reject_managed_credential_write(
+        "modify configuration and credentials",
+        config_path,
+    )
     with credential_transaction(config_path) as spec:
         config_exists, config_before = _read_optional_bytes(
             spec.config_target
@@ -2960,8 +3630,12 @@ def mutate_config_env_strict(
         env_target, applied = _mutated_env_bytes(
             env_before,
             env_updates,
-            None,
+            expected_env_values,
         )
+        if any(not did_apply for did_apply in applied.values()):
+            raise _CredentialCompareAndSwapError(
+                "credential env changed before config/env transaction publish"
+            )
         config_changed = (
             config_target != config_before
             if config_exists
@@ -3000,7 +3674,7 @@ def mutate_config_env_strict(
             _atomic_write_credential_bytes(
                 spec.env_path,
                 env_target,
-                mode=0o600,
+                mode=_credential_data_mode(),
                 expected_exists=env_exists,
                 expected_sha256=_sha256_bytes(env_before),
                 env_keys=projection_keys,
@@ -3009,6 +3683,99 @@ def mutate_config_env_strict(
             _commit_credential_targets(
                 [],
                 env_keys=projection_keys,
+            )
+        return _load_credential_snapshot_unlocked(spec)
+
+
+def replace_config_env_payload_strict(
+    config_mutator: Callable[[dict[str, Any]], Any],
+    env_payload: bytes,
+    *,
+    config_path: Path | None = None,
+    env_keys: tuple[str, ...] = (),
+) -> CredentialSnapshot:
+    """Atomically replace a repaired env payload with its config mutation.
+
+    This narrow primitive exists for legacy env repair. Ordinary credential
+    writers should keep using :func:`mutate_config_env_strict`, which preserves
+    unrelated formatting while changing selected keys.
+    """
+    _reject_managed_credential_write(
+        "replace configuration and credentials",
+        config_path,
+    )
+    if not isinstance(env_payload, bytes):
+        raise ValueError("credential env payload must be bytes")
+    if len(env_payload) > _MAX_CREDENTIAL_ENV_BYTES:
+        raise ValueError("credential env exceeds maximum size")
+    _parse_env_bytes(env_payload)
+    projection_keys = tuple(
+        _validated_env_update(key, "")[0]
+        for key in env_keys
+    )
+    with credential_transaction(config_path) as spec:
+        config_exists, config_before = _read_optional_bytes(
+            spec.config_target
+        )
+        env_exists, env_before = _read_optional_bytes(spec.env_target)
+        current_config = (
+            _parse_config_bytes(config_before)
+            if config_exists
+            else {}
+        )
+        mutated_config = copy.deepcopy(current_config)
+        mutation_result = config_mutator(mutated_config)
+        if mutation_result is not None:
+            mutated_config = mutation_result
+        if not isinstance(mutated_config, dict):
+            raise ValueError("credential config mutation must produce a mapping")
+        config_target = yaml.safe_dump(
+            mutated_config,
+            allow_unicode=True,
+            sort_keys=False,
+        ).encode("utf-8")
+        config_changed = (
+            config_target != config_before
+            if config_exists
+            else bool(mutated_config)
+        )
+        env_changed = (
+            (not env_exists and bool(env_payload))
+            or env_payload != env_before
+        )
+        if config_changed and env_changed:
+            _commit_config_env_pair(
+                config_path=spec.logical_config_path,
+                config_exists=config_exists,
+                config_before=config_before,
+                config_target=config_target,
+                env_exists=env_exists,
+                env_before=env_before,
+                env_target=env_payload,
+                env_keys=list(projection_keys),
+            )
+        elif config_changed:
+            _atomic_write_credential_bytes(
+                spec.logical_config_path,
+                config_target,
+                mode=_existing_target_mode(spec.config_target),
+                expected_exists=config_exists,
+                expected_sha256=_sha256_bytes(config_before),
+                env_keys=list(projection_keys),
+            )
+        elif env_changed:
+            _atomic_write_credential_bytes(
+                spec.env_path,
+                env_payload,
+                mode=_credential_data_mode(),
+                expected_exists=env_exists,
+                expected_sha256=_sha256_bytes(env_before),
+                env_keys=list(projection_keys),
+            )
+        elif projection_keys:
+            _commit_credential_targets(
+                [],
+                env_keys=list(projection_keys),
             )
         return _load_credential_snapshot_unlocked(spec)
 

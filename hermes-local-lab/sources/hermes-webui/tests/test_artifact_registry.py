@@ -1275,6 +1275,25 @@ def _run_legacy_image_turn(
 
         monkeypatch.setattr(Session, "save", fail_artifact_save)
 
+    from agent import image_runtime
+
+    capability_generation = image_runtime.CapabilityRuntimeGeneration(
+        vision=(1, "artifact-vision-fp", "verified", True, "vision-gen"),
+        image_generation=(
+            1,
+            "artifact-image-fp",
+            "verified",
+            True,
+            "image-gen",
+        ),
+        stable=True,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "capture_capability_runtime_generation",
+        lambda: capability_generation,
+    )
+
     class StructuredCallbackAgent:
         def __init__(
             self,
@@ -1289,6 +1308,9 @@ def _run_legacy_image_turn(
             self.tool_progress_callback = tool_progress_callback
             self.tool_start_callback = tool_start_callback
             self.tool_complete_callback = tool_complete_callback
+            self._capability_runtime_identity = (
+                capability_generation.identity
+            )
 
         def run_conversation(self, **kwargs):
             if self.tool_start_callback:
@@ -1319,6 +1341,9 @@ def _run_legacy_image_turn(
             self.context_compressor = None
             self.ephemeral_system_prompt = None
             self.tool_progress_callback = tool_progress_callback
+            self._capability_runtime_identity = (
+                capability_generation.identity
+            )
 
         def run_conversation(self, **kwargs):
             self.tool_progress_callback(

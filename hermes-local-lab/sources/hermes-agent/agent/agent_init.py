@@ -985,9 +985,17 @@ def init_agent(
             agent._image_capability_fingerprint = (
                 _capability_generation.image_generation[1]
             )
+            agent._vision_capability_authorization_generation = (
+                _capability_generation.vision[4]
+            )
+            agent._image_capability_authorization_generation = (
+                _capability_generation.image_generation[4]
+            )
         else:
             agent._vision_capability_fingerprint = ""
             agent._image_capability_fingerprint = ""
+            agent._vision_capability_authorization_generation = ""
+            agent._image_capability_authorization_generation = ""
         # Sentinel until the final, post-injection refresh below publishes
         # definitions and identity from one stable snapshot.
         agent._capability_runtime_identity = None
@@ -995,6 +1003,8 @@ def init_agent(
     except Exception:
         agent._vision_capability_fingerprint = ""
         agent._image_capability_fingerprint = ""
+        agent._vision_capability_authorization_generation = ""
+        agent._image_capability_authorization_generation = ""
         agent._capability_runtime_identity = None
         agent._image_runtime_identity = None
 

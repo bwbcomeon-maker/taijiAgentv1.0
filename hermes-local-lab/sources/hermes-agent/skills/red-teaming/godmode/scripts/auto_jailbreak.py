@@ -21,6 +21,8 @@ import time
 import yaml
 from pathlib import Path
 
+from agent.provider_credentials import mutate_config_strict
+
 try:
     from openai import OpenAI
 except ImportError:
@@ -382,26 +384,21 @@ def _build_messages(system_prompt=None, prefill=None, query=None):
 
 def _write_config(system_prompt: str = None, prefill_file: str = None):
     """Write jailbreak settings to config.yaml (merges, doesn't overwrite)."""
-    cfg = {}
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH) as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception:
-            cfg = {}
+    def update(cfg):
+        agent_config = cfg.get("agent")
+        if agent_config is None:
+            agent_config = {}
+            cfg["agent"] = agent_config
+        elif not isinstance(agent_config, dict):
+            raise ValueError("agent config must be a mapping")
 
-    if "agent" not in cfg:
-        cfg["agent"] = {}
+        if system_prompt is not None:
+            agent_config["system_prompt"] = system_prompt
 
-    if system_prompt is not None:
-        cfg["agent"]["system_prompt"] = system_prompt
+        if prefill_file is not None:
+            agent_config["prefill_messages_file"] = prefill_file
 
-    if prefill_file is not None:
-        cfg["agent"]["prefill_messages_file"] = prefill_file
-
-    with open(CONFIG_PATH, "w") as f:
-        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True,
-                  width=120, sort_keys=False)
+    mutate_config_strict(update, config_path=CONFIG_PATH)
 
     return str(CONFIG_PATH)
 
@@ -716,14 +713,16 @@ def undo_jailbreak(verbose=True):
     """Remove jailbreak settings from config.yaml and delete prefill.json."""
     if CONFIG_PATH.exists():
         try:
-            with open(CONFIG_PATH) as f:
-                cfg = yaml.safe_load(f) or {}
-            if "agent" in cfg:
-                cfg["agent"].pop("system_prompt", None)
-                cfg["agent"].pop("prefill_messages_file", None)
-            with open(CONFIG_PATH, "w") as f:
-                yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True,
-                          width=120, sort_keys=False)
+            def update(cfg):
+                agent_config = cfg.get("agent")
+                if agent_config is None:
+                    return
+                if not isinstance(agent_config, dict):
+                    raise ValueError("agent config must be a mapping")
+                agent_config.pop("system_prompt", None)
+                agent_config.pop("prefill_messages_file", None)
+
+            mutate_config_strict(update, config_path=CONFIG_PATH)
             if verbose:
                 print(f"[UNDO] Cleared system_prompt and prefill_messages_file from {CONFIG_PATH}")
         except Exception as e:

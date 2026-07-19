@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+from io import StringIO
 from pathlib import Path
 
 from dotenv import load_dotenv
-from utils import atomic_replace
 
 
 # Env var name suffixes that indicate credential values.  These are the
@@ -15,6 +15,10 @@ from utils import atomic_replace
 # alter arbitrary user env vars, but credentials are known to require
 # pure ASCII (they become HTTP header values).
 _CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
+
+# Operator-controlled transaction policy must come from the process manager,
+# never from the credential data file whose safety it governs.
+_DOTENV_PROTECTED_KEYS = frozenset({"HERMES_CREDENTIAL_GROUP_SHARED"})
 
 # Names we've already warned about during this process, so repeated
 # load_hermes_dotenv() calls (user env + project env, gateway hot-reload,
@@ -143,11 +147,22 @@ def _sanitize_loaded_credentials() -> None:
         )
 
 
-def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
-    try:
-        load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
-    except UnicodeDecodeError:
-        load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
+def _load_dotenv_with_fallback(
+    path: Path,
+    *,
+    override: bool,
+    sanitized_lines: list[str] | None = None,
+) -> None:
+    if sanitized_lines is not None:
+        load_dotenv(
+            stream=StringIO("".join(sanitized_lines)),
+            override=override,
+        )
+    else:
+        try:
+            load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
+        except UnicodeDecodeError:
+            load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
     # Strip non-ASCII characters from credential env vars that were just
     # loaded.  API keys must be pure ASCII since they're sent as HTTP
     # header values (httpx encodes headers as ASCII).  Non-ASCII chars
@@ -156,7 +171,12 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     _sanitize_loaded_credentials()
 
 
-def _sanitize_env_file_if_needed(path: Path) -> None:
+def _sanitize_env_file_if_needed(
+    path: Path,
+    *,
+    config_path: Path | None = None,
+    persist: bool = True,
+) -> list[str]:
     """Pre-sanitize a .env file before python-dotenv reads it.
 
     python-dotenv does not handle corrupted lines where multiple
@@ -173,40 +193,98 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
     concatenated lines correctly.
     """
     if not path.exists():
-        return
+        return []
     try:
         from hermes_cli.config import _sanitize_env_lines
     except ImportError:
-        return  # early bootstrap — config module not available yet
+        return []  # early bootstrap — config module not available yet
 
     read_kw = {"encoding": "utf-8-sig", "errors": "replace"}
-    try:
-        with open(path, **read_kw) as f:
-            original = f.readlines()
-        # Strip null bytes before _sanitize_env_lines so they never
-        # reach python-dotenv (which passes them to os.environ and
-        # crashes with ValueError).
-        stripped = [line.replace("\x00", "") for line in original]
-        sanitized = _sanitize_env_lines(stripped)
-        if sanitized != original:
-            import tempfile
-            fd, tmp = tempfile.mkstemp(
-                dir=str(path.parent), suffix=".tmp", prefix=".env_"
+
+    def _read_and_sanitize(target: Path) -> tuple[list[str], list[str]]:
+        with open(target, **read_kw) as file_handle:
+            original_lines = file_handle.readlines()
+        # Strip null bytes before _sanitize_env_lines so they never reach
+        # python-dotenv (which passes them to os.environ and crashes with
+        # ValueError).
+        stripped = [line.replace("\x00", "") for line in original_lines]
+        return original_lines, _sanitize_env_lines(stripped)
+
+    if not persist:
+        _original, sanitized = _read_and_sanitize(path)
+        return sanitized
+
+    target_config_path = config_path or path.with_name("config.yaml")
+    from agent.provider_credentials import (
+        credential_transaction,
+        replace_config_env_payload_strict,
+    )
+
+    # Hold the shared config/.env lock across read, repair, epoch
+    # reconciliation, and publish. Without the outer transaction a canonical
+    # credential writer could land between our read and replace.
+    with credential_transaction(target_config_path) as spec:
+        original, sanitized = _read_and_sanitize(spec.env_target)
+        if sanitized == original:
+            return sanitized
+
+        from dotenv import dotenv_values
+        from agent.image_gen_verification import (
+            bump_capability_config_epochs,
+            capability_epochs_for_secret_env,
+        )
+
+        def _parsed_values(lines: list[str]) -> dict[str, str]:
+            values = dotenv_values(
+                stream=StringIO("".join(lines)),
+                interpolate=False,
             )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.writelines(sanitized)
-                    f.flush()
-                    os.fsync(f.fileno())
-                atomic_replace(tmp, path)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
-    except Exception:
-        pass  # best-effort — don't block gateway startup
+            return {
+                str(key): str(value or "")
+                for key, value in values.items()
+                if key is not None
+            }
+
+        before_values = _parsed_values(original)
+        after_values = _parsed_values(sanitized)
+        changed_keys = tuple(
+            sorted(
+                key
+                for key in set(before_values) | set(after_values)
+                if before_values.get(key) != after_values.get(key)
+            )
+        )
+        projection_keys = tuple(
+            key
+            for key in changed_keys
+            if key not in _DOTENV_PROTECTED_KEYS
+        )
+
+        def _advance_repaired_capability_epochs(
+            config_data: dict,
+        ) -> None:
+            capabilities = {
+                capability
+                for key in changed_keys
+                for capability in capability_epochs_for_secret_env(
+                    config_data,
+                    key,
+                    env_values=before_values,
+                )
+            }
+            if capabilities:
+                bump_capability_config_epochs(
+                    config_data,
+                    *sorted(capabilities),
+                )
+
+        replace_config_env_payload_strict(
+            _advance_repaired_capability_epochs,
+            "".join(sanitized).encode("utf-8"),
+            config_path=target_config_path,
+            env_keys=projection_keys,
+        )
+        return sanitized
 
 
 def load_hermes_dotenv(
@@ -232,24 +310,56 @@ def load_hermes_dotenv(
     )
     user_env = home_path / ".env"
     project_env_path = Path(project_env) if project_env else None
+    protected_values = {
+        key: os.environ.get(key)
+        for key in _DOTENV_PROTECTED_KEYS
+    }
 
-    # Fix corrupted .env files before python-dotenv parses them (#8908).
-    if user_env.exists():
-        _sanitize_env_file_if_needed(user_env)
-    if project_env_path and project_env_path.exists():
-        _sanitize_env_file_if_needed(project_env_path)
+    def _restore_process_authority() -> None:
+        for key, value in protected_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
-    if user_env.exists():
-        _load_dotenv_with_fallback(user_env, override=True)
-        loaded.append(user_env)
+    try:
+        # Fix corrupted .env files before python-dotenv parses them (#8908).
+        user_lines = None
+        if user_env.exists():
+            user_lines = _sanitize_env_file_if_needed(
+                user_env,
+                config_path=home_path / "config.yaml",
+            )
+        project_lines = None
+        if project_env_path and project_env_path.exists():
+            # Project .env is source material, not the canonical user
+            # credential store. Repair it in memory for dotenv without
+            # mutating the checkout.
+            project_lines = _sanitize_env_file_if_needed(
+                project_env_path,
+                persist=False,
+            )
 
-    if project_env_path and project_env_path.exists():
-        _load_dotenv_with_fallback(project_env_path, override=not loaded)
-        loaded.append(project_env_path)
+        if user_env.exists():
+            _load_dotenv_with_fallback(
+                user_env,
+                override=True,
+                sanitized_lines=user_lines,
+            )
+            loaded.append(user_env)
 
-    _apply_external_secret_sources(home_path)
+        if project_env_path and project_env_path.exists():
+            _load_dotenv_with_fallback(
+                project_env_path,
+                override=not loaded,
+                sanitized_lines=project_lines,
+            )
+            loaded.append(project_env_path)
 
-    return loaded
+        _apply_external_secret_sources(home_path)
+        return loaded
+    finally:
+        _restore_process_authority()
 
 
 def _apply_external_secret_sources(home_path: Path) -> None:

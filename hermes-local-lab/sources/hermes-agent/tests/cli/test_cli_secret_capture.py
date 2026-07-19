@@ -101,6 +101,36 @@ def test_secret_capture_uses_masked_prompt_without_tui():
     assert result["skipped"] is False
 
 
+def test_secret_capture_does_not_print_success_for_managed_rejection():
+    cli = _make_cli_stub()
+    managed_message = "Cannot set TENOR_API_KEY: managed configuration"
+
+    with patch(
+        "hermes_cli.callbacks.masked_secret_prompt",
+        return_value="secret-value",
+    ), patch(
+        "hermes_cli.callbacks.cprint",
+    ) as render, patch(
+        "hermes_cli.callbacks.save_env_value_secure",
+        return_value={
+            "success": False,
+            "stored_as": "TENOR_API_KEY",
+            "validated": False,
+            "reason": "managed_configuration",
+            "error_code": "managed_configuration",
+            "message": managed_message,
+        },
+    ):
+        result = prompt_for_secret(cli, "TENOR_API_KEY", "Tenor API key")
+
+    rendered = "\n".join(str(call.args[0]) for call in render.call_args_list)
+    assert result["success"] is False
+    assert result["message"] == managed_message
+    assert result["skipped"] is False
+    assert "✓ Stored secret" not in rendered
+    assert managed_message in rendered
+
+
 def test_secret_capture_timeout_clears_hidden_input_buffer():
     cli = _make_cli_stub(with_app=True)
     cleared = {"value": False}

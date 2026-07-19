@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="0.145" timestamp="2026-07-19T17:47:21.413928+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.cli.test_image_capability_consistency" name="test_caller_generation_is_published_and_forwarded_for_aba_gate" time="0.086"><failure message="AttributeError: 'types.SimpleNamespace' object has no attribute '_image_capability_authorization_generation'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10b0c1dd0&gt;
+
+    def test_caller_generation_is_published_and_forwarded_for_aba_gate(monkeypatch):
+        from agent import agent_runtime_helpers
+
+        generation = _generation(image_generation="image-gen-after-aba")
+        monkeypatch.setattr(
+            image_runtime,
+            "capture_capability_runtime_generation",
+            lambda: generation,
+        )
+        agent = SimpleNamespace(
+            _capability_runtime_lock=threading.RLock(),
+            _image_runtime_lock=None,
+            _capability_runtime_identity=None,
+            _registry_tool_names=set(),
+            tools=[],
+            valid_tool_names=set(),
+            enabled_toolsets=["image_gen"],
+            disabled_toolsets=None,
+            quiet_mode=True,
+            _cached_system_prompt="old",
+        )
+
+        assert image_runtime.refresh_agent_capability_runtime(
+            agent,
+            definitions_loader=lambda **_kwargs: [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "image_generate",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+        assert (
+&gt;           agent._image_capability_authorization_generation
+            == "image-gen-after-aba"
+        )
+E       AttributeError: 'types.SimpleNamespace' object has no attribute '_image_capability_authorization_generation'
+
+tests/cli/test_image_capability_consistency.py:200: AttributeError</failure></testcase></testsuite></testsuites>

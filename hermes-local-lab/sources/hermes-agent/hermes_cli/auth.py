@@ -6243,45 +6243,37 @@ def _update_config_for_provider(
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config = read_raw_config()
+    from agent.provider_credentials import mutate_config_strict
 
-    current_model = config.get("model")
-    if isinstance(current_model, dict):
-        model_cfg = dict(current_model)
-    elif isinstance(current_model, str) and current_model.strip():
-        model_cfg = {"default": current_model.strip()}
-    else:
-        model_cfg = {}
+    def update_model(config: Dict[str, Any]) -> None:
+        current_model = config.get("model")
+        if isinstance(current_model, dict):
+            model_cfg = dict(current_model)
+        elif isinstance(current_model, str) and current_model.strip():
+            model_cfg = {"default": current_model.strip()}
+        else:
+            model_cfg = {}
 
-    model_cfg["provider"] = provider_id
-    if inference_base_url and inference_base_url.strip():
-        model_cfg["base_url"] = inference_base_url.rstrip("/")
-    else:
-        # Clear stale base_url to prevent contamination when switching providers
-        model_cfg.pop("base_url", None)
+        model_cfg["provider"] = provider_id
+        if inference_base_url and inference_base_url.strip():
+            model_cfg["base_url"] = inference_base_url.rstrip("/")
+        else:
+            # Clear stale base_url to prevent contamination when switching providers
+            model_cfg.pop("base_url", None)
 
-    # Clear stale api_key/api_mode left over from a previous custom provider.
-    # When the user switches from e.g. a MiniMax custom endpoint
-    # (api_mode=anthropic_messages, api_key=mxp-...) to a built-in provider
-    # (e.g. OpenRouter), the stale api_key/api_mode would override the new
-    # provider's credentials and transport choice.  Built-in providers that
-    # need a specific api_mode (copilot, xai) set it at request-resolution
-    # time via `_copilot_runtime_api_mode` / `_detect_api_mode_for_url`, so
-    # removing the persisted value here is safe.
-    model_cfg.pop("api_key", None)
-    model_cfg.pop("api_mode", None)
+        # Clear stale api_key/api_mode left over from a previous custom provider.
+        model_cfg.pop("api_key", None)
+        model_cfg.pop("api_mode", None)
 
-    # When switching to a non-OpenRouter provider, ensure model.default is
-    # valid for the new provider.  An OpenRouter-formatted name like
-    # "anthropic/claude-opus-4.6" will fail on direct-API providers.
-    if default_model:
-        cur_default = model_cfg.get("default", "")
-        if not cur_default or "/" in cur_default:
-            model_cfg["default"] = default_model
+        # Avoid carrying an OpenRouter-formatted model to a direct provider.
+        if default_model:
+            cur_default = model_cfg.get("default", "")
+            if not cur_default or "/" in cur_default:
+                model_cfg["default"] = default_model
 
-    config["model"] = model_cfg
+        config["model"] = model_cfg
 
-    atomic_yaml_write(config_path, config, sort_keys=False)
+    mutate_config_strict(update_model, config_path=config_path)
     return config_path
 
 
@@ -6339,16 +6331,16 @@ def _reset_config_provider() -> Path:
     if not config_path.exists():
         return config_path
 
-    config = read_raw_config()
-    if not config:
-        return config_path
+    from agent.provider_credentials import mutate_config_strict
 
-    model = config.get("model")
-    if isinstance(model, dict):
-        model["provider"] = "auto"
-        if "base_url" in model:
-            model["base_url"] = OPENROUTER_BASE_URL
-    atomic_yaml_write(config_path, config, sort_keys=False)
+    def reset_model(config: Dict[str, Any]) -> None:
+        model = config.get("model")
+        if isinstance(model, dict):
+            model["provider"] = "auto"
+            if "base_url" in model:
+                model["base_url"] = OPENROUTER_BASE_URL
+
+    mutate_config_strict(reset_model, config_path=config_path)
     return config_path
 
 

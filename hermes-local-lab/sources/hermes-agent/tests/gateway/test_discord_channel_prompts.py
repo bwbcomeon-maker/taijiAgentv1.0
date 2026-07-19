@@ -34,6 +34,21 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
 
+def _capability_bound_factory(agent_cls):
+    """Construct a fake with the runtime identity production AIAgent binds."""
+
+    def _factory(*args, **kwargs):
+        from agent.image_runtime import capture_capability_runtime_generation
+
+        agent = agent_cls(*args, **kwargs)
+        agent._capability_runtime_identity = (
+            capture_capability_runtime_generation().identity
+        )
+        return agent
+
+    return _factory
+
+
 class _CapturingAgent:
     last_init = None
 
@@ -52,7 +67,7 @@ class _CapturingAgent:
 
 def _install_fake_agent(monkeypatch):
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = _CapturingAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(_CapturingAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
 

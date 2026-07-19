@@ -6095,6 +6095,24 @@ from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
 
+def _configuration_mutation_error_response(handler, exc: RuntimeError):
+    """Preserve machine-readable configuration conflicts at the HTTP edge."""
+    error_code = str(getattr(exc, "code", "") or "").strip()
+    if error_code in {
+        "managed_configuration",
+        "configuration_conflict",
+    }:
+        return j(
+            handler,
+            {
+                "error": str(exc),
+                "error_code": error_code,
+            },
+            status=409,
+        )
+    return bad(handler, str(exc), status=500)
+
+
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
     """Return a Kanban-specific 404 for stale clients/obsolete endpoint shapes."""
     return bad(
@@ -11665,7 +11683,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         except RuntimeError as e:
-            return bad(handler, str(e), 500)
+            return _configuration_mutation_error_response(handler, e)
 
     if parsed.path == "/api/model-config/main":
         from api.model_config import set_main_model_config
@@ -11675,7 +11693,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
 
     if parsed.path == "/api/image-capabilities/alibaba":
         from api.model_config import set_alibaba_image_capabilities
@@ -11685,6 +11703,8 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except (RuntimeError, OSError) as exc:
+            if isinstance(exc, RuntimeError):
+                return _configuration_mutation_error_response(handler, exc)
             return bad(handler, str(exc), status=500)
 
     if parsed.path == "/api/provider-credentials":
@@ -11695,7 +11715,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
 
     if parsed.path == "/api/license/import":
         return _handle_license_import(handler, body)
@@ -11717,7 +11737,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
 
     if parsed.path == "/api/vision/config":
         from api.model_config import set_vision_config
@@ -11727,7 +11747,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
 
     if parsed.path == "/api/vision/test":
         from api.model_config import test_vision_config
@@ -11742,7 +11762,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
 
     if parsed.path == "/api/image-gen/test":
         from api.model_config import test_image_gen_config
@@ -11765,7 +11785,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
 
     # ── Auxiliary model set (POST) ──
     if parsed.path == "/api/model/set":
@@ -14035,7 +14055,7 @@ def handle_delete(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
     if parsed.path.startswith("/api/vision/custom-providers/"):
         from api.model_config import delete_custom_vision_provider_config
 
@@ -14045,7 +14065,7 @@ def handle_delete(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
     if parsed.path.startswith("/api/provider-credentials/"):
         from api.model_config import delete_provider_credential
 
@@ -14055,7 +14075,7 @@ def handle_delete(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except RuntimeError as exc:
-            return bad(handler, str(exc), status=500)
+            return _configuration_mutation_error_response(handler, exc)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 

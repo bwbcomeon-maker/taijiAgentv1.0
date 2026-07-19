@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Code,
   Download,
@@ -36,7 +36,7 @@ import {
   FileOutput,
   RefreshCw,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, isConfigurationConflict } from "@/lib/api";
 import { getNestedValue, setNestedValue } from "@/lib/nested";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { Toast } from "@nous-research/ui/ui/components/toast";
@@ -97,12 +97,123 @@ function CategoryIcon({
   return <Icon className={className ?? "h-4 w-4"} />;
 }
 
+async function fetchConfigDependencies() {
+  const [draft, schemaResponse] = await Promise.all([
+    api.getConfigDraft(),
+    api.getSchema(),
+  ]);
+  return { draft, schemaResponse };
+}
+
+const CONFIG_VALUE_MISSING = Symbol("config-value-missing");
+type ConfigMergeValue = unknown | typeof CONFIG_VALUE_MISSING;
+
+function isConfigRecord(value: ConfigMergeValue): value is Record<string, unknown> {
+  return (
+    value !== CONFIG_VALUE_MISSING &&
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
+function configValuesEqual(
+  left: ConfigMergeValue,
+  right: ConfigMergeValue,
+): boolean {
+  if (left === right) return true;
+  if (left === CONFIG_VALUE_MISSING || right === CONFIG_VALUE_MISSING) {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) =>
+        configValuesEqual(value, right[index]),
+      )
+    );
+  }
+  if (isConfigRecord(left) || isConfigRecord(right)) {
+    if (!isConfigRecord(left) || !isConfigRecord(right)) return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return (
+      leftKeys.length === rightKeys.length &&
+      leftKeys.every(
+        (key, index) =>
+          key === rightKeys[index] &&
+          configValuesEqual(left[key], right[key]),
+      )
+    );
+  }
+  return false;
+}
+
+function rebaseConfigValue(
+  base: ConfigMergeValue,
+  local: ConfigMergeValue,
+  server: ConfigMergeValue,
+): { conflict: boolean; value: ConfigMergeValue } {
+  if (configValuesEqual(local, base)) {
+    return { conflict: false, value: server };
+  }
+  if (
+    configValuesEqual(server, base) ||
+    configValuesEqual(local, server)
+  ) {
+    return { conflict: false, value: local };
+  }
+  if (
+    !isConfigRecord(base) ||
+    !isConfigRecord(local) ||
+    !isConfigRecord(server)
+  ) {
+    return { conflict: true, value: local };
+  }
+
+  const merged: Record<string, unknown> = {};
+  const keys = new Set([
+    ...Object.keys(base),
+    ...Object.keys(local),
+    ...Object.keys(server),
+  ]);
+  for (const key of keys) {
+    const result = rebaseConfigValue(
+      Object.hasOwn(base, key) ? base[key] : CONFIG_VALUE_MISSING,
+      Object.hasOwn(local, key) ? local[key] : CONFIG_VALUE_MISSING,
+      Object.hasOwn(server, key) ? server[key] : CONFIG_VALUE_MISSING,
+    );
+    if (result.conflict) return result;
+    if (result.value !== CONFIG_VALUE_MISSING) {
+      merged[key] = result.value;
+    }
+  }
+  return { conflict: false, value: merged };
+}
+
+function rebaseConfigDraft(
+  base: Record<string, unknown>,
+  local: Record<string, unknown>,
+  server: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const result = rebaseConfigValue(base, local, server);
+  return result.conflict || !isConfigRecord(result.value)
+    ? null
+    : result.value;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
 export default function ConfigPage() {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
+  const [configLoadError, setConfigLoadError] = useState(false);
+  const [configSnapshotToken, setConfigSnapshotToken] = useState<string | null>(
+    null,
+  );
   const [schema, setSchema] = useState<Record<
     string,
     Record<string, unknown>
@@ -115,15 +226,40 @@ export default function ConfigPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [yamlMode, setYamlMode] = useState(false);
   const [yamlText, setYamlText] = useState("");
+  const [yamlSnapshotToken, setYamlSnapshotToken] = useState<string | null>(
+    null,
+  );
+  const [yamlEditable, setYamlEditable] = useState(false);
+  const [yamlBlockedCode, setYamlBlockedCode] = useState<string | null>(
+    null,
+  );
+  const [yamlBlockedFallback, setYamlBlockedFallback] = useState<string | null>(
+    null,
+  );
+  const [yamlLoadError, setYamlLoadError] = useState(false);
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [configPath, setConfigPath] = useState<string | null>(null);
-  const [activeCategory, setActiveCategory] = useState<string>("");
+  const [selectedCategory, setSelectedCategory] = useState<string>("");
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmReloadDraft, setConfirmReloadDraft] = useState<
+    "config" | "yaml" | null
+  >(null);
   const { toast, showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const latestConfigRef = useRef<Record<string, unknown> | null>(config);
+  const configRevisionRef = useRef(0);
+  const configSyncedRevisionRef = useRef(0);
+  const configRequestGenerationRef = useRef(0);
+  const yamlRevisionRef = useRef(0);
+  const yamlRequestGenerationRef = useRef(0);
+  const yamlDraftLoadedRef = useRef(false);
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
+
+  useLayoutEffect(() => {
+    latestConfigRef.current = config;
+  }, [config]);
 
   useLayoutEffect(() => {
     if (!config || !schema) {
@@ -162,17 +298,30 @@ export default function ConfigPage() {
   }
 
   useEffect(() => {
-    api
-      .getConfig()
-      .then(setConfig)
-      .catch(() => {});
-    api
-      .getSchema()
-      .then((resp) => {
-        setSchema(resp.fields as Record<string, Record<string, unknown>>);
-        setCategoryOrder(resp.category_order ?? []);
+    const generation = ++configRequestGenerationRef.current;
+    void fetchConfigDependencies()
+      .then(({ draft, schemaResponse }) => {
+        if (generation !== configRequestGenerationRef.current) return;
+        setConfig(draft.config);
+        setConfigSnapshotToken(draft.snapshot_token);
+        setSchema(
+          schemaResponse.fields as Record<
+            string,
+            Record<string, unknown>
+          >,
+        );
+        setCategoryOrder(schemaResponse.category_order ?? []);
+        setConfigLoadError(false);
+        configSyncedRevisionRef.current = configRevisionRef.current;
       })
-      .catch(() => {});
+      .catch(() => {
+        if (generation !== configRequestGenerationRef.current) return;
+        setConfig(null);
+        setConfigSnapshotToken(null);
+        setSchema(null);
+        setCategoryOrder([]);
+        setConfigLoadError(true);
+      });
     api
       .getDefaults()
       .then(setDefaults)
@@ -181,29 +330,15 @@ export default function ConfigPage() {
       .getStatus()
       .then((resp) => setConfigPath(resp.config_path))
       .catch(() => {});
+    return () => {
+      if (generation === configRequestGenerationRef.current) {
+        configRequestGenerationRef.current += 1;
+      }
+    };
   }, []);
 
-  // Set active category when categories load
-  useEffect(() => {
-    if (categoryOrder.length > 0 && !activeCategory) {
-      setActiveCategory(categoryOrder[0]);
-    }
-  }, [categoryOrder, activeCategory]);
-
-  // Load YAML when switching to YAML mode
-  useEffect(() => {
-    if (yamlMode) {
-      setYamlLoading(true);
-      api
-        .getConfigRaw()
-        .then((resp) => setYamlText(resp.yaml))
-        .catch(() => showToast(t.config.failedToLoadRaw, "error"))
-        .finally(() => setYamlLoading(false));
-    }
-  }, [yamlMode]);
-
   /* ---- Categories ---- */
-  const categories = useMemo(() => {
+  const categories = (() => {
     if (!schema) return [];
     const allCats = [
       ...new Set(
@@ -213,10 +348,11 @@ export default function ConfigPage() {
     const ordered = categoryOrder.filter((c) => allCats.includes(c));
     const extra = allCats.filter((c) => !categoryOrder.includes(c)).sort();
     return [...ordered, ...extra];
-  }, [schema, categoryOrder]);
+  })();
+  const activeCategory = selectedCategory || categories[0] || "";
 
   /* ---- Category field counts ---- */
-  const categoryCounts = useMemo(() => {
+  const categoryCounts = (() => {
     if (!schema) return {};
     const counts: Record<string, number> = {};
     for (const s of Object.values(schema)) {
@@ -224,13 +360,13 @@ export default function ConfigPage() {
       counts[cat] = (counts[cat] || 0) + 1;
     }
     return counts;
-  }, [schema]);
+  })();
 
   /* ---- Search ---- */
   const isSearching = searchQuery.trim().length > 0;
   const lowerSearch = searchQuery.toLowerCase();
 
-  const searchMatchedFields = useMemo(() => {
+  const searchMatchedFields = (() => {
     if (!isSearching || !schema) return [];
     return Object.entries(schema).filter(([key, s]) => {
       const label = key.split(".").pop() ?? key;
@@ -246,43 +382,280 @@ export default function ConfigPage() {
           .includes(lowerSearch)
       );
     });
-  }, [isSearching, lowerSearch, schema]);
+  })();
 
   /* ---- Active tab fields ---- */
-  const activeFields = useMemo(() => {
+  const activeFields = (() => {
     if (!schema || isSearching) return [];
     return Object.entries(schema).filter(
       ([, s]) => String(s.category ?? "general") === activeCategory,
     );
-  }, [schema, activeCategory, isSearching]);
+  })();
 
   /* ---- Handlers ---- */
   const handleSave = async () => {
-    if (!config) return;
+    if (!config || !configSnapshotToken) return;
+    const configAtSave = structuredClone(config);
+    const revisionAtSave = configRevisionRef.current;
+    const generation = ++configRequestGenerationRef.current;
     setSaving(true);
     try {
-      await api.saveConfig(config);
-      showToast(t.config.configSaved, "success");
+      await api.saveConfig(config, configSnapshotToken);
     } catch (e) {
+      if (isConfigurationConflict(e)) {
+        // Keep the unsaved draft visible, but invalidate its stale write
+        // authority.  The explicit Retry button reloads only on user action.
+        setConfigSnapshotToken(null);
+      }
       showToast(`${t.config.failedToSave}: ${e}`, "error");
+      if (generation === configRequestGenerationRef.current) {
+        setSaving(false);
+      }
+      return;
+    }
+
+    setConfigSnapshotToken(null);
+    showToast(t.config.configSaved, "success");
+    if (revisionAtSave !== configRevisionRef.current) {
+      try {
+        const refreshed = await api.getConfigDraft();
+        if (generation !== configRequestGenerationRef.current) return;
+        const latestConfig = latestConfigRef.current;
+        const rebased = latestConfig
+          ? rebaseConfigDraft(
+              configAtSave,
+              latestConfig,
+              refreshed.config,
+            )
+          : null;
+        if (!rebased) {
+          showToast(
+            `${t.config.configSaved}. ${t.common.refresh}: ${t.common.retry}.`,
+            "error",
+          );
+          return;
+        }
+        latestConfigRef.current = rebased;
+        setConfig(rebased);
+        setConfigSnapshotToken(refreshed.snapshot_token);
+      } catch (e) {
+        if (generation === configRequestGenerationRef.current) {
+          showToast(
+            `${t.config.configSaved}. ${t.common.refresh}: ${e}. ${t.common.retry}.`,
+            "error",
+          );
+        }
+      } finally {
+        if (generation === configRequestGenerationRef.current) {
+          setSaving(false);
+        }
+      }
+      return;
+    }
+    try {
+      const refreshed = await api.getConfigDraft();
+      if (
+        generation !== configRequestGenerationRef.current ||
+        revisionAtSave !== configRevisionRef.current
+      ) {
+        return;
+      }
+      setConfig(refreshed.config);
+      setConfigSnapshotToken(refreshed.snapshot_token);
+      configSyncedRevisionRef.current = configRevisionRef.current;
+    } catch (e) {
+      if (generation === configRequestGenerationRef.current) {
+        showToast(
+          `${t.config.configSaved}. ${t.common.refresh}: ${e}. ${t.common.retry}.`,
+          "error",
+        );
+      }
     } finally {
-      setSaving(false);
+      if (generation === configRequestGenerationRef.current) {
+        setSaving(false);
+      }
     }
   };
 
   const handleYamlSave = async () => {
+    if (!yamlSnapshotToken) return;
+    const revisionAtSave = yamlRevisionRef.current;
+    const yamlGeneration = ++yamlRequestGenerationRef.current;
+    const configRevisionAtSave = configRevisionRef.current;
+    const formWasClean =
+      configRevisionAtSave === configSyncedRevisionRef.current;
     setYamlSaving(true);
     try {
-      await api.saveConfigRaw(yamlText);
-      showToast(t.config.yamlConfigSaved, "success");
-      api
-        .getConfig()
-        .then(setConfig)
-        .catch(() => {});
+      await api.saveConfigRaw(yamlText, yamlSnapshotToken);
     } catch (e) {
+      if (isConfigurationConflict(e)) {
+        setYamlSnapshotToken(null);
+      }
       showToast(`${t.config.failedToSaveYaml}: ${e}`, "error");
-    } finally {
+      if (yamlGeneration === yamlRequestGenerationRef.current) {
+        setYamlSaving(false);
+      }
+      return;
+    }
+
+    setYamlSnapshotToken(null);
+    setConfigSnapshotToken(null);
+    showToast(t.config.yamlConfigSaved, "success");
+    if (revisionAtSave !== yamlRevisionRef.current) {
       setYamlSaving(false);
+      return;
+    }
+    const configGeneration = ++configRequestGenerationRef.current;
+    try {
+      const [rawDraft, formDraft] = await Promise.all([
+        api.getConfigRaw(),
+        formWasClean ? api.getConfigDraft() : Promise.resolve(null),
+      ]);
+      if (
+        yamlGeneration === yamlRequestGenerationRef.current &&
+        revisionAtSave === yamlRevisionRef.current
+      ) {
+        setYamlText(rawDraft.yaml);
+        setYamlSnapshotToken(rawDraft.snapshot_token);
+        setYamlEditable(rawDraft.editable);
+        setYamlBlockedCode(rawDraft.blocked_code);
+        setYamlBlockedFallback(rawDraft.blocked_reason);
+        setYamlLoadError(false);
+      }
+      if (
+        formDraft &&
+        configGeneration === configRequestGenerationRef.current &&
+        configRevisionAtSave === configRevisionRef.current
+      ) {
+        setConfig(formDraft.config);
+        setConfigSnapshotToken(formDraft.snapshot_token);
+        configSyncedRevisionRef.current = configRevisionRef.current;
+      }
+    } catch (e) {
+      if (yamlGeneration === yamlRequestGenerationRef.current) {
+        showToast(
+          `${t.config.yamlConfigSaved}. ${t.common.refresh}: ${e}. ${t.common.retry}.`,
+          "error",
+        );
+      }
+    } finally {
+      if (yamlGeneration === yamlRequestGenerationRef.current) {
+        setYamlSaving(false);
+      }
+    }
+  };
+
+  const handleReloadConfigDraft = async () => {
+    const generation = ++configRequestGenerationRef.current;
+    configRevisionRef.current += 1;
+    const revisionAtLoad = configRevisionRef.current;
+    setSaving(true);
+    try {
+      const refreshed = await api.getConfigDraft();
+      if (
+        generation !== configRequestGenerationRef.current ||
+        revisionAtLoad !== configRevisionRef.current
+      ) {
+        return;
+      }
+      setConfig(refreshed.config);
+      setConfigSnapshotToken(refreshed.snapshot_token);
+      setConfigLoadError(false);
+      configSyncedRevisionRef.current = configRevisionRef.current;
+    } catch (e) {
+      if (generation === configRequestGenerationRef.current) {
+        showToast(`${t.common.refresh}: ${e}`, "error");
+      }
+    } finally {
+      if (generation === configRequestGenerationRef.current) {
+        setSaving(false);
+      }
+    }
+  };
+
+  const handleReloadYamlDraft = async () => {
+    const generation = ++yamlRequestGenerationRef.current;
+    yamlDraftLoadedRef.current = false;
+    setYamlLoading(true);
+    setYamlLoadError(false);
+    setYamlEditable(false);
+    setYamlSnapshotToken(null);
+    setYamlBlockedCode(null);
+    setYamlBlockedFallback(null);
+    try {
+      const refreshed = await api.getConfigRaw();
+      if (generation !== yamlRequestGenerationRef.current) return;
+      setYamlText(refreshed.yaml);
+      setYamlSnapshotToken(refreshed.snapshot_token);
+      setYamlEditable(refreshed.editable);
+      setYamlBlockedCode(refreshed.blocked_code);
+      setYamlBlockedFallback(refreshed.blocked_reason);
+      setYamlLoadError(false);
+      yamlDraftLoadedRef.current = true;
+      yamlRevisionRef.current += 1;
+    } catch (e) {
+      if (generation === yamlRequestGenerationRef.current) {
+        setYamlLoadError(true);
+        showToast(`${t.common.refresh}: ${e}`, "error");
+      }
+    } finally {
+      if (generation === yamlRequestGenerationRef.current) {
+        setYamlLoading(false);
+      }
+    }
+  };
+
+  const handleToggleYamlMode = () => {
+    if (yamlMode) {
+      yamlRequestGenerationRef.current += 1;
+      setYamlLoading(false);
+      setYamlMode(false);
+      return;
+    }
+    setYamlMode(true);
+    if (!yamlDraftLoadedRef.current) {
+      void handleReloadYamlDraft();
+    }
+  };
+
+  const handleRetryInitialConfig = async () => {
+    if (config && schema) return;
+    const generation = ++configRequestGenerationRef.current;
+    setSaving(true);
+    setConfigLoadError(false);
+    try {
+      const { draft, schemaResponse } = await fetchConfigDependencies();
+      if (generation !== configRequestGenerationRef.current) return;
+      setConfig(draft.config);
+      setConfigSnapshotToken(draft.snapshot_token);
+      setSchema(
+        schemaResponse.fields as Record<string, Record<string, unknown>>,
+      );
+      setCategoryOrder(schemaResponse.category_order ?? []);
+      setConfigLoadError(false);
+      configSyncedRevisionRef.current = configRevisionRef.current;
+    } catch {
+      if (generation === configRequestGenerationRef.current) {
+        setConfig(null);
+        setConfigSnapshotToken(null);
+        setSchema(null);
+        setCategoryOrder([]);
+        setConfigLoadError(true);
+      }
+    } finally {
+      if (generation === configRequestGenerationRef.current) {
+        setSaving(false);
+      }
+    }
+  };
+
+  const executeReloadDraft = () => {
+    const target = confirmReloadDraft;
+    setConfirmReloadDraft(null);
+    if (target === "config") {
+      void handleReloadConfigDraft();
+    } else if (target === "yaml") {
+      void handleReloadYamlDraft();
     }
   };
 
@@ -311,6 +684,7 @@ export default function ConfigPage() {
     for (const [key] of scopedFields) {
       next = setNestedValue(next, key, getNestedValue(defaults, key));
     }
+    configRevisionRef.current += 1;
     setConfig(next);
     showToast(
       t.config.resetScopeToast.replace("{scope}", scopeLabel),
@@ -338,6 +712,7 @@ export default function ConfigPage() {
     reader.onload = () => {
       try {
         const imported = JSON.parse(reader.result as string);
+        configRevisionRef.current += 1;
         setConfig(imported);
         showToast(t.config.configImported, "success");
       } catch {
@@ -347,11 +722,44 @@ export default function ConfigPage() {
     reader.readAsText(file);
   };
 
+  const yamlBlockedMessages: Record<string, string> = {
+    invalid_utf8: t.config.rawBlockedInvalidUtf8,
+    literal_credentials: t.config.rawBlockedLiteralCredentials,
+    too_large: t.config.rawBlockedTooLarge,
+    unsafe_file: t.config.rawBlockedUnsafeFile,
+    unsafe_yaml: t.config.rawBlockedUnsafeYaml,
+  };
+  const yamlBlockedMessage = yamlBlockedCode
+    ? (yamlBlockedMessages[yamlBlockedCode] ??
+      yamlBlockedFallback ??
+      t.config.rawBlockedUnknown)
+    : yamlBlockedFallback;
+
   /* ---- Loading ---- */
+  if (!config && configLoadError) {
+    return (
+      <div
+        className="flex flex-col items-center justify-center gap-3 py-24"
+        role="alert"
+      >
+        <p className="text-sm text-destructive">
+          {t.config.configLoadFailed}
+        </p>
+        <Button outlined onClick={handleRetryInitialConfig} disabled={saving}>
+          {t.config.retryConfigLoad}
+        </Button>
+      </div>
+    );
+  }
   if (!config || !schema) {
     return (
-      <div className="flex items-center justify-center py-24">
+      <div
+        className="flex items-center justify-center py-24"
+        role="status"
+        aria-live="polite"
+      >
         <Spinner className="text-2xl text-primary" />
+        <span className="sr-only">{t.config.loadingConfig}</span>
       </div>
     );
   }
@@ -403,7 +811,11 @@ export default function ConfigPage() {
               schemaKey={key}
               schema={s}
               value={getNestedValue(config, key)}
-              onChange={(v) => setConfig(setNestedValue(config, key, v))}
+              onChange={(v) => {
+                configRevisionRef.current += 1;
+                const next = setNestedValue(config, key, v);
+                setConfig(next);
+              }}
             />
           </div>
         </div>
@@ -476,30 +888,69 @@ export default function ConfigPage() {
           <Button
             size="sm"
             outlined={!yamlMode}
-            onClick={() => setYamlMode(!yamlMode)}
+            onClick={handleToggleYamlMode}
+            disabled={saving || yamlSaving}
             prefix={yamlMode ? <FormInput /> : <Code />}
           >
             {yamlMode ? t.common.form : "YAML"}
           </Button>
 
           {yamlMode ? (
-            <Button
-              size="sm"
-              className="uppercase"
-              onClick={handleYamlSave}
-              disabled={yamlSaving}
-            >
-              {yamlSaving ? t.common.saving : t.common.save}
-            </Button>
+            <>
+              {(yamlLoadError || yamlBlockedMessage) && !yamlLoading ? (
+                <Button
+                  size="sm"
+                  outlined
+                  onClick={handleReloadYamlDraft}
+                >
+                  {t.config.retryRawLoad}
+                </Button>
+              ) : (
+                !yamlSnapshotToken &&
+                !yamlLoading &&
+                !yamlBlockedMessage && (
+                  <Button
+                    size="sm"
+                    outlined
+                    onClick={() => setConfirmReloadDraft("yaml")}
+                  >
+                    {t.config.reloadDiscard}
+                  </Button>
+                )
+              )}
+              {!yamlBlockedMessage && (
+                <Button
+                  size="sm"
+                  className="uppercase"
+                  onClick={handleYamlSave}
+                  disabled={
+                    yamlSaving || !yamlEditable || !yamlSnapshotToken
+                  }
+                >
+                  {yamlSaving ? t.common.saving : t.common.save}
+                </Button>
+              )}
+            </>
           ) : (
-            <Button
-              size="sm"
-              className="uppercase"
-              onClick={handleSave}
-              disabled={saving}
-            >
-              {saving ? t.common.saving : t.common.save}
-            </Button>
+            <>
+              {!configSnapshotToken && !saving && (
+                <Button
+                  size="sm"
+                  outlined
+                  onClick={() => setConfirmReloadDraft("config")}
+                >
+                  {t.config.reloadDiscard}
+                </Button>
+              )}
+              <Button
+                size="sm"
+                className="uppercase"
+                onClick={handleSave}
+                disabled={saving || !configSnapshotToken}
+              >
+                {saving ? t.common.saving : t.common.save}
+              </Button>
+            </>
           )}
         </div>
       </div>
@@ -514,14 +965,37 @@ export default function ConfigPage() {
           </CardHeader>
           <CardContent className="p-0">
             {yamlLoading ? (
-              <div className="flex items-center justify-center py-12">
+              <div
+                className="flex items-center justify-center py-12"
+                role="status"
+                aria-live="polite"
+              >
                 <Spinner className="text-xl text-primary" />
+                <span className="sr-only">{t.config.loadingConfig}</span>
+              </div>
+            ) : yamlLoadError ? (
+              <div
+                className="border-t border-border px-4 py-6 text-sm text-destructive"
+                role="alert"
+              >
+                {t.config.failedToLoadRaw}
+              </div>
+            ) : yamlBlockedMessage ? (
+              <div
+                className="border-t border-border px-4 py-6 text-sm text-destructive"
+                role="alert"
+              >
+                {yamlBlockedMessage}
               </div>
             ) : (
               <textarea
                 className="flex min-h-[600px] w-full bg-transparent px-4 py-3 text-sm font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none border-t border-border"
+                aria-label={t.config.rawYaml}
                 value={yamlText}
-                onChange={(e) => setYamlText(e.target.value)}
+                onChange={(e) => {
+                  yamlRevisionRef.current += 1;
+                  setYamlText(e.target.value);
+                }}
                 spellCheck={false}
               />
             )}
@@ -553,7 +1027,7 @@ export default function ConfigPage() {
                         active={isActive}
                         onClick={() => {
                           setSearchQuery("");
-                          setActiveCategory(cat);
+                          setSelectedCategory(cat);
                         }}
                         className="rounded-none whitespace-nowrap px-2 py-1 text-xs"
                       >
@@ -649,11 +1123,21 @@ export default function ConfigPage() {
             ? t.config.searchResults
             : prettyCategoryName(activeCategory),
         )}
-        description={`This will reset ${
-          (isSearching ? searchMatchedFields : activeFields).length
-        } field(s) to their default values.`}
+        description={t.config.resetDescription.replace(
+          "{count}",
+          String((isSearching ? searchMatchedFields : activeFields).length),
+        )}
         destructive
         confirmLabel={t.config.resetDefaults}
+      />
+      <ConfirmDialog
+        open={confirmReloadDraft !== null}
+        onCancel={() => setConfirmReloadDraft(null)}
+        onConfirm={executeReloadDraft}
+        title={t.config.reloadDiscardTitle}
+        description={t.config.reloadDiscardDescription}
+        destructive
+        confirmLabel={t.config.reloadDiscardConfirm}
       />
     </div>
   );

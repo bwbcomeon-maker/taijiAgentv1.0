@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -2764,3 +2765,434 @@ def test_config_and_canonical_env_cannot_be_hardlinks_to_same_inode(
         )
 
     assert config_path.read_text(encoding="utf-8") == "provider: before\n"
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_transaction_uses_exact_group_modes(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+
+    mutate_config_env_strict(
+        lambda config: config.update(provider="shared"),
+        {"API_KEY": "shared-secret"},
+        config_path=config_path,
+    )
+
+    lock_path = (
+        profile_root / credentials._CREDENTIAL_LOCK_NAME
+    )
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o660
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
+    assert stat.S_IMODE((profile_root / ".env").stat().st_mode) == 0o640
+
+    with credentials.credential_transaction(config_path):
+        stage_path, _real_path = credentials._stage_credential_bytes(
+            config_path,
+            b"provider: staged\n",
+        )
+        assert stat.S_IMODE(stage_path.stat().st_mode) == 0o640
+        stage_path.unlink()
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_transaction_skips_cross_owner_chmod_when_mode_matches(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: shared\n", encoding="utf-8")
+    config_path.chmod(0o640)
+    lock_path = profile_root / credentials._CREDENTIAL_LOCK_NAME
+    lock_path.touch(mode=0o660)
+    lock_path.chmod(0o660)
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+
+    def reject_redundant_chmod(_fd, _mode):
+        raise PermissionError("simulated group-only cross-owner descriptor")
+
+    monkeypatch.setattr(credentials._os, "fchmod", reject_redundant_chmod)
+
+    snapshot = load_credential_snapshot(config_path)
+
+    assert snapshot.config == {"provider": "shared"}
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_transaction_rejects_world_accessible_root(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2777)
+    config_path = profile_root / "config.yaml"
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+
+    with pytest.raises(
+        CredentialRecoveryError,
+        match="shared credential resource root",
+    ):
+        load_credential_snapshot(config_path)
+
+
+def test_private_transaction_modes_remain_private_by_default(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    config_path = profile_root / "config.yaml"
+    monkeypatch.delenv("HERMES_CREDENTIAL_GROUP_SHARED", raising=False)
+
+    mutate_config_env_strict(
+        lambda config: config.update(provider="private"),
+        {"API_KEY": "private-secret"},
+        config_path=config_path,
+    )
+
+    lock_path = profile_root / credentials._CREDENTIAL_LOCK_NAME
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE((profile_root / ".env").stat().st_mode) == 0o600
+
+
+def test_invalid_group_shared_policy_fails_closed(monkeypatch, tmp_path):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    config_path = profile_root / "config.yaml"
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "true")
+
+    with pytest.raises(
+        CredentialRecoveryError,
+        match="must be exactly 0 or 1",
+    ):
+        load_credential_snapshot(config_path)
+
+    assert not (
+        profile_root / credentials._CREDENTIAL_LOCK_NAME
+    ).exists()
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_policy_is_frozen_for_nested_transactions(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    monkeypatch.delenv("HERMES_CREDENTIAL_GROUP_SHARED", raising=False)
+
+    with credentials.credential_transaction(config_path):
+        monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+        with credentials.credential_transaction(config_path):
+            active_policy = credentials._active_credential_access_policy()
+            assert active_policy.group_shared is False
+            assert active_policy.lock_mode == 0o600
+
+    lock_path = profile_root / credentials._CREDENTIAL_LOCK_NAME
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_manifest_rejects_world_readable_target_mode(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    transaction_id = "1" * 32
+    digest = hashlib.sha256(b"").hexdigest()
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+    manifest = {
+        "schema": credentials._CREDENTIAL_JOURNAL_SCHEMA,
+        "transaction_id": transaction_id,
+        "env_keys": [],
+        "targets": [
+            {
+                "name": "config",
+                "logical_path": str(config_path),
+                "real_path": str(config_path),
+                "stage_path": str(
+                    profile_root
+                    / (
+                        ".taiji-credential-config.yaml-"
+                        f"{transaction_id}.stage"
+                    )
+                ),
+                "before_exists": False,
+                "before_sha256": digest,
+                "target_sha256": digest,
+                "mode": 0o777,
+            }
+        ],
+    }
+
+    with credentials.credential_transaction(config_path):
+        with pytest.raises(
+            CredentialRecoveryError,
+            match="target mode is invalid",
+        ):
+            credentials._validated_credential_manifest(
+                profile_root,
+                manifest,
+            )
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+@pytest.mark.parametrize("journal_mode", [0o600, 0o640])
+def test_group_shared_recovery_rejects_unsafe_pending_target_mode(
+    monkeypatch,
+    tmp_path,
+    journal_mode,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: before\n", encoding="utf-8")
+    env_path = profile_root / ".env"
+    env_path.write_text("API_KEY=before\n", encoding="utf-8")
+    original_finalize = credentials._finalize_committed_transaction
+    monkeypatch.delenv("HERMES_CREDENTIAL_GROUP_SHARED", raising=False)
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        lambda *_args, **_kwargs: None,
+    )
+
+    mutate_config_env_strict(
+        lambda config: config.update(provider="after"),
+        {"API_KEY": "after"},
+        config_path=config_path,
+    )
+
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        original_finalize,
+    )
+    intent_path = profile_root / credentials._CREDENTIAL_JOURNAL_NAME
+    manifest = json.loads(intent_path.read_text(encoding="utf-8"))
+    for target in manifest["targets"]:
+        target["mode"] = 0o777
+    intent_path.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    intent_path.chmod(journal_mode)
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+
+    with pytest.raises(
+        CredentialRecoveryError,
+        match="target mode is invalid",
+    ):
+        recover_credential_transaction(config_path)
+
+    assert intent_path.exists()
+    assert stat.S_IMODE(intent_path.stat().st_mode) == journal_mode
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_pending_artifacts_use_exact_mode_and_gid(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: before\n", encoding="utf-8")
+    config_path.chmod(0o640)
+    env_path = profile_root / ".env"
+    env_path.write_text("API_KEY=before\n", encoding="utf-8")
+    env_path.chmod(0o640)
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+    original_finalize = credentials._finalize_committed_transaction
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        lambda *_args, **_kwargs: None,
+    )
+
+    mutate_config_env_strict(
+        lambda config: config.update(provider="after"),
+        {"API_KEY": "after"},
+        config_path=config_path,
+    )
+
+    intent_path = (
+        profile_root / credentials._CREDENTIAL_JOURNAL_NAME
+    )
+    stages = list(profile_root.glob(".taiji-credential-*.stage"))
+    assert intent_path.exists()
+    assert stages
+    manifest = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert manifest["schema"] == "taiji-credential-pair-intent/v2"
+    expected_gid = profile_root.stat().st_gid
+    for artifact in [intent_path, *stages]:
+        artifact_stat = artifact.stat()
+        assert stat.S_IMODE(artifact_stat.st_mode) == 0o640
+        assert artifact_stat.st_gid == expected_gid
+
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        original_finalize,
+    )
+    assert recover_credential_transaction(config_path) == "recovered"
+    assert not intent_path.exists()
+    assert not list(profile_root.glob(".taiji-credential-*.stage"))
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_transaction_migrates_legacy_private_pending_intent(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: before\n", encoding="utf-8")
+    env_path = profile_root / ".env"
+    env_path.write_text("API_KEY=before\n", encoding="utf-8")
+    original_finalize = credentials._finalize_committed_transaction
+    monkeypatch.delenv("HERMES_CREDENTIAL_GROUP_SHARED", raising=False)
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        lambda *_args, **_kwargs: None,
+    )
+
+    mutate_config_env_strict(
+        lambda config: config.update(provider="after"),
+        {"API_KEY": "after"},
+        config_path=config_path,
+    )
+
+    intent_path = profile_root / credentials._CREDENTIAL_JOURNAL_NAME
+    stages = list(profile_root.glob(".taiji-credential-*.stage"))
+    assert stat.S_IMODE(intent_path.stat().st_mode) == 0o600
+    assert stages
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in stages)
+
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        original_finalize,
+    )
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+
+    assert recover_credential_transaction(config_path) == "recovered"
+    snapshot = load_credential_snapshot(config_path)
+    assert snapshot.config["provider"] == "after"
+    assert snapshot.env["API_KEY"] == "after"
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o640
+    assert not intent_path.exists()
+    assert not list(profile_root.glob(".taiji-credential-*.stage"))
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX ownership and mode policy only",
+)
+def test_group_shared_legacy_migration_persists_marker_across_interruption(
+    monkeypatch,
+    tmp_path,
+):
+    profile_root = tmp_path / "profile"
+    profile_root.mkdir()
+    profile_root.chmod(0o2770)
+    config_path = profile_root / "config.yaml"
+    config_path.write_text("provider: before\n", encoding="utf-8")
+    env_path = profile_root / ".env"
+    env_path.write_text("API_KEY=before\n", encoding="utf-8")
+    original_finalize = credentials._finalize_committed_transaction
+    original_classify = credentials._classify_commit_target_state
+    monkeypatch.delenv("HERMES_CREDENTIAL_GROUP_SHARED", raising=False)
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        lambda *_args, **_kwargs: None,
+    )
+
+    mutate_config_env_strict(
+        lambda config: config.update(provider="after"),
+        {"API_KEY": "after"},
+        config_path=config_path,
+    )
+
+    intent_path = profile_root / credentials._CREDENTIAL_JOURNAL_NAME
+    monkeypatch.setattr(
+        credentials,
+        "_finalize_committed_transaction",
+        original_finalize,
+    )
+    monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
+    monkeypatch.setattr(
+        credentials,
+        "_classify_commit_target_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated migration interruption")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="migration interruption"):
+        recover_credential_transaction(config_path)
+
+    assert stat.S_IMODE(intent_path.stat().st_mode) == 0o640
+    migrated_manifest = json.loads(
+        intent_path.read_text(encoding="utf-8")
+    )
+    assert (
+        migrated_manifest["schema"]
+        == "taiji-credential-pair-intent/v2"
+    )
+    monkeypatch.setattr(
+        credentials,
+        "_classify_commit_target_state",
+        original_classify,
+    )
+
+    assert recover_credential_transaction(config_path) == "recovered"
+    snapshot = load_credential_snapshot(config_path)
+    assert snapshot.config["provider"] == "after"
+    assert snapshot.env["API_KEY"] == "after"

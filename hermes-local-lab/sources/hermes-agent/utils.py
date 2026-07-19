@@ -1,12 +1,13 @@
 """Shared utility functions for hermes-agent."""
 
+import copy
 import json
 import logging
 import os
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Callable, Mapping, Union
 from urllib.parse import urlparse
 
 import yaml
@@ -207,20 +208,38 @@ def atomic_yaml_write(
         raise
 
 
+_ROUNDTRIP_VALUE_UNSET = object()
+
+
 def atomic_roundtrip_yaml_update(
     path: Union[str, Path],
-    key_path: str,
-    value: Any,
+    key_path: str | Mapping[str, Any],
+    value: Any = _ROUNDTRIP_VALUE_UNSET,
+    *,
+    config_reconciler: Callable[[dict, dict], None] | None = None,
 ) -> None:
-    """Update one dotted YAML key while preserving comments and readable text.
+    """Update dotted YAML keys while preserving comments and readable text.
 
     This is intentionally narrower than :func:`atomic_yaml_write`: it is for
     user-edited config files where comments, ordering, quoting, and Unicode
-    should survive a single setting mutation.  Writes still use the same temp
-    file + fsync + atomic replace pattern.
+    should survive a setting mutation. ``key_path`` accepts either the legacy
+    single dotted path (with ``value``) or a mapping of dotted paths to values.
+    A mapping is applied in memory and committed with one temp file + fsync +
+    atomic replace, so related settings cannot be partially persisted.
     """
     from ruamel.yaml import YAML
     from ruamel.yaml.comments import CommentedMap
+
+    if isinstance(key_path, str):
+        if value is _ROUNDTRIP_VALUE_UNSET:
+            raise TypeError("value is required for a single YAML key update")
+        updates = ((key_path, value),)
+    elif isinstance(key_path, Mapping):
+        if value is not _ROUNDTRIP_VALUE_UNSET:
+            raise TypeError("value must be omitted for a YAML update mapping")
+        updates = tuple(key_path.items())
+    else:
+        raise TypeError("key_path must be a dotted path or mapping")
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,15 +259,21 @@ def atomic_roundtrip_yaml_update(
     if not isinstance(config, CommentedMap):
         config = CommentedMap(config)
 
-    current = config
-    keys = key_path.split(".")
-    for key in keys[:-1]:
-        next_value = current.get(key)
-        if not isinstance(next_value, CommentedMap):
-            next_value = CommentedMap()
-            current[key] = next_value
-        current = next_value
-    current[keys[-1]] = value
+    previous = copy.deepcopy(config)
+    for update_path, update_value in updates:
+        if not isinstance(update_path, str) or not update_path.strip():
+            raise ValueError("YAML update paths must be non-empty strings")
+        current = config
+        keys = update_path.split(".")
+        for key in keys[:-1]:
+            next_value = current.get(key)
+            if not isinstance(next_value, CommentedMap):
+                next_value = CommentedMap()
+                current[key] = next_value
+            current = next_value
+        current[keys[-1]] = update_value
+    if config_reconciler is not None:
+        config_reconciler(previous, config)
 
     original_mode = _preserve_file_mode(path)
     fd, tmp_path = tempfile.mkstemp(

@@ -59,6 +59,117 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
+def test_secret_callback_preserves_managed_failure_message(monkeypatch):
+    import hermes_cli.config as config_module
+    import tools.skills_tool as skills_tool
+    import tools.terminal_tool as terminal_tool
+
+    callbacks = {}
+    managed_message = "Cannot set TENOR_API_KEY: managed configuration"
+    monkeypatch.setattr(
+        terminal_tool,
+        "set_sudo_password_callback",
+        lambda callback: callbacks.update(sudo=callback),
+    )
+    monkeypatch.setattr(
+        skills_tool,
+        "set_secret_capture_callback",
+        lambda callback: callbacks.update(secret=callback),
+    )
+    monkeypatch.setattr(
+        server,
+        "_block",
+        lambda *_args, **_kwargs: "secret-value",
+    )
+    monkeypatch.setattr(
+        config_module,
+        "save_env_value_secure",
+        lambda *_args, **_kwargs: {
+            "success": False,
+            "stored_as": "TENOR_API_KEY",
+            "validated": False,
+            "reason": "managed_configuration",
+            "error_code": "managed_configuration",
+            "message": managed_message,
+        },
+    )
+
+    server._wire_callbacks("sid")
+    result = callbacks["secret"]("TENOR_API_KEY", "Tenor API key")
+
+    assert result["success"] is False
+    assert result["skipped"] is False
+    assert result["message"] == managed_message
+
+
+def test_mutate_cfg_rejects_managed_before_transaction_state(
+    tmp_path,
+    monkeypatch,
+):
+    from hermes_cli.config import ManagedConfigurationError
+
+    managed_home = tmp_path / "managed-home"
+    monkeypatch.setattr(server, "_hermes_home", managed_home)
+    monkeypatch.setenv("HERMES_MANAGED", "nixos")
+
+    rejection = None
+    try:
+        server._mutate_cfg(
+            lambda config: config.update({"display": {"busy_input_mode": "queue"}})
+        )
+    except ManagedConfigurationError as exc:
+        rejection = exc
+
+    assert not managed_home.exists()
+    assert rejection is not None
+    assert rejection.code == "managed_configuration"
+
+
+def test_config_set_surfaces_managed_rejection_before_config_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    managed_home = tmp_path / "managed-home"
+    monkeypatch.setattr(server, "_hermes_home", managed_home)
+    monkeypatch.setenv("HERMES_MANAGED", "nixos")
+
+    response = server.handle_request({
+        "id": "managed-config-set",
+        "method": "config.set",
+        "params": {"key": "busy", "value": "queue"},
+    })
+
+    assert "error" in response
+    assert response["error"]["code"] == 5035
+    assert response["error"]["data"]["error_code"] == "managed_configuration"
+    assert "managed by NixOS" in response["error"]["message"]
+    assert not managed_home.exists()
+
+
+def test_model_disconnect_surfaces_managed_rejection_without_mutating_state(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED", "nixos")
+
+    response = server.handle_request(
+        {
+            "id": "managed-disconnect",
+            "method": "model.disconnect",
+            "params": {"slug": "deepseek"},
+        }
+    )
+
+    assert response["error"]["code"] == 5035
+    assert response["error"]["data"]["error_code"] == "managed_configuration"
+    assert "managed by NixOS" in response["error"]["message"]
+    assert not (tmp_path / ".env").exists()
+    assert not (
+        tmp_path / ".taiji-credential-transaction.lock"
+    ).exists()
+
+
 def test_tui_verbose_tool_details_fail_closed_when_redaction_fails(monkeypatch):
     redact_module = types.ModuleType("agent.redact")
 
@@ -1822,11 +1933,16 @@ def test_config_set_model_global_persists(monkeypatch):
         seen.update(kwargs)
         return result
 
+    def _capture_config_mutation(mutator):
+        config = {}
+        mutator(config)
+        saved.update(config)
+
     server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.setattr("hermes_cli.model_switch.switch_model", _switch_model)
     monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
-    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved.update(cfg))
+    monkeypatch.setattr(server, "_mutate_cfg", _capture_config_mutation)
 
     resp = server.handle_request(
         {
@@ -4305,6 +4421,10 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
             patch(
                 "hermes_cli.browser_connect.get_chrome_debug_candidates",
                 return_value=[],
+            ),
+            patch(
+                "hermes_cli.browser_connect.manual_chrome_debug_command",
+                return_value=None,
             ),
         ):
             resp = server.handle_request(

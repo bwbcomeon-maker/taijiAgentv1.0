@@ -26,6 +26,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional
@@ -573,6 +574,27 @@ def write_profile_meta(
 # CRUD operations
 # ---------------------------------------------------------------------------
 
+
+def _mint_profile_incarnation(profile_dir: Path) -> str:
+    """Persist a fresh identity that clone/delete/recreate cannot reuse."""
+    from agent.image_gen_verification import (
+        CAPABILITY_PROFILE_INCARNATION_KEY,
+    )
+    from agent.provider_credentials import mutate_config_env_strict
+
+    incarnation = uuid.uuid4().hex
+
+    def update_config(config_data: dict) -> None:
+        config_data[CAPABILITY_PROFILE_INCARNATION_KEY] = incarnation
+
+    mutate_config_env_strict(
+        update_config,
+        {},
+        config_path=profile_dir / "config.yaml",
+    )
+    return incarnation
+
+
 def list_profiles() -> List[ProfileInfo]:
     """Return info for all profiles, including the default."""
     profiles = []
@@ -725,15 +747,29 @@ def create_profile(
                 if src.exists():
                     dst = profile_dir / filename
                     shutil.copy2(src, dst)
-                    # Tighten .env to owner-only after copy. shutil.copy2
-                    # preserves source mode bits, but if the source's .env
-                    # was loose (host umask 0o022 leaving 0o644), tighten
-                    # explicitly so the clone doesn't inherit weak perms.
                     if filename == ".env":
-                        try:
-                            os.chmod(str(dst), 0o600)
-                        except OSError:
-                            pass
+                        from agent.provider_credentials import (
+                            _active_credential_access_policy,
+                            credential_transaction,
+                        )
+
+                        access_policy = (
+                            _active_credential_access_policy()
+                        )
+                        if access_policy.group_shared:
+                            # This profile root was created by this operation,
+                            # so make it a valid canonical credential root
+                            # before asking the transaction to pin its gid.
+                            profile_dir.chmod(0o2770)
+                        os.chmod(
+                            str(dst),
+                            access_policy.data_mode,
+                        )
+                        if access_policy.group_shared:
+                            with credential_transaction(
+                                profile_dir / "config.yaml"
+                            ):
+                                pass
 
             # Clone installed skills from the source profile. The dashboard's
             # "clone from default" flow is expected to preserve both bundled
@@ -760,6 +796,8 @@ def create_profile(
             soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
         except Exception:
             pass  # best-effort — don't fail profile creation over this
+
+    _mint_profile_incarnation(profile_dir)
 
     # Write the opt-out marker so seed_profile_skills() and `hermes update`'s
     # all-profile sync loop both skip this profile for bundled-skill seeding.
@@ -1472,6 +1510,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
 
         shutil.move(str(final_source), str(profile_dir))
 
+    _mint_profile_incarnation(profile_dir)
     return profile_dir
 
 

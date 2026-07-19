@@ -151,6 +151,15 @@ class TestFormatters:
 # ---------------------------------------------------------------------------
 
 class TestSpawnAsyncDiagnostic:
+    def test_uses_python_watchdog_when_timeout_command_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(sf.shutil, "which", lambda _name: None)
+
+        command = sf._diagnostic_command(3.0, "echo ok")
+
+        assert command[0] == sys.executable
+        assert command[1] == "-c"
+        assert command[-2:] == ["3.0", "echo ok"]
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only diagnostic")
     def test_spawns_subprocess_and_writes_output(self, tmp_path):
         log_path = tmp_path / "diag.log"

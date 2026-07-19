@@ -146,32 +146,27 @@ def is_seen(config: Mapping[str, Any], flag: str) -> bool:
 def mark_seen(config_path: Path, flag: str) -> bool:
     """Persist ``onboarding.seen.<flag> = True`` to ``config_path``.
 
-    Uses the atomic YAML writer so a concurrent process can't observe a
-    partially-written file.  Returns True on success, False on any error
-    (including the config file being absent — onboarding is best-effort).
+    Mutates the latest config while holding the shared config transaction so
+    concurrent writers cannot be overwritten by a stale snapshot. Returns
+    True on success and False on any error (onboarding is best-effort).
     """
     try:
-        import yaml
-        from utils import atomic_yaml_write
+        from agent.provider_credentials import mutate_config_strict
     except Exception as e:  # pragma: no cover — dependency issue
-        logger.debug("onboarding: failed to import yaml/utils: %s", e)
+        logger.debug("onboarding: failed to import config mutator: %s", e)
         return False
 
     try:
-        cfg: dict = {}
-        if config_path.exists():
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-        if not isinstance(cfg.get("onboarding"), dict):
-            cfg["onboarding"] = {}
-        seen = cfg["onboarding"].get("seen")
-        if not isinstance(seen, dict):
-            seen = {}
-            cfg["onboarding"]["seen"] = seen
-        if seen.get(flag) is True:
-            return True  # already marked — nothing to do
-        seen[flag] = True
-        atomic_yaml_write(config_path, cfg)
+        def _mark(cfg: dict[str, Any]) -> None:
+            if not isinstance(cfg.get("onboarding"), dict):
+                cfg["onboarding"] = {}
+            seen = cfg["onboarding"].get("seen")
+            if not isinstance(seen, dict):
+                seen = {}
+                cfg["onboarding"]["seen"] = seen
+            seen[flag] = True
+
+        mutate_config_strict(_mark, config_path=config_path)
         return True
     except Exception as e:
         logger.debug("onboarding: failed to mark flag %s: %s", flag, e)

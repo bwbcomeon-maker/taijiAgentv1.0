@@ -338,6 +338,27 @@ export const zh: Translations = {
     failedToLoadRaw: "加载原始配置失败",
     configImported: "配置已导入 — 请检查后保存",
     invalidJson: "无效的 JSON 文件",
+    configLoadFailed: "配置加载失败。",
+    loadingConfig: "正在加载配置",
+    retryConfigLoad: "重试加载配置",
+    retryRawLoad: "重试加载原始 YAML",
+    reloadDiscard: "重新加载并丢弃本地更改",
+    reloadDiscardTitle: "重新加载并丢弃本地更改？",
+    reloadDiscardDescription:
+      "要丢弃本地草稿并从磁盘重新加载吗？此操作无法撤销。",
+    reloadDiscardConfirm: "重新加载并丢弃",
+    resetDescription: "将把 {count} 个字段恢复为默认值。",
+    rawBlockedLiteralCredentials:
+      "config.yaml 含有明文凭据，已禁用原始 YAML 编辑。请先改为环境变量引用，再使用网页编辑器。",
+    rawBlockedInvalidUtf8:
+      "config.yaml 不是有效的 UTF-8，无法使用原始 YAML 编辑。请在网页界面之外修复。",
+    rawBlockedUnsafeYaml:
+      "无法安全检查该文件中的凭据，原始 YAML 编辑不可用。请在网页界面之外修复。",
+    rawBlockedTooLarge:
+      "config.yaml 超过大小上限，原始 YAML 编辑不可用。",
+    rawBlockedUnsafeFile:
+      "无法安全读取 config.yaml，原始 YAML 编辑不可用。请在网页界面之外修复。",
+    rawBlockedUnknown: "原始 YAML 编辑当前不可用。",
     categories: {
       general: "通用",
       agent: "代理",

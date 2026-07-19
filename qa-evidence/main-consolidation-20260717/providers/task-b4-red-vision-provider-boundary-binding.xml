@@ -1,0 +1,502 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="4" skipped="0" tests="4" time="0.236" timestamp="2026-07-19T16:25:07.702988+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.tools.test_vision_tools" name="test_vision_provider_boundary_final_reauth_blocks_state_drift_without_io" time="0.015"><failure message="AssertionError: handler did not freeze one route decision; state drift reached Provider I/O; state drift did not return a blocked result; state drift did not return stable blocked status; state drift did not return stable stale error_code&#10;assert ['handler did...e error_code'] == []&#10;  &#10;  Left contains 5 more items, first extra item: 'handler did not freeze one route decision'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10721b750&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2625/test_vision_provider_boundary_0')
+
+    @pytest.mark.asyncio
+    async def test_vision_provider_boundary_final_reauth_blocks_state_drift_without_io(
+        monkeypatch,
+        tmp_path,
+    ):
+        """A frozen vision route must be reauthorized immediately before Provider I/O."""
+        from agent import auxiliary_client, image_routing, image_runtime
+        from agent.auxiliary_client import VisionRequestBinding
+        from tools import vision_tools
+
+        decision_factory = getattr(
+            image_runtime,
+            "build_capability_route_decision",
+            None,
+        )
+        assert callable(decision_factory), "CapabilityRouteDecision factory is missing"
+
+        image = tmp_path / "vision-final-reauth.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        verified = {
+            "schema_version": 1,
+            "fingerprint": "vision-final-reauth-v1",
+            "status": "verified",
+            "available": True,
+            "reason_code": "ready",
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        stale = {
+            **verified,
+            "status": "configured_unverified",
+            "available": False,
+            "reason_code": "vision_not_verified",
+        }
+        binding = VisionRequestBinding(
+            provider="alibaba",
+            model="qwen3-vl-plus",
+            base_url="https://pinned-vision.example.test/v1",
+            api_key="pinned-vision-secret",
+        )
+        decision = decision_factory(
+            "vision",
+            snapshot=verified,
+            route="auxiliary",
+            tool_call_id="call-vision-final-reauth",
+            request_binding=binding,
+        )
+        runtime = {"snapshot": dict(verified)}
+        build_calls = []
+
+        def freeze_then_drift(*args, **kwargs):
+            build_calls.append((args, kwargs))
+            # The persisted verification state changes after the caller's first
+            # read but before the Provider-boundary final authorization.
+            runtime["snapshot"] = dict(stale)
+            return decision
+
+        monkeypatch.setattr(
+            image_runtime,
+            "build_capability_route_decision",
+            freeze_then_drift,
+        )
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(runtime["snapshot"]),
+        )
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_read_main_provider",
+            lambda: "openai",
+        )
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_read_main_model",
+            lambda: "gpt-4.1-mini",
+        )
+        monkeypatch.setattr(
+            image_routing,
+            "decide_image_input_mode",
+            lambda *_args, **_kwargs: "text",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {},
+        )
+        provider_io = []
+
+        async def provider_call(**kwargs):
+            provider_io.append(kwargs)
+            kwargs["resolution_out"].update(
+                {"provider": "alibaba", "model": "qwen3-vl-plus"}
+            )
+            response = MagicMock()
+            choice = MagicMock()
+            choice.message.content = "should not reach Provider"
+            response.choices = [choice]
+            return response
+
+        monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+
+        result = json.loads(
+            await vision_tools._handle_vision_analyze(
+                {
+                    "image_url": str(image),
+                    "question": "describe the authorization boundary",
+                }
+            )
+        )
+
+        violations = []
+        if len(build_calls) != 1:
+            violations.append("handler did not freeze one route decision")
+        if provider_io:
+            violations.append("state drift reached Provider I/O")
+        if result.get("success") is not False:
+            violations.append("state drift did not return a blocked result")
+        if result.get("status") != "blocked":
+            violations.append("state drift did not return stable blocked status")
+        if result.get("error_code") != "capability_caller_stale":
+            violations.append("state drift did not return stable stale error_code")
+&gt;       assert violations == [], "; ".join(violations)
+E       AssertionError: handler did not freeze one route decision; state drift reached Provider I/O; state drift did not return a blocked result; state drift did not return stable blocked status; state drift did not return stable stale error_code
+E       assert ['handler did...e error_code'] == []
+E
+E         Left contains 5 more items, first extra item: 'handler did not freeze one route decision'
+E         Use -v to get more diff
+
+tests/tools/test_vision_tools.py:784: AssertionError</failure></testcase><testcase classname="tests.tools.test_vision_tools" name="test_vision_handler_uses_private_pinned_binding_after_ambient_rotation" time="0.003"><failure message="AssertionError: handler did not freeze one route decision; Provider did not receive the private pinned binding&#10;assert ['handler did...nned binding'] == []&#10;  &#10;  Left contains 2 more items, first extra item: 'handler did not freeze one route decision'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x106d4c950&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2625/test_vision_handler_uses_priva0')
+
+    @pytest.mark.asyncio
+    async def test_vision_handler_uses_private_pinned_binding_after_ambient_rotation(
+        monkeypatch,
+        tmp_path,
+    ):
+        """Ambient secret/endpoint rotation after reauth must not replace the binding."""
+        from agent import auxiliary_client, image_routing, image_runtime
+        from agent.auxiliary_client import VisionRequestBinding
+        from tools import vision_tools
+
+        decision_factory = getattr(
+            image_runtime,
+            "build_capability_route_decision",
+            None,
+        )
+        assert callable(decision_factory), "CapabilityRouteDecision factory is missing"
+
+        image = tmp_path / "vision-pinned-binding.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        verified = {
+            "schema_version": 1,
+            "fingerprint": "vision-pinned-binding-v1",
+            "status": "verified",
+            "available": True,
+            "reason_code": "ready",
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        pinned_endpoint = "https://pinned-vision.example.test/v1"
+        pinned_secret = "pinned-vision-secret"
+        binding = VisionRequestBinding(
+            provider="alibaba",
+            model="qwen3-vl-plus",
+            base_url=pinned_endpoint,
+            api_key=pinned_secret,
+        )
+        decision = decision_factory(
+            "vision",
+            snapshot=verified,
+            route="auxiliary",
+            tool_call_id="call-vision-pinned-binding",
+            request_binding=binding,
+        )
+        build_calls = []
+
+        def build_decision(*args, **kwargs):
+            build_calls.append((args, kwargs))
+            return decision
+
+        monkeypatch.setattr(
+            image_runtime,
+            "build_capability_route_decision",
+            build_decision,
+        )
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(verified),
+        )
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_read_main_provider",
+            lambda: "openai",
+        )
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_read_main_model",
+            lambda: "gpt-4.1-mini",
+        )
+        monkeypatch.setattr(
+            image_routing,
+            "decide_image_input_mode",
+            lambda *_args, **_kwargs: "text",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {},
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-before-reauth")
+        monkeypatch.setenv(
+            "OPENAI_BASE_URL",
+            "https://ambient-before-reauth.example.test/v1",
+        )
+        reauth_calls = []
+
+        def final_reauth(_snapshot):
+            reauth_calls.append(True)
+            # The exact snapshot has been accepted. Rotate ambient state before
+            # async_call_llm receives the request-local binding.
+            monkeypatch.setenv("OPENAI_API_KEY", "ambient-after-reauth")
+            monkeypatch.setenv(
+                "OPENAI_BASE_URL",
+                "https://ambient-after-reauth.example.test/v1",
+            )
+            return True
+
+        monkeypatch.setattr(
+            vision_tools,
+            "_vision_authorization_is_current",
+            final_reauth,
+        )
+        provider_calls = []
+
+        async def provider_call(**kwargs):
+            provider_calls.append(kwargs)
+            kwargs["resolution_out"].update(
+                {"provider": "alibaba", "model": "qwen3-vl-plus"}
+            )
+            response = MagicMock()
+            choice = MagicMock()
+            choice.message.content = "pinned binding used"
+            response.choices = [choice]
+            return response
+
+        monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+
+        result = json.loads(
+            await vision_tools._handle_vision_analyze(
+                {
+                    "image_url": str(image),
+                    "question": "describe the pinned route",
+                }
+            )
+        )
+
+        observed_binding = (
+            provider_calls[0].get("vision_binding")
+            if len(provider_calls) == 1
+            else None
+        )
+        violations = []
+        if result.get("success") is not True:
+            violations.append("pinned vision dispatch unexpectedly failed")
+        if len(build_calls) != 1:
+            violations.append("handler did not freeze one route decision")
+        if reauth_calls != [True]:
+            violations.append("handler did not perform exactly one final reauth")
+        if len(provider_calls) != 1:
+            violations.append("Provider was not called exactly once")
+        if observed_binding is not binding:
+            violations.append("Provider did not receive the private pinned binding")
+        if (
+            observed_binding is not None
+            and observed_binding.api_key != pinned_secret
+        ):
+            violations.append("Provider binding secret changed with ambient state")
+        if (
+            observed_binding is not None
+            and observed_binding.base_url != pinned_endpoint
+        ):
+            violations.append("Provider binding endpoint changed with ambient state")
+        if os.environ["OPENAI_API_KEY"] != "ambient-after-reauth":
+            violations.append("test did not rotate the ambient secret after reauth")
+        if (
+            os.environ["OPENAI_BASE_URL"]
+            != "https://ambient-after-reauth.example.test/v1"
+        ):
+            violations.append("test did not rotate the ambient endpoint after reauth")
+&gt;       assert violations == [], "; ".join(violations)
+E       AssertionError: handler did not freeze one route decision; Provider did not receive the private pinned binding
+E       assert ['handler did...nned binding'] == []
+E
+E         Left contains 2 more items, first extra item: 'handler did not freeze one route decision'
+E         Use -v to get more diff
+
+tests/tools/test_vision_tools.py:945: AssertionError</failure></testcase><testcase classname="tests.tools.test_vision_tools" name="test_public_vision_tool_cannot_bypass_verification_or_binding_gate[configured_unverified-True-vision_not_verified]" time="0.005"><failure message="AssertionError: direct public call reached Provider I/O; direct public call did not fail closed; direct public call did not return blocked status; direct public call did not return vision_not_verified&#10;assert ['direct publ...not_verified'] == []&#10;  &#10;  Left contains 4 more items, first extra item: 'direct public call reached Provider I/O'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x107fcf690&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2625/test_public_vision_tool_cannot0')
+snapshot_status = 'configured_unverified', binding_present = True
+expected_error_code = 'vision_not_verified'
+
+    @pytest.mark.parametrize(
+        ("snapshot_status", "binding_present", "expected_error_code"),
+        [
+            ("configured_unverified", True, "vision_not_verified"),
+            ("verified", False, "vision_binding_required"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_public_vision_tool_cannot_bypass_verification_or_binding_gate(
+        monkeypatch,
+        tmp_path,
+        snapshot_status,
+        binding_present,
+        expected_error_code,
+    ):
+        """Direct public calls must fail closed before auxiliary Provider I/O."""
+        from agent import image_runtime
+        from agent.auxiliary_client import VisionRequestBinding
+        from tools import vision_tools
+
+        image = tmp_path / f"direct-{snapshot_status}.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        available = snapshot_status == "verified"
+        snapshot = {
+            "schema_version": 1,
+            "fingerprint": f"vision-direct-{snapshot_status}",
+            "status": snapshot_status,
+            "available": available,
+            "reason_code": (
+                "ready" if available else "vision_not_verified"
+            ),
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        binding = (
+            VisionRequestBinding(
+                provider="alibaba",
+                model="qwen3-vl-plus",
+                base_url="https://pinned-direct.example.test/v1",
+                api_key="pinned-direct-secret",
+            )
+            if binding_present
+            else None
+        )
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        provider_io = []
+
+        async def provider_call(**kwargs):
+            provider_io.append(kwargs)
+            kwargs["resolution_out"].update(
+                {"provider": "alibaba", "model": "qwen3-vl-plus"}
+            )
+            response = MagicMock()
+            choice = MagicMock()
+            choice.message.content = "direct call bypassed the gate"
+            response.choices = [choice]
+            return response
+
+        monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+        token = vision_tools._VISION_AUTHORIZATION_SNAPSHOT.set(None)
+        try:
+            result = json.loads(
+                await vision_tools.vision_analyze_tool(
+                    str(image),
+                    "describe the direct-call gate",
+                    "qwen3-vl-plus",
+                    provider="alibaba",
+                    strict_target=True,
+                    _runtime_binding=binding,
+                )
+            )
+        finally:
+            vision_tools._VISION_AUTHORIZATION_SNAPSHOT.reset(token)
+
+        violations = []
+        if provider_io:
+            violations.append("direct public call reached Provider I/O")
+        if result.get("success") is not False:
+            violations.append("direct public call did not fail closed")
+        if result.get("status") != "blocked":
+            violations.append("direct public call did not return blocked status")
+        if result.get("error_code") != expected_error_code:
+            violations.append(
+                f"direct public call did not return {expected_error_code}"
+            )
+&gt;       assert violations == [], "; ".join(violations)
+E       AssertionError: direct public call reached Provider I/O; direct public call did not fail closed; direct public call did not return blocked status; direct public call did not return vision_not_verified
+E       assert ['direct publ...not_verified'] == []
+E
+E         Left contains 4 more items, first extra item: 'direct public call reached Provider I/O'
+E         Use -v to get more diff
+
+tests/tools/test_vision_tools.py:1037: AssertionError</failure></testcase><testcase classname="tests.tools.test_vision_tools" name="test_public_vision_tool_cannot_bypass_verification_or_binding_gate[verified-False-vision_binding_required]" time="0.004"><failure message="AssertionError: direct public call reached Provider I/O; direct public call did not fail closed; direct public call did not return blocked status; direct public call did not return vision_binding_required&#10;assert ['direct publ...ing_required'] == []&#10;  &#10;  Left contains 4 more items, first extra item: 'direct public call reached Provider I/O'&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x1081e5450&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2625/test_public_vision_tool_cannot1')
+snapshot_status = 'verified', binding_present = False
+expected_error_code = 'vision_binding_required'
+
+    @pytest.mark.parametrize(
+        ("snapshot_status", "binding_present", "expected_error_code"),
+        [
+            ("configured_unverified", True, "vision_not_verified"),
+            ("verified", False, "vision_binding_required"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_public_vision_tool_cannot_bypass_verification_or_binding_gate(
+        monkeypatch,
+        tmp_path,
+        snapshot_status,
+        binding_present,
+        expected_error_code,
+    ):
+        """Direct public calls must fail closed before auxiliary Provider I/O."""
+        from agent import image_runtime
+        from agent.auxiliary_client import VisionRequestBinding
+        from tools import vision_tools
+
+        image = tmp_path / f"direct-{snapshot_status}.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        available = snapshot_status == "verified"
+        snapshot = {
+            "schema_version": 1,
+            "fingerprint": f"vision-direct-{snapshot_status}",
+            "status": snapshot_status,
+            "available": available,
+            "reason_code": (
+                "ready" if available else "vision_not_verified"
+            ),
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        binding = (
+            VisionRequestBinding(
+                provider="alibaba",
+                model="qwen3-vl-plus",
+                base_url="https://pinned-direct.example.test/v1",
+                api_key="pinned-direct-secret",
+            )
+            if binding_present
+            else None
+        )
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        provider_io = []
+
+        async def provider_call(**kwargs):
+            provider_io.append(kwargs)
+            kwargs["resolution_out"].update(
+                {"provider": "alibaba", "model": "qwen3-vl-plus"}
+            )
+            response = MagicMock()
+            choice = MagicMock()
+            choice.message.content = "direct call bypassed the gate"
+            response.choices = [choice]
+            return response
+
+        monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+        token = vision_tools._VISION_AUTHORIZATION_SNAPSHOT.set(None)
+        try:
+            result = json.loads(
+                await vision_tools.vision_analyze_tool(
+                    str(image),
+                    "describe the direct-call gate",
+                    "qwen3-vl-plus",
+                    provider="alibaba",
+                    strict_target=True,
+                    _runtime_binding=binding,
+                )
+            )
+        finally:
+            vision_tools._VISION_AUTHORIZATION_SNAPSHOT.reset(token)
+
+        violations = []
+        if provider_io:
+            violations.append("direct public call reached Provider I/O")
+        if result.get("success") is not False:
+            violations.append("direct public call did not fail closed")
+        if result.get("status") != "blocked":
+            violations.append("direct public call did not return blocked status")
+        if result.get("error_code") != expected_error_code:
+            violations.append(
+                f"direct public call did not return {expected_error_code}"
+            )
+&gt;       assert violations == [], "; ".join(violations)
+E       AssertionError: direct public call reached Provider I/O; direct public call did not fail closed; direct public call did not return blocked status; direct public call did not return vision_binding_required
+E       assert ['direct publ...ing_required'] == []
+E
+E         Left contains 4 more items, first extra item: 'direct public call reached Provider I/O'
+E         Use -v to get more diff
+
+tests/tools/test_vision_tools.py:1037: AssertionError</failure></testcase></testsuite></testsuites>

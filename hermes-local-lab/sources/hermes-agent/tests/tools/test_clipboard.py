@@ -13,6 +13,7 @@ import queue
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, PropertyMock, mock_open
 
 import pytest
@@ -903,6 +904,32 @@ class TestPreprocessImagesWithVision:
                     cli_obj._image_counter = 0
                     return cli_obj
 
+    @pytest.fixture
+    def frozen_vision_route(self, monkeypatch):
+        from agent import image_runtime
+
+        generation = object()
+        route = SimpleNamespace(
+            provider="aux-provider",
+            model="aux-model",
+        )
+        binding = object()
+        monkeypatch.setattr(
+            image_runtime,
+            "capture_frozen_vision_request_binding",
+            lambda decision, *, generation=None: (
+                binding
+                if decision is route and generation is not None
+                else (_ for _ in ()).throw(
+                    AssertionError("wrong frozen route")
+                )
+            ),
+        )
+        return {
+            "route_decision": route,
+            "capability_generation": generation,
+        }
+
     def _make_image(self, tmp_path, name="test.png", content=FAKE_PNG):
         img = tmp_path / name
         img.write_bytes(content)
@@ -922,10 +949,16 @@ class TestPreprocessImagesWithVision:
             return json.dumps({"success": False, "analysis": "Error"})
         return _fake_vision
 
-    def test_single_image_with_text(self, cli, tmp_path):
+    def test_single_image_with_text(
+        self, cli, tmp_path, frozen_vision_route
+    ):
         img = self._make_image(tmp_path)
         with patch("tools.vision_tools.vision_analyze_tool", side_effect=self._mock_vision_success()):
-            result = cli._preprocess_images_with_vision("Describe this", [img])
+            result = cli._preprocess_images_with_vision(
+                "Describe this",
+                [img],
+                **frozen_vision_route,
+            )
 
         assert isinstance(result, str)
         assert "A test image with colored pixels." in result
@@ -933,10 +966,14 @@ class TestPreprocessImagesWithVision:
         assert str(img) in result
         assert "base64," not in result  # no raw base64 image content
 
-    def test_multiple_images(self, cli, tmp_path):
+    def test_multiple_images(self, cli, tmp_path, frozen_vision_route):
         imgs = [self._make_image(tmp_path, f"img{i}.png") for i in range(3)]
         with patch("tools.vision_tools.vision_analyze_tool", side_effect=self._mock_vision_success()):
-            result = cli._preprocess_images_with_vision("Compare", imgs)
+            result = cli._preprocess_images_with_vision(
+                "Compare",
+                imgs,
+                **frozen_vision_route,
+            )
 
         assert isinstance(result, str)
         assert "Compare" in result
@@ -944,45 +981,72 @@ class TestPreprocessImagesWithVision:
         for img in imgs:
             assert str(img) in result
 
-    def test_empty_text_gets_default_question(self, cli, tmp_path):
+    def test_empty_text_gets_default_question(
+        self, cli, tmp_path, frozen_vision_route
+    ):
         img = self._make_image(tmp_path)
         with patch("tools.vision_tools.vision_analyze_tool", side_effect=self._mock_vision_success()):
-            result = cli._preprocess_images_with_vision("", [img])
+            result = cli._preprocess_images_with_vision(
+                "",
+                [img],
+                **frozen_vision_route,
+            )
         assert isinstance(result, str)
         assert "A test image with colored pixels." in result
 
-    def test_missing_image_skipped(self, cli, tmp_path):
+    def test_missing_image_skipped(
+        self, cli, tmp_path, frozen_vision_route
+    ):
         missing = tmp_path / "gone.png"
         with patch("tools.vision_tools.vision_analyze_tool", side_effect=self._mock_vision_success()):
-            result = cli._preprocess_images_with_vision("test", [missing])
+            result = cli._preprocess_images_with_vision(
+                "test",
+                [missing],
+                **frozen_vision_route,
+            )
         # No images analyzed, falls back to default
         assert result == "test"
 
-    def test_mix_of_existing_and_missing(self, cli, tmp_path):
+    def test_mix_of_existing_and_missing(
+        self, cli, tmp_path, frozen_vision_route
+    ):
         real = self._make_image(tmp_path, "real.png")
         missing = tmp_path / "gone.png"
         with patch("tools.vision_tools.vision_analyze_tool", side_effect=self._mock_vision_success()):
-            result = cli._preprocess_images_with_vision("test", [real, missing])
+            result = cli._preprocess_images_with_vision(
+                "test",
+                [real, missing],
+                **frozen_vision_route,
+            )
         assert str(real) in result
         assert str(missing) not in result
         assert "test" in result
 
-    def test_vision_failure_includes_path(self, cli, tmp_path):
+    def test_vision_failure_stops_turn(
+        self, cli, tmp_path, frozen_vision_route
+    ):
         img = self._make_image(tmp_path)
         with patch("tools.vision_tools.vision_analyze_tool", side_effect=self._mock_vision_failure()):
-            result = cli._preprocess_images_with_vision("check this", [img])
-        assert isinstance(result, str)
-        assert str(img) in result  # path still included for retry
-        assert "check this" in result
+            with pytest.raises(RuntimeError, match="vision_analysis_failed"):
+                cli._preprocess_images_with_vision(
+                    "check this",
+                    [img],
+                    **frozen_vision_route,
+                )
 
-    def test_vision_exception_includes_path(self, cli, tmp_path):
+    def test_vision_exception_stops_turn(
+        self, cli, tmp_path, frozen_vision_route
+    ):
         img = self._make_image(tmp_path)
         async def _explode(**kwargs):
             raise RuntimeError("API down")
         with patch("tools.vision_tools.vision_analyze_tool", side_effect=_explode):
-            result = cli._preprocess_images_with_vision("check this", [img])
-        assert isinstance(result, str)
-        assert str(img) in result  # path still included for retry
+            with pytest.raises(RuntimeError, match="vision_analysis_failed"):
+                cli._preprocess_images_with_vision(
+                    "check this",
+                    [img],
+                    **frozen_vision_route,
+                )
 
 
 # ═════════════════════════════════════════════════════════════════════════

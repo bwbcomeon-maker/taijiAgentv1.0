@@ -401,11 +401,6 @@ def _cmd_migrate(args):
     # Check if a Hermes gateway is running with connected platforms.
     _warn_if_gateway_running(auto_yes)
 
-    # Ensure config.yaml exists before migration tries to read it
-    config_path = get_config_path()
-    if not config_path.exists():
-        save_config(load_config())
-
     # Load the migration module
     try:
         mod = _load_migration_module(script_path)

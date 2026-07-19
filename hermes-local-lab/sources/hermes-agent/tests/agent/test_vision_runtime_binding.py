@@ -4,6 +4,7 @@ import asyncio
 import threading
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 
@@ -131,6 +132,7 @@ def test_concurrent_vision_binding_controls_final_client_url_and_auth(
             api_mode=api_mode,
             network_scope="public_direct",
             endpoint_mode="custom",
+            _authorization_fingerprint=f"binding-{profile}",
         )
         try:
             start.wait(timeout=5)
@@ -139,6 +141,7 @@ def test_concurrent_vision_binding_controls_final_client_url_and_auth(
                 auxiliary_client.async_call_llm(
                     task="vision",
                     vision_binding=binding,
+                    vision_reauth_guard=lambda: None,
                     messages=[{"role": "user", "content": "inspect"}],
                     timeout=1.0,
                     no_fallback=True,
@@ -271,6 +274,7 @@ def test_concurrent_anthropic_vision_binding_controls_final_url_auth_and_model(
             api_key=profiles[profile]["api_key"],
             api_mode="anthropic_messages",
             network_scope="public_direct",
+            _authorization_fingerprint=f"anthropic-binding-{profile}",
         )
         try:
             start.wait(timeout=5)
@@ -279,6 +283,7 @@ def test_concurrent_anthropic_vision_binding_controls_final_url_auth_and_model(
                 auxiliary_client.async_call_llm(
                     task="vision",
                     vision_binding=binding,
+                    vision_reauth_guard=lambda: None,
                     messages=[{"role": "user", "content": "inspect"}],
                     timeout=1.0,
                     no_fallback=True,
@@ -320,6 +325,187 @@ def test_concurrent_anthropic_vision_binding_controls_final_url_auth_and_model(
         }
         for profile_data in profiles.values()
     }
+
+
+@pytest.mark.asyncio
+async def test_frozen_openai_vision_binding_disables_sdk_internal_retries(
+    monkeypatch,
+):
+    import openai
+    from agent import auxiliary_client
+    from agent.auxiliary_client import VisionRequestBinding
+
+    real_async_openai = openai.AsyncOpenAI
+    io_calls = []
+    authorization_current = True
+    clients = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal authorization_current
+        io_calls.append(request)
+        if len(io_calls) == 1:
+            authorization_current = False
+            return httpx.Response(
+                500,
+                request=request,
+                json={
+                    "error": {
+                        "message": "transient failure",
+                        "type": "server_error",
+                        "code": "server_error",
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl-vision-retry",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "vision-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "must not succeed",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    def build_async_openai(**kwargs):
+        kwargs["http_client"] = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        client = real_async_openai(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", build_async_openai)
+    binding = VisionRequestBinding(
+        provider="custom",
+        model="vision-model",
+        base_url="https://vision-openai.example.test/v1",
+        api_key="vision-openai-secret",
+        api_mode="chat_completions",
+        network_scope="public_direct",
+        _authorization_fingerprint="vision-openai-retry-generation",
+    )
+
+    def guard() -> None:
+        if not authorization_current:
+            raise RuntimeError("capability_caller_stale")
+
+    try:
+        with pytest.raises(Exception, match="transient failure"):
+            await auxiliary_client.async_call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "inspect"}],
+                no_fallback=True,
+                vision_binding=binding,
+                vision_reauth_guard=guard,
+            )
+    finally:
+        for client in clients:
+            await client.close()
+
+    assert len(io_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_frozen_anthropic_vision_binding_disables_sdk_internal_retries(
+    monkeypatch,
+):
+    import anthropic
+    from agent import anthropic_adapter, auxiliary_client
+    from agent.auxiliary_client import VisionRequestBinding
+
+    io_calls = []
+    authorization_current = True
+    clients = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal authorization_current
+        io_calls.append(request)
+        if len(io_calls) == 1:
+            authorization_current = False
+            return httpx.Response(
+                500,
+                request=request,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": "transient failure",
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "msg_vision_retry",
+                "type": "message",
+                "role": "assistant",
+                "model": "vision-model",
+                "content": [
+                    {"type": "text", "text": "must not succeed"}
+                ],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    def build_anthropic_client(api_key, base_url, **_kwargs):
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(handler)
+            ),
+        )
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(auxiliary_client, "OpenAI", _FakeSyncOpenAI)
+    monkeypatch.setattr(
+        anthropic_adapter,
+        "build_anthropic_client",
+        build_anthropic_client,
+    )
+    binding = VisionRequestBinding(
+        provider="custom",
+        model="vision-model",
+        base_url="https://vision-anthropic.example.test",
+        api_key="vision-anthropic-secret",
+        api_mode="anthropic_messages",
+        network_scope="public_direct",
+        _authorization_fingerprint="vision-anthropic-retry-generation",
+    )
+
+    def guard() -> None:
+        if not authorization_current:
+            raise RuntimeError("capability_caller_stale")
+
+    try:
+        with pytest.raises(Exception, match="transient failure"):
+            await auxiliary_client.async_call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "inspect"}],
+                no_fallback=True,
+                vision_binding=binding,
+                vision_reauth_guard=guard,
+            )
+    finally:
+        for client in clients:
+            client.close()
+
+    assert len(io_calls) == 1
 
 
 def test_vision_binding_and_client_cache_key_do_not_expose_secret():

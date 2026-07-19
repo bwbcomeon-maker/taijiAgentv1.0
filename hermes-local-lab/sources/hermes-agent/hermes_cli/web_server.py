@@ -10,6 +10,7 @@ Usage:
 """
 
 import asyncio
+import copy
 import hmac
 import importlib.util
 import json
@@ -35,24 +36,34 @@ if str(PROJECT_ROOT) not in sys.path:
 from hermes_cli import __version__, __release_date__
 from hermes_cli.config import (
     cfg_get,
+    ConfigurationConflictError,
     DEFAULT_CONFIG,
+    get_config_snapshot_base,
+    ManagedConfigurationError,
     OPTIONAL_ENV_VARS,
     get_config_path,
     get_env_path,
     get_hermes_home,
+    is_managed,
     load_config,
     load_env,
+    load_raw_config_snapshot,
+    load_web_config_snapshot,
+    parse_raw_config_yaml,
     save_config,
     save_env_value,
     remove_env_value,
     check_config_version,
     redact_key,
+    validate_web_config_draft,
+    WebConfigValidationError,
 )
 from gateway.status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
@@ -65,6 +76,7 @@ except ImportError:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.dashboard", prompt=False)
         from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+        from fastapi.exceptions import RequestValidationError
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
@@ -79,6 +91,109 @@ WEB_DIST = Path(os.environ["HERMES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.enviro
 _log = logging.getLogger(__name__)
 
 app = FastAPI(title="Hermes Agent", version=__version__)
+
+
+def _redact_web_diagnostic_text(value: Any) -> str:
+    """Return one response-safe diagnostic segment without credential data."""
+    from agent.credential_persistence import is_secret_payload_key
+    from agent.redact import redact_sensitive_text
+
+    rendered = str(value)
+    if (
+        is_secret_payload_key(rendered)
+        or redact_sensitive_text(rendered, force=True) != rendered
+    ):
+        return "<redacted>"
+    return rendered
+
+
+@app.exception_handler(RequestValidationError)
+async def _request_validation_error_handler(
+    _request: Request,
+    exc: RequestValidationError,
+):
+    # Pydantic's default 422 payload includes ``detail[].input``. That can
+    # reflect malformed credentials before an endpoint handler gets a chance
+    # to redact them. Preserve actionable schema diagnostics, but never copy
+    # input or context values into the response.
+    detail = []
+    for error in exc.errors():
+        detail.append(
+            {
+                "loc": [
+                    (
+                        part
+                        if isinstance(part, int)
+                        else _redact_web_diagnostic_text(part)
+                    )
+                    for part in error.get("loc", ())
+                ],
+                "msg": _redact_web_diagnostic_text(
+                    error.get("msg", "Invalid value")
+                ),
+                "type": _redact_web_diagnostic_text(
+                    error.get("type", "validation_error")
+                ),
+            }
+        )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": detail,
+            "error_code": "request_validation_error",
+        },
+    )
+
+
+@app.exception_handler(WebConfigValidationError)
+async def _web_config_validation_error_handler(
+    _request: Request,
+    exc: WebConfigValidationError,
+):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": str(exc),
+            "error_code": exc.code,
+        },
+    )
+
+
+@app.exception_handler(ManagedConfigurationError)
+async def _managed_configuration_error_handler(
+    _request: Request,
+    exc: ManagedConfigurationError,
+):
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": str(exc),
+            "error_code": exc.code,
+        },
+    )
+
+
+@app.exception_handler(ConfigurationConflictError)
+async def _configuration_conflict_error_handler(
+    _request: Request,
+    exc: ConfigurationConflictError,
+):
+    safe_path = [
+        _redact_web_diagnostic_text(part)
+        for part in exc.path
+    ]
+    rendered_path = ".".join(safe_path) or "<root>"
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": (
+                "Configuration changed concurrently at "
+                f"{rendered_path}; reload the configuration and retry"
+            ),
+            "error_code": exc.code,
+            "path": safe_path,
+        },
+    )
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -477,6 +592,7 @@ CONFIG_SCHEMA = _ordered_schema
 
 class ConfigUpdate(BaseModel):
     config: dict
+    snapshot_token: Optional[str] = None
 
 
 class EnvVarUpdate(BaseModel):
@@ -908,9 +1024,27 @@ def _normalize_config_for_web(config: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/config")
 async def get_config():
-    config = _normalize_config_for_web(load_config())
-    # Strip internal keys that the frontend shouldn't see or send back
-    return {k: v for k, v in config.items() if not k.startswith("_")}
+    snapshot = load_web_config_snapshot()
+    config = _normalize_config_for_web(snapshot.config)
+    return {
+        key: value
+        for key, value in config.items()
+        if not key.startswith("_")
+    }
+
+
+@app.get("/api/config/draft")
+async def get_config_draft():
+    snapshot = load_web_config_snapshot()
+    config = _normalize_config_for_web(snapshot.config)
+    return {
+        "config": {
+            key: value
+            for key, value in config.items()
+            if not key.startswith("_")
+        },
+        "snapshot_token": snapshot.token,
+    }
 
 
 @app.get("/api/config/defaults")
@@ -1176,6 +1310,8 @@ async def set_model_assignment(body: ModelAssignment):
         }
     except HTTPException:
         raise
+    except ManagedConfigurationError:
+        raise
     except Exception:
         _log.exception("POST /api/model/set failed")
         raise HTTPException(status_code=500, detail="Failed to save model assignment")
@@ -1183,10 +1319,13 @@ async def set_model_assignment(body: ModelAssignment):
 
 
 
-def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
+def _denormalize_config_from_web(
+    config: Dict[str, Any],
+    snapshot_token: str | None,
+) -> Dict[str, Any]:
     """Reverse _normalize_config_for_web before saving.
 
-    Reconstructs ``model`` as a dict by reading the current on-disk config
+    Reconstructs ``model`` as a dict from the immutable draft base
     to recover model subkeys (provider, base_url, api_mode, etc.) that were
     stripped from the GET response.  The frontend only sees model as a flat
     string; the rest is preserved transparently.
@@ -1196,6 +1335,10 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
     from the dict so get_model_context_length() uses its normal resolution).
     """
     config = dict(config)
+    projected_base = validate_web_config_draft(
+        config,
+        snapshot_token,
+    )
     # Remove any _model_meta that might have leaked in (shouldn't happen
     # with the stripped GET response, but be defensive)
     config.pop("_model_meta", None)
@@ -1209,37 +1352,41 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
             ctx_override = 0
 
     model_val = config.get("model")
-    if isinstance(model_val, str) and model_val:
-        # Read the current disk config to recover model subkeys
-        try:
-            disk_config = load_config()
-            disk_model = disk_config.get("model")
-            if isinstance(disk_model, dict):
-                # Preserve all subkeys, update default with the new value
-                disk_model["default"] = model_val
-                # Write context_length into the model dict (0 = remove/auto)
-                if ctx_override > 0:
-                    disk_model["context_length"] = ctx_override
-                else:
-                    disk_model.pop("context_length", None)
-                config["model"] = disk_model
-            # Model was previously a bare string — upgrade to dict if
-            # user is setting a context_length override
-            elif ctx_override > 0:
-                config["model"] = {
-                    "default": model_val,
-                    "context_length": ctx_override,
-                }
-        except Exception:
-            pass  # can't read disk config — just use the string form
+    if isinstance(model_val, str):
+        base_model = projected_base.get("model")
+        if isinstance(base_model, dict):
+            model_config = copy.deepcopy(base_model)
+            model_config["default"] = model_val
+            if ctx_override > 0:
+                model_config["context_length"] = ctx_override
+            else:
+                model_config.pop("context_length", None)
+            config["model"] = model_config
+        elif ctx_override > 0:
+            config["model"] = {
+                "default": model_val,
+                "context_length": ctx_override,
+            }
     return config
 
 
 @app.put("/api/config")
 async def update_config(body: ConfigUpdate):
     try:
-        save_config(_denormalize_config_from_web(body.config))
+        if is_managed():
+            raise ManagedConfigurationError("save configuration")
+        config = _denormalize_config_from_web(
+            body.config,
+            body.snapshot_token,
+        )
+        save_config(config, snapshot_token=body.snapshot_token)
         return {"ok": True}
+    except ManagedConfigurationError:
+        raise
+    except ConfigurationConflictError:
+        raise
+    except WebConfigValidationError:
+        raise
     except Exception:
         _log.exception("PUT /api/config failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1269,6 +1416,8 @@ async def set_env_var(body: EnvVarUpdate):
     try:
         save_env_value(body.key, body.value)
         return {"ok": True, "key": body.key}
+    except ManagedConfigurationError:
+        raise
     except ValueError as exc:
         # save_env_value raises ValueError for invalid names and for keys
         # on the denylist (LD_PRELOAD, PATH, PYTHONPATH, …). Surface the
@@ -1287,6 +1436,8 @@ async def remove_env_var(body: EnvVarDelete):
         if not removed:
             raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")
         return {"ok": True, "key": body.key}
+    except ManagedConfigurationError:
+        raise
     except HTTPException:
         raise
     except Exception:
@@ -3144,26 +3295,31 @@ async def get_toolsets():
 
 class RawConfigUpdate(BaseModel):
     yaml_text: str
+    snapshot_token: Optional[str] = None
 
 
 @app.get("/api/config/raw")
 async def get_config_raw():
-    path = get_config_path()
-    if not path.exists():
-        return {"yaml": ""}
-    return {"yaml": path.read_text(encoding="utf-8")}
+    snapshot = load_raw_config_snapshot()
+    return {
+        "yaml": snapshot.yaml_text,
+        "snapshot_token": snapshot.token,
+        "editable": snapshot.editable,
+        "blocked_reason": snapshot.blocked_reason,
+        "blocked_code": snapshot.blocked_code,
+    }
 
 
 @app.put("/api/config/raw")
 async def update_config_raw(body: RawConfigUpdate):
     try:
-        parsed = yaml.safe_load(body.yaml_text)
-        if not isinstance(parsed, dict):
-            raise HTTPException(status_code=400, detail="YAML must be a mapping")
-        save_config(parsed)
+        if is_managed():
+            raise ManagedConfigurationError("save configuration")
+        parsed = parse_raw_config_yaml(body.yaml_text)
+        save_config(parsed, raw_snapshot_token=body.snapshot_token)
         return {"ok": True}
-    except yaml.YAMLError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------

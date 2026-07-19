@@ -362,6 +362,21 @@ export interface Translations {
     failedToLoadRaw: string;
     configImported: string;
     invalidJson: string;
+    configLoadFailed: string;
+    loadingConfig: string;
+    retryConfigLoad: string;
+    retryRawLoad: string;
+    reloadDiscard: string;
+    reloadDiscardTitle: string;
+    reloadDiscardDescription: string;
+    reloadDiscardConfirm: string;
+    resetDescription: string;
+    rawBlockedLiteralCredentials: string;
+    rawBlockedInvalidUtf8: string;
+    rawBlockedUnsafeYaml: string;
+    rawBlockedTooLarge: string;
+    rawBlockedUnsafeFile: string;
+    rawBlockedUnknown: string;
     categories: {
       general: string;
       agent: string;

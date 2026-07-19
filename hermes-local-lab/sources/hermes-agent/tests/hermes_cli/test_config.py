@@ -11,6 +11,7 @@ import yaml
 
 from agent.provider_credentials import credential_transaction
 from hermes_cli.config import (
+    ConfigurationConflictError,
     DEFAULT_CONFIG,
     get_hermes_home,
     get_config_path,
@@ -18,7 +19,9 @@ from hermes_cli.config import (
     ensure_hermes_home,
     get_compatible_custom_providers,
     load_config,
+    load_config_snapshot,
     load_env,
+    load_raw_config_snapshot,
     migrate_config,
     remove_env_value,
     save_config,
@@ -288,6 +291,492 @@ class TestSaveAndLoadRoundtrip:
 
             assert config_path.read_bytes() == ambiguous
 
+    def test_stale_loaded_snapshot_preserves_unrelated_canonical_mutation(
+        self,
+        tmp_path,
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            stale = load_config()
+            stale["agent"]["max_turns"] = 37
+
+            (tmp_path / "config.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "provider_credentials": {
+                            "concurrent-provider": {
+                                "kind": "api_key",
+                                "secret_env": "CONCURRENT_PROVIDER_API_KEY",
+                            }
+                        }
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            save_config(stale)
+
+            saved = yaml.safe_load(
+                (tmp_path / "config.yaml").read_text(encoding="utf-8")
+            )
+            assert saved["agent"]["max_turns"] == 37
+            assert saved["provider_credentials"]["concurrent-provider"] == {
+                "kind": "api_key",
+                "secret_env": "CONCURRENT_PROVIDER_API_KEY",
+            }
+
+    def test_deepcopied_stale_snapshot_preserves_unrelated_canonical_mutation(
+        self,
+        tmp_path,
+    ):
+        import copy
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            stale = copy.deepcopy(load_config())
+            stale["agent"]["max_turns"] = 41
+
+            (tmp_path / "config.yaml").write_text(
+                yaml.safe_dump(
+                    {"concurrent_unrelated": {"kept": True}},
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            save_config(stale)
+
+            saved = yaml.safe_load(
+                (tmp_path / "config.yaml").read_text(encoding="utf-8")
+            )
+            assert saved["agent"]["max_turns"] == 41
+            assert saved["concurrent_unrelated"] == {"kept": True}
+
+    def test_plain_dict_snapshot_survives_env_rotation_and_concurrent_update(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        config_path = tmp_path / "config.yaml"
+        original_secret = "secret-at-load-time"
+        rotated_secret = "secret-after-rotation"
+        raw = {
+            "agent": {"max_turns": 10},
+            "custom_providers": [
+                {
+                    "name": "rotating-provider",
+                    "api_key": "${ROTATING_PROVIDER_API_KEY}",
+                    "model": "test/model",
+                }
+            ],
+        }
+        config_path.write_text(
+            yaml.safe_dump(raw, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            monkeypatch.setenv(
+                "ROTATING_PROVIDER_API_KEY",
+                original_secret,
+            )
+            draft = load_config_snapshot()
+            stale_plain_dict = dict(draft.config)
+            assert (
+                stale_plain_dict["custom_providers"][0]["api_key"]
+                == original_secret
+            )
+
+            concurrent = {
+                **raw,
+                "concurrent_unrelated": {"kept": True},
+            }
+            config_path.write_text(
+                yaml.safe_dump(concurrent, sort_keys=False),
+                encoding="utf-8",
+            )
+            monkeypatch.setenv(
+                "ROTATING_PROVIDER_API_KEY",
+                rotated_secret,
+            )
+            # A later reader refreshes the process-wide expanded cache. The
+            # stale plain dict must still retain its own load-time base.
+            assert (
+                load_config()["custom_providers"][0]["api_key"]
+                == rotated_secret
+            )
+
+            stale_plain_dict["agent"]["max_turns"] = 37
+            save_config(
+                stale_plain_dict,
+                snapshot_token=draft.token,
+            )
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agent"]["max_turns"] == 37
+        assert saved["concurrent_unrelated"] == {"kept": True}
+        assert (
+            saved["custom_providers"][0]["api_key"]
+            == "${ROTATING_PROVIDER_API_KEY}"
+        )
+        persisted_text = config_path.read_text(encoding="utf-8")
+        assert original_secret not in persisted_text
+        assert rotated_secret not in persisted_text
+
+    def test_independent_plain_dict_snapshots_do_not_share_mutable_base(
+        self,
+        tmp_path,
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            first_draft = load_config_snapshot()
+            second_draft = load_config_snapshot()
+            assert first_draft.token == second_draft.token
+            first = dict(first_draft.config)
+            second = dict(second_draft.config)
+
+            first["agent"]["max_turns"] = 20
+            save_config(first, snapshot_token=first_draft.token)
+            second["display"]["skin"] = "compact"
+            save_config(second, snapshot_token=second_draft.token)
+
+            saved = yaml.safe_load(
+                (tmp_path / "config.yaml").read_text(encoding="utf-8")
+            )
+            assert saved["agent"]["max_turns"] == 20
+            assert saved["display"]["skin"] == "compact"
+
+    def test_loaded_snapshot_json_does_not_expose_internal_token(
+        self,
+        tmp_path,
+    ):
+        import json
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            loaded = load_config()
+            encoded = json.dumps(loaded)
+            dumped_yaml = yaml.safe_dump(loaded)
+
+        assert "config_snapshot_token" not in encoded
+        assert "config_snapshot_token" not in dumped_yaml
+
+    def test_snapshot_repr_redacts_config_secret_and_token(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "secret: ${SNAPSHOT_REPR_SECRET}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("SNAPSHOT_REPR_SECRET", "repr-secret-value")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            snapshot = load_config_snapshot()
+
+        rendered = repr(snapshot)
+        assert "repr-secret-value" not in rendered
+        assert snapshot.token not in rendered
+
+    def test_raw_snapshot_repr_redacts_yaml_and_token(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model: safe-model\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            snapshot = load_raw_config_snapshot()
+
+        rendered = repr(snapshot)
+        assert "safe-model" not in rendered
+        assert snapshot.token not in rendered
+
+    def test_evicted_plain_dict_snapshot_fails_closed(
+        self,
+        tmp_path,
+    ):
+        from hermes_cli.config import _LOADED_CONFIG_SNAPSHOT_LIMIT
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text("revision: -1\n", encoding="utf-8")
+            stale_draft = load_config_snapshot()
+            stale = dict(stale_draft.config)
+            for revision in range(_LOADED_CONFIG_SNAPSHOT_LIMIT):
+                config_path.write_text(
+                    f"revision: {revision}\n",
+                    encoding="utf-8",
+                )
+                load_config_snapshot()
+            before = config_path.read_bytes()
+
+            stale["agent"]["max_turns"] = 91
+            with pytest.raises(ConfigurationConflictError) as exc:
+                save_config(stale, snapshot_token=stale_draft.token)
+
+        assert exc.value.code == "configuration_conflict"
+        assert exc.value.path == ("<snapshot>",)
+        after = config_path.read_bytes()
+        assert after == before
+
+    def test_explicit_missing_snapshot_cannot_replace_existing_config(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("model: original\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            with pytest.raises(ConfigurationConflictError) as exc:
+                save_config(
+                    {"model": "replacement"},
+                    snapshot_token=None,
+                )
+
+        assert exc.value.path == ("<snapshot>",)
+        assert config_path.read_text(encoding="utf-8") == "model: original\n"
+
+    def test_legacy_plain_dict_writer_remains_supported(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("model: original\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_config({"model": "replacement"})
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["model"] == "replacement"
+
+    def test_successful_direct_save_refreshes_only_that_draft_token(
+        self,
+        tmp_path,
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            first = load_config()
+            independent = load_config()
+            shared_token = first._save_token
+            assert independent._save_token == shared_token
+
+            first["model"] = "first-save"
+            save_config(first)
+            assert first._save_token != shared_token
+            assert independent._save_token == shared_token
+
+            first["model"] = "second-save"
+            save_config(first)
+
+        saved = yaml.safe_load(
+            (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert saved["model"] == "second-save"
+
+    def test_repeated_direct_save_keeps_concurrent_field_merged_on_first_save(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "agent:\n  max_turns: 10\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            draft = load_config()
+            draft["agent"]["max_turns"] = 11
+            config_path.write_text(
+                (
+                    "agent:\n"
+                    "  max_turns: 10\n"
+                    "concurrent_unrelated:\n"
+                    "  kept: true\n"
+                ),
+                encoding="utf-8",
+            )
+
+            save_config(draft)
+            assert draft["concurrent_unrelated"] == {"kept": True}
+
+            draft["agent"]["max_turns"] = 12
+            save_config(draft)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agent"]["max_turns"] == 12
+        assert saved["concurrent_unrelated"] == {"kept": True}
+
+    def test_ordinary_reads_do_not_evict_same_revision_snapshot(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agent:\n  max_turns: 10\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            draft = load_config_snapshot()
+            for _ in range(100):
+                load_config()
+            draft.config["agent"]["max_turns"] = 11
+            save_config(draft.config, snapshot_token=draft.token)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agent"]["max_turns"] == 11
+
+    def test_stale_snapshot_delete_conflicts_with_concurrent_update(
+        self,
+        tmp_path,
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {"conflict": {"delete_me": "base"}},
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            stale = load_config()
+            del stale["conflict"]["delete_me"]
+            concurrent = {"conflict": {"delete_me": "concurrent"}}
+            config_path.write_text(
+                yaml.safe_dump(concurrent, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            with pytest.raises(ConfigurationConflictError) as exc:
+                save_config(stale)
+
+            assert exc.value.code == "configuration_conflict"
+            assert exc.value.path == ("conflict", "delete_me")
+            assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == concurrent
+
+    def test_stale_snapshot_add_conflicts_with_concurrent_add(
+        self,
+        tmp_path,
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump({"conflict": {}}, sort_keys=False),
+                encoding="utf-8",
+            )
+            stale = load_config()
+            stale["conflict"]["new_key"] = "caller-secret-value"
+            concurrent = {
+                "conflict": {"new_key": "concurrent-secret-value"}
+            }
+            config_path.write_text(
+                yaml.safe_dump(concurrent, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            with pytest.raises(ConfigurationConflictError) as exc:
+                save_config(stale)
+
+            assert exc.value.code == "configuration_conflict"
+            assert exc.value.path == ("conflict", "new_key")
+            assert "caller-secret-value" not in str(exc.value)
+            assert "concurrent-secret-value" not in str(exc.value)
+            assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == concurrent
+
+    def test_nested_type_change_conflicts_instead_of_overwrite(
+        self,
+        tmp_path,
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {"conflict": {"node": {"child": "base"}}},
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            stale = load_config()
+            stale["conflict"]["node"] = "caller"
+            concurrent = {"conflict": {"node": {"child": "concurrent"}}}
+            config_path.write_text(
+                yaml.safe_dump(concurrent, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            with pytest.raises(ConfigurationConflictError) as exc:
+                save_config(stale)
+
+            assert exc.value.code == "configuration_conflict"
+            assert exc.value.path == ("conflict", "node")
+            assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == concurrent
+
+    def test_three_way_merge_treats_bool_and_int_as_distinct_values(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"typed": {"value": 1}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            stale = load_config()
+            stale["typed"]["value"] = True
+            save_config(stale)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["typed"]["value"] is True
+
+    def test_three_way_merge_treats_unchanged_nan_as_equal(
+        self,
+        tmp_path,
+    ):
+        import math
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "typed:\n  value: .nan\nagent:\n  max_turns: 10\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            draft = load_config()
+            draft["agent"]["max_turns"] = 11
+            save_config(draft)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert math.isnan(saved["typed"]["value"])
+        assert saved["agent"]["max_turns"] == 11
+
+    @pytest.mark.parametrize("writer", [save_config, save_env_value])
+    def test_managed_mode_writers_raise_instead_of_reporting_success(
+        self,
+        writer,
+        tmp_path,
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_HOME": str(tmp_path),
+                "HERMES_MANAGED": "nixos",
+            },
+        ):
+            args = ({"model": "test/model"},) if writer is save_config else (
+                "TEST_API_KEY",
+                "secret",
+            )
+            with pytest.raises(RuntimeError, match="managed by NixOS") as exc:
+                writer(*args)
+
+            assert getattr(exc.value, "code", None) == "managed_configuration"
+            assert not (tmp_path / "config.yaml").exists()
+            assert not (tmp_path / ".env").exists()
+            assert not (
+                tmp_path / ".taiji-credential-transaction.lock"
+            ).exists()
+
 
 class TestSaveEnvValueSecure:
     def test_save_env_value_writes_without_stdout(self, tmp_path, capsys):
@@ -327,6 +816,36 @@ class TestSaveEnvValueSecure:
                 "validated": False,
             }
             assert "secret" not in str(result).lower()
+
+    def test_secure_save_returns_machine_readable_managed_failure(self, tmp_path):
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_HOME": str(tmp_path),
+                "HERMES_MANAGED": "nixos",
+            },
+        ):
+            result = save_env_value_secure(
+                "GITHUB_TOKEN",
+                "ghp_must_not_be_returned",
+            )
+
+        assert result == {
+            "success": False,
+            "stored_as": "GITHUB_TOKEN",
+            "validated": False,
+            "reason": "managed_configuration",
+            "error_code": "managed_configuration",
+            "message": (
+                "Cannot set GITHUB_TOKEN: this Hermes installation is managed "
+                "by NixOS (HERMES_MANAGED=nixos).\n"
+                "Edit services.hermes-agent.settings in your configuration.nix "
+                "and run:\n"
+                "  sudo nixos-rebuild switch"
+            ),
+        }
+        assert "ghp_must_not_be_returned" not in str(result)
+        assert not (tmp_path / ".env").exists()
 
     def test_save_env_value_updates_process_environment(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
@@ -374,6 +893,26 @@ def test_anthropic_pair_writers_hold_one_outer_transaction(invoke):
 
 
 class TestRemoveEnvValue:
+    def test_managed_mode_rejects_before_transaction_state_is_created(
+        self,
+        tmp_path,
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_HOME": str(tmp_path),
+                "HERMES_MANAGED": "nixos",
+            },
+        ):
+            with pytest.raises(RuntimeError, match="managed by NixOS") as exc:
+                remove_env_value("TEST_API_KEY")
+
+        assert getattr(exc.value, "code", None) == "managed_configuration"
+        assert not (tmp_path / ".env").exists()
+        assert not (
+            tmp_path / ".taiji-credential-transaction.lock"
+        ).exists()
+
     def test_removes_key_from_env_file(self, tmp_path):
         env_path = tmp_path / ".env"
         env_path.write_text("KEY_A=value_a\nKEY_B=value_b\nKEY_C=value_c\n")

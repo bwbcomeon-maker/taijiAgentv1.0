@@ -15,6 +15,26 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 from hermes_constants import display_hermes_home
 
 
+def _finish_secret_save(var_name: str, stored: dict) -> dict:
+    """Render and return a truthful result for one secret save attempt."""
+    result = {**stored, "skipped": False}
+    if stored.get("success") is True:
+        _dhh = display_hermes_home()
+        cprint(f"\n{_DIM}  ✓ Stored secret in {_dhh}/.env as {var_name}{_RST}")
+        result["message"] = (
+            "Secret stored securely. The secret value was not exposed to the model."
+        )
+        return result
+
+    message = str(
+        stored.get("message")
+        or "Secret could not be stored. Review the runtime configuration."
+    )
+    result["message"] = message
+    cprint(f"\n{_DIM}  ✗ {message}{_RST}")
+    return result
+
+
 def clarify_callback(cli, question, choices):
     """Prompt for clarifying question through the TUI.
 
@@ -91,13 +111,7 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
             }
 
         stored = save_env_value_secure(var_name, value)
-        _dhh = display_hermes_home()
-        cprint(f"\n{_DIM}  ✓ Stored secret in {_dhh}/.env as {var_name}{_RST}")
-        return {
-            **stored,
-            "skipped": False,
-            "message": "Secret stored securely. The secret value was not exposed to the model.",
-        }
+        return _finish_secret_save(var_name, stored)
 
     timeout = 120
     response_queue = queue.Queue()
@@ -144,13 +158,7 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
                 }
 
             stored = save_env_value_secure(var_name, value)
-            _dhh = display_hermes_home()
-            cprint(f"\n{_DIM}  ✓ Stored secret in {_dhh}/.env as {var_name}{_RST}")
-            return {
-                **stored,
-                "skipped": False,
-                "message": "Secret stored securely. The secret value was not exposed to the model.",
-            }
+            return _finish_secret_save(var_name, stored)
         except queue.Empty:
             remaining = cli._secret_deadline - _time.monotonic()
             if remaining <= 0:

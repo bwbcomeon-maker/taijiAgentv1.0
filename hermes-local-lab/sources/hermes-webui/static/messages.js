@@ -222,6 +222,7 @@ const _sessionTitleProvisionalBySid = new Map();
 const _VISION_RECOVERY_TYPES=new Set(['vision_analysis_error','vision_configuration_error','image_attachment_error']);
 const _visionRecoveryById=new Map();
 let _visionRecoverySequence=0;
+let _visionSettingsReturnFocus=null;
 
 function _storeVisionRecovery(activeSid,text,attachments,type){
   const id=`vision-recovery-${Date.now()}-${++_visionRecoverySequence}`;
@@ -298,9 +299,57 @@ async function retryVisionAnalysis(button,recoveryId){
   return !!accepted;
 }
 
-function openVisionRecognitionSettings(){
+function openVisionRecognitionSettings(trigger){
+  if(trigger&&typeof trigger.focus==='function') _visionSettingsReturnFocus=trigger;
   if(typeof switchSettingsSection==='function') switchSettingsSection('models');
   if(typeof toggleModelConfigSection==='function') toggleModelConfigSection('visionConfigEdit',true);
+  setTimeout(()=>{
+    const firstControl=$('visionConfigCredential')||$('visionConfigProvider')||$('visionConfigModel');
+    if(firstControl&&!firstControl.hidden&&!firstControl.disabled&&typeof firstControl.focus==='function') firstControl.focus();
+  },0);
+}
+
+function restoreVisionRecognitionSettingsFocus(){
+  const target=_visionSettingsReturnFocus;
+  _visionSettingsReturnFocus=null;
+  if(!target||target.isConnected===false||typeof target.focus!=='function') return false;
+  setTimeout(()=>target.focus(),0);
+  return true;
+}
+
+function _normalizeCapabilityRouteEvent(value){
+  const data=value&&typeof value==='object'?value:{};
+  const normalized={};
+  for(const field of ['capability','status','reason_code','route','provider','model','tool_call_id']){
+    const text=String(data[field]||'').trim();
+    if(text) normalized[field]=text.slice(0,160);
+  }
+  if(!normalized.capability||!normalized.route) return null;
+  normalized.schema_version=Number(data.schema_version)||1;
+  return normalized;
+}
+
+function _capabilityRouteEventKey(value){
+  const data=value||{};
+  return [
+    data.tool_call_id||'',
+    data.capability||'',
+    data.route||'',
+    data.reason_code||'',
+    data.provider||'',
+    data.model||'',
+  ].join('|');
+}
+
+function _mergeCapabilityRouteEvent(events,value){
+  const normalized=_normalizeCapabilityRouteEvent(value);
+  const current=Array.isArray(events)?events.slice():[];
+  if(!normalized) return current;
+  const key=_capabilityRouteEventKey(normalized);
+  const index=current.findIndex(item=>_capabilityRouteEventKey(item)===key);
+  if(index>=0) current[index]=normalized;
+  else current.push(normalized);
+  return current.slice(-12);
 }
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
@@ -1050,6 +1099,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     : null;
   let assistantText = _lastLiveAssistant ? (_lastLiveAssistant.content || '') : '';
   let reasoningText = _lastLiveAssistant ? (_lastLiveAssistant.reasoning || '') : '';
+  let capabilityRouteEvents = _lastLiveAssistant&&Array.isArray(_lastLiveAssistant.capability_route_events)
+    ? _lastLiveAssistant.capability_route_events.slice()
+    : [];
   let liveReasoningText = reasoningText;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
@@ -1203,11 +1255,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(assistantIdx>=0){
       inflight.messages[assistantIdx].content=assistantText;
       inflight.messages[assistantIdx].reasoning=reasoningText||undefined;
+      inflight.messages[assistantIdx].capability_route_events=capabilityRouteEvents.length?capabilityRouteEvents:undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
       _throttledPersist();
       return;
     }
-    inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
+    inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,
+      capability_route_events:capabilityRouteEvents.length?capabilityRouteEvents:undefined,_live:true,_ts:ts});
     _throttledPersist();
   }
   function ensureAssistantRow(force=false){
@@ -2028,6 +2082,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
+    source.addEventListener('capability_route',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      let data=null;
+      try{data=JSON.parse(e.data||'{}');}catch(_){return;}
+      capabilityRouteEvents=_mergeCapabilityRouteEvent(capabilityRouteEvents,data);
+      if(!capabilityRouteEvents.length) return;
+      syncInflightAssistantMessage();
+      persistInflightState();
+      if(!S.session||S.session.session_id!==activeSid) return;
+      const latest=capabilityRouteEvents[capabilityRouteEvents.length-1];
+      const label=typeof _capabilityRouteMetadataText==='function'
+        ?_capabilityRouteMetadataText(latest)
+        :`${latest.capability}: ${latest.route} (${latest.reason_code||'unknown'})`;
+      if(typeof setComposerStatus==='function') setComposerStatus(label);
+      snapshotLiveTurn();
+    });
+
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
@@ -2756,7 +2827,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','capability_route','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -2779,7 +2850,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','image_generation_events'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','image_generation_events','capability_route_events'];
   function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
     if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
     if(!prevMessages.length||!nextMessages.length) return nextMessages;

@@ -463,6 +463,7 @@ def test_forced_refresh_rejects_drift_before_publishing_identity(
         "config-after",
         "verified",
         True,
+        "",
     )
     assert attempts == ["build"]
 
@@ -892,18 +893,28 @@ def test_capability_route_decision_is_frozen_and_projects_only_public_identity()
         ["mutable-nested-list"],
         {"nested": "mutable-nested-dict"},
     ):
-        unsafe_production_binding = ImageGenRequestBinding(
+        frozen_production_binding = ImageGenRequestBinding(
             provider="dashscope",
             model="qwen-image-2.0-pro",
-            api_key="unsafe-production-binding-secret",
+            api_key="frozen-production-binding-secret",
             runtime_identity={"unsafe": nested_mutable},
         )
-        with pytest.raises(TypeError, match="deeply immutable frozen dataclass"):
-            factory(
-                "image_generation",
-                snapshot=mutable_snapshot,
-                request_binding=unsafe_production_binding,
+        frozen_decision = factory(
+            "image_generation",
+            snapshot=mutable_snapshot,
+            request_binding=frozen_production_binding,
+        )
+        assert frozen_decision._request_binding is frozen_production_binding
+        if isinstance(nested_mutable, list):
+            assert (
+                frozen_production_binding.runtime_identity["unsafe"]
+                == ("mutable-nested-list",)
             )
+        else:
+            with pytest.raises(TypeError):
+                frozen_production_binding.runtime_identity["unsafe"][
+                    "nested"
+                ] = "mutated"
 
     projection = projector(decision)
     assert projection == {

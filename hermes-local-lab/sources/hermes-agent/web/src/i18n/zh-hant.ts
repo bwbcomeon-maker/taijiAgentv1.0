@@ -1,4 +1,5 @@
 import type { Translations } from "./types";
+import { en } from "./en";
 
 export const zhHant: Translations = {
   common: {
@@ -322,6 +323,7 @@ export const zhHant: Translations = {
   },
 
   config: {
+    ...en.config,
     configPath: "~/.hermes/config.yaml",
     filters: "篩選",
     sections: "分類",

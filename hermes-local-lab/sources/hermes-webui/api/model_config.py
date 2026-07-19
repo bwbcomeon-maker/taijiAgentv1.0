@@ -19,10 +19,16 @@ import stat
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:  # pragma: no cover - Windows uses a named mutex below.
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows.
+    _fcntl = None
 
 from agent.provider_credentials import (
     credential_transaction,
@@ -36,12 +42,22 @@ from agent.provider_credentials import (
     resolve_api_key,
     resolve_secret_env_value,
 )
-from agent.auxiliary_client import VisionRequestBinding
+from agent.auxiliary_client import (
+    VisionRequestBinding,
+    authorize_vision_request_binding,
+)
 from plugins.image_gen.domestic_common import credential_field, normalized_setup_contract
 from agent.alibaba_endpoints import build_vision_base_url
 from agent.image_gen_verification import (
+    CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+    CAPABILITY_CONFIG_EPOCH_VISION,
     CAPABILITY_VERIFICATION_SCHEMA_VERSION,
     ImageGenRequestBinding,
+    active_custom_provider_identity,
+    authorize_image_gen_request_binding,
+    bump_capability_config_epochs,
+    build_image_gen_request_reauth_guard,
+    capability_epochs_for_secret_env,
     expand_effective_config,
     image_gen_fingerprint as shared_image_gen_fingerprint,
     image_gen_fingerprint_from_material as shared_image_gen_fingerprint_from_material,
@@ -54,6 +70,7 @@ from agent.image_gen_verification import (
 from agent.image_runtime import (
     VisionResolvedMaterial,
     resolve_vision_material,
+    verification_authorization_generation,
     vision_fingerprint,
     vision_fingerprint_from_material,
 )
@@ -78,6 +95,182 @@ from api.providers import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DURABLE_MUTATION_REFRESH_WARNING = "durable_mutation_refresh_pending"
+_UNSET_SECRET_VALUE = object()
+
+
+@dataclass(frozen=True)
+class _VerificationInvalidationToken:
+    """Ownership proof for replacing one capability state with a tombstone."""
+
+    capability: str
+    profile: str
+    generation: int
+    state_identity: str
+
+
+def _deduplicated_warnings(warnings: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(item) for item in warnings if str(item)))
+
+
+def _required_invalidation_token(
+    token: _VerificationInvalidationToken | None,
+    *,
+    capability: str,
+) -> _VerificationInvalidationToken:
+    if token is None or token.capability != capability:
+        raise RuntimeError(
+            f"missing {capability} verification invalidation token"
+        )
+    return token
+
+
+def _run_durable_mutation_post_commit_hook(
+    mutation: str,
+    *,
+    invalidate_vision: bool = False,
+    invalidate_image: bool = False,
+    vision_invalidation_token: _VerificationInvalidationToken | None = None,
+    image_invalidation_token: _VerificationInvalidationToken | None = None,
+) -> list[str]:
+    """Refresh process-local capability state after one durable mutation.
+
+    The caller must invoke this only after every persistence/profile lock has
+    been released.  Each action is best-effort because the durable file/env or
+    verification-state commit is already authoritative at this boundary.
+    """
+    actions: list[tuple[str, Any]] = [
+        ("runtime_config_refresh_pending", reload_config),
+        ("models_cache_refresh_pending", invalidate_models_cache),
+    ]
+    if invalidate_vision:
+        actions.append(
+            (
+                "vision_verification_refresh_pending",
+                lambda: _invalidate_vision_verification(
+                    _required_invalidation_token(
+                        vision_invalidation_token,
+                        capability="vision",
+                    )
+                ),
+            )
+        )
+    if invalidate_image:
+        actions.append(
+            (
+                "image_gen_verification_refresh_pending",
+                lambda: _invalidate_image_gen_verification(
+                    _required_invalidation_token(
+                        image_invalidation_token,
+                        capability="image",
+                    )
+                ),
+            )
+        )
+
+    warnings: list[str] = []
+    for warning, action in actions:
+        try:
+            action()
+        except Exception:
+            logger.warning(
+                "Durable model mutation post-commit refresh failed "
+                "(mutation=%s, warning=%s)",
+                mutation,
+                warning,
+                exc_info=True,
+            )
+            warnings.append(warning)
+    return _deduplicated_warnings(warnings)
+
+
+def _invoke_durable_mutation_post_commit(
+    mutation: str,
+    *,
+    invalidate_vision: bool = False,
+    invalidate_image: bool = False,
+    vision_invalidation_token: _VerificationInvalidationToken | None = None,
+    image_invalidation_token: _VerificationInvalidationToken | None = None,
+) -> list[str]:
+    """Invoke the single post-commit seam without reclassifying a saved write."""
+    try:
+        warnings = _run_durable_mutation_post_commit_hook(
+            mutation,
+            invalidate_vision=invalidate_vision,
+            invalidate_image=invalidate_image,
+            vision_invalidation_token=vision_invalidation_token,
+            image_invalidation_token=image_invalidation_token,
+        )
+    except Exception:
+        logger.warning(
+            "Durable model mutation post-commit hook failed (mutation=%s)",
+            mutation,
+            exc_info=True,
+        )
+        return [_DURABLE_MUTATION_REFRESH_WARNING]
+    return _deduplicated_warnings(list(warnings or []))
+
+
+def _merge_post_commit_warnings(
+    response: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    existing = response.get("warnings")
+    combined = _deduplicated_warnings(
+        [
+            *(existing if isinstance(existing, list) else []),
+            *warnings,
+        ]
+    )
+    if combined:
+        response["refresh_pending"] = True
+        response["warnings"] = combined
+    elif "refresh_pending" in response or "warnings" in response:
+        response["refresh_pending"] = False
+        response["warnings"] = []
+    return response
+
+
+def _project_successful_verification_invalidation(
+    response: dict[str, Any],
+    warnings: list[str],
+    *,
+    capability: str,
+) -> dict[str, Any]:
+    """Project a successful state-file invalidation onto a frozen response."""
+    if capability == "vision":
+        section = "vision"
+        warning = "vision_verification_refresh_pending"
+        message = "识图配置已保存，但尚未通过真实图片验证。"
+    elif capability == "image":
+        section = "image_gen"
+        warning = "image_gen_verification_refresh_pending"
+        message = "生图配置已保存，但尚未通过真实生成验证。"
+    else:
+        raise ValueError(f"unsupported verification capability: {capability}")
+    if warning in warnings or _DURABLE_MUTATION_REFRESH_WARNING in warnings:
+        return response
+    capability_projection = response.get(section)
+    if not isinstance(capability_projection, dict):
+        return response
+    verification = capability_projection.get("verification")
+    if (
+        not isinstance(verification, dict)
+        or verification.get("status")
+        not in {"verifying", "verified", "failed"}
+    ):
+        return response
+    frozen = copy.deepcopy(response)
+    frozen[section]["verification"] = {
+        "status": "configured_unverified",
+        "checked_at": "",
+        "error_code": "",
+        "message": message,
+        "diagnostic_id": "",
+    }
+    return frozen
+
 
 _CUSTOM_MODEL_KEY_ENV = "HERMES_CUSTOM_MODEL_API_KEY"
 _IMAGE_GEN_KEY_ENV: dict[str, str] = {
@@ -286,6 +479,18 @@ def _commit_expected_config_env(
 
 def _provider_credential_used_by(config_data: dict[str, Any], credential_id: str) -> list[str]:
     used_by: list[str] = []
+    _target_index, target_row = _provider_credential_row(
+        config_data,
+        credential_id,
+    )
+    target_family = (
+        provider_family(target_row.get("provider_family"))
+        if isinstance(target_row, dict)
+        else ""
+    )
+    target_is_default = bool(
+        isinstance(target_row, dict) and target_row.get("default")
+    )
     auxiliary = config_data.get("auxiliary")
     vision = auxiliary.get("vision") if isinstance(auxiliary, dict) else None
     image_gen = config_data.get("image_gen")
@@ -293,27 +498,51 @@ def _provider_credential_used_by(config_data: dict[str, Any], credential_id: str
         if not isinstance(section, dict):
             continue
         raw_ref = section.get("credential_ref")
-        try:
-            ref = normalize_credential_id(raw_ref)
-        except ValueError:
-            continue
-        if ref == credential_id:
-            used_by.append(path)
-    for config_key in ("custom_image_providers", "custom_vision_providers"):
-        entries = config_data.get(config_key)
-        if not isinstance(entries, list):
-            continue
-        for index, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
+        ref = str(raw_ref or "").strip()
+        if ref:
             try:
-                ref = normalize_credential_id(entry.get("credential_ref"))
+                ref = normalize_credential_id(ref)
             except ValueError:
                 continue
-            if ref != credential_id:
+        if ref == credential_id:
+            used_by.append(path)
+            continue
+        provider = str(section.get("provider") or "").strip().lower()
+        if not ref and provider.startswith("custom:"):
+            custom_key = (
+                "custom_vision_providers"
+                if path == "auxiliary.vision"
+                else "custom_image_providers"
+            )
+            requested_id = provider.split(":", 1)[1]
+            entries = config_data.get(custom_key)
+            if not isinstance(entries, list):
                 continue
-            provider_id = str(entry.get("id") or index).strip() or str(index)
-            used_by.append(f"{config_key}.{provider_id}")
+            for entry in entries:
+                if (
+                    not isinstance(entry, dict)
+                    or str(entry.get("id") or "").strip().lower()
+                    != requested_id
+                ):
+                    continue
+                try:
+                    entry_ref = normalize_credential_id(
+                        entry.get("credential_ref")
+                    )
+                except ValueError:
+                    entry_ref = ""
+                if entry_ref == credential_id:
+                    used_by.append(path)
+                break
+            continue
+        if (
+            not ref
+            and target_is_default
+            and target_family
+            and target_family != "custom"
+            and provider_family(provider) == target_family
+        ):
+            used_by.append(path)
     return used_by
 
 
@@ -457,24 +686,35 @@ def _public_provider_credential(
     }
 
 
+def _public_provider_credentials_config(
+    config_data: dict[str, Any],
+) -> dict[str, Any]:
+    rows = config_data.get("provider_credentials")
+    credentials: list[dict[str, Any]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                credentials.append(
+                    _public_provider_credential(
+                        row,
+                        config_data=config_data,
+                    )
+                )
+            except ValueError:
+                continue
+    return {
+        "ok": True,
+        "profile": _active_profile_name(),
+        "credentials": credentials,
+    }
+
+
 def get_provider_credentials_config() -> dict[str, Any]:
     with credential_transaction(_get_config_path()):
         config_data = load_credential_config(_get_config_path())
-        rows = config_data.get("provider_credentials")
-        credentials: list[dict[str, Any]] = []
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                try:
-                    credentials.append(_public_provider_credential(row, config_data=config_data))
-                except ValueError:
-                    continue
-        return {
-            "ok": True,
-            "profile": _active_profile_name(),
-            "credentials": credentials,
-        }
+        return _public_provider_credentials_config(config_data)
 
 
 def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
@@ -537,6 +777,73 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
                     stored[lifecycle_key] = previous_row[lifecycle_key]
         if default_value:
             stored["default"] = True
+        env_updates = (
+            {secret_env: secret_value}
+            if secret_value
+            else {}
+        )
+        committed_config = copy.deepcopy(config_data)
+        _replace_provider_credential_row(
+            committed_config,
+            credential_id,
+            copy.deepcopy(stored),
+            preferred_index=previous_index,
+        )
+        used_by_before = _provider_credential_used_by(
+            config_data,
+            credential_id,
+        )
+        used_by_after = _provider_credential_used_by(
+            committed_config,
+            credential_id,
+        )
+        authorization_fields = (
+            "provider_family",
+            "auth_type",
+            "secret_env",
+            "default",
+        )
+        authorization_metadata_changed = previous_row is None or any(
+            previous_row.get(field) != stored.get(field)
+            for field in authorization_fields
+        )
+        authorization_changed = bool(
+            secret_value or authorization_metadata_changed
+        )
+        used_by_union = set(used_by_before) | set(used_by_after)
+        invalidate_vision = bool(
+            authorization_changed
+            and (
+                "auxiliary.vision" in used_by_union
+                or any(
+                    str(path).startswith("custom_vision_providers.")
+                    for path in used_by_union
+                )
+            )
+        )
+        invalidate_image = bool(
+            authorization_changed
+            and (
+                "image_gen" in used_by_union
+                or any(
+                    str(path).startswith("custom_image_providers.")
+                    for path in used_by_union
+                )
+            )
+        )
+        capability_epochs = (
+            *(
+                (CAPABILITY_CONFIG_EPOCH_VISION,)
+                if invalidate_vision
+                else ()
+            ),
+            *(
+                (CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,)
+                if invalidate_image
+                else ()
+            ),
+        )
+
         def update_metadata(latest: dict[str, Any]) -> None:
             _replace_provider_credential_row(
                 latest,
@@ -544,30 +851,45 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
                 copy.deepcopy(stored),
                 preferred_index=previous_index,
             )
+            bump_capability_config_epochs(
+                latest,
+                *capability_epochs,
+            )
 
         mutate_config_env_strict(
             update_metadata,
-            {secret_env: secret_value} if secret_value else {},
+            env_updates,
             config_path=config_path,
         )
-        reload_config()
-        public_config = get_provider_credentials_config()
-        credential = next(
-            row for row in public_config["credentials"] if row["id"] == credential_id
+        bump_capability_config_epochs(
+            committed_config,
+            *capability_epochs,
         )
-        if secret_value:
-            used_by = credential.get("used_by") or []
-            if "auxiliary.vision" in used_by or any(
-                str(path).startswith("custom_vision_providers.")
-                for path in used_by
-            ):
-                _invalidate_vision_verification()
-            if "image_gen" in used_by or any(
-                str(path).startswith("custom_image_providers.")
-                for path in used_by
-            ):
-                _invalidate_image_gen_verification()
-        return {"ok": True, "credential": credential}
+        vision_invalidation_token = (
+            _capture_vision_verification_invalidation()
+            if invalidate_vision
+            else None
+        )
+        image_invalidation_token = (
+            _capture_image_gen_verification_invalidation()
+            if invalidate_image
+            else None
+        )
+        credential = _public_provider_credential(
+            stored,
+            config_data=committed_config,
+        )
+    warnings = _invoke_durable_mutation_post_commit(
+        "upsert_provider_credential",
+        invalidate_vision=invalidate_vision,
+        invalidate_image=invalidate_image,
+        vision_invalidation_token=vision_invalidation_token,
+        image_invalidation_token=image_invalidation_token,
+    )
+    return _merge_post_commit_warnings(
+        {"ok": True, "credential": credential},
+        warnings,
+    )
 
 
 def delete_provider_credential(credential_id: str) -> dict[str, Any]:
@@ -592,8 +914,22 @@ def delete_provider_credential(credential_id: str) -> dict[str, Any]:
             {secret_env: None},
             config_path=config_path,
         )
-        reload_config()
-        return get_provider_credentials_config()
+        committed_config = copy.deepcopy(config_data)
+        _replace_provider_credential_row(
+            committed_config,
+            normalized,
+            None,
+        )
+        response = _public_provider_credentials_config(committed_config)
+    warnings = _invoke_durable_mutation_post_commit(
+        "delete_provider_credential"
+    )
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
+    )
+
+
 _VISION_PROBE_MARKER = "TAIJI-VISION-CHECK-7319"
 _VISION_PROBE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAkAAAAA0CAAAAABH3dgUAAABPElEQVR42u3aYRKCIBAGUO9/6TpAyO4COYrv+1cpwvKasc3jIzKRQwkEIAFIABKARAASgAQgAUgEIAFIHgLoaKT1Web41jnR8T+Ta4xXmWf1+Oi60Vxb1101/8p8zsaPan/2Xm+vAAIIIIAAAmgHQNkCVhaUnei/51E5PwKVXU9v/NFxsrUbGXekvgABBBBAAAEE0F6AMht+NaCVeFbVFyCAAAIIIIB2BxQ1DGcA9Rpf5QUVGmWZDc40JHsbX2noReNkx19Vn1TzESCAAAIIIIA2BzT6+sqb6FXrmL3OHW6is38Az64TIIAAAggggABaDygq3tsAzXz5AAIIIIAAAgigdYAyD4dXGl+VhVYbdG96qH6kKZidC0AAAQQQQADtDEgk/SNHCQQgAUgAEoBEABKABCABSAQgAUjumy803ZPAu+g+xgAAAABJRU5ErkJggg=="
@@ -1307,8 +1643,12 @@ def get_image_gen_config() -> dict[str, Any]:
         return _get_image_gen_config_unlocked()
 
 
-def _get_image_gen_config_unlocked() -> dict[str, Any]:
-    reload_config()
+def _get_image_gen_config_unlocked(
+    *,
+    refresh_runtime: bool = True,
+) -> dict[str, Any]:
+    if refresh_runtime:
+        reload_config()
     config_path = _get_config_path()
     config_data = load_credential_config(config_path)
     image_cfg = config_data.get("image_gen")
@@ -1573,15 +1913,20 @@ def _vision_profile_lock(profile: str) -> threading.Lock:
 
 def _begin_vision_probe(profile: str, state: dict[str, Any]) -> int:
     with _vision_profile_lock(profile):
-        generation = _VISION_PROBE_GENERATIONS.get(profile, 0) + 1
-        _VISION_PROBE_GENERATIONS[profile] = generation
-        generation_state = dict(state)
-        generation_state["generation"] = generation
-        _atomic_write_json(
-            _vision_verification_state_path(profile),
-            generation_state,
-        )
-        return generation
+        state_path = _vision_verification_state_path(profile)
+        with _verification_state_file_lock(state_path):
+            disk_generation = _verification_state_generation(
+                _read_verification_state_file(state_path)
+            )
+            generation = max(
+                _VISION_PROBE_GENERATIONS.get(profile, 0),
+                disk_generation,
+            ) + 1
+            _VISION_PROBE_GENERATIONS[profile] = generation
+            generation_state = dict(state)
+            generation_state["generation"] = generation
+            _atomic_write_json(state_path, generation_state)
+            return generation
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
@@ -1608,6 +1953,162 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     _atomic_write_bytes(path, encoded)
 
 
+@contextmanager
+def _windows_verification_state_mutex(path: Path):
+    """Use a logical-path mutex without opening attacker-controlled lockfiles."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_wchar_p,
+    ]
+    create_mutex.restype = ctypes.c_void_p
+    wait_for_single_object = kernel32.WaitForSingleObject
+    wait_for_single_object.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    wait_for_single_object.restype = ctypes.c_uint32
+    release_mutex = kernel32.ReleaseMutex
+    release_mutex.argtypes = [ctypes.c_void_p]
+    release_mutex.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    logical_path = os.path.normcase(
+        os.path.abspath(os.fspath(Path(path)))
+    )
+    mutex_id = hashlib.sha256(
+        logical_path.encode("utf-8")
+    ).hexdigest()
+    handle = create_mutex(
+        None,
+        False,
+        f"Local\\TaijiVerificationState-{mutex_id}",
+    )
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    acquired = False
+    try:
+        wait_result = wait_for_single_object(handle, 0xFFFFFFFF)
+        if wait_result not in {0x00000000, 0x00000080}:
+            raise ctypes.WinError(ctypes.get_last_error())
+        acquired = True
+        yield
+    finally:
+        if acquired and not release_mutex(handle):
+            logger.error("Failed to release verification state mutex")
+        close_handle(handle)
+
+
+@contextmanager
+def _verification_state_file_lock(path: Path):
+    """Serialize one capability-state CAS across WebUI worker processes."""
+    state_path = Path(path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":  # pragma: no cover - exercised on Windows CI.
+        with _windows_verification_state_mutex(state_path):
+            yield
+        return
+
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(lock_path, flags, 0o600)
+    locked = False
+    try:
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+            raise OSError(f"unsafe verification state lock: {lock_path}")
+        if hasattr(os, "fchmod"):
+            os.fchmod(lock_fd, 0o600)
+        if _fcntl is not None:
+            _fcntl.flock(lock_fd, _fcntl.LOCK_EX)
+        else:  # pragma: no cover - supported targets provide one primitive.
+            raise RuntimeError("cross-process verification state locking unavailable")
+        locked = True
+        yield
+    finally:
+        try:
+            if locked and _fcntl is not None:
+                _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def _read_verification_state_file(path: Path) -> dict[str, Any]:
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _verification_state_generation(state: Any) -> int:
+    generation = state.get("generation") if isinstance(state, dict) else None
+    return generation if type(generation) is int and generation >= 0 else 0
+
+
+def _verification_invalidation_state(generation: int) -> dict[str, Any]:
+    """Persist a private tombstone so restart cannot reuse an old generation."""
+    return {
+        "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+        "generation": generation,
+        "fingerprint": "",
+        "status": "configured_unverified",
+        "checked_at": "",
+        "error_code": "",
+        "message": "",
+        "diagnostic_id": "",
+    }
+
+
+def _owned_verifying_state(
+    path: Path,
+    *,
+    generation: int,
+    fingerprint: str,
+    diagnostic_id: str,
+) -> dict[str, Any]:
+    """Return the exact in-flight state owned by one probe, if still current."""
+    state = _read_verification_state_file(path)
+    state_generation = state.get("generation")
+    if (
+        type(state_generation) is not int
+        or state_generation != generation
+        or str(state.get("status") or "") != "verifying"
+        or str(state.get("fingerprint") or "") != fingerprint
+        or str(state.get("diagnostic_id") or "") != diagnostic_id
+    ):
+        return {}
+    return state
+
+
+def _commit_owned_verification_result(
+    path: Path,
+    *,
+    generation: int,
+    current_generation: int,
+    fingerprint: str,
+    diagnostic_id: str,
+    state: dict[str, Any],
+) -> bool:
+    """CAS one final probe result over only its own persisted in-flight state."""
+    if current_generation != generation or not _owned_verifying_state(
+        path,
+        generation=generation,
+        fingerprint=fingerprint,
+        diagnostic_id=diagnostic_id,
+    ):
+        return False
+    final_state = dict(state)
+    final_state["generation"] = generation
+    _atomic_write_json(path, final_state)
+    return True
+
+
 def _discard_owned_verifying_state(
     path: Path,
     *,
@@ -1616,34 +2117,27 @@ def _discard_owned_verifying_state(
     fingerprint: str,
     diagnostic_id: str,
 ) -> bool:
-    """Delete only the still-current in-flight state owned by one probe."""
+    """Invalidate only the still-current in-flight state owned by one probe."""
     if current_generation != generation:
         return False
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
-        return False
-    state_generation = state.get("generation") if isinstance(state, dict) else None
-    if (
-        not isinstance(state, dict)
-        or type(state_generation) is not int
-        or state_generation != generation
-        or str(state.get("status") or "") != "verifying"
-        or str(state.get("fingerprint") or "") != fingerprint
-        or str(state.get("diagnostic_id") or "") != diagnostic_id
+    if not _owned_verifying_state(
+        path,
+        generation=generation,
+        fingerprint=fingerprint,
+        diagnostic_id=diagnostic_id,
     ):
         return False
     try:
-        path.unlink(missing_ok=True)
+        _atomic_write_json(
+            path,
+            _verification_invalidation_state(generation + 1),
+        )
     except OSError:
-        try:
-            _atomic_write_json(path, {})
-        except OSError:
-            logger.warning(
-                "Failed to clear superseded verification state at %s",
-                path,
-            )
-            return False
+        logger.warning(
+            "Failed to invalidate superseded verification state at %s",
+            path,
+        )
+        return False
     return True
 
 
@@ -1656,6 +2150,66 @@ def _read_vision_verification_state(profile: str) -> dict[str, Any]:
         except (OSError, ValueError, TypeError):
             return {}
     return data if isinstance(data, dict) else {}
+
+
+def _verification_state_file_identity(path: Path) -> str:
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"unreadable:{type(exc).__name__}"
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _verification_probe_runtime_snapshot(
+    state: dict[str, Any],
+    *,
+    generation: int,
+    capability: str,
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """Freeze the private identity of the verifying state written to disk."""
+    persisted_state = dict(state)
+    persisted_state["generation"] = generation
+    fingerprint = str(persisted_state.get("fingerprint") or "")
+    return {
+        "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+        "fingerprint": fingerprint,
+        "status": "verifying",
+        "available": False,
+        "_authorization_generation": verification_authorization_generation(
+            persisted_state,
+            expected_fingerprint=fingerprint,
+            capability=capability,
+        ),
+        "provider": str(provider or "").strip().lower(),
+        "model": str(model or "").strip(),
+    }
+
+
+def _capture_vision_verification_invalidation(
+    profile: str | None = None,
+) -> _VerificationInvalidationToken:
+    committed_profile = str(profile or _active_profile_name() or "default")
+    with _vision_profile_lock(committed_profile):
+        state_path = _vision_verification_state_path(committed_profile)
+        with _verification_state_file_lock(state_path):
+            disk_generation = _verification_state_generation(
+                _read_verification_state_file(state_path)
+            )
+            generation = max(
+                _VISION_PROBE_GENERATIONS.get(committed_profile, 0),
+                disk_generation,
+            )
+            _VISION_PROBE_GENERATIONS[committed_profile] = generation
+            return _VerificationInvalidationToken(
+                capability="vision",
+                profile=committed_profile,
+                generation=generation,
+                state_identity=_verification_state_file_identity(state_path),
+            )
 
 
 def _vision_secret_value(
@@ -1855,6 +2409,19 @@ def _capture_vision_config_snapshot_unlocked(
             )
         except ValueError:
             config_complete = False
+    key_status = {
+        "configured": bool(secret_value),
+        "source": "profile",
+        "env_var": "",
+    }
+    fingerprint = _vision_config_fingerprint(
+        vision_cfg,
+        key_status,
+        profile=profile,
+        config_data=config_data,
+        secret_value=secret_value,
+        resolved_material=resolved_material,
+    )
     if config_resolved and endpoint_resolved and config_complete:
         binding = VisionRequestBinding(
             provider=provider,
@@ -1866,11 +2433,6 @@ def _capture_vision_config_snapshot_unlocked(
             trusted_proxy_profile=trusted_proxy_profile,
             endpoint_mode=endpoint_mode,
         )
-    key_status = {
-        "configured": bool(secret_value),
-        "source": "profile",
-        "env_var": "",
-    }
     return _VisionConfigSnapshot(
         config_path=exact_config_path,
         runtime_home=Path(_get_hermes_home()),
@@ -1892,14 +2454,7 @@ def _capture_vision_config_snapshot_unlocked(
         effective_config_resolved=bool(
             config_resolved and endpoint_resolved
         ),
-        fingerprint=_vision_config_fingerprint(
-            vision_cfg,
-            key_status,
-            profile=profile,
-            config_data=config_data,
-            secret_value=secret_value,
-            resolved_material=resolved_material,
-        ),
+        fingerprint=fingerprint,
         binding=binding,
     )
 
@@ -2043,28 +2598,76 @@ def _public_vision_verification(
     }
 
 
-def _invalidate_vision_verification() -> None:
-    profile = _active_profile_name()
+def _invalidate_vision_verification(
+    expected: _VerificationInvalidationToken | None = None,
+) -> bool:
+    profile = (
+        expected.profile
+        if expected is not None
+        else _active_profile_name()
+    )
     with _vision_profile_lock(profile):
-        _VISION_PROBE_GENERATIONS[profile] = _VISION_PROBE_GENERATIONS.get(profile, 0) + 1
         path = _vision_verification_state_path(profile)
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            _atomic_write_json(path, {})
+        with _verification_state_file_lock(path):
+            disk_generation = _verification_state_generation(
+                _read_verification_state_file(path)
+            )
+            current_generation = max(
+                _VISION_PROBE_GENERATIONS.get(profile, 0),
+                disk_generation,
+            )
+            if expected is not None:
+                if expected.capability != "vision":
+                    raise ValueError("invalid vision verification token")
+                if (
+                    current_generation != expected.generation
+                    or _verification_state_file_identity(path)
+                    != expected.state_identity
+                ):
+                    return False
+            next_generation = current_generation + 1
+            _VISION_PROBE_GENERATIONS[profile] = next_generation
+            _atomic_write_json(
+                path,
+                _verification_invalidation_state(next_generation),
+            )
+            return True
 
 
-def _invalidate_image_gen_verification() -> None:
-    profile = _active_profile_name()
+def _invalidate_image_gen_verification(
+    expected: _VerificationInvalidationToken | None = None,
+) -> bool:
+    profile = (
+        expected.profile
+        if expected is not None
+        else _active_profile_name()
+    )
     with _image_gen_profile_lock(profile):
-        _IMAGE_GEN_PROBE_GENERATIONS[profile] = (
-            _IMAGE_GEN_PROBE_GENERATIONS.get(profile, 0) + 1
-        )
         path = _image_gen_verification_state_path(profile)
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            _atomic_write_json(path, {})
+        with _verification_state_file_lock(path):
+            disk_generation = _verification_state_generation(
+                _read_verification_state_file(path)
+            )
+            current_generation = max(
+                _IMAGE_GEN_PROBE_GENERATIONS.get(profile, 0),
+                disk_generation,
+            )
+            if expected is not None:
+                if expected.capability != "image":
+                    raise ValueError("invalid image generation verification token")
+                if (
+                    current_generation != expected.generation
+                    or _verification_state_file_identity(path)
+                    != expected.state_identity
+                ):
+                    return False
+            next_generation = current_generation + 1
+            _IMAGE_GEN_PROBE_GENERATIONS[profile] = next_generation
+            _atomic_write_json(
+                path,
+                _verification_invalidation_state(next_generation),
+            )
+            return True
 
 def _vision_test_response(
     *,
@@ -2106,7 +2709,7 @@ def test_vision_config() -> dict[str, Any]:
             message="识图配置包含未解析或不受支持的运行时端点，请修正后重新验证。",
             diagnostic_id=diagnostic_id,
         )
-    if not snapshot.configured:
+    if not snapshot.configured or snapshot.binding is None:
         return _vision_test_response(
             ok=False,
             status="unconfigured",
@@ -2128,10 +2731,23 @@ def test_vision_config() -> dict[str, Any]:
         "diagnostic_id": diagnostic_id,
     }
     generation = _begin_vision_probe(snapshot.profile, verifying_state)
+    verifying_snapshot = _verification_probe_runtime_snapshot(
+        verifying_state,
+        generation=generation,
+        capability="vision",
+        provider=snapshot.provider,
+        model=snapshot.model,
+    )
+    probe_binding = authorize_vision_request_binding(
+        snapshot.binding,
+        authorization_fingerprint=verifying_snapshot["fingerprint"],
+        authorization_generation=verifying_snapshot[
+            "_authorization_generation"
+        ],
+    )
     error_code = ""
     message = "识图验证通过，当前配置已完成真实图片探测。"
     ok = False
-    current_snapshot: _VisionConfigSnapshot | None = None
     from hermes_constants import (
         reset_hermes_config_path_override,
         reset_hermes_home_override,
@@ -2162,7 +2778,7 @@ def test_vision_config() -> dict[str, Any]:
                     model=snapshot.model,
                     provider=snapshot.provider,
                     strict_target=True,
-                    _runtime_binding=snapshot.binding,
+                    _runtime_binding=probe_binding,
                 )
 
             result = json.loads(asyncio.run(_run_probe()))
@@ -2181,7 +2797,6 @@ def test_vision_config() -> dict[str, Any]:
             logger.warning("Vision configuration probe failed (%s)", diagnostic_id)
             error_code = "vision_probe_failed"
             message = "识图验证失败，请检查网络、密钥、模型和账号状态后重试。"
-        current_snapshot = _capture_vision_config_snapshot()
     finally:
         reset_hermes_config_path_override(config_path_token)
         reset_hermes_home_override(home_token)
@@ -2196,27 +2811,43 @@ def test_vision_config() -> dict[str, Any]:
         "message": message,
         "diagnostic_id": diagnostic_id,
     }
-    with _vision_profile_lock(snapshot.profile):
-        current_generation = _VISION_PROBE_GENERATIONS.get(
-            snapshot.profile
-        )
-        still_current = (
-            current_generation == generation
-            and current_snapshot == snapshot
-        )
-        if still_current:
-            _atomic_write_json(
-                _vision_verification_state_path(snapshot.profile),
-                state,
+    with credential_transaction(snapshot.config_path):
+        with _cfg_lock:
+            active_config_path = Path(_get_config_path())
+            current_snapshot = (
+                _capture_vision_config_snapshot_unlocked(
+                    config_path=snapshot.config_path
+                )
+                if active_config_path == snapshot.config_path
+                else None
             )
-        else:
-            _discard_owned_verifying_state(
-                _vision_verification_state_path(snapshot.profile),
-                generation=generation,
-                current_generation=current_generation or 0,
-                fingerprint=snapshot.fingerprint,
-                diagnostic_id=diagnostic_id,
-            )
+            with _vision_profile_lock(snapshot.profile):
+                state_path = _vision_verification_state_path(
+                    snapshot.profile
+                )
+                current_generation = _VISION_PROBE_GENERATIONS.get(
+                    snapshot.profile
+                )
+                with _verification_state_file_lock(state_path):
+                    still_current = bool(
+                        current_snapshot == snapshot
+                        and _commit_owned_verification_result(
+                            state_path,
+                            generation=generation,
+                            current_generation=current_generation or 0,
+                            fingerprint=snapshot.fingerprint,
+                            diagnostic_id=diagnostic_id,
+                            state=state,
+                        )
+                    )
+                    if not still_current:
+                        _discard_owned_verifying_state(
+                            state_path,
+                            generation=generation,
+                            current_generation=current_generation or 0,
+                            fingerprint=snapshot.fingerprint,
+                            diagnostic_id=diagnostic_id,
+                        )
     if not still_current:
         return _vision_test_response(
             ok=False,
@@ -2228,15 +2859,19 @@ def test_vision_config() -> dict[str, Any]:
             message="识图配置在验证期间已变更，本次结果已忽略，请重新测试。",
             diagnostic_id=diagnostic_id,
         )
-    return _vision_test_response(
-        ok=ok,
-        status=status,
-        checked_at=checked_at,
-        provider=snapshot.provider,
-        model=snapshot.model,
-        error_code=error_code,
-        message=message,
-        diagnostic_id=diagnostic_id,
+    warnings = _invoke_durable_mutation_post_commit("test_vision_config")
+    return _merge_post_commit_warnings(
+        _vision_test_response(
+            ok=ok,
+            status=status,
+            checked_at=checked_at,
+            provider=snapshot.provider,
+            model=snapshot.model,
+            error_code=error_code,
+            message=message,
+            diagnostic_id=diagnostic_id,
+        ),
+        warnings,
     )
 
 
@@ -2294,15 +2929,20 @@ def _image_gen_profile_lock(profile: str) -> threading.Lock:
 
 def _begin_image_gen_probe(profile: str, state: dict[str, Any]) -> int:
     with _image_gen_profile_lock(profile):
-        generation = _IMAGE_GEN_PROBE_GENERATIONS.get(profile, 0) + 1
-        _IMAGE_GEN_PROBE_GENERATIONS[profile] = generation
-        generation_state = dict(state)
-        generation_state["generation"] = generation
-        _atomic_write_json(
-            _image_gen_verification_state_path(profile),
-            generation_state,
-        )
-        return generation
+        state_path = _image_gen_verification_state_path(profile)
+        with _verification_state_file_lock(state_path):
+            disk_generation = _verification_state_generation(
+                _read_verification_state_file(state_path)
+            )
+            generation = max(
+                _IMAGE_GEN_PROBE_GENERATIONS.get(profile, 0),
+                disk_generation,
+            ) + 1
+            _IMAGE_GEN_PROBE_GENERATIONS[profile] = generation
+            generation_state = dict(state)
+            generation_state["generation"] = generation
+            _atomic_write_json(state_path, generation_state)
+            return generation
 
 
 def _read_image_gen_verification_state(profile: str) -> dict[str, Any]:
@@ -2314,6 +2954,29 @@ def _read_image_gen_verification_state(profile: str) -> dict[str, Any]:
         except (OSError, ValueError, TypeError):
             return {}
     return data if isinstance(data, dict) else {}
+
+
+def _capture_image_gen_verification_invalidation(
+    profile: str | None = None,
+) -> _VerificationInvalidationToken:
+    committed_profile = str(profile or _active_profile_name() or "default")
+    with _image_gen_profile_lock(committed_profile):
+        state_path = _image_gen_verification_state_path(committed_profile)
+        with _verification_state_file_lock(state_path):
+            disk_generation = _verification_state_generation(
+                _read_verification_state_file(state_path)
+            )
+            generation = max(
+                _IMAGE_GEN_PROBE_GENERATIONS.get(committed_profile, 0),
+                disk_generation,
+            )
+            _IMAGE_GEN_PROBE_GENERATIONS[committed_profile] = generation
+            return _VerificationInvalidationToken(
+                capability="image",
+                profile=committed_profile,
+                generation=generation,
+                state_identity=_verification_state_file_identity(state_path),
+            )
 
 
 def _image_gen_secret_value(
@@ -2339,28 +3002,31 @@ def _image_gen_config_fingerprint(
     config_data: dict[str, Any] | None = None,
     resolved_material: Any | None = None,
     config_path: Path | None = None,
+    secret_value: str | object = _UNSET_SECRET_VALUE,
 ) -> str:
     exact_config_path = Path(config_path or _get_config_path())
     data = config_data or load_credential_config(exact_config_path)
     provider = str(image_cfg.get("provider") or "").strip().lower()
     credential_ref = str(image_cfg.get("credential_ref") or "").strip()
-    secret_value = _image_gen_secret_value(
-        provider,
-        credential_ref,
-        data,
-        config_path=exact_config_path,
-    )
+    if secret_value is _UNSET_SECRET_VALUE:
+        secret_value = _image_gen_secret_value(
+            provider,
+            credential_ref,
+            data,
+            config_path=exact_config_path,
+        )
+    exact_secret_value = str(secret_value or "")
     if resolved_material is not None:
         return shared_image_gen_fingerprint_from_material(
             resolved_material,
             profile=profile,
-            secret_value=secret_value,
+            secret_value=exact_secret_value,
         )
     return shared_image_gen_fingerprint(
         image_cfg,
         profile=profile,
         config_data=data,
-        secret_value=secret_value,
+        secret_value=exact_secret_value,
     )
 
 
@@ -2444,12 +3110,25 @@ def _capture_image_gen_config_snapshot_unlocked(
         and endpoint_complete
         and (not credential_required or secret_value)
     )
+    fingerprint = _image_gen_config_fingerprint(
+        image_cfg,
+        profile=profile,
+        config_data=config_data,
+        resolved_material=resolved_material,
+        config_path=exact_config_path,
+        secret_value=secret_value,
+    )
+    provider_config = active_custom_provider_identity(
+        provider,
+        config_data,
+    )
     probe_binding = (
         ImageGenRequestBinding(
             provider=provider,
             model=model,
             api_key=secret_value,
             runtime_identity=resolved_material.runtime_identity,
+            _provider_config=provider_config,
         )
         if configured and effective_config_resolved
         else None
@@ -2467,13 +3146,7 @@ def _capture_image_gen_config_snapshot_unlocked(
         base_url=str(options.get("base_url") or "").strip().rstrip("/"),
         configured=configured,
         effective_config_resolved=effective_config_resolved,
-        fingerprint=_image_gen_config_fingerprint(
-            image_cfg,
-            profile=profile,
-            config_data=config_data,
-            resolved_material=resolved_material,
-            config_path=exact_config_path,
-        ),
+        fingerprint=fingerprint,
         request_local_provider=request_local_provider,
         probe_binding=probe_binding,
     )
@@ -2720,6 +3393,7 @@ def _execute_image_gen_probe(
     snapshot: _ImageGenConfigSnapshot,
     *,
     diagnostic_id: str,
+    reauth_guard: Any,
 ) -> tuple[bool, str, str]:
     ok = False
     error_code = "image_gen_probe_failed"
@@ -2777,6 +3451,7 @@ def _execute_image_gen_probe(
             }
             if binding_aware:
                 probe_kwargs["_runtime_binding"] = snapshot.probe_binding
+                probe_kwargs["_reauth_guard"] = reauth_guard
             result = selected.generate(
                 **probe_kwargs,
             )
@@ -2841,6 +3516,12 @@ def test_image_gen_config() -> dict[str, Any]:
     checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     diagnostic_id = uuid.uuid4().hex
     preflight_failure = _image_gen_preflight_failure(snapshot)
+    if preflight_failure is None and snapshot.probe_binding is None:
+        preflight_failure = (
+            "configured_unverified",
+            "image_gen_provider_unavailable",
+            "生图配置已保存，但当前 Provider 或凭据暂不可用。",
+        )
     if preflight_failure is not None:
         status, error_code, message = preflight_failure
         return _image_gen_test_response(
@@ -2864,6 +3545,24 @@ def test_image_gen_config() -> dict[str, Any]:
         "diagnostic_id": diagnostic_id,
     }
     generation = _begin_image_gen_probe(snapshot.profile, verifying_state)
+    verifying_snapshot = _verification_probe_runtime_snapshot(
+        verifying_state,
+        generation=generation,
+        capability="image_generation",
+        provider=snapshot.provider,
+        model=snapshot.model,
+    )
+    probe_binding = authorize_image_gen_request_binding(
+        snapshot.probe_binding,
+        authorization_fingerprint=verifying_snapshot["fingerprint"],
+        authorization_generation=verifying_snapshot[
+            "_authorization_generation"
+        ],
+    )
+    reauth_guard = build_image_gen_request_reauth_guard(
+        probe_binding,
+        expected_snapshot=verifying_snapshot,
+    )
 
     from hermes_constants import (
         reset_hermes_config_path_override,
@@ -2880,8 +3579,8 @@ def test_image_gen_config() -> dict[str, Any]:
         ok, error_code, message = _execute_image_gen_probe(
             snapshot,
             diagnostic_id=diagnostic_id,
+            reauth_guard=reauth_guard,
         )
-        current_snapshot = _capture_image_gen_config_snapshot()
     finally:
         reset_hermes_config_path_override(config_path_token)
         reset_hermes_home_override(home_token)
@@ -2896,24 +3595,43 @@ def test_image_gen_config() -> dict[str, Any]:
         "message": message,
         "diagnostic_id": diagnostic_id,
     }
-    with _image_gen_profile_lock(snapshot.profile):
-        current_generation = _IMAGE_GEN_PROBE_GENERATIONS.get(
-            snapshot.profile
-        )
-        still_current = (
-            current_generation == generation
-            and current_snapshot == snapshot
-        )
-        if still_current:
-            _atomic_write_json(_image_gen_verification_state_path(snapshot.profile), state)
-        else:
-            _discard_owned_verifying_state(
-                _image_gen_verification_state_path(snapshot.profile),
-                generation=generation,
-                current_generation=current_generation or 0,
-                fingerprint=snapshot.fingerprint,
-                diagnostic_id=diagnostic_id,
+    with credential_transaction(snapshot.config_path):
+        with _cfg_lock:
+            active_config_path = Path(_get_config_path())
+            current_snapshot = (
+                _capture_image_gen_config_snapshot_unlocked(
+                    config_path=snapshot.config_path
+                )
+                if active_config_path == snapshot.config_path
+                else None
             )
+            with _image_gen_profile_lock(snapshot.profile):
+                state_path = _image_gen_verification_state_path(
+                    snapshot.profile
+                )
+                current_generation = _IMAGE_GEN_PROBE_GENERATIONS.get(
+                    snapshot.profile
+                )
+                with _verification_state_file_lock(state_path):
+                    still_current = bool(
+                        current_snapshot == snapshot
+                        and _commit_owned_verification_result(
+                            state_path,
+                            generation=generation,
+                            current_generation=current_generation or 0,
+                            fingerprint=snapshot.fingerprint,
+                            diagnostic_id=diagnostic_id,
+                            state=state,
+                        )
+                    )
+                    if not still_current:
+                        _discard_owned_verifying_state(
+                            state_path,
+                            generation=generation,
+                            current_generation=current_generation or 0,
+                            fingerprint=snapshot.fingerprint,
+                            diagnostic_id=diagnostic_id,
+                        )
     if not still_current:
         return _image_gen_test_response(
             ok=False,
@@ -2925,15 +3643,21 @@ def test_image_gen_config() -> dict[str, Any]:
             message="生图配置在验证期间已变更，本次结果已忽略，请重新测试。",
             diagnostic_id=diagnostic_id,
         )
-    return _image_gen_test_response(
-        ok=ok,
-        status=status,
-        checked_at=checked_at,
-        provider=snapshot.provider,
-        model=snapshot.model,
-        error_code=error_code,
-        message=message,
-        diagnostic_id=diagnostic_id,
+    warnings = _invoke_durable_mutation_post_commit(
+        "test_image_gen_config"
+    )
+    return _merge_post_commit_warnings(
+        _image_gen_test_response(
+            ok=ok,
+            status=status,
+            checked_at=checked_at,
+            provider=snapshot.provider,
+            model=snapshot.model,
+            error_code=error_code,
+            message=message,
+            diagnostic_id=diagnostic_id,
+        ),
+        warnings,
     )
 
 
@@ -3085,8 +3809,12 @@ def get_vision_config() -> dict[str, Any]:
         return _get_vision_config_unlocked()
 
 
-def _get_vision_config_unlocked() -> dict[str, Any]:
-    reload_config()
+def _get_vision_config_unlocked(
+    *,
+    refresh_runtime: bool = True,
+) -> dict[str, Any]:
+    if refresh_runtime:
+        reload_config()
     config_path = Path(_get_config_path())
     config_data = load_credential_config(config_path)
     auxiliary = config_data.get("auxiliary")
@@ -3345,6 +4073,10 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                 vision_cfg.pop("endpoint_field_names", None)
             auxiliary["vision"] = vision_cfg
             config_data["auxiliary"] = auxiliary
+            bump_capability_config_epochs(
+                config_data,
+                CAPABILITY_CONFIG_EPOCH_VISION,
+            )
             _commit_expected_config_env(
                 config_path,
                 expected_config=original_config,
@@ -3355,10 +4087,24 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                     else {}
                 ),
             )
-    reload_config()
-    invalidate_models_cache()
-    _invalidate_vision_verification()
-    return get_vision_config()
+        vision_invalidation_token = (
+            _capture_vision_verification_invalidation()
+        )
+        response = _get_vision_config_unlocked(refresh_runtime=False)
+    warnings = _invoke_durable_mutation_post_commit(
+        "set_vision_config",
+        invalidate_vision=True,
+        vision_invalidation_token=vision_invalidation_token,
+    )
+    response = _project_successful_verification_invalidation(
+        response,
+        warnings,
+        capability="vision",
+    )
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
+    )
 
 
 def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
@@ -3485,6 +4231,11 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             config_data["image_gen"] = image_cfg
+            bump_capability_config_epochs(
+                config_data,
+                CAPABILITY_CONFIG_EPOCH_VISION,
+                CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+            )
             _commit_expected_config_env(
                 config_path,
                 expected_config=original_config,
@@ -3493,29 +4244,55 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
                     _ALIBABA_QUICK_CREDENTIAL_ENV: secret_value,
                 },
             )
-
-    warnings: list[str] = []
-    post_save_steps = (
-        ("runtime_config_refresh_pending", reload_config),
-        ("model_cache_invalidation_pending", invalidate_models_cache),
-        ("vision_verification_invalidation_pending", _invalidate_vision_verification),
-        (
-            "image_gen_verification_invalidation_pending",
-            _invalidate_image_gen_verification,
-        ),
-    )
-    for warning_code, step in post_save_steps:
-        try:
-            step()
-        except Exception:
-            logger.exception(
-                "Alibaba quick setup post-save step failed: %s", warning_code
+            vision_invalidation_token = (
+                _capture_vision_verification_invalidation()
             )
-            warnings.append(warning_code)
+            image_invalidation_token = (
+                _capture_image_gen_verification_invalidation()
+            )
+            key_status = copy.deepcopy(
+                _key_status_for_env(_ALIBABA_QUICK_CREDENTIAL_ENV)
+            )
+            try:
+                committed_credential_rows = copy.deepcopy(
+                    _public_provider_credentials_config(config_data).get(
+                        "credentials",
+                        [],
+                    )
+                )
+            except Exception:
+                committed_credential_rows = None
+            try:
+                committed_vision_provider_rows = copy.deepcopy(
+                    _vision_provider_rows(
+                        "alibaba",
+                        vision_cfg,
+                        config_data=config_data,
+                        config_path=Path(config_path),
+                        allow_process_fallback=False,
+                    )
+                )
+            except Exception:
+                committed_vision_provider_rows = None
+            try:
+                committed_image_provider_rows = copy.deepcopy(
+                    _image_gen_provider_rows("dashscope")
+                )
+            except Exception:
+                committed_image_provider_rows = None
 
-    key_status = _key_status_for_env(_ALIBABA_QUICK_CREDENTIAL_ENV)
+    warnings = _invoke_durable_mutation_post_commit(
+        "set_alibaba_image_capabilities",
+        invalidate_vision=True,
+        invalidate_image=True,
+        vision_invalidation_token=vision_invalidation_token,
+        image_invalidation_token=image_invalidation_token,
+    )
+
     response = {
         "ok": True,
+        "refresh_pending": False,
+        "warnings": [],
         "vision": {
             "provider": "alibaba",
             "model": vision_model,
@@ -3592,139 +4369,91 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
     ]
 
     try:
-        credential_payload = get_provider_credentials_config()
-        credential_rows = credential_payload.get("credentials")
-        if not isinstance(credential_rows, list) or not any(
+        if not isinstance(committed_credential_rows, list) or not any(
             isinstance(row, dict)
             and row.get("id") == _ALIBABA_QUICK_CREDENTIAL_ID
-            for row in credential_rows
+            for row in committed_credential_rows
         ):
             raise ValueError("reserved credential metadata is unavailable")
-        response["provider_credentials"] = credential_rows
+        response["provider_credentials"] = committed_credential_rows
     except Exception:
         logger.warning("Alibaba quick setup credential metadata refresh failed")
         warnings.append("provider_credentials_refresh_pending")
         response["provider_credentials"] = fallback_credentials
 
     try:
-        vision_provider_rows = _vision_provider_rows("alibaba", vision_cfg)
-        if not isinstance(vision_provider_rows, list) or not any(
+        if not isinstance(committed_vision_provider_rows, list) or not any(
             isinstance(row, dict) and row.get("id") == "alibaba"
-            for row in vision_provider_rows
+            for row in committed_vision_provider_rows
         ):
             raise ValueError("Alibaba vision provider metadata is unavailable")
-        response["vision_providers"] = vision_provider_rows
+        response["vision_providers"] = committed_vision_provider_rows
     except Exception:
         logger.warning("Alibaba quick setup vision provider metadata refresh failed")
         warnings.append("vision_provider_metadata_refresh_pending")
         response["vision_providers"] = fallback_vision_providers
 
     try:
-        image_provider_rows = _image_gen_provider_rows("dashscope")
-        if not isinstance(image_provider_rows, list) or not any(
+        if not isinstance(committed_image_provider_rows, list) or not any(
             isinstance(row, dict) and row.get("id") == "dashscope"
-            for row in image_provider_rows
+            for row in committed_image_provider_rows
         ):
             raise ValueError("DashScope image provider metadata is unavailable")
-        response["image_gen_providers"] = image_provider_rows
+        response["image_gen_providers"] = committed_image_provider_rows
     except Exception:
         logger.warning("Alibaba quick setup image provider metadata refresh failed")
         warnings.append("image_gen_provider_metadata_refresh_pending")
         response["image_gen_providers"] = fallback_image_gen_providers
 
-    if warnings:
-        response["refresh_pending"] = True
-        response["warnings"] = warnings
-    else:
-        response["refresh_pending"] = False
-        response["warnings"] = []
-    return response
+    return _merge_post_commit_warnings(response, warnings)
 
 
-def _refresh_custom_provider_commit(
-    capability: str,
+def _custom_vision_provider_rows_from_config(
+    config_data: dict[str, Any],
     *,
-    fallback_providers: list[dict[str, Any]],
-) -> dict[str, Any]:
-    if capability == "vision":
-        verification_action = (
-            "vision_verification_refresh_pending",
-            _invalidate_vision_verification,
-        )
-        projection_action = get_custom_vision_provider_configs
-        projection_warning = "vision_provider_projection_refresh_pending"
-    elif capability == "image":
-        verification_action = (
-            "image_gen_verification_refresh_pending",
-            _invalidate_image_gen_verification,
-        )
-        projection_action = get_custom_image_provider_configs
-        projection_warning = "image_gen_provider_projection_refresh_pending"
-    else:
-        raise ValueError(f"unsupported custom provider capability: {capability}")
+    config_path: Path,
+    env_path: Path,
+) -> list[dict[str, Any]]:
+    auxiliary = config_data.get("auxiliary")
+    vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
+    active_provider = str(
+        (vision_cfg or {}).get("provider") or ""
+    ).strip().lower()
+    from agent.custom_vision_providers import (
+        custom_vision_provider_public_row,
+        load_custom_vision_provider_entries,
+    )
 
-    warnings: list[str] = []
-    for warning, action in (
-        ("runtime_config_refresh_pending", reload_config),
-        ("models_cache_refresh_pending", invalidate_models_cache),
-        verification_action,
-    ):
-        try:
-            action()
-        except Exception:
-            logger.warning(
-                "Custom %s provider post-commit refresh failed: %s",
-                capability,
-                warning,
-                exc_info=True,
-            )
-            warnings.append(warning)
-    try:
-        providers = list(projection_action().get("providers") or [])
-    except Exception:
-        logger.warning(
-            "Custom %s provider committed projection refresh failed",
-            capability,
-            exc_info=True,
+    rows = [
+        custom_vision_provider_public_row(
+            entry,
+            active_provider=active_provider,
+            config_path=config_path,
+            allow_process_fallback=False,
         )
-        warnings.append(projection_warning)
-        providers = list(fallback_providers)
-    return {
-        "providers": providers,
-        "refresh_pending": bool(warnings),
-        "warnings": warnings,
-    }
+        for entry in load_custom_vision_provider_entries(config_data)
+    ]
+    for row in rows:
+        row["key_status"] = _key_status_for_env(
+            row["key_status"]["env_var"],
+            env_path=env_path,
+        )
+        row["available"] = bool(row["key_status"].get("configured"))
+    return rows
 
 
 def get_custom_vision_provider_configs() -> dict[str, Any]:
     config_path = Path(_get_config_path())
     with credential_transaction(config_path) as credential_spec:
         config_data = load_credential_config(credential_spec.config_target)
-        auxiliary = config_data.get("auxiliary")
-        vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
-        active_provider = str((vision_cfg or {}).get("provider") or "").strip().lower()
         try:
-            from agent.custom_vision_providers import (
-                custom_vision_provider_public_row,
-                load_custom_vision_provider_entries,
+            rows = _custom_vision_provider_rows_from_config(
+                config_data,
+                config_path=credential_spec.config_target,
+                env_path=credential_spec.env_target,
             )
         except ImportError:
             return {"ok": True, "providers": []}
-        rows = [
-            custom_vision_provider_public_row(
-                entry,
-                active_provider=active_provider,
-                config_path=_get_config_path(),
-                allow_process_fallback=False,
-            )
-            for entry in load_custom_vision_provider_entries(config_data)
-        ]
-        for row in rows:
-            row["key_status"] = _key_status_for_env(
-                row["key_status"]["env_var"],
-                env_path=credential_spec.env_target,
-            )
-            row["available"] = bool(row["key_status"].get("configured"))
         return {"ok": True, "providers": rows}
 
 
@@ -3834,31 +4563,47 @@ def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
                 )
                 if orphaned_env:
                     env_updates[orphaned_env] = None
+            bump_capability_config_epochs(
+                config_data,
+                CAPABILITY_CONFIG_EPOCH_VISION,
+            )
             _write_custom_provider_transaction(
                 config_path=config_path,
                 env_path=env_path,
                 config_data=config_data,
                 env_updates=env_updates,
             )
-    row = custom_vision_provider_public_row(
-        normalized,
-        config_path=_get_config_path(),
-        allow_process_fallback=False,
+            row = custom_vision_provider_public_row(
+                normalized,
+                config_path=config_path,
+                allow_process_fallback=False,
+            )
+            row["key_status"] = _key_status_for_env(
+                secret_env,
+                env_path=env_path,
+            )
+            row["available"] = bool(row["key_status"].get("configured"))
+            response = {
+                "ok": True,
+                "provider": copy.deepcopy(row),
+                "providers": _custom_vision_provider_rows_from_config(
+                    config_data,
+                    config_path=config_path,
+                    env_path=env_path,
+                ),
+            }
+            vision_invalidation_token = (
+                _capture_vision_verification_invalidation()
+            )
+    warnings = _invoke_durable_mutation_post_commit(
+        "set_custom_vision_provider_config",
+        invalidate_vision=True,
+        vision_invalidation_token=vision_invalidation_token,
     )
-    row["key_status"] = _key_status_for_env(
-        secret_env,
-        env_path=env_path,
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
     )
-    row["available"] = bool(row["key_status"].get("configured"))
-    refresh = _refresh_custom_provider_commit(
-        "vision",
-        fallback_providers=[row],
-    )
-    return {
-        "ok": True,
-        "provider": row,
-        **refresh,
-    }
 
 
 def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
@@ -3915,6 +4660,10 @@ def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
                 capability="custom_vision_provider",
                 provider_id=normalized_id,
             )
+            bump_capability_config_epochs(
+                config_data,
+                CAPABILITY_CONFIG_EPOCH_VISION,
+            )
             _write_custom_provider_transaction(
                 config_path=config_path,
                 env_path=env_path,
@@ -3925,58 +4674,97 @@ def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
                     if env_var
                 },
             )
-    return {
-        "ok": True,
-        **_refresh_custom_provider_commit(
-            "vision",
-            fallback_providers=[],
-        ),
-    }
+            response = {
+                "ok": True,
+                "providers": _custom_vision_provider_rows_from_config(
+                    config_data,
+                    config_path=config_path,
+                    env_path=env_path,
+                ),
+            }
+            vision_invalidation_token = (
+                _capture_vision_verification_invalidation()
+            )
+    warnings = _invoke_durable_mutation_post_commit(
+        "delete_custom_vision_provider_config",
+        invalidate_vision=True,
+        vision_invalidation_token=vision_invalidation_token,
+    )
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
+    )
+
+
+def _custom_image_provider_rows_from_config(
+    config_data: dict[str, Any],
+    *,
+    config_path: Path,
+    env_path: Path,
+) -> list[dict[str, Any]]:
+    active_provider = ""
+    image_cfg = config_data.get("image_gen")
+    if isinstance(image_cfg, dict):
+        active_provider = str(image_cfg.get("provider") or "").strip()
+    from agent.custom_image_providers import (
+        custom_image_provider_public_row,
+        load_custom_image_provider_entries,
+    )
+    from hermes_constants import (
+        reset_hermes_config_path_override,
+        set_hermes_config_path_override,
+    )
+
+    config_path_token = set_hermes_config_path_override(config_path)
+    try:
+        rows = [
+            custom_image_provider_public_row(
+                entry,
+                active_provider=active_provider,
+            )
+            for entry in load_custom_image_provider_entries(config_data)
+        ]
+    finally:
+        reset_hermes_config_path_override(config_path_token)
+    for row in rows:
+        key_status = _key_status_for_env(
+            (row.get("key_status") or {}).get("env_var"),
+            env_path=env_path,
+        )
+        row["key_status"] = key_status
+        configured = bool(
+            key_status.get("configured")
+            and row.get("base_url_configured")
+            and row.get("default_model")
+        )
+        row["configured"] = configured
+        row["available"] = False
+        row["verification_status"] = (
+            "configured_unverified" if configured else "not_configured"
+        )
+        row["reason_code"] = (
+            "configured_unverified" if configured else "authorization_required"
+        )
+        row["status_message"] = (
+            "已配置，尚未验证。"
+            if configured
+            else "外部图片模型密钥未配置。"
+        )
+    return rows
 
 
 def get_custom_image_provider_configs() -> dict[str, Any]:
     config_path = Path(_get_config_path())
     with credential_transaction(config_path) as credential_spec:
         config_data = load_credential_config(credential_spec.config_target)
-        active_provider = ""
-        image_cfg = config_data.get("image_gen")
-        if isinstance(image_cfg, dict):
-            active_provider = str(image_cfg.get("provider") or "").strip()
         try:
-            from agent.custom_image_providers import (
-                custom_image_provider_public_row,
-                load_custom_image_provider_entries,
+            rows = _custom_image_provider_rows_from_config(
+                config_data,
+                config_path=credential_spec.config_target,
+                env_path=credential_spec.env_target,
             )
         except Exception:
             return {"ok": True, "providers": []}
-        rows = [
-            custom_image_provider_public_row(entry, active_provider=active_provider)
-            for entry in load_custom_image_provider_entries(config_data)
-        ]
-        for row in rows:
-            key_status = _key_status_for_env(
-                (row.get("key_status") or {}).get("env_var"),
-                env_path=credential_spec.env_target,
-            )
-            row["key_status"] = key_status
-            configured = bool(
-                key_status.get("configured")
-                and row.get("base_url_configured")
-                and row.get("default_model")
-            )
-            row["configured"] = configured
-            row["available"] = False
-            row["verification_status"] = (
-                "configured_unverified" if configured else "not_configured"
-            )
-            row["reason_code"] = (
-                "configured_unverified" if configured else "authorization_required"
-            )
-            row["status_message"] = (
-                "已配置，尚未验证。"
-                if configured
-                else "外部图片模型密钥未配置。"
-            )
         return {"ok": True, "providers": rows}
 
 
@@ -3986,7 +4774,6 @@ def set_custom_image_provider_config(body: dict[str, Any]) -> dict[str, Any]:
     try:
         from agent.custom_image_providers import (
             custom_image_provider_env_var,
-            custom_image_provider_public_row,
             normalize_custom_image_provider_entry,
             normalize_custom_image_provider_id,
         )
@@ -4075,30 +4862,43 @@ def set_custom_image_provider_config(body: dict[str, Any]) -> dict[str, Any]:
                 )
                 if orphaned_env:
                     env_updates[orphaned_env] = None
+            bump_capability_config_epochs(
+                config_data,
+                CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+            )
             _write_custom_provider_transaction(
                 config_path=config_path,
                 env_path=env_path,
                 config_data=config_data,
                 env_updates=env_updates,
             )
-    row = custom_image_provider_public_row(normalized)
-    row["key_status"] = _key_status_for_env(
-        secret_env,
-        env_path=env_path,
+            committed_providers = _custom_image_provider_rows_from_config(
+                config_data,
+                config_path=config_path,
+                env_path=env_path,
+            )
+            row = next(
+                item
+                for item in committed_providers
+                if item.get("id") == f"custom:{requested_id}"
+            )
+            response = {
+                "ok": True,
+                "provider": copy.deepcopy(row),
+                "providers": committed_providers,
+            }
+            image_invalidation_token = (
+                _capture_image_gen_verification_invalidation()
+            )
+    warnings = _invoke_durable_mutation_post_commit(
+        "set_custom_image_provider_config",
+        invalidate_image=True,
+        image_invalidation_token=image_invalidation_token,
     )
-    row["configured"] = bool(
-        row["key_status"].get("configured")
-        and row.get("base_url_configured")
-        and row.get("default_model")
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
     )
-    return {
-        "ok": True,
-        "provider": row,
-        **_refresh_custom_provider_commit(
-            "image",
-            fallback_providers=[row],
-        ),
-    }
 
 
 def delete_custom_image_provider_config(provider_id: str) -> dict[str, Any]:
@@ -4158,6 +4958,10 @@ def delete_custom_image_provider_config(provider_id: str) -> dict[str, Any]:
                 capability="custom_image_provider",
                 provider_id=normalized_id,
             )
+            bump_capability_config_epochs(
+                config_data,
+                CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+            )
             _write_custom_provider_transaction(
                 config_path=config_path,
                 env_path=env_path,
@@ -4168,13 +4972,26 @@ def delete_custom_image_provider_config(provider_id: str) -> dict[str, Any]:
                     if env_var
                 },
             )
-    return {
-        "ok": True,
-        **_refresh_custom_provider_commit(
-            "image",
-            fallback_providers=[],
-        ),
-    }
+            response = {
+                "ok": True,
+                "providers": _custom_image_provider_rows_from_config(
+                    config_data,
+                    config_path=config_path,
+                    env_path=env_path,
+                ),
+            }
+            image_invalidation_token = (
+                _capture_image_gen_verification_invalidation()
+            )
+    warnings = _invoke_durable_mutation_post_commit(
+        "delete_custom_image_provider_config",
+        invalidate_image=True,
+        image_invalidation_token=image_invalidation_token,
+    )
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
+    )
 
 
 def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
@@ -4382,16 +5199,36 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             else:
                 image_cfg.pop("endpoint_field_names", None)
             config_data["image_gen"] = image_cfg
+            bump_capability_config_epochs(
+                config_data,
+                CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+            )
             _commit_expected_config_env(
                 config_path,
                 expected_config=original_config,
                 desired_config=config_data,
                 env_updates=env_updates,
             )
-    reload_config()
-    invalidate_models_cache()
-    _invalidate_image_gen_verification()
-    return get_image_gen_config()
+        image_invalidation_token = (
+            _capture_image_gen_verification_invalidation()
+        )
+        response = _get_image_gen_config_unlocked(
+            refresh_runtime=False
+        )
+    warnings = _invoke_durable_mutation_post_commit(
+        "set_image_gen_config",
+        invalidate_image=True,
+        image_invalidation_token=image_invalidation_token,
+    )
+    response = _project_successful_verification_invalidation(
+        response,
+        warnings,
+        capability="image",
+    )
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
+    )
 
 
 def get_model_config() -> dict[str, Any]:
@@ -4399,16 +5236,22 @@ def get_model_config() -> dict[str, Any]:
         return _get_model_config_unlocked()
 
 
-def _get_model_config_unlocked() -> dict[str, Any]:
-    reload_config()
+def _get_model_config_unlocked(
+    *,
+    refresh_runtime: bool = True,
+) -> dict[str, Any]:
+    if refresh_runtime:
+        reload_config()
     config_path = _get_config_path()
     config_data = load_credential_config(config_path)
     model_cfg = _safe_model_cfg(config_data)
     provider = str(model_cfg.get("provider") or "").strip()
     model = str(model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "").strip()
     key_env = str(model_cfg.get("key_env") or model_cfg.get("api_key_env") or "").strip()
-    image_gen_config = get_image_gen_config()
-    vision_config = get_vision_config()
+    image_gen_config = _get_image_gen_config_unlocked(
+        refresh_runtime=False
+    )
+    vision_config = _get_vision_config_unlocked(refresh_runtime=False)
     provider_credentials = get_provider_credentials_config().get("credentials", [])
     return {
         "ok": True,
@@ -4489,12 +5332,52 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
                 model_cfg.pop("key_env", None)
                 model_cfg.pop("api_key_env", None)
             config_data["model"] = model_cfg
+            if env_updates:
+                from agent.provider_credentials import (
+                    load_credential_snapshot,
+                )
+
+                current_env = load_credential_snapshot(
+                    config_path
+                ).env
+                changed_env_keys = tuple(
+                    key
+                    for key, value in env_updates.items()
+                    if (
+                        key in current_env
+                        if value is None
+                        else current_env.get(key) != value
+                    )
+                )
+                capabilities = {
+                    capability
+                    for key in changed_env_keys
+                    for capability in capability_epochs_for_secret_env(
+                        original_config,
+                        key,
+                        env_values=current_env,
+                    )
+                }
+                if capabilities:
+                    bump_capability_config_epochs(
+                        config_data,
+                        *sorted(capabilities),
+                    )
             _commit_expected_config_env(
                 config_path,
                 expected_config=original_config,
                 desired_config=config_data,
                 env_updates=env_updates,
             )
-    reload_config()
-    invalidate_models_cache()
-    return get_model_config()
+        response = _get_model_config_unlocked(refresh_runtime=False)
+    warnings = _invoke_durable_mutation_post_commit(
+        "set_main_model_config"
+    )
+    # The main provider/model participates in next-turn native-vs-text routing
+    # and agent cache identity, but it does not change either auxiliary
+    # capability fingerprint.  Refresh config/model caches without revoking a
+    # still-valid vision or image-generation verification.
+    return _merge_post_commit_warnings(
+        response,
+        warnings,
+    )

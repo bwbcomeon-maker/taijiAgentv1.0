@@ -19,6 +19,21 @@ from gateway.config import Platform
 from gateway.session import SessionSource
 
 
+def _capability_bound_factory(agent_cls):
+    """Construct a fake with the runtime identity production AIAgent binds."""
+
+    def _factory(*args, **kwargs):
+        from agent.image_runtime import capture_capability_runtime_generation
+
+        agent = agent_cls(*args, **kwargs)
+        agent._capability_runtime_identity = (
+            capture_capability_runtime_generation().identity
+        )
+        return agent
+
+    return _factory
+
+
 class _CapturingAgent:
     """Fake agent that records init kwargs for assertions."""
 
@@ -88,7 +103,7 @@ def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = _CapturingAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(_CapturingAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     _CapturingAgent.last_init = None
@@ -132,7 +147,7 @@ async def test_background_task_prefers_session_override_over_global_runtime(monk
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = _CapturingAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(_CapturingAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     _CapturingAgent.last_init = None
@@ -260,4 +275,3 @@ fallback_providers:
     assert runtime_kwargs["api_key"] == "env-secret"
     assert runtime_kwargs["base_url"] == "https://fallback.example/v1"
     assert runtime_kwargs["model"] == "fallback-model"
-

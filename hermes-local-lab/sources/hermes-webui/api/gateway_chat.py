@@ -642,6 +642,7 @@ def _gateway_messages_for_new_turn(
     prepared_user_content: Any,
     *,
     cfg: dict | None = None,
+    capability_generation=None,
     state_messages: list[dict] | None = None,
 ) -> list[dict]:
     """Build Gateway input through the standard WebUI context pipeline."""
@@ -657,7 +658,11 @@ def _gateway_messages_for_new_turn(
     )
     history = _new_turn_context_from_messages(history, display_user_message)
     history = _deduplicate_context_messages(history)
-    history = _sanitize_messages_for_api(history, cfg=cfg)
+    history = _sanitize_messages_for_api(
+        history,
+        cfg=cfg,
+        capability_generation=capability_generation,
+    )
     return [
         *[dict(message) for message in (ephemeral_messages or [])],
         *history,
@@ -1161,8 +1166,14 @@ def _run_gateway_chat_streaming(
     try:
         s = get_session(session_id)
         from api.config import get_config  # imported lazily to avoid config-cycle churn
+        from agent.image_runtime import (
+            capture_capability_runtime_generation,
+        )
 
         cfg = get_config()
+        capability_generation = (
+            capture_capability_runtime_generation()
+        )
         try:
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
@@ -1204,6 +1215,7 @@ def _run_gateway_chat_streaming(
                 provider=model_provider,
                 model=model,
                 cancel_check=cancel_event.is_set,
+                capability_generation=capability_generation,
             )
         except WebUIChatInputCancelled:
             record_turn_interrupted("cancelled")
@@ -1225,6 +1237,7 @@ def _run_gateway_chat_streaming(
             prefill_messages,
             message_content,
             cfg=cfg,
+            capability_generation=capability_generation,
         )
         if turn_envelope is None:
             turn_envelope = TurnEnvelope.create(

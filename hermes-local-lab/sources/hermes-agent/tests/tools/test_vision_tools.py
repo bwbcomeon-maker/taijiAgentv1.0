@@ -21,9 +21,83 @@ from tools.vision_tools import (
     _is_image_size_error,
     _MAX_BASE64_BYTES,
     _RESIZE_TARGET_BYTES,
-    vision_analyze_tool,
+    vision_analyze_tool as _public_vision_analyze_tool,
     check_vision_requirements,
 )
+
+
+def _test_vision_binding(
+    provider: str = "custom",
+    model: str = "test/model",
+    fingerprint: str = "authorized-test-vision",
+    authorization_generation: str = "authorized-test-vision-generation",
+):
+    from agent.auxiliary_client import (
+        VisionRequestBinding,
+        authorize_vision_request_binding,
+    )
+
+    binding = VisionRequestBinding(
+        provider=provider,
+        model=model,
+        base_url="https://authorized-test-vision.example.test/v1",
+        api_key="authorized-test-secret",
+    )
+    return authorize_vision_request_binding(
+        binding,
+        authorization_fingerprint=fingerprint,
+        authorization_generation=authorization_generation,
+    )
+
+
+async def vision_analyze_tool(
+    image_url,
+    user_prompt,
+    model=None,
+    *,
+    provider=None,
+    strict_target=False,
+    _runtime_binding=None,
+):
+    """Run legacy unit cases through an explicit frozen test authorization."""
+    from agent import image_runtime
+    from tools import vision_tools
+
+    binding = _runtime_binding or _test_vision_binding(
+        provider=provider or "custom",
+        model=model or "test/model",
+    )
+    snapshot = {
+        "schema_version": 1,
+        "fingerprint": "authorized-test-vision",
+        "_authorization_generation": binding.authorization_generation,
+        "status": "verified",
+        "available": True,
+        "reason_code": "ready",
+        "provider": binding.provider,
+        "model": binding.model,
+    }
+    decision = image_runtime.build_capability_route_decision(
+        "vision",
+        snapshot=snapshot,
+        route="auxiliary",
+        request_binding=binding,
+    )
+    with patch(
+        "agent.image_runtime.verification_runtime_snapshot",
+        return_value=snapshot,
+    ):
+        return await vision_tools._await_with_vision_authorization(
+            _public_vision_analyze_tool(
+                image_url,
+                user_prompt,
+                binding.model,
+                provider=binding.provider,
+                strict_target=strict_target,
+                _runtime_binding=binding,
+            ),
+            decision,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +272,7 @@ class TestHandleVisionAnalyze:
         snapshot = {
             "schema_version": 1,
             "fingerprint": "verified-vision",
+            "_authorization_generation": "verified-vision-generation",
             "status": "verified",
             "available": True,
             "provider": "alibaba",
@@ -224,6 +299,15 @@ class TestHandleVisionAnalyze:
                 "agent.image_runtime.verification_runtime_snapshot",
                 return_value=snapshot,
             ),
+            patch(
+                "tools.vision_tools.capture_vision_request_binding",
+                return_value=_test_vision_binding(
+                    "alibaba",
+                    "qwen3-vl-plus",
+                    snapshot["fingerprint"],
+                    snapshot["_authorization_generation"],
+                ),
+            ),
         ):
             mock_tool.return_value = json.dumps({"result": "ok"})
             coro = _handle_vision_analyze(
@@ -244,6 +328,7 @@ class TestHandleVisionAnalyze:
         snapshot = {
             "schema_version": 1,
             "fingerprint": "verified-vision",
+            "_authorization_generation": "verified-vision-generation",
             "status": "verified",
             "available": True,
             "provider": "alibaba",
@@ -270,6 +355,15 @@ class TestHandleVisionAnalyze:
                 "agent.image_runtime.verification_runtime_snapshot",
                 return_value=snapshot,
             ),
+            patch(
+                "tools.vision_tools.capture_vision_request_binding",
+                return_value=_test_vision_binding(
+                    "alibaba",
+                    "qwen3-vl-plus",
+                    snapshot["fingerprint"],
+                    snapshot["_authorization_generation"],
+                ),
+            ),
         ):
             mock_tool.return_value = json.dumps({"result": "ok"})
             coro = _handle_vision_analyze(
@@ -288,6 +382,7 @@ class TestHandleVisionAnalyze:
         snapshot = {
             "schema_version": 1,
             "fingerprint": "verified-vision",
+            "_authorization_generation": "verified-vision-generation",
             "status": "verified",
             "available": True,
             "provider": "alibaba",
@@ -313,6 +408,15 @@ class TestHandleVisionAnalyze:
             patch(
                 "agent.image_runtime.verification_runtime_snapshot",
                 return_value=snapshot,
+            ),
+            patch(
+                "tools.vision_tools.capture_vision_request_binding",
+                return_value=_test_vision_binding(
+                    "alibaba",
+                    "qwen3-vl-plus",
+                    snapshot["fingerprint"],
+                    snapshot["_authorization_generation"],
+                ),
             ),
         ):
             # Ensure AUXILIARY_VISION_MODEL is not set
@@ -450,6 +554,7 @@ async def test_vision_handle_call_time_gate_blocks_unknown_unverified_and_stale_
         *,
         provider=None,
         strict_target=False,
+        _runtime_binding=None,
     ):
         provider_calls.append(
             {
@@ -458,6 +563,7 @@ async def test_vision_handle_call_time_gate_blocks_unknown_unverified_and_stale_
                 "model": model,
                 "provider": provider,
                 "strict_target": strict_target,
+                "runtime_binding": _runtime_binding,
             }
         )
         return json.dumps(
@@ -561,6 +667,7 @@ async def test_vision_handle_call_time_gate_blocks_unknown_unverified_and_stale_
             routed["provider"] != "alibaba"
             or routed["model"] != "qwen3-vl-plus"
             or routed["strict_target"] is not True
+            or routed["runtime_binding"] is None
         ):
             violations.append(
                 "current verified auxiliary route was not pinned to exact provider/model"
@@ -583,11 +690,24 @@ async def test_vision_deep_gate_revalidates_before_provider_and_retry(
     verified = {
         "schema_version": 1,
         "fingerprint": "verified-vision-runtime",
+        "_authorization_generation": "verified-vision-runtime-generation",
         "status": "verified",
         "available": True,
         "provider": "alibaba",
         "model": "qwen3-vl-plus",
     }
+    binding = _test_vision_binding(
+        "alibaba",
+        "qwen3-vl-plus",
+        verified["fingerprint"],
+        verified["_authorization_generation"],
+    )
+    decision = image_runtime.build_capability_route_decision(
+        "vision",
+        snapshot=verified,
+        route="auxiliary",
+        request_binding=binding,
+    )
     runtime = {"snapshot": dict(verified)}
     monkeypatch.setattr(
         image_runtime,
@@ -619,8 +739,9 @@ async def test_vision_deep_gate_revalidates_before_provider_and_retry(
             "qwen3-vl-plus",
             provider="alibaba",
             strict_target=True,
+            _runtime_binding=binding,
         ),
-        verified,
+        decision,
     )
     assert json.loads(stable)["success"] is True
     assert len(stable_calls) == 1
@@ -652,12 +773,414 @@ async def test_vision_deep_gate_revalidates_before_provider_and_retry(
             "qwen3-vl-plus",
             provider="alibaba",
             strict_target=True,
+            _runtime_binding=binding,
         ),
-        verified,
+        decision,
     )
 
     assert json.loads(revoked)["success"] is False
     assert len(retry_calls) == 1, "revocation allowed a second Provider call"
+
+
+@pytest.mark.asyncio
+async def test_vision_provider_boundary_final_reauth_blocks_state_drift_without_io(
+    monkeypatch,
+    tmp_path,
+):
+    """A frozen vision route must be reauthorized immediately before Provider I/O."""
+    from agent import auxiliary_client, image_routing, image_runtime
+    from agent.auxiliary_client import (
+        VisionRequestBinding,
+        authorize_vision_request_binding,
+    )
+    from tools import vision_tools
+
+    decision_factory = getattr(
+        image_runtime,
+        "build_capability_route_decision",
+        None,
+    )
+    assert callable(decision_factory), "CapabilityRouteDecision factory is missing"
+
+    image = tmp_path / "vision-final-reauth.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    verified = {
+        "schema_version": 1,
+        "fingerprint": "vision-final-reauth-v1",
+        "_authorization_generation": "vision-final-reauth-generation-v1",
+        "status": "verified",
+        "available": True,
+        "reason_code": "ready",
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+    }
+    stale = {
+        **verified,
+        "status": "configured_unverified",
+        "available": False,
+        "reason_code": "vision_not_verified",
+    }
+    binding = authorize_vision_request_binding(
+        VisionRequestBinding(
+            provider="alibaba",
+            model="qwen3-vl-plus",
+            base_url="https://pinned-vision.example.test/v1",
+            api_key="pinned-vision-secret",
+        ),
+        authorization_fingerprint=verified["fingerprint"],
+        authorization_generation=verified[
+            "_authorization_generation"
+        ],
+    )
+    runtime = {"snapshot": dict(verified)}
+    build_calls = []
+
+    def freeze_then_drift(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        # The persisted verification state changes after the caller's first
+        # read but before the Provider-boundary final authorization.
+        runtime["snapshot"] = dict(stale)
+        return decision_factory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_runtime,
+        "build_capability_route_decision",
+        freeze_then_drift,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda *_args, **_kwargs: dict(runtime["snapshot"]),
+    )
+    monkeypatch.setattr(
+        vision_tools,
+        "capture_vision_request_binding",
+        lambda **_kwargs: binding,
+    )
+    monkeypatch.setattr(
+        auxiliary_client,
+        "_read_main_provider",
+        lambda: "openai",
+    )
+    monkeypatch.setattr(
+        auxiliary_client,
+        "_read_main_model",
+        lambda: "gpt-4.1-mini",
+    )
+    monkeypatch.setattr(
+        image_routing,
+        "decide_image_input_mode",
+        lambda *_args, **_kwargs: "text",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {},
+    )
+    provider_io = []
+
+    async def provider_call(**kwargs):
+        provider_io.append(kwargs)
+        kwargs["resolution_out"].update(
+            {"provider": "alibaba", "model": "qwen3-vl-plus"}
+        )
+        response = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "should not reach Provider"
+        response.choices = [choice]
+        return response
+
+    monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+
+    result = json.loads(
+        await vision_tools._handle_vision_analyze(
+            {
+                "image_url": str(image),
+                "question": "describe the authorization boundary",
+            }
+        )
+    )
+
+    violations = []
+    if len(build_calls) != 1:
+        violations.append("handler did not freeze one route decision")
+    if provider_io:
+        violations.append("state drift reached Provider I/O")
+    if result.get("success") is not False:
+        violations.append("state drift did not return a blocked result")
+    if result.get("status") != "blocked":
+        violations.append("state drift did not return stable blocked status")
+    if result.get("error_code") != "capability_caller_stale":
+        violations.append("state drift did not return stable stale error_code")
+    assert violations == [], "; ".join(violations)
+
+
+@pytest.mark.asyncio
+async def test_vision_handler_uses_private_pinned_binding_after_ambient_rotation(
+    monkeypatch,
+    tmp_path,
+):
+    """Ambient secret/endpoint rotation after reauth must not replace the binding."""
+    from agent import auxiliary_client, image_routing, image_runtime
+    from agent.auxiliary_client import (
+        VisionRequestBinding,
+        authorize_vision_request_binding,
+    )
+    from tools import vision_tools
+
+    decision_factory = getattr(
+        image_runtime,
+        "build_capability_route_decision",
+        None,
+    )
+    assert callable(decision_factory), "CapabilityRouteDecision factory is missing"
+
+    image = tmp_path / "vision-pinned-binding.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    verified = {
+        "schema_version": 1,
+        "fingerprint": "vision-pinned-binding-v1",
+        "_authorization_generation": "vision-pinned-binding-generation-v1",
+        "status": "verified",
+        "available": True,
+        "reason_code": "ready",
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+    }
+    pinned_endpoint = "https://pinned-vision.example.test/v1"
+    pinned_secret = "pinned-vision-secret"
+    binding = authorize_vision_request_binding(
+        VisionRequestBinding(
+            provider="alibaba",
+            model="qwen3-vl-plus",
+            base_url=pinned_endpoint,
+            api_key=pinned_secret,
+        ),
+        authorization_fingerprint=verified["fingerprint"],
+        authorization_generation=verified[
+            "_authorization_generation"
+        ],
+    )
+    build_calls = []
+
+    def build_decision(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        return decision_factory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_runtime,
+        "build_capability_route_decision",
+        build_decision,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda *_args, **_kwargs: dict(verified),
+    )
+    monkeypatch.setattr(
+        vision_tools,
+        "capture_vision_request_binding",
+        lambda **_kwargs: binding,
+    )
+    monkeypatch.setattr(
+        auxiliary_client,
+        "_read_main_provider",
+        lambda: "openai",
+    )
+    monkeypatch.setattr(
+        auxiliary_client,
+        "_read_main_model",
+        lambda: "gpt-4.1-mini",
+    )
+    monkeypatch.setattr(
+        image_routing,
+        "decide_image_input_mode",
+        lambda *_args, **_kwargs: "text",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {},
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-before-reauth")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://ambient-before-reauth.example.test/v1",
+    )
+    reauth_calls = []
+
+    def final_reauth(_snapshot):
+        reauth_calls.append(True)
+        # The exact snapshot has been accepted. Rotate ambient state before
+        # async_call_llm receives the request-local binding.
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-after-reauth")
+        monkeypatch.setenv(
+            "OPENAI_BASE_URL",
+            "https://ambient-after-reauth.example.test/v1",
+        )
+        return True
+
+    monkeypatch.setattr(
+        vision_tools,
+        "_vision_authorization_is_current",
+        final_reauth,
+    )
+    provider_calls = []
+
+    async def provider_call(**kwargs):
+        provider_calls.append(kwargs)
+        kwargs["resolution_out"].update(
+            {"provider": "alibaba", "model": "qwen3-vl-plus"}
+        )
+        response = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "pinned binding used"
+        response.choices = [choice]
+        return response
+
+    monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+
+    result = json.loads(
+        await vision_tools._handle_vision_analyze(
+            {
+                "image_url": str(image),
+                "question": "describe the pinned route",
+            }
+        )
+    )
+
+    observed_binding = (
+        provider_calls[0].get("vision_binding")
+        if len(provider_calls) == 1
+        else None
+    )
+    violations = []
+    if result.get("success") is not True:
+        violations.append("pinned vision dispatch unexpectedly failed")
+    if len(build_calls) != 1:
+        violations.append("handler did not freeze one route decision")
+    if reauth_calls != [True]:
+        violations.append("handler did not perform exactly one final reauth")
+    if len(provider_calls) != 1:
+        violations.append("Provider was not called exactly once")
+    if observed_binding is not binding:
+        violations.append("Provider did not receive the private pinned binding")
+    if (
+        observed_binding is not None
+        and observed_binding.api_key != pinned_secret
+    ):
+        violations.append("Provider binding secret changed with ambient state")
+    if (
+        observed_binding is not None
+        and observed_binding.base_url != pinned_endpoint
+    ):
+        violations.append("Provider binding endpoint changed with ambient state")
+    if os.environ["OPENAI_API_KEY"] != "ambient-after-reauth":
+        violations.append("test did not rotate the ambient secret after reauth")
+    if (
+        os.environ["OPENAI_BASE_URL"]
+        != "https://ambient-after-reauth.example.test/v1"
+    ):
+        violations.append("test did not rotate the ambient endpoint after reauth")
+    assert violations == [], "; ".join(violations)
+
+
+@pytest.mark.parametrize(
+    ("snapshot_status", "binding_present", "expected_error_code"),
+    [
+        ("configured_unverified", True, "vision_not_verified"),
+        ("verified", False, "vision_binding_required"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_public_vision_tool_cannot_bypass_verification_or_binding_gate(
+    monkeypatch,
+    tmp_path,
+    snapshot_status,
+    binding_present,
+    expected_error_code,
+):
+    """Direct public calls must fail closed before auxiliary Provider I/O."""
+    from agent import image_runtime
+    from agent.auxiliary_client import VisionRequestBinding
+    from tools import vision_tools
+
+    image = tmp_path / f"direct-{snapshot_status}.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    available = snapshot_status == "verified"
+    snapshot = {
+        "schema_version": 1,
+        "fingerprint": f"vision-direct-{snapshot_status}",
+        "_authorization_generation": (
+            f"vision-direct-{snapshot_status}-generation"
+        ),
+        "status": snapshot_status,
+        "available": available,
+        "reason_code": (
+            "ready" if available else "vision_not_verified"
+        ),
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+    }
+    binding = (
+        VisionRequestBinding(
+            provider="alibaba",
+            model="qwen3-vl-plus",
+            base_url="https://pinned-direct.example.test/v1",
+            api_key="pinned-direct-secret",
+        )
+        if binding_present
+        else None
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda *_args, **_kwargs: dict(snapshot),
+    )
+    monkeypatch.setattr(
+        vision_tools,
+        "capture_vision_request_binding",
+        lambda **_kwargs: None,
+    )
+    provider_io = []
+
+    async def provider_call(**kwargs):
+        provider_io.append(kwargs)
+        kwargs["resolution_out"].update(
+            {"provider": "alibaba", "model": "qwen3-vl-plus"}
+        )
+        response = MagicMock()
+        choice = MagicMock()
+        choice.message.content = "direct call bypassed the gate"
+        response.choices = [choice]
+        return response
+
+    monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+    token = vision_tools._VISION_AUTHORIZATION_SNAPSHOT.set(None)
+    try:
+        result = json.loads(
+            await vision_tools.vision_analyze_tool(
+                str(image),
+                "describe the direct-call gate",
+                "qwen3-vl-plus",
+                provider="alibaba",
+                strict_target=True,
+                _runtime_binding=binding,
+            )
+        )
+    finally:
+        vision_tools._VISION_AUTHORIZATION_SNAPSHOT.reset(token)
+
+    violations = []
+    if provider_io:
+        violations.append("direct public call reached Provider I/O")
+    if result.get("success") is not False:
+        violations.append("direct public call did not fail closed")
+    if result.get("status") != "blocked":
+        violations.append("direct public call did not return blocked status")
+    if result.get("error_code") != expected_error_code:
+        violations.append(
+            f"direct public call did not return {expected_error_code}"
+        )
+    assert violations == [], "; ".join(violations)
 
 
 # ---------------------------------------------------------------------------
@@ -1186,15 +1709,22 @@ class TestStrictVisionTarget:
         self,
         tmp_path,
     ):
-        from agent.auxiliary_client import VisionRequestBinding
+        from agent.auxiliary_client import (
+            VisionRequestBinding,
+            authorize_vision_request_binding,
+        )
 
         img = tmp_path / "strict.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
-        binding = VisionRequestBinding(
-            provider="custom:router",
-            model="router-vl",
-            base_url="https://vision.example.test/v1",
-            api_key="binding-secret",
+        binding = authorize_vision_request_binding(
+            VisionRequestBinding(
+                provider="custom:router",
+                model="router-vl",
+                base_url="https://vision.example.test/v1",
+                api_key="binding-secret",
+            ),
+            authorization_fingerprint="authorized-test-vision",
+            authorization_generation="authorized-test-vision-generation",
         )
         empty_response = MagicMock()
         empty_choice = MagicMock()

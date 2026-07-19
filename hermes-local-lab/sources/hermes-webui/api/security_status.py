@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any
 
@@ -103,33 +102,15 @@ def _env_file() -> Path:
     return _runtime_home() / ".env"
 
 
-def _set_env_lines(existing: str, values: dict[str, str]) -> str:
-    lines = existing.splitlines()
-    remaining = dict(values)
-    updated: list[str] = []
-    pattern = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
-    for line in lines:
-        match = pattern.match(line)
-        if match and match.group(1) in remaining:
-            key = match.group(1)
-            updated.append(f"{key}={remaining.pop(key)}")
-        else:
-            updated.append(line)
-    if updated and updated[-1].strip():
-        updated.append("")
-    for key, value in remaining.items():
-        updated.append(f"{key}={value}")
-    return "\n".join(updated).rstrip() + "\n"
-
-
 def _write_env(values: dict[str, str]) -> Path:
+    from agent.provider_credentials import mutate_env_unique
+
+    runtime_home = _runtime_home()
     env_path = _env_file()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    current = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    next_content = _set_env_lines(current, values)
-    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
-    tmp.write_text(next_content, encoding="utf-8")
-    tmp.replace(env_path)
+    mutate_env_unique(
+        values,
+        config_path=runtime_home / "config.yaml",
+    )
     return env_path
 
 

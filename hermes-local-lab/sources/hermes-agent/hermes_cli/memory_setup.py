@@ -12,7 +12,7 @@ import sys
 import shlex
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_config_path, get_hermes_home
 from hermes_cli.secret_prompt import masked_secret_prompt
 
 
@@ -180,7 +180,7 @@ def _get_available_providers() -> list:
 
 def cmd_setup_provider(provider_name: str) -> None:
     """Run memory setup for a specific provider, skipping the picker."""
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config
 
     providers = _get_available_providers()
     match = None
@@ -208,15 +208,14 @@ def cmd_setup_provider(provider_name: str) -> None:
         return
 
     # Fallback: generic schema-based setup (same as cmd_setup)
-    config["memory"]["provider"] = name
-    save_config(config)
+    _set_memory_provider(name)
     print(f"\n  Memory provider: {name}")
     print(f"  Activation saved to config.yaml\n")
 
 
 def cmd_setup(args) -> None:
     """Interactive memory provider setup wizard."""
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config
 
     providers = _get_available_providers()
 
@@ -240,8 +239,7 @@ def cmd_setup(args) -> None:
 
     # Built-in only
     if selected >= len(providers) or selected < 0:
-        config["memory"]["provider"] = ""
-        save_config(config)
+        _set_memory_provider("")
         print("\n  ✓ Memory provider: built-in only")
         print("  Saved to config.yaml\n")
         return
@@ -264,7 +262,7 @@ def cmd_setup(args) -> None:
     if not isinstance(provider_config, dict):
         provider_config = {}
 
-    env_path = get_hermes_home() / ".env"
+    config_path = get_config_path()
     env_writes = {}
 
     if schema:
@@ -326,21 +324,26 @@ def cmd_setup(args) -> None:
                     if env_var and env_var not in env_writes:
                         env_writes[env_var] = val
 
-    # Write activation key to config.yaml
-    config["memory"]["provider"] = name
-    save_config(config)
-
     # Write non-secret config to provider's native location
     hermes_home = str(get_hermes_home())
     if provider_config and hasattr(provider, "save_config"):
-        try:
-            provider.save_config(provider_config, hermes_home)
-        except Exception as e:
-            print(f"  Failed to write provider config: {e}")
+        provider.save_config(provider_config, hermes_home)
 
-    # Write secrets to .env
-    if env_writes:
-        _write_env_vars(env_path, env_writes)
+    # Publish activation and secrets only after native provider config succeeds.
+    from agent.provider_credentials import mutate_config_env_strict
+
+    def activate_provider(current: dict) -> None:
+        memory = current.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+            current["memory"] = memory
+        memory["provider"] = name
+
+    mutate_config_env_strict(
+        activate_provider,
+        env_writes,
+        config_path=config_path,
+    )
 
     print(f"\n  Memory provider: {name}")
     print(f"  Activation saved to config.yaml")
@@ -351,35 +354,40 @@ def cmd_setup(args) -> None:
     print(f"\n  Start a new session to activate.\n")
 
 
-def _write_env_vars(env_path: Path, env_writes: dict) -> None:
-    """Append or update env vars in .env file."""
-    env_path.parent.mkdir(parents=True, exist_ok=True)
+def _set_memory_provider(
+    provider_name: str,
+    *,
+    config_path: Path | None = None,
+) -> None:
+    """Activate one memory provider without replacing unrelated config."""
+    from agent.provider_credentials import mutate_config_strict
 
-    existing_lines = []
-    if env_path.exists():
-        existing_lines = env_path.read_text(encoding="utf-8").splitlines()
+    def activate_provider(current: dict) -> None:
+        memory = current.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+            current["memory"] = memory
+        memory["provider"] = provider_name
 
-    updated_keys = set()
-    new_lines = []
-    for line in existing_lines:
-        key_match = line.split("=", 1)[0].strip() if "=" in line else ""
-        if key_match in env_writes:
-            new_lines.append(f"{key_match}={env_writes[key_match]}")
-            updated_keys.add(key_match)
-        else:
-            new_lines.append(line)
+    mutate_config_strict(
+        activate_provider,
+        config_path=config_path or get_config_path(),
+    )
 
-    for key, val in env_writes.items():
-        if key not in updated_keys:
-            new_lines.append(f"{key}={val}")
 
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    # Restrict permissions — .env holds API keys and tokens.
-    try:
-        import stat
-        env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
-    except OSError:
-        pass  # Windows or read-only FS
+def _write_env_vars(
+    env_path: Path,
+    env_writes: dict,
+    *,
+    config_path: Path | None = None,
+) -> None:
+    """Update selected main ``.env`` keys through the canonical writer."""
+    from agent.provider_credentials import mutate_env_unique
+
+    mutate_env_unique(
+        env_writes,
+        config_path=config_path or env_path.parent / "config.yaml",
+    )
 
 
 # ---------------------------------------------------------------------------

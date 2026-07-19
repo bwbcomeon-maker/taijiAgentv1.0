@@ -1,0 +1,649 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="9" skipped="0" tests="9" time="0.320" timestamp="2026-07-19T17:06:43.871530+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_image_aba_snapshot_rejects_binding_from_intermediate_generation" time="0.097"><failure message="AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []&#10;  &#10;  Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x1098bdcd0&gt;
+
+    def test_image_aba_snapshot_rejects_binding_from_intermediate_generation(
+        monkeypatch,
+    ):
+        """Snapshot A -&gt; binding B -&gt; current A must not reach Provider I/O."""
+        from agent import image_gen_registry, image_runtime
+        from agent.image_gen_provider import ImageGenProvider
+        from hermes_cli import plugins as plugins_module
+        from tools import image_generation_tool
+
+        snapshot_a = _verified_snapshot(
+            "image_generation",
+            fingerprint="image-generation-A",
+            provider="codex",
+            model="gpt-image-2",
+        )
+        binding_b = _image_binding(fingerprint="image-generation-B")
+        provider_io: list[dict[str, Any]] = []
+
+        class Provider(ImageGenProvider):
+            _supports_pinned_image_request_binding = True
+
+            @property
+            def name(self) -&gt; str:
+                return "codex"
+
+            def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+                provider_io.append(dict(kwargs))
+                return {
+                    "success": True,
+                    "provider": self.name,
+                    "image": "/tmp/aba-should-not-run.png",
+                }
+
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot_a),
+        )
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_capture_image_gen_request_binding",
+            lambda: binding_b,
+        )
+        monkeypatch.setattr(
+            plugins_module,
+            "_ensure_plugins_discovered",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            image_gen_registry,
+            "get_provider",
+            lambda name: Provider() if name == "codex" else None,
+        )
+
+        result = json.loads(
+            image_generation_tool._handle_image_generate(
+                {"prompt": "aba image"},
+                caller_capability_fingerprint=snapshot_a["fingerprint"],
+            )
+        )
+
+&gt;       assert provider_io == []
+E       AssertionError: assert [{'_runtime_b...gpt-image-2'}] == []
+E
+E         Left contains one more item: {'_runtime_binding': ImageGenRequestBinding(provider='codex', model='gpt-image-2'), 'model': 'gpt-image-2'}
+E         Use -v to get more diff
+
+tests/tools/test_provider_boundary_adversarial.py:164: AssertionError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_custom_image_uses_only_deep_frozen_binding_material" time="0.030"><failure message="assert False is True">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x1098bf410&gt;
+
+    def test_custom_image_uses_only_deep_frozen_binding_material(
+        monkeypatch,
+    ):
+        """Endpoint, secret, network policy and timeout come from one immutable binding."""
+        from agent import custom_image_providers, image_runtime
+        from tools import image_generation_tool
+
+        provider = "custom:router"
+        model = "router-image-v1"
+        fingerprint = "custom-image-pinned-generation"
+        endpoint = "https://pinned-custom-image.example.test/v1"
+        secret = "PINNED-CUSTOM-IMAGE-SECRET"
+        provider_config = {
+            "id": "router",
+            "name": "Pinned router",
+            "base_url": endpoint,
+            "credential_ref": "custom-router-key",
+            "allow_custom_model_id": False,
+            "models": [model],
+            "default_model": model,
+            "size_map": {
+                "landscape": "1400x900",
+                "square": "900x900",
+                "portrait": "900x1400",
+            },
+            "response_format": "b64_json",
+            "timeout_seconds": 37,
+            "network_scope": "public_direct",
+            "trusted_proxy_profile": "",
+        }
+        binding = _image_binding(
+            fingerprint=fingerprint,
+            provider=provider,
+            model=model,
+            secret=secret,
+            endpoint=f"{endpoint}/images/generations",
+            provider_config=provider_config,
+        )
+        snapshot = _verified_snapshot(
+            "image_generation",
+            fingerprint=fingerprint,
+            provider=provider,
+            model=model,
+        )
+        outbound: list[dict[str, Any]] = []
+
+        @contextmanager
+        def request_pinned_https(**kwargs):
+            outbound.append(dict(kwargs))
+            yield SimpleNamespace(status_code=200)
+
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_capture_image_gen_request_binding",
+            lambda: binding,
+        )
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_load_image_gen_full_config",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("ambient custom image config was re-read")
+            ),
+        )
+        monkeypatch.setattr(
+            custom_image_providers,
+            "request_pinned_https",
+            request_pinned_https,
+        )
+        monkeypatch.setattr(
+            custom_image_providers,
+            "read_bounded_json",
+            lambda _response: {
+                "data": [
+                    {
+                        "b64_json": base64.b64encode(b"pinned-image").decode(
+                            "ascii"
+                        )
+                    }
+                ]
+            },
+        )
+        monkeypatch.setattr(
+            custom_image_providers,
+            "save_b64_image",
+            lambda *_args, **_kwargs: "/tmp/pinned-custom-image.png",
+        )
+
+        result = json.loads(
+            image_generation_tool._handle_image_generate(
+                {"prompt": "pinned custom image", "aspect_ratio": "portrait"},
+                caller_capability_fingerprint=fingerprint,
+            )
+        )
+
+&gt;       assert result["success"] is True
+E       assert False is True
+
+tests/tools/test_provider_boundary_adversarial.py:269: AssertionError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_custom_image_constructor_failure_never_falls_back_to_fal" time="0.003"><failure message="KeyError: 'error_code'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10a326150&gt;
+
+    def test_custom_image_constructor_failure_never_falls_back_to_fal(
+        monkeypatch,
+    ):
+        from agent import custom_image_providers, image_runtime
+        from tools import image_generation_tool
+
+        provider = "custom:router"
+        model = "router-image-v1"
+        fingerprint = "custom-image-constructor-failure"
+        snapshot = _verified_snapshot(
+            "image_generation",
+            fingerprint=fingerprint,
+            provider=provider,
+            model=model,
+        )
+        binding = _image_binding(
+            fingerprint=fingerprint,
+            provider=provider,
+            model=model,
+            provider_config={
+                "id": "router",
+                "name": "Router",
+                "base_url": "https://router.example.test/v1",
+                "credential_ref": "router-key",
+                "allow_custom_model_id": False,
+                "models": [model],
+                "default_model": model,
+                "size_map": {},
+                "response_format": "auto",
+                "timeout_seconds": 30,
+                "network_scope": "public_direct",
+                "trusted_proxy_profile": "",
+            },
+        )
+        fal_calls: list[dict[str, Any]] = []
+
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_capture_image_gen_request_binding",
+            lambda: binding,
+        )
+        monkeypatch.setattr(
+            custom_image_providers,
+            "ConfigurableOpenAIImageProvider",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("constructor failed")
+            ),
+        )
+        monkeypatch.setattr(
+            image_generation_tool,
+            "image_generate_tool",
+            lambda **kwargs: fal_calls.append(dict(kwargs))
+            or {"success": True, "provider": "fal"},
+        )
+
+        result = json.loads(
+            image_generation_tool._handle_image_generate(
+                {"prompt": "do not fall back"},
+                caller_capability_fingerprint=fingerprint,
+            )
+        )
+
+        assert fal_calls == []
+        assert result["success"] is False
+&gt;       assert result["error_code"] == "provider_configuration_invalid"
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'error_code'
+
+tests/tools/test_provider_boundary_adversarial.py:350: KeyError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_auxiliary_inner_retry_reauth_blocks_second_io[first_error0-0.7-None]" time="0.004"><failure message="TypeError: async_call_llm() got an unexpected keyword argument 'vision_reauth_guard'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10a325010&gt;
+first_error = RuntimeError('unsupported parameter temperature')
+temperature = 0.7, max_tokens = None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("first_error", "temperature", "max_tokens"),
+        [
+            (RuntimeError("unsupported parameter temperature"), 0.7, None),
+            (RuntimeError("unsupported parameter max_tokens"), None, 256),
+        ],
+    )
+    async def test_auxiliary_inner_retry_reauth_blocks_second_io(
+        monkeypatch,
+        first_error,
+        temperature,
+        max_tokens,
+    ):
+        from agent import auxiliary_client
+
+        fingerprint = "vision-inner-retry-generation"
+        binding = _vision_binding(fingerprint=fingerprint)
+        io_calls: list[dict[str, Any]] = []
+        guard_calls: list[int] = []
+
+        class Completions:
+            async def create(self, **kwargs):
+                io_calls.append(dict(kwargs))
+                raise first_error
+
+        client = SimpleNamespace(
+            base_url=binding.base_url,
+            chat=SimpleNamespace(completions=Completions()),
+        )
+
+        def guard():
+            guard_calls.append(len(guard_calls) + 1)
+            if len(guard_calls) &gt; 1:
+                raise RuntimeError("capability_caller_stale")
+
+        monkeypatch.setattr(
+            auxiliary_client,
+            "resolve_vision_provider_client",
+            lambda **_kwargs: (binding.provider, client, binding.model),
+        )
+
+        with pytest.raises(RuntimeError, match="capability_caller_stale"):
+&gt;           await auxiliary_client.async_call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "inspect"}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                no_fallback=True,
+                vision_binding=binding,
+                vision_reauth_guard=guard,
+            )
+
+tests/tools/test_provider_boundary_adversarial.py:397:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+args = ()
+kwargs = {'max_tokens': None, 'messages': [{'content': 'inspect', 'role': 'user'}], 'no_fallback': True, 'task': 'vision', ...}
+clients = []
+token = &lt;Token used var=&lt;ContextVar name='transient_named_vision_clients' default=None at 0x10a4618f0&gt; at 0x10a3753c0&gt;
+
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        clients: list[Any] = []
+        token = _transient_named_vision_clients.set(clients)
+        try:
+&gt;           return await fn(*args, **kwargs)
+                         ^^^^^^^^^^^^^^^^^^^
+E           TypeError: async_call_llm() got an unexpected keyword argument 'vision_reauth_guard'
+
+agent/auxiliary_client.py:205: TypeError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_auxiliary_inner_retry_reauth_blocks_second_io[first_error1-None-256]" time="0.002"><failure message="TypeError: async_call_llm() got an unexpected keyword argument 'vision_reauth_guard'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10a575c50&gt;
+first_error = RuntimeError('unsupported parameter max_tokens')
+temperature = None, max_tokens = 256
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("first_error", "temperature", "max_tokens"),
+        [
+            (RuntimeError("unsupported parameter temperature"), 0.7, None),
+            (RuntimeError("unsupported parameter max_tokens"), None, 256),
+        ],
+    )
+    async def test_auxiliary_inner_retry_reauth_blocks_second_io(
+        monkeypatch,
+        first_error,
+        temperature,
+        max_tokens,
+    ):
+        from agent import auxiliary_client
+
+        fingerprint = "vision-inner-retry-generation"
+        binding = _vision_binding(fingerprint=fingerprint)
+        io_calls: list[dict[str, Any]] = []
+        guard_calls: list[int] = []
+
+        class Completions:
+            async def create(self, **kwargs):
+                io_calls.append(dict(kwargs))
+                raise first_error
+
+        client = SimpleNamespace(
+            base_url=binding.base_url,
+            chat=SimpleNamespace(completions=Completions()),
+        )
+
+        def guard():
+            guard_calls.append(len(guard_calls) + 1)
+            if len(guard_calls) &gt; 1:
+                raise RuntimeError("capability_caller_stale")
+
+        monkeypatch.setattr(
+            auxiliary_client,
+            "resolve_vision_provider_client",
+            lambda **_kwargs: (binding.provider, client, binding.model),
+        )
+
+        with pytest.raises(RuntimeError, match="capability_caller_stale"):
+&gt;           await auxiliary_client.async_call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "inspect"}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                no_fallback=True,
+                vision_binding=binding,
+                vision_reauth_guard=guard,
+            )
+
+tests/tools/test_provider_boundary_adversarial.py:397:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+args = ()
+kwargs = {'max_tokens': 256, 'messages': [{'content': 'inspect', 'role': 'user'}], 'no_fallback': True, 'task': 'vision', ...}
+clients = []
+token = &lt;Token used var=&lt;ContextVar name='transient_named_vision_clients' default=None at 0x10a4618f0&gt; at 0x10a576ac0&gt;
+
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        clients: list[Any] = []
+        token = _transient_named_vision_clients.set(clients)
+        try:
+&gt;           return await fn(*args, **kwargs)
+                         ^^^^^^^^^^^^^^^^^^^
+E           TypeError: async_call_llm() got an unexpected keyword argument 'vision_reauth_guard'
+
+agent/auxiliary_client.py:205: TypeError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_forged_vision_binding_fails_closed_for_runtime_and_probe[verified]" time="0.006"><failure message="AssertionError: assert [{'max_tokens...': True, ...}] == []&#10;  &#10;  Left contains one more item: {'max_tokens': 2000, 'messages': [{'content': [{'text': 'forged binding', 'type': 'text'}, {'image_url': {'url': 'data...64,iVBORw0KGgpwcm9iZQ=='}, 'type': 'image_url'}], 'role': 'user'}], 'model': 'qwen3-vl-plus', 'no_fallback': True, ...}&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10a552050&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2665/test_forged_vision_binding_fai0')
+status = 'verified'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["verified", "verifying"])
+    async def test_forged_vision_binding_fails_closed_for_runtime_and_probe(
+        monkeypatch,
+        tmp_path,
+        status,
+    ):
+        from agent import image_runtime
+        from tools import vision_tools
+
+        fingerprint = f"vision-{status}-generation-A"
+        forged = _vision_binding(fingerprint=f"vision-{status}-forged-B")
+        snapshot = _verified_snapshot(
+            "vision",
+            fingerprint=fingerprint,
+            provider=forged.provider,
+            model=forged.model,
+            status=status,
+        )
+        image = tmp_path / "probe.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"probe")
+        provider_io: list[dict[str, Any]] = []
+
+        async def provider_call(**kwargs):
+            provider_io.append(dict(kwargs))
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="forged call ran")
+                    )
+                ]
+            )
+            return response
+
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+
+        result = json.loads(
+            await vision_tools.vision_analyze_tool(
+                str(image),
+                "forged binding",
+                forged.model,
+                provider=forged.provider,
+                strict_target=True,
+                _runtime_binding=forged,
+            )
+        )
+
+&gt;       assert provider_io == []
+E       AssertionError: assert [{'max_tokens...': True, ...}] == []
+E
+E         Left contains one more item: {'max_tokens': 2000, 'messages': [{'content': [{'text': 'forged binding', 'type': 'text'}, {'image_url': {'url': 'data...64,iVBORw0KGgpwcm9iZQ=='}, 'type': 'image_url'}], 'role': 'user'}], 'model': 'qwen3-vl-plus', 'no_fallback': True, ...}
+E         Use -v to get more diff
+
+tests/tools/test_provider_boundary_adversarial.py:463: AssertionError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_forged_vision_binding_fails_closed_for_runtime_and_probe[verifying]" time="0.004"><failure message="AssertionError: assert [{'max_tokens...': True, ...}] == []&#10;  &#10;  Left contains one more item: {'max_tokens': 2000, 'messages': [{'content': [{'text': 'forged binding', 'type': 'text'}, {'image_url': {'url': 'data...64,iVBORw0KGgpwcm9iZQ=='}, 'type': 'image_url'}], 'role': 'user'}], 'model': 'qwen3-vl-plus', 'no_fallback': True, ...}&#10;  Use -v to get more diff">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10a3061d0&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2665/test_forged_vision_binding_fai1')
+status = 'verifying'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["verified", "verifying"])
+    async def test_forged_vision_binding_fails_closed_for_runtime_and_probe(
+        monkeypatch,
+        tmp_path,
+        status,
+    ):
+        from agent import image_runtime
+        from tools import vision_tools
+
+        fingerprint = f"vision-{status}-generation-A"
+        forged = _vision_binding(fingerprint=f"vision-{status}-forged-B")
+        snapshot = _verified_snapshot(
+            "vision",
+            fingerprint=fingerprint,
+            provider=forged.provider,
+            model=forged.model,
+            status=status,
+        )
+        image = tmp_path / "probe.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"probe")
+        provider_io: list[dict[str, Any]] = []
+
+        async def provider_call(**kwargs):
+            provider_io.append(dict(kwargs))
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="forged call ran")
+                    )
+                ]
+            )
+            return response
+
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+
+        result = json.loads(
+            await vision_tools.vision_analyze_tool(
+                str(image),
+                "forged binding",
+                forged.model,
+                provider=forged.provider,
+                strict_target=True,
+                _runtime_binding=forged,
+            )
+        )
+
+&gt;       assert provider_io == []
+E       AssertionError: assert [{'max_tokens...': True, ...}] == []
+E
+E         Left contains one more item: {'max_tokens': 2000, 'messages': [{'content': [{'text': 'forged binding', 'type': 'text'}, {'image_url': {'url': 'data...64,iVBORw0KGgpwcm9iZQ=='}, 'type': 'image_url'}], 'role': 'user'}], 'model': 'qwen3-vl-plus', 'no_fallback': True, ...}
+E         Use -v to get more diff
+
+tests/tools/test_provider_boundary_adversarial.py:463: AssertionError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_image_provider_exception_redacts_secret_and_endpoint" time="0.001"><failure message="KeyError: 'error_code'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10a4107d0&gt;
+caplog = &lt;_pytest.logging.LogCaptureFixture object at 0x10a551290&gt;
+
+    def test_image_provider_exception_redacts_secret_and_endpoint(
+        monkeypatch,
+        caplog,
+    ):
+        from agent import image_gen_registry, image_runtime
+        from agent.image_gen_provider import ImageGenProvider
+        from hermes_cli import plugins as plugins_module
+        from tools import image_generation_tool
+
+        secret = "SENTINEL-IMAGE-SECRET-DO-NOT-LEAK"
+        endpoint = "https://sentinel-image-endpoint.example.test/private"
+        fingerprint = "image-redaction-generation"
+        snapshot = _verified_snapshot(
+            "image_generation",
+            fingerprint=fingerprint,
+            provider="codex",
+            model="gpt-image-2",
+        )
+        binding = _image_binding(
+            fingerprint=fingerprint,
+            secret=secret,
+            endpoint=endpoint,
+        )
+
+        class Provider(ImageGenProvider):
+            _supports_pinned_image_request_binding = True
+
+            @property
+            def name(self) -&gt; str:
+                return "codex"
+
+            def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+                raise RuntimeError(f"{secret} {endpoint}")
+
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_capture_image_gen_request_binding",
+            lambda: binding,
+        )
+        monkeypatch.setattr(
+            plugins_module,
+            "_ensure_plugins_discovered",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            image_gen_registry,
+            "get_provider",
+            lambda name: Provider() if name == "codex" else None,
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            result_text = image_generation_tool._handle_image_generate(
+                {"prompt": "redact image error"},
+                caller_capability_fingerprint=fingerprint,
+            )
+        result = json.loads(result_text)
+        evidence = f"{result_text}\n{caplog.text}"
+
+        assert result["success"] is False
+&gt;       assert result["error_code"] == "provider_exception"
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'error_code'
+
+tests/tools/test_provider_boundary_adversarial.py:533: KeyError</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_vision_provider_exception_redacts_secret_and_endpoint" time="0.004"><failure message="KeyError: 'error_code'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10a572a50&gt;
+caplog = &lt;_pytest.logging.LogCaptureFixture object at 0x10a570cd0&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2665/test_vision_provider_exception0')
+
+    @pytest.mark.asyncio
+    async def test_vision_provider_exception_redacts_secret_and_endpoint(
+        monkeypatch,
+        caplog,
+        tmp_path,
+    ):
+        from agent import image_runtime
+        from tools import vision_tools
+
+        secret = "SENTINEL-VISION-SECRET-DO-NOT-LEAK"
+        endpoint = "https://sentinel-vision-endpoint.example.test/private"
+        fingerprint = "vision-redaction-generation"
+        binding = _vision_binding(
+            fingerprint=fingerprint,
+            secret=secret,
+            endpoint=endpoint,
+        )
+        snapshot = _verified_snapshot(
+            "vision",
+            fingerprint=fingerprint,
+            provider=binding.provider,
+            model=binding.model,
+        )
+        image = tmp_path / "vision.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"vision")
+
+        async def provider_call(**_kwargs):
+            raise RuntimeError(f"{secret} {endpoint}")
+
+        monkeypatch.setattr(
+            image_runtime,
+            "verification_runtime_snapshot",
+            lambda *_args, **_kwargs: dict(snapshot),
+        )
+        monkeypatch.setattr(vision_tools, "async_call_llm", provider_call)
+
+        with caplog.at_level(logging.DEBUG):
+            result_text = await vision_tools.vision_analyze_tool(
+                str(image),
+                "redact vision error",
+                binding.model,
+                provider=binding.provider,
+                strict_target=True,
+                _runtime_binding=binding,
+            )
+        result = json.loads(result_text)
+        evidence = f"{result_text}\n{caplog.text}"
+
+        assert result["success"] is False
+&gt;       assert result["error_code"] == "vision_provider_exception"
+               ^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'error_code'
+
+tests/tools/test_provider_boundary_adversarial.py:588: KeyError</failure></testcase></testsuite></testsuites>

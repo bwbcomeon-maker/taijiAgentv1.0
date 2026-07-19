@@ -14,6 +14,10 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 RUNTIME_ENV_SH = (LAB_ROOT / "scripts" / "runtime-env.sh").read_text(encoding="utf-8")
+SYNC_CONFIG_PY = (LAB_ROOT / "scripts" / "sync-packaged-config.py").read_text(
+    encoding="utf-8"
+)
+STOP_ALL_SH = (LAB_ROOT / "scripts" / "stop-all.sh").read_text(encoding="utf-8")
 PACKAGED_CONFIG_PATH = LAB_ROOT / "config" / "taiji-default-config.yaml"
 PACKAGED_CONFIG = PACKAGED_CONFIG_PATH.read_text(encoding="utf-8")
 
@@ -193,6 +197,26 @@ def test_runtime_env_syncs_packaged_feature_visibility_on_startup():
     assert "TAIJI_AGENT_SYNC_PACKAGED_CONFIG" in RUNTIME_ENV_SH
     assert "$LAB_DIR/config/taiji-default-config.yaml" in RUNTIME_ENV_SH
     assert "$TAIJI_RUNTIME_HOME/config.yaml" in RUNTIME_ENV_SH
+    sync_block = RUNTIME_ENV_SH.split(
+        'if [ "${TAIJI_AGENT_SYNC_PACKAGED_CONFIG',
+        1,
+    )[1].split("# Treat dotenv files as data only.", 1)[0]
+    assert "$AGENT_DIR/.venv/bin/python" in sync_block
+    assert "|| true" not in sync_block
+    assert "could not find Python" in sync_block
+
+
+def test_packaged_config_sync_uses_canonical_locked_atomic_writer():
+    assert "mutate_config_strict" in SYNC_CONFIG_PY
+    assert "reconcile_capability_config_epochs" in SYNC_CONFIG_PY
+    assert "target_path.write_text" not in SYNC_CONFIG_PY
+    assert "shutil.copyfile" not in SYNC_CONFIG_PY
+
+
+def test_stop_script_does_not_mutate_packaged_runtime_config():
+    disable_at = STOP_ALL_SH.index("TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0")
+    source_at = STOP_ALL_SH.index('source "$SCRIPT_DIR/runtime-env.sh"')
+    assert disable_at < source_at
 
 
 def test_sync_packaged_config_preserves_existing_model_secrets(tmp_path):
@@ -244,6 +268,67 @@ def test_sync_packaged_config_preserves_existing_model_secrets(tmp_path):
     assert merged["webui"]["feature_visibility"]["nav"]["tasks"] is False
     assert merged["webui"]["feature_visibility"]["settings_sections"]["models"] is False
     assert merged["webui"]["feature_visibility"]["composer"]["model"] is False
+
+
+def test_sync_packaged_config_advances_only_changed_capability_epoch(tmp_path):
+    template = tmp_path / "template.yaml"
+    target = tmp_path / "user" / "config.yaml"
+    template.write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {
+                    "provider": "dashscope",
+                    "model": "wanx2.1-t2i-turbo",
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        yaml.safe_dump(
+            {
+                "auxiliary": {
+                    "vision": {
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                    }
+                },
+                "_taiji_capability_epochs": {
+                    "vision": 41,
+                    "image_generation": 53,
+                },
+                "_taiji_profile_incarnation": "incarnation-current",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(LAB_ROOT / "scripts" / "sync-packaged-config.py"),
+            str(template),
+            str(target),
+        ],
+        check=True,
+    )
+
+    merged = yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert merged["image_gen"] == {
+        "provider": "dashscope",
+        "model": "wanx2.1-t2i-turbo",
+    }
+    assert merged["_taiji_capability_epochs"] == {
+        "vision": 41,
+        "image_generation": 54,
+    }
+    assert (
+        merged["_taiji_profile_incarnation"]
+        == "incarnation-current"
+    )
 
 
 def test_packaged_config_declares_empty_provider_credentials_without_secrets():

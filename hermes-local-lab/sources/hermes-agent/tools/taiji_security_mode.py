@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any
 
@@ -93,25 +92,6 @@ def _env_file() -> Path:
     return _runtime_home() / ".env"
 
 
-def _set_env_lines(existing: str, values: dict[str, str]) -> str:
-    lines = existing.splitlines()
-    remaining = dict(values)
-    updated: list[str] = []
-    pattern = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
-    for line in lines:
-        match = pattern.match(line)
-        if match and match.group(1) in remaining:
-            key = match.group(1)
-            updated.append(f"{key}={remaining.pop(key)}")
-        else:
-            updated.append(line)
-    if updated and updated[-1].strip():
-        updated.append("")
-    for key, value in remaining.items():
-        updated.append(f"{key}={value}")
-    return "\n".join(updated).rstrip() + "\n"
-
-
 def enable_capability_env(allow_var: str) -> dict[str, Any]:
     """Persist one controlled capability for desktop runtimes only."""
     if allow_var not in _CONTROLLED_ALLOW_VARS.values():
@@ -125,12 +105,14 @@ def enable_capability_env(allow_var: str) -> dict[str, Any]:
         "TAIJI_SECURITY_MODE": "restricted",
         allow_var: "1",
     }
+    runtime_home = _runtime_home()
     env_path = _env_file()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    current = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
-    tmp.write_text(_set_env_lines(current, values), encoding="utf-8")
-    tmp.replace(env_path)
+    from agent.provider_credentials import mutate_env_unique
+
+    mutate_env_unique(
+        values,
+        config_path=runtime_home / "config.yaml",
+    )
     os.environ.update(values)
     return {"persisted": True, "env_file": str(env_path)}
 

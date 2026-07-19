@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import base64
+import inspect
 import multiprocessing
 import os
 import threading
@@ -122,6 +123,113 @@ def _credential_config_process_reader(
     completed_event.set()
 
 
+def _verification_state_lock_process(
+    state_path: str,
+    label: str,
+    attempting_event,
+    acquired_event,
+    release_event,
+    result_queue,
+) -> None:
+    from api import model_config as child_model_config
+
+    attempting_event.set()
+    with child_model_config._verification_state_file_lock(
+        Path(state_path)
+    ):
+        result_queue.put((label, "entered"))
+        acquired_event.set()
+        release_event.wait(timeout=10)
+    result_queue.put((label, "exited"))
+
+
+def _old_vision_probe_owner_process(
+    state_dir: str,
+    profile: str,
+    old_began_event,
+    newer_began_event,
+    result_queue,
+) -> None:
+    import api.config as child_api_config
+    from api import model_config as child_model_config
+
+    child_api_config.STATE_DIR = Path(state_dir)
+    fingerprint = "cross-process-vision-old"
+    diagnostic_id = "cross-process-old-owner"
+    generation = child_model_config._begin_vision_probe(
+        profile,
+        {
+            "schema_version": 1,
+            "fingerprint": fingerprint,
+            "status": "verifying",
+            "checked_at": "2030-01-01T00:00:00Z",
+            "error_code": "",
+            "message": "old probe",
+            "diagnostic_id": diagnostic_id,
+        },
+    )
+    result_queue.put(("old_generation", generation))
+    old_began_event.set()
+    if not newer_began_event.wait(timeout=10):
+        result_queue.put(("old_commit", "newer_timeout"))
+        return
+    state_path = child_model_config._vision_verification_state_path(
+        profile
+    )
+    with child_model_config._vision_profile_lock(profile):
+        current_generation = (
+            child_model_config._VISION_PROBE_GENERATIONS.get(profile, 0)
+        )
+        with child_model_config._verification_state_file_lock(state_path):
+            committed = child_model_config._commit_owned_verification_result(
+                state_path,
+                generation=generation,
+                current_generation=current_generation,
+                fingerprint=fingerprint,
+                diagnostic_id=diagnostic_id,
+                state={
+                    "schema_version": 1,
+                    "fingerprint": fingerprint,
+                    "status": "verified",
+                    "checked_at": "2030-01-01T00:00:01Z",
+                    "error_code": "",
+                    "message": "old final result",
+                    "diagnostic_id": diagnostic_id,
+                },
+            )
+    result_queue.put(("old_commit", committed))
+
+
+def _newer_vision_probe_owner_process(
+    state_dir: str,
+    profile: str,
+    old_began_event,
+    newer_began_event,
+    result_queue,
+) -> None:
+    import api.config as child_api_config
+    from api import model_config as child_model_config
+
+    child_api_config.STATE_DIR = Path(state_dir)
+    if not old_began_event.wait(timeout=10):
+        result_queue.put(("new_generation", "old_timeout"))
+        return
+    generation = child_model_config._begin_vision_probe(
+        profile,
+        {
+            "schema_version": 1,
+            "fingerprint": "cross-process-vision-new",
+            "status": "verifying",
+            "checked_at": "2030-01-01T00:00:02Z",
+            "error_code": "",
+            "message": "new probe",
+            "diagnostic_id": "cross-process-new-owner",
+        },
+    )
+    result_queue.put(("new_generation", generation))
+    newer_began_event.set()
+
+
 def _use_home(monkeypatch, tmp_path, *, stub_image_gen: bool = True):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(tmp_path / "config.yaml"))
@@ -163,6 +271,36 @@ def _use_home(monkeypatch, tmp_path, *, stub_image_gen: bool = True):
 
 def _read_config(tmp_path):
     return yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8")) or {}
+
+
+def _assert_verification_tombstone(
+    state,
+    *,
+    minimum_generation,
+    forbidden_fingerprint="",
+    forbidden_diagnostic_id="",
+):
+    assert state["schema_version"] == (
+        model_config.CAPABILITY_VERIFICATION_SCHEMA_VERSION
+    )
+    assert type(state["generation"]) is int
+    assert state["generation"] >= minimum_generation
+    assert state["status"] == "configured_unverified"
+    assert state["fingerprint"] == ""
+    assert state["diagnostic_id"] == ""
+    assert state["checked_at"] == ""
+    assert state["error_code"] == ""
+    assert state["message"] == ""
+    if forbidden_fingerprint:
+        assert forbidden_fingerprint not in json.dumps(
+            state,
+            ensure_ascii=False,
+        )
+    if forbidden_diagnostic_id:
+        assert forbidden_diagnostic_id not in json.dumps(
+            state,
+            ensure_ascii=False,
+        )
 
 
 @pytest.mark.parametrize(
@@ -419,9 +557,18 @@ def test_first_vision_save_lazily_binds_family_default_and_is_idempotent(monkeyp
     model_config.set_vision_config(body)
     first = _read_config(tmp_path)
     model_config.set_vision_config(body)
+    second = _read_config(tmp_path)
 
     assert first["auxiliary"]["vision"]["credential_ref"] == "alibaba-default"
-    assert _read_config(tmp_path) == first
+    assert (
+        second["_taiji_capability_epochs"]["vision"]
+        > first["_taiji_capability_epochs"]["vision"]
+    )
+    first_semantic = dict(first)
+    second_semantic = dict(second)
+    first_semantic.pop("_taiji_capability_epochs")
+    second_semantic.pop("_taiji_capability_epochs")
+    assert second_semantic == first_semantic
 
 
 def test_vision_save_without_explicit_default_keeps_legacy_fallback(monkeypatch, tmp_path):
@@ -766,6 +913,95 @@ def test_provider_credential_routes_map_validation_errors_to_400(monkeypatch):
         object(), SimpleNamespace(path="/api/provider-credentials/alibaba-default")
     ) is True
     assert responses == [("凭据无效", 400), ("凭据正在使用", 400)]
+
+
+@pytest.mark.parametrize(
+    ("path", "mutation_name"),
+    [
+        (
+            "/api/provider-credentials/alibaba-default",
+            "delete_provider_credential",
+        ),
+        (
+            "/api/vision/custom-providers/relay",
+            "delete_custom_vision_provider_config",
+        ),
+        (
+            "/api/image-gen/custom-providers/relay",
+            "delete_custom_image_provider_config",
+        ),
+    ],
+)
+def test_managed_provider_delete_routes_return_stable_conflict(
+    monkeypatch,
+    path,
+    mutation_name,
+):
+    from hermes_cli.config import ManagedConfigurationError
+
+    responses = []
+    rejection = ManagedConfigurationError("delete provider configuration")
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {})
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200: responses.append(
+            (payload, status)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda *_args, **_kwargs: pytest.fail(
+            "managed configuration rejection must not become an opaque error"
+        ),
+    )
+    monkeypatch.setattr(
+        model_config,
+        mutation_name,
+        lambda _value: (_ for _ in ()).throw(rejection),
+    )
+
+    assert routes.handle_delete(object(), SimpleNamespace(path=path)) is True
+    assert responses == [
+        (
+            {
+                "error": str(rejection),
+                "error_code": "managed_configuration",
+            },
+            409,
+        )
+    ]
+
+
+def test_configuration_conflict_response_exposes_path_not_values(monkeypatch):
+    from hermes_cli.config import ConfigurationConflictError
+
+    responses = []
+    conflict = ConfigurationConflictError(
+        ("custom_providers", 0, "api_key")
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200: responses.append(
+            (payload, status)
+        )
+        or True,
+    )
+
+    assert (
+        routes._configuration_mutation_error_response(object(), conflict)
+        is True
+    )
+    payload, status = responses[0]
+    assert status == 409
+    assert payload["error_code"] == "configuration_conflict"
+    assert "custom_providers.0.api_key" in payload["error"]
+    assert "caller-secret-value" not in payload["error"]
+    assert "concurrent-secret-value" not in payload["error"]
 
 
 def test_alibaba_image_capabilities_route_saves_single_key_payload(monkeypatch):
@@ -1230,21 +1466,26 @@ def test_upsert_preserves_durable_commit_after_post_commit_failure(
     monkeypatch.setattr(
         model_config,
         "_invalidate_vision_verification",
-        lambda: (_ for _ in ()).throw(OSError("simulated invalidation failure")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated invalidation failure")
+        ),
     )
 
-    with pytest.raises(OSError, match="simulated invalidation failure"):
-        model_config.upsert_provider_credential(
-            {
-                "id": "shared",
-                "provider": "alibaba",
-                "label": "After",
-                "api_key": "after-secret",
-            }
-        )
+    result = model_config.upsert_provider_credential(
+        {
+            "id": "shared",
+            "provider": "alibaba",
+            "label": "After",
+            "api_key": "after-secret",
+        }
+    )
 
     assert _read_config(tmp_path)["provider_credentials"][0]["label"] == "After"
     assert api_config.get_config()["provider_credentials"][0]["label"] == "After"
+    assert result["refresh_pending"] is True
+    assert result["warnings"] == [
+        "vision_verification_refresh_pending"
+    ]
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "TAIJI_CREDENTIAL_SHARED_API_KEY=after-secret" in env_text
     assert "before-secret" not in env_text
@@ -1437,8 +1678,8 @@ def test_main_model_config_acquires_credential_transaction_before_cfg_lock(
     monkeypatch.setattr(model_config, "invalidate_models_cache", lambda: None)
     monkeypatch.setattr(
         model_config,
-        "get_model_config",
-        lambda: {"ok": True},
+        "_get_model_config_unlocked",
+        lambda **_kwargs: {"ok": True},
     )
 
     assert model_config.set_main_model_config(
@@ -1841,12 +2082,12 @@ def test_shared_credential_rotation_invalidates_every_referencing_capability(
     monkeypatch.setattr(
         model_config,
         "_invalidate_vision_verification",
-        lambda: invalidated.append("vision"),
+        lambda *_args, **_kwargs: invalidated.append("vision"),
     )
     monkeypatch.setattr(
         model_config,
         "_invalidate_image_gen_verification",
-        lambda: invalidated.append("image_gen"),
+        lambda *_args, **_kwargs: invalidated.append("image_gen"),
         raising=False,
     )
 
@@ -2106,12 +2347,12 @@ def test_alibaba_single_key_configures_public_vision_and_image_atomically(
     monkeypatch.setattr(
         model_config,
         "_invalidate_vision_verification",
-        lambda: vision_invalidations.append(True),
+        lambda *_args, **_kwargs: vision_invalidations.append(True),
     )
     monkeypatch.setattr(
         model_config,
         "_invalidate_image_gen_verification",
-        lambda: image_invalidations.append(True),
+        lambda *_args, **_kwargs: image_invalidations.append(True),
     )
 
     result = model_config.set_alibaba_image_capabilities(
@@ -2443,8 +2684,10 @@ def test_alibaba_single_key_public_metadata_failure_uses_safe_fallback(
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     monkeypatch.setattr(
         model_config,
-        "get_provider_credentials_config",
-        lambda: (_ for _ in ()).throw(RuntimeError("metadata failed")),
+        "_public_provider_credentials_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("metadata failed")
+        ),
     )
     monkeypatch.setattr(
         model_config,
@@ -2775,6 +3018,13 @@ def test_vision_probe_full_chain_uses_named_key_and_keeps_alibaba_identity(
     state_path = tmp_path / "vision-verification.json"
     monkeypatch.setattr(
         model_config, "_vision_verification_state_path", lambda *_: state_path
+    )
+    import agent.image_runtime as image_runtime
+
+    monkeypatch.setattr(
+        image_runtime,
+        "vision_verification_state_path",
+        lambda *_args, **_kwargs: state_path,
     )
     model_config.upsert_provider_credential(
         {
@@ -3352,21 +3602,44 @@ def test_saving_vision_config_invalidates_previous_verification(monkeypatch, tmp
     _use_home(monkeypatch, tmp_path)
     state_path = tmp_path / "vision-verification.json"
     monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
+    monkeypatch.setattr(model_config, "_VISION_PROBE_GENERATIONS", {})
     _write_saved_vision_config(tmp_path)
-    state_path.write_text('{"status":"verified"}', encoding="utf-8")
+    model_config._atomic_write_json(
+        state_path,
+        {
+            "schema_version": 1,
+            "generation": 5,
+            "fingerprint": "previous-vision-fingerprint",
+            "status": "verified",
+            "checked_at": "2030-01-01T00:00:00Z",
+            "error_code": "",
+            "message": "previous verified state",
+            "diagnostic_id": "previous-vision-diagnostic",
+        },
+    )
 
     model_config.set_vision_config({"provider": "alibaba", "model": "qwen3-vl-plus"})
 
-    assert not state_path.exists()
+    _assert_verification_tombstone(
+        json.loads(state_path.read_text(encoding="utf-8")),
+        minimum_generation=6,
+        forbidden_fingerprint="previous-vision-fingerprint",
+        forbidden_diagnostic_id="previous-vision-diagnostic",
+    )
 
 
 def test_vision_probe_does_not_persist_success_after_key_rotation(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     state_path = tmp_path / "vision-verification.json"
     monkeypatch.setattr(model_config, "_vision_verification_state_path", lambda *_: state_path)
+    monkeypatch.setattr(model_config, "_VISION_PROBE_GENERATIONS", {})
     _write_saved_vision_config(tmp_path)
+    verifying = {}
 
     async def rotate_key_during_probe(**_kwargs):
+        verifying.update(
+            json.loads(state_path.read_text(encoding="utf-8"))
+        )
         (tmp_path / ".env").write_text(
             "DASHSCOPE_API_KEY=rotated-during-probe\n", encoding="utf-8"
         )
@@ -3385,7 +3658,12 @@ def test_vision_probe_does_not_persist_success_after_key_rotation(monkeypatch, t
     assert result["ok"] is False
     assert result["status"] == "configured_unverified"
     assert result["error_code"] == "vision_probe_superseded"
-    assert not state_path.exists()
+    _assert_verification_tombstone(
+        json.loads(state_path.read_text(encoding="utf-8")),
+        minimum_generation=verifying["generation"] + 1,
+        forbidden_fingerprint=verifying["fingerprint"],
+        forbidden_diagnostic_id=verifying["diagnostic_id"],
+    )
     assert (
         model_config.get_vision_config()["vision"]["verification"]["status"]
         != "verified"
@@ -3403,8 +3681,10 @@ def test_superseded_vision_probe_tombstones_owned_state_when_unlink_fails(
         "_vision_verification_state_path",
         lambda *_: state_path,
     )
+    monkeypatch.setattr(model_config, "_VISION_PROBE_GENERATIONS", {})
     _write_saved_vision_config(tmp_path)
     original_unlink = Path.unlink
+    verifying = {}
 
     def fail_state_unlink(path, *args, **kwargs):
         if path == state_path:
@@ -3414,6 +3694,9 @@ def test_superseded_vision_probe_tombstones_owned_state_when_unlink_fails(
     monkeypatch.setattr(Path, "unlink", fail_state_unlink)
 
     async def rotate_key_during_probe(**_kwargs):
+        verifying.update(
+            json.loads(state_path.read_text(encoding="utf-8"))
+        )
         (tmp_path / ".env").write_text(
             "DASHSCOPE_API_KEY=rotated-during-probe\n",
             encoding="utf-8",
@@ -3438,7 +3721,12 @@ def test_superseded_vision_probe_tombstones_owned_state_when_unlink_fails(
     result = model_config.test_vision_config()
 
     assert result["error_code"] == "vision_probe_superseded"
-    assert json.loads(state_path.read_text(encoding="utf-8")) == {}
+    _assert_verification_tombstone(
+        json.loads(state_path.read_text(encoding="utf-8")),
+        minimum_generation=verifying["generation"] + 1,
+        forbidden_fingerprint=verifying["fingerprint"],
+        forbidden_diagnostic_id=verifying["diagnostic_id"],
+    )
     assert (
         model_config.get_vision_config()["vision"]["verification"]["status"]
         != "verifying"
@@ -3479,6 +3767,7 @@ def test_vision_verification_is_isolated_per_profile(monkeypatch, tmp_path):
 def test_vision_probe_does_not_persist_after_profile_switch(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     active_profile = {"name": "profile-a"}
+    monkeypatch.setattr(model_config, "_VISION_PROBE_GENERATIONS", {})
     monkeypatch.setattr(model_config, "_active_profile_name", lambda: active_profile["name"])
     monkeypatch.setattr(
         model_config,
@@ -3486,8 +3775,16 @@ def test_vision_probe_does_not_persist_after_profile_switch(monkeypatch, tmp_pat
         lambda: tmp_path / "vision-verification",
     )
     _write_saved_vision_config(tmp_path)
+    verifying = {}
 
     async def switch_profile(**_kwargs):
+        state_files = list(
+            (tmp_path / "vision-verification").glob("*.json")
+        )
+        assert len(state_files) == 1
+        verifying.update(
+            json.loads(state_files[0].read_text(encoding="utf-8"))
+        )
         active_profile["name"] = "profile-b"
         return json.dumps({
             "success": True,
@@ -3504,7 +3801,16 @@ def test_vision_probe_does_not_persist_after_profile_switch(monkeypatch, tmp_pat
     assert result["ok"] is False
     assert result["status"] == "configured_unverified"
     assert result["error_code"] == "vision_probe_superseded"
-    assert list((tmp_path / "vision-verification").glob("*.json")) == []
+    state_files = list(
+        (tmp_path / "vision-verification").glob("*.json")
+    )
+    assert len(state_files) == 1
+    _assert_verification_tombstone(
+        json.loads(state_files[0].read_text(encoding="utf-8")),
+        minimum_generation=verifying["generation"] + 1,
+        forbidden_fingerprint=verifying["fingerprint"],
+        forbidden_diagnostic_id=verifying["diagnostic_id"],
+    )
     assert (
         model_config.get_vision_config()["vision"]["verification"]["status"]
         != "verified"
@@ -3737,6 +4043,10 @@ def test_vision_snapshot_uses_one_environment_generation(
     assert snapshot.binding is not None
     assert snapshot.binding.model == "model-a"
     assert snapshot.binding.base_url == "https://a.example.test/v1"
+    # The capture freezes endpoint and secret material, but must remain
+    # unsealed until the unique ``verifying`` state is persisted.
+    assert snapshot.binding.authorization_fingerprint == ""
+    assert snapshot.binding.authorization_generation == ""
     assert snapshot.configured is True
 
 
@@ -3894,13 +4204,35 @@ def test_webui_image_snapshot_uses_one_env_generation(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config_module, "_expand_env_vars", racing_expand)
 
+    original_secret_resolver = model_config._image_gen_secret_value
+    secret_resolver_calls = []
+
+    def one_generation_secret(*args, **kwargs):
+        secret_resolver_calls.append((args, kwargs))
+        if len(secret_resolver_calls) > 1:
+            raise AssertionError("image snapshot re-read its secret")
+        return original_secret_resolver(*args, **kwargs)
+
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_secret_value",
+        one_generation_secret,
+    )
+
     snapshot = model_config._capture_image_gen_config_snapshot()
 
     assert switched["value"] is True
+    assert len(secret_resolver_calls) == 1
     assert snapshot.effective_config_resolved is True
     assert snapshot.model == model_before
     assert snapshot.fingerprint == expected_before
     assert snapshot.fingerprint != expected_after
+    assert snapshot.probe_binding is not None
+    # Capture freezes private Provider material only.  Authorization cannot be
+    # sealed until test_image_gen_config() has durably written its unique
+    # ``verifying`` generation.
+    assert snapshot.probe_binding.authorization_fingerprint == ""
+    assert snapshot.probe_binding.authorization_generation == ""
 
 
 def test_image_probe_uses_exact_profile_config_path_for_real_dispatch(
@@ -4110,12 +4442,18 @@ def test_concurrent_custom_image_probes_use_request_local_provider_identity(
 ):
     """Same custom ID in concurrent profiles must keep each profile's URL/key/model."""
     import agent.custom_image_providers as custom_image_providers
+    from agent.image_gen_verification import verification_state_path
 
     profiles = {}
     credential_ref = "shared-custom-image"
     secret_env = model_config.credential_secret_env(credential_ref)
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    state_root = tmp_path / "states" / "image-gen-verification"
+    monkeypatch.setenv("TAIJI_WEBUI_STATE_DIR", str(tmp_path / "states"))
+    monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "states"))
     for name in ("A", "B"):
-        home = tmp_path / f"profile-{name.lower()}"
+        home = profiles_root / name
         home.mkdir()
         model = f"image-model-{name.lower()}"
         base_url = f"https://profile-{name.lower()}.example.test/v1"
@@ -4187,8 +4525,9 @@ def test_concurrent_custom_image_probes_use_request_local_provider_identity(
     monkeypatch.setattr(
         model_config,
         "_image_gen_verification_state_path",
-        lambda profile=None: (
-            tmp_path / "states" / f"{profile or runtime.profile}.json"
+        lambda profile=None: verification_state_path(
+            state_root,
+            profile or runtime.profile,
         ),
     )
     register_barrier = threading.Barrier(2)
@@ -4415,16 +4754,6 @@ def test_custom_provider_set_uses_captured_config_parent_for_env(
             "agent.custom_vision_providers.is_custom_vision_base_url_safe",
             lambda _url: True,
         )
-    monkeypatch.setattr(
-        model_config,
-        "_refresh_custom_provider_commit",
-        lambda *_args, **_kwargs: {
-            "providers": [],
-            "refresh_pending": False,
-            "warnings": [],
-        },
-    )
-
     getattr(model_config, setter_name)(payload)
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -4482,16 +4811,6 @@ def test_custom_provider_delete_uses_captured_config_parent_for_env(
     )
     _use_home(monkeypatch, unrelated_home, stub_image_gen=False)
     monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
-    monkeypatch.setattr(
-        model_config,
-        "_refresh_custom_provider_commit",
-        lambda *_args, **_kwargs: {
-            "providers": [],
-            "refresh_pending": False,
-            "warnings": [],
-        },
-    )
-
     getattr(model_config, deleter_name)("router")
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -4950,16 +5269,6 @@ def test_custom_vision_save_preserves_non_public_runtime_transport_scope(
         "agent.custom_vision_providers.is_custom_vision_base_url_safe",
         reject_public_guard,
     )
-    monkeypatch.setattr(
-        model_config,
-        "_refresh_custom_provider_commit",
-        lambda *_args, **_kwargs: {
-            "providers": [],
-            "refresh_pending": False,
-            "warnings": [],
-        },
-    )
-
     result = model_config.set_custom_vision_provider_config(
         {
             "id": "router",
@@ -5069,7 +5378,9 @@ def test_custom_image_set_reports_refresh_pending_after_committed_save(
     monkeypatch.setattr(
         model_config,
         "_invalidate_image_gen_verification",
-        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("state unavailable")
+        ),
     )
 
     result = model_config.set_custom_image_provider_config(
@@ -5101,7 +5412,9 @@ def test_custom_vision_set_reports_refresh_pending_after_committed_save(
     monkeypatch.setattr(
         model_config,
         "_invalidate_vision_verification",
-        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("state unavailable")
+        ),
     )
 
     result = model_config.set_custom_vision_provider_config(
@@ -5159,7 +5472,9 @@ def test_custom_provider_delete_reports_refresh_pending_after_committed_delete(
     monkeypatch.setattr(
         model_config,
         invalidator_name,
-        lambda: (_ for _ in ()).throw(OSError("state unavailable")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("state unavailable")
+        ),
     )
 
     result = delete("router")
@@ -5273,17 +5588,27 @@ def test_generic_custom_credential_rotation_invalidates_bound_capabilities(
                         "models": ["image-model"],
                     }
                 ],
-                "custom_vision_providers": [
-                    {
-                        "id": "vision-router",
-                        "base_url": "https://vision.example.com/v1",
+                    "custom_vision_providers": [
+                        {
+                            "id": "vision-router",
+                            "base_url": "https://vision.example.com/v1",
                         "credential_ref": credential_ref,
                         "models": ["vision-model"],
-                        "transport": "openai_chat_completions",
-                    }
-                ],
-            }
-        ),
+                            "transport": "openai_chat_completions",
+                        }
+                    ],
+                    "auxiliary": {
+                        "vision": {
+                            "provider": "custom:vision-router",
+                            "model": "vision-model",
+                        }
+                    },
+                    "image_gen": {
+                        "provider": "custom:image-router",
+                        "model": "image-model",
+                    },
+                }
+            ),
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(f"{secret_env}=before\n", encoding="utf-8")
@@ -5291,12 +5616,12 @@ def test_generic_custom_credential_rotation_invalidates_bound_capabilities(
     monkeypatch.setattr(
         model_config,
         "_invalidate_vision_verification",
-        lambda: invalidated.append("vision"),
+        lambda *_args, **_kwargs: invalidated.append("vision"),
     )
     monkeypatch.setattr(
         model_config,
         "_invalidate_image_gen_verification",
-        lambda: invalidated.append("image"),
+        lambda *_args, **_kwargs: invalidated.append("image"),
     )
 
     model_config.upsert_provider_credential(
@@ -6777,10 +7102,15 @@ def test_image_gen_probe_discards_its_verifying_state_after_key_rotation(
         "_image_gen_verification_state_path",
         lambda *_: state_path,
     )
+    monkeypatch.setattr(model_config, "_IMAGE_GEN_PROBE_GENERATIONS", {})
     _write_saved_image_gen_config(tmp_path)
     generated = tmp_path / "cache" / "images" / "rotated.png"
+    verifying = {}
 
     def rotate_key_during_probe():
+        verifying.update(
+            json.loads(state_path.read_text(encoding="utf-8"))
+        )
         (tmp_path / ".env").write_text(
             "DASHSCOPE_API_KEY=rotated-during-probe\n",
             encoding="utf-8",
@@ -6804,7 +7134,12 @@ def test_image_gen_probe_discards_its_verifying_state_after_key_rotation(
     assert result["ok"] is False
     assert result["status"] == "configured_unverified"
     assert result["error_code"] == "image_gen_probe_superseded"
-    assert not state_path.exists()
+    _assert_verification_tombstone(
+        json.loads(state_path.read_text(encoding="utf-8")),
+        minimum_generation=verifying["generation"] + 1,
+        forbidden_fingerprint=verifying["fingerprint"],
+        forbidden_diagnostic_id=verifying["diagnostic_id"],
+    )
     assert (
         model_config.get_image_gen_config()["image_gen"]["verification"][
             "status"
@@ -6987,10 +7322,9 @@ def test_image_probe_uses_captured_custom_binding_after_config_rotation(
     result = model_config.test_image_gen_config()
 
     assert result["error_code"] == "image_gen_probe_superseded"
-    assert captured == {
-        "url": before_root + "/images/generations",
-        "authorization": "Bearer before-custom-secret",
-    }
+    # Config changed after capture, so the verifying-generation guard must
+    # reject the old A binding before the first external request.
+    assert captured == {}
     assert "after-custom-secret" not in json.dumps(captured)
     assert after_root not in json.dumps(captured)
 
@@ -7108,10 +7442,13 @@ def test_image_gen_probe_verifies_identity_magic_and_removes_probe_file(monkeypa
     from agent.image_gen_verification import ImageGenRequestBinding
 
     assert isinstance(call["_runtime_binding"], ImageGenRequestBinding)
+    assert call["_runtime_binding"].authorization_fingerprint
+    assert call["_runtime_binding"].authorization_generation
+    assert callable(call["_reauth_guard"])
     assert {
         key: value
         for key, value in call.items()
-        if key != "_runtime_binding"
+        if key not in {"_runtime_binding", "_reauth_guard"}
     } == {
         "prompt": "生成一张简洁的蓝色几何图形测试图，不包含人物、文字或品牌。",
         "aspect_ratio": "square",
@@ -7263,12 +7600,30 @@ def test_saving_image_gen_config_invalidates_previous_verification(monkeypatch, 
     _use_home(monkeypatch, tmp_path, stub_image_gen=False)
     state_path = tmp_path / "state.json"
     monkeypatch.setattr(model_config, "_image_gen_verification_state_path", lambda *_: state_path, raising=False)
-    state_path.write_text('{"status":"verified"}', encoding="utf-8")
+    monkeypatch.setattr(model_config, "_IMAGE_GEN_PROBE_GENERATIONS", {})
+    model_config._atomic_write_json(
+        state_path,
+        {
+            "schema_version": 1,
+            "generation": 5,
+            "fingerprint": "previous-image-fingerprint",
+            "status": "verified",
+            "checked_at": "2030-01-01T00:00:00Z",
+            "error_code": "",
+            "message": "previous verified state",
+            "diagnostic_id": "previous-image-diagnostic",
+        },
+    )
     monkeypatch.setattr(model_config, "_image_gen_provider_rows", lambda *_: [_dashscope_image_provider_row()])
 
     model_config.set_image_gen_config({"provider": "dashscope", "model": "qwen-image-2.0-pro", "api_key": "key"})
 
-    assert not state_path.exists()
+    _assert_verification_tombstone(
+        json.loads(state_path.read_text(encoding="utf-8")),
+        minimum_generation=6,
+        forbidden_fingerprint="previous-image-fingerprint",
+        forbidden_diagnostic_id="previous-image-diagnostic",
+    )
 
 
 def test_image_gen_probe_isolated_by_profile_and_newer_probe_wins(monkeypatch, tmp_path):
@@ -7429,7 +7784,7 @@ def test_updating_custom_image_provider_invalidates_image_verification(monkeypat
     monkeypatch.setattr(
         model_config,
         "_invalidate_image_gen_verification",
-        lambda: invalidated.append(True),
+        lambda *_args, **_kwargs: invalidated.append(True),
     )
 
     model_config.set_custom_image_provider_config({
@@ -7952,5 +8307,3018 @@ def test_webui_effective_fingerprint_expands_env_or_fails_unresolved(
         violations.append(
             "unresolved endpoint token inherited verified"
         )
+
+    assert violations == [], "; ".join(violations)
+
+
+_DURABLE_MODEL_MUTATIONS = (
+    "upsert_provider_credential",
+    "delete_provider_credential",
+    "test_vision_config",
+    "test_image_gen_config",
+    "set_vision_config",
+    "set_alibaba_image_capabilities",
+    "set_custom_vision_provider_config",
+    "delete_custom_vision_provider_config",
+    "set_custom_image_provider_config",
+    "delete_custom_image_provider_config",
+    "set_image_gen_config",
+    "set_main_model_config",
+)
+
+
+def _prepare_durable_model_mutation_case(monkeypatch, tmp_path, mutation_name):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+
+    if mutation_name == "upsert_provider_credential":
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "auxiliary": {
+                        "vision": {
+                            "provider": "alibaba",
+                            "model": "qwen3-vl-plus",
+                            "credential_ref": "hook-credential",
+                        }
+                    },
+                    "image_gen": {
+                        "provider": "dashscope",
+                        "model": "qwen-image-2.0-pro",
+                        "credential_ref": "hook-credential",
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return (
+            lambda: model_config.upsert_provider_credential(
+                {
+                    "id": "hook-credential",
+                    "provider": "alibaba",
+                    "api_key": "hook-secret",
+                }
+            ),
+            lambda: any(
+                row.get("id") == "hook-credential"
+                for row in _read_config(tmp_path).get("provider_credentials", [])
+            ),
+            (True, True),
+        )
+
+    if mutation_name == "delete_provider_credential":
+        model_config.upsert_provider_credential(
+            {
+                "id": "hook-credential",
+                "provider": "alibaba",
+                "api_key": "hook-secret",
+            }
+        )
+        return (
+            lambda: model_config.delete_provider_credential("hook-credential"),
+            lambda: not _read_config(tmp_path).get("provider_credentials"),
+            (False, False),
+        )
+
+    if mutation_name == "test_vision_config":
+        state_path = tmp_path / "vision-verification.json"
+        monkeypatch.setattr(
+            model_config,
+            "_vision_verification_state_path",
+            lambda *_: state_path,
+        )
+        _write_saved_vision_config(tmp_path)
+
+        async def succeed(**_kwargs):
+            return json.dumps(
+                {
+                    "success": True,
+                    "analysis": "TAIJI-VISION-CHECK-7319",
+                    "resolved_provider": "alibaba",
+                    "resolved_model": "qwen3-vl-plus",
+                }
+            )
+
+        monkeypatch.setattr("tools.vision_tools.vision_analyze_tool", succeed)
+        return (
+            model_config.test_vision_config,
+            lambda: json.loads(state_path.read_text(encoding="utf-8"))[
+                "status"
+            ]
+            == "verified",
+            (False, False),
+        )
+
+    if mutation_name == "test_image_gen_config":
+        state_path = tmp_path / "image-gen-verification.json"
+        generated = tmp_path / "cache" / "images" / "hook-probe.png"
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_verification_state_path",
+            lambda *_: state_path,
+        )
+        _write_saved_image_gen_config(tmp_path)
+
+        def succeed():
+            generated.parent.mkdir(parents=True, exist_ok=True)
+            generated.write_bytes(b"\x89PNG\r\n\x1a\nhook")
+            return {
+                "success": True,
+                "image": str(generated),
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+            }
+
+        _install_probe_provider(monkeypatch, _ProbeImageProvider(succeed))
+        return (
+            model_config.test_image_gen_config,
+            lambda: json.loads(state_path.read_text(encoding="utf-8"))[
+                "status"
+            ]
+            == "verified",
+            (False, False),
+        )
+
+    if mutation_name == "set_vision_config":
+        return (
+            lambda: model_config.set_vision_config(
+                {
+                    "provider": "alibaba",
+                    "model": "qwen3-vl-plus",
+                    "api_key": "vision-hook-key",
+                }
+            ),
+            lambda: _read_config(tmp_path)["auxiliary"]["vision"]["provider"]
+            == "alibaba",
+            (True, False),
+        )
+
+    if mutation_name == "set_alibaba_image_capabilities":
+        return (
+            lambda: model_config.set_alibaba_image_capabilities(
+                {"api_key": "alibaba-hook-key"}
+            ),
+            lambda: (
+                _read_config(tmp_path)["auxiliary"]["vision"]["provider"]
+                == "alibaba"
+                and _read_config(tmp_path)["image_gen"]["provider"]
+                == "dashscope"
+            ),
+            (True, True),
+        )
+
+    vision_body = {
+        "id": "hook-vision",
+        "name": "Hook Vision",
+        "base_url": "https://vision.example.com/v1",
+        "models": ["hook-vl"],
+        "default_model": "hook-vl",
+        "transport": "openai_chat_completions",
+        "api_key": "vision-hook-secret",
+    }
+    if mutation_name in {
+        "set_custom_vision_provider_config",
+        "delete_custom_vision_provider_config",
+    }:
+        monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+        if mutation_name == "delete_custom_vision_provider_config":
+            model_config.set_custom_vision_provider_config(vision_body)
+            return (
+                lambda: model_config.delete_custom_vision_provider_config(
+                    "hook-vision"
+                ),
+                lambda: not _read_config(tmp_path).get(
+                    "custom_vision_providers"
+                ),
+                (True, False),
+            )
+        return (
+            lambda: model_config.set_custom_vision_provider_config(vision_body),
+            lambda: _read_config(tmp_path)["custom_vision_providers"][0]["id"]
+            == "hook-vision",
+            (True, False),
+        )
+
+    image_body = {
+        "id": "hook-image",
+        "name": "Hook Image",
+        "base_url": "https://images.example.com/v1",
+        "models": ["hook-image-model"],
+        "default_model": "hook-image-model",
+        "api_key": "image-hook-secret",
+    }
+    if mutation_name in {
+        "set_custom_image_provider_config",
+        "delete_custom_image_provider_config",
+    }:
+        if mutation_name == "delete_custom_image_provider_config":
+            model_config.set_custom_image_provider_config(image_body)
+            return (
+                lambda: model_config.delete_custom_image_provider_config(
+                    "hook-image"
+                ),
+                lambda: not _read_config(tmp_path).get(
+                    "custom_image_providers"
+                ),
+                (False, True),
+            )
+        return (
+            lambda: model_config.set_custom_image_provider_config(image_body),
+            lambda: _read_config(tmp_path)["custom_image_providers"][0]["id"]
+            == "hook-image",
+            (False, True),
+        )
+
+    if mutation_name == "set_image_gen_config":
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_rows",
+            lambda _active: [
+                {
+                    "id": "doubao",
+                    "name": "Doubao Seedream",
+                    "models": [
+                        {
+                            "id": "doubao-seedream-5-0-260128",
+                            "label": "Doubao Seedream",
+                        }
+                    ],
+                    "default_model": "doubao-seedream-5-0-260128",
+                    "key_status": {
+                        "configured": False,
+                        "env_var": "ARK_API_KEY",
+                    },
+                }
+            ],
+        )
+        return (
+            lambda: model_config.set_image_gen_config(
+                {
+                    "provider": "doubao",
+                    "model": "doubao-seedream-5-0-260128",
+                    "api_key": "image-hook-key",
+                }
+            ),
+            lambda: _read_config(tmp_path)["image_gen"]["provider"]
+            == "doubao",
+            (False, True),
+        )
+
+    if mutation_name == "set_main_model_config":
+        monkeypatch.setattr(
+            model_config,
+            "get_image_gen_config",
+            lambda: {"image_gen": {}, "providers": []},
+        )
+        monkeypatch.setattr(
+            model_config,
+            "get_vision_config",
+            lambda: {"vision": {}, "providers": []},
+        )
+        return (
+            lambda: model_config.set_main_model_config(
+                {
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "api_key": "main-hook-key-123456",
+                }
+            ),
+            lambda: _read_config(tmp_path)["model"]["provider"] == "deepseek",
+            (False, False),
+        )
+
+    raise AssertionError(f"unhandled durable mutation: {mutation_name}")
+
+
+@pytest.mark.parametrize("mutation_name", _DURABLE_MODEL_MUTATIONS)
+@pytest.mark.parametrize("hook_fails", (False, True))
+def test_durable_model_mutations_publish_exactly_once_after_persist(
+    monkeypatch,
+    tmp_path,
+    mutation_name,
+    hook_fails,
+):
+    invoke, durable_evidence, expected_flags = (
+        _prepare_durable_model_mutation_case(
+            monkeypatch,
+            tmp_path,
+            mutation_name,
+        )
+    )
+    calls = []
+    transaction_depth = 0
+    profile_lock_depth = 0
+    original_transaction = model_config.credential_transaction
+
+    @contextmanager
+    def tracked_transaction(*args, **kwargs):
+        nonlocal transaction_depth
+        transaction_depth += 1
+        try:
+            with original_transaction(*args, **kwargs) as transaction:
+                yield transaction
+        finally:
+            transaction_depth -= 1
+
+    monkeypatch.setattr(
+        model_config,
+        "credential_transaction",
+        tracked_transaction,
+    )
+    profile_lock_name = {
+        "test_vision_config": "_vision_profile_lock",
+        "test_image_gen_config": "_image_gen_profile_lock",
+    }.get(mutation_name)
+    if profile_lock_name:
+        original_profile_lock = getattr(model_config, profile_lock_name)
+
+        @contextmanager
+        def tracked_profile_lock(*args, **kwargs):
+            nonlocal profile_lock_depth
+            profile_lock_depth += 1
+            try:
+                with original_profile_lock(*args, **kwargs) as lock:
+                    yield lock
+            finally:
+                profile_lock_depth -= 1
+
+        monkeypatch.setattr(
+            model_config,
+            profile_lock_name,
+            tracked_profile_lock,
+        )
+
+    def post_commit_hook(
+        published_mutation,
+        *,
+        invalidate_vision=False,
+        invalidate_image=False,
+        vision_invalidation_token=None,
+        image_invalidation_token=None,
+    ):
+        calls.append(
+            (
+                published_mutation,
+                invalidate_vision,
+                invalidate_image,
+            )
+        )
+        if invalidate_vision:
+            assert vision_invalidation_token is not None
+            assert vision_invalidation_token.capability == "vision"
+            assert (
+                vision_invalidation_token.profile
+                == model_config._active_profile_name()
+            )
+        else:
+            assert vision_invalidation_token is None
+        if invalidate_image:
+            assert image_invalidation_token is not None
+            assert image_invalidation_token.capability == "image"
+            assert (
+                image_invalidation_token.profile
+                == model_config._active_profile_name()
+            )
+        else:
+            assert image_invalidation_token is None
+        assert transaction_depth == 0
+        assert profile_lock_depth == 0
+        assert durable_evidence()
+        if hook_fails:
+            raise RuntimeError("simulated post-commit refresh failure")
+        return []
+
+    monkeypatch.setattr(
+        model_config,
+        "_run_durable_mutation_post_commit_hook",
+        post_commit_hook,
+    )
+
+    result = invoke()
+
+    assert calls == [
+        (mutation_name, expected_flags[0], expected_flags[1])
+    ]
+    assert durable_evidence()
+    if hook_fails:
+        assert result["refresh_pending"] is True
+        assert (
+            "durable_mutation_refresh_pending" in result["warnings"]
+        )
+
+
+@pytest.mark.parametrize("mutation_name", _DURABLE_MODEL_MUTATIONS)
+def test_durable_model_mutations_do_not_publish_before_persist(
+    monkeypatch,
+    tmp_path,
+    mutation_name,
+):
+    if mutation_name in {"test_vision_config", "test_image_gen_config"}:
+        _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+        calls = []
+        monkeypatch.setattr(
+            model_config,
+            "_run_durable_mutation_post_commit_hook",
+            lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+        result = getattr(model_config, mutation_name)()
+        assert result["status"] == "unconfigured"
+        assert calls == []
+        return
+
+    invoke, _durable_evidence, _expected_flags = (
+        _prepare_durable_model_mutation_case(
+            monkeypatch,
+            tmp_path,
+            mutation_name,
+        )
+    )
+    calls = []
+    monkeypatch.setattr(
+        model_config,
+        "_run_durable_mutation_post_commit_hook",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    failing_writer = lambda *args, **kwargs: (_ for _ in ()).throw(
+        OSError("simulated failure before durable commit")
+    )
+    if mutation_name in {
+        "upsert_provider_credential",
+        "delete_provider_credential",
+    }:
+        monkeypatch.setattr(
+            model_config,
+            "mutate_config_env_strict",
+            failing_writer,
+        )
+    elif mutation_name in {
+        "set_custom_vision_provider_config",
+        "delete_custom_vision_provider_config",
+        "set_custom_image_provider_config",
+        "delete_custom_image_provider_config",
+    }:
+        monkeypatch.setattr(
+            model_config,
+            "_write_custom_provider_transaction",
+            failing_writer,
+        )
+    else:
+        monkeypatch.setattr(
+            model_config,
+            "_commit_expected_config_env",
+            failing_writer,
+        )
+
+    with pytest.raises(OSError, match="before durable commit"):
+        invoke()
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation_name", _DURABLE_MODEL_MUTATIONS)
+def test_each_durable_model_mutation_has_one_explicit_post_commit_boundary(
+    mutation_name,
+):
+    source = inspect.getsource(getattr(model_config, mutation_name))
+    hook_call = "_invoke_durable_mutation_post_commit("
+    assert source.count(hook_call) == 1
+    if mutation_name in {"test_vision_config", "test_image_gen_config"}:
+        assert source.index("if not still_current:") < source.index(hook_call)
+
+
+def _pause_first_durable_post_commit(monkeypatch):
+    first_hook_started = threading.Event()
+    release_first_hook = threading.Event()
+    calls = []
+    calls_lock = threading.Lock()
+
+    def hook(
+        mutation,
+        *,
+        invalidate_vision=False,
+        invalidate_image=False,
+        vision_invalidation_token=None,
+        image_invalidation_token=None,
+    ):
+        with calls_lock:
+            call_index = len(calls)
+            calls.append(
+                (mutation, invalidate_vision, invalidate_image)
+            )
+        if call_index == 0:
+            first_hook_started.set()
+            assert release_first_hook.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr(
+        model_config,
+        "_run_durable_mutation_post_commit_hook",
+        hook,
+    )
+    return first_hook_started, release_first_hook, calls
+
+
+def test_delete_credential_response_stays_on_its_committed_generation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    model_config.upsert_provider_credential(
+        {
+            "id": "generation-race",
+            "provider": "alibaba",
+            "label": "generation-zero",
+            "api_key": "generation-zero-secret",
+        }
+    )
+    started, release, calls = _pause_first_durable_post_commit(monkeypatch)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            deleted = pool.submit(
+                model_config.delete_provider_credential,
+                "generation-race",
+            )
+            assert started.wait(timeout=5)
+            model_config.upsert_provider_credential(
+                {
+                    "id": "generation-race",
+                    "provider": "alibaba",
+                    "label": "generation-newer",
+                    "api_key": "generation-newer-secret",
+                }
+            )
+            release.set()
+            result = deleted.result(timeout=5)
+    finally:
+        release.set()
+
+    assert result["credentials"] == []
+    assert calls == [
+        ("delete_provider_credential", False, False),
+        ("upsert_provider_credential", False, False),
+    ]
+    assert (
+        model_config.get_provider_credentials_config()["credentials"][0][
+            "label"
+        ]
+        == "generation-newer"
+    )
+    assert "generation-newer-secret" not in json.dumps(result)
+
+
+def test_upsert_credential_response_stays_on_its_committed_generation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    started, release, calls = _pause_first_durable_post_commit(monkeypatch)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            upserted = pool.submit(
+                model_config.upsert_provider_credential,
+                {
+                    "id": "generation-race",
+                    "provider": "alibaba",
+                    "label": "generation-outer",
+                    "api_key": "generation-outer-secret",
+                },
+            )
+            assert started.wait(timeout=5)
+            model_config.delete_provider_credential("generation-race")
+            release.set()
+            result = upserted.result(timeout=5)
+    finally:
+        release.set()
+
+    assert result["credential"]["label"] == "generation-outer"
+    assert result["credential"]["configured"] is True
+    assert calls == [
+        ("upsert_provider_credential", False, False),
+        ("delete_provider_credential", False, False),
+    ]
+    assert model_config.get_provider_credentials_config()["credentials"] == []
+    assert "generation-outer-secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("capability", "set_name", "delete_name", "getter_name", "body"),
+    (
+        (
+            "vision",
+            "set_custom_vision_provider_config",
+            "delete_custom_vision_provider_config",
+            "get_custom_vision_provider_configs",
+            {
+                "id": "router",
+                "name": "Outer vision",
+                "base_url": "https://vision.example.com/v1",
+                "models": ["vision-model"],
+                "transport": "openai_chat_completions",
+                "api_key": "outer-vision-secret",
+            },
+        ),
+        (
+            "image",
+            "set_custom_image_provider_config",
+            "delete_custom_image_provider_config",
+            "get_custom_image_provider_configs",
+            {
+                "id": "router",
+                "name": "Outer image",
+                "base_url": "https://images.example.com/v1",
+                "models": ["image-model"],
+                "default_model": "image-model",
+                "api_key": "outer-image-secret",
+            },
+        ),
+    ),
+)
+def test_custom_provider_set_response_stays_on_its_committed_generation(
+    monkeypatch,
+    tmp_path,
+    capability,
+    set_name,
+    delete_name,
+    getter_name,
+    body,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    started, release, _calls = _pause_first_durable_post_commit(monkeypatch)
+    setter = getattr(model_config, set_name)
+    delete = getattr(model_config, delete_name)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outer = pool.submit(setter, body)
+            assert started.wait(timeout=5)
+            delete("router")
+            release.set()
+            outer_result = outer.result(timeout=5)
+    finally:
+        release.set()
+
+    assert outer_result["provider"]["id"] == "custom:router"
+    assert [row["id"] for row in outer_result["providers"]] == [
+        "custom:router"
+    ]
+    assert getattr(model_config, getter_name)()["providers"] == []
+    assert str(body["api_key"]) not in json.dumps(outer_result)
+    assert capability in {"vision", "image"}
+
+
+@pytest.mark.parametrize(
+    ("set_name", "delete_name", "getter_name", "initial_body", "newer_name"),
+    (
+        (
+            "set_custom_vision_provider_config",
+            "delete_custom_vision_provider_config",
+            "get_custom_vision_provider_configs",
+            {
+                "id": "router",
+                "name": "Initial vision",
+                "base_url": "https://vision.example.com/v1",
+                "models": ["vision-model"],
+                "transport": "openai_chat_completions",
+                "api_key": "initial-vision-secret",
+            },
+            "Newer vision",
+        ),
+        (
+            "set_custom_image_provider_config",
+            "delete_custom_image_provider_config",
+            "get_custom_image_provider_configs",
+            {
+                "id": "router",
+                "name": "Initial image",
+                "base_url": "https://images.example.com/v1",
+                "models": ["image-model"],
+                "default_model": "image-model",
+                "api_key": "initial-image-secret",
+            },
+            "Newer image",
+        ),
+    ),
+)
+def test_custom_provider_delete_response_stays_on_its_committed_generation(
+    monkeypatch,
+    tmp_path,
+    set_name,
+    delete_name,
+    getter_name,
+    initial_body,
+    newer_name,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
+    setter = getattr(model_config, set_name)
+    delete = getattr(model_config, delete_name)
+    setter(initial_body)
+    started, release, _calls = _pause_first_durable_post_commit(monkeypatch)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outer = pool.submit(delete, "router")
+            assert started.wait(timeout=5)
+            newer_body = {
+                **initial_body,
+                "name": newer_name,
+                "api_key": "newer-generation-secret",
+            }
+            setter(newer_body)
+            release.set()
+            outer_result = outer.result(timeout=5)
+    finally:
+        release.set()
+
+    assert outer_result["providers"] == []
+    current = getattr(model_config, getter_name)()["providers"]
+    assert [row["id"] for row in current] == ["custom:router"]
+    assert current[0]["name"] == newer_name
+    assert "newer-generation-secret" not in json.dumps(outer_result)
+
+
+@pytest.mark.parametrize(
+    (
+        "setter_name",
+        "outer_body",
+        "newer_body",
+        "response_section",
+        "expected_outer",
+        "expected_newer",
+    ),
+    (
+        (
+            "set_vision_config",
+            {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "api_key": "outer-vision-key",
+            },
+            {
+                "provider": "zai",
+                "model": "glm-5v-turbo",
+                "api_key": "newer-vision-key",
+            },
+            "vision",
+            ("alibaba", "qwen3-vl-plus"),
+            ("zai", "glm-5v-turbo"),
+        ),
+        (
+            "set_image_gen_config",
+            {
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "api_key": "outer-image-key",
+            },
+            {
+                "provider": "dashscope",
+                "model": "qwen-image",
+                "api_key": "newer-image-key",
+            },
+            "image_gen",
+            ("dashscope", "qwen-image-2.0-pro"),
+            ("dashscope", "qwen-image"),
+        ),
+        (
+            "set_main_model_config",
+            {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "api_key": "outer-main-key",
+            },
+            {
+                "provider": "deepseek",
+                "model": "deepseek-reasoner",
+                "api_key": "newer-main-key",
+            },
+            "main",
+            ("deepseek", "deepseek-chat"),
+            ("deepseek", "deepseek-reasoner"),
+        ),
+    ),
+)
+def test_durable_setter_response_stays_on_its_committed_generation(
+    monkeypatch,
+    tmp_path,
+    setter_name,
+    outer_body,
+    newer_body,
+    response_section,
+    expected_outer,
+    expected_newer,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    if setter_name == "set_image_gen_config":
+        def image_provider_rows(_active):
+            row = _dashscope_image_provider_row()
+            row["models"].append(
+                {"id": "qwen-image", "label": "Qwen Image"}
+            )
+            return [row]
+
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_rows",
+            image_provider_rows,
+        )
+    started, release, calls = _pause_first_durable_post_commit(monkeypatch)
+    setter = getattr(model_config, setter_name)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outer = pool.submit(setter, outer_body)
+            assert started.wait(timeout=5)
+            newer_result = setter(newer_body)
+            release.set()
+            outer_result = outer.result(timeout=5)
+    finally:
+        release.set()
+
+    assert (
+        outer_result[response_section]["provider"],
+        outer_result[response_section]["model"],
+    ) == expected_outer
+    assert (
+        newer_result[response_section]["provider"],
+        newer_result[response_section]["model"],
+    ) == expected_newer
+    assert len(calls) == 2
+    serialized_outer = json.dumps(outer_result)
+    assert str(outer_body["api_key"]) not in serialized_outer
+    assert str(newer_body["api_key"]) not in serialized_outer
+
+
+def test_alibaba_quick_response_stays_on_its_committed_generation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+
+    def image_provider_rows(_active):
+        row = _dashscope_image_provider_row()
+        row["models"].append(
+            {"id": "qwen-image", "label": "Qwen Image"}
+        )
+        return [row]
+
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        image_provider_rows,
+    )
+    started, release, _calls = _pause_first_durable_post_commit(monkeypatch)
+    outer_body = {
+        "api_key": "outer-quick-secret",
+        "vision_model": "qwen3-vl-plus",
+        "image_model": "qwen-image-2.0-pro",
+    }
+    newer_body = {
+        "api_key": "newer-quick-secret",
+        "vision_model": "qwen3-vl-flash",
+        "image_model": "qwen-image",
+    }
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outer = pool.submit(
+                model_config.set_alibaba_image_capabilities,
+                outer_body,
+            )
+            assert started.wait(timeout=5)
+            newer_result = model_config.set_alibaba_image_capabilities(
+                newer_body
+            )
+            release.set()
+            outer_result = outer.result(timeout=5)
+    finally:
+        release.set()
+
+    assert (
+        outer_result["vision"]["provider"],
+        outer_result["vision"]["model"],
+        outer_result["image_gen"]["provider"],
+        outer_result["image_gen"]["model"],
+    ) == (
+        "alibaba",
+        "qwen3-vl-plus",
+        "dashscope",
+        "qwen-image-2.0-pro",
+    )
+    assert (
+        newer_result["vision"]["model"],
+        newer_result["image_gen"]["model"],
+    ) == ("qwen3-vl-flash", "qwen-image")
+    serialized_outer = json.dumps(outer_result)
+    assert outer_body["api_key"] not in serialized_outer
+    assert newer_body["api_key"] not in serialized_outer
+
+
+@pytest.mark.parametrize("capability", ["vision", "image"])
+def test_verification_compare_delete_binds_profile_and_state_identity(
+    monkeypatch,
+    tmp_path,
+    capability,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    active_profile = ["commit-profile"]
+    monkeypatch.setattr(
+        model_config,
+        "_active_profile_name",
+        lambda: active_profile[0],
+    )
+    if capability == "vision":
+        state_path = lambda profile=None: (
+            tmp_path / f"vision-{profile or active_profile[0]}.json"
+        )
+        monkeypatch.setattr(
+            model_config,
+            "_vision_verification_state_path",
+            state_path,
+        )
+        monkeypatch.setattr(model_config, "_VISION_PROBE_GENERATIONS", {})
+        capture = model_config._capture_vision_verification_invalidation
+        invalidate = model_config._invalidate_vision_verification
+    else:
+        state_path = lambda profile=None: (
+            tmp_path / f"image-{profile or active_profile[0]}.json"
+        )
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_verification_state_path",
+            state_path,
+        )
+        monkeypatch.setattr(model_config, "_IMAGE_GEN_PROBE_GENERATIONS", {})
+        capture = model_config._capture_image_gen_verification_invalidation
+        invalidate = model_config._invalidate_image_gen_verification
+
+    committed_path = state_path("commit-profile")
+    newer_active_path = state_path("new-active-profile")
+    model_config._atomic_write_json(
+        committed_path,
+        {
+            "schema_version": 1,
+            "generation": 5,
+            "status": "verified",
+            "fingerprint": "commit-state",
+            "diagnostic_id": "commit-diagnostic",
+        },
+    )
+    token = capture("commit-profile")
+    model_config._atomic_write_json(
+        newer_active_path,
+        {
+            "schema_version": 1,
+            "generation": 9,
+            "status": "verified",
+            "fingerprint": "other-profile-state",
+            "diagnostic_id": "other-profile-diagnostic",
+        },
+    )
+    active_profile[0] = "new-active-profile"
+
+    assert invalidate(token) is True
+    _assert_verification_tombstone(
+        json.loads(committed_path.read_text(encoding="utf-8")),
+        minimum_generation=6,
+        forbidden_fingerprint="commit-state",
+        forbidden_diagnostic_id="commit-diagnostic",
+    )
+    assert json.loads(newer_active_path.read_text(encoding="utf-8"))[
+        "fingerprint"
+    ] == "other-profile-state"
+
+    model_config._atomic_write_json(
+        committed_path,
+        {
+            "schema_version": 1,
+            "generation": 7,
+            "status": "verified",
+            "fingerprint": "older-state",
+            "diagnostic_id": "older-diagnostic",
+        },
+    )
+    changed_state_token = capture("commit-profile")
+    model_config._atomic_write_json(
+        committed_path,
+        {
+            "schema_version": 1,
+            "generation": 8,
+            "status": "verified",
+            "fingerprint": "newer-probe-state",
+            "diagnostic_id": "newer-probe-diagnostic",
+        },
+    )
+
+    assert invalidate(changed_state_token) is False
+    preserved = json.loads(committed_path.read_text(encoding="utf-8"))
+    assert preserved["generation"] == 8
+    assert preserved["status"] == "verified"
+    assert preserved["fingerprint"] == "newer-probe-state"
+    assert preserved["diagnostic_id"] == "newer-probe-diagnostic"
+
+
+def test_delayed_vision_set_invalidation_preserves_new_probe_result(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "vision-set-vs-test.json"
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_path",
+        lambda *_args, **_kwargs: state_path,
+    )
+
+    async def successful_probe(*, provider, model, **_kwargs):
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": model_config._VISION_PROBE_MARKER,
+                "resolved_provider": provider,
+                "resolved_model": model,
+            }
+        )
+
+    monkeypatch.setattr(
+        "tools.vision_tools.vision_analyze_tool",
+        successful_probe,
+    )
+    original_invalidator = model_config._invalidate_vision_verification
+    invalidator_started = threading.Event()
+    release_invalidator = threading.Event()
+
+    def delayed_invalidator(expected):
+        invalidator_started.set()
+        assert release_invalidator.wait(timeout=5)
+        return original_invalidator(expected)
+
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        delayed_invalidator,
+    )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            setter = pool.submit(
+                model_config.set_vision_config,
+                {
+                    "provider": "alibaba",
+                    "model": "qwen3-vl-plus",
+                    "api_key": "vision-set-vs-test-secret",
+                },
+            )
+            assert invalidator_started.wait(timeout=5)
+            probe_result = model_config.test_vision_config()
+            assert probe_result["status"] == "verified"
+            release_invalidator.set()
+            setter.result(timeout=5)
+    finally:
+        release_invalidator.set()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "verified"
+    assert persisted["diagnostic_id"] == probe_result["diagnostic_id"]
+
+
+def test_delayed_image_set_invalidation_preserves_new_probe_result(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / "image-set-vs-test.json"
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_args, **_kwargs: state_path,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda _active: [_dashscope_image_provider_row()],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_execute_image_gen_probe",
+        lambda *_args, **_kwargs: (
+            True,
+            "",
+            "真实生图验证通过。",
+        ),
+    )
+    original_invalidator = model_config._invalidate_image_gen_verification
+    invalidator_started = threading.Event()
+    release_invalidator = threading.Event()
+
+    def delayed_invalidator(expected):
+        invalidator_started.set()
+        assert release_invalidator.wait(timeout=5)
+        return original_invalidator(expected)
+
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        delayed_invalidator,
+    )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            setter = pool.submit(
+                model_config.set_image_gen_config,
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                    "api_key": "image-set-vs-test-secret",
+                },
+            )
+            assert invalidator_started.wait(timeout=5)
+            probe_result = model_config.test_image_gen_config()
+            assert probe_result["status"] == "verified"
+            release_invalidator.set()
+            setter.result(timeout=5)
+    finally:
+        release_invalidator.set()
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "verified"
+    assert persisted["diagnostic_id"] == probe_result["diagnostic_id"]
+
+
+def test_default_durable_mutation_hook_runs_real_refresh_actions_once(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        model_config,
+        "reload_config",
+        lambda: calls.append("reload_config"),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "invalidate_models_cache",
+        lambda: calls.append("invalidate_models_cache"),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        lambda *_args, **_kwargs: calls.append("invalidate_vision"),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        lambda *_args, **_kwargs: calls.append("invalidate_image"),
+    )
+    vision_token = model_config._VerificationInvalidationToken(
+        capability="vision",
+        profile="test",
+        generation=0,
+        state_identity="missing",
+    )
+    image_token = model_config._VerificationInvalidationToken(
+        capability="image",
+        profile="test",
+        generation=0,
+        state_identity="missing",
+    )
+
+    warnings = model_config._run_durable_mutation_post_commit_hook(
+        "set_alibaba_image_capabilities",
+        invalidate_vision=True,
+        invalidate_image=True,
+        vision_invalidation_token=vision_token,
+        image_invalidation_token=image_token,
+    )
+
+    assert warnings == []
+    assert calls == [
+        "reload_config",
+        "invalidate_models_cache",
+        "invalidate_vision",
+        "invalidate_image",
+    ]
+
+
+def test_durable_mutation_hook_fails_safe_when_invalidation_token_is_missing(
+    monkeypatch,
+):
+    invalidations = []
+    monkeypatch.setattr(model_config, "reload_config", lambda: None)
+    monkeypatch.setattr(model_config, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_vision_verification",
+        lambda *_args, **_kwargs: invalidations.append("vision"),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invalidate_image_gen_verification",
+        lambda *_args, **_kwargs: invalidations.append("image"),
+    )
+
+    warnings = model_config._run_durable_mutation_post_commit_hook(
+        "unsafe-caller",
+        invalidate_vision=True,
+        invalidate_image=True,
+    )
+
+    assert invalidations == []
+    assert warnings == [
+        "vision_verification_refresh_pending",
+        "image_gen_verification_refresh_pending",
+    ]
+
+
+def test_default_durable_mutation_hook_returns_stable_deduplicated_warning(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        model_config,
+        "reload_config",
+        lambda: (_ for _ in ()).throw(OSError("reload failed")),
+    )
+    monkeypatch.setattr(model_config, "invalidate_models_cache", lambda: None)
+
+    warnings = model_config._run_durable_mutation_post_commit_hook(
+        "set_main_model_config"
+    )
+
+    assert warnings == ["runtime_config_refresh_pending"]
+
+
+def test_main_model_refresh_preserves_auxiliary_verification_authority(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    vision_state_path = tmp_path / "vision-verification.json"
+    image_state_path = tmp_path / "image-gen-verification.json"
+    vision_state = {"status": "verified", "fingerprint": "vision-authority"}
+    image_state = {"status": "verified", "fingerprint": "image-authority"}
+    vision_state_path.write_text(json.dumps(vision_state), encoding="utf-8")
+    image_state_path.write_text(json.dumps(image_state), encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_vision_verification_state_path",
+        lambda *_args: vision_state_path,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_verification_state_path",
+        lambda *_args: image_state_path,
+    )
+    refresh_calls = []
+    monkeypatch.setattr(
+        model_config,
+        "reload_config",
+        lambda: refresh_calls.append("reload_config"),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "invalidate_models_cache",
+        lambda: refresh_calls.append("invalidate_models_cache"),
+    )
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": "main-route-key-123456",
+        }
+    )
+
+    assert result["main"]["provider"] == "deepseek"
+    assert refresh_calls == ["reload_config", "invalidate_models_cache"]
+    assert json.loads(vision_state_path.read_text(encoding="utf-8")) == vision_state
+    assert json.loads(image_state_path.read_text(encoding="utf-8")) == image_state
+
+
+def test_durable_main_model_save_survives_default_runtime_reload_failure(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        model_config,
+        "reload_config",
+        lambda: (_ for _ in ()).throw(OSError("reload failed")),
+    )
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": "durable-main-key-123456",
+        }
+    )
+
+    assert _read_config(tmp_path)["model"]["provider"] == "deepseek"
+    assert result["main"]["provider"] == "deepseek"
+    assert result["refresh_pending"] is True
+    assert result["warnings"] == ["runtime_config_refresh_pending"]
+
+
+def _use_persisted_capability_test_home(monkeypatch, tmp_path):
+    """Isolate real config/state readers without replacing runtime snapshots."""
+    os_home = tmp_path / "os-home"
+    hermes_home = tmp_path / "hermes-home"
+    state_dir = tmp_path / "webui-state"
+    os_home.mkdir()
+    hermes_home.mkdir()
+    state_dir.mkdir()
+    monkeypatch.setenv("HOME", str(os_home))
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "default")
+    monkeypatch.setenv("TAIJI_WEBUI_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("HERMES_WEBUI_PORT", "28571")
+    monkeypatch.setenv("PORT", "28571")
+    monkeypatch.delenv("TAIJI_RUNTIME_HOME", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_STATE_DIR", raising=False)
+    _use_home(monkeypatch, hermes_home, stub_image_gen=False)
+    monkeypatch.setattr(api_config, "STATE_DIR", state_dir)
+    return hermes_home, state_dir
+
+
+def test_vision_probe_does_not_overwrite_newer_out_of_band_verifying_state(
+    monkeypatch,
+    tmp_path,
+):
+    """Finalization must own the exact state file it began, not just config."""
+    hermes_home, _state_dir = _use_persisted_capability_test_home(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    model_config.set_vision_config(
+        {
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+            "api_key": "vision-state-owner-a",
+        }
+    )
+    state_path = model_config._vision_verification_state_path("default")
+    newer_state = {}
+
+    async def replace_state_during_provider_callback(**_kwargs):
+        current = json.loads(state_path.read_text(encoding="utf-8"))
+        assert current["status"] == "verifying"
+        newer_state.update(
+            {
+                **current,
+                "generation": int(current["generation"]) + 1,
+                "fingerprint": f"{current['fingerprint']}-newer",
+                "diagnostic_id": "newer-vision-probe-owner",
+            }
+        )
+        state_path.write_text(
+            json.dumps(newer_state, sort_keys=True),
+            encoding="utf-8",
+        )
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": "TAIJI-VISION-CHECK-7319",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            }
+        )
+
+    import tools.vision_tools as vision_tools
+
+    monkeypatch.setattr(
+        vision_tools,
+        "vision_analyze_tool",
+        replace_state_during_provider_callback,
+    )
+
+    result = model_config.test_vision_config()
+
+    assert result["error_code"] == "vision_probe_superseded"
+    assert json.loads(state_path.read_text(encoding="utf-8")) == newer_state
+    assert (hermes_home / "config.yaml").is_file()
+
+
+def test_image_probe_does_not_overwrite_newer_out_of_band_verifying_state(
+    monkeypatch,
+    tmp_path,
+):
+    """Image finalization must compare durable state ownership before write."""
+    hermes_home, _state_dir = _use_persisted_capability_test_home(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda _active: [_dashscope_image_provider_row()],
+    )
+    model_config.set_image_gen_config(
+        {
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "credentials": {
+                "api_key": "image-state-owner-a",
+                "workspace_id": "ws-state-owner",
+            },
+        }
+    )
+    state_path = model_config._image_gen_verification_state_path("default")
+    generated = hermes_home / "cache" / "images" / "state-owner.png"
+    newer_state = {}
+
+    def replace_state_during_provider_callback():
+        current = json.loads(state_path.read_text(encoding="utf-8"))
+        assert current["status"] == "verifying"
+        newer_state.update(
+            {
+                **current,
+                "generation": int(current["generation"]) + 1,
+                "fingerprint": f"{current['fingerprint']}-newer",
+                "diagnostic_id": "newer-image-probe-owner",
+            }
+        )
+        state_path.write_text(
+            json.dumps(newer_state, sort_keys=True),
+            encoding="utf-8",
+        )
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nstate-owner")
+        return {
+            "success": True,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+
+    _install_probe_provider(
+        monkeypatch,
+        _ProbeImageProvider(replace_state_during_provider_callback),
+    )
+
+    result = model_config.test_image_gen_config()
+
+    assert result["error_code"] == "image_gen_probe_superseded"
+    assert json.loads(state_path.read_text(encoding="utf-8")) == newer_state
+    assert (hermes_home / "config.yaml").is_file()
+
+
+def test_persisted_image_a_b_a_rejects_old_verified_binding_before_io(
+    monkeypatch,
+    tmp_path,
+):
+    """Real setter/probe A -> B -> A must not revive the old A1 binding."""
+    hermes_home, state_dir = _use_persisted_capability_test_home(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda _active: [_dashscope_image_provider_row()],
+    )
+    probe_counter = {"value": 0}
+
+    def successful_probe():
+        probe_counter["value"] += 1
+        generated = (
+            hermes_home
+            / "cache"
+            / "images"
+            / f"persisted-aba-{probe_counter['value']}.png"
+        )
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\npersisted-aba")
+        return {
+            "success": True,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+
+    _install_probe_provider(
+        monkeypatch,
+        _ProbeImageProvider(successful_probe),
+    )
+
+    def save_and_verify(api_key):
+        model_config.set_image_gen_config(
+            {
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "credentials": {
+                    "api_key": api_key,
+                    "workspace_id": "ws-persisted-aba",
+                },
+            }
+        )
+        result = model_config.test_image_gen_config()
+        assert result["status"] == "verified"
+        return result
+
+    from agent import image_runtime
+    from agent.image_gen_verification import (
+        ImageGenRequestAuthorizationError,
+        authorize_image_gen_request_binding,
+        build_image_gen_request_reauth_guard,
+    )
+
+    a1_result = save_and_verify("image-persisted-a")
+    state_path = model_config._image_gen_verification_state_path("default")
+    assert state_path.parent == state_dir / "image-gen-verification"
+    a1_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert a1_state["diagnostic_id"] == a1_result["diagnostic_id"]
+    a1_runtime = image_runtime.verification_runtime_snapshot(
+        "image_generation"
+    )
+    assert a1_runtime["status"] == "verified"
+    assert a1_runtime["fingerprint"] == a1_state["fingerprint"]
+    captured_a1 = model_config._capture_image_gen_config_snapshot()
+    assert captured_a1.probe_binding is not None
+    old_a1_binding = authorize_image_gen_request_binding(
+        captured_a1.probe_binding,
+        authorization_fingerprint=a1_runtime["fingerprint"],
+        authorization_generation=a1_runtime[
+            "_authorization_generation"
+        ],
+    )
+    a1_config_semantic = _read_config(hermes_home)
+
+    save_and_verify("image-persisted-b")
+    a3_result = save_and_verify("image-persisted-a")
+    a3_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert a3_state["diagnostic_id"] == a3_result["diagnostic_id"]
+    a3_runtime = image_runtime.verification_runtime_snapshot(
+        "image_generation"
+    )
+
+    assert a1_runtime["fingerprint"] != a3_runtime["fingerprint"]
+    assert (
+        a1_runtime["_authorization_generation"]
+        != a3_runtime["_authorization_generation"]
+    )
+    assert a3_state["generation"] > a1_state["generation"]
+    assert {
+        key: a1_runtime[key]
+        for key in ("provider", "model")
+    } == {
+        key: a3_runtime[key]
+        for key in ("provider", "model")
+    }
+    assert _read_config(hermes_home) != a1_config_semantic
+
+    old_a1_guard = build_image_gen_request_reauth_guard(
+        old_a1_binding,
+        expected_snapshot=a1_runtime,
+    )
+    provider_io = []
+    cache_writes = []
+
+    def forbidden_provider_io(*_args, **_kwargs):
+        provider_io.append((_args, _kwargs))
+        raise AssertionError("stale A1 binding reached external Provider I/O")
+
+    def forbidden_cache_write(*_args, **_kwargs):
+        cache_writes.append((_args, _kwargs))
+        raise AssertionError("stale A1 binding wrote an image cache entry")
+
+    from plugins.image_gen import dashscope as dashscope_provider
+    from plugins.image_gen import domestic_common
+
+    monkeypatch.setattr(
+        domestic_common,
+        "request_pinned_https",
+        forbidden_provider_io,
+    )
+    monkeypatch.setattr(
+        dashscope_provider,
+        "_save_safe_image_url",
+        forbidden_cache_write,
+    )
+
+    with pytest.raises(ImageGenRequestAuthorizationError) as blocked:
+        dashscope_provider.DashScopeQwenImageProvider().generate(
+            prompt="persisted ABA stale binding must be blocked",
+            aspect_ratio="square",
+            model="qwen-image-2.0-pro",
+            _runtime_binding=old_a1_binding,
+            _reauth_guard=old_a1_guard,
+        )
+
+    assert blocked.value.error_code == "capability_caller_stale"
+    assert provider_io == []
+    assert cache_writes == []
+
+
+def test_persisted_vision_a_b_a_rejects_old_verified_binding_before_io(
+    monkeypatch,
+    tmp_path,
+):
+    """Real vision setter/probe state on disk must defeat ABA material reuse."""
+    import asyncio
+    import tools.vision_tools as vision_tools
+    from agent import image_runtime
+    from agent.auxiliary_client import capture_vision_request_binding
+
+    hermes_home, state_dir = _use_persisted_capability_test_home(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    real_vision_boundary = vision_tools.vision_analyze_tool
+
+    async def successful_probe(**_kwargs):
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": "TAIJI-VISION-CHECK-7319",
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            }
+        )
+
+    monkeypatch.setattr(
+        vision_tools,
+        "vision_analyze_tool",
+        successful_probe,
+    )
+
+    def save_and_verify(api_key):
+        model_config.set_vision_config(
+            {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "api_key": api_key,
+            }
+        )
+        result = model_config.test_vision_config()
+        assert result["status"] == "verified"
+        return result
+
+    a1_result = save_and_verify("vision-persisted-a")
+    state_path = model_config._vision_verification_state_path("default")
+    assert state_path.parent == state_dir / "vision-verification"
+    a1_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert a1_state["diagnostic_id"] == a1_result["diagnostic_id"]
+    a1_runtime = image_runtime.verification_runtime_snapshot("vision")
+    assert a1_runtime["status"] == "verified"
+    assert a1_runtime["fingerprint"] == a1_state["fingerprint"]
+    old_a1_binding = capture_vision_request_binding(
+        authorization_fingerprint=a1_runtime["fingerprint"],
+        authorization_generation=a1_runtime[
+            "_authorization_generation"
+        ],
+    )
+    assert old_a1_binding is not None
+    a1_config_semantic = _read_config(hermes_home)
+
+    save_and_verify("vision-persisted-b")
+    a3_result = save_and_verify("vision-persisted-a")
+    a3_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert a3_state["diagnostic_id"] == a3_result["diagnostic_id"]
+    a3_runtime = image_runtime.verification_runtime_snapshot("vision")
+
+    assert a1_runtime["fingerprint"] != a3_runtime["fingerprint"]
+    assert (
+        a1_runtime["_authorization_generation"]
+        != a3_runtime["_authorization_generation"]
+    )
+    assert a3_state["generation"] > a1_state["generation"]
+    assert {
+        key: a1_runtime[key]
+        for key in ("provider", "model", "base_url", "transport")
+    } == {
+        key: a3_runtime[key]
+        for key in ("provider", "model", "base_url", "transport")
+    }
+    assert _read_config(hermes_home) != a1_config_semantic
+
+    monkeypatch.setattr(
+        vision_tools,
+        "vision_analyze_tool",
+        real_vision_boundary,
+    )
+    provider_io = []
+    cache_writes = []
+
+    async def forbidden_provider_io(**kwargs):
+        provider_io.append(kwargs)
+        raise AssertionError("stale A1 binding reached vision Provider I/O")
+
+    async def forbidden_cache_write(*args, **kwargs):
+        cache_writes.append((args, kwargs))
+        raise AssertionError("stale A1 binding wrote the vision cache")
+
+    monkeypatch.setattr(
+        vision_tools,
+        "async_call_llm",
+        forbidden_provider_io,
+    )
+    monkeypatch.setattr(
+        vision_tools,
+        "_download_image",
+        forbidden_cache_write,
+    )
+
+    blocked = json.loads(
+        asyncio.run(
+            real_vision_boundary(
+                image_url="https://example.test/stale-a1.png",
+                user_prompt="persisted ABA stale binding must be blocked",
+                model="qwen3-vl-plus",
+                provider="alibaba",
+                strict_target=True,
+                _runtime_binding=old_a1_binding,
+            )
+        )
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["error_code"] == "capability_binding_mismatch"
+    assert provider_io == []
+    assert cache_writes == []
+
+
+def test_image_a_b_a_does_not_revive_old_verified_binding_when_tombstones_fail(
+    monkeypatch,
+    tmp_path,
+):
+    """Config epoch, not a best-effort tombstone, must defeat image ABA."""
+    hermes_home, _state_dir = _use_persisted_capability_test_home(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda _active: [_dashscope_image_provider_row()],
+    )
+
+    generated = hermes_home / "cache" / "images" / "epoch-a1.png"
+
+    def successful_probe():
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(b"\x89PNG\r\n\x1a\nepoch-a1")
+        return {
+            "success": True,
+            "image": str(generated),
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+
+    _install_probe_provider(
+        monkeypatch,
+        _ProbeImageProvider(successful_probe),
+    )
+
+    def save(api_key):
+        return model_config.set_image_gen_config(
+            {
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "credentials": {
+                    "api_key": api_key,
+                    "workspace_id": "ws-epoch-adversarial",
+                },
+            }
+        )
+
+    from agent import image_runtime
+    from agent.image_gen_verification import (
+        ImageGenRequestAuthorizationError,
+        authorize_image_gen_request_binding,
+        build_image_gen_request_reauth_guard,
+    )
+
+    save("image-epoch-a")
+    verified_a = model_config.test_image_gen_config()
+    assert verified_a["status"] == "verified"
+    state_path = model_config._image_gen_verification_state_path("default")
+    old_state = json.loads(state_path.read_text(encoding="utf-8"))
+    old_runtime = image_runtime.verification_runtime_snapshot(
+        "image_generation"
+    )
+    old_snapshot = model_config._capture_image_gen_config_snapshot()
+    assert old_snapshot.probe_binding is not None
+    old_binding = authorize_image_gen_request_binding(
+        old_snapshot.probe_binding,
+        authorization_fingerprint=old_runtime["fingerprint"],
+        authorization_generation=old_runtime[
+            "_authorization_generation"
+        ],
+    )
+    old_guard = build_image_gen_request_reauth_guard(
+        old_binding,
+        expected_snapshot=old_runtime,
+    )
+    old_config = _read_config(hermes_home)
+
+    original_atomic_write_json = model_config._atomic_write_json
+    failed_tombstones = []
+
+    def fail_verification_tombstone(path, payload):
+        if (
+            Path(path) == state_path
+            and payload.get("status") == "configured_unverified"
+            and payload.get("fingerprint") == ""
+        ):
+            failed_tombstones.append(dict(payload))
+            raise OSError("simulated image tombstone write failure")
+        return original_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(
+        model_config,
+        "_atomic_write_json",
+        fail_verification_tombstone,
+    )
+    save("image-epoch-b")
+    save("image-epoch-a")
+
+    current_runtime = image_runtime.verification_runtime_snapshot(
+        "image_generation"
+    )
+    provider_io = []
+    cache_writes = []
+
+    def forbidden_provider_io(*args, **kwargs):
+        provider_io.append((args, kwargs))
+        raise AssertionError("revived image A1 binding reached Provider I/O")
+
+    def forbidden_cache_write(*args, **kwargs):
+        cache_writes.append((args, kwargs))
+        raise AssertionError("revived image A1 binding wrote cache")
+
+    from plugins.image_gen import dashscope as dashscope_provider
+    from plugins.image_gen import domestic_common
+
+    monkeypatch.setattr(
+        domestic_common,
+        "request_pinned_https",
+        forbidden_provider_io,
+    )
+    monkeypatch.setattr(
+        dashscope_provider,
+        "_save_safe_image_url",
+        forbidden_cache_write,
+    )
+    blocked_error = ""
+    try:
+        dashscope_provider.DashScopeQwenImageProvider().generate(
+            prompt="tombstone failure ABA must remain blocked",
+            aspect_ratio="square",
+            model="qwen-image-2.0-pro",
+            _runtime_binding=old_binding,
+            _reauth_guard=old_guard,
+        )
+    except ImageGenRequestAuthorizationError as exc:
+        blocked_error = exc.error_code
+    except Exception as exc:  # noqa: BLE001 - preserve exact RED evidence.
+        blocked_error = f"unexpected:{type(exc).__name__}"
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    violations = []
+    if len(failed_tombstones) != 2:
+        violations.append("B->A did not exercise two tombstone write failures")
+    if persisted != old_state:
+        violations.append("adversarial setup did not retain old verified A")
+    if current_runtime.get("status") != "configured_unverified":
+        violations.append("old verified image A revived after B->A")
+    if current_runtime.get("fingerprint") == old_runtime.get("fingerprint"):
+        violations.append("image capability fingerprint reused the A1 epoch")
+    if (
+        current_runtime.get("_authorization_generation")
+        == old_runtime.get("_authorization_generation")
+    ):
+        violations.append("image authorization generation reused A1")
+    if _read_config(hermes_home) == old_config:
+        violations.append("image config omitted a durable capability epoch")
+    if blocked_error not in {
+        "capability_caller_stale",
+        "capability_binding_mismatch",
+    }:
+        violations.append("old image A1 binding was not rejected")
+    if provider_io:
+        violations.append("old image A1 binding reached Provider I/O")
+    if cache_writes:
+        violations.append("old image A1 binding wrote cache")
+
+    assert violations == [], "; ".join(violations)
+
+
+def test_vision_a_b_a_does_not_revive_old_verified_binding_when_tombstones_fail(
+    monkeypatch,
+    tmp_path,
+):
+    """Config epoch, not a best-effort tombstone, must defeat vision ABA."""
+    import asyncio
+    import tools.vision_tools as vision_tools
+    from agent import image_runtime
+    from agent.auxiliary_client import capture_vision_request_binding
+
+    hermes_home, _state_dir = _use_persisted_capability_test_home(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    real_vision_boundary = vision_tools.vision_analyze_tool
+
+    async def successful_probe(**_kwargs):
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": model_config._VISION_PROBE_MARKER,
+                "resolved_provider": "alibaba",
+                "resolved_model": "qwen3-vl-plus",
+            }
+        )
+
+    monkeypatch.setattr(
+        vision_tools,
+        "vision_analyze_tool",
+        successful_probe,
+    )
+
+    def save(api_key):
+        return model_config.set_vision_config(
+            {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "api_key": api_key,
+            }
+        )
+
+    save("vision-epoch-a")
+    verified_a = model_config.test_vision_config()
+    assert verified_a["status"] == "verified"
+    state_path = model_config._vision_verification_state_path("default")
+    old_state = json.loads(state_path.read_text(encoding="utf-8"))
+    old_runtime = image_runtime.verification_runtime_snapshot("vision")
+    old_binding = capture_vision_request_binding(
+        authorization_fingerprint=old_runtime["fingerprint"],
+        authorization_generation=old_runtime[
+            "_authorization_generation"
+        ],
+    )
+    assert old_binding is not None
+    old_config = _read_config(hermes_home)
+
+    original_atomic_write_json = model_config._atomic_write_json
+    failed_tombstones = []
+
+    def fail_verification_tombstone(path, payload):
+        if (
+            Path(path) == state_path
+            and payload.get("status") == "configured_unverified"
+            and payload.get("fingerprint") == ""
+        ):
+            failed_tombstones.append(dict(payload))
+            raise OSError("simulated vision tombstone write failure")
+        return original_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(
+        model_config,
+        "_atomic_write_json",
+        fail_verification_tombstone,
+    )
+    save("vision-epoch-b")
+    save("vision-epoch-a")
+
+    current_runtime = image_runtime.verification_runtime_snapshot("vision")
+    monkeypatch.setattr(
+        vision_tools,
+        "vision_analyze_tool",
+        real_vision_boundary,
+    )
+    provider_io = []
+    cache_writes = []
+
+    async def forbidden_provider_io(**kwargs):
+        provider_io.append(kwargs)
+        raise AssertionError("revived vision A1 binding reached Provider I/O")
+
+    async def forbidden_cache_write(*args, **kwargs):
+        cache_writes.append((args, kwargs))
+        raise AssertionError("revived vision A1 binding wrote cache")
+
+    monkeypatch.setattr(
+        vision_tools,
+        "async_call_llm",
+        forbidden_provider_io,
+    )
+    monkeypatch.setattr(
+        vision_tools,
+        "_download_image",
+        forbidden_cache_write,
+    )
+    local_probe = tmp_path / "tombstone-failure-a1.png"
+    local_probe.write_bytes(model_config._VISION_PROBE_PNG)
+    blocked = json.loads(
+        asyncio.run(
+            real_vision_boundary(
+                image_url=str(local_probe),
+                user_prompt="tombstone failure ABA must remain blocked",
+                model="qwen3-vl-plus",
+                provider="alibaba",
+                strict_target=True,
+                _runtime_binding=old_binding,
+            )
+        )
+    )
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    violations = []
+    if len(failed_tombstones) != 2:
+        violations.append("B->A did not exercise two tombstone write failures")
+    if persisted != old_state:
+        violations.append("adversarial setup did not retain old verified A")
+    if current_runtime.get("status") != "configured_unverified":
+        violations.append("old verified vision A revived after B->A")
+    if current_runtime.get("fingerprint") == old_runtime.get("fingerprint"):
+        violations.append("vision capability fingerprint reused the A1 epoch")
+    if (
+        current_runtime.get("_authorization_generation")
+        == old_runtime.get("_authorization_generation")
+    ):
+        violations.append("vision authorization generation reused A1")
+    if _read_config(hermes_home) == old_config:
+        violations.append("vision config omitted a durable capability epoch")
+    if blocked.get("error_code") not in {
+        "capability_caller_stale",
+        "capability_binding_mismatch",
+        "verification_required",
+    }:
+        violations.append(
+            "old vision A1 binding was not rejected "
+            f"(blocked={blocked!r})"
+        )
+    if provider_io:
+        violations.append("old vision A1 binding reached Provider I/O")
+    if cache_writes:
+        violations.append("old vision A1 binding wrote cache")
+
+    assert violations == [], "; ".join(violations)
+
+
+def test_verification_state_file_lock_is_mutually_exclusive_across_processes(
+    tmp_path,
+):
+    """A second worker cannot enter the same state lock before release."""
+    context = multiprocessing.get_context("spawn")
+    state_path = tmp_path / "cross-process-state" / "verification.json"
+    first_attempting = context.Event()
+    first_acquired = context.Event()
+    release_first = context.Event()
+    second_attempting = context.Event()
+    second_acquired = context.Event()
+    release_second = context.Event()
+    result_queue = context.Queue()
+    first = context.Process(
+        target=_verification_state_lock_process,
+        args=(
+            str(state_path),
+            "first",
+            first_attempting,
+            first_acquired,
+            release_first,
+            result_queue,
+        ),
+    )
+    second = context.Process(
+        target=_verification_state_lock_process,
+        args=(
+            str(state_path),
+            "second",
+            second_attempting,
+            second_acquired,
+            release_second,
+            result_queue,
+        ),
+    )
+    try:
+        first.start()
+        assert first_attempting.wait(timeout=5)
+        assert first_acquired.wait(timeout=5)
+        second.start()
+        assert second_attempting.wait(timeout=5)
+        assert second.is_alive()
+        assert second_acquired.wait(timeout=0.5) is False
+
+        release_first.set()
+        assert second_acquired.wait(timeout=5)
+        release_second.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+    finally:
+        release_first.set()
+        release_second.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        if first.is_alive():
+            first.terminate()
+            first.join(timeout=5)
+        if second.is_alive():
+            second.terminate()
+            second.join(timeout=5)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    events = [result_queue.get(timeout=5) for _ in range(4)]
+    assert events.index(("first", "exited")) < events.index(
+        ("second", "entered")
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX lockfile safety")
+def test_verification_state_lock_rejects_symlink_without_touching_target(
+    tmp_path,
+):
+    if not getattr(os, "O_NOFOLLOW", 0):
+        pytest.skip("platform does not expose O_NOFOLLOW")
+    state_path = tmp_path / "symlink-state.json"
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    protected = tmp_path / "symlink-protected.txt"
+    protected.write_bytes(b"protected-symlink-target")
+    protected.chmod(0o640)
+    lock_path.symlink_to(protected)
+    original_payload = protected.read_bytes()
+    original_mode = protected.stat().st_mode & 0o777
+
+    with pytest.raises(OSError):
+        with model_config._verification_state_file_lock(state_path):
+            raise AssertionError("unsafe symlink lock was entered")
+
+    assert protected.read_bytes() == original_payload
+    assert protected.stat().st_mode & 0o777 == original_mode
+    assert lock_path.is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX lockfile safety")
+def test_verification_state_lock_rejects_hardlink_without_touching_target(
+    tmp_path,
+):
+    state_path = tmp_path / "hardlink-state.json"
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    protected = tmp_path / "hardlink-protected.txt"
+    protected.write_bytes(b"protected-hardlink-target")
+    protected.chmod(0o640)
+    os.link(protected, lock_path)
+    original_payload = protected.read_bytes()
+    original_mode = protected.stat().st_mode & 0o777
+
+    with pytest.raises(OSError, match="unsafe verification state lock"):
+        with model_config._verification_state_file_lock(state_path):
+            raise AssertionError("unsafe hardlink lock was entered")
+
+    assert protected.read_bytes() == original_payload
+    assert protected.stat().st_mode & 0o777 == original_mode
+    assert protected.stat().st_nlink == 2
+
+
+def test_windows_verification_state_lock_delegates_to_named_mutex_without_open(
+    monkeypatch,
+    tmp_path,
+):
+    state_path = tmp_path / "windows-state.json"
+    mutex_calls = []
+    open_calls = []
+
+    @contextmanager
+    def named_mutex(path):
+        mutex_calls.append(("enter", Path(path)))
+        try:
+            yield
+        finally:
+            mutex_calls.append(("exit", Path(path)))
+
+    def forbidden_open(*args, **kwargs):
+        open_calls.append((args, kwargs))
+        raise AssertionError("Windows lock path must not call os.open")
+
+    monkeypatch.setattr(
+        model_config,
+        "_windows_verification_state_mutex",
+        named_mutex,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "os",
+        SimpleNamespace(name="nt", open=forbidden_open),
+    )
+
+    with model_config._verification_state_file_lock(state_path):
+        mutex_calls.append(("body", state_path))
+
+    assert mutex_calls == [
+        ("enter", state_path),
+        ("body", state_path),
+        ("exit", state_path),
+    ]
+    assert open_calls == []
+    assert not state_path.with_name(f".{state_path.name}.lock").exists()
+
+
+def test_cross_process_newer_probe_generation_blocks_old_final_cas(
+    monkeypatch,
+    tmp_path,
+):
+    """A newer process-owned begin must survive an old worker's final CAS."""
+    context = multiprocessing.get_context("spawn")
+    state_dir = tmp_path / "cross-process-webui-state"
+    state_dir.mkdir()
+    profile = "cross-process-profile"
+    old_began = context.Event()
+    newer_began = context.Event()
+    result_queue = context.Queue()
+    old_owner = context.Process(
+        target=_old_vision_probe_owner_process,
+        args=(
+            str(state_dir),
+            profile,
+            old_began,
+            newer_began,
+            result_queue,
+        ),
+    )
+    new_owner = context.Process(
+        target=_newer_vision_probe_owner_process,
+        args=(
+            str(state_dir),
+            profile,
+            old_began,
+            newer_began,
+            result_queue,
+        ),
+    )
+    try:
+        old_owner.start()
+        new_owner.start()
+        old_owner.join(timeout=10)
+        new_owner.join(timeout=10)
+    finally:
+        old_began.set()
+        newer_began.set()
+        old_owner.join(timeout=5)
+        new_owner.join(timeout=5)
+        if old_owner.is_alive():
+            old_owner.terminate()
+            old_owner.join(timeout=5)
+        if new_owner.is_alive():
+            new_owner.terminate()
+            new_owner.join(timeout=5)
+
+    assert old_owner.exitcode == 0
+    assert new_owner.exitcode == 0
+    results = dict(result_queue.get(timeout=5) for _ in range(3))
+    assert results == {
+        "old_generation": 1,
+        "new_generation": 2,
+        "old_commit": False,
+    }
+
+    monkeypatch.setattr(api_config, "STATE_DIR", state_dir)
+    state_path = model_config._vision_verification_state_path(profile)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "verifying"
+    assert persisted["generation"] == 2
+    assert persisted["fingerprint"] == "cross-process-vision-new"
+    assert persisted["diagnostic_id"] == "cross-process-new-owner"
+
+
+@pytest.mark.parametrize("capability", ["vision", "image"])
+def test_cold_worker_invalidation_preserves_durable_generation_tombstone(
+    monkeypatch,
+    tmp_path,
+    capability,
+):
+    """Cold workers must derive invalidation ownership from durable state."""
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    profile = f"cold-worker-{capability}"
+    state_path = tmp_path / f"{capability}-cold-worker-state.json"
+    if capability == "vision":
+        monkeypatch.setattr(
+            model_config,
+            "_vision_verification_state_path",
+            lambda *_args, **_kwargs: state_path,
+        )
+        monkeypatch.setattr(model_config, "_VISION_PROBE_GENERATIONS", {})
+        generation_map = model_config._VISION_PROBE_GENERATIONS
+        capture = model_config._capture_vision_verification_invalidation
+        invalidate = model_config._invalidate_vision_verification
+        begin = model_config._begin_vision_probe
+    else:
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_verification_state_path",
+            lambda *_args, **_kwargs: state_path,
+        )
+        monkeypatch.setattr(model_config, "_IMAGE_GEN_PROBE_GENERATIONS", {})
+        generation_map = model_config._IMAGE_GEN_PROBE_GENERATIONS
+        capture = model_config._capture_image_gen_verification_invalidation
+        invalidate = model_config._invalidate_image_gen_verification
+        begin = model_config._begin_image_gen_probe
+
+    model_config._atomic_write_json(
+        state_path,
+        {
+            "schema_version": 1,
+            "generation": 5,
+            "fingerprint": f"{capability}-durable-generation-five",
+            "status": "verifying",
+            "checked_at": "2030-01-01T00:00:00Z",
+            "error_code": "",
+            "message": "durable generation five",
+            "diagnostic_id": f"{capability}-generation-five",
+        },
+    )
+
+    captured = capture(profile)
+    invalidated = invalidate(captured)
+    tombstone_exists = state_path.exists()
+    tombstone = (
+        json.loads(state_path.read_text(encoding="utf-8"))
+        if tombstone_exists
+        else {}
+    )
+    tombstone_generation = tombstone.get("generation")
+
+    generation_map.clear()
+    restart_generation = begin(
+        profile,
+        {
+            "schema_version": 1,
+            "fingerprint": f"{capability}-after-restart",
+            "status": "verifying",
+            "checked_at": "2030-01-01T00:00:01Z",
+            "error_code": "",
+            "message": "probe after cold restart",
+            "diagnostic_id": f"{capability}-after-restart",
+        },
+    )
+    restarted = json.loads(state_path.read_text(encoding="utf-8"))
+
+    violations = []
+    if captured.generation != 5:
+        violations.append(
+            "cold worker captured process-local generation "
+            f"{captured.generation} instead of durable generation 5"
+        )
+    if invalidated is not True:
+        violations.append("durable generation token did not invalidate its state")
+    if not tombstone_exists:
+        violations.append("invalidation unlinked durable generation history")
+    if (
+        type(tombstone_generation) is not int
+        or tombstone_generation < 6
+    ):
+        violations.append(
+            "invalidation did not persist a generation >= 6 tombstone"
+        )
+    if str(tombstone.get("status") or "") in {
+        "verifying",
+        "verified",
+        "failed",
+    }:
+        violations.append("tombstone retained an authorizing probe status")
+    durable_floor = (
+        tombstone_generation
+        if type(tombstone_generation) is int
+        else 5
+    )
+    if restart_generation <= durable_floor:
+        violations.append(
+            "cold restart reused an invalidated durable generation "
+            f"({restart_generation} <= {durable_floor})"
+        )
+    if restarted.get("generation") != restart_generation:
+        violations.append("restart begin did not persist its returned generation")
+
+    assert violations == [], "; ".join(violations)
+
+
+def _prepare_setter_probe_race(
+    monkeypatch,
+    tmp_path,
+    capability,
+    *,
+    probe_started=None,
+    release_probe=None,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    state_path = tmp_path / f"{capability}-setter-finalization-race.json"
+
+    if capability == "vision":
+        monkeypatch.setattr(
+            model_config,
+            "_vision_verification_state_path",
+            lambda *_args, **_kwargs: state_path,
+        )
+        monkeypatch.setattr(model_config, "_VISION_PROBE_GENERATIONS", {})
+        _write_saved_vision_config(tmp_path)
+
+        async def successful_probe(*, provider, model, **_kwargs):
+            if probe_started is not None:
+                probe_started.set()
+                assert release_probe.wait(timeout=10)
+            return json.dumps(
+                {
+                    "success": True,
+                    "analysis": model_config._VISION_PROBE_MARKER,
+                    "resolved_provider": provider,
+                    "resolved_model": model,
+                }
+            )
+
+        monkeypatch.setattr(
+            "tools.vision_tools.vision_analyze_tool",
+            successful_probe,
+        )
+        return SimpleNamespace(
+            state_path=state_path,
+            snapshot_unlocked_name="_capture_vision_config_snapshot_unlocked",
+            token_capture_name="_capture_vision_verification_invalidation",
+            invalidator_name="_invalidate_vision_verification",
+            probe=model_config.test_vision_config,
+            setter=model_config.set_vision_config,
+            setter_body={
+                "provider": "alibaba",
+                "model": "qwen3-vl-flash",
+                "api_key": "vision-config-b-secret",
+            },
+            expected_superseded="vision_probe_superseded",
+            initial_model="qwen3-vl-plus",
+            expected_model="qwen3-vl-flash",
+            committed_model=lambda config: config["auxiliary"]["vision"][
+                "model"
+            ],
+            response_model=lambda response: response.get("vision", {}).get(
+                "model"
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_verification_state_path",
+            lambda *_args, **_kwargs: state_path,
+        )
+        monkeypatch.setattr(model_config, "_IMAGE_GEN_PROBE_GENERATIONS", {})
+        _write_saved_image_gen_config(tmp_path)
+
+        def image_provider_rows(_active):
+            row = _dashscope_image_provider_row()
+            row["models"].append(
+                {"id": "qwen-image", "label": "Qwen Image"}
+            )
+            return [row]
+
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_rows",
+            image_provider_rows,
+        )
+
+        def successful_probe(*_args, **_kwargs):
+            if probe_started is not None:
+                probe_started.set()
+                assert release_probe.wait(timeout=10)
+            return (
+                True,
+                "",
+                "真实生图验证通过。",
+            )
+
+        monkeypatch.setattr(
+            model_config,
+            "_execute_image_gen_probe",
+            successful_probe,
+        )
+        return SimpleNamespace(
+            state_path=state_path,
+            snapshot_unlocked_name="_capture_image_gen_config_snapshot_unlocked",
+            token_capture_name="_capture_image_gen_verification_invalidation",
+            invalidator_name="_invalidate_image_gen_verification",
+            probe=model_config.test_image_gen_config,
+            setter=model_config.set_image_gen_config,
+            setter_body={
+                "provider": "dashscope",
+                "model": "qwen-image",
+                "api_key": "image-config-b-secret",
+            },
+            expected_superseded="image_gen_probe_superseded",
+            initial_model="qwen-image-2.0-pro",
+            expected_model="qwen-image",
+            committed_model=lambda config: config["image_gen"]["model"],
+            response_model=lambda response: response.get(
+                "image_gen", {}
+            ).get("model"),
+        )
+
+
+@pytest.mark.parametrize("capability", ["vision", "image"])
+def test_probe_final_snapshot_and_setter_commit_are_serialized(
+    monkeypatch,
+    tmp_path,
+    capability,
+):
+    """Once old final holds the config lock, setter B must wait its turn."""
+    race = _prepare_setter_probe_race(
+        monkeypatch,
+        tmp_path,
+        capability,
+    )
+    final_snapshot_read = threading.Event()
+    release_old_final = threading.Event()
+    setter_token_captured = threading.Event()
+    release_setter = threading.Event()
+    probe_thread = {"ident": None}
+    probe_snapshot_calls = {"value": 0}
+    snapshot_calls_lock = threading.Lock()
+    captured_tokens = []
+    invalidation_results = []
+    original_unlocked = getattr(
+        model_config,
+        race.snapshot_unlocked_name,
+    )
+    original_token_capture = getattr(
+        model_config,
+        race.token_capture_name,
+    )
+    original_invalidator = getattr(
+        model_config,
+        race.invalidator_name,
+    )
+
+    def capture_unlocked_and_pause_probe_final(*args, **kwargs):
+        snapshot = original_unlocked(*args, **kwargs)
+        if threading.get_ident() != probe_thread["ident"]:
+            return snapshot
+        with snapshot_calls_lock:
+            probe_snapshot_calls["value"] += 1
+            call_number = probe_snapshot_calls["value"]
+        if call_number == 2:
+            final_snapshot_read.set()
+            assert release_old_final.wait(timeout=10)
+        return snapshot
+
+    def capture_setter_token_and_pause(profile=None):
+        token = original_token_capture(profile)
+        captured_tokens.append(token)
+        setter_token_captured.set()
+        assert release_setter.wait(timeout=10)
+        return token
+
+    def record_invalidation(expected=None):
+        result = original_invalidator(expected)
+        invalidation_results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        model_config,
+        race.snapshot_unlocked_name,
+        capture_unlocked_and_pause_probe_final,
+    )
+    monkeypatch.setattr(
+        model_config,
+        race.token_capture_name,
+        capture_setter_token_and_pause,
+    )
+    monkeypatch.setattr(
+        model_config,
+        race.invalidator_name,
+        record_invalidation,
+    )
+
+    def run_probe():
+        probe_thread["ident"] = threading.get_ident()
+        return race.probe()
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    old_result = {}
+    setter_result = {}
+    committed_b = {}
+    verifying_a = {}
+    state_after_token = {}
+    setter_blocked = False
+    config_while_blocked = {}
+    try:
+        old_future = executor.submit(run_probe)
+        assert final_snapshot_read.wait(timeout=5)
+        verifying_a = json.loads(
+            race.state_path.read_text(encoding="utf-8")
+        )
+
+        setter_future = executor.submit(race.setter, race.setter_body)
+        setter_blocked = not setter_token_captured.wait(timeout=0.5)
+        config_while_blocked = _read_config(tmp_path)
+
+        release_old_final.set()
+        assert setter_token_captured.wait(timeout=5)
+        committed_b = _read_config(tmp_path)
+        state_after_token = json.loads(
+            race.state_path.read_text(encoding="utf-8")
+        )
+
+        release_setter.set()
+        setter_result = setter_future.result(timeout=5)
+        old_result = old_future.result(timeout=5)
+    finally:
+        release_old_final.set()
+        release_setter.set()
+        executor.shutdown(wait=True)
+
+    persisted = (
+        json.loads(race.state_path.read_text(encoding="utf-8"))
+        if race.state_path.exists()
+        else {}
+    )
+    old_fingerprint = str(verifying_a.get("fingerprint") or "")
+    old_diagnostic_id = str(verifying_a.get("diagnostic_id") or "")
+    violations = []
+    if verifying_a.get("status") != "verifying":
+        violations.append("old probe was not paused after a verifying A begin")
+    if not setter_blocked:
+        violations.append(
+            "setter captured its token while old final held the config lock"
+        )
+    if race.committed_model(config_while_blocked) != race.initial_model:
+        violations.append("config B committed through the old final lock")
+    if old_result.get("status") != "verified":
+        violations.append("linearized old final did not commit verified A")
+    if state_after_token.get("diagnostic_id") != old_diagnostic_id:
+        violations.append(
+            "setter did not capture ownership of the linearized A final"
+        )
+    if race.committed_model(committed_b) != race.expected_model:
+        violations.append("config B did not commit after old final released")
+    if invalidation_results != [True]:
+        violations.append(
+            "setter invalidation lost ownership after old final changed identity"
+        )
+    if (
+        persisted.get("status") == "verified"
+        and persisted.get("fingerprint") == old_fingerprint
+    ):
+        violations.append("disk retained the stale verified A result")
+    if not captured_tokens:
+        violations.append("setter did not publish an invalidation token")
+    if race.response_model(setter_result) != race.expected_model:
+        violations.append("setter response did not stay on committed config B")
+
+    assert violations == [], "; ".join(violations)
+
+
+@pytest.mark.parametrize("capability", ["vision", "image"])
+def test_setter_commit_before_probe_final_supersedes_old_probe(
+    monkeypatch,
+    tmp_path,
+    capability,
+):
+    """If setter B linearizes first, old A final cannot restore verification."""
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    race = _prepare_setter_probe_race(
+        monkeypatch,
+        tmp_path,
+        capability,
+        probe_started=probe_started,
+        release_probe=release_probe,
+    )
+    setter_token_captured = threading.Event()
+    captured_tokens = []
+    invalidation_results = []
+    original_token_capture = getattr(
+        model_config,
+        race.token_capture_name,
+    )
+    original_invalidator = getattr(
+        model_config,
+        race.invalidator_name,
+    )
+
+    def capture_setter_token(profile=None):
+        token = original_token_capture(profile)
+        captured_tokens.append(token)
+        setter_token_captured.set()
+        return token
+
+    def record_invalidation(expected=None):
+        result = original_invalidator(expected)
+        invalidation_results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        model_config,
+        race.token_capture_name,
+        capture_setter_token,
+    )
+    monkeypatch.setattr(
+        model_config,
+        race.invalidator_name,
+        record_invalidation,
+    )
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    old_result = {}
+    setter_result = {}
+    verifying_a = {}
+    state_after_setter = {}
+    try:
+        old_future = executor.submit(race.probe)
+        assert probe_started.wait(timeout=5)
+        verifying_a = json.loads(
+            race.state_path.read_text(encoding="utf-8")
+        )
+
+        setter_future = executor.submit(race.setter, race.setter_body)
+        assert setter_token_captured.wait(timeout=5)
+        setter_result = setter_future.result(timeout=5)
+        state_after_setter = json.loads(
+            race.state_path.read_text(encoding="utf-8")
+        )
+
+        release_probe.set()
+        old_result = old_future.result(timeout=5)
+    finally:
+        release_probe.set()
+        executor.shutdown(wait=True)
+
+    persisted = json.loads(
+        race.state_path.read_text(encoding="utf-8")
+    )
+    old_fingerprint = str(verifying_a.get("fingerprint") or "")
+    violations = []
+    if verifying_a.get("status") != "verifying":
+        violations.append("old A probe did not reach persisted verifying")
+    if not captured_tokens:
+        violations.append("setter B did not capture the verifying A token")
+    if invalidation_results != [True]:
+        violations.append("setter B failed to invalidate verifying A")
+    if race.response_model(setter_result) != race.expected_model:
+        violations.append("setter response did not stay on committed config B")
+    if state_after_setter.get("status") in {"verifying", "verified"}:
+        violations.append("setter B did not persist an invalidation tombstone")
+    if old_result.get("error_code") != race.expected_superseded:
+        violations.append("old A probe was not reported as superseded")
+    if old_result.get("status") != "configured_unverified":
+        violations.append("old A probe returned a non-superseded status")
+    if (
+        persisted.get("status") == "verified"
+        and persisted.get("fingerprint") == old_fingerprint
+    ):
+        violations.append("old final restored stale verified A on disk")
+
+    assert violations == [], "; ".join(violations)
+
+
+def _write_implicit_alibaba_default_capabilities(
+    home: Path,
+    *,
+    vision_epoch: int = 11,
+    image_epoch: int = 17,
+) -> None:
+    """Write the legacy-empty-ref shape that resolves the family default."""
+    credentials = [
+        {
+            "id": "alibaba-default-a",
+            "provider_family": "alibaba_dashscope",
+            "label": "Alibaba default A",
+            "auth_type": "api_key",
+            "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_A_API_KEY",
+            "default": True,
+        },
+        {
+            "id": "alibaba-default-b",
+            "provider_family": "alibaba_dashscope",
+            "label": "Alibaba default B",
+            "auth_type": "api_key",
+            "secret_env": "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_B_API_KEY",
+        },
+    ]
+    config = {
+        "provider_credentials": credentials,
+        "auxiliary": {
+            "vision": {
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "credential_ref": "",
+            }
+        },
+        "image_gen": {
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "credential_ref": "",
+        },
+        "_taiji_capability_epochs": {
+            "vision": vision_epoch,
+            "image_generation": image_epoch,
+        },
+    }
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    (home / ".env").write_text(
+        "\n".join(
+            (
+                "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_A_API_KEY=implicit-a",
+                "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_B_API_KEY=implicit-b",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
+def _capability_epochs(home: Path) -> tuple[int, int]:
+    epochs = _read_config(home).get("_taiji_capability_epochs") or {}
+    return (
+        int(epochs.get("vision") or 0),
+        int(epochs.get("image_generation") or 0),
+    )
+
+
+def test_implicit_default_secret_rotation_advances_both_capability_epochs(
+    monkeypatch,
+    tmp_path,
+):
+    """An empty credential_ref still consumes the family default secret."""
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _write_implicit_alibaba_default_capabilities(tmp_path)
+    before = _capability_epochs(tmp_path)
+
+    result = model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default-a",
+            "provider": "alibaba",
+            "label": "Alibaba default A",
+            "api_key": "implicit-a-rotated",
+        }
+    )
+
+    after = _capability_epochs(tmp_path)
+    assert after[0] > before[0]
+    assert after[1] > before[1]
+    assert result["credential"]["used_by"] == [
+        "auxiliary.vision",
+        "image_gen",
+    ]
+
+
+def test_implicit_default_marker_switch_advances_both_capability_epochs(
+    monkeypatch,
+    tmp_path,
+):
+    """Removing and selecting a family default are authorization mutations."""
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _write_implicit_alibaba_default_capabilities(tmp_path)
+    initial = _capability_epochs(tmp_path)
+
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default-a",
+            "provider": "alibaba",
+            "label": "Alibaba default A",
+            "default": False,
+        }
+    )
+    without_default = _capability_epochs(tmp_path)
+    model_config.upsert_provider_credential(
+        {
+            "id": "alibaba-default-b",
+            "provider": "alibaba",
+            "label": "Alibaba default B",
+            "default": True,
+        }
+    )
+    switched = _capability_epochs(tmp_path)
+
+    assert without_default[0] > initial[0]
+    assert without_default[1] > initial[1]
+    assert switched[0] > without_default[0]
+    assert switched[1] > without_default[1]
+
+
+def test_implicit_default_credential_cannot_be_deleted_while_in_use(
+    monkeypatch,
+    tmp_path,
+):
+    """Deletion must account for family-default resolution, not only refs."""
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _write_implicit_alibaba_default_capabilities(tmp_path)
+    config_before = (tmp_path / "config.yaml").read_bytes()
+    env_before = (tmp_path / ".env").read_bytes()
+
+    with pytest.raises(ValueError, match="正在使用"):
+        model_config.delete_provider_credential("alibaba-default-a")
+
+    assert (tmp_path / "config.yaml").read_bytes() == config_before
+    assert (tmp_path / ".env").read_bytes() == env_before
+
+
+def test_implicit_default_secret_a_b_a_rejects_old_image_proof_before_io(
+    monkeypatch,
+    tmp_path,
+):
+    """A restored secret value must not revive the old verified generation."""
+    from agent import image_runtime
+    from agent.image_gen_verification import (
+        ImageGenRequestAuthorizationError,
+        authorize_image_gen_request_binding,
+        build_image_gen_request_reauth_guard,
+    )
+    from plugins.image_gen import dashscope as dashscope_provider
+    from plugins.image_gen import domestic_common
+
+    hermes_home, _state_dir = _use_persisted_capability_test_home(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    _write_implicit_alibaba_default_capabilities(
+        hermes_home,
+        vision_epoch=0,
+        image_epoch=0,
+    )
+    a1_snapshot = model_config._capture_image_gen_config_snapshot()
+    assert a1_snapshot.configured is True
+    assert a1_snapshot.probe_binding is not None
+    generation = model_config._begin_image_gen_probe(
+        "default",
+        {
+            "schema_version": model_config.CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+            "fingerprint": a1_snapshot.fingerprint,
+            "status": "verified",
+            "checked_at": "2030-01-01T00:00:00Z",
+            "error_code": "",
+            "message": "",
+            "diagnostic_id": "implicit-default-a1",
+        },
+    )
+    assert generation > 0
+    a1_runtime = image_runtime.verification_runtime_snapshot(
+        "image_generation"
+    )
+    assert a1_runtime["status"] == "verified"
+    old_binding = authorize_image_gen_request_binding(
+        a1_snapshot.probe_binding,
+        authorization_fingerprint=a1_runtime["fingerprint"],
+        authorization_generation=a1_runtime[
+            "_authorization_generation"
+        ],
+    )
+    old_guard = build_image_gen_request_reauth_guard(
+        old_binding,
+        expected_snapshot=a1_runtime,
+    )
+
+    for secret in ("implicit-b", "implicit-a"):
+        model_config.upsert_provider_credential(
+            {
+                "id": "alibaba-default-a",
+                "provider": "alibaba",
+                "label": "Alibaba default A",
+                "api_key": secret,
+            }
+        )
+
+    current_runtime = image_runtime.verification_runtime_snapshot(
+        "image_generation"
+    )
+    provider_io = []
+
+    def forbidden_provider_io(*args, **kwargs):
+        provider_io.append((args, kwargs))
+        raise AssertionError("stale A1 proof reached Provider I/O")
+
+    monkeypatch.setattr(
+        domestic_common,
+        "request_pinned_https",
+        forbidden_provider_io,
+    )
+    blocked_error = ""
+    try:
+        dashscope_provider.DashScopeQwenImageProvider().generate(
+            prompt="implicit default ABA must remain blocked",
+            aspect_ratio="square",
+            model="qwen-image-2.0-pro",
+            _runtime_binding=old_binding,
+            _reauth_guard=old_guard,
+        )
+    except ImageGenRequestAuthorizationError as exc:
+        blocked_error = exc.error_code
+
+    violations = []
+    if current_runtime.get("fingerprint") == a1_runtime.get("fingerprint"):
+        violations.append("implicit default A1 fingerprint revived after A-B-A")
+    if current_runtime.get("status") == "verified":
+        violations.append("implicit default A1 verified state revived after A-B-A")
+    if blocked_error not in {
+        "capability_caller_stale",
+        "capability_binding_mismatch",
+    }:
+        violations.append("old implicit-default A1 proof was not rejected")
+    if provider_io:
+        violations.append("old implicit-default A1 proof reached Provider I/O")
 
     assert violations == [], "; ".join(violations)

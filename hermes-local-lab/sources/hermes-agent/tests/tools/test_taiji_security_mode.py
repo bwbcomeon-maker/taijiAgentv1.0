@@ -121,10 +121,12 @@ def test_capability_session_approval_is_remembered(monkeypatch):
     sid = "capability-session-terminal"
 
     from tools.approval import (
+        clear_session,
         request_capability_approval,
         resolve_gateway_approval,
         unregister_gateway_notify,
     )
+    from gateway.session_context import clear_session_vars, set_session_vars
 
     events = []
     from tools.approval import register_gateway_notify
@@ -133,13 +135,22 @@ def test_capability_session_approval_is_remembered(monkeypatch):
     monkeypatch.setenv("HERMES_SESSION_KEY", sid)
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webui")
     monkeypatch.delenv("TAIJI_ALLOW_TERMINAL", raising=False)
+    clear_session(sid)
     register_gateway_notify(sid, lambda data: events.append(data))
     result = {}
+
+    def _request_in_gateway_context():
+        tokens = set_session_vars(platform="webui", session_key=sid)
+        try:
+            result.setdefault(
+                "first",
+                request_capability_approval("terminal", "TAIJI_ALLOW_TERMINAL"),
+            )
+        finally:
+            clear_session_vars(tokens)
+
     thread = threading.Thread(
-        target=lambda: result.setdefault(
-            "first",
-            request_capability_approval("terminal", "TAIJI_ALLOW_TERMINAL"),
-        )
+        target=_request_in_gateway_context
     )
     thread.start()
     deadline = time.time() + 5
@@ -151,12 +162,20 @@ def test_capability_session_approval_is_remembered(monkeypatch):
         thread.join(timeout=10)
         assert result["first"]["approved"] is True
         assert result["first"]["scope"] == "session"
-        second = request_capability_approval("terminal", "TAIJI_ALLOW_TERMINAL")
+        tokens = set_session_vars(platform="webui", session_key=sid)
+        try:
+            second = request_capability_approval(
+                "terminal",
+                "TAIJI_ALLOW_TERMINAL",
+            )
+        finally:
+            clear_session_vars(tokens)
         assert second["approved"] is True
         assert second["scope"] == "session"
         assert len(events) == 1
     finally:
         unregister_gateway_notify(sid)
+        clear_session(sid)
 
 
 def test_capability_always_persists_only_current_allow_var(monkeypatch, tmp_path):
@@ -197,9 +216,47 @@ def test_capability_always_persists_only_current_allow_var(monkeypatch, tmp_path
         env_text = (runtime_home / ".env").read_text(encoding="utf-8")
         assert "TAIJI_ALLOW_TERMINAL=1" in env_text
         assert "TAIJI_ALLOW_EXECUTE_CODE=1" not in env_text
+        if os.name != "nt":
+            assert (runtime_home / ".env").stat().st_mode & 0o777 == 0o600
         assert os.environ["TAIJI_ALLOW_TERMINAL"] == "1"
     finally:
         unregister_gateway_notify(sid)
+
+
+def test_capability_persistence_uses_canonical_env_writer(
+    monkeypatch,
+    tmp_path,
+):
+    from agent import provider_credentials
+    from tools.taiji_security_mode import enable_capability_env
+
+    runtime_home = tmp_path / "runtime-home"
+    calls = []
+
+    def _record(updates, *, config_path=None, **_kwargs):
+        calls.append((dict(updates), config_path))
+        return {key: True for key in updates}
+
+    monkeypatch.setenv("TAIJI_DESKTOP_ONLY", "1")
+    monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setattr(
+        provider_credentials,
+        "mutate_env_unique",
+        _record,
+    )
+
+    result = enable_capability_env("TAIJI_ALLOW_TERMINAL")
+
+    assert result["persisted"] is True
+    assert calls == [
+        (
+            {
+                "TAIJI_SECURITY_MODE": "restricted",
+                "TAIJI_ALLOW_TERMINAL": "1",
+            },
+            runtime_home / "config.yaml",
+        )
+    ]
 
 
 def test_security_status_reports_local_controlled_profile(monkeypatch):

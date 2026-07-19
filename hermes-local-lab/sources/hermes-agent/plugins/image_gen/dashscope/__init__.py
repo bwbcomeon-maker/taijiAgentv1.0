@@ -271,6 +271,16 @@ class DashScopeQwenImageProvider(ImageGenProvider):
         if prompt_error:
             return prompt_error
         raw_binding = kwargs.get("_runtime_binding")
+        reauth_guard = kwargs.get("_reauth_guard")
+        if raw_binding is not None and not callable(reauth_guard):
+            return error_response(
+                error="DashScope request authorization guard is missing.",
+                error_type="configuration_error",
+                provider=self.name,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         if raw_binding is not None:
             try:
                 binding = require_image_gen_request_binding(
@@ -377,6 +387,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             prompt=prompt,
             aspect_ratio=aspect,
             secrets=secrets,
+            reauth_guard=reauth_guard,
         )
         if error:
             return error
@@ -398,6 +409,7 @@ class DashScopeQwenImageProvider(ImageGenProvider):
             aspect_ratio=aspect,
             provider=self.name,
             save_image=_save_safe_image_url,
+            reauth_guard=reauth_guard,
         )
 
 

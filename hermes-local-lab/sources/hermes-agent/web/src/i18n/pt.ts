@@ -1,4 +1,5 @@
 import type { Translations } from "./types";
+import { en } from "./en";
 
 export const pt: Translations = {
   common: {
@@ -322,6 +323,7 @@ export const pt: Translations = {
   },
 
   config: {
+    ...en.config,
     configPath: "~/.hermes/config.yaml",
     filters: "Filtros",
     sections: "Secções",

@@ -3,6 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Stopping processes must never seed or rewrite the active runtime config.
+TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0
 # shellcheck source=runtime-env.sh
 source "$SCRIPT_DIR/runtime-env.sh"
 

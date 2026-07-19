@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -1511,6 +1512,26 @@ def _write_profile_runtime_config(
     )
 
 
+def _mint_profile_incarnation(profile_dir: Path) -> str:
+    """Bind a newly created profile directory to a non-reusable identity."""
+    from agent.image_gen_verification import (
+        CAPABILITY_PROFILE_INCARNATION_KEY,
+    )
+    from agent.provider_credentials import mutate_config_env_strict
+
+    incarnation = uuid.uuid4().hex
+
+    def update_config(config_data: dict) -> None:
+        config_data[CAPABILITY_PROFILE_INCARNATION_KEY] = incarnation
+
+    mutate_config_env_strict(
+        update_config,
+        {},
+        config_path=Path(profile_dir) / "config.yaml",
+    )
+    return incarnation
+
+
 def create_profile_api(name: str, clone_from: str = None,
                        clone_config: bool = False,
                        base_url: str = None,
@@ -1564,6 +1585,7 @@ def create_profile_api(name: str, clone_from: str = None,
             break
 
     profile_path.mkdir(parents=True, exist_ok=True)
+    _mint_profile_incarnation(profile_path)
 
     # Seed bundled skills for non-cloned profiles (#2305).
     # Cloned profiles should preserve the clone-source behaviour and must not

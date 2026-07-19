@@ -14,6 +14,21 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.session import SessionSource
 
 
+def _capability_bound_factory(agent_cls):
+    """Construct a fake with the runtime identity production AIAgent binds."""
+
+    def _factory(*args, **kwargs):
+        from agent.image_runtime import capture_capability_runtime_generation
+
+        agent = agent_cls(*args, **kwargs)
+        agent._capability_runtime_identity = (
+            capture_capability_runtime_generation().identity
+        )
+        return agent
+
+    return _factory
+
+
 class ProgressCaptureAdapter(BasePlatformAdapter):
     def __init__(self, platform=Platform.TELEGRAM):
         super().__init__(PlatformConfig(enabled=True, token="***"), platform)
@@ -254,7 +269,7 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = FakeAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(FakeAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
     import tools.terminal_tool  # noqa: F401 - register terminal emoji for this fake-agent test
 
@@ -301,7 +316,7 @@ async def test_run_agent_progress_edits_keep_originating_topic_metadata(monkeypa
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = FakeAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(FakeAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = MetadataEditProgressCaptureAdapter()
@@ -340,7 +355,7 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = FakeAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(FakeAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = ProgressCaptureAdapter(platform=Platform.TELEGRAM)
@@ -390,7 +405,7 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = FakeAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(FakeAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = ProgressCaptureAdapter(platform=Platform.SLACK)
@@ -432,7 +447,7 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = FakeAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(FakeAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = ProgressCaptureAdapter(platform=Platform.FEISHU)
@@ -488,7 +503,7 @@ def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = LongPreviewAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(LongPreviewAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     # Write config.yaml so _run_agent picks up tool_preview_length
@@ -698,7 +713,7 @@ async def _run_with_agent(
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = agent_cls
+    fake_run_agent.AIAgent = _capability_bound_factory(agent_cls)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = adapter_cls(platform=platform)
@@ -1090,7 +1105,7 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = DelayedProgressAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(DelayedProgressAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
     import tools.terminal_tool  # noqa: F401 - register terminal tool metadata
 
@@ -1152,7 +1167,7 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = DelayedInterimAgent
+    fake_run_agent.AIAgent = _capability_bound_factory(DelayedInterimAgent)
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = ProgressCaptureAdapter(platform=Platform.DISCORD)

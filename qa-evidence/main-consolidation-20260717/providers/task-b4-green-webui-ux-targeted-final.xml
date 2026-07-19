@@ -1,0 +1,550 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="5" skipped="0" tests="237" time="8.840" timestamp="2026-07-19T23:19:00.291617+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.test_model_config_frontend" name="test_model_config_settings_section_exists" time="1.481" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_has_three_required_surfaces" time="0.004" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_js_calls_expected_endpoints" time="0.005" /><testcase classname="tests.test_model_config_frontend" name="test_every_model_and_provider_mutation_handles_runtime_refresh_truth" time="0.054" /><testcase classname="tests.test_model_config_frontend" name="test_runtime_refresh_warning_never_uses_green_success_and_stays_actionable" time="0.071" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_secret_inputs_start_empty" time="0.003" /><testcase classname="tests.test_model_config_frontend" name="test_secret_paste_uses_desktop_clipboard_bridge_when_available" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_focus_layout_has_summary_cards" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_license_actions_remain_visible" time="0.001" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_edit_forms_are_collapsible_in_cards" time="0.001" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_js_updates_focus_summaries" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_summary_uses_real_verification_state" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_auth_hint_is_taiji_branded" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_custom_provider_management_has_visible_entry" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_named_custom_vision_provider_management_has_visible_accessible_entry" time="0.003" /><testcase classname="tests.test_model_config_frontend" name="test_custom_vision_provider_focus_falls_back_inside_visible_providers_pane" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_named_custom_vision_provider_interactions[save]" time="0.067" /><testcase classname="tests.test_model_config_frontend" name="test_named_custom_vision_provider_interactions[active-delete]" time="0.064" /><testcase classname="tests.test_model_config_frontend" name="test_named_custom_vision_provider_interactions[dirty-close]" time="0.066" /><testcase classname="tests.test_model_config_frontend" name="test_named_custom_vision_provider_interactions[switch-cancel]" time="0.066" /><testcase classname="tests.test_model_config_frontend" name="test_named_custom_vision_provider_interactions[switch-confirm]" time="0.065" /><testcase classname="tests.test_model_config_frontend" name="test_named_custom_vision_provider_interactions[switch-busy]" time="0.066" /><testcase classname="tests.test_model_config_frontend" name="test_active_custom_vision_row_explains_delete_block_with_aria_relation" time="0.060" /><testcase classname="tests.test_model_config_frontend" name="test_settings_menu_does_not_add_auth_keys_section" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_routes_image_generation_management_to_existing_providers_tab" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_providers_panel_contains_image_generation_provider_management_surface" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_providers_panel_does_not_offer_unsupported_image_protocol_templates" time="0.001" /><testcase classname="tests.test_model_config_frontend" name="test_provider_status_refresh_is_not_mislabeled_as_verification" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_custom_image_provider_editor_has_safe_complete_interactions" time="0.003" /><testcase classname="tests.test_model_config_frontend" name="test_dynamic_image_credential_fields_expose_help_and_error_semantics" time="0.001" /><testcase classname="tests.test_model_config_frontend" name="test_platform_credential_editor_expansion_tracks_only_its_trigger" time="0.001" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_has_clear_image_capability_cards" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_is_primary_and_advanced_fields_are_progressively_disclosed" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_uses_api_models_and_verifies_both_capabilities" time="0.085" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_reports_partial_failure_without_retaining_key" time="0.088" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_stops_before_probe_when_runtime_refresh_is_pending" time="0.086" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_probe_refresh_pending_never_advances_to_green" time="0.091" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_old_operation_never_clears_new_key_or_operation" time="0.083" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_sanitizes_failure_and_always_clears_key" time="0.083" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_marks_changed_models_saved_even_when_probe_partially_fails" time="0.079" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_ignores_late_probe_after_configuration_changes[advanced-change]" time="0.078" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_ignores_late_probe_after_configuration_changes[late-invalidated]" time="0.077" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_never_accepts_wrong_or_superseded_probe_identity[wrong-identity]" time="0.078" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_never_accepts_wrong_or_superseded_probe_identity[superseded]" time="0.079" /><testcase classname="tests.test_model_config_frontend" name="test_alibaba_quick_config_restores_safe_persistent_failed_status" time="0.077" /><testcase classname="tests.test_model_config_frontend" name="test_image_capability_has_visible_safe_platform_credential_surface" time="0.003" /><testcase classname="tests.test_model_config_frontend" name="test_credential_controls_expose_expansion_errors_and_touch_targets" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_named_credential_controls_are_scoped_to_supported_providers" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_load_and_secret_lifecycle_have_explicit_guards" time="0.003" /><testcase classname="tests.test_model_config_frontend" name="test_secret_cleanup_is_scoped_and_provider_refresh_does_not_replace_model_baseline" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_provider_scope_load_generation_and_secret_cleanup_are_state_safe" time="0.069" /><testcase classname="tests.test_model_config_frontend" name="test_both_image_capability_cards_use_consistent_endpoint_and_test_controls" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_endpoint_fields_are_accessible_and_progressively_disclosed" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_closing_editor_restores_focus_to_visible_toggle" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_config_switching_preview_and_focus_are_state_safe" time="0.062" /><testcase classname="tests.test_model_config_frontend" name="test_credential_save_delete_sessions_do_not_clobber_newer_drafts" time="0.064" /><testcase classname="tests.test_model_config_frontend" name="test_default_credential_list_badge_and_editor_state_are_rendered" time="0.059" /><testcase classname="tests.test_model_config_frontend" name="test_vision_verification_has_visible_accessible_status_and_action" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_vision_verification_ui_uses_explicit_state_machine_and_test_endpoint" time="0.003" /><testcase classname="tests.test_model_config_frontend" name="test_vision_verification_uses_long_timeout_and_stale_response_guard" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_vision_verifying_save_failure_restores_state_without_losing_draft" time="0.065" /><testcase classname="tests.test_model_config_frontend" name="test_vision_verifying_edit_invalidates_probe_and_ignores_late_response" time="0.064" /><testcase classname="tests.test_model_config_frontend" name="test_vision_stale_finally_restores_snapshot_without_overwriting_input" time="0.066" /><testcase classname="tests.test_model_config_frontend" name="test_image_gen_verification_guards_late_responses_and_preserves_draft[save-failure]" time="0.066" /><testcase classname="tests.test_model_config_frontend" name="test_image_gen_verification_guards_late_responses_and_preserves_draft[edit]" time="0.068" /><testcase classname="tests.test_model_config_frontend" name="test_image_gen_verification_guards_late_responses_and_preserves_draft[stale]" time="0.073" /><testcase classname="tests.test_model_config_frontend" name="test_vision_test_route_is_registered" time="0.003" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_advanced_actions_are_outside_primary_card" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_uses_dynamic_domestic_credential_form" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_custom_provider_new_form_generates_id" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_save_updates_only_its_capability_without_clobbering_other_drafts" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_edit_uses_selected_provider_default_model" time="0.001" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_oauth_managed_provider_hides_key_paste_action" time="0.001" /><testcase classname="tests.test_model_config_frontend" name="test_image_generation_key_row_uses_dynamic_credentials_and_policy_explanation" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_auth_schema_keeps_non_editable_auth_explanation_visible" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_endpoint_field_visibility_is_driven_by_provider_schema" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_endpoint_schema_renderer_creates_unknown_fields_and_preserves_drafts" time="0.064" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_license_layout_prioritizes_customer_and_compacts_actions" time="0.002" /><testcase classname="tests.test_model_config_frontend" name="test_model_config_styles_are_present" time="0.002" /><testcase classname="tests.test_run_journal_frontend_static" name="test_reattach_path_uses_replay_when_status_reports_journal" time="0.001" /><testcase classname="tests.test_run_journal_frontend_static" name="test_error_reconnect_path_can_restore_from_journal" time="0.001" /><testcase classname="tests.test_run_journal_frontend_static" name="test_frontend_replay_cursor_uses_eventsource_last_event_id" time="0.001" /><testcase classname="tests.test_run_journal_frontend_static" name="test_replayed_long_task_events_enter_the_same_live_timeline_handlers" time="0.002" /><testcase classname="tests.test_run_journal_frontend_static" name="test_run_journal_cursor_tracks_every_long_task_timeline_event" time="0.001" /><testcase classname="tests.test_run_journal_frontend_static" name="test_capability_route_uses_existing_live_and_replay_pipeline" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_backend_ui_visibility_defaults_fail_open" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_backend_ui_visibility_hides_known_features_and_ignores_unknown" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_backend_feature_visibility_boolean_schema_controls_visibility" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_feature_visibility_schema_overrides_legacy_hidden_features" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_settings_api_returns_computed_visibility_not_raw_config" time="0.002" /><testcase classname="tests.test_ui_visibility_config" name="test_packaged_config_lists_all_features_with_chinese_explanations" time="0.003" /><testcase classname="tests.test_ui_visibility_config" name="test_runtime_env_syncs_packaged_feature_visibility_on_startup" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_packaged_config_sync_uses_canonical_locked_atomic_writer" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_stop_script_does_not_mutate_packaged_runtime_config" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_sync_packaged_config_preserves_existing_model_secrets" time="0.053"><failure message="subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_pres0/template.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_pres0/user/config.yaml']' returned non-zero exit status 1.">tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_pres0')
+
+    def test_sync_packaged_config_preserves_existing_model_secrets(tmp_path):
+        template = tmp_path / "template.yaml"
+        target = tmp_path / "user" / "config.yaml"
+        template.write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"default": "packaged-model"},
+                    "image_gen": {"provider": "openai-codex", "model": "gpt-image-2-medium"},
+                    "webui": {
+                        "feature_visibility": {
+                            "nav": {"tasks": False},
+                            "settings_sections": {"models": False},
+                            "composer": {"model": False},
+                        }
+                    },
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"default": "user-model", "api_key": "keep-me"},
+                    "providers": {"deepseek": {"api_key": "also-keep"}},
+                    "webui": {"feature_visibility": {"nav": {"tasks": True}}},
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+&gt;       subprocess.run(
+            [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+            check=True,
+        )
+
+tests/test_ui_visibility_config.py:257:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+input = None, capture_output = False, timeout = None, check = True
+popenargs = (['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webu...ders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_pres0/user/config.yaml'],)
+kwargs = {}
+process = &lt;Popen: returncode: 1 args: ['/Users/bwb/Documents/工作/taiji-agentv1.0/.workt...&gt;
+stdout = None, stderr = None, retcode = 1
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output &amp; stderr attributes if those streams
+        were captured.
+
+        If timeout is given, and the process takes too long, a TimeoutExpired
+        exception will be raised.
+
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+&gt;               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_pres0/template.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_pres0/user/config.yaml']' returned non-zero exit status 1.
+
+/Users/bwb/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py:571: CalledProcessError</failure></testcase><testcase classname="tests.test_ui_visibility_config" name="test_sync_packaged_config_advances_only_changed_capability_epoch" time="0.049"><failure message="subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_adva0/template.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_adva0/user/config.yaml']' returned non-zero exit status 1.">tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_adva0')
+
+    def test_sync_packaged_config_advances_only_changed_capability_epoch(tmp_path):
+        template = tmp_path / "template.yaml"
+        target = tmp_path / "user" / "config.yaml"
+        template.write_text(
+            yaml.safe_dump(
+                {
+                    "image_gen": {
+                        "provider": "dashscope",
+                        "model": "wanx2.1-t2i-turbo",
+                    }
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            yaml.safe_dump(
+                {
+                    "auxiliary": {
+                        "vision": {
+                            "provider": "alibaba",
+                            "model": "qwen3-vl-plus",
+                        }
+                    },
+                    "_taiji_capability_epochs": {
+                        "vision": 41,
+                        "image_generation": 53,
+                    },
+                    "_taiji_profile_incarnation": "incarnation-current",
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+&gt;       subprocess.run(
+            [
+                sys.executable,
+                str(LAB_ROOT / "scripts" / "sync-packaged-config.py"),
+                str(template),
+                str(target),
+            ],
+            check=True,
+        )
+
+tests/test_ui_visibility_config.py:309:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+input = None, capture_output = False, timeout = None, check = True
+popenargs = (['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webu...ders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_adva0/user/config.yaml'],)
+kwargs = {}
+process = &lt;Popen: returncode: 1 args: ['/Users/bwb/Documents/工作/taiji-agentv1.0/.workt...&gt;
+stdout = None, stderr = None, retcode = 1
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output &amp; stderr attributes if those streams
+        were captured.
+
+        If timeout is given, and the process takes too long, a TimeoutExpired
+        exception will be raised.
+
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+&gt;               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_adva0/template.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_adva0/user/config.yaml']' returned non-zero exit status 1.
+
+/Users/bwb/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py:571: CalledProcessError</failure></testcase><testcase classname="tests.test_ui_visibility_config" name="test_packaged_config_declares_empty_provider_credentials_without_secrets" time="0.003" /><testcase classname="tests.test_ui_visibility_config" name="test_sync_packaged_config_only_adds_missing_provider_credentials" time="0.090"><failure message="subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_only0/template.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_only0/missing.yaml']' returned non-zero exit status 1.">tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_only0')
+
+    def test_sync_packaged_config_only_adds_missing_provider_credentials(tmp_path):
+        template = tmp_path / "template.yaml"
+        target = tmp_path / "config.yaml"
+        template.write_text("provider_credentials: []\n", encoding="utf-8")
+        target.write_text(
+            yaml.safe_dump(
+                {
+                    "provider_credentials": [
+                        {
+                            "id": "keep",
+                            "provider_family": "alibaba_dashscope",
+                            "secret_env": "TAIJI_CREDENTIAL_KEEP_API_KEY",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+            check=True,
+        )
+
+        assert yaml.safe_load(target.read_text(encoding="utf-8"))["provider_credentials"][0]["id"] == "keep"
+
+        missing = tmp_path / "missing.yaml"
+        missing.write_text("model:\n  provider: deepseek\n", encoding="utf-8")
+&gt;       subprocess.run(
+            [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(missing)],
+            check=True,
+        )
+
+tests/test_ui_visibility_config.py:371:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+input = None, capture_output = False, timeout = None, check = True
+popenargs = (['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webu.../folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_only0/missing.yaml'],)
+kwargs = {}
+process = &lt;Popen: returncode: 1 args: ['/Users/bwb/Documents/工作/taiji-agentv1.0/.workt...&gt;
+stdout = None, stderr = None, retcode = 1
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output &amp; stderr attributes if those streams
+        were captured.
+
+        If timeout is given, and the process takes too long, a TimeoutExpired
+        exception will be raised.
+
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+&gt;               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_only0/template.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_only0/missing.yaml']' returned non-zero exit status 1.
+
+/Users/bwb/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py:571: CalledProcessError</failure></testcase><testcase classname="tests.test_ui_visibility_config" name="test_sync_packaged_config_copies_template_for_missing_target" time="0.062"><failure message="subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/config/taiji-default-config.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_copi0/fresh/config.yaml']' returned non-zero exit status 1.">tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_copi0')
+
+    def test_sync_packaged_config_copies_template_for_missing_target(tmp_path):
+        template = PACKAGED_CONFIG_PATH
+        target = tmp_path / "fresh" / "config.yaml"
+
+&gt;       subprocess.run(
+            [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+            check=True,
+        )
+
+tests/test_ui_visibility_config.py:382:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+input = None, capture_output = False, timeout = None, check = True
+popenargs = (['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webu...ers/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_copi0/fresh/config.yaml'],)
+kwargs = {}
+process = &lt;Popen: returncode: 1 args: ['/Users/bwb/Documents/工作/taiji-agentv1.0/.workt...&gt;
+stdout = None, stderr = None, retcode = 1
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output &amp; stderr attributes if those streams
+        were captured.
+
+        If timeout is given, and the process takes too long, a TimeoutExpired
+        exception will be raised.
+
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+&gt;               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/config/taiji-default-config.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_copi0/fresh/config.yaml']' returned non-zero exit status 1.
+
+/Users/bwb/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py:571: CalledProcessError</failure></testcase><testcase classname="tests.test_ui_visibility_config" name="test_sync_packaged_config_fills_empty_model_without_overwriting_user_values" time="0.050"><failure message="subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/config/taiji-default-config.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_fill0/existing/config.yaml']' returned non-zero exit status 1.">tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_fill0')
+
+    def test_sync_packaged_config_fills_empty_model_without_overwriting_user_values(tmp_path):
+        template = PACKAGED_CONFIG_PATH
+        target = tmp_path / "existing" / "config.yaml"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"provider": "", "default": "user-model", "api_key": "keep-me"},
+                    "image_gen": {"provider": "fal"},
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+&gt;       subprocess.run(
+            [sys.executable, str(LAB_ROOT / "scripts" / "sync-packaged-config.py"), str(template), str(target)],
+            check=True,
+        )
+
+tests/test_ui_visibility_config.py:409:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+input = None, capture_output = False, timeout = None, check = True
+popenargs = (['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webu.../5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_fill0/existing/config.yaml'],)
+kwargs = {}
+process = &lt;Popen: returncode: 1 args: ['/Users/bwb/Documents/工作/taiji-agentv1.0/.workt...&gt;
+stdout = None, stderr = None, retcode = 1
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output &amp; stderr attributes if those streams
+        were captured.
+
+        If timeout is given, and the process takes too long, a TimeoutExpired
+        exception will be raised.
+
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+&gt;               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/sources/hermes-webui/../hermes-agent/.venv/bin/python', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/scripts/sync-packaged-config.py', '/Users/bwb/Documents/工作/taiji-agentv1.0/.worktrees/main-consolidation-20260717/hermes-local-lab/config/taiji-default-config.yaml', '/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-3090/test_sync_packaged_config_fill0/existing/config.yaml']' returned non-zero exit status 1.
+
+/Users/bwb/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py:571: CalledProcessError</failure></testcase><testcase classname="tests.test_ui_visibility_config" name="test_boot_reads_ui_visibility_and_applies_it" time="0.002" /><testcase classname="tests.test_ui_visibility_config" name="test_frontend_has_unified_visibility_helper_and_selectors" time="0.002" /><testcase classname="tests.test_ui_visibility_config" name="test_visibility_hidden_elements_are_forced_out_of_layout" time="0.002" /><testcase classname="tests.test_ui_visibility_config" name="test_workspace_feature_visibility_hides_panel_and_home_shortcut" time="0.002" /><testcase classname="tests.test_ui_visibility_config" name="test_taiji_composer_visibility_hidden_overrides_skin_display_rules" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_taiji_compact_composer_shows_reasoning_when_workspace_group_is_hidden" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_hidden_panels_and_settings_sections_are_guarded" time="0.001" /><testcase classname="tests.test_ui_visibility_config" name="test_hidden_composer_controls_noop_their_dropdowns" time="0.004" /><testcase classname="tests.test_ui_visibility_config" name="test_desktop_mic_denied_message_uses_desktop_permission_copy" time="0.001" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_typed_vision_errors_render_dedicated_chinese_recovery_card" time="0.002" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_retry_path_reuses_descriptors_without_uploading_or_persisting_them" time="0.002" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_recovery_card_never_renders_descriptor_paths_and_settings_is_reachable" time="0.016" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_capability_route_metadata_is_visible_with_actual_route_and_reason" time="0.007" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_capability_route_metadata_deduplicates_replay_and_keeps_public_truth" time="0.066" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_persisted_vision_error_rehydrates_recovery_actions_after_reload" time="0.012" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_retry_is_guarded_against_repeat_clicks_and_transient_state_is_pruned" time="0.002" /><testcase classname="tests.test_vision_error_recovery_frontend" name="test_busy_vision_retry_preserves_composer_and_pending_files_without_side_effects" time="0.061" /><testcase classname="tests.test_native_image_attachments.TestAttachmentName" name="test_dict_with_name" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestAttachmentName" name="test_dict_with_filename_fallback" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestAttachmentName" name="test_dict_with_path_fallback" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestAttachmentName" name="test_string_attachment" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestAttachmentName" name="test_empty_attachment" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestAttachmentName" name="test_none_attachment" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestNormalizeChatAttachments" name="test_legacy_string_list" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestNormalizeChatAttachments" name="test_dict_with_mime_and_is_image" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestNormalizeChatAttachments" name="test_dict_missing_fields_defaults" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestNormalizeChatAttachments" name="test_mixed_list" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestNormalizeChatAttachments" name="test_empty_list" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestNormalizeChatAttachments" name="test_not_a_list" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_no_attachments_returns_string" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_single_image_in_session_inbox" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_jpeg_image_in_session_inbox" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_multiple_images_become_multiple_parts" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_non_image_attachment_stays_text_fallback" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_outside_workspace_path_rejected" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_symlink_inside_session_inbox_rejected" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_symlink_pointing_outside_workspace_rejected" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_size_above_cap_rejected" time="0.008" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_missing_path_skipped" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_no_mime_guessed_from_extension" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_mixed_image_and_nonimage" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_upload_result_structure_roundtrip" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_pure_text_history_does_not_read_image_capability_state" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_text_image_mode_strips_historical_image_url_parts" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_native_image_mode_keeps_historical_image_url_parts" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_sync_chat_history_sanitizer_receives_config" time="0.003" /><testcase classname="tests.test_native_image_attachments.TestBuildNativeMultimodalMessage" name="test_fake_png_rejected_by_magic_bytes" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestIsValidImage" name="test_valid_png" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestIsValidImage" name="test_valid_jpeg" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestIsValidImage" name="test_fake_png_rejected" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestIsValidImage" name="test_text_file_not_image" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestIsValidImage" name="test_svg_allowed" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestIsValidImage" name="test_missing_file" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestIsValidImage" name="test_mime_with_charset" time="0.001" /><testcase classname="tests.test_native_image_attachments.TestAttachmentRootIntegration" name="test_attachment_root_path_allowed_for_native_multimodal" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestAttachmentRootIntegration" name="test_other_session_attachment_rejected_for_native_multimodal" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestAttachmentRootIntegration" name="test_path_outside_both_workspace_and_attachment_root_still_rejected" time="0.002" /><testcase classname="tests.test_native_image_attachments.TestAttachmentRootIntegration" name="test_workspace_absolute_path_is_not_a_chat_attachment" time="0.002" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_all_entrypoints_share_capability_snapshot_and_reason_codes" time="0.001" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_webui_frozen_vision_binding_blocks_stale_route_before_all_io[a_to_b]" time="0.002" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_webui_frozen_vision_binding_blocks_stale_route_before_all_io[a_to_b_to_a]" time="0.002" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_webui_frozen_vision_binding_blocks_post_binding_drift_before_io[a_to_b]" time="0.002" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_webui_frozen_vision_binding_blocks_post_binding_drift_before_io[a_to_b_to_a]" time="0.002" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_webui_and_gateway_agent_cache_identity_tracks_capability_snapshot" time="0.006" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_webui_self_heal_generation_race_fails_before_cache_and_main_io[result-error-path]" time="0.022" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_webui_self_heal_generation_race_fails_before_cache_and_main_io[exception-path]" time="0.021" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_capability_route_event_matches_decision_and_actual_tool_execution" time="0.004" /><testcase classname="tests.test_image_capability_entrypoint_consistency" name="test_config_transaction_propagates_invalidation_without_losing_state" time="0.003" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_backend_is_default_off_for_truthy_values" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_backend_only_accepts_explicit_gateway_aliases" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_backend_can_be_enabled_from_config_without_env" time="0.002" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_config_status_is_redacted_and_reports_missing_key" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_config_status_reports_fallback_api_server_key_without_exposing_value" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_backend_env_wins_over_config_and_stays_safe" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_sse_delta_extracts_openai_chat_chunks" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_sse_reasoning_delta_extracts_reasoning_without_treating_it_as_content" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_request_body_uses_current_user_content_without_history_replay" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_request_body_omits_incomplete_model_routes[route_fields0]" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_request_body_omits_incomplete_model_routes[route_fields1]" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_request_body_omits_incomplete_model_routes[route_fields2]" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_request_body_omits_incomplete_model_routes[route_fields3]" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_request_body_omits_incomplete_model_routes[route_fields4]" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_request_body_trims_complete_model_route" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_stream_usage_normalizes_token_names" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_image_candidate_is_private_and_requires_completed_correlated_envelope" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_completion_promotes_image_to_current_assistant_without_media_text" time="0.131" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_artifact_commit_and_session_save_have_safe_failure_order[stale]" time="0.124" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_artifact_commit_and_session_save_have_safe_failure_order[commit]" time="0.125" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_artifact_commit_and_session_save_have_safe_failure_order[save]" time="0.129" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_artifact_commit_and_session_save_have_safe_failure_order[crash]" time="0.130" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_http_401_reports_gateway_auth_not_provider_key" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_http_401_with_key_suggests_key_mismatch" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_public_errors_do_not_echo_provider_secrets_paths_or_raw_exceptions" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_sse_error_event_sanitizes_model_configuration_errors" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_frontend_renders_gateway_auth_error_with_specific_label" time="0.002" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_auth_label_i18n_key_exists_for_every_locale" time="0.007" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_health_payload_is_documented_as_operator_diagnostic_only" time="0.003" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_worker_translates_sse_and_persists_session" time="0.178" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_completions_buffers_reasoning_until_done" time="0.150" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_completions_discards_incomplete_reasoning[cancel]" time="0.147" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_completions_discards_incomplete_reasoning[failed]" time="0.146" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_completions_discards_incomplete_reasoning[eof]" time="0.152" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_required_input_helper_survives_optional_prefill_import_failure" time="0.147" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_final_save_validates_visible_assistant_but_keeps_internal_context" time="0.150" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_accumulates_raw_internal_and_filtered_public_final_text" time="0.002" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_short_buffered_delta_is_not_duplicated_by_completed_output" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_collects_private_image_candidate_without_public_path" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_failed_runs_turn_never_promotes_collected_image_candidate" time="0.147" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_worker_maps_sse_error_to_taiji_message" time="0.148" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts" time="0.007" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_uses_auxiliary_vision_text_before_main_request" time="0.006" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_blocks_main_request_when_auxiliary_vision_fails" time="0.011" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_cancellation_after_first_auxiliary_image_skips_second_and_main_request" time="0.007" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_chat_worker_injects_document_attachment_context" time="0.150" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_request_uses_only_current_input_and_instructions" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_keeps_ephemeral_user_prefill_without_replaying_history" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_error_preserves_model_configuration_classification" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_terminal_events_keep_cancel_and_error_semantics[terminal_event0-None-None]" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_terminal_events_keep_cancel_and_error_semantics[terminal_event1-None-model_configuration_error]" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_stops_orphan_when_started_session_id_does_not_match" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_same_name_tool_completion_matches_stable_id" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_live_tool_completion_with_id_never_falls_back_to_name" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_incomplete_event_stream_stops_run_and_returns_error" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_fallback_only_when_start_endpoint_is_unavailable" time="0.001" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_compatibility_fallback_sends_full_webui_history" time="0.150" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_transport_creates_managed_session_and_matches_visible_events[test-model-None-expected_route0]" time="0.148" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_transport_creates_managed_session_and_matches_visible_events[deepseek-chat-deepseek-expected_route1]" time="0.149" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_cancelled_result_uses_cancel_path_without_success_or_empty_error" time="0.147" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_suppresses_transport_error_after_user_cancel" time="0.146" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_worker_finalizes_cancel_when_stream_was_removed_before_registration" time="0.004" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_transport_keeps_current_image_attachment_in_input" time="0.171" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_user_cancel_returns_cancelled_even_with_partial_text" time="0.014" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_run_reasoning_uses_stateful_cross_chunk_filter" time="0.002" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_server_cancelled_preserves_cancelled_outcome" time="0.002" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_partial_eof_is_not_completed" time="0.014" /><testcase classname="tests.test_webui_gateway_chat_backend" name="test_gateway_runs_failed_discards_buffered_reasoning" time="0.007" /></testsuite></testsuites>

@@ -585,15 +585,6 @@ def test_custom_provider_legacy_secret_migrates_from_physical_env_target(
     (alias_home / ".env").write_text("KEEP=alias\n", encoding="utf-8")
     monkeypatch.delenv(legacy_env, raising=False)
     monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
-    monkeypatch.setattr(
-        model_config,
-        "_refresh_custom_provider_commit",
-        lambda _capability, *, fallback_providers: {
-            "providers": list(fallback_providers),
-            "refresh_pending": False,
-            "warnings": [],
-        },
-    )
     if capability == "vision":
         monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
     credential_ref = f"migration-{capability}-router"

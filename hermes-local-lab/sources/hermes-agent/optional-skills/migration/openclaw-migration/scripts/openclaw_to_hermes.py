@@ -9,6 +9,7 @@ reports exactly what was skipped and why.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -353,16 +354,6 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def dump_yaml_file(path: Path, data: Dict[str, Any]) -> None:
-    if yaml is None:
-        raise RuntimeError("PyYAML is required to update Hermes config.yaml")
-    ensure_parent(path)
-    path.write_text(
-        yaml.safe_dump(data, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
-    )
-
-
 def parse_env_file(path: Path) -> Dict[str, str]:
     if not path.exists():
         return {}
@@ -374,12 +365,6 @@ def parse_env_file(path: Path) -> Dict[str, str]:
         key, _, value = line.partition("=")
         data[key.strip()] = value.strip()
     return data
-
-
-def save_env_file(path: Path, data: Dict[str, str]) -> None:
-    ensure_parent(path)
-    lines = [f"{key}={value}" for key, value in data.items()]
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def backup_existing(path: Path, backup_root: Path) -> Optional[Path]:
@@ -739,6 +724,26 @@ class Migrator:
         self.backup_dir = self.output_dir / "backups" if self.output_dir else None
         self.overflow_dir = self.output_dir / "overflow" if self.output_dir else None
         self.items: List[ItemResult] = []
+        self._config_path = self.target_root / "config.yaml"
+        if self.execute:
+            try:
+                from agent.provider_credentials import load_credential_snapshot
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Hermes canonical credential writer is required for migration"
+                ) from exc
+            target_snapshot = load_credential_snapshot(self._config_path)
+            self._initial_hermes_config = copy.deepcopy(target_snapshot.config)
+            self._initial_hermes_env = dict(target_snapshot.env)
+        else:
+            self._initial_hermes_config = load_yaml_file(self._config_path)
+            self._initial_hermes_env = parse_env_file(
+                self.target_root / ".env"
+            )
+        self._staged_hermes_config = copy.deepcopy(
+            self._initial_hermes_config
+        )
+        self._staged_env_updates: Dict[str, str] = {}
         # Once a config.yaml write hits conflict/error mid-run, later
         # config.yaml writes are deliberately short-circuited to avoid
         # leaving config in a partially-written state.  Modelled on
@@ -765,7 +770,7 @@ class Migrator:
                     # ws_path is outside source_root — use it as custom workspace
                     self._custom_workspace = ws_path
 
-        config = load_yaml_file(self.target_root / "config.yaml")
+        config = self._load_staged_hermes_config()
         mem_cfg = config.get("memory", {}) if isinstance(config.get("memory"), dict) else {}
         self.memory_limit = int(mem_cfg.get("memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT))
         self.user_limit = int(mem_cfg.get("user_char_limit", DEFAULT_USER_CHAR_LIMIT))
@@ -781,10 +786,138 @@ class Migrator:
     def is_selected(self, option_id: str) -> bool:
         return option_id in self.selected_options
 
-    # Option ids that mutate the Hermes config.yaml file.  Once any one of
-    # them records a conflict/error on config.yaml, subsequent ones are
-    # short-circuited to avoid partial writes.  Keep in sync with methods
-    # that call load_yaml_file(target_root / "config.yaml") + dump_yaml_file.
+    def _load_staged_hermes_config(self) -> Dict[str, Any]:
+        return copy.deepcopy(self._staged_hermes_config)
+
+    def _stage_hermes_config(self, desired: Dict[str, Any]) -> None:
+        if not isinstance(desired, dict):
+            raise ValueError("Hermes config staging target must be a mapping")
+        self._staged_hermes_config = copy.deepcopy(desired)
+
+    def _load_staged_hermes_env(self) -> Dict[str, str]:
+        staged = dict(self._initial_hermes_env)
+        staged.update(self._staged_env_updates)
+        return staged
+
+    def _stage_env_values(self, values: Dict[str, str]) -> None:
+        for key, value in values.items():
+            normalized_key = str(key or "").strip()
+            if not normalized_key:
+                raise ValueError("Hermes env staging key cannot be empty")
+            normalized_value = str(value)
+            if self._initial_hermes_env.get(normalized_key) == normalized_value:
+                self._staged_env_updates.pop(normalized_key, None)
+            else:
+                self._staged_env_updates[normalized_key] = normalized_value
+
+    def _has_staged_main_state_changes(self) -> bool:
+        return bool(
+            self._staged_hermes_config != self._initial_hermes_config
+            or self._staged_env_updates
+        )
+
+    def _publish_staged_main_state(self) -> None:
+        """Publish config.yaml and .env once through the canonical transaction."""
+        if not self.execute or not self._has_staged_main_state_changes():
+            return
+
+        try:
+            from agent.image_gen_verification import (
+                CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+                CAPABILITY_CONFIG_EPOCH_VISION,
+                bump_capability_config_epochs,
+                capability_config_epoch,
+                capability_epochs_for_secret_env,
+                reconcile_capability_config_epochs,
+            )
+            from agent.provider_credentials import (
+                CredentialRecoveryError,
+                mutate_config_env_strict,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "Hermes canonical config transaction is unavailable"
+            ) from exc
+
+        expected_config = copy.deepcopy(self._initial_hermes_config)
+        desired_config = copy.deepcopy(self._staged_hermes_config)
+        env_updates = dict(self._staged_env_updates)
+        desired_env = dict(self._initial_hermes_env)
+        desired_env.update(env_updates)
+        capabilities = (
+            CAPABILITY_CONFIG_EPOCH_VISION,
+            CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+        )
+
+        def publish_config(current: Dict[str, Any]) -> None:
+            if current != expected_config:
+                raise RuntimeError(
+                    "Hermes config changed while OpenClaw migration was staging; "
+                    "no migration config or secret changes were published"
+                )
+
+            reconciled = copy.deepcopy(desired_config)
+            before_epochs = {
+                capability: capability_config_epoch(current, capability)
+                for capability in capabilities
+            }
+            reconcile_capability_config_epochs(current, reconciled)
+            config_advanced = {
+                capability
+                for capability in capabilities
+                if capability_config_epoch(reconciled, capability)
+                > before_epochs[capability]
+            }
+
+            secret_capabilities = set()
+            for env_key in env_updates:
+                secret_capabilities.update(
+                    capability_epochs_for_secret_env(
+                        current,
+                        env_key,
+                        env_values=desired_env,
+                    )
+                )
+                secret_capabilities.update(
+                    capability_epochs_for_secret_env(
+                        reconciled,
+                        env_key,
+                        env_values=desired_env,
+                    )
+                )
+            secret_only_capabilities = sorted(
+                secret_capabilities - config_advanced
+            )
+            if secret_only_capabilities:
+                bump_capability_config_epochs(
+                    reconciled,
+                    *secret_only_capabilities,
+                )
+
+            current.clear()
+            current.update(reconciled)
+
+        expected_env_values = {
+            key: self._initial_hermes_env.get(key)
+            for key in env_updates
+        }
+        try:
+            mutate_config_env_strict(
+                publish_config,
+                env_updates,
+                config_path=self._config_path,
+                expected_env_values=expected_env_values,
+            )
+        except CredentialRecoveryError as exc:
+            raise RuntimeError(
+                "Hermes config or secret changed while OpenClaw migration "
+                "was staging; no migration config or secret changes were "
+                "published"
+            ) from exc
+
+    # Option ids that stage Hermes config.yaml changes. Once any one records a
+    # conflict/error, later config options are short-circuited and the final
+    # config/.env transaction is not published.
     _CONFIG_MUTATING_OPTIONS = frozenset({
         "model-config",
         "tts-config",
@@ -954,8 +1087,34 @@ class Migrator:
         self.run_if_selected("ui-identity", lambda: self.migrate_ui_identity(config))
         self.run_if_selected("logging-config", lambda: self.migrate_logging_config(config))
 
+        blocking_results = [
+            item
+            for item in self.items
+            if item.status in {STATUS_CONFLICT, STATUS_ERROR}
+        ]
+        if (
+            self.execute
+            and self._has_staged_main_state_changes()
+            and blocking_results
+        ):
+            self.record(
+                "main-config-env-transaction",
+                self.source_root,
+                self._config_path,
+                STATUS_ERROR,
+                "Staged config and secret changes were not published because "
+                "the migration plan produced a conflict or error.",
+                blocking_items=[
+                    {"kind": item.kind, "status": item.status}
+                    for item in blocking_results
+                ],
+            )
+
         # Generate migration notes
         self.generate_migration_notes()
+
+        if not blocking_results:
+            self._publish_staged_main_state()
 
         return self.build_report()
 
@@ -1227,11 +1386,7 @@ class Migrator:
         if not patterns:
             self.record("command-allowlist", source, destination, "skipped", "No allowlist patterns found")
             return
-        if not destination.exists():
-            self.record("command-allowlist", source, destination, "skipped", "Hermes config.yaml does not exist yet")
-            return
-
-        config = load_yaml_file(destination)
+        config = self._load_staged_hermes_config()
         current = config.get("command_allowlist", [])
         if not isinstance(current, list):
             current = []
@@ -1244,7 +1399,7 @@ class Migrator:
         if self.execute:
             backup_path = self.maybe_backup(destination)
             config["command_allowlist"] = merged
-            dump_yaml_file(destination, config)
+            self._stage_hermes_config(config)
             self.record(
                 "command-allowlist",
                 source,
@@ -1274,7 +1429,7 @@ class Migrator:
 
     def merge_env_values(self, additions: Dict[str, str], kind: str, source: Path) -> None:
         destination = self.target_root / ".env"
-        env_data = parse_env_file(destination)
+        env_data = self._load_staged_hermes_env()
         added: Dict[str, str] = {}
         conflicts: List[str] = []
 
@@ -1297,7 +1452,7 @@ class Migrator:
 
         if self.execute:
             backup_path = self.maybe_backup(destination)
-            save_env_file(destination, env_data)
+            self._stage_env_values(added)
             self.record(
                 kind,
                 source,
@@ -1698,7 +1853,7 @@ class Migrator:
             self.record("model-config", source_path, destination, "error", "PyYAML is not available")
             return
 
-        hermes_config = load_yaml_file(destination)
+        hermes_config = self._load_staged_hermes_config()
         current_model = hermes_config.get("model")
         if current_model == model_str:
             self.record("model-config", source_path, destination, "skipped", "Model already set to the same value")
@@ -1714,7 +1869,7 @@ class Migrator:
                 existing_model["default"] = model_str
             else:
                 hermes_config["model"] = {"default": model_str}
-            dump_yaml_file(destination, hermes_config)
+            self._stage_hermes_config(hermes_config)
             self.record("model-config", source_path, destination, "migrated", backup=str(backup_path) if backup_path else "", model=model_str)
         else:
             self.record("model-config", source_path, destination, "migrated", "Would set model", model=model_str)
@@ -1800,7 +1955,7 @@ class Migrator:
             self.record("tts-config", source_path, destination, "skipped", "No compatible TTS settings found")
             return
 
-        hermes_config = load_yaml_file(destination)
+        hermes_config = self._load_staged_hermes_config()
         existing_tts = hermes_config.get("tts", {})
         if not isinstance(existing_tts, dict):
             existing_tts = {}
@@ -1814,7 +1969,7 @@ class Migrator:
                 else:
                     merged_tts[key] = value
             hermes_config["tts"] = merged_tts
-            dump_yaml_file(destination, hermes_config)
+            self._stage_hermes_config(hermes_config)
             self.record("tts-config", source_path, destination, "migrated", backup=str(backup_path) if backup_path else "", settings=list(tts_data.keys()))
         else:
             self.record("tts-config", source_path, destination, "migrated", "Would set TTS config", settings=list(tts_data.keys()))
@@ -2108,7 +2263,7 @@ class Migrator:
             return
 
         hermes_cfg_path = self.target_root / "config.yaml"
-        hermes_cfg = load_yaml_file(hermes_cfg_path)
+        hermes_cfg = self._load_staged_hermes_config()
         existing_mcp = hermes_cfg.get("mcp_servers") or {}
         added = 0
 
@@ -2173,7 +2328,7 @@ class Migrator:
         if added > 0 and self.execute:
             self.maybe_backup(hermes_cfg_path)
             hermes_cfg["mcp_servers"] = existing_mcp
-            dump_yaml_file(hermes_cfg_path, hermes_cfg)
+            self._stage_hermes_config(hermes_cfg)
 
     # ── Plugins ───────────────────────────────────────────────
     def migrate_plugins_config(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -2287,7 +2442,7 @@ class Migrator:
             return
 
         hermes_cfg_path = self.target_root / "config.yaml"
-        hermes_cfg = load_yaml_file(hermes_cfg_path)
+        hermes_cfg = self._load_staged_hermes_config()
         changes = False
 
         # Map agent defaults
@@ -2371,7 +2526,7 @@ class Migrator:
             hermes_cfg["agent"] = agent_cfg
             if self.execute:
                 self.maybe_backup(hermes_cfg_path)
-                dump_yaml_file(hermes_cfg_path, hermes_cfg)
+                self._stage_hermes_config(hermes_cfg)
             self.record("agent-config", "openclaw.json agents.defaults", "config.yaml agent/compression/terminal",
                         "migrated", "Agent defaults mapped to Hermes config")
 
@@ -2424,7 +2579,7 @@ class Migrator:
             return
 
         hermes_cfg_path = self.target_root / "config.yaml"
-        hermes_cfg = load_yaml_file(hermes_cfg_path)
+        hermes_cfg = self._load_staged_hermes_config()
         sr = hermes_cfg.get("session_reset") or {}
         changes = False
 
@@ -2462,7 +2617,7 @@ class Migrator:
             hermes_cfg["session_reset"] = sr
             if self.execute:
                 self.maybe_backup(hermes_cfg_path)
-                dump_yaml_file(hermes_cfg_path, hermes_cfg)
+                self._stage_hermes_config(hermes_cfg)
             self.record("session-config", "openclaw.json session.resetTriggers",
                         "config.yaml session_reset", "migrated")
 
@@ -2488,7 +2643,7 @@ class Migrator:
             return
 
         hermes_cfg_path = self.target_root / "config.yaml"
-        hermes_cfg = load_yaml_file(hermes_cfg_path)
+        hermes_cfg = self._load_staged_hermes_config()
         custom_providers = hermes_cfg.get("custom_providers") or []
         added = 0
 
@@ -2539,7 +2694,7 @@ class Migrator:
         if added > 0 and self.execute:
             self.maybe_backup(hermes_cfg_path)
             hermes_cfg["custom_providers"] = custom_providers
-            dump_yaml_file(hermes_cfg_path, hermes_cfg)
+            self._stage_hermes_config(hermes_cfg)
 
         # Archive model aliases/catalog
         agent_defaults = (config.get("agents") or {}).get("defaults") or {}
@@ -2607,7 +2762,7 @@ class Migrator:
         discord_cfg = channels.get("discord") or {}
         if discord_cfg:
             hermes_cfg_path = self.target_root / "config.yaml"
-            hermes_cfg = load_yaml_file(hermes_cfg_path)
+            hermes_cfg = self._load_staged_hermes_config()
             discord_hermes = hermes_cfg.get("discord") or {}
             changed = False
             if "requireMention" in discord_cfg:
@@ -2618,7 +2773,7 @@ class Migrator:
                 changed = True
             if changed and self.execute:
                 hermes_cfg["discord"] = discord_hermes
-                dump_yaml_file(hermes_cfg_path, hermes_cfg)
+                self._stage_hermes_config(hermes_cfg)
 
         # Archive complex channel configs (group settings, thread bindings, etc.)
         complex_archive = {}
@@ -2649,7 +2804,7 @@ class Migrator:
             return
 
         hermes_cfg_path = self.target_root / "config.yaml"
-        hermes_cfg = load_yaml_file(hermes_cfg_path)
+        hermes_cfg = self._load_staged_hermes_config()
         browser_hermes = hermes_cfg.get("browser") or {}
         changed = False
 
@@ -2665,7 +2820,7 @@ class Migrator:
             hermes_cfg["browser"] = browser_hermes
             if self.execute:
                 self.maybe_backup(hermes_cfg_path)
-                dump_yaml_file(hermes_cfg_path, hermes_cfg)
+                self._stage_hermes_config(hermes_cfg)
             self.record("browser-config", "openclaw.json browser.*", "config.yaml browser",
                         "migrated")
 
@@ -2689,7 +2844,7 @@ class Migrator:
             return
 
         hermes_cfg_path = self.target_root / "config.yaml"
-        hermes_cfg = load_yaml_file(hermes_cfg_path)
+        hermes_cfg = self._load_staged_hermes_config()
         changed = False
 
         # Map exec timeout -> terminal timeout (field is timeoutSec in OpenClaw)
@@ -2711,7 +2866,7 @@ class Migrator:
 
         if changed and self.execute:
             self.maybe_backup(hermes_cfg_path)
-            dump_yaml_file(hermes_cfg_path, hermes_cfg)
+            self._stage_hermes_config(hermes_cfg)
             self.record("tools-config", "openclaw.json tools.*", "config.yaml terminal",
                         "migrated")
 
@@ -2733,7 +2888,7 @@ class Migrator:
             return
 
         hermes_cfg_path = self.target_root / "config.yaml"
-        hermes_cfg = load_yaml_file(hermes_cfg_path)
+        hermes_cfg = self._load_staged_hermes_config()
 
         # Map approval mode (nested under approvals.exec.mode in OpenClaw)
         exec_approvals = approvals.get("exec") or {}
@@ -2744,7 +2899,7 @@ class Migrator:
             hermes_cfg.setdefault("approvals", {})["mode"] = hermes_mode
             if self.execute:
                 self.maybe_backup(hermes_cfg_path)
-                dump_yaml_file(hermes_cfg_path, hermes_cfg)
+                self._stage_hermes_config(hermes_cfg)
             self.record("approvals-config", "openclaw.json approvals.mode",
                         "config.yaml approvals.mode", "migrated", f"Mapped '{mode}' -> '{hermes_mode}'")
 
@@ -2826,15 +2981,22 @@ class Migrator:
 
     # ── Helper: set env var ───────────────────────────────────
     def _set_env_var(self, key: str, value: str, source_label: str) -> None:
-        env_path = self.target_root / ".env"
         if self.execute:
-            env_data = parse_env_file(env_path)
+            env_data = self._load_staged_hermes_env()
+            if env_data.get(key) == str(value):
+                self.record(
+                    "env-var",
+                    source_label,
+                    f".env {key}",
+                    STATUS_SKIPPED,
+                    f"Env var {key} already has the same value",
+                )
+                return
             if key in env_data and not self.overwrite:
                 self.record("env-var", source_label, f".env {key}", "conflict",
                             f"Env var {key} already set")
                 return
-            env_data[key] = value
-            save_env_file(env_path, env_data)
+            self._stage_env_values({key: str(value)})
         self.record("env-var", source_label, f".env {key}", "migrated")
 
     # ── Generate migration notes ──────────────────────────────

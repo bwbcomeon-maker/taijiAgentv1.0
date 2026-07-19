@@ -19,6 +19,31 @@ const BASE = HERMES_BASE_PATH;
 
 import type { DashboardTheme } from "@/themes/types";
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(status: number, responseText: string) {
+    super(`${status}: ${responseText}`);
+    this.name = "ApiError";
+    this.status = status;
+    try {
+      this.body = JSON.parse(responseText);
+    } catch {
+      this.body = null;
+    }
+  }
+}
+
+export function isConfigurationConflict(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 409) return false;
+  if (!error.body || typeof error.body !== "object") return false;
+  return (
+    "error_code" in error.body &&
+    error.body.error_code === "configuration_conflict"
+  );
+}
+
 // Ephemeral session token for protected endpoints.
 // Injected into index.html by the server — never fetched via API.
 declare global {
@@ -135,7 +160,7 @@ export async function fetchJSON<T>(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${text}`);
+    throw new ApiError(res.status, text);
   }
   return res.json();
 }
@@ -251,6 +276,11 @@ export const api = {
   getModelsAnalytics: (days: number) =>
     fetchJSON<ModelsAnalyticsResponse>(`/api/analytics/models?days=${days}`),
   getConfig: () => fetchJSON<Record<string, unknown>>("/api/config"),
+  getConfigDraft: () =>
+    fetchJSON<{
+      config: Record<string, unknown>;
+      snapshot_token: string;
+    }>("/api/config/draft"),
   getDefaults: () => fetchJSON<Record<string, unknown>>("/api/config/defaults"),
   getSchema: () => fetchJSON<{ fields: Record<string, unknown>; category_order: string[] }>("/api/config/schema"),
   getModelInfo: () => fetchJSON<ModelInfoResponse>("/api/model/info"),
@@ -262,18 +292,25 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  saveConfig: (config: Record<string, unknown>) =>
+  saveConfig: (config: Record<string, unknown>, snapshot_token: string) =>
     fetchJSON<{ ok: boolean }>("/api/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config }),
+      body: JSON.stringify({ config, snapshot_token }),
     }),
-  getConfigRaw: () => fetchJSON<{ yaml: string }>("/api/config/raw"),
-  saveConfigRaw: (yaml_text: string) =>
+  getConfigRaw: () =>
+    fetchJSON<{
+      yaml: string;
+      snapshot_token: string | null;
+      editable: boolean;
+      blocked_reason: string | null;
+      blocked_code: string | null;
+    }>("/api/config/raw"),
+  saveConfigRaw: (yaml_text: string, snapshot_token: string) =>
     fetchJSON<{ ok: boolean }>("/api/config/raw", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ yaml_text }),
+      body: JSON.stringify({ yaml_text, snapshot_token }),
     }),
   getEnvVars: () => fetchJSON<Record<string, EnvVarInfo>>("/api/env"),
   setEnvVar: (key: string, value: string) =>

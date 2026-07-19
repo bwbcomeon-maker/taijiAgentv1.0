@@ -642,10 +642,23 @@ class HindsightMemoryProvider(MemoryProvider):
         import sys
         from pathlib import Path
 
-        from hermes_cli.config import save_config
+        from agent.provider_credentials import mutate_config_env_strict
+        from hermes_constants import (
+            get_config_path as get_active_config_path,
+            get_hermes_home as get_active_hermes_home,
+        )
         from hermes_cli.secret_prompt import masked_secret_prompt
 
         from hermes_cli.memory_setup import _curses_select
+
+        requested_home = Path(hermes_home).expanduser()
+        active_home = get_active_hermes_home().expanduser()
+        main_config_path = (
+            get_active_config_path()
+            if requested_home.resolve() == active_home.resolve()
+            else requested_home / "config.yaml"
+        )
+        main_env_path = Path(os.path.realpath(main_config_path)).parent / ".env"
 
         print("\n  Configuring Hindsight memory:\n")
 
@@ -762,10 +775,9 @@ class HindsightMemoryProvider(MemoryProvider):
             if llm_key:
                 env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key
             else:
-                env_path = Path(hermes_home) / ".env"
                 existing_llm_key = ""
-                if env_path.exists():
-                    for line in env_path.read_text().splitlines():
+                if main_env_path.exists():
+                    for line in main_env_path.read_text().splitlines():
                         if line.startswith("HINDSIGHT_LLM_API_KEY="):
                             existing_llm_key = line.split("=", 1)[1]
                             break
@@ -785,30 +797,20 @@ class HindsightMemoryProvider(MemoryProvider):
             idle_timeout_val = existing_idle_timeout if existing_idle_timeout is not None else _DEFAULT_IDLE_TIMEOUT
             provider_config["idle_timeout"] = idle_timeout_val
             env_writes["HINDSIGHT_IDLE_TIMEOUT"] = str(idle_timeout_val)
-        config["memory"]["provider"] = "hindsight"
-        save_config(config)
-
         self.save_config(provider_config, hermes_home)
 
-        if env_writes:
-            env_path = Path(hermes_home) / ".env"
-            env_path.parent.mkdir(parents=True, exist_ok=True)
-            existing_lines = []
-            if env_path.exists():
-                existing_lines = env_path.read_text().splitlines()
-            updated_keys = set()
-            new_lines = []
-            for line in existing_lines:
-                key_match = line.split("=", 1)[0].strip() if "=" in line and not line.startswith("#") else None
-                if key_match and key_match in env_writes:
-                    new_lines.append(f"{key_match}={env_writes[key_match]}")
-                    updated_keys.add(key_match)
-                else:
-                    new_lines.append(line)
-            for k, v in env_writes.items():
-                if k not in updated_keys:
-                    new_lines.append(f"{k}={v}")
-            env_path.write_text("\n".join(new_lines) + "\n")
+        def activate_hindsight(current: dict) -> None:
+            memory = current.get("memory")
+            if not isinstance(memory, dict):
+                memory = {}
+                current["memory"] = memory
+            memory["provider"] = "hindsight"
+
+        mutate_config_env_strict(
+            activate_hindsight,
+            env_writes,
+            config_path=main_config_path,
+        )
 
         if mode == "local_embedded":
             materialized_config = dict(provider_config)
@@ -820,7 +822,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
             llm_api_key = env_writes.get("HINDSIGHT_LLM_API_KEY", "")
             if not llm_api_key:
-                llm_api_key = _load_simple_env(Path(hermes_home) / ".env").get("HINDSIGHT_LLM_API_KEY", "")
+                llm_api_key = _load_simple_env(main_env_path).get("HINDSIGHT_LLM_API_KEY", "")
             if not llm_api_key:
                 llm_api_key = _load_simple_env(_embedded_profile_env_path(materialized_config)).get(
                     "HINDSIGHT_API_LLM_API_KEY",

@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType
@@ -14,7 +15,10 @@ def _make_runner() -> GatewayRunner:
     runner.adapters = {}
     runner._model = "openai/gpt-4.1-mini"
     runner._base_url = None
-    runner._decide_image_input_mode = lambda: "native"
+    runner._decide_image_input_route = lambda **_kwargs: SimpleNamespace(
+        mode="native",
+        reason_code="main_model_supports_vision",
+    )
     return runner
 
 

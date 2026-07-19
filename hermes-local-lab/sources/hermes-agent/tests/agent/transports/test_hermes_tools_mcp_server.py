@@ -100,11 +100,11 @@ class TestModuleSurface:
                 f"{orch_tool!r} missing from codex callback"
             )
 
-    def test_mcp_image_handler_freezes_private_capability_fingerprint(
+    def test_mcp_image_handler_refreshes_private_capability_generation_per_request(
         self,
         monkeypatch,
     ):
-        """An MCP handler must keep its creation-generation caller identity."""
+        """One long-lived MCP handler must follow A→B→A request generations."""
         from agent import image_runtime
         from agent.transports import hermes_tools_mcp_server as m
         import mcp.server.fastmcp as fastmcp_module
@@ -173,6 +173,7 @@ class TestModuleSurface:
                     "mcp-image-generation-a",
                     "verified",
                     True,
+                    "mcp-authorization-a",
                 ),
             )
         }
@@ -183,6 +184,7 @@ class TestModuleSurface:
         )
 
         server = m._build_server()
+        server.handlers["image_generate"](prompt="draw generation a")
         generation["value"] = SimpleNamespace(
             stable=True,
             image_generation=(
@@ -190,23 +192,62 @@ class TestModuleSurface:
                 "mcp-image-generation-b",
                 "verified",
                 True,
+                "mcp-authorization-b",
             ),
         )
-
-        server.handlers["image_generate"](prompt="draw a cat")
+        server.handlers["image_generate"](prompt="draw generation b")
+        generation["value"] = SimpleNamespace(
+            stable=True,
+            image_generation=(
+                1,
+                "mcp-image-generation-a",
+                "verified",
+                True,
+                "mcp-authorization-a-after-aba",
+            ),
+        )
+        server.handlers["image_generate"](prompt="draw generation a again")
         server.handlers["web_search"](q="cat")
 
-        assert calls == [
-            (
-                "image_generate",
-                {"prompt": "draw a cat"},
-                {
-                    "caller_capability_fingerprint":
-                        "mcp-image-generation-a",
-                },
-            ),
-            ("web_search", {"q": "cat"}, {}),
-        ]
+        assert calls[0][0:2] == (
+            "image_generate",
+            {"prompt": "draw generation a"},
+        )
+        assert calls[0][2][
+            "caller_capability_fingerprint"
+        ] == "mcp-image-generation-a"
+        assert calls[0][2][
+            "caller_capability_generation"
+        ] == "mcp-authorization-a"
+        assert calls[0][2]["tool_call_id"].startswith("mcp-")
+        assert calls[1][0:2] == (
+            "image_generate",
+            {"prompt": "draw generation b"},
+        )
+        assert calls[1][2][
+            "caller_capability_fingerprint"
+        ] == "mcp-image-generation-b"
+        assert calls[1][2][
+            "caller_capability_generation"
+        ] == "mcp-authorization-b"
+        assert calls[2][0:2] == (
+            "image_generate",
+            {"prompt": "draw generation a again"},
+        )
+        assert calls[2][2][
+            "caller_capability_fingerprint"
+        ] == "mcp-image-generation-a"
+        assert calls[2][2][
+            "caller_capability_generation"
+        ] == "mcp-authorization-a-after-aba"
+        assert len(
+            {
+                calls[0][2]["tool_call_id"],
+                calls[1][2]["tool_call_id"],
+                calls[2][2]["tool_call_id"],
+            }
+        ) == 3
+        assert calls[3] == ("web_search", {"q": "cat"}, {})
         assert "caller_capability_fingerprint" not in json.dumps(
             definitions
         )
@@ -260,6 +301,7 @@ class TestModuleSurface:
                     "mcp-image-generation-old",
                     "verified",
                     True,
+                    "mcp-authorization-old",
                 ),
             ),
         )
@@ -271,6 +313,7 @@ class TestModuleSurface:
             "provider": "dashscope",
             "model": "qwen-image-2.0-pro",
             "reason_code": "ready",
+            "_authorization_generation": "mcp-authorization-new",
         }
         monkeypatch.setattr(
             image_runtime,

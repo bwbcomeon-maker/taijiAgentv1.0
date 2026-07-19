@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
 from agent.image_gen_provider import (
@@ -280,7 +280,10 @@ def post_json(
     prompt: str,
     aspect_ratio: str,
     secrets: Iterable[str],
+    reauth_guard: Callable[[], None] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if reauth_guard is not None:
+        reauth_guard()
     try:
         with request_pinned_https(
             method="POST",
@@ -409,6 +412,7 @@ def cached_success(
     provider: str,
     extra: dict[str, Any] | None = None,
     save_image: Any | None = None,
+    reauth_guard: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     if not _https_image_url(image_url):
         return error_response(
@@ -419,6 +423,8 @@ def cached_success(
             prompt=prompt,
             aspect_ratio=aspect_ratio,
         )
+    if reauth_guard is not None:
+        reauth_guard()
     try:
         saver = save_image or save_url_image
         image_ref = str(

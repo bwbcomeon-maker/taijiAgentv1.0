@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="2" time="0.195" timestamp="2026-07-19T17:40:06.713236+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_custom_image_result_io_exception_is_redacted_and_diagnostic[b64_json]" time="0.091"><failure message="RuntimeError: SENTINEL-CUSTOM-RESULT-SECRET-DO-NOT-LEAK https://sentinel-custom-result.example.test/private">tests/tools/test_provider_boundary_adversarial.py:790: in test_custom_image_result_io_exception_is_redacted_and_diagnostic
+    result = provider.generate(
+agent/custom_image_providers.py:749: in generate
+    path = save_b64_image(b64, prefix=prefix)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/tools/test_provider_boundary_adversarial.py:763: in fail_result_io
+    raise RuntimeError(f"{secret} {endpoint}")
+E   RuntimeError: SENTINEL-CUSTOM-RESULT-SECRET-DO-NOT-LEAK https://sentinel-custom-result.example.test/private</failure></testcase><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_custom_image_result_io_exception_is_redacted_and_diagnostic[url]" time="0.003"><failure message="KeyError: 'error_code'">tests/tools/test_provider_boundary_adversarial.py:799: in test_custom_image_result_io_exception_is_redacted_and_diagnostic
+    assert result["error_code"] == "custom_provider_result_io_failed"
+           ^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'error_code'</failure></testcase></testsuite></testsuites>

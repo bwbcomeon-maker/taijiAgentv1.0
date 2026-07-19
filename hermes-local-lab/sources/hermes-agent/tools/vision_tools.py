@@ -41,7 +41,9 @@ import httpx
 from agent.auxiliary_client import (
     VisionRequestBinding,
     async_call_llm,
+    capture_vision_request_binding,
     extract_content_or_reasoning,
+    vision_request_binding_matches_authorization,
 )
 from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
@@ -51,15 +53,39 @@ import sys
 logger = logging.getLogger(__name__)
 
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
-_VISION_AUTHORIZATION_SNAPSHOT: contextvars.ContextVar[
-    Dict[str, Any] | None
-] = contextvars.ContextVar(
+_VISION_AUTHORIZATION_SNAPSHOT: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
     "vision_authorization_snapshot",
     default=None,
 )
 
 
-def _vision_authorization_is_current(expected: Dict[str, Any]) -> bool:
+class _VisionAuthorizationError(RuntimeError):
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
+
+
+class _VisionProviderBoundaryError(RuntimeError):
+    def __init__(self, diagnostic_id: str, error_code: str) -> None:
+        super().__init__(error_code)
+        self.diagnostic_id = diagnostic_id
+        self.error_code = error_code
+
+
+def _vision_authorization_value(
+    expected: Any,
+    field_name: str,
+) -> Any:
+    if isinstance(expected, dict):
+        return expected.get(field_name)
+    if field_name == "fingerprint":
+        return getattr(expected, "authorization_fingerprint", "")
+    if field_name == "generation":
+        return getattr(expected, "authorization_generation", "")
+    return getattr(expected, field_name, None)
+
+
+def _vision_authorization_is_current(expected: Any) -> bool:
     """Revalidate the exact immutable snapshot immediately before Provider I/O."""
     from agent.image_gen_verification import (
         CAPABILITY_VERIFICATION_SCHEMA_VERSION,
@@ -67,32 +93,86 @@ def _vision_authorization_is_current(expected: Dict[str, Any]) -> bool:
     from agent.image_runtime import verification_runtime_snapshot
 
     current = verification_runtime_snapshot("vision")
+    binding = (
+        getattr(expected, "_request_binding", None)
+        if not isinstance(expected, dict)
+        else None
+    )
+    expected_fingerprint = str(
+        _vision_authorization_value(expected, "fingerprint") or ""
+    )
+    expected_generation = str(
+        _vision_authorization_value(expected, "generation") or ""
+    )
+    if not isinstance(binding, VisionRequestBinding):
+        return False
+    if (
+        not expected_fingerprint
+        or not expected_generation
+        or not vision_request_binding_matches_authorization(
+            binding,
+            authorization_fingerprint=expected_fingerprint,
+            authorization_generation=expected_generation,
+        )
+        or binding.provider
+        != str(_vision_authorization_value(expected, "provider") or "")
+        .strip()
+        .lower()
+        or binding.model
+        != str(_vision_authorization_value(expected, "model") or "").strip()
+    ):
+        return False
+    expected_status = str(
+        _vision_authorization_value(expected, "status") or ""
+    )
+    expected_route = str(
+        _vision_authorization_value(expected, "route") or ""
+    )
+    verification_probe = bool(
+        expected_route == "verification_probe"
+        and expected_status == "verifying"
+    )
     return bool(
         current.get("schema_version")
         == CAPABILITY_VERIFICATION_SCHEMA_VERSION
-        and current.get("schema_version") == expected.get("schema_version")
+        and current.get("schema_version")
+        == _vision_authorization_value(expected, "schema_version")
         and str(current.get("fingerprint") or "")
-        == str(expected.get("fingerprint") or "")
-        and str(current.get("status") or "") == "verified"
+        == expected_fingerprint
+        and str(current.get("_authorization_generation") or "")
+        == expected_generation
+        and str(current.get("status") or "") == expected_status
+        and (verification_probe or expected_status == "verified")
         and str(current.get("provider") or "")
-        == str(expected.get("provider") or "")
+        == str(_vision_authorization_value(expected, "provider") or "")
         and str(current.get("model") or "")
-        == str(expected.get("model") or "")
-        and bool(current.get("available"))
+        == str(_vision_authorization_value(expected, "model") or "")
+        and (verification_probe or bool(current.get("available")))
     )
 
 
-def _require_current_vision_authorization() -> None:
-    expected = _VISION_AUTHORIZATION_SNAPSHOT.get()
-    if expected is not None and not _vision_authorization_is_current(expected):
-        raise RuntimeError("vision_capability_stale")
+def _require_current_vision_authorization(expected: Any = None) -> None:
+    authorization = (
+        expected
+        if expected is not None
+        else _VISION_AUTHORIZATION_SNAPSHOT.get()
+    )
+    if authorization is None:
+        raise _VisionAuthorizationError("vision_authorization_required")
+    if not _vision_authorization_is_current(authorization):
+        raise _VisionAuthorizationError("capability_caller_stale")
 
 
 async def _await_with_vision_authorization(
     awaitable: Awaitable[str],
-    snapshot: Dict[str, Any],
+    authorization: Any,
 ) -> str:
-    token = _VISION_AUTHORIZATION_SNAPSHOT.set(dict(snapshot))
+    value = (
+        dict(authorization)
+        if isinstance(authorization, dict)
+        else authorization
+    )
+    token = _VISION_AUTHORIZATION_SNAPSHOT.set(value)
     try:
         return await awaitable
     finally:
@@ -106,9 +186,175 @@ async def _blocked_vision_result(error_code: str, message: str) -> str:
             "status": "blocked",
             "error": message,
             "error_code": error_code,
+            "diagnostic_id": uuid.uuid4().hex,
         },
         ensure_ascii=False,
     )
+
+
+def _vision_provider_boundary_error(
+    error: Exception,
+) -> _VisionProviderBoundaryError:
+    """Create and log one redacted provider error without serializing the cause."""
+    diagnostic_id = uuid.uuid4().hex
+    lowered = str(error).lower()
+    if any(
+        hint in lowered
+        for hint in (
+            "402",
+            "insufficient",
+            "payment required",
+            "credits",
+            "billing",
+        )
+    ):
+        error_code = "vision_payment_required"
+    elif any(
+        hint in lowered
+        for hint in (
+            "does not support",
+            "not support image",
+            "content_policy",
+            "multimodal",
+            "unrecognized request argument",
+            "image input",
+        )
+    ):
+        error_code = "vision_not_supported"
+    elif "invalid_request" in lowered or "image_url" in lowered:
+        error_code = "vision_invalid_image"
+    else:
+        error_code = "vision_provider_exception"
+    logger.error(
+        "Vision Provider request failed "
+        "diagnostic_id=%s error_code=%s",
+        diagnostic_id,
+        error_code,
+    )
+    return _VisionProviderBoundaryError(diagnostic_id, error_code)
+
+
+def _resolve_vision_route_decision(
+    *,
+    runtime_binding: VisionRequestBinding | None,
+) -> tuple[Any | None, VisionRequestBinding | None, str]:
+    """Resolve a frozen verified route for handler and direct public calls."""
+    from agent.image_gen_verification import (
+        CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    )
+    from agent.image_runtime import (
+        build_capability_route_decision,
+        verification_runtime_snapshot,
+    )
+
+    contextual = _VISION_AUTHORIZATION_SNAPSHOT.get()
+    if contextual is not None and not isinstance(contextual, dict):
+        decision = contextual
+        binding = getattr(decision, "_request_binding", None)
+        if (
+            runtime_binding is not None
+            and binding is not runtime_binding
+        ):
+            return None, None, "vision_binding_mismatch"
+        if not isinstance(binding, VisionRequestBinding):
+            return None, None, "vision_binding_required"
+        if (
+            not vision_request_binding_matches_authorization(
+                binding,
+                authorization_fingerprint=str(
+                    getattr(
+                        decision,
+                        "authorization_fingerprint",
+                        "",
+                    )
+                    or ""
+                ),
+                authorization_generation=str(
+                    getattr(
+                        decision,
+                        "authorization_generation",
+                        "",
+                    )
+                    or ""
+                ),
+            )
+            or binding.provider
+            != str(getattr(decision, "provider", "") or "").strip().lower()
+            or binding.model
+            != str(getattr(decision, "model", "") or "").strip()
+        ):
+            return None, None, "capability_binding_mismatch"
+        return decision, binding, ""
+
+    snapshot = (
+        dict(contextual)
+        if isinstance(contextual, dict)
+        else verification_runtime_snapshot("vision")
+    )
+    status = str(snapshot.get("status") or "")
+    verified = bool(
+        snapshot.get("schema_version")
+        == CAPABILITY_VERIFICATION_SCHEMA_VERSION
+        and status == "verified"
+        and snapshot.get("available")
+        and str(snapshot.get("fingerprint") or "")
+        and str(snapshot.get("provider") or "")
+        and str(snapshot.get("model") or "")
+    )
+    verification_probe = bool(
+        status == "verifying"
+        and runtime_binding is not None
+        and snapshot.get("schema_version")
+        == CAPABILITY_VERIFICATION_SCHEMA_VERSION
+        and str(snapshot.get("fingerprint") or "")
+        and str(snapshot.get("provider") or "")
+        and str(snapshot.get("model") or "")
+    )
+    if not verified and not verification_probe:
+        return (
+            None,
+            None,
+            str(snapshot.get("reason_code") or "vision_not_verified"),
+        )
+    binding = runtime_binding or capture_vision_request_binding(
+        authorization_fingerprint=str(
+            snapshot.get("fingerprint") or ""
+        ),
+        authorization_generation=str(
+            snapshot.get("_authorization_generation") or ""
+        ),
+    )
+    if not isinstance(binding, VisionRequestBinding):
+        return None, None, "vision_binding_required"
+    if (
+        binding.provider
+        != str(snapshot.get("provider") or "").strip().lower()
+        or binding.model != str(snapshot.get("model") or "").strip()
+    ):
+        return None, None, "vision_binding_mismatch"
+    if (
+        not vision_request_binding_matches_authorization(
+            binding,
+            authorization_fingerprint=str(
+                snapshot.get("fingerprint") or ""
+            ),
+            authorization_generation=str(
+                snapshot.get("_authorization_generation") or ""
+            ),
+        )
+    ):
+        return None, None, "capability_binding_mismatch"
+    decision = build_capability_route_decision(
+        "vision",
+        snapshot=snapshot,
+        route=(
+            "verification_probe"
+            if verification_probe
+            else "auxiliary"
+        ),
+        request_binding=binding,
+    )
+    return decision, binding, ""
 
 # Configurable HTTP download timeout for _download_image().
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
@@ -757,11 +1003,32 @@ async def vision_analyze_tool(
     # Local files (e.g. from the image cache) should NOT be deleted.
     should_cleanup = True
     detected_mime_type = None
+    route_decision = None
     
     try:
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return tool_error("Interrupted", success=False)
+
+        (
+            route_decision,
+            _runtime_binding,
+            authorization_error,
+        ) = _resolve_vision_route_decision(
+            runtime_binding=_runtime_binding,
+        )
+        if authorization_error:
+            return await _blocked_vision_result(
+                authorization_error,
+                "辅助识图请求未通过当前 Provider 授权门禁。",
+            )
+        model = str(
+            getattr(route_decision, "model", "") or ""
+        )
+        provider = str(
+            getattr(route_decision, "provider", "") or ""
+        )
+        debug_call_data["model_used"] = model
 
         logger.info("Analyzing image: %s", image_url[:60])
         logger.info("User prompt: %s", user_prompt[:100])
@@ -883,9 +1150,14 @@ async def vision_analyze_tool(
             call_kwargs["resolution_out"] = resolution
         if _runtime_binding is not None:
             call_kwargs["vision_binding"] = _runtime_binding
+            call_kwargs["vision_reauth_guard"] = (
+                lambda: _require_current_vision_authorization(
+                    route_decision
+                )
+            )
         # Try full-size image first; on size-related rejection, downscale and retry.
         try:
-            _require_current_vision_authorization()
+            _require_current_vision_authorization(route_decision)
             response = await async_call_llm(**call_kwargs)
         except Exception as _api_err:
             if (_is_image_size_error(_api_err)
@@ -899,10 +1171,21 @@ async def vision_analyze_tool(
                 image_data_url = _resize_image_for_vision(
                     temp_image_path, mime_type=detected_mime_type)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
-                _require_current_vision_authorization()
-                response = await async_call_llm(**call_kwargs)
+                _require_current_vision_authorization(route_decision)
+                try:
+                    response = await async_call_llm(**call_kwargs)
+                except _VisionAuthorizationError:
+                    raise
+                except Exception as resize_error:
+                    raise _vision_provider_boundary_error(
+                        resize_error
+                    ) from None
             else:
-                raise
+                if isinstance(_api_err, _VisionAuthorizationError):
+                    raise
+                raise _vision_provider_boundary_error(
+                    _api_err
+                ) from None
 
         if strict_target:
             resolved_provider = str(resolution.get("provider") or "").strip().lower()
@@ -918,8 +1201,15 @@ async def vision_analyze_tool(
         # Retry once on empty content (reasoning-only response)
         if not analysis:
             logger.warning("Vision LLM returned empty content, retrying once")
-            _require_current_vision_authorization()
-            response = await async_call_llm(**call_kwargs)
+            _require_current_vision_authorization(route_decision)
+            try:
+                response = await async_call_llm(**call_kwargs)
+            except _VisionAuthorizationError:
+                raise
+            except Exception as retry_error:
+                raise _vision_provider_boundary_error(
+                    retry_error
+                ) from None
             analysis = extract_content_or_reasoning(response)
 
         analysis_length = len(analysis)
@@ -945,6 +1235,48 @@ async def vision_analyze_tool(
         return json.dumps(result, indent=2, ensure_ascii=False)
         
     except Exception as e:
+        if isinstance(e, _VisionAuthorizationError):
+            return await _blocked_vision_result(
+                e.error_code,
+                "辅助识图授权状态已变化，请重新发起请求。",
+            )
+        if isinstance(e, _VisionProviderBoundaryError):
+            error_msg = "辅助识图 Provider 请求失败，请根据诊断编号排查。"
+            analysis_by_code = {
+                "vision_payment_required": (
+                    "Insufficient credits or payment required. Please top up "
+                    "your API provider account and try again."
+                ),
+                "vision_not_supported": (
+                    f"{model} does not support vision or the request was not "
+                    "accepted by the server."
+                ),
+                "vision_invalid_image": (
+                    "The vision API rejected the image. This can happen when "
+                    "the image is in an unsupported format, corrupted, or "
+                    "still too large after auto-resize. Try a smaller "
+                    "JPEG/PNG and retry."
+                ),
+            }
+            result = {
+                "success": False,
+                "status": "error",
+                "error": error_msg,
+                "analysis": analysis_by_code.get(
+                    e.error_code,
+                    (
+                        "There was a problem with the request and the image "
+                        "could not be analyzed."
+                    ),
+                ),
+                "error_code": e.error_code,
+                "diagnostic_id": e.diagnostic_id,
+            }
+            debug_call_data["error"] = e.error_code
+            debug_call_data["diagnostic_id"] = e.diagnostic_id
+            _debug.log_call("vision_analyze_tool", debug_call_data)
+            _debug.save()
+            return json.dumps(result, indent=2, ensure_ascii=False)
         error_msg = f"Error analyzing image: {str(e)}"
         logger.error("%s", error_msg, exc_info=True)
         
@@ -1161,7 +1493,10 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
     from agent.image_gen_verification import (
         CAPABILITY_VERIFICATION_SCHEMA_VERSION,
     )
-    from agent.image_runtime import verification_runtime_snapshot
+    from agent.image_runtime import (
+        build_capability_route_decision,
+        verification_runtime_snapshot,
+    )
 
     runtime_snapshot = verification_runtime_snapshot("vision")
     if not (
@@ -1170,12 +1505,40 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         and runtime_snapshot.get("status") == "verified"
         and runtime_snapshot.get("available")
         and str(runtime_snapshot.get("fingerprint") or "")
+        and str(
+            runtime_snapshot.get("_authorization_generation") or ""
+        )
         and str(runtime_snapshot.get("provider") or "")
         and str(runtime_snapshot.get("model") or "")
     ):
         return _blocked_vision_result(
             str(runtime_snapshot.get("reason_code") or "vision_not_verified"),
             "辅助识图配置未通过当前版本的真实验证，未调用 Provider。",
+        )
+
+    route_decision = build_capability_route_decision(
+        "vision",
+        snapshot=runtime_snapshot,
+        route="auxiliary",
+        tool_call_id=str(kw.get("tool_call_id") or ""),
+        request_binding=capture_vision_request_binding(
+            authorization_fingerprint=str(
+                runtime_snapshot.get("fingerprint") or ""
+            ),
+            authorization_generation=str(
+                runtime_snapshot.get("_authorization_generation") or ""
+            ),
+        ),
+    )
+    request_binding = getattr(
+        route_decision,
+        "_request_binding",
+        None,
+    )
+    if not isinstance(request_binding, VisionRequestBinding):
+        return _blocked_vision_result(
+            "vision_binding_required",
+            "辅助识图请求缺少固定 Provider 授权，未调用 Provider。",
         )
 
     # Legacy path: aux LLM describes the image and we return its text.
@@ -1189,8 +1552,9 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         str(runtime_snapshot.get("model") or ""),
         provider=str(runtime_snapshot.get("provider") or ""),
         strict_target=True,
+        _runtime_binding=request_binding,
     )
-    return _await_with_vision_authorization(call, runtime_snapshot)
+    return _await_with_vision_authorization(call, route_decision)
 
 
 registry.register(

@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="0.170" timestamp="2026-07-19T17:37:10.308175+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.tools.test_provider_boundary_adversarial" name="test_image_dispatch_passes_reauth_guard_to_provider_io_seam" time="0.089"><failure message="assert False is True">tests/tools/test_provider_boundary_adversarial.py:244: in test_image_dispatch_passes_reauth_guard_to_provider_io_seam
+    assert result["success"] is True
+E   assert False is True</failure></testcase></testsuite></testsuites>

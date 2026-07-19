@@ -20,11 +20,40 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+_PYTHON_TIMEOUT_WRAPPER = """
+import os
+import signal
+import subprocess
+import sys
+
+timeout_seconds = float(sys.argv[1])
+script = sys.argv[2]
+process = subprocess.Popen(["bash", "-c", script], start_new_session=True)
+try:
+    raise SystemExit(process.wait(timeout=timeout_seconds))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+    raise SystemExit(124)
+""".strip()
 
 
 _SIGNAL_NAME_BY_NUM: Dict[int, str] = {}
@@ -255,7 +284,7 @@ def spawn_async_diagnostic(
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            _diagnostic_command(timeout_seconds, script),
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -276,6 +305,28 @@ def spawn_async_diagnostic(
             pass
 
     return proc.pid
+
+
+def _diagnostic_command(timeout_seconds: float, script: str) -> List[str]:
+    """Build a bounded diagnostic command on GNU and non-GNU POSIX hosts."""
+
+    bounded_timeout = max(float(timeout_seconds), 0.1)
+    timeout_binary = shutil.which("timeout") or shutil.which("gtimeout")
+    if timeout_binary:
+        return [
+            timeout_binary,
+            str(bounded_timeout),
+            "bash",
+            "-c",
+            script,
+        ]
+    return [
+        sys.executable,
+        "-c",
+        _PYTHON_TIMEOUT_WRAPPER,
+        str(bounded_timeout),
+        script,
+    ]
 
 
 def format_context_for_log(ctx: Dict[str, Any]) -> str:

@@ -13,9 +13,11 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 import time
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +65,49 @@ _EXCLUDED_NAMES = {
 
 # zipfile.open() drops Unix mode bits on extract; restore tightens these to 0600.
 _SECRET_FILE_NAMES = {".env", "auth.json", "state.db"}
+_CREDENTIAL_PAIR_FILE_NAMES = ("config.yaml", ".env")
+_CREDENTIAL_TRANSACTION_ARTIFACT_NAMES = {
+    ".taiji-credential-transaction.lock",
+    ".taiji-credential-pair-intent.json",
+    ".taiji-credential-pair-abort.json",
+}
+
+
+def _credential_pair_home_rel(rel_path: Path) -> Optional[Path]:
+    """Return the managed credential-home path for a root/profile member."""
+    parts = Path(rel_path).parts
+    if len(parts) == 1 and parts[0] in _CREDENTIAL_PAIR_FILE_NAMES:
+        return Path()
+    if (
+        len(parts) == 3
+        and parts[0] == "profiles"
+        and parts[1] not in {"", ".", ".."}
+        and parts[2] in _CREDENTIAL_PAIR_FILE_NAMES
+    ):
+        return Path("profiles") / parts[1]
+    return None
+
+
+def _is_credential_transaction_artifact(rel_path: Path) -> bool:
+    """Recognize provider transaction internals at root/profile homes."""
+    parts = Path(rel_path).parts
+    if len(parts) == 1:
+        name = parts[0]
+    elif (
+        len(parts) == 3
+        and parts[0] == "profiles"
+        and parts[1] not in {"", ".", ".."}
+    ):
+        name = parts[2]
+    else:
+        return False
+    return (
+        name in _CREDENTIAL_TRANSACTION_ARTIFACT_NAMES
+        or (
+            name.startswith(".taiji-credential-")
+            and name.endswith(".stage")
+        )
+    )
 
 
 def _should_exclude(rel_path: Path) -> bool:
@@ -75,6 +120,9 @@ def _should_exclude(rel_path: Path) -> bool:
             return True
 
     name = rel_path.name
+
+    if _is_credential_transaction_artifact(rel_path):
+        return True
 
     if name in _EXCLUDED_NAMES:
         return True
@@ -200,45 +248,90 @@ def run_backup(args) -> None:
             if _should_skip_backup_file(fpath, rel, out_path):
                 continue
 
+            if _credential_pair_home_rel(rel) is not None:
+                continue
+
             files_to_add.append((fpath, rel))
 
-    if not files_to_add:
+    from agent.provider_credentials import CredentialRecoveryError
+
+    try:
+        credential_payloads = _read_full_credential_payloads(hermes_root)
+    except (OSError, ValueError, CredentialRecoveryError) as exc:
+        print(f"Error: Could not read credential pairs safely: {exc}")
+        return
+
+    if not files_to_add and not credential_payloads:
         print("No files to back up.")
         return
 
     # Create the zip
-    file_count = len(files_to_add)
+    file_count = len(files_to_add) + len(credential_payloads)
     print(f"Backing up {file_count} files ...")
 
     total_bytes = 0
     errors = []
     t0 = time.monotonic()
 
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
-            try:
-                # Safe copy for SQLite databases (handles WAL mode)
-                if abs_path.suffix == ".db":
-                    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-                        tmp_db = Path(tmp.name)
-                    if _safe_copy_db(abs_path, tmp_db):
-                        zf.write(tmp_db, arcname=str(rel_path))
-                        total_bytes += tmp_db.stat().st_size
-                        tmp_db.unlink(missing_ok=True)
+    try:
+        with zipfile.ZipFile(
+            out_path,
+            "w",
+            zipfile.ZIP_DEFLATED,
+            compresslevel=6,
+        ) as zf:
+            for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
+                try:
+                    # Safe copy for SQLite databases (handles WAL mode)
+                    if abs_path.suffix == ".db":
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".db",
+                            delete=False,
+                        ) as tmp:
+                            tmp_db = Path(tmp.name)
+                        if _safe_copy_db(abs_path, tmp_db):
+                            zf.write(tmp_db, arcname=str(rel_path))
+                            total_bytes += tmp_db.stat().st_size
+                            tmp_db.unlink(missing_ok=True)
+                        else:
+                            tmp_db.unlink(missing_ok=True)
+                            errors.append(
+                                f"  {rel_path}: SQLite safe copy failed"
+                            )
+                            continue
                     else:
-                        tmp_db.unlink(missing_ok=True)
-                        errors.append(f"  {rel_path}: SQLite safe copy failed")
-                        continue
-                else:
-                    zf.write(abs_path, arcname=str(rel_path))
-                    total_bytes += abs_path.stat().st_size
-            except (PermissionError, OSError, ValueError) as exc:
-                errors.append(f"  {rel_path}: {exc}")
-                continue
+                        zf.write(abs_path, arcname=str(rel_path))
+                        total_bytes += abs_path.stat().st_size
+                except (PermissionError, OSError, ValueError) as exc:
+                    errors.append(f"  {rel_path}: {exc}")
+                    continue
 
-            # Progress every 500 files
-            if i % 500 == 0:
-                print(f"  {i}/{file_count} files ...")
+                # Progress every 500 files
+                if i % 500 == 0:
+                    print(f"  {i}/{file_count} files ...")
+
+            for rel_path, payload in sorted(
+                credential_payloads.items(),
+                key=lambda item: item[0].as_posix(),
+            ):
+                try:
+                    zf.writestr(rel_path.as_posix(), payload)
+                    total_bytes += len(payload)
+                except (PermissionError, OSError, ValueError) as exc:
+                    errors.append(f"  {rel_path}: {exc}")
+                    raise
+    except (PermissionError, OSError, ValueError) as exc:
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if not errors or str(exc) not in errors[-1]:
+            errors.append(f"  archive: {exc}")
+        print("Error: Backup archive could not be written safely.")
+        if errors:
+            for error in errors[:10]:
+                print(error)
+        return
 
     elapsed = time.monotonic() - t0
     zip_size = out_path.stat().st_size
@@ -321,6 +414,170 @@ def _detect_prefix(zf: zipfile.ZipFile) -> str:
     return ""
 
 
+def _zip_member_is_symlink(info: zipfile.ZipInfo) -> bool:
+    """Return whether a zip member declares a Unix symbolic-link mode."""
+    return stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF)
+
+
+def _import_member_rel(
+    member: str,
+    prefix: str,
+    hermes_root: Path,
+) -> Optional[Path]:
+    """Normalize and confine one archive member to HERMES_HOME."""
+    if prefix and member.startswith(prefix):
+        rel_text = member[len(prefix):]
+    else:
+        rel_text = member
+    if not rel_text:
+        return None
+
+    # Zip names are POSIX paths.  Treat backslashes as separators too so a
+    # malicious archive cannot become traversing only when restored on Windows.
+    rel_path = Path(rel_text.replace("\\", "/"))
+    if rel_path.is_absolute() or ".." in rel_path.parts:
+        return None
+    target = hermes_root / rel_path
+    try:
+        target.resolve().relative_to(hermes_root.resolve())
+    except ValueError:
+        return None
+    return rel_path
+
+
+def _stage_and_restore_import(
+    zf: zipfile.ZipFile,
+    members: List[zipfile.ZipInfo],
+    prefix: str,
+    hermes_root: Path,
+) -> tuple[int, List[str], bool]:
+    """Stage a full import, validate all pairs, then publish credentials first.
+
+    Returns ``(restored_count, errors, fatal)``.  A fatal result means no
+    generic files were published; credential pairs already use an atomic,
+    durable two-file commit individually.
+    """
+    from agent.provider_credentials import CredentialRecoveryError
+
+    errors: List[str] = []
+    restored = 0
+    with tempfile.TemporaryDirectory(prefix="hermes-import-stage-") as tmp:
+        stage_root = Path(tmp)
+        staged_rels: List[Path] = []
+        seen_rels = set()
+        staging_failed = False
+
+        for info in members:
+            rel_path = _import_member_rel(
+                info.filename,
+                prefix,
+                hermes_root,
+            )
+            if rel_path is None:
+                errors.append(
+                    f"  {info.filename}: path traversal blocked"
+                )
+                continue
+            rel_key = rel_path.as_posix()
+            if _is_credential_transaction_artifact(rel_path):
+                errors.append(
+                    f"  {rel_key}: credential transaction artifact blocked"
+                )
+                continue
+            if rel_key in seen_rels:
+                errors.append(f"  {rel_key}: duplicate archive member")
+                staging_failed = True
+                continue
+            seen_rels.add(rel_key)
+            if _zip_member_is_symlink(info):
+                errors.append(f"  {rel_key}: symbolic link blocked")
+                staging_failed = True
+                continue
+
+            staged_target = stage_root / rel_path
+            try:
+                staged_target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as source, open(
+                    staged_target,
+                    "wb",
+                ) as target:
+                    shutil.copyfileobj(source, target)
+                if staged_target.name in _SECRET_FILE_NAMES:
+                    os.chmod(staged_target, 0o600)
+                staged_rels.append(rel_path)
+            except (PermissionError, OSError, ValueError) as exc:
+                errors.append(f"  {rel_key}: staging failed: {exc}")
+                staging_failed = True
+
+        if staging_failed:
+            return 0, errors, True
+
+        grouped: Dict[Path, Dict[str, Any]] = {}
+        for rel_path in staged_rels:
+            home_rel = _credential_pair_home_rel(rel_path)
+            if home_rel is None:
+                continue
+            grouped.setdefault(home_rel, {})[rel_path.name] = (
+                stage_root / rel_path
+            ).stat().st_size
+
+        staged_pairs = []
+        try:
+            for home_rel in sorted(
+                grouped,
+                key=lambda path: (
+                    len(path.parts),
+                    path.as_posix(),
+                ),
+            ):
+                staged_pair = _load_staged_credential_pair(
+                    stage_root / home_rel,
+                    grouped[home_rel],
+                )
+                staged_pairs.append((home_rel, staged_pair))
+        except (OSError, ValueError, CredentialRecoveryError) as exc:
+            errors.append(
+                f"  credentials: staged pair validation failed: {exc}"
+            )
+            return 0, errors, True
+
+        for home_rel, staged_pair in staged_pairs:
+            target_home = hermes_root / home_rel
+            try:
+                target_home.mkdir(parents=True, exist_ok=True)
+                restored += _publish_staged_credential_pair(
+                    target_home,
+                    staged_pair,
+                )
+            except (OSError, ValueError, CredentialRecoveryError) as exc:
+                display_home = (
+                    "root" if home_rel == Path() else home_rel.as_posix()
+                )
+                errors.append(
+                    f"  {display_home}: credential pair commit failed: {exc}"
+                )
+                return restored, errors, True
+
+        for rel_path in staged_rels:
+            if _credential_pair_home_rel(rel_path) is not None:
+                continue
+            source = stage_root / rel_path
+            target = hermes_root / rel_path
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                if target.name in _SECRET_FILE_NAMES:
+                    os.chmod(target, 0o600)
+                restored += 1
+            except (PermissionError, OSError, ValueError) as exc:
+                errors.append(f"  {rel_path.as_posix()}: {exc}")
+
+            if restored and restored % 500 == 0:
+                print(f"  {restored}/{len(members)} files ...")
+
+    return restored, errors, False
+
+
 def run_import(args) -> None:
     """Restore a Hermes backup from a zip file."""
     zip_path = Path(args.zipfile).expanduser().resolve()
@@ -343,7 +600,7 @@ def run_import(args) -> None:
             sys.exit(1)
 
         prefix = _detect_prefix(zf)
-        members = [n for n in zf.namelist() if not n.endswith("/")]
+        members = [info for info in zf.infolist() if not info.is_dir()]
         file_count = len(members)
 
         print(f"Backup contains {file_count} files")
@@ -374,43 +631,29 @@ def run_import(args) -> None:
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
 
-        errors = []
-        restored = 0
         t0 = time.monotonic()
-
-        for member in members:
-            # Strip prefix if detected
-            if prefix and member.startswith(prefix):
-                rel = member[len(prefix):]
-            else:
-                rel = member
-
-            if not rel:
-                continue
-
-            target = hermes_root / rel
-
-            # Security: reject absolute paths and traversals
-            try:
-                target.resolve().relative_to(hermes_root.resolve())
-            except ValueError:
-                errors.append(f"  {rel}: path traversal blocked")
-                continue
-
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
-                if target.name in _SECRET_FILE_NAMES:
-                    os.chmod(target, 0o600)
-                restored += 1
-            except (PermissionError, OSError) as exc:
-                errors.append(f"  {rel}: {exc}")
-
-            if restored % 500 == 0:
-                print(f"  {restored}/{file_count} files ...")
+        restored, errors, fatal = _stage_and_restore_import(
+            zf,
+            members,
+            prefix,
+            hermes_root,
+        )
 
         elapsed = time.monotonic() - t0
+
+        if fatal:
+            print()
+            print(
+                "Import aborted before generic files were published: "
+                "credential safety checks failed."
+            )
+            if errors:
+                print(f"\n  Errors ({len(errors)}):")
+                for error in errors[:10]:
+                    print(error)
+                if len(errors) > 10:
+                    print(f"  ... and {len(errors) - 10} more")
+            return
 
         # Summary
         print()
@@ -510,11 +753,264 @@ _QUICK_STATE_FILES = (
 
 _QUICK_SNAPSHOTS_DIR = "state-snapshots"
 _QUICK_DEFAULT_KEEP = 20
+_QUICK_CREDENTIAL_FILES = _CREDENTIAL_PAIR_FILE_NAMES
 
 
 def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
     home = hermes_home or get_hermes_home()
     return home / _QUICK_SNAPSHOTS_DIR
+
+
+def _read_quick_credential_pair(
+    home: Path,
+) -> Dict[str, tuple[bool, bytes]]:
+    """Read config.yaml and .env under one canonical credential lock."""
+    from agent.provider_credentials import (
+        _read_optional_bytes,
+        credential_transaction,
+    )
+
+    config_path = home / "config.yaml"
+    with credential_transaction(config_path) as spec:
+        config_exists, config_payload = _read_optional_bytes(
+            spec.config_target,
+        )
+        env_exists, env_payload = _read_optional_bytes(spec.env_target)
+    return {
+        "config.yaml": (config_exists, config_payload),
+        ".env": (env_exists, env_payload),
+    }
+
+
+def _full_credential_homes(hermes_root: Path) -> List[Path]:
+    """List the root and concrete profile homes whose pairs need snapshots."""
+    def has_pair_member(home: Path) -> bool:
+        return any(
+            os.path.lexists(home / name)
+            for name in _CREDENTIAL_PAIR_FILE_NAMES
+        )
+
+    homes = [hermes_root] if has_pair_member(hermes_root) else []
+    profiles_dir = hermes_root / "profiles"
+    try:
+        entries = sorted(profiles_dir.iterdir())
+    except FileNotFoundError:
+        return homes
+    for entry in entries:
+        if (
+            entry.is_symlink()
+            or not entry.is_dir()
+            or not has_pair_member(entry)
+        ):
+            continue
+        homes.append(entry)
+    return homes
+
+
+def _read_full_credential_payloads(
+    hermes_root: Path,
+) -> Dict[Path, bytes]:
+    """Capture every root/profile credential pair under its canonical lock."""
+    payloads: Dict[Path, bytes] = {}
+    for home in _full_credential_homes(hermes_root):
+        rel_home = home.relative_to(hermes_root)
+        for name, (exists, payload) in _read_quick_credential_pair(
+            home
+        ).items():
+            if exists:
+                payloads[rel_home / name] = payload
+    return payloads
+
+
+def _read_snapshot_credential_payload(
+    snap_dir: Path,
+    rel: str,
+    declared_files: Dict[str, Any],
+) -> tuple[bool, bytes]:
+    """Read one declared sensitive snapshot file without following links."""
+    if rel not in declared_files:
+        return False, b""
+    source = snap_dir / rel
+    if source.is_symlink():
+        raise ValueError(f"snapshot {rel} cannot be a symlink")
+    from agent.provider_credentials import _read_optional_bytes
+
+    exists, payload = _read_optional_bytes(
+        source,
+        label=f"snapshot {rel}",
+    )
+    if not exists:
+        raise ValueError(f"snapshot {rel} is missing")
+    return True, payload
+
+
+def _load_staged_credential_pair(
+    staged_home: Path,
+    declared_files: Dict[str, Any],
+) -> Dict[str, tuple[bool, bytes]]:
+    """Strictly read and validate one staged config/.env pair."""
+    declared = tuple(
+        rel for rel in _QUICK_CREDENTIAL_FILES if rel in declared_files
+    )
+    if not declared:
+        return {
+            "config.yaml": (False, b""),
+            ".env": (False, b""),
+        }
+
+    config_exists, config_payload = (
+        _read_snapshot_credential_payload(
+            staged_home,
+            "config.yaml",
+            declared_files,
+        )
+    )
+    env_exists, env_payload = _read_snapshot_credential_payload(
+        staged_home,
+        ".env",
+        declared_files,
+    )
+    from agent.provider_credentials import (
+        _parse_config_bytes,
+        _parse_env_bytes,
+    )
+
+    if config_exists:
+        _parse_config_bytes(config_payload)
+    if env_exists:
+        _parse_env_bytes(env_payload)
+    return {
+        "config.yaml": (config_exists, config_payload),
+        ".env": (env_exists, env_payload),
+    }
+
+
+def _publish_staged_credential_pair(
+    home: Path,
+    staged_pair: Dict[str, tuple[bool, bytes]],
+) -> int:
+    """Atomically publish a prevalidated config/.env pair."""
+    snapshot_config_exists, snapshot_config = staged_pair["config.yaml"]
+    snapshot_env_exists, snapshot_env = staged_pair[".env"]
+    declared_count = int(snapshot_config_exists) + int(snapshot_env_exists)
+    if not declared_count:
+        return 0
+
+    from agent.image_gen_verification import (
+        CAPABILITY_PROFILE_INCARNATION_KEY,
+        bump_capability_config_epochs,
+        capability_config_epoch,
+        capability_epochs_for_secret_env,
+        capability_profile_incarnation,
+        reconcile_capability_config_epochs,
+    )
+    from agent.provider_credentials import (
+        _parse_config_bytes,
+        _parse_env_bytes,
+        _read_optional_bytes,
+        credential_transaction,
+        replace_config_env_payload_strict,
+    )
+
+    config_path = home / "config.yaml"
+    with credential_transaction(config_path) as spec:
+        current_config_exists, current_config_payload = (
+            _read_optional_bytes(spec.config_target)
+        )
+        current_env_exists, current_env_payload = _read_optional_bytes(
+            spec.env_target
+        )
+        desired_config_payload = (
+            snapshot_config
+            if snapshot_config_exists
+            else current_config_payload
+        )
+        desired_env_payload = (
+            snapshot_env if snapshot_env_exists else current_env_payload
+        )
+        current_config = (
+            _parse_config_bytes(current_config_payload)
+            if current_config_exists
+            else {}
+        )
+        current_env = (
+            _parse_env_bytes(current_env_payload)
+            if current_env_exists
+            else {}
+        )
+        desired_config = _parse_config_bytes(desired_config_payload)
+        desired_env = _parse_env_bytes(desired_env_payload)
+        changed_env_keys = tuple(
+            sorted(
+                key
+                for key in set(current_env) | set(desired_env)
+                if current_env.get(key) != desired_env.get(key)
+            )
+        )
+
+        reconciled_epochs = reconcile_capability_config_epochs(
+            current_config,
+            desired_config,
+        )
+        config_advanced = {
+            capability
+            for capability, epoch in reconciled_epochs.items()
+            if epoch > capability_config_epoch(
+                current_config,
+                capability,
+            )
+        }
+        if not capability_profile_incarnation(current_config):
+            desired_config[CAPABILITY_PROFILE_INCARNATION_KEY] = (
+                uuid.uuid4().hex
+            )
+        affected_capabilities = {
+            capability
+            for key in changed_env_keys
+            for config_data, env_values in (
+                (current_config, current_env),
+                (desired_config, desired_env),
+            )
+            for capability in capability_epochs_for_secret_env(
+                config_data,
+                key,
+                env_values=env_values,
+            )
+        }
+        secret_only_capabilities = (
+            affected_capabilities - config_advanced
+        )
+        if secret_only_capabilities:
+            bump_capability_config_epochs(
+                desired_config,
+                *sorted(secret_only_capabilities),
+            )
+
+        def publish_config(config_data: dict[str, Any]) -> None:
+            config_data.clear()
+            config_data.update(desired_config)
+
+        replace_config_env_payload_strict(
+            publish_config,
+            desired_env_payload,
+            config_path=config_path,
+            env_keys=changed_env_keys,
+        )
+
+    return declared_count
+
+
+def _restore_quick_credential_pair(
+    home: Path,
+    snap_dir: Path,
+    declared_files: Dict[str, Any],
+) -> int:
+    """Publish a snapshot config/.env pair through the strict writer."""
+    staged_pair = _load_staged_credential_pair(
+        snap_dir,
+        declared_files,
+    )
+    return _publish_staged_credential_pair(home, staged_pair)
 
 
 def create_quick_snapshot(
@@ -540,7 +1036,16 @@ def create_quick_snapshot(
 
     manifest: Dict[str, int] = {}  # rel_path -> file size
 
+    try:
+        credential_pair = _read_quick_credential_pair(home)
+    except (OSError, ValueError) as exc:
+        logger.error("Could not snapshot credential pair: %s", exc)
+        shutil.rmtree(snap_dir, ignore_errors=True)
+        return None
+
     for rel in _QUICK_STATE_FILES:
+        if rel in _QUICK_CREDENTIAL_FILES:
+            continue
         src = home / rel
         if not src.exists():
             continue
@@ -577,6 +1082,20 @@ def create_quick_snapshot(
             manifest[rel] = dst.stat().st_size
         except (OSError, PermissionError) as exc:
             logger.warning("Could not snapshot %s: %s", rel, exc)
+
+    for rel, (exists, payload) in credential_pair.items():
+        if not exists:
+            continue
+        dst = snap_dir / rel
+        try:
+            dst.write_bytes(payload)
+            if rel == ".env":
+                os.chmod(dst, 0o600)
+            manifest[rel] = len(payload)
+        except (OSError, PermissionError) as exc:
+            logger.error("Could not snapshot %s: %s", rel, exc)
+            shutil.rmtree(snap_dir, ignore_errors=True)
+            return None
 
     if not manifest:
         shutil.rmtree(snap_dir, ignore_errors=True)
@@ -652,8 +1171,30 @@ def restore_quick_snapshot(
     with open(manifest_path, encoding="utf-8") as f:
         meta = json.load(f)
 
-    restored = 0
-    for rel in meta.get("files", {}):
+    declared_files = meta.get("files", {})
+    if not isinstance(declared_files, dict):
+        logger.error("Snapshot manifest has an invalid files mapping")
+        return False
+
+    from agent.provider_credentials import CredentialRecoveryError
+
+    try:
+        restored = _restore_quick_credential_pair(
+            home,
+            snap_dir,
+            declared_files,
+        )
+    except (OSError, ValueError, CredentialRecoveryError) as exc:
+        logger.error(
+            "Failed to restore credential pair from %s: %s",
+            snapshot_id,
+            exc,
+        )
+        return False
+
+    for rel in declared_files:
+        if rel in _QUICK_CREDENTIAL_FILES:
+            continue
         src = snap_dir / rel
         if not src.exists():
             continue
@@ -749,12 +1290,26 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
                 if _should_skip_backup_file(fpath, rel, out_path):
                     continue
 
+                if _credential_pair_home_rel(rel) is not None:
+                    continue
+
                 files_to_add.append((fpath, rel))
     except OSError as exc:
         logger.warning("Full-zip backup: walk failed: %s", exc)
         return None
 
-    if not files_to_add:
+    from agent.provider_credentials import CredentialRecoveryError
+
+    try:
+        credential_payloads = _read_full_credential_payloads(hermes_root)
+    except (OSError, ValueError, CredentialRecoveryError) as exc:
+        logger.warning(
+            "Full-zip backup: credential pair snapshot failed: %s",
+            exc,
+        )
+        return None
+
+    if not files_to_add and not credential_payloads:
         return None
 
     try:
@@ -774,7 +1329,12 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
                 except (PermissionError, OSError, ValueError) as exc:
                     logger.debug("Skipping %s in zip backup: %s", rel_path, exc)
                     continue
-    except OSError as exc:
+            for rel_path, payload in sorted(
+                credential_payloads.items(),
+                key=lambda item: item[0].as_posix(),
+            ):
+                zf.writestr(rel_path.as_posix(), payload)
+    except (OSError, ValueError) as exc:
         logger.warning("Full-zip backup: zip write failed: %s", exc)
         # Best-effort cleanup of partial file
         try:

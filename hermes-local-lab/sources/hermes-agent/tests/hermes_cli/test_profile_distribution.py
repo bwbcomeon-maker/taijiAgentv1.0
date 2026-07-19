@@ -14,7 +14,9 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
+from agent.image_gen_verification import CAPABILITY_PROFILE_INCARNATION_KEY
 from hermes_cli.profile_distribution import (
     DEFAULT_DIST_OWNED,
     DistributionError,
@@ -306,6 +308,36 @@ class TestInstall:
         # Install again with --force succeeds
         plan = install_distribution(str(staged), name="target", force=True)
         assert plan.target_dir.is_dir()
+
+    def test_install_and_force_reinstall_mint_distinct_incarnations(
+        self,
+        profile_env,
+    ):
+        staged = _make_staging_dir(profile_env, "src")
+
+        first = install_distribution(str(staged), name="target")
+        first_config = yaml.safe_load(
+            (first.target_dir / "config.yaml").read_text(encoding="utf-8")
+        ) or {}
+        first_incarnation = str(
+            first_config.get(CAPABILITY_PROFILE_INCARNATION_KEY) or ""
+        ).strip()
+
+        second = install_distribution(
+            str(staged),
+            name="target",
+            force=True,
+        )
+        second_config = yaml.safe_load(
+            (second.target_dir / "config.yaml").read_text(encoding="utf-8")
+        ) or {}
+        second_incarnation = str(
+            second_config.get(CAPABILITY_PROFILE_INCARNATION_KEY) or ""
+        ).strip()
+
+        assert first_incarnation
+        assert second_incarnation
+        assert second_incarnation != first_incarnation
 
     def test_install_rejects_default_name(self, profile_env):
         staged = _make_staging_dir(profile_env, "src")

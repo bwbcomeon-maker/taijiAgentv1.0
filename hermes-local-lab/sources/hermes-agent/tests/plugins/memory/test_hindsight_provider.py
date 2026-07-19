@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 from plugins.memory.hindsight import (
     HindsightMemoryProvider,
@@ -335,13 +336,13 @@ class TestPostSetup:
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-local-test")
-        saved_configs = []
-        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved_configs.append(cfg.copy()))
-
         provider = HindsightMemoryProvider()
         provider.post_setup(str(hermes_home), {"memory": {}})
 
-        assert saved_configs[-1]["memory"]["provider"] == "hindsight"
+        activation = yaml.safe_load(
+            (hermes_home / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert activation["memory"]["provider"] == "hindsight"
         env_text = (hermes_home / ".env").read_text()
         assert "HINDSIGHT_LLM_API_KEY=sk-local-test\n" in env_text
         assert "HINDSIGHT_TIMEOUT=120\n" in env_text
@@ -369,8 +370,6 @@ class TestPostSetup:
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-local-test")
-        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
-
         provider = HindsightMemoryProvider()
         provider.save_config({"profile": "coder"}, str(hermes_home))
         provider.post_setup(str(hermes_home), {"memory": {}})
@@ -392,8 +391,6 @@ class TestPostSetup:
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
-        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
-
         env_path = hermes_home / ".env"
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text("HINDSIGHT_LLM_API_KEY=existing-key\n")
@@ -437,8 +434,6 @@ class TestPostSetup:
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
-        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
-
         provider = HindsightMemoryProvider()
         provider.post_setup(str(hermes_home), {"memory": {}})
 
@@ -1570,4 +1565,3 @@ class TestShutdown:
         embedded.close.assert_called_once()
         assert embedded._client is None
         assert provider._client is None
-

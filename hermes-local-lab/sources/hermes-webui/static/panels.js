@@ -6537,6 +6537,7 @@ function _hideSettingsPanel(){
   _resetSettingsPanelState();
   const target = _consumeSettingsTargetPanel('chat');
   if(_currentPanel==='settings') switchPanel(target, {bypassSettingsGuard:true});
+  if(target==='chat'&&typeof restoreVisionRecognitionSettingsFocus==='function') restoreVisionRecognitionSettingsFocus();
 }
 
 // Close with unsaved-changes check. If dirty, show a confirm dialog.
@@ -7868,14 +7869,15 @@ async function _saveProviderKey(providerId){
   try{
     const res=await api('/api/providers',{method:'POST',body:JSON.stringify({provider:providerId,api_key:key})});
     if(res.ok){
-      showToast(res.provider+' key '+res.action);
+      const refresh=_handleRuntimeRefreshOutcome(res,{savedLabel:(res.provider||providerId)+' 平台凭据',target:els.card});
+      if(!refresh.pending) showToast(res.provider+' key '+res.action);
       els.input.value='';
       // Invalidate every dropdown surface that caches /api/models so the
       // newly-configured provider's models show up without a server restart
       // or page reload (#1539). Server-side invalidate_models_cache() is
       // already called by api/providers.py:set_provider_key.
       _refreshModelDropdownsAfterProviderChange();
-      await loadProvidersPanel(); // refresh list
+      if(!refresh.pending) await loadProvidersPanel(); // refresh list
     }else{
       showToast(res.error||'保存密钥失败');
       els.saveBtn.disabled=false;
@@ -8211,6 +8213,61 @@ const _imageCapabilityProviderDrafts={vision:{},image:{}};
 let _modelConfigAuxProviders=[];
 let _modelConfigAuxOriginalConfig=null;
 
+function _runtimeRefreshWarningText(warnings){
+ const labels={
+  runtime_config_refresh_pending:'运行配置',
+  models_cache_refresh_pending:'模型列表缓存',
+  vision_verification_refresh_pending:'识图验证状态',
+  image_gen_verification_refresh_pending:'生图验证状态',
+  provider_credentials_refresh_pending:'平台凭据',
+  vision_provider_metadata_refresh_pending:'识图 Provider 列表',
+  image_gen_provider_metadata_refresh_pending:'生图 Provider 列表',
+  durable_mutation_refresh_pending:'运行时状态',
+ };
+ const areas=[];
+ (Array.isArray(warnings)?warnings:[]).forEach(code=>{
+  const label=labels[String(code||'')]||'运行时状态';
+  if(!areas.includes(label)) areas.push(label);
+ });
+ return areas.length?areas.join('、'):'运行时状态';
+}
+
+function _runtimeRefreshOutcome(result,options){
+ const data=result&&typeof result==='object'?result:{};
+ const warnings=Array.isArray(data.warnings)?data.warnings.filter(Boolean):[];
+ const pending=data.refresh_pending===true||warnings.length>0;
+ const savedLabel=String(options&&options.savedLabel||'配置');
+ const message=pending
+  ? `${savedLabel}已写入本机，但${_runtimeRefreshWarningText(warnings)}尚未刷新，当前页面不能视为已经生效或验证通过。请点击“刷新状态”；若提示仍在，请重启太极智能体后再测试。`
+  : '';
+ return {pending,warnings,message};
+}
+
+function _handleRuntimeRefreshOutcome(result,options){
+ const opts=options||{};
+ const outcome=_runtimeRefreshOutcome(result,opts);
+ if(!outcome.pending) return outcome;
+ let status=opts.statusId&&typeof $==='function'?$(opts.statusId):null;
+ const host=opts.target||null;
+ if(!status&&host&&host.querySelector){
+  status=host.querySelector('[data-runtime-refresh-status]');
+  if(!status&&typeof document!=='undefined'&&document.createElement){
+   status=document.createElement('div');
+   status.className='provider-card-hint';
+   status.dataset.runtimeRefreshStatus='1';
+   status.setAttribute('role','status');
+   host.appendChild(status);
+  }
+ }
+ if(status){
+  status.textContent=outcome.message;
+  if(status.dataset) status.dataset.state='warn';
+  if(status.setAttribute) status.setAttribute('role','status');
+ }
+ if(typeof showToast==='function') showToast(outcome.message,8000,'warning');
+ return outcome;
+}
+
 function _auxSelectStyle(){
  return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
 }
@@ -8477,6 +8534,19 @@ async function _testAlibabaQuickCapability(endpoint,capability,secret,operation)
   }
   const verification=result||{};
   const target=capability==='vision'?(_modelConfigData.vision||{}):(_modelConfigData.image_gen||{});
+  const refresh=_handleRuntimeRefreshOutcome(verification,{
+   savedLabel:capability==='vision'?'识图测试结果':'生图测试结果'
+  });
+  if(refresh.pending){
+   target.verification={
+    ok:false,
+    status:'configured_unverified',
+    provider:expected&&expected.provider,
+    model:expected&&expected.model,
+    message:refresh.message
+   };
+   return {ok:false,message:refresh.message,refreshPending:true};
+  }
   const identityMatches=!!expected
    &&String(verification.provider||'')===String(expected.provider||'')
    &&String(verification.model||'')===String(expected.model||'');
@@ -8523,7 +8593,8 @@ async function saveAndVerifyAlibabaImageCapabilities(){
   _renderModelConfigPanel(_modelConfigData);
   operation.expectedIdentity=_alibabaQuickConfigIdentity(_modelConfigData);
   if(!_alibabaQuickOperationIsCurrent(operation)) return;
-  if(saved&&((saved.refresh_pending===true)||(Array.isArray(saved.warnings)&&saved.warnings.length))){
+  const refresh=_handleRuntimeRefreshOutcome(saved,{savedLabel:'图片模型配置'});
+  if(refresh.pending){
    _setAlibabaQuickStatus('配置已保存，但运行时刷新待处理，请刷新状态或重启应用后再验证。',
     '识图：刷新后再验证','生图：刷新后再验证','warn');
    return;
@@ -8532,11 +8603,21 @@ async function saveAndVerifyAlibabaImageCapabilities(){
   const visionResult=await _testAlibabaQuickCapability('/api/vision/test','vision',secret,operation);
   if(visionResult.aborted) return;
   _renderVisionConfigSummary(_modelConfigData);
+  if(visionResult.refreshPending){
+   _setAlibabaQuickStatus('配置与识图测试结果已保存，但运行时刷新待处理，请刷新状态或重启应用后再验证。',
+    '识图：刷新后再验证','生图：刷新后再验证','warn');
+   return;
+  }
   _setAlibabaQuickStatus('配置已保存，正在验证…',visionResult.ok?'识图：已验证':('识图：'+visionResult.message),'生图：正在验证','warn');
   const imageResult=await _testAlibabaQuickCapability('/api/image-gen/test','image',secret,operation);
   if(imageResult.aborted) return;
   _renderImageGenConfigSummary(_modelConfigData);
   const visionStatus=visionResult.ok?'识图：已验证':('识图：'+visionResult.message);
+  if(imageResult.refreshPending){
+   _setAlibabaQuickStatus('配置与生图测试结果已保存，但运行时刷新待处理，请刷新状态或重启应用后再验证。',
+    visionStatus,'生图：刷新后再验证','warn');
+   return;
+  }
   const imageStatus=imageResult.ok?'生图：已验证':('生图：'+imageResult.message);
   if(visionResult.ok&&imageResult.ok){
    _setAlibabaQuickStatus('识图和生图均已验证',visionStatus,imageStatus,'ok');
@@ -8980,6 +9061,7 @@ async function savePlatformCredential(){
   if(apiKey) payload.api_key=apiKey;
   const result=await api('/api/provider-credentials',{method:'POST',body:JSON.stringify(payload)});
   if(!_platformCredentialSessionIsCurrent(session)) return;
+  const refresh=_handleRuntimeRefreshOutcome(result,{savedLabel:'平台凭据',statusId:'platformCredentialError'});
   _applyProviderCredentialResult(result,{id,existing,apiKey});
   _clearModelConfigSecrets('platform');
   _renderPlatformCredentials(_modelConfigData);
@@ -8994,8 +9076,10 @@ async function savePlatformCredential(){
   _renderImageGenConfigSummary(_modelConfigData);
   _platformCredentialSaveSession=null;
   _setPlatformCredentialActionsBusy(false);
-  closePlatformCredentialEditor();
-  if(typeof showToast==='function') showToast('平台凭据已保存');
+  if(!refresh.pending){
+   closePlatformCredentialEditor();
+   if(typeof showToast==='function') showToast('平台凭据已保存');
+  }
  }catch(e){
   if(!_platformCredentialSessionIsCurrent(session)) return;
   _setFieldError('platformCredentialError','凭据保存失败：'+(e.message||e),['platformCredentialSecret','platformCredentialDefault']);
@@ -9543,7 +9627,7 @@ function _renderModelConfigFocusSummary(data){
  const mainModel=String(main.model||'').trim();
  const mainKeyLabel=_modelConfigKeyLabel(main.key_status);
  const mainProviderDisplay=_modelConfigProviderDisplay(mainProvider,data);
- const mainReady=!!(mainProvider&&mainModel&&main.key_status&&main.key_status.configured);
+ const mainReady=!!(mainProvider&&mainModel&&main.key_status&&main.key_status.configured&&!main.runtime_refresh_pending);
  _setModelConfigText('modelConfigMainModelName',mainModel||'未配置主模型');
  _setModelConfigText('modelConfigProviderSummary',_formatModelConfigProvider(mainProvider,mainProviderDisplay));
  _setModelConfigText('modelConfigModelSummary',mainModel);
@@ -9796,6 +9880,7 @@ async function saveCustomVisionProviderConfig(){
  try{
   const result=await api('/api/vision/custom-providers',{method:'POST',body:JSON.stringify(payload)});
   if(generation!==_customVisionProviderGeneration) return;
+  const refresh=_handleRuntimeRefreshOutcome(result,{savedLabel:'外部识图 Provider',statusId:'customVisionProviderError'});
   const builtins=(_modelConfigData.vision_providers||[]).filter(row=>!row.custom);
   _modelConfigData.vision_providers=builtins.concat(result.providers||[]);
   if(_modelConfigData.vision&&_modelConfigData.vision.provider==='custom:'+payload.id){
@@ -9805,8 +9890,10 @@ async function saveCustomVisionProviderConfig(){
   const secret=$('customVisionProviderApiKey');if(secret) secret.value='';
   _renderCustomVisionProviderList(_modelConfigData);_renderModelConfigPanel(_modelConfigData);
   _setCustomVisionProviderBusy(false);
-  await closeCustomVisionProviderEditor(true);
-  if(typeof showToast==='function') showToast('外部识图 Provider 已保存');
+  if(!refresh.pending){
+   await closeCustomVisionProviderEditor(true);
+   if(typeof showToast==='function') showToast('外部识图 Provider 已保存');
+  }
  }catch(e){
   if(generation!==_customVisionProviderGeneration) return;
   _setFieldError('customVisionProviderError','保存失败：'+(e.message||e),['customVisionProviderBaseUrl','customVisionProviderApiKey']);
@@ -10208,14 +10295,17 @@ async function saveCustomImageProviderConfig(){
  }
  _setCustomImageProviderBusy(true);
  try{
-  await api('/api/image-gen/custom-providers',{method:'POST',body:JSON.stringify(payload)});
+  const result=await api('/api/image-gen/custom-providers',{method:'POST',body:JSON.stringify(payload)});
+  const refresh=_handleRuntimeRefreshOutcome(result,{savedLabel:'外部图片 Provider',statusId:'customImageProviderError'});
   const key=$('customImageProviderApiKey');
   if(key) key.value='';
   await loadModelConfigPanel(true);
   if(_settingsSection==='providers') _renderProviderImageGenSettings(_modelConfigData);
   _setCustomImageProviderBusy(false);
-  await closeCustomImageProviderEditor(true);
-  if(typeof showToast==='function') showToast('外部图片模型已保存，请在模型配置页执行真实生图测试');
+  if(!refresh.pending){
+   await closeCustomImageProviderEditor(true);
+   if(typeof showToast==='function') showToast('外部图片模型已保存，请在模型配置页执行真实生图测试');
+  }
  }catch(e){
   _setFieldError('customImageProviderError','保存失败：'+(e.message||e),['customImageProviderBaseUrl','customImageProviderApiKey']);
   if(typeof showToast==='function') showToast('保存外部图片模型失败',5000,'error');
@@ -10858,10 +10948,12 @@ async function saveMainModelConfig(){
   const payload={provider,model,base_url:baseUrl};
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/model-config/main',{method:'POST',body:JSON.stringify(payload)});
+  const refresh=_handleRuntimeRefreshOutcome(data,{savedLabel:'主模型配置',statusId:'modelConfigDraftStatus'});
   _clearModelConfigSecrets('main');
   if(_modelConfigData&&data&&data.main){
    _modelConfigData.profile=data.profile||_modelConfigData.profile;
    _modelConfigData.main=data.main;
+   _modelConfigData.main.runtime_refresh_pending=refresh.pending;
    if(Array.isArray(data.providers)) _modelConfigData.providers=data.providers;
    const saved=data.main;
    const providerInput=$('modelConfigProvider');
@@ -10873,9 +10965,11 @@ async function saveMainModelConfig(){
    _syncMainModelConfigControls();
    _renderModelConfigFocusSummary(_modelConfigData);
   }
-  toggleModelConfigSection('modelConfigMainEdit',false);
   if(typeof populateModelDropdown==='function') populateModelDropdown();
-  if(typeof showToast==='function') showToast('主模型配置已保存');
+  if(!refresh.pending){
+   toggleModelConfigSection('modelConfigMainEdit',false);
+   if(typeof showToast==='function') showToast('主模型配置已保存');
+  }
  }catch(e){
   if(typeof showToast==='function') showToast('保存主模型失败：'+(e.message||e),5000,'error');
  }finally{
@@ -10907,19 +11001,25 @@ async function saveVisionConfig(){
   if(credentialRef) payload.credential_ref=credentialRef;
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/vision/config',{method:'POST',body:JSON.stringify(payload)});
+  const refresh=_handleRuntimeRefreshOutcome(data,{savedLabel:'识图配置',statusId:'visionConfigVerificationStatus'});
   _clearModelConfigSecrets('vision',provider);
   delete _imageCapabilityProviderDrafts.vision[provider];
   if(_modelConfigData&&data&&data.vision){
    _modelConfigData.profile=data.profile||_modelConfigData.profile;
    _modelConfigData.vision=data.vision;
+   if(refresh.pending){
+    _modelConfigData.vision.verification={status:'configured_unverified',message:refresh.message};
+   }
    if(Array.isArray(data.providers)) _modelConfigData.vision_providers=data.providers;
    const keyInput=$('visionConfigApiKey');
    if(keyInput&&keyInput.value===apiKey) keyInput.value='';
    _syncVisionConfigControls();
    _renderVisionConfigSummary(_modelConfigData);
   }
-  _closeModelConfigEditor('visionConfigEdit','btnEditVisionConfig');
-  if(typeof showToast==='function') showToast('识图配置已保存');
+  if(!refresh.pending){
+   _closeModelConfigEditor('visionConfigEdit','btnEditVisionConfig');
+   if(typeof showToast==='function') showToast('识图配置已保存');
+  }
  }catch(e){
   _setFieldError('visionConfigEndpointError','识图配置保存失败：'+(e.message||e),['visionConfigCredential','visionConfigEndpointMode','visionConfigRegion','visionConfigWorkspaceId','visionConfigBaseUrl','visionConfigModel']);
   if(typeof showToast==='function') showToast('保存识图配置失败：'+(e.message||e),5000,'error');
@@ -10977,10 +11077,13 @@ async function testVisionConfig(){
  try{
   const result=await api('/api/vision/test',{method:'POST',body:'{}',timeoutMs:150000});
   if(runGeneration!==_visionTestGeneration||_visionConfigIdentity(_modelConfigData)!==startIdentity) return;
-  saved.verification=result||{};
+  const refresh=_handleRuntimeRefreshOutcome(result,{savedLabel:'识图测试结果',statusId:'visionConfigVerificationStatus'});
+  saved.verification=refresh.pending
+   ?{status:'configured_unverified',message:refresh.message}
+   :(result||{});
   _visionVerificationSnapshot=null;
   _renderVisionConfigSummary(_modelConfigData);
-  if(typeof showToast==='function') showToast(result&&result.ok?'识图验证通过':'识图验证失败',5000,result&&result.ok?'success':'error');
+  if(!refresh.pending&&typeof showToast==='function') showToast(result&&result.ok?'识图验证通过':'识图验证失败',5000,result&&result.ok?'success':'error');
  }catch(e){
   if(runGeneration!==_visionTestGeneration||_visionConfigIdentity(_modelConfigData)!==startIdentity) return;
   saved.verification={status:'failed',message:'识图验证请求失败，请稍后重试。'};
@@ -11021,17 +11124,23 @@ async function saveImageGenConfig(){
   if(apiKey) payload.api_key=apiKey;
   if(Object.keys(credentials).length) payload.credentials=credentials;
   const data=await api('/api/image-gen/config',{method:'POST',body:JSON.stringify(payload)});
+  const refresh=_handleRuntimeRefreshOutcome(data,{savedLabel:'生图配置',statusId:'imageGenConfigVerificationStatus'});
   _clearModelConfigSecrets('image',provider);
   delete _imageCapabilityProviderDrafts.image[provider];
   if(_modelConfigData&&data&&data.image_gen){
    _modelConfigData.profile=data.profile||_modelConfigData.profile;
    _modelConfigData.image_gen=data.image_gen;
+   if(refresh.pending){
+    _modelConfigData.image_gen.verification={status:'configured_unverified',message:refresh.message};
+   }
    if(Array.isArray(data.providers)) _modelConfigData.image_gen_providers=data.providers;
    _syncImageGenConfigControls();
    _renderImageGenConfigSummary(_modelConfigData);
   }
-  _closeModelConfigEditor('imageGenConfigEdit','btnEditImageGenConfig');
-  if(typeof showToast==='function') showToast('图片生成配置已保存');
+  if(!refresh.pending){
+   _closeModelConfigEditor('imageGenConfigEdit','btnEditImageGenConfig');
+   if(typeof showToast==='function') showToast('图片生成配置已保存');
+  }
  }catch(e){
   if(document.querySelectorAll) document.querySelectorAll('[data-image-gen-credential]').forEach(input=>{
    input.setAttribute('aria-invalid','true');
@@ -11083,10 +11192,13 @@ async function testImageGenConfig(){
  try{
   const result=await api('/api/image-gen/test',{method:'POST',body:'{}',timeoutMs:210000});
   if(runGeneration!==_imageGenTestGeneration||_imageGenConfigIdentity(_modelConfigData)!==startIdentity) return;
-  saved.verification=result||{};
+  const refresh=_handleRuntimeRefreshOutcome(result,{savedLabel:'生图测试结果',statusId:'imageGenConfigVerificationStatus'});
+  saved.verification=refresh.pending
+   ?{status:'configured_unverified',message:refresh.message}
+   :(result||{});
   _imageGenVerificationSnapshot=null;
   _renderImageGenConfigSummary(_modelConfigData);
-  if(typeof showToast==='function') showToast(result&&result.ok?'生图验证通过':'生图验证失败',5000,result&&result.ok?'success':'error');
+  if(!refresh.pending&&typeof showToast==='function') showToast(result&&result.ok?'生图验证通过':'生图验证失败',5000,result&&result.ok?'success':'error');
  }catch(e){
   if(runGeneration!==_imageGenTestGeneration||_imageGenConfigIdentity(_modelConfigData)!==startIdentity) return;
   saved.verification={status:'failed',message:'生图验证请求失败，请稍后重试。'};

@@ -3,12 +3,14 @@
 import json
 import os
 import sqlite3
+import threading
 import zipfile
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +100,26 @@ class TestShouldExclude:
         assert _should_exclude(Path("gateway.pid"))
         assert _should_exclude(Path("cron.pid"))
 
+    def test_excludes_credential_transaction_artifacts(self):
+        from hermes_cli.backup import _should_exclude
+
+        assert _should_exclude(
+            Path(".taiji-credential-transaction.lock")
+        )
+        assert _should_exclude(
+            Path(
+                "profiles/coder/"
+                ".taiji-credential-pair-intent.json"
+            )
+        )
+        assert _should_exclude(
+            Path(
+                "profiles/coder/"
+                ".taiji-credential-config.yaml-"
+                "0123456789abcdef0123456789abcdef.stage"
+            )
+        )
+
     def test_excludes_checkpoints(self):
         """checkpoints/ is session-local trajectory cache — hash-keyed,
         regenerated per-session, won't port to another machine anyway."""
@@ -185,6 +207,101 @@ class TestBackup:
             assert "logs/agent.log" in names
             # Skins
             assert "skins/cyber.yaml" in names
+
+    def test_reads_root_and_profile_credentials_as_consistent_pairs(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Concurrent canonical writers cannot tear full-backup credential pairs."""
+        from agent import provider_credentials as credentials
+        from hermes_cli.backup import run_backup
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        pair_homes = (
+            hermes_home,
+            hermes_home / "profiles" / "coder",
+        )
+        for pair_home in pair_homes:
+            (pair_home / "config.yaml").write_text(
+                yaml.safe_dump({"pair_version": "before"}),
+                encoding="utf-8",
+            )
+            (pair_home / ".env").write_text(
+                "PAIR_SECRET=before\n",
+                encoding="utf-8",
+            )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        original_read = credentials._read_optional_bytes
+        writer_threads = {}
+        writer_started = {
+            pair_home: threading.Event()
+            for pair_home in pair_homes
+        }
+        writer_finished = {
+            pair_home: threading.Event()
+            for pair_home in pair_homes
+        }
+
+        def publish_after_pair(pair_home):
+            writer_started[pair_home].set()
+
+            def update_config(config):
+                config["pair_version"] = "after"
+
+            credentials.mutate_config_env_strict(
+                update_config,
+                {"PAIR_SECRET": "after"},
+                config_path=pair_home / "config.yaml",
+            )
+            writer_finished[pair_home].set()
+
+        def interleaving_read(path, *args, **kwargs):
+            result = original_read(path, *args, **kwargs)
+            pair_home = Path(path).parent
+            if (
+                Path(path).name == "config.yaml"
+                and pair_home in writer_started
+                and pair_home not in writer_threads
+            ):
+                thread = threading.Thread(
+                    target=publish_after_pair,
+                    args=(pair_home,),
+                )
+                writer_threads[pair_home] = thread
+                thread.start()
+                assert writer_started[pair_home].wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(
+            credentials,
+            "_read_optional_bytes",
+            interleaving_read,
+        )
+        out_zip = tmp_path / "consistent-pairs.zip"
+
+        run_backup(Namespace(output=str(out_zip)))
+
+        assert set(writer_threads) == set(pair_homes)
+        for pair_home, thread in writer_threads.items():
+            thread.join(timeout=5)
+            assert writer_finished[pair_home].is_set()
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            for pair_home in pair_homes:
+                rel_home = pair_home.relative_to(hermes_home)
+                config_rel = (rel_home / "config.yaml").as_posix()
+                env_rel = (rel_home / ".env").as_posix()
+                archived_config = yaml.safe_load(zf.read(config_rel))
+                archived_env = zf.read(env_rel).decode("utf-8")
+                assert (
+                    archived_config["pair_version"],
+                    archived_env,
+                ) == ("before", "PAIR_SECRET=before\n")
 
     def test_excludes_protected_skills_but_keeps_open_skills(self, tmp_path, monkeypatch):
         """Backup keeps user/open skills but does not ship protected skill source."""
@@ -401,10 +518,352 @@ class TestImport:
         from hermes_cli.backup import run_import
         run_import(args)
 
-        assert (hermes_home / "config.yaml").read_text() == "model:\n  provider: openrouter\n"
+        restored_config = yaml.safe_load(
+            (hermes_home / "config.yaml").read_text()
+        )
+        assert restored_config["model"]["provider"] == "openrouter"
+        assert restored_config["_taiji_profile_incarnation"]
         assert (hermes_home / ".env").read_text() == "OPENROUTER_API_KEY=sk-test\n"
         assert (hermes_home / "skills" / "my-skill" / "SKILL.md").read_text() == "# My Skill\n"
         assert (hermes_home / "profiles" / "coder" / "config.yaml").exists()
+
+    def test_existing_root_and_profile_keep_incarnation_and_advance_epochs(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Full import cannot roll root/profile authorization generations back."""
+        from agent.image_gen_verification import (
+            CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+            CAPABILITY_CONFIG_EPOCH_VISION,
+            CAPABILITY_CONFIG_EPOCHS_KEY,
+            CAPABILITY_PROFILE_INCARNATION_KEY,
+            capability_config_epoch,
+        )
+        from hermes_cli.backup import run_import
+
+        hermes_home = tmp_path / ".hermes"
+        profile_home = hermes_home / "profiles" / "coder"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        def config(vision_epoch, image_epoch, incarnation):
+            return {
+                "auxiliary": {
+                    "vision": {
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                    }
+                },
+                "image_gen": {
+                    "provider": "dashscope",
+                    "model": "wanx2.1-t2i-turbo",
+                },
+                CAPABILITY_CONFIG_EPOCHS_KEY: {
+                    CAPABILITY_CONFIG_EPOCH_VISION: vision_epoch,
+                    CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION: image_epoch,
+                },
+                CAPABILITY_PROFILE_INCARNATION_KEY: incarnation,
+            }
+
+        current = {
+            hermes_home: config(41, 43, "root-current-incarnation"),
+            profile_home: config(61, 67, "profile-current-incarnation"),
+        }
+        for pair_home, config_data in current.items():
+            (pair_home / "config.yaml").write_text(
+                yaml.safe_dump(config_data),
+                encoding="utf-8",
+            )
+            (pair_home / ".env").write_text(
+                "DASHSCOPE_API_KEY=secret-b\n",
+                encoding="utf-8",
+            )
+
+        zip_path = tmp_path / "stale-generations.zip"
+        archived_root = config(3, 5, "root-stale-incarnation")
+        archived_profile = config(7, 11, "profile-stale-incarnation")
+        archived_root["auxiliary"]["vision"]["model"] = "qwen-vl-max"
+        archived_root["image_gen"]["model"] = "wanx2.1-t2i-plus"
+        archived_profile["auxiliary"]["vision"]["model"] = "qwen-vl-max"
+        archived_profile["image_gen"]["model"] = "wanx2.1-t2i-plus"
+        self._make_backup_zip(
+            zip_path,
+            {
+                "config.yaml": yaml.safe_dump(archived_root),
+                ".env": "DASHSCOPE_API_KEY=secret-a\n",
+                "profiles/coder/config.yaml": yaml.safe_dump(
+                    archived_profile
+                ),
+                "profiles/coder/.env": (
+                    "DASHSCOPE_API_KEY=secret-a\n"
+                ),
+            },
+        )
+
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        expected = {
+            hermes_home: (
+                41,
+                43,
+                "root-current-incarnation",
+            ),
+            profile_home: (
+                61,
+                67,
+                "profile-current-incarnation",
+            ),
+        }
+        for pair_home, (
+            old_vision_epoch,
+            old_image_epoch,
+            incarnation,
+        ) in expected.items():
+            restored = yaml.safe_load(
+                (pair_home / "config.yaml").read_text(encoding="utf-8")
+            )
+            assert (
+                capability_config_epoch(
+                    restored,
+                    CAPABILITY_CONFIG_EPOCH_VISION,
+                )
+                == old_vision_epoch + 1
+            )
+            assert (
+                capability_config_epoch(
+                    restored,
+                    CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+                )
+                == old_image_epoch + 1
+            )
+            assert (
+                restored[CAPABILITY_PROFILE_INCARNATION_KEY]
+                == incarnation
+            )
+            assert (pair_home / ".env").read_text(encoding="utf-8") == (
+                "DASHSCOPE_API_KEY=secret-a\n"
+            )
+
+    def test_fresh_root_and_profile_mint_distinct_incarnations(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Importing into fresh targets must not reuse archived identities."""
+        from agent.image_gen_verification import (
+            CAPABILITY_PROFILE_INCARNATION_KEY,
+        )
+        from hermes_cli.backup import run_import
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        zip_path = tmp_path / "fresh-target.zip"
+        self._make_backup_zip(
+            zip_path,
+            {
+                "config.yaml": yaml.safe_dump(
+                    {
+                        "model": {"provider": "openrouter"},
+                        CAPABILITY_PROFILE_INCARNATION_KEY: (
+                            "archived-root-incarnation"
+                        ),
+                    }
+                ),
+                ".env": "OPENROUTER_API_KEY=root-secret\n",
+                "profiles/coder/config.yaml": yaml.safe_dump(
+                    {
+                        "model": {"provider": "anthropic"},
+                        CAPABILITY_PROFILE_INCARNATION_KEY: (
+                            "archived-profile-incarnation"
+                        ),
+                    }
+                ),
+                "profiles/coder/.env": (
+                    "ANTHROPIC_API_KEY=profile-secret\n"
+                ),
+            },
+        )
+
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        root_config = yaml.safe_load(
+            (hermes_home / "config.yaml").read_text(encoding="utf-8")
+        )
+        profile_config = yaml.safe_load(
+            (
+                hermes_home
+                / "profiles"
+                / "coder"
+                / "config.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        root_incarnation = root_config[
+            CAPABILITY_PROFILE_INCARNATION_KEY
+        ]
+        profile_incarnation = profile_config[
+            CAPABILITY_PROFILE_INCARNATION_KEY
+        ]
+        assert root_incarnation
+        assert profile_incarnation
+        assert root_incarnation != "archived-root-incarnation"
+        assert profile_incarnation != "archived-profile-incarnation"
+        assert root_incarnation != profile_incarnation
+
+    def test_invalid_staged_profile_env_blocks_all_credential_publication(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """All archived credential pairs are validated before any are published."""
+        from hermes_cli.backup import run_import
+
+        hermes_home = tmp_path / ".hermes"
+        profile_home = hermes_home / "profiles" / "coder"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        current_payloads = {}
+        for pair_home, label in (
+            (hermes_home, "root-current"),
+            (profile_home, "profile-current"),
+        ):
+            config_payload = yaml.safe_dump({"pair_version": label})
+            env_payload = f"PAIR_SECRET={label}\n"
+            (pair_home / "config.yaml").write_text(
+                config_payload,
+                encoding="utf-8",
+            )
+            (pair_home / ".env").write_text(
+                env_payload,
+                encoding="utf-8",
+            )
+            current_payloads[pair_home] = (
+                config_payload,
+                env_payload,
+            )
+
+        zip_path = tmp_path / "invalid-profile-env.zip"
+        self._make_backup_zip(
+            zip_path,
+            {
+                "config.yaml": yaml.safe_dump(
+                    {"pair_version": "root-archived"}
+                ),
+                ".env": "PAIR_SECRET=root-archived\n",
+                "profiles/coder/config.yaml": yaml.safe_dump(
+                    {"pair_version": "profile-archived"}
+                ),
+                "profiles/coder/.env": (
+                    "PAIR_SECRET=one\nPAIR_SECRET=two\n"
+                ),
+            },
+        )
+
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        for pair_home, (
+            config_payload,
+            env_payload,
+        ) in current_payloads.items():
+            assert (pair_home / "config.yaml").read_text(
+                encoding="utf-8"
+            ) == config_payload
+            assert (pair_home / ".env").read_text(
+                encoding="utf-8"
+            ) == env_payload
+
+    def test_pair_commit_failure_does_not_partially_import_credentials(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A strict pair commit failure leaves both target files unchanged."""
+        from agent import provider_credentials as credentials
+        from hermes_cli.backup import run_import
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        current_config = yaml.safe_dump({"pair_version": "current"})
+        current_env = "PAIR_SECRET=current\n"
+        (hermes_home / "config.yaml").write_text(
+            current_config,
+            encoding="utf-8",
+        )
+        (hermes_home / ".env").write_text(
+            current_env,
+            encoding="utf-8",
+        )
+        zip_path = tmp_path / "pair-commit-failure.zip"
+        self._make_backup_zip(
+            zip_path,
+            {
+                "config.yaml": yaml.safe_dump(
+                    {"pair_version": "archived"}
+                ),
+                ".env": "PAIR_SECRET=archived\n",
+            },
+        )
+
+        def fail_pair_commit(**_kwargs):
+            raise credentials.CredentialRecoveryError(
+                "injected full-import pair failure"
+            )
+
+        monkeypatch.setattr(
+            credentials,
+            "_commit_config_env_pair",
+            fail_pair_commit,
+        )
+
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert (hermes_home / "config.yaml").read_text(
+            encoding="utf-8"
+        ) == current_config
+        assert (hermes_home / ".env").read_text(
+            encoding="utf-8"
+        ) == current_env
+
+    def test_blocks_archived_credential_transaction_artifacts(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Import must not resurrect locks, journals, or credential stages."""
+        from hermes_cli.backup import run_import
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        artifacts = (
+            ".taiji-credential-pair-intent.json",
+            "profiles/coder/.taiji-credential-pair-abort.json",
+            (
+                "profiles/coder/.taiji-credential-config.yaml-"
+                "0123456789abcdef0123456789abcdef.stage"
+            ),
+        )
+        zip_path = tmp_path / "transaction-artifacts.zip"
+        files = {
+            "config.yaml": "model: restored\n",
+            **{artifact: "stale transaction data\n" for artifact in artifacts},
+        }
+        self._make_backup_zip(zip_path, files)
+
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert yaml.safe_load(
+            (hermes_home / "config.yaml").read_text(encoding="utf-8")
+        )["model"] == "restored"
+        for artifact in artifacts:
+            assert not (hermes_home / artifact).exists()
 
     def test_strips_hermes_prefix(self, tmp_path, monkeypatch):
         """Import strips .hermes/ prefix if all entries share it."""
@@ -424,7 +883,11 @@ class TestImport:
         from hermes_cli.backup import run_import
         run_import(args)
 
-        assert (hermes_home / "config.yaml").read_text() == "model: test\n"
+        restored_config = yaml.safe_load(
+            (hermes_home / "config.yaml").read_text()
+        )
+        assert restored_config["model"] == "test"
+        assert restored_config["_taiji_profile_incarnation"]
         assert (hermes_home / "skills" / "a" / "SKILL.md").read_text() == "# A\n"
 
     def test_rejects_empty_zip(self, tmp_path, monkeypatch):
@@ -528,7 +991,11 @@ class TestImport:
         from hermes_cli.backup import run_import
         run_import(args)
 
-        assert (hermes_home / "config.yaml").read_text() == "model: restored\n"
+        restored_config = yaml.safe_load(
+            (hermes_home / "config.yaml").read_text()
+        )
+        assert restored_config["model"] == "restored"
+        assert restored_config["_taiji_profile_incarnation"]
 
     def test_missing_file_exits(self, tmp_path, monkeypatch):
         """Import exits with error for nonexistent file."""
@@ -600,7 +1067,11 @@ class TestRoundTrip:
         run_import(Namespace(zipfile=str(out_zip), force=True))
 
         # Verify key files
-        assert (dst_home / "config.yaml").read_text() == "model:\n  provider: openrouter\n"
+        restored_config = yaml.safe_load(
+            (dst_home / "config.yaml").read_text()
+        )
+        assert restored_config["model"]["provider"] == "openrouter"
+        assert restored_config["_taiji_profile_incarnation"]
         assert (dst_home / ".env").read_text() == "OPENROUTER_API_KEY=sk-test-123\n"
         assert (dst_home / "skills" / "my-skill" / "SKILL.md").exists()
         assert (dst_home / "profiles" / "coder" / "config.yaml").exists()
@@ -1227,6 +1698,216 @@ class TestQuickSnapshot:
         result = restore_quick_snapshot(snap_id, hermes_home=hermes_home)
         assert result is True
         assert "openrouter" in (hermes_home / "config.yaml").read_text()
+
+    def test_snapshot_reads_config_and_env_as_one_credential_pair(
+        self,
+        hermes_home,
+        monkeypatch,
+    ):
+        """A concurrent canonical writer cannot produce a torn snapshot pair."""
+        from agent import provider_credentials as credentials
+        from hermes_cli.backup import create_quick_snapshot
+
+        config_path = hermes_home / "config.yaml"
+        env_path = hermes_home / ".env"
+        config_path.write_text(
+            yaml.safe_dump({"pair_version": "before"}),
+            encoding="utf-8",
+        )
+        env_path.write_text("PAIR_SECRET=before\n", encoding="utf-8")
+
+        original_read = credentials._read_optional_bytes
+        writer_started = threading.Event()
+        writer_finished = threading.Event()
+        writer_threads = []
+
+        def publish_after_pair():
+            writer_started.set()
+
+            def update_config(config):
+                config["pair_version"] = "after"
+
+            credentials.mutate_config_env_strict(
+                update_config,
+                {"PAIR_SECRET": "after"},
+                config_path=config_path,
+            )
+            writer_finished.set()
+
+        def interleaving_read(path, *args, **kwargs):
+            result = original_read(path, *args, **kwargs)
+            if Path(path).name == "config.yaml" and not writer_threads:
+                thread = threading.Thread(target=publish_after_pair)
+                writer_threads.append(thread)
+                thread.start()
+                assert writer_started.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(
+            credentials,
+            "_read_optional_bytes",
+            interleaving_read,
+        )
+
+        snap_id = create_quick_snapshot(hermes_home=hermes_home)
+
+        assert writer_threads, "snapshot bypassed the canonical pair reader"
+        writer_threads[0].join(timeout=5)
+        assert writer_finished.is_set()
+        snap_dir = hermes_home / "state-snapshots" / snap_id
+        snap_config = yaml.safe_load(
+            (snap_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        snap_env = (snap_dir / ".env").read_text(encoding="utf-8")
+        live_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        live_env = env_path.read_text(encoding="utf-8")
+
+        assert (snap_config["pair_version"], snap_env) == (
+            "before",
+            "PAIR_SECRET=before\n",
+        )
+        assert (live_config["pair_version"], live_env) == (
+            "after",
+            "PAIR_SECRET=after\n",
+        )
+
+    def test_restore_a_b_a_advances_epochs_and_preserves_incarnation(
+        self,
+        hermes_home,
+    ):
+        """Restoring an old secret cannot reactivate an old authorization epoch."""
+        from agent.image_gen_verification import (
+            CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+            CAPABILITY_CONFIG_EPOCH_VISION,
+            CAPABILITY_CONFIG_EPOCHS_KEY,
+            CAPABILITY_PROFILE_INCARNATION_KEY,
+            capability_config_epoch,
+        )
+        from hermes_cli.backup import (
+            create_quick_snapshot,
+            restore_quick_snapshot,
+        )
+
+        config_path = hermes_home / "config.yaml"
+        env_path = hermes_home / ".env"
+        snapshot_config = {
+            "auxiliary": {
+                "vision": {
+                    "provider": "alibaba",
+                    "model": "qwen3-vl-plus",
+                }
+            },
+            "image_gen": {
+                "provider": "dashscope",
+                "model": "wanx2.1-t2i-turbo",
+            },
+            CAPABILITY_CONFIG_EPOCHS_KEY: {
+                CAPABILITY_CONFIG_EPOCH_VISION: 7,
+                CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION: 11,
+            },
+            CAPABILITY_PROFILE_INCARNATION_KEY: "snapshot-incarnation",
+        }
+        config_path.write_text(
+            yaml.safe_dump(snapshot_config),
+            encoding="utf-8",
+        )
+        env_path.write_text(
+            "DASHSCOPE_API_KEY=secret-a\n",
+            encoding="utf-8",
+        )
+        snap_id = create_quick_snapshot(hermes_home=hermes_home)
+
+        current_config = dict(snapshot_config)
+        current_config[CAPABILITY_CONFIG_EPOCHS_KEY] = {
+            CAPABILITY_CONFIG_EPOCH_VISION: 29,
+            CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION: 31,
+        }
+        current_config[CAPABILITY_PROFILE_INCARNATION_KEY] = (
+            "current-incarnation"
+        )
+        config_path.write_text(
+            yaml.safe_dump(current_config),
+            encoding="utf-8",
+        )
+        env_path.write_text(
+            "DASHSCOPE_API_KEY=secret-b\n",
+            encoding="utf-8",
+        )
+
+        assert restore_quick_snapshot(
+            snap_id,
+            hermes_home=hermes_home,
+        )
+
+        restored = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert (
+            capability_config_epoch(
+                restored,
+                CAPABILITY_CONFIG_EPOCH_VISION,
+            )
+            == 30
+        )
+        assert (
+            capability_config_epoch(
+                restored,
+                CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+            )
+            == 32
+        )
+        assert (
+            restored[CAPABILITY_PROFILE_INCARNATION_KEY]
+            == "current-incarnation"
+        )
+        assert env_path.read_text(encoding="utf-8") == (
+            "DASHSCOPE_API_KEY=secret-a\n"
+        )
+
+    def test_restore_pair_commit_failure_keeps_config_and_env_unchanged(
+        self,
+        hermes_home,
+        monkeypatch,
+    ):
+        """A failed sensitive-pair publish must not partially restore either file."""
+        from agent import provider_credentials as credentials
+        from hermes_cli.backup import (
+            create_quick_snapshot,
+            restore_quick_snapshot,
+        )
+
+        config_path = hermes_home / "config.yaml"
+        env_path = hermes_home / ".env"
+        config_path.write_text(
+            yaml.safe_dump({"pair_version": "snapshot"}),
+            encoding="utf-8",
+        )
+        env_path.write_text("PAIR_SECRET=snapshot\n", encoding="utf-8")
+        snap_id = create_quick_snapshot(hermes_home=hermes_home)
+
+        current_config = yaml.safe_dump({"pair_version": "current"})
+        current_env = "PAIR_SECRET=current\n"
+        config_path.write_text(current_config, encoding="utf-8")
+        env_path.write_text(current_env, encoding="utf-8")
+
+        def fail_pair_commit(**_kwargs):
+            raise credentials.CredentialRecoveryError(
+                "injected pair commit failure"
+            )
+
+        monkeypatch.setattr(
+            credentials,
+            "_commit_config_env_pair",
+            fail_pair_commit,
+        )
+
+        assert (
+            restore_quick_snapshot(
+                snap_id,
+                hermes_home=hermes_home,
+            )
+            is False
+        )
+        assert config_path.read_text(encoding="utf-8") == current_config
+        assert env_path.read_text(encoding="utf-8") == current_env
 
     def test_restore_state_db(self, hermes_home):
         from hermes_cli.backup import create_quick_snapshot, restore_quick_snapshot

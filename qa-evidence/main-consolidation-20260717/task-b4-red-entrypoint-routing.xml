@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="4" skipped="0" tests="4" time="0.097" timestamp="2026-07-19T17:44:03.600131+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.cli.test_image_capability_consistency" name="test_image_input_route_fails_closed_for_unknown_main_model" time="0.031"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x107368890&gt;
+
+    def test_image_input_route_fails_closed_for_unknown_main_model(monkeypatch):
+        generation = _generation()
+        _install_runtime(monkeypatch, generation=generation)
+        monkeypatch.setattr(
+            image_routing,
+            "_lookup_supports_vision",
+            lambda *_args, **_kwargs: None,
+        )
+
+&gt;       decision = image_runtime.resolve_image_input_route(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            "unknown-provider",
+            "unknown-model",
+            {},
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'
+
+tests/cli/test_image_capability_consistency.py:79: AttributeError</failure></testcase><testcase classname="tests.cli.test_image_capability_consistency" name="test_text_route_requires_current_verified_auxiliary_snapshot" time="0.003"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x1072bd010&gt;
+
+    def test_text_route_requires_current_verified_auxiliary_snapshot(monkeypatch):
+        generation = _generation(
+            vision_status="configured_unverified",
+            vision_available=False,
+        )
+        _install_runtime(
+            monkeypatch,
+            generation=generation,
+            vision_reason="verification_required",
+        )
+        monkeypatch.setattr(
+            image_routing,
+            "_lookup_supports_vision",
+            lambda *_args, **_kwargs: False,
+        )
+
+&gt;       decision = image_runtime.resolve_image_input_route(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            "text-provider",
+            "text-model",
+            {"agent": {"image_input_mode": "text"}},
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'
+
+tests/cli/test_image_capability_consistency.py:107: AttributeError</failure></testcase><testcase classname="tests.cli.test_image_capability_consistency" name="test_auto_route_uses_verified_auxiliary_for_nonvision_main_model" time="0.001"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x1077a3390&gt;
+
+    def test_auto_route_uses_verified_auxiliary_for_nonvision_main_model(monkeypatch):
+        generation = _generation()
+        _install_runtime(monkeypatch, generation=generation)
+        monkeypatch.setattr(
+            image_routing,
+            "_lookup_supports_vision",
+            lambda *_args, **_kwargs: False,
+        )
+
+&gt;       decision = image_runtime.resolve_image_input_route(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            "text-provider",
+            "text-model",
+            {},
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'
+
+tests/cli/test_image_capability_consistency.py:128: AttributeError</failure></testcase><testcase classname="tests.cli.test_image_capability_consistency" name="test_native_route_uses_same_combined_generation" time="0.001"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x1073aae90&gt;
+
+    def test_native_route_uses_same_combined_generation(monkeypatch):
+        generation = _generation()
+        _install_runtime(monkeypatch, generation=generation)
+        monkeypatch.setattr(
+            image_routing,
+            "_lookup_supports_vision",
+            lambda *_args, **_kwargs: True,
+        )
+
+&gt;       decision = image_runtime.resolve_image_input_route(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            "vision-provider",
+            "vision-model",
+            {},
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'resolve_image_input_route'
+
+tests/cli/test_image_capability_consistency.py:149: AttributeError</failure></testcase></testsuite></testsuites>

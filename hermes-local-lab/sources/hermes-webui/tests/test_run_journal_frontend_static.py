@@ -100,3 +100,24 @@ def test_run_journal_cursor_tracks_every_long_task_timeline_event():
         assert f"'{event_name}'" in cursor_loop, (
             f"{event_name} must advance the replay cursor to avoid duplicate timeline replay"
         )
+
+
+def test_capability_route_uses_existing_live_and_replay_pipeline():
+    """Actual image routing must survive journal replay without a second protocol."""
+    wire_pos = MESSAGES_SRC.index("function _wireSSE(source)")
+    wire_block = MESSAGES_SRC[
+        wire_pos : MESSAGES_SRC.index("async function _restoreSettledSession", wire_pos)
+    ]
+    cursor_loop_pos = MESSAGES_SRC.index("for(const _runJournalEventName of [")
+    cursor_loop = MESSAGES_SRC[
+        cursor_loop_pos : MESSAGES_SRC.index("]", cursor_loop_pos)
+    ]
+
+    assert "source.addEventListener('capability_route'" in wire_block
+    assert "_mergeCapabilityRouteEvent" in wire_block
+    assert "capability_route_events" in wire_block
+    assert "persistInflightState()" in wire_block
+    assert "'capability_route'" in cursor_loop
+    fields_pos = MESSAGES_SRC.index("const _EPHEMERAL_TURN_FIELDS")
+    fields_block = MESSAGES_SRC[fields_pos : MESSAGES_SRC.index("];", fields_pos) + 2]
+    assert "'capability_route_events'" in fields_block

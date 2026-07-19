@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="24" time="1.564" timestamp="2026-07-19T20:38:01.154493+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.gateway.test_display_config.TestConfigMigration" name="test_migration_creates_platforms_entries" time="0.084"><failure message="AssertionError: assert None == 'off'&#10; +  where None = &lt;built-in method get of dict object at 0x10c9db9c0&gt;('tool_progress')&#10; +    where &lt;built-in method get of dict object at 0x10c9db9c0&gt; = {}.get&#10; +      where {} = &lt;built-in method get of dict object at 0x10c9da6c0&gt;('signal', {})&#10; +        where &lt;built-in method get of dict object at 0x10c9da6c0&gt; = {}.get">self = &lt;tests.gateway.test_display_config.TestConfigMigration object at 0x10bb23e90&gt;
+tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2897/test_migration_creates_platfor0')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10c7d4d90&gt;
+
+    def test_migration_creates_platforms_entries(self, tmp_path, monkeypatch):
+        """Old overrides are migrated into display.platforms.&lt;plat&gt;.tool_progress."""
+        import yaml
+
+        config_path = tmp_path / "config.yaml"
+        config = {
+            "_config_version": 15,
+            "display": {
+                "tool_progress_overrides": {
+                    "signal": "off",
+                    "telegram": "all",
+                },
+            },
+        }
+        config_path.write_text(yaml.dump(config), encoding="utf-8")
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        # Re-import to pick up the new HERMES_HOME
+        import importlib
+        import hermes_cli.config as cfg_mod
+        importlib.reload(cfg_mod)
+
+        result = cfg_mod.migrate_config(interactive=False, quiet=True)
+        # Re-read config
+        updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        platforms = updated.get("display", {}).get("platforms", {})
+&gt;       assert platforms.get("signal", {}).get("tool_progress") == "off"
+E       AssertionError: assert None == 'off'
+E        +  where None = &lt;built-in method get of dict object at 0x10c9db9c0&gt;('tool_progress')
+E        +    where &lt;built-in method get of dict object at 0x10c9db9c0&gt; = {}.get
+E        +      where {} = &lt;built-in method get of dict object at 0x10c9da6c0&gt;('signal', {})
+E        +        where &lt;built-in method get of dict object at 0x10c9da6c0&gt; = {}.get
+
+tests/gateway/test_display_config.py:305: AssertionError</failure></testcase><testcase classname="tests.gateway.test_goal_max_turns_config" name="test_gateway_goal_uses_goals_max_turns_from_full_config" time="0.031"><failure message="assert '⊙ Goal set (7-turn budget): ship the benchmark' in &quot;⊙ Goal set (20-turn budget): ship the benchmark\nI'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.\nControls: /goal status · /goal pause · /goal resume · /goal clear&quot;">tmp_path = PosixPath('/private/var/folders/5h/f2nd43h57ll1gn08pqvv722c0000gn/T/pytest-of-bwb/pytest-2897/test_gateway_goal_uses_goals_m0')
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x10c873d90&gt;
+
+    @pytest.mark.asyncio
+    async def test_gateway_goal_uses_goals_max_turns_from_full_config(tmp_path, monkeypatch):
+        """Gateway /goal should honor top-level goals.max_turns from config.yaml."""
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("goals:\n  max_turns: 7\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        goals._DB_CACHE.clear()
+
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig(
+            platforms={Platform.DISCORD: PlatformConfig(enabled=True, token="token")}
+        )
+        runner.session_store = _FakeSessionStore()
+        runner.adapters = {}
+        runner._queued_events = {}
+
+        event = MessageEvent(
+            text="/goal ship the benchmark",
+            message_type=MessageType.TEXT,
+            source=SessionSource(
+                platform=Platform.DISCORD,
+                chat_id="chat-goal-config",
+                chat_type="channel",
+                user_id="user-goal-config",
+            ),
+            message_id="msg-goal-config",
+        )
+
+        response = await GatewayRunner._handle_goal_command(runner, event)
+
+        try:
+&gt;           assert "⊙ Goal set (7-turn budget): ship the benchmark" in response
+E           assert '⊙ Goal set (7-turn budget): ship the benchmark' in "⊙ Goal set (20-turn budget): ship the benchmark\nI'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.\nControls: /goal status · /goal pause · /goal resume · /goal clear"
+
+tests/gateway/test_goal_max_turns_config.py:57: AssertionError</failure></testcase><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_reasoning_in_help_output" time="0.046" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_reasoning_is_known_command" time="0.017" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_parse_reasoning_command_args_accepts_ascii_and_smart_global_flags" time="0.008" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_reasoning_command_reloads_current_state_from_config" time="0.010" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_handle_reasoning_command_updates_config_and_cache" time="0.012" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_handle_reasoning_command_defaults_to_session_only" time="0.009" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_reasoning_global_clears_existing_session_override" time="0.011" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_reasoning_reset_clears_session_override_without_config_write" time="0.010" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_resolve_session_reasoning_prefers_session_override" time="0.008" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_run_agent_reloads_reasoning_config_per_message" time="0.359" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_run_agent_prefers_session_reasoning_override" time="0.225" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_run_agent_includes_enabled_mcp_servers_in_gateway_toolsets" time="0.227" /><testcase classname="tests.gateway.test_reasoning_command.TestReasoningCommand" name="test_run_agent_homeassistant_uses_default_platform_toolset" time="0.225" /><testcase classname="tests.gateway.test_reasoning_command.TestLoadShowReasoningCoercion" name="test_quoted_false_is_false" time="0.009" /><testcase classname="tests.gateway.test_reasoning_command.TestLoadShowReasoningCoercion" name="test_quoted_off_is_false" time="0.008" /><testcase classname="tests.gateway.test_reasoning_command.TestLoadShowReasoningCoercion" name="test_quoted_true_is_true" time="0.008" /><testcase classname="tests.gateway.test_reasoning_command.TestLoadShowReasoningCoercion" name="test_bare_true_is_true" time="0.008" /><testcase classname="tests.gateway.test_reasoning_command.TestLoadShowReasoningCoercion" name="test_missing_is_false" time="0.009" /><testcase classname="tests.test_unrelated_config_writer_metadata_preservation" name="test_onboarding_mark_seen_uses_latest_locked_config" time="0.013" /><testcase classname="tests.test_unrelated_config_writer_metadata_preservation" name="test_yuanbao_auto_sethome_uses_latest_locked_config" time="0.012" /><testcase classname="tests.test_unrelated_config_writer_metadata_preservation" name="test_gateway_verbose_uses_latest_locked_config" time="0.013" /><testcase classname="tests.test_unrelated_config_writer_metadata_preservation" name="test_gateway_config_commands_do_not_write_loaded_snapshots" time="0.010" /></testsuite></testsuites>

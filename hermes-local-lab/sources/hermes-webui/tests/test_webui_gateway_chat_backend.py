@@ -37,6 +37,67 @@ from api.gateway_chat import (
 WEBUI_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def verified_gateway_aux_vision(monkeypatch):
+    """Freeze one verified auxiliary generation for Gateway attachment tests."""
+    from types import SimpleNamespace
+    from agent import image_runtime
+
+    generation = image_runtime.CapabilityRuntimeGeneration(
+        vision=(
+            1,
+            "gateway-vision-fingerprint",
+            "verified",
+            True,
+            "gateway-vision-generation",
+        ),
+        image_generation=(
+            1,
+            "gateway-image-fingerprint",
+            "verified",
+            True,
+            "gateway-image-generation",
+        ),
+        stable=True,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "capture_capability_runtime_generation",
+        lambda: generation,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda capability="image_generation": {
+            "schema_version": generation.vision[0],
+            "fingerprint": generation.vision[1],
+            "status": generation.vision[2],
+            "available": generation.vision[3],
+            "_authorization_generation": generation.vision[4],
+            "reason_code": "",
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        if capability in {"vision", "image_analysis"}
+        else {
+            "schema_version": generation.image_generation[0],
+            "fingerprint": generation.image_generation[1],
+            "status": generation.image_generation[2],
+            "available": generation.image_generation[3],
+            "_authorization_generation": generation.image_generation[4],
+            "reason_code": "",
+            "provider": "image-provider",
+            "model": "image-model",
+        },
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "capture_frozen_vision_request_binding",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    return generation
+
+
 def _assert_no_public_hermes(value):
     serialized = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
     assert "hermes" not in serialized.lower()
@@ -1221,6 +1282,8 @@ def test_gateway_chat_worker_maps_sse_error_to_taiji_message(tmp_path, monkeypat
 
 
 def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):
+    from agent import image_runtime
+
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -1231,6 +1294,73 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     )
     captured = {}
+    generation = image_runtime.CapabilityRuntimeGeneration(
+        vision=(
+            1,
+            "gateway-native-vision-fingerprint",
+            "configured_unverified",
+            False,
+            "gateway-native-vision-generation",
+        ),
+        image_generation=(
+            1,
+            "gateway-native-image-fingerprint",
+            "verified",
+            True,
+            "gateway-native-image-generation",
+        ),
+        stable=True,
+    )
+    captures = []
+    forwarded_generations = []
+    original_prepare = gateway_chat.prepare_webui_chat_input
+    original_messages = gateway_chat._gateway_messages_for_new_turn
+
+    def capture_generation():
+        captures.append("capture")
+        return generation
+
+    def prepare_with_generation(*args, **kwargs):
+        forwarded_generations.append(
+            ("prepare", kwargs.get("capability_generation"))
+        )
+        return original_prepare(*args, **kwargs)
+
+    def messages_with_generation(*args, **kwargs):
+        forwarded_generations.append(
+            ("history", kwargs.get("capability_generation"))
+        )
+        return original_messages(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_runtime,
+        "capture_capability_runtime_generation",
+        capture_generation,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda capability="image_generation": {
+            "schema_version": generation.vision[0],
+            "fingerprint": generation.vision[1],
+            "status": generation.vision[2],
+            "available": generation.vision[3],
+            "_authorization_generation": generation.vision[4],
+            "reason_code": "verification_required",
+            "provider": "",
+            "model": "",
+        },
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "prepare_webui_chat_input",
+        prepare_with_generation,
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_gateway_messages_for_new_turn",
+        messages_with_generation,
+    )
 
     class FakeResponse:
         def __enter__(self):
@@ -1282,9 +1412,16 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert captures == ["capture"]
+    assert forwarded_generations == [
+        ("prepare", generation),
+        ("history", generation),
+    ]
 
 
-def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, monkeypatch):
+def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(
+    tmp_path, monkeypatch, verified_gateway_aux_vision
+):
     from tools import vision_tools
 
     session_dir = tmp_path / "sessions"
@@ -1380,7 +1517,9 @@ def test_gateway_runs_uses_auxiliary_vision_text_before_main_request(tmp_path, m
     assert "base64" not in content
 
 
-def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monkeypatch):
+def test_gateway_blocks_main_request_when_auxiliary_vision_fails(
+    tmp_path, monkeypatch, verified_gateway_aux_vision
+):
     from tools import vision_tools
 
     session_dir = tmp_path / "sessions"
@@ -1468,7 +1607,9 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(tmp_path, monke
     assert str(image_path) not in reloaded.messages[3]["content"]
 
 
-def test_gateway_cancellation_after_first_auxiliary_image_skips_second_and_main_request(tmp_path, monkeypatch):
+def test_gateway_cancellation_after_first_auxiliary_image_skips_second_and_main_request(
+    tmp_path, monkeypatch, verified_gateway_aux_vision
+):
     from tools import vision_tools
 
     session_dir = tmp_path / "sessions"

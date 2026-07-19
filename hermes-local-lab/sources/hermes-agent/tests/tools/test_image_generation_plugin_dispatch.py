@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -224,13 +225,39 @@ class TestPluginDispatch:
             token = set_hermes_home_override(profiles[profile]["home"])
             try:
                 start.wait(timeout=5)
+                binding = (
+                    image_generation_tool
+                    ._capture_image_gen_request_binding(
+                        authorization_generation=f"test-generation-{profile}",
+                    )
+                )
+                assert binding is not None
+                snapshot = {
+                    "schema_version": 1,
+                    "fingerprint": binding.authorization_fingerprint,
+                    "_authorization_generation": (
+                        binding.authorization_generation
+                    ),
+                    "status": "verified",
+                    "available": True,
+                    "provider": "custom:router",
+                    "model": profiles[profile]["model"],
+                }
+                from agent.image_runtime import (
+                    build_capability_route_decision,
+                )
+
+                decision = build_capability_route_decision(
+                    "image_generation",
+                    snapshot=snapshot,
+                    route="provider",
+                    request_binding=binding,
+                )
                 raw = image_generation_tool._dispatch_to_plugin_provider(
                     f"probe-{profile}",
                     "square",
-                    runtime_snapshot={
-                        "provider": "custom:router",
-                        "model": profiles[profile]["model"],
-                    },
+                    runtime_snapshot=snapshot,
+                    route_decision=decision,
                 )
                 results[profile] = json.loads(raw)
             finally:
@@ -295,6 +322,7 @@ def test_builtin_image_provider_consumes_pinned_probe_key(
 ):
     from agent.image_gen_verification import (
         ImageGenRequestBinding,
+        authorize_image_gen_request_binding,
         image_gen_runtime_identity,
     )
 
@@ -306,30 +334,39 @@ def test_builtin_image_provider_consumes_pinned_probe_key(
         raise AssertionError("pinned probe fell back to live credential")
 
     def fake_post_json(**kwargs):
+        kwargs["reauth_guard"]()
         captured["authorization"] = kwargs["headers"]["Authorization"]
         captured["url"] = kwargs["url"]
         return {"data": [{"url": "https://cdn.example.test/image.png"}]}, None
+
+    def fake_cached_success(**kwargs):
+        kwargs["reauth_guard"]()
+        return {
+            "success": True,
+            "image": "/tmp/pinned-probe.png",
+            "provider": provider_name,
+            "model": kwargs["model"],
+        }
 
     monkeypatch.setattr(module, "provider_api_key", live_key_must_not_be_read)
     monkeypatch.setattr(module, "post_json", fake_post_json)
     monkeypatch.setattr(
         module,
         "cached_success",
-        lambda **kwargs: {
-            "success": True,
-            "image": "/tmp/pinned-probe.png",
-            "provider": provider_name,
-            "model": kwargs["model"],
-        },
+        fake_cached_success,
     )
-    binding = ImageGenRequestBinding(
-        provider=provider_name,
-        model=model,
-        api_key="pinned-secret",
-        runtime_identity=image_gen_runtime_identity(
-            provider_name,
-            {"provider": provider_name, "model": model},
+    binding = authorize_image_gen_request_binding(
+        ImageGenRequestBinding(
+            provider=provider_name,
+            model=model,
+            api_key="pinned-secret",
+            runtime_identity=image_gen_runtime_identity(
+                provider_name,
+                {"provider": provider_name, "model": model},
+            ),
         ),
+        authorization_fingerprint="direct-provider-test",
+        authorization_generation="direct-provider-generation",
     )
 
     result = provider.generate(
@@ -337,6 +374,7 @@ def test_builtin_image_provider_consumes_pinned_probe_key(
         aspect_ratio="square",
         model=model,
         _runtime_binding=binding,
+        _reauth_guard=lambda: None,
     )
 
     assert result["success"] is True
@@ -357,6 +395,7 @@ def test_dashscope_rejects_mismatched_pinned_probe_binding_without_io(
 ):
     from agent.image_gen_verification import (
         ImageGenRequestBinding,
+        authorize_image_gen_request_binding,
         image_gen_runtime_identity,
     )
     from plugins.image_gen.dashscope import DashScopeQwenImageProvider
@@ -368,17 +407,21 @@ def test_dashscope_rejects_mismatched_pinned_probe_binding_without_io(
         "post_json",
         lambda **kwargs: calls.append(kwargs),
     )
-    binding = ImageGenRequestBinding(
-        provider=binding_provider,
-        model=binding_model,
-        api_key="must-not-leak",
-        runtime_identity=image_gen_runtime_identity(
-            "dashscope",
-            {
-                "provider": "dashscope",
-                "model": "qwen-image-2.0-pro",
-            },
+    binding = authorize_image_gen_request_binding(
+        ImageGenRequestBinding(
+            provider=binding_provider,
+            model=binding_model,
+            api_key="must-not-leak",
+            runtime_identity=image_gen_runtime_identity(
+                "dashscope",
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                },
+            ),
         ),
+        authorization_fingerprint="mismatched-binding-test",
+        authorization_generation="mismatched-binding-generation",
     )
 
     result = DashScopeQwenImageProvider().generate(
@@ -386,6 +429,7 @@ def test_dashscope_rejects_mismatched_pinned_probe_binding_without_io(
         aspect_ratio="square",
         model="qwen-image-2.0-pro",
         _runtime_binding=binding,
+        _reauth_guard=lambda: None,
     )
 
     assert result["success"] is False
@@ -407,6 +451,7 @@ def test_image_probe_binding_repr_and_runtime_identity_are_secret_safe():
             "endpoint_resolved": True,
             "endpoint": endpoint,
         },
+        _authorization_fingerprint="repr-safety-test",
     )
 
     rendered = repr(binding)
@@ -414,3 +459,311 @@ def test_image_probe_binding_repr_and_runtime_identity_are_secret_safe():
     assert endpoint not in rendered
     with pytest.raises(TypeError):
         binding.runtime_identity["endpoint"] = "https://mutated.invalid"
+
+
+def test_image_provider_boundary_final_reauth_blocks_state_drift_without_io(
+    monkeypatch,
+):
+    """A route decision must be reauthorized after it is frozen, before Provider I/O."""
+    from agent import image_runtime
+    from agent import image_gen_registry as registry_module
+    from agent.image_gen_verification import ImageGenRequestBinding
+    from hermes_cli import plugins as plugins_module
+    from tools import image_generation_tool
+
+    decision_factory = getattr(
+        image_runtime,
+        "build_capability_route_decision",
+        None,
+    )
+    assert callable(decision_factory), "CapabilityRouteDecision factory is missing"
+
+    verified = {
+        "schema_version": 1,
+        "fingerprint": "image-final-reauth-v1",
+        "_authorization_generation": "image-final-reauth-generation-v1",
+        "status": "verified",
+        "available": True,
+        "reason_code": "ready",
+        "provider": "codex",
+        "model": "gpt-image-2",
+    }
+    stale = {
+        **verified,
+        "status": "configured_unverified",
+        "available": False,
+        "reason_code": "image_generation_not_verified",
+    }
+    from agent.image_gen_verification import (
+        authorize_image_gen_request_binding,
+    )
+
+    binding = authorize_image_gen_request_binding(
+        ImageGenRequestBinding(
+            provider="codex",
+            model="gpt-image-2",
+            api_key="pinned-before-drift",
+            runtime_identity={
+                "identity_supported": True,
+                "endpoint_resolved": True,
+                "endpoint": "https://pinned-before-drift.example.test/v1",
+            },
+        ),
+        authorization_fingerprint=verified["fingerprint"],
+        authorization_generation=verified[
+            "_authorization_generation"
+        ],
+    )
+    runtime = {"snapshot": dict(verified)}
+    build_calls = []
+
+    def freeze_then_drift(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        # The verification state changes after the caller's initial read but
+        # before the Provider-boundary final authorization.
+        runtime["snapshot"] = dict(stale)
+        return decision_factory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_runtime,
+        "build_capability_route_decision",
+        freeze_then_drift,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda *_args, **_kwargs: dict(runtime["snapshot"]),
+    )
+    monkeypatch.setattr(
+        image_generation_tool,
+        "_capture_image_gen_request_binding",
+        lambda **_kwargs: binding,
+    )
+    monkeypatch.setattr(
+        plugins_module,
+        "_ensure_plugins_discovered",
+        lambda *args, **kwargs: None,
+    )
+    provider_io = []
+
+    class BoundaryProvider(ImageGenProvider):
+        @property
+        def name(self) -> str:
+            return "codex"
+
+        def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+            provider_io.append(
+                {
+                    "prompt": prompt,
+                    "aspect_ratio": aspect_ratio,
+                    **kwargs,
+                }
+            )
+            return {
+                "success": True,
+                "provider": "codex",
+                "model": "gpt-image-2",
+                "image": "/tmp/should-not-exist.png",
+            }
+
+    provider = BoundaryProvider()
+    monkeypatch.setattr(
+        registry_module,
+        "get_provider",
+        lambda name: provider if name == "codex" else None,
+    )
+
+    result = json.loads(
+        image_generation_tool._handle_image_generate(
+            {"prompt": "draw the boundary", "aspect_ratio": "square"},
+            caller_capability_fingerprint=verified["fingerprint"],
+            caller_capability_generation=verified[
+                "_authorization_generation"
+            ],
+        )
+    )
+
+    violations = []
+    if len(build_calls) != 1:
+        violations.append("dispatch did not freeze one route decision")
+    if provider_io:
+        violations.append("state drift reached Provider I/O")
+    if result.get("success") is not False:
+        violations.append("state drift did not return a blocked result")
+    if result.get("error_code") != "capability_caller_stale":
+        violations.append("state drift did not return stable stale error_code")
+    if result.get("error_type") != "capability_caller_stale":
+        violations.append("state drift did not return stable stale error_type")
+    assert violations == [], "; ".join(violations)
+
+
+def test_image_dispatch_uses_private_pinned_binding_after_ambient_rotation(
+    monkeypatch,
+):
+    """Ambient credentials changed after reauth must not replace the private binding."""
+    from agent import image_runtime
+    from agent import image_gen_registry as registry_module
+    from agent.image_gen_verification import ImageGenRequestBinding
+    from hermes_cli import plugins as plugins_module
+    from tools import image_generation_tool
+
+    decision_factory = getattr(
+        image_runtime,
+        "build_capability_route_decision",
+        None,
+    )
+    assert callable(decision_factory), "CapabilityRouteDecision factory is missing"
+
+    verified = {
+        "schema_version": 1,
+        "fingerprint": "image-pinned-binding-v1",
+        "_authorization_generation": "image-pinned-binding-generation-v1",
+        "status": "verified",
+        "available": True,
+        "reason_code": "ready",
+        "provider": "codex",
+        "model": "gpt-image-2",
+    }
+    pinned_endpoint = "https://pinned-image.example.test/v1"
+    pinned_secret = "pinned-image-secret"
+    from agent.image_gen_verification import (
+        authorize_image_gen_request_binding,
+    )
+
+    binding = authorize_image_gen_request_binding(
+        ImageGenRequestBinding(
+            provider="codex",
+            model="gpt-image-2",
+            api_key=pinned_secret,
+            runtime_identity={
+                "identity_supported": True,
+                "endpoint_resolved": True,
+                "endpoint": pinned_endpoint,
+            },
+        ),
+        authorization_fingerprint=verified["fingerprint"],
+        authorization_generation=verified[
+            "_authorization_generation"
+        ],
+    )
+    build_calls = []
+
+    def build_decision(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        return decision_factory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        image_runtime,
+        "build_capability_route_decision",
+        build_decision,
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "verification_runtime_snapshot",
+        lambda *_args, **_kwargs: dict(verified),
+    )
+    monkeypatch.setattr(
+        image_generation_tool,
+        "_capture_image_gen_request_binding",
+        lambda **_kwargs: binding,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-before-reauth")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://ambient-before-reauth.example.test/v1",
+    )
+    reauth_calls = []
+
+    def final_reauth(_snapshot):
+        reauth_calls.append(True)
+        # Authorization has succeeded. Rotate the ambient process state before
+        # the Provider consumes its request-local binding.
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-after-reauth")
+        monkeypatch.setenv(
+            "OPENAI_BASE_URL",
+            "https://ambient-after-reauth.example.test/v1",
+        )
+        return True
+
+    monkeypatch.setattr(
+        image_generation_tool,
+        "_same_authorization_snapshot",
+        final_reauth,
+    )
+    monkeypatch.setattr(
+        plugins_module,
+        "_ensure_plugins_discovered",
+        lambda *args, **kwargs: None,
+    )
+    provider_calls = []
+
+    class BindingAwareProvider(ImageGenProvider):
+        _supports_pinned_image_request_binding = True
+
+        @property
+        def name(self) -> str:
+            return "codex"
+
+        def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+            kwargs["_reauth_guard"]()
+            provider_calls.append(kwargs)
+            return {
+                "success": True,
+                "provider": "codex",
+                "model": kwargs.get("model"),
+                "image": "/tmp/pinned-binding.png",
+            }
+
+    provider = BindingAwareProvider()
+    monkeypatch.setattr(
+        registry_module,
+        "get_provider",
+        lambda name: provider if name == "codex" else None,
+    )
+
+    result = json.loads(
+        image_generation_tool._handle_image_generate(
+            {"prompt": "draw the pinned route", "aspect_ratio": "portrait"},
+            caller_capability_fingerprint=verified["fingerprint"],
+            caller_capability_generation=verified[
+                "_authorization_generation"
+            ],
+        )
+    )
+
+    observed_binding = (
+        provider_calls[0].get("_runtime_binding")
+        if len(provider_calls) == 1
+        else None
+    )
+    violations = []
+    if result.get("success") is not True:
+        violations.append("pinned image dispatch unexpectedly failed")
+    if len(build_calls) != 1:
+        violations.append("dispatch did not freeze one route decision")
+    if reauth_calls != [True, True]:
+        violations.append(
+            "dispatch did not reauthorize at final dispatch and Provider I/O"
+        )
+    if len(provider_calls) != 1:
+        violations.append("Provider was not called exactly once")
+    if observed_binding is not binding:
+        violations.append("Provider did not receive the private pinned binding")
+    if (
+        observed_binding is not None
+        and observed_binding.api_key != pinned_secret
+    ):
+        violations.append("Provider binding secret changed with ambient state")
+    if (
+        observed_binding is not None
+        and observed_binding.runtime_identity["endpoint"] != pinned_endpoint
+    ):
+        violations.append("Provider binding endpoint changed with ambient state")
+    if os.environ["OPENAI_API_KEY"] != "ambient-after-reauth":
+        violations.append("test did not rotate the ambient secret after reauth")
+    if (
+        os.environ["OPENAI_BASE_URL"]
+        != "https://ambient-after-reauth.example.test/v1"
+    ):
+        violations.append("test did not rotate the ambient endpoint after reauth")
+    assert violations == [], "; ".join(violations)

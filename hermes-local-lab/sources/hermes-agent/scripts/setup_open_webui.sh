@@ -62,61 +62,85 @@ choose_python() {
   fi
 }
 
-upsert_env() {
-  local key="$1"
-  local value="$2"
-  local file="$3"
+choose_hermes_python() {
+  local script_dir repo_root candidate hermes_bin
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(dirname "$script_dir")"
+  hermes_bin="$(command -v hermes 2>/dev/null || true)"
 
-  mkdir -p "$(dirname "$file")"
-  touch "$file"
+  for candidate in \
+    "${HERMES_PYTHON:-}" \
+    "$repo_root/.venv/bin/python" \
+    "$repo_root/venv/bin/python" \
+    "${hermes_bin:+$(dirname "$hermes_bin")/python3}" \
+    "$(command -v python3 2>/dev/null || true)"
+  do
+    if [[ -n "$candidate" && -x "$candidate" ]] \
+      && "$candidate" -c 'import agent.provider_credentials' >/dev/null 2>&1
+    then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
 
-  python3 - "$file" "$key" "$value" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-key = sys.argv[2]
-value = sys.argv[3]
-lines = path.read_text().splitlines() if path.exists() else []
-out = []
-seen = False
-for raw in lines:
-    stripped = raw.strip()
-    if stripped.startswith(f"{key}="):
-        if not seen:
-            out.append(f"{key}={value}")
-            seen = True
-        continue
-    out.append(raw)
-if not seen:
-    if out and out[-1] != "":
-        out.append("")
-    out.append(f"{key}={value}")
-path.write_text("\n".join(out).rstrip() + "\n")
-PY
+  echo "A Hermes Python environment with agent.provider_credentials is required." >&2
+  exit 1
 }
 
-get_env_value() {
-  local key="$1"
-  local file="$2"
-  python3 - "$file" "$key" <<'PY'
+configure_hermes_api_env() {
+  local hermes_python
+  hermes_python="$(choose_hermes_python)"
+  "$hermes_python" - \
+    "$HERMES_ENV_FILE" \
+    "$HERMES_API_HOST" \
+    "$HERMES_API_PORT" \
+    "$HERMES_API_MODEL_NAME" <<'PY'
 from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-key = sys.argv[2]
-if not path.exists():
-    raise SystemExit(0)
-for raw in path.read_text().splitlines():
-    line = raw.strip()
-    if line.startswith(f"{key}="):
-        print(line.split("=", 1)[1])
-        raise SystemExit(0)
-PY
-}
-
-generate_secret() {
-  python3 - <<'PY'
+import os
 import secrets
-print(secrets.token_urlsafe(32))
+import sys
+
+from agent.provider_credentials import (
+    _credential_data_mode,
+    _enforce_active_credential_fd_policy,
+    credential_transaction,
+    load_credential_snapshot,
+    mutate_env_unique,
+)
+
+env_path = Path(sys.argv[1]).expanduser()
+if not env_path.is_absolute():
+    env_path = Path.cwd() / env_path
+if env_path.name != ".env":
+    raise ValueError("HERMES_ENV_FILE must target the canonical .env")
+config_path = env_path.parent / "config.yaml"
+
+with credential_transaction(config_path):
+    snapshot = load_credential_snapshot(config_path)
+    api_key = snapshot.env.get("API_SERVER_KEY") or secrets.token_urlsafe(32)
+    mutate_env_unique(
+        {
+            "API_SERVER_ENABLED": "true",
+            "API_SERVER_HOST": sys.argv[2],
+            "API_SERVER_PORT": sys.argv[3],
+            "API_SERVER_MODEL_NAME": sys.argv[4],
+            "API_SERVER_KEY": api_key,
+        },
+        config_path=config_path,
+    )
+    if env_path.exists():
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_fd = os.open(env_path, flags)
+        try:
+            _enforce_active_credential_fd_policy(
+                file_fd,
+                env_path,
+                expected_mode=_credential_data_mode(),
+                label="Open WebUI env",
+            )
+        finally:
+            os.close(file_fd)
 PY
 }
 
@@ -217,10 +241,6 @@ EOF
   chmod +x "$LAUNCHER_PATH"
 }
 
-ensure_env_permissions() {
-  chmod 600 "$HERMES_ENV_FILE" 2>/dev/null || true
-}
-
 install_launchd_service() {
   local plist="$HOME/Library/LaunchAgents/ai.openwebui.hermes.plist"
   mkdir -p "$(dirname "$plist")"
@@ -293,19 +313,8 @@ main() {
 
   install_macos_dependencies
 
-  local api_key
-  api_key="$(get_env_value API_SERVER_KEY "$HERMES_ENV_FILE")"
-  if [[ -z "$api_key" ]]; then
-    api_key="$(generate_secret)"
-  fi
-
   log 'Ensuring Hermes API server is configured...'
-  upsert_env API_SERVER_ENABLED true "$HERMES_ENV_FILE"
-  upsert_env API_SERVER_HOST "$HERMES_API_HOST" "$HERMES_ENV_FILE"
-  upsert_env API_SERVER_PORT "$HERMES_API_PORT" "$HERMES_ENV_FILE"
-  upsert_env API_SERVER_MODEL_NAME "$HERMES_API_MODEL_NAME" "$HERMES_ENV_FILE"
-  upsert_env API_SERVER_KEY "$api_key" "$HERMES_ENV_FILE"
-  ensure_env_permissions
+  configure_hermes_api_env
 
   log 'Restarting Hermes gateway so API server settings take effect...'
   hermes gateway restart >/dev/null 2>&1 || true
@@ -346,4 +355,6 @@ main() {
   log 'Important: Open WebUI persists connection settings after first launch. If you later save a wrong API key in the Admin UI, update/delete that connection there or reset its database.'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

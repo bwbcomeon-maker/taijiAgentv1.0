@@ -111,13 +111,16 @@ def is_borrowed_credential_source(source: Any, provider_id: Any = None) -> bool:
     return (normalized_provider, normalized_source) not in _PERSISTABLE_PROVIDER_SOURCES
 
 
-def _is_secret_payload_key(key: Any) -> bool:
+def is_secret_payload_key(key: Any) -> bool:
     normalized = _normalize_key(key)
     if not normalized or normalized in _SAFE_SECRETISH_METADATA_KEYS:
         return False
     if normalized in _SECRET_VALUE_KEYS:
         return True
     return normalized.endswith(_SECRET_VALUE_SUFFIXES)
+
+
+_is_secret_payload_key = is_secret_payload_key
 
 
 def _fingerprint_value(value: Any) -> str | None:
@@ -137,7 +140,7 @@ def _credential_secret_fingerprint(payload: Mapping[str, Any]) -> str | None:
             return fingerprint
 
     for key, value in payload.items():
-        if _is_secret_payload_key(key):
+        if is_secret_payload_key(key):
             fingerprint = _fingerprint_value(value)
             if fingerprint:
                 return fingerprint
@@ -167,7 +170,7 @@ def sanitize_borrowed_credential_payload(
     sanitized = {
         key: value
         for key, value in result.items()
-        if not _is_secret_payload_key(key)
+        if not is_secret_payload_key(key)
     }
     if fingerprint:
         sanitized["secret_fingerprint"] = fingerprint

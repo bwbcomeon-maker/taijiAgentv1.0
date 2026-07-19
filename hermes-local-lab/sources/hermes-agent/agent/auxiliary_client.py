@@ -42,6 +42,7 @@ Payment / credit exhaustion fallback:
 
 import json
 import hashlib
+import hmac
 import logging
 import os
 import threading
@@ -51,7 +52,7 @@ from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
 
 
@@ -61,6 +62,7 @@ _transient_named_vision_clients: ContextVar[Optional[list[Any]]] = ContextVar(
 _named_vision_http_binding: ContextVar[Optional[dict[str, Any]]] = ContextVar(
     "named_vision_http_binding", default=None
 )
+_VISION_BINDING_SEAL_KEY = os.urandom(32)
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,292 @@ class VisionRequestBinding:
     network_scope: str = "public_direct"
     trusted_proxy_profile: str = field(default="", repr=False)
     endpoint_mode: str = ""
+    _authorization_fingerprint: str = field(
+        default="",
+        repr=False,
+        compare=False,
+    )
+    _authorization_generation: str = field(
+        default="",
+        repr=False,
+        compare=False,
+    )
+    _authorization_seal: str = field(
+        default="",
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider",
+            str(self.provider or "").strip().lower(),
+        )
+        object.__setattr__(
+            self,
+            "model",
+            str(self.model or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "base_url",
+            str(self.base_url or "").strip().rstrip("/"),
+        )
+        object.__setattr__(
+            self,
+            "api_key",
+            str(self.api_key or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "api_mode",
+            str(self.api_mode or "").strip() or "chat_completions",
+        )
+        object.__setattr__(
+            self,
+            "network_scope",
+            str(self.network_scope or "").strip() or "public_direct",
+        )
+        object.__setattr__(
+            self,
+            "trusted_proxy_profile",
+            str(self.trusted_proxy_profile or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "endpoint_mode",
+            str(self.endpoint_mode or "").strip().lower(),
+        )
+        object.__setattr__(
+            self,
+            "_authorization_fingerprint",
+            str(self._authorization_fingerprint or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "_authorization_generation",
+            str(self._authorization_generation or "").strip(),
+        )
+        object.__setattr__(self, "_authorization_seal", "")
+
+    @property
+    def authorization_fingerprint(self) -> str:
+        """Private fingerprint tying material, secret and profile together."""
+        return self._authorization_fingerprint
+
+    @property
+    def authorization_generation(self) -> str:
+        """Private persisted verification-state generation."""
+        return self._authorization_generation
+
+
+def _vision_binding_seal_value(binding: VisionRequestBinding) -> str:
+    material = {
+        "authorization_fingerprint": binding.authorization_fingerprint,
+        "authorization_generation": binding.authorization_generation,
+        "provider": binding.provider,
+        "model": binding.model,
+        "base_url": binding.base_url,
+        "api_key_digest": hashlib.sha256(
+            binding.api_key.encode("utf-8")
+        ).hexdigest(),
+        "api_mode": binding.api_mode,
+        "network_scope": binding.network_scope,
+        "trusted_proxy_profile": binding.trusted_proxy_profile,
+        "endpoint_mode": binding.endpoint_mode,
+    }
+    return hmac.new(
+        _VISION_BINDING_SEAL_KEY,
+        json.dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def authorize_vision_request_binding(
+    binding: VisionRequestBinding,
+    *,
+    authorization_fingerprint: str,
+    authorization_generation: str,
+) -> VisionRequestBinding:
+    """Seal trusted request-local material after one canonical fingerprint."""
+    if not isinstance(binding, VisionRequestBinding):
+        raise TypeError("binding must be VisionRequestBinding")
+    fingerprint = str(authorization_fingerprint or "").strip()
+    generation = str(authorization_generation or "").strip()
+    if not fingerprint or not generation:
+        raise ValueError(
+            "vision authorization fingerprint and generation are required"
+        )
+    object.__setattr__(
+        binding,
+        "_authorization_fingerprint",
+        fingerprint,
+    )
+    object.__setattr__(
+        binding,
+        "_authorization_generation",
+        generation,
+    )
+    object.__setattr__(
+        binding,
+        "_authorization_seal",
+        _vision_binding_seal_value(binding),
+    )
+    return binding
+
+
+def vision_request_binding_matches_authorization(
+    binding: Any,
+    *,
+    authorization_fingerprint: str,
+    authorization_generation: str,
+) -> bool:
+    """Validate both generation identity and the private material seal."""
+    if not isinstance(binding, VisionRequestBinding):
+        return False
+    expected = str(authorization_fingerprint or "").strip()
+    expected_generation = str(
+        authorization_generation or ""
+    ).strip()
+    if (
+        not expected
+        or not expected_generation
+        or binding.authorization_fingerprint != expected
+        or binding.authorization_generation != expected_generation
+        or not binding._authorization_seal
+    ):
+        return False
+    return hmac.compare_digest(
+        binding._authorization_seal,
+        _vision_binding_seal_value(binding),
+    )
+
+
+def capture_vision_request_binding(
+    *,
+    authorization_fingerprint: str = "",
+    authorization_generation: str = "",
+) -> Optional[VisionRequestBinding]:
+    """Capture one private vision Provider binding from the active runtime."""
+    try:
+        from agent.image_runtime import (
+            _vision_secret_env,
+            resolve_vision_material,
+            vision_fingerprint_from_material,
+        )
+        from agent.image_gen_verification import active_profile_name
+        from agent.provider_credentials import resolve_secret_env_value
+        from hermes_cli.config import load_config
+        from hermes_constants import get_config_path
+
+        config_data = load_config()
+        if not isinstance(config_data, dict):
+            return None
+        auxiliary = config_data.get("auxiliary")
+        vision_cfg = (
+            auxiliary.get("vision")
+            if isinstance(auxiliary, dict)
+            else {}
+        )
+        if not isinstance(vision_cfg, dict):
+            return None
+        resolved = resolve_vision_material(vision_cfg, config_data)
+        effective_cfg = resolved.vision_cfg
+        provider = str(
+            effective_cfg.get("provider") or ""
+        ).strip().lower()
+        model = str(effective_cfg.get("model") or "").strip()
+        base_url = str(
+            effective_cfg.get("base_url") or ""
+        ).strip().rstrip("/")
+        config_path = get_config_path()
+        secret_env = _vision_secret_env(
+            provider,
+            effective_cfg,
+            resolved.config_data,
+            config_path=config_path,
+        )
+        api_key = (
+            resolve_secret_env_value(
+                secret_env,
+                config_path=config_path,
+            )
+            if secret_env
+            else ""
+        )
+        material_fingerprint, runtime_resolved = (
+            vision_fingerprint_from_material(
+                resolved,
+                profile=active_profile_name(),
+                secret_value=api_key,
+                key_configured=bool(api_key),
+            )
+        )
+    except (ImportError, OSError, TypeError, ValueError):
+        return None
+    if (
+        not resolved.effective_config_resolved
+        or not runtime_resolved
+        or not provider
+        or not model
+        or not base_url
+        or not api_key
+    ):
+        return None
+    expected_fingerprint = str(
+        authorization_fingerprint or material_fingerprint
+    ).strip()
+    expected_generation = str(authorization_generation or "").strip()
+    if expected_fingerprint != material_fingerprint:
+        return None
+    if not expected_generation:
+        try:
+            from agent.image_runtime import verification_runtime_snapshot
+
+            snapshot = verification_runtime_snapshot("vision")
+        except (ImportError, TypeError, ValueError):
+            return None
+        if str(snapshot.get("fingerprint") or "") != material_fingerprint:
+            return None
+        expected_generation = str(
+            snapshot.get("_authorization_generation") or ""
+        ).strip()
+    if not expected_generation:
+        return None
+    binding = VisionRequestBinding(
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=(
+            str(effective_cfg.get("api_mode") or "").strip()
+            or "chat_completions"
+        ),
+        network_scope=(
+            str(
+                effective_cfg.get("network_scope")
+                or "public_direct"
+            ).strip()
+            or "public_direct"
+        ),
+        trusted_proxy_profile=str(
+            effective_cfg.get("trusted_proxy_profile") or ""
+        ).strip(),
+        endpoint_mode=str(
+            effective_cfg.get("endpoint_mode") or ""
+        ).strip().lower(),
+    )
+    return authorize_vision_request_binding(
+        binding,
+        authorization_fingerprint=expected_fingerprint,
+        authorization_generation=expected_generation,
+    )
 
 
 def _register_transient_named_vision_client(client: Any) -> None:
@@ -4226,6 +4514,30 @@ def _close_unclaimed_named_vision_http_client(
         running_loop.create_task(close_result)
 
 
+def _disable_frozen_vision_sdk_retries(client: Any) -> None:
+    """Keep every frozen Vision Provider I/O behind the explicit guard.
+
+    OpenAI and Anthropic SDKs retry transient failures internally by default.
+    Those hidden HTTP attempts bypass ``vision_reauth_guard`` because the
+    guard wraps the public ``create`` call, not the SDK transport. Frozen
+    bindings therefore disable SDK retries and leave retry policy to the
+    guarded outer call path.
+    """
+    pending = [client]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+        if hasattr(current, "max_retries"):
+            current.max_retries = 0
+        for attr in ("_real_client", "_client"):
+            nested = getattr(current, attr, None)
+            if nested is not None and nested is not current:
+                pending.append(nested)
+
+
 def resolve_vision_provider_client(
     provider: Optional[str] = None,
     model: Optional[str] = None,
@@ -4334,6 +4646,8 @@ def resolve_vision_provider_client(
                 )
         if client is None:
             return provider_for_base_override, None, None
+        if binding is not None:
+            _disable_frozen_vision_sdk_retries(client)
         if named_custom_vision:
             _register_transient_named_vision_client(client)
         return provider_for_base_override, client, final_model
@@ -5775,6 +6089,7 @@ async def async_call_llm(
     no_fallback: bool = False,
     resolution_out: Optional[Dict[str, str]] = None,
     vision_binding: Optional[VisionRequestBinding] = None,
+    vision_reauth_guard: Optional[Callable[[], None]] = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
@@ -5783,6 +6098,10 @@ async def async_call_llm(
     if vision_binding is not None:
         if task != "vision":
             raise ValueError("vision request binding requires task=vision")
+        if not callable(vision_reauth_guard):
+            raise ValueError(
+                "vision request binding requires a request-local reauth guard"
+            )
         resolved_provider = str(vision_binding.provider or "").strip().lower()
         resolved_model = str(vision_binding.model or "").strip() or None
         resolved_base_url = str(vision_binding.base_url or "").strip() or None
@@ -5801,6 +6120,16 @@ async def async_call_llm(
             task, provider, model, base_url, api_key)
         effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
+
+    async def _create_with_request_authorization(
+        target_client: Any,
+        call_kwargs: Dict[str, Any],
+    ) -> Any:
+        """Authorize immediately before every real Provider create seam."""
+        if vision_binding is not None:
+            assert vision_reauth_guard is not None
+            vision_reauth_guard()
+        return await target_client.chat.completions.create(**call_kwargs)
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -5892,7 +6221,7 @@ async def async_call_llm(
 
     try:
         return _validate_llm_response(
-            await client.chat.completions.create(**kwargs), task)
+            await _create_with_request_authorization(client, kwargs), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
@@ -5903,7 +6232,12 @@ async def async_call_llm(
             )
             try:
                 return _validate_llm_response(
-                    await client.chat.completions.create(**retry_kwargs), task)
+                    await _create_with_request_authorization(
+                        client,
+                        retry_kwargs,
+                    ),
+                    task,
+                )
             except Exception as retry_err:
                 retry_err_str = str(retry_err)
                 if not (
@@ -5937,7 +6271,12 @@ async def async_call_llm(
             kwargs.pop("max_completion_tokens", None)
             try:
                 return _validate_llm_response(
-                    await client.chat.completions.create(**kwargs), task)
+                    await _create_with_request_authorization(
+                        client,
+                        kwargs,
+                    ),
+                    task,
+                )
             except Exception as retry_err:
                 # If the max_tokens retry also hits a payment or connection
                 # error, fall through to the fallback chain below.
@@ -5974,7 +6313,12 @@ async def async_call_llm(
                     kwargs["model"] = refreshed_model
                 try:
                     return _validate_llm_response(
-                        await refreshed_client.chat.completions.create(**kwargs), task)
+                        await _create_with_request_authorization(
+                            refreshed_client,
+                            kwargs,
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     if not (
                         _is_auth_error(retry_err)
@@ -6005,7 +6349,12 @@ async def async_call_llm(
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
                 return _validate_llm_response(
-                    await refreshed_client.chat.completions.create(**kwargs), task)
+                    await _create_with_request_authorization(
+                        refreshed_client,
+                        kwargs,
+                    ),
+                    task,
+                )
 
         # ── Auth refresh retry (mirrors sync call_llm) ───────────────
         if (_is_auth_error(first_err)
@@ -6052,7 +6401,12 @@ async def async_call_llm(
             if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
                 try:
                     return _validate_llm_response(
-                        await client.chat.completions.create(**kwargs), task)
+                        await _create_with_request_authorization(
+                            client,
+                            kwargs,
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
                         raise
@@ -6146,7 +6500,12 @@ async def async_call_llm(
                 if async_fb_model and async_fb_model != fb_kwargs.get("model"):
                     fb_kwargs["model"] = async_fb_model
                 return _validate_llm_response(
-                    await async_fb.chat.completions.create(**fb_kwargs), task)
+                    await _create_with_request_authorization(
+                        async_fb,
+                        fb_kwargs,
+                    ),
+                    task,
+                )
             # All fallback layers exhausted — warn before re-raising. (#26882)
             logger.warning(
                 "Auxiliary %s (async): %s on %s and all fallbacks exhausted "

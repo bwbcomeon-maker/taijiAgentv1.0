@@ -435,6 +435,14 @@ def _err(rid, code: int, msg: str) -> dict:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}}
 
 
+def _managed_configuration_err(rid, exc: Exception) -> dict:
+    response = _err(rid, 5035, str(exc))
+    response["error"]["data"] = {
+        "error_code": getattr(exc, "code", "managed_configuration")
+    }
+    return response
+
+
 def method(name: str):
     def dec(fn):
         _methods[name] = fn
@@ -679,13 +687,8 @@ def _load_cfg() -> dict:
     return {}
 
 
-def _save_cfg(cfg: dict):
+def _publish_cfg_cache(cfg: dict, path: Path) -> None:
     global _cfg_cache, _cfg_mtime, _cfg_path
-    import yaml
-
-    path = _hermes_home / "config.yaml"
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f)
     with _cfg_lock:
         _cfg_cache = copy.deepcopy(cfg)
         _cfg_path = path
@@ -693,6 +696,23 @@ def _save_cfg(cfg: dict):
             _cfg_mtime = path.stat().st_mtime
         except Exception:
             _cfg_mtime = None
+
+
+def _mutate_cfg(mutator) -> dict:
+    from hermes_cli.config import ManagedConfigurationError, is_managed
+
+    if is_managed():
+        raise ManagedConfigurationError("modify TUI configuration")
+
+    from agent.provider_credentials import mutate_config_strict
+
+    path = _hermes_home / "config.yaml"
+    persisted = mutate_config_strict(
+        mutator,
+        config_path=path,
+    )
+    _publish_cfg_cache(persisted, path)
+    return persisted
 
 
 def _set_session_context(session_key: str) -> list:
@@ -827,16 +847,22 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     return model, None
 
 
-def _write_config_key(key_path: str, value):
-    cfg = _load_cfg()
-    current = cfg
-    keys = key_path.split(".")
-    for key in keys[:-1]:
-        if key not in current or not isinstance(current.get(key), dict):
-            current[key] = {}
-        current = current[key]
-    current[keys[-1]] = value
-    _save_cfg(cfg)
+def _write_config_values(updates: dict[str, Any]) -> None:
+    def apply_updates(config: dict) -> None:
+        for key_path, value in updates.items():
+            current = config
+            keys = key_path.split(".")
+            for key in keys[:-1]:
+                if key not in current or not isinstance(current.get(key), dict):
+                    current[key] = {}
+                current = current[key]
+            current[keys[-1]] = value
+
+    _mutate_cfg(apply_updates)
+
+
+def _write_config_key(key_path: str, value) -> None:
+    _write_config_values({key_path: value})
 
 
 _STATUSBAR_MODES = frozenset({"off", "top", "bottom"})
@@ -1091,21 +1117,20 @@ def _restart_slash_worker(session: dict):
 
 
 def _persist_model_switch(result) -> None:
-    from hermes_cli.config import save_config
+    def _apply_model_switch(config: dict) -> None:
+        model_cfg = config.get("model")
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+            config["model"] = model_cfg
 
-    cfg = _load_cfg()
-    model_cfg = cfg.get("model")
-    if not isinstance(model_cfg, dict):
-        model_cfg = {}
-        cfg["model"] = model_cfg
+        model_cfg["default"] = result.new_model
+        model_cfg["provider"] = result.target_provider
+        if result.base_url:
+            model_cfg["base_url"] = result.base_url
+        else:
+            model_cfg.pop("base_url", None)
 
-    model_cfg["default"] = result.new_model
-    model_cfg["provider"] = result.target_provider
-    if result.base_url:
-        model_cfg["base_url"] = result.base_url
-    else:
-        model_cfg.pop("base_url", None)
-    save_config(cfg)
+    _mutate_cfg(_apply_model_switch)
 
 
 def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
@@ -1695,6 +1720,17 @@ def _on_tool_progress(
     _args: dict | None = None,
     **_kwargs,
 ):
+    if event_type == "capability_route":
+        from agent.image_runtime import (
+            project_capability_route_progress_event,
+        )
+
+        payload = project_capability_route_progress_event(
+            _kwargs.get("route_event")
+        )
+        if payload is not None:
+            _emit("capability_route", sid, payload)
+        return
     if not _tool_progress_enabled(sid):
         return
     if event_type == "tool.started" and name:
@@ -1815,10 +1851,18 @@ def _wire_callbacks(sid: str):
             }
         from hermes_cli.config import save_env_value_secure
 
+        stored = save_env_value_secure(env_var, val)
         return {
-            **save_env_value_secure(env_var, val),
+            **stored,
             "skipped": False,
-            "message": "ok",
+            "message": (
+                "ok"
+                if stored.get("success") is True
+                else str(
+                    stored.get("message")
+                    or "Secret could not be stored."
+                )
+            ),
         }
 
     set_secret_capture_callback(secret_cb)
@@ -2134,11 +2178,26 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
     raise ValueError(f"Invalid checkpoint number. Use 1-{len(checkpoints)}.")
 
 
-def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
+def _enrich_with_attached_images(
+    user_text: str,
+    image_paths: list[str],
+    *,
+    route_decision=None,
+    capability_generation=None,
+) -> str:
     """Pre-analyze attached images via vision and prepend descriptions to user text."""
     import asyncio, json as _json
+    from agent.image_runtime import (
+        capture_frozen_vision_request_binding,
+    )
     from tools.vision_tools import vision_analyze_tool
 
+    request_binding = capture_frozen_vision_request_binding(
+        route_decision,
+        generation=capability_generation,
+    )
+    vision_provider = str(route_decision.provider or "").strip()
+    vision_model = str(route_decision.model or "").strip()
     prompt = (
         "Describe everything visible in this image in thorough detail. "
         "Include any text, code, data, objects, people, layout, colors, "
@@ -2153,22 +2212,71 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
         hint = f"[You can examine it with vision_analyze using image_url: {p}]"
         try:
             r = _json.loads(
-                asyncio.run(vision_analyze_tool(image_url=str(p), user_prompt=prompt))
+                asyncio.run(
+                    vision_analyze_tool(
+                        image_url=str(p),
+                        user_prompt=prompt,
+                        provider=vision_provider,
+                        model=vision_model,
+                        strict_target=True,
+                        _runtime_binding=request_binding,
+                    )
+                )
             )
             desc = r.get("analysis", "") if r.get("success") else None
-            parts.append(
-                f"[The user attached an image:\n{desc}]\n{hint}"
-                if desc
-                else f"[The user attached an image but analysis failed.]\n{hint}"
-            )
-        except Exception:
-            parts.append(f"[The user attached an image but analysis failed.]\n{hint}")
+            if not desc:
+                raise RuntimeError(
+                    str(
+                        r.get("error_code")
+                        or r.get("reason_code")
+                        or "vision_analysis_failed"
+                    )
+                )
+            parts.append(f"[The user attached an image:\n{desc}]\n{hint}")
+        except Exception as exc:
+            raise RuntimeError("vision_analysis_failed") from exc
 
     text = user_text or ""
     prefix = "\n\n".join(parts)
     if prefix:
         return f"{prefix}\n\n{text}" if text else prefix
     return text or "What do you see in this image?"
+
+
+def _refresh_image_runtime_agent(agent, *, generation=None) -> bool:
+    """Refresh a long-lived TUI agent to one stable combined generation."""
+    from agent.image_runtime import (
+        capture_capability_runtime_generation,
+        refresh_agent_capability_runtime,
+    )
+
+    expected = generation or capture_capability_runtime_generation()
+    if not expected.stable:
+        return False
+    if getattr(agent, "_capability_runtime_identity", None) != expected.identity:
+        refresh_agent_capability_runtime(agent)
+    return (
+        getattr(agent, "_capability_runtime_identity", None)
+        == expected.identity
+    )
+
+
+def get_tui_image_input_route(
+    cfg: dict,
+    *,
+    provider: str,
+    model: str,
+    generation=None,
+):
+    """Resolve one TUI attachment route through the shared B4 contract."""
+    from agent.image_runtime import resolve_image_input_route
+
+    return resolve_image_input_route(
+        str(provider or "").strip(),
+        str(model or "").strip(),
+        cfg if isinstance(cfg, dict) else {},
+        generation=generation,
+    )
 
 
 def _content_display_text(content: Any) -> str:
@@ -3498,6 +3606,29 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
+            from agent.image_runtime import (
+                capture_capability_runtime_generation,
+            )
+
+            capability_generation = (
+                capture_capability_runtime_generation()
+            )
+            if not _refresh_image_runtime_agent(
+                agent,
+                generation=capability_generation,
+            ):
+                _emit(
+                    "error",
+                    sid,
+                    {
+                        "message": (
+                            "图片能力状态在本轮开始时发生变化，"
+                            "请求已停止 "
+                            "(runtime_config_changed_during_snapshot)"
+                        )
+                    },
+                )
+                return
 
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
@@ -3539,7 +3670,6 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             if images:
                 try:
                     from agent.image_routing import (
-                        decide_image_input_mode,
                         build_native_content_parts,
                     )
                     from agent.auxiliary_client import (
@@ -3549,19 +3679,46 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     from hermes_cli.config import load_config as _tui_load_config
 
                     _cfg = _tui_load_config()
-                    _mode = decide_image_input_mode(
-                        _read_main_provider(),
-                        _read_main_model(),
-                        _cfg,
-                    )
                     if getattr(agent, "api_mode", "") == "codex_app_server":
-                        _mode = "text"
+                        _cfg = dict(_cfg)
+                        _agent_cfg = dict(_cfg.get("agent") or {})
+                        _agent_cfg["image_input_mode"] = "text"
+                        _cfg["agent"] = _agent_cfg
+                    _image_route = get_tui_image_input_route(
+                        _cfg,
+                        provider=_read_main_provider(),
+                        model=_read_main_model(),
+                        generation=capability_generation,
+                    )
+                    _mode = _image_route.mode
                 except Exception as _img_exc:
                     print(
-                        f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
+                        f"[tui_gateway] image_routing decision failed closed: {_img_exc}",
                         file=sys.stderr,
                     )
-                    _mode = "text"
+                    _emit(
+                        "error",
+                        sid,
+                        {
+                            "message": (
+                                "图片能力状态读取失败，请求已停止 "
+                                "(runtime_config_changed_during_snapshot)"
+                            )
+                        },
+                    )
+                    return
+                if _mode == "blocked":
+                    _emit(
+                        "error",
+                        sid,
+                        {
+                            "message": (
+                                "当前图片能力不可用，请求已停止 "
+                                f"({_image_route.reason_code})"
+                            )
+                        },
+                    )
+                    return
 
                 if _mode == "native":
                     try:
@@ -3577,15 +3734,45 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         if any(p.get("type") == "image_url" for p in _parts):
                             run_message = _parts
                         else:
-                            run_message = _enrich_with_attached_images(prompt, images)
+                            raise RuntimeError(
+                                "image_attachment_unreadable"
+                            )
                     except Exception as _img_exc:
                         print(
-                            f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
+                            f"[tui_gateway] native attach failed closed: {_img_exc}",
                             file=sys.stderr,
                         )
-                        run_message = _enrich_with_attached_images(prompt, images)
+                        _emit(
+                            "error",
+                            sid,
+                            {
+                                "message": (
+                                    "图片附件处理失败，请求已停止 "
+                                    "(image_attachment_error)"
+                                )
+                            },
+                        )
+                        return
                 else:
-                    run_message = _enrich_with_attached_images(prompt, images)
+                    try:
+                        run_message = _enrich_with_attached_images(
+                            prompt,
+                            images,
+                            route_decision=_image_route,
+                            capability_generation=capability_generation,
+                        )
+                    except Exception:
+                        _emit(
+                            "error",
+                            sid,
+                            {
+                                "message": (
+                                    "辅助视觉分析失败，请求已停止 "
+                                    "(vision_analysis_failed)"
+                                )
+                            },
+                        )
+                        return
 
             def _stream(delta):
                 with session["history_lock"]:
@@ -4105,6 +4292,14 @@ def _(rid, params: dict) -> dict:
 
 @method("config.set")
 def _(rid, params: dict) -> dict:
+    from hermes_cli.config import ManagedConfigurationError, is_managed
+
+    if is_managed():
+        return _managed_configuration_err(
+            rid,
+            ManagedConfigurationError("modify TUI configuration"),
+        )
+
     key, value = params.get("key", ""), params.get("value", "")
     session = _sessions.get(params.get("session_id", ""))
 
@@ -4275,38 +4470,44 @@ def _(rid, params: dict) -> dict:
 
             arg = str(value or "").strip().lower()
             if arg in {"show", "on"}:
-                cfg = _load_cfg()
-                display = (
-                    cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-                )
-                sections = (
-                    display.get("sections")
-                    if isinstance(display.get("sections"), dict)
-                    else {}
-                )
-                display["show_reasoning"] = True
-                sections["thinking"] = "expanded"
-                display["sections"] = sections
-                cfg["display"] = display
-                _save_cfg(cfg)
+                def show_reasoning(config: dict) -> None:
+                    display = (
+                        config.get("display")
+                        if isinstance(config.get("display"), dict)
+                        else {}
+                    )
+                    sections = (
+                        display.get("sections")
+                        if isinstance(display.get("sections"), dict)
+                        else {}
+                    )
+                    display["show_reasoning"] = True
+                    sections["thinking"] = "expanded"
+                    display["sections"] = sections
+                    config["display"] = display
+
+                _mutate_cfg(show_reasoning)
                 if session:
                     session["show_reasoning"] = True
                 return _ok(rid, {"key": key, "value": "show"})
             if arg in {"hide", "off"}:
-                cfg = _load_cfg()
-                display = (
-                    cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-                )
-                sections = (
-                    display.get("sections")
-                    if isinstance(display.get("sections"), dict)
-                    else {}
-                )
-                display["show_reasoning"] = False
-                sections["thinking"] = "hidden"
-                display["sections"] = sections
-                cfg["display"] = display
-                _save_cfg(cfg)
+                def hide_reasoning(config: dict) -> None:
+                    display = (
+                        config.get("display")
+                        if isinstance(config.get("display"), dict)
+                        else {}
+                    )
+                    sections = (
+                        display.get("sections")
+                        if isinstance(display.get("sections"), dict)
+                        else {}
+                    )
+                    display["show_reasoning"] = False
+                    sections["thinking"] = "hidden"
+                    display["sections"] = sections
+                    config["display"] = display
+
+                _mutate_cfg(hide_reasoning)
                 if session:
                     session["show_reasoning"] = False
                 return _ok(rid, {"key": key, "value": "hide"})
@@ -4325,17 +4526,25 @@ def _(rid, params: dict) -> dict:
         nv = str(value or "").strip().lower()
         if nv not in _DETAIL_MODES:
             return _err(rid, 4002, f"unknown details_mode: {value}")
-        cfg = _load_cfg()
-        display = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-        sections = (
-            display.get("sections") if isinstance(display.get("sections"), dict) else {}
-        )
-        display["details_mode"] = nv
-        for section in _DETAIL_SECTION_NAMES:
-            sections[section] = nv
-        display["sections"] = sections
-        cfg["display"] = display
-        _save_cfg(cfg)
+
+        def pin_detail_sections(config: dict) -> None:
+            display = (
+                config.get("display")
+                if isinstance(config.get("display"), dict)
+                else {}
+            )
+            sections = (
+                display.get("sections")
+                if isinstance(display.get("sections"), dict)
+                else {}
+            )
+            display["details_mode"] = nv
+            for section in _DETAIL_SECTION_NAMES:
+                sections[section] = nv
+            display["sections"] = sections
+            config["display"] = display
+
+        _mutate_cfg(pin_detail_sections)
         return _ok(rid, {"key": key, "value": nv})
 
     if key.startswith("details_mode."):
@@ -4347,27 +4556,45 @@ def _(rid, params: dict) -> dict:
         if section not in _DETAIL_SECTION_NAMES:
             return _err(rid, 4002, f"unknown section: {section}")
 
-        cfg = _load_cfg()
-        display = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-        sections_cfg = (
-            display.get("sections") if isinstance(display.get("sections"), dict) else {}
-        )
-
         nv = str(value or "").strip().lower()
         if not nv:
-            sections_cfg.pop(section, None)
-            display["sections"] = sections_cfg
-            cfg["display"] = display
-            _save_cfg(cfg)
+            def clear_section_override(config: dict) -> None:
+                display = (
+                    config.get("display")
+                    if isinstance(config.get("display"), dict)
+                    else {}
+                )
+                sections_cfg = (
+                    display.get("sections")
+                    if isinstance(display.get("sections"), dict)
+                    else {}
+                )
+                sections_cfg.pop(section, None)
+                display["sections"] = sections_cfg
+                config["display"] = display
+
+            _mutate_cfg(clear_section_override)
             return _ok(rid, {"key": key, "value": ""})
 
         if nv not in _DETAIL_MODES:
             return _err(rid, 4002, f"unknown details_mode: {value}")
 
-        sections_cfg[section] = nv
-        display["sections"] = sections_cfg
-        cfg["display"] = display
-        _save_cfg(cfg)
+        def set_section_override(config: dict) -> None:
+            display = (
+                config.get("display")
+                if isinstance(config.get("display"), dict)
+                else {}
+            )
+            sections_cfg = (
+                display.get("sections")
+                if isinstance(display.get("sections"), dict)
+                else {}
+            )
+            sections_cfg[section] = nv
+            display["sections"] = sections_cfg
+            config["display"] = display
+
+        _mutate_cfg(set_section_override)
         return _ok(rid, {"key": key, "value": nv})
 
     if key == "thinking_mode":
@@ -4375,10 +4602,14 @@ def _(rid, params: dict) -> dict:
         allowed_tm = frozenset({"collapsed", "truncated", "full"})
         if nv not in allowed_tm:
             return _err(rid, 4002, f"unknown thinking_mode: {value}")
-        _write_config_key("display.thinking_mode", nv)
         # Backward compatibility bridge: keep details_mode aligned.
-        _write_config_key(
-            "display.details_mode", "expanded" if nv == "full" else "collapsed"
+        _write_config_values(
+            {
+                "display.thinking_mode": nv,
+                "display.details_mode": (
+                    "expanded" if nv == "full" else "collapsed"
+                ),
+            }
         )
         return _ok(rid, {"key": key, "value": nv})
 
@@ -4455,18 +4686,26 @@ def _(rid, params: dict) -> dict:
         try:
             cfg = _load_cfg()
             if key == "prompt":
+                def update_prompt(config: dict) -> None:
+                    if value == "clear":
+                        config.pop("custom_prompt", None)
+                    else:
+                        config["custom_prompt"] = value
+
+                _mutate_cfg(update_prompt)
                 if value == "clear":
-                    cfg.pop("custom_prompt", None)
                     nv = ""
                 else:
-                    cfg["custom_prompt"] = value
                     nv = value
-                _save_cfg(cfg)
             elif key == "personality":
                 sid_key = params.get("session_id", "")
                 pname, new_prompt = _validate_personality(str(value or ""), cfg)
-                _write_config_key("display.personality", pname)
-                _write_config_key("agent.system_prompt", new_prompt)
+                _write_config_values(
+                    {
+                        "display.personality": pname,
+                        "agent.system_prompt": new_prompt,
+                    }
+                )
                 nv = str(value or "default")
                 history_reset, info = _apply_personality_to_session(
                     sid_key, session, new_prompt
@@ -5789,7 +6028,7 @@ def _(rid, params: dict) -> dict:
     """
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY, clear_provider_auth
-        from hermes_cli.config import remove_env_value
+        from hermes_cli.config import ManagedConfigurationError, remove_env_value
 
         slug = (params.get("slug") or "").strip()
         if not slug:
@@ -5820,6 +6059,8 @@ def _(rid, params: dict) -> dict:
                 "disconnected": True,
             },
         )
+    except ManagedConfigurationError as e:
+        return _managed_configuration_err(rid, e)
     except Exception as e:
         return _err(rid, 5035, str(e))
 
@@ -6739,7 +6980,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4018, "names required")
 
     try:
-        from hermes_cli.config import load_config, save_config
+        from hermes_cli.config import load_config
         from hermes_cli.tools_config import (
             CONFIGURABLE_TOOLSETS,
             _apply_mcp_change,
@@ -6748,7 +6989,6 @@ def _(rid, params: dict) -> dict:
             _get_plugin_toolset_keys,
         )
 
-        cfg = load_config()
         valid_toolsets = {
             ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS
         } | _get_plugin_toolset_keys()
@@ -6757,13 +6997,24 @@ def _(rid, params: dict) -> dict:
         unknown = [name for name in toolset_targets if name not in valid_toolsets]
         toolset_targets = [name for name in toolset_targets if name in valid_toolsets]
 
-        if toolset_targets:
-            _apply_toolset_change(cfg, "cli", toolset_targets, action)
+        missing_servers: set[str] = set()
 
-        missing_servers = (
-            _apply_mcp_change(cfg, mcp_targets, action) if mcp_targets else set()
-        )
-        save_config(cfg)
+        def _apply_changes(config: dict) -> None:
+            nonlocal missing_servers
+            if toolset_targets:
+                _apply_toolset_change(
+                    config,
+                    "cli",
+                    toolset_targets,
+                    action,
+                )
+            missing_servers = (
+                _apply_mcp_change(config, mcp_targets, action)
+                if mcp_targets
+                else set()
+            )
+
+        _mutate_cfg(_apply_changes)
 
         session = _sessions.get(params.get("session_id", ""))
         info = (

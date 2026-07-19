@@ -137,8 +137,11 @@ def format_issue(issue: RetirementIssue) -> str:
 # ---------------------------------------------------------------------------
 
 import datetime as _dt
+import copy
+import os
 from pathlib import Path
 import shutil
+import tempfile
 
 
 @dataclass(frozen=True)
@@ -201,49 +204,79 @@ def apply_migration(
             config_changed=False,
         )
 
+    from agent.image_gen_verification import (
+        reconcile_capability_config_epochs,
+    )
+    from agent.provider_credentials import credential_transaction
+    from utils import atomic_replace
+
     yaml = YAML(typ="rt")
     yaml.preserve_quotes = True
-    with config_path.open("r", encoding="utf-8") as fh:
-        doc = yaml.load(fh)
-
-    if doc is None:
-        return ApplyResult(
-            file_path=config_path,
-            backup_path=None,
-            issues_resolved=[],
-            config_changed=False,
-        )
-
-    resolved: List[RetirementIssue] = []
-    for issue in issues:
-        try:
-            parent, leaf = _walk_to_parent(doc, issue.config_path)
-        except KeyError:
-            # Slot vanished between scan and apply — skip silently
-            continue
-        parent[leaf] = issue.replacement
-        if issue.reasoning_effort:
-            parent["reasoning_effort"] = issue.reasoning_effort
-        resolved.append(issue)
-
-    if not resolved:
-        return ApplyResult(
-            file_path=config_path,
-            backup_path=None,
-            issues_resolved=[],
-            config_changed=False,
-        )
-
     backup_path: Optional[Path] = None
-    if backup:
-        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = config_path.with_name(
-            f"{config_path.name}.bak-pre-migrate-xai-{ts}"
-        )
-        shutil.copy2(config_path, backup_path)
+    with credential_transaction(config_path) as spec:
+        target_path = spec.config_target
+        with target_path.open("r", encoding="utf-8") as fh:
+            doc = yaml.load(fh)
 
-    with config_path.open("w", encoding="utf-8") as fh:
-        yaml.dump(doc, fh)
+        if doc is None:
+            return ApplyResult(
+                file_path=config_path,
+                backup_path=None,
+                issues_resolved=[],
+                config_changed=False,
+            )
+        previous = copy.deepcopy(doc)
+
+        resolved: List[RetirementIssue] = []
+        for issue in issues:
+            try:
+                parent, leaf = _walk_to_parent(
+                    doc,
+                    issue.config_path,
+                )
+            except KeyError:
+                # Slot vanished between scan and apply — skip silently
+                continue
+            parent[leaf] = issue.replacement
+            if issue.reasoning_effort:
+                parent["reasoning_effort"] = issue.reasoning_effort
+            resolved.append(issue)
+
+        if not resolved:
+            return ApplyResult(
+                file_path=config_path,
+                backup_path=None,
+                issues_resolved=[],
+                config_changed=False,
+            )
+
+        reconcile_capability_config_epochs(previous, doc)
+        if backup:
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = config_path.with_name(
+                f"{config_path.name}.bak-pre-migrate-xai-{ts}"
+            )
+            shutil.copy2(target_path, backup_path)
+
+        original_mode = target_path.stat().st_mode
+        fd, staged_name = tempfile.mkstemp(
+            dir=str(target_path.parent),
+            prefix=f".{target_path.stem}-xai-",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                yaml.dump(doc, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(staged_name, original_mode)
+            atomic_replace(staged_name, target_path)
+        except BaseException:
+            try:
+                os.unlink(staged_name)
+            except OSError:
+                pass
+            raise
 
     return ApplyResult(
         file_path=config_path,

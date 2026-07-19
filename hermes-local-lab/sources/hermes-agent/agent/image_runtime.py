@@ -6,16 +6,21 @@ import hashlib
 import json
 import os
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from agent.image_gen_verification import (
     CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+    CAPABILITY_CONFIG_EPOCH_VISION,
     _contains_unresolved_env,
     active_profile_name,
+    capability_config_epoch,
+    capability_profile_incarnation,
     verification_status_from_state,
 )
 
@@ -59,6 +64,11 @@ class CapabilityRouteDecision:
         repr=False,
         compare=False,
     )
+    _authorization_generation: str = field(
+        default="",
+        repr=False,
+        compare=False,
+    )
     _request_binding: Any = field(
         default=None,
         repr=False,
@@ -70,29 +80,84 @@ class CapabilityRouteDecision:
         """Private caller identity for internal boundary checks."""
         return self._authorization_fingerprint
 
+    @property
+    def authorization_generation(self) -> str:
+        """Private persisted-state generation for internal boundary checks."""
+        return self._authorization_generation
+
 
 @dataclass(frozen=True)
 class CapabilityRuntimeGeneration:
     """One bracketed observation of both gated capability identities."""
 
-    vision: tuple[int, str, str, bool]
-    image_generation: tuple[int, str, str, bool]
+    vision: tuple[int, str, str, bool, str]
+    image_generation: tuple[int, str, str, bool, str]
     stable: bool
 
     @property
     def identity(self) -> tuple[
-        tuple[int, str, str, bool],
-        tuple[int, str, str, bool],
+        tuple[int, str, str, bool, str],
+        tuple[int, str, str, bool, str],
     ]:
         return (self.vision, self.image_generation)
 
     @property
     def cache_identity(self) -> tuple[
         bool,
-        tuple[int, str, str, bool],
-        tuple[int, str, str, bool],
+        tuple[int, str, str, bool, str],
+        tuple[int, str, str, bool, str],
     ]:
         return (self.stable, self.vision, self.image_generation)
+
+
+@dataclass(frozen=True)
+class ImageInputRouteDecision:
+    """One fail-closed attachment route tied to a combined runtime generation."""
+
+    schema_version: int
+    fingerprint: str
+    status: str
+    reason_code: str
+    route: str
+    mode: str
+    provider: str
+    model: str
+    _generation: CapabilityRuntimeGeneration = field(
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def generation(self) -> CapabilityRuntimeGeneration:
+        return self._generation
+
+
+class _CapabilityRouteEventState:
+    """Request-local, once-only route event state.
+
+    The callback is deliberately kept outside the public route decision. This
+    object may cross into a worker via ``copy_context``; the lock preserves the
+    exactly-once invariant if a Provider implementation retries internally.
+    """
+
+    def __init__(
+        self,
+        callback: Callable[..., Any],
+        *,
+        tool_call_id: str,
+    ) -> None:
+        self.callback = callback
+        self.tool_call_id = str(tool_call_id or "")
+        self.lock = threading.Lock()
+        self.emitted = False
+
+
+_CAPABILITY_ROUTE_EVENT_STATE: ContextVar[
+    _CapabilityRouteEventState | None
+] = ContextVar(
+    "capability_route_event_state",
+    default=None,
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +188,45 @@ def _stable_fingerprint(material: dict[str, Any]) -> str:
             ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def verification_authorization_generation(
+    state: Any,
+    *,
+    expected_fingerprint: str,
+    capability: str,
+) -> str:
+    """Derive the private, non-reusable identity of one persisted auth state.
+
+    Public capability payloads expose neither this digest nor any of its source
+    fields. ``diagnostic_id`` is intentionally part of the material so a
+    normal re-verification from A back to A still creates a new generation on
+    state formats that predate the monotonic ``authorization_generation``.
+    """
+    row = state if isinstance(state, dict) else {}
+    raw_schema_version = row.get("schema_version")
+    schema_version = (
+        raw_schema_version if type(raw_schema_version) is int else 0
+    )
+    raw_generation = row.get("authorization_generation")
+    if raw_generation is None:
+        raw_generation = row.get("generation")
+    if type(raw_generation) is int:
+        generation: int | str = raw_generation
+    else:
+        generation = str(raw_generation or "")
+    return _stable_fingerprint(
+        {
+            "schema_version": schema_version,
+            "capability": str(capability or "").strip().lower(),
+            "authorization_generation": generation,
+            "diagnostic_id": str(row.get("diagnostic_id") or ""),
+            "fingerprint": str(row.get("fingerprint") or ""),
+            "expected_fingerprint": str(expected_fingerprint or ""),
+            "status": str(row.get("status") or ""),
+            "checked_at": str(row.get("checked_at") or ""),
+        }
+    )
 
 
 def _custom_vision_identity(
@@ -321,6 +425,13 @@ def vision_fingerprint_from_material(
         "base_url": base_url,
         "transport": transport,
         "credential_ref": credential_ref,
+        "network_scope": (
+            str(expanded_cfg.get("network_scope") or "").strip()
+            or "public_direct"
+        ),
+        "trusted_proxy_profile": str(
+            expanded_cfg.get("trusted_proxy_profile") or ""
+        ).strip(),
         "endpoint_mode": str(expanded_cfg.get("endpoint_mode") or "").strip(),
         "region": str(expanded_cfg.get("region") or "").strip(),
         "workspace_id": str(expanded_cfg.get("workspace_id") or "").strip(),
@@ -330,6 +441,15 @@ def vision_fingerprint_from_material(
         else "",
         "custom_provider": custom_identity,
     }
+    profile_incarnation = capability_profile_incarnation(expanded_data)
+    if profile_incarnation:
+        material["profile_incarnation"] = profile_incarnation
+    config_epoch = capability_config_epoch(
+        expanded_data,
+        CAPABILITY_CONFIG_EPOCH_VISION,
+    )
+    if config_epoch:
+        material["config_epoch"] = config_epoch
     return _stable_fingerprint(material), runtime_resolved
 
 
@@ -354,6 +474,8 @@ def _vision_secret_env(
     provider: str,
     vision_cfg: dict[str, Any],
     config_data: dict[str, Any],
+    *,
+    config_path: Path | None = None,
 ) -> str:
     credential_ref = str(vision_cfg.get("credential_ref") or "").strip()
     if provider.startswith("custom:"):
@@ -369,6 +491,30 @@ def _vision_secret_env(
                 return custom_vision_provider_secret_env(entry)
         except (ImportError, ValueError):
             return ""
+    if not credential_ref:
+        if config_path is None:
+            from agent.image_gen_verification import (
+                _referenced_credential_secret_env,
+            )
+
+            configured_env = _referenced_credential_secret_env(
+                config_data,
+                provider,
+                "",
+            )
+            if configured_env:
+                return configured_env
+        else:
+            try:
+                from agent.provider_credentials import default_credential_ref
+
+                credential_ref = default_credential_ref(
+                    provider,
+                    config_data=config_data,
+                    config_path=config_path,
+                )
+            except (ImportError, ValueError):
+                return ""
     if credential_ref:
         try:
             from agent.provider_credentials import (
@@ -437,21 +583,27 @@ def current_vision_runtime_snapshot() -> dict[str, Any]:
         provider,
         effective_config_data,
     )
+    try:
+        from agent.image_gen_verification import image_gen_runtime_context
+
+        runtime_config_path = image_gen_runtime_context().config_path
+    except (ImportError, OSError, ValueError):
+        runtime_config_path = None
     secret_env = _vision_secret_env(
         provider,
         effective_cfg,
         effective_config_data,
+        config_path=runtime_config_path,
     )
     try:
-        from agent.image_gen_verification import image_gen_runtime_context
         from agent.provider_credentials import resolve_secret_env_value
 
         secret_value = (
             resolve_secret_env_value(
                 secret_env,
-                config_path=image_gen_runtime_context().config_path,
+                config_path=runtime_config_path,
             )
-            if secret_env
+            if secret_env and runtime_config_path is not None
             else ""
         )
     except ValueError:
@@ -516,6 +668,11 @@ def current_vision_runtime_snapshot() -> dict[str, Any]:
         "fingerprint": fingerprint,
         "status": status,
         "available": bool(configured and status == "verified"),
+        "_authorization_generation": verification_authorization_generation(
+            state,
+            expected_fingerprint=fingerprint,
+            capability="vision",
+        ),
         "reason_code": reason_code,
         "configured": configured,
         "provider": provider,
@@ -565,11 +722,31 @@ def current_image_runtime_snapshot() -> dict[str, Any]:
                 "reason_code": reason_code,
             }
         )
+    try:
+        from agent.image_gen_verification import (
+            image_gen_runtime_context,
+            verification_state_path,
+        )
+
+        runtime_context = image_gen_runtime_context()
+        persisted_state = json.loads(
+            verification_state_path(
+                None,
+                runtime_context.profile,
+            ).read_text(encoding="utf-8")
+        )
+    except (ImportError, OSError, TypeError, ValueError):
+        persisted_state = {}
     return {
         "schema_version": schema_version,
         "fingerprint": fingerprint,
         "status": status,
         "available": available,
+        "_authorization_generation": verification_authorization_generation(
+            persisted_state,
+            expected_fingerprint=fingerprint,
+            capability="image_generation",
+        ),
         "provider": str(readiness.get("provider") or ""),
         "model": str(readiness.get("model") or ""),
         "reason_code": reason_code,
@@ -590,6 +767,12 @@ def _drifted_snapshot(
             "reason_code": "runtime_config_changed_during_snapshot",
             "before": str(before.get("fingerprint") or ""),
             "after": str(after.get("fingerprint") or ""),
+            "before_authorization_generation": str(
+                before.get("_authorization_generation") or ""
+            ),
+            "after_authorization_generation": str(
+                after.get("_authorization_generation") or ""
+            ),
         }
     )
     result = dict(after)
@@ -600,6 +783,13 @@ def _drifted_snapshot(
             "status": "configured_unverified",
             "available": False,
             "reason_code": "runtime_config_changed_during_snapshot",
+            "_authorization_generation": _stable_fingerprint(
+                {
+                    "capability": capability,
+                    "reason_code": "runtime_config_changed_during_snapshot",
+                    "fingerprint": fingerprint,
+                }
+            ),
         }
     )
     return result
@@ -626,6 +816,8 @@ def verification_runtime_snapshot(
         or before.get("schema_version") != after.get("schema_version")
         or str(before.get("fingerprint") or "")
         != str(after.get("fingerprint") or "")
+        or str(before.get("_authorization_generation") or "")
+        != str(after.get("_authorization_generation") or "")
     ):
         return _drifted_snapshot(before, after, capability=normalized)
     snapshot = dict(after)
@@ -646,7 +838,7 @@ def verification_runtime_snapshot(
 
 def _capability_snapshot_identity(
     snapshot: dict[str, Any],
-) -> tuple[int, str, str, bool]:
+) -> tuple[int, str, str, bool, str]:
     raw_schema_version = snapshot.get("schema_version")
     schema_version = (
         raw_schema_version if type(raw_schema_version) is int else 0
@@ -656,6 +848,7 @@ def _capability_snapshot_identity(
         str(snapshot.get("fingerprint") or ""),
         str(snapshot.get("status") or ""),
         bool(snapshot.get("available")),
+        str(snapshot.get("_authorization_generation") or ""),
     )
 
 
@@ -681,6 +874,291 @@ def capture_capability_runtime_generation() -> CapabilityRuntimeGeneration:
             and before_image == after_image
         ),
     )
+
+
+def _image_input_route_fingerprint(
+    generation: CapabilityRuntimeGeneration,
+    *,
+    status: str,
+    reason_code: str,
+    route: str,
+    mode: str,
+    provider: str,
+    model: str,
+) -> str:
+    """Project one public route identity without leaking auth generations."""
+    return _stable_fingerprint(
+        {
+            "schema_version": CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+            "vision": generation.vision[:4],
+            "image_generation": generation.image_generation[:4],
+            "status": str(status or ""),
+            "reason_code": str(reason_code or ""),
+            "route": str(route or ""),
+            "mode": str(mode or ""),
+            "provider": str(provider or ""),
+            "model": str(model or ""),
+        }
+    )
+
+
+def _blocked_image_input_route(
+    generation: CapabilityRuntimeGeneration,
+    *,
+    reason_code: str,
+    provider: str,
+    model: str,
+    status: str = "configured_unverified",
+) -> ImageInputRouteDecision:
+    resolved_status = str(status or "configured_unverified")
+    resolved_reason = str(reason_code or "capability_unavailable")
+    resolved_provider = str(provider or "")
+    resolved_model = str(model or "")
+    return ImageInputRouteDecision(
+        schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+        fingerprint=_image_input_route_fingerprint(
+            generation,
+            status=resolved_status,
+            reason_code=resolved_reason,
+            route="blocked",
+            mode="blocked",
+            provider=resolved_provider,
+            model=resolved_model,
+        ),
+        status=resolved_status,
+        reason_code=resolved_reason,
+        route="blocked",
+        mode="blocked",
+        provider=resolved_provider,
+        model=resolved_model,
+        _generation=generation,
+    )
+
+
+def resolve_image_input_route(
+    provider: str,
+    model: str,
+    cfg: dict[str, Any] | None,
+    *,
+    generation: CapabilityRuntimeGeneration | None = None,
+) -> ImageInputRouteDecision:
+    """Resolve native/text attachment routing from one combined generation."""
+    from agent.image_routing import (
+        _coerce_mode,
+        _explicit_aux_vision_override,
+        _lookup_supports_vision,
+    )
+
+    explicit_generation = generation is not None
+    start = generation or capture_capability_runtime_generation()
+    if not start.stable:
+        return _blocked_image_input_route(
+            start,
+            reason_code="runtime_config_changed_during_snapshot",
+            provider=provider,
+            model=model,
+        )
+    vision_snapshot = verification_runtime_snapshot("vision")
+    if (
+        explicit_generation
+        and _capability_snapshot_identity(vision_snapshot) != start.vision
+    ):
+        return _blocked_image_input_route(
+            start,
+            reason_code="runtime_config_changed_during_snapshot",
+            provider=provider,
+            model=model,
+        )
+    if not explicit_generation:
+        end = capture_capability_runtime_generation()
+        if (
+            not end.stable
+            or end.identity != start.identity
+            or _capability_snapshot_identity(vision_snapshot) != start.vision
+        ):
+            return _blocked_image_input_route(
+                end,
+                reason_code="runtime_config_changed_during_snapshot",
+                provider=provider,
+                model=model,
+            )
+
+    config = cfg if isinstance(cfg, dict) else {}
+    agent_cfg = config.get("agent")
+    mode = _coerce_mode(
+        agent_cfg.get("image_input_mode")
+        if isinstance(agent_cfg, dict)
+        else "auto"
+    )
+    if mode == "native":
+        return ImageInputRouteDecision(
+            schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+            fingerprint=_image_input_route_fingerprint(
+                start,
+                status="verified",
+                reason_code="explicit_native_mode",
+                route="main_model",
+                mode="native",
+                provider=str(provider or ""),
+                model=str(model or ""),
+            ),
+            status="verified",
+            reason_code="explicit_native_mode",
+            route="main_model",
+            mode="native",
+            provider=str(provider or ""),
+            model=str(model or ""),
+            _generation=start,
+        )
+    supports_vision = _lookup_supports_vision(provider, model, config)
+    wants_auxiliary = bool(
+        mode == "text"
+        or (mode == "auto" and _explicit_aux_vision_override(config))
+        or (mode == "auto" and supports_vision is False)
+    )
+
+    if wants_auxiliary:
+        if not bool(vision_snapshot.get("available")):
+            return _blocked_image_input_route(
+                start,
+                reason_code=str(
+                    vision_snapshot.get("reason_code")
+                    or "verification_required"
+                ),
+                provider=str(vision_snapshot.get("provider") or ""),
+                model=str(vision_snapshot.get("model") or ""),
+                status=str(
+                    vision_snapshot.get("status")
+                    or "configured_unverified"
+                ),
+            )
+        return ImageInputRouteDecision(
+            schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+            fingerprint=_image_input_route_fingerprint(
+                start,
+                status="verified",
+                reason_code="auxiliary_vision_verified",
+                route="auxiliary_vision",
+                mode="text",
+                provider=str(vision_snapshot.get("provider") or ""),
+                model=str(vision_snapshot.get("model") or ""),
+            ),
+            status="verified",
+            reason_code="auxiliary_vision_verified",
+            route="auxiliary_vision",
+            mode="text",
+            provider=str(vision_snapshot.get("provider") or ""),
+            model=str(vision_snapshot.get("model") or ""),
+            _generation=start,
+        )
+
+    if supports_vision is True:
+        return ImageInputRouteDecision(
+            schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+            fingerprint=_image_input_route_fingerprint(
+                start,
+                status="verified",
+                reason_code="main_model_supports_vision",
+                route="main_model",
+                mode="native",
+                provider=str(provider or ""),
+                model=str(model or ""),
+            ),
+            status="verified",
+            reason_code="main_model_supports_vision",
+            route="main_model",
+            mode="native",
+            provider=str(provider or ""),
+            model=str(model or ""),
+            _generation=start,
+        )
+
+    reason_code = (
+        "main_model_vision_unsupported"
+        if supports_vision is False
+        else "main_model_capability_unknown"
+    )
+    return _blocked_image_input_route(
+        start,
+        reason_code=reason_code,
+        provider=provider,
+        model=model,
+    )
+
+
+def capture_frozen_vision_request_binding(
+    decision: ImageInputRouteDecision,
+    *,
+    generation: CapabilityRuntimeGeneration | None = None,
+):
+    """Seal the exact auxiliary-vision Provider material for one frozen turn.
+
+    Image routing and Provider dispatch are separate boundaries.  A route
+    resolved from generation A must never silently capture generation B's
+    credentials later.  This helper brackets the private binding capture with
+    current-state checks and returns only a binding whose provider, model,
+    fingerprint, and persisted authorization generation all match the route.
+    The vision Provider boundary revalidates the same binding immediately
+    before every I/O, closing the remaining post-capture race.
+    """
+    from agent.auxiliary_client import (
+        VisionRequestBinding,
+        capture_vision_request_binding,
+        vision_request_binding_matches_authorization,
+    )
+
+    if not isinstance(decision, ImageInputRouteDecision):
+        raise RuntimeError("vision_route_decision_required")
+    frozen = generation or decision.generation
+    if (
+        not isinstance(frozen, CapabilityRuntimeGeneration)
+        or not frozen.stable
+        or decision.generation.cache_identity != frozen.cache_identity
+        or decision.mode != "text"
+        or decision.route != "auxiliary_vision"
+        or decision.status != "verified"
+    ):
+        raise RuntimeError("capability_caller_stale")
+
+    schema_version, fingerprint, status, available, auth_generation = (
+        frozen.vision
+    )
+    provider = str(decision.provider or "").strip().lower()
+    model = str(decision.model or "").strip()
+    if (
+        type(schema_version) is not int
+        or schema_version != CAPABILITY_VERIFICATION_SCHEMA_VERSION
+        or status != "verified"
+        or not available
+        or not fingerprint
+        or not auth_generation
+        or not provider
+        or not model
+    ):
+        raise RuntimeError("vision_authorization_required")
+
+    before = verification_runtime_snapshot("vision")
+    if _capability_snapshot_identity(before) != frozen.vision:
+        raise RuntimeError("capability_caller_stale")
+    binding = capture_vision_request_binding(
+        authorization_fingerprint=fingerprint,
+        authorization_generation=auth_generation,
+    )
+    after = verification_runtime_snapshot("vision")
+    if _capability_snapshot_identity(after) != frozen.vision:
+        raise RuntimeError("capability_caller_stale")
+    if (
+        not isinstance(binding, VisionRequestBinding)
+        or binding.provider != provider
+        or binding.model != model
+        or not vision_request_binding_matches_authorization(
+            binding,
+            authorization_fingerprint=fingerprint,
+            authorization_generation=auth_generation,
+        )
+    ):
+        raise RuntimeError("vision_binding_mismatch")
+    return binding
 
 
 def _is_deeply_immutable_binding_value(value: Any) -> bool:
@@ -779,6 +1257,9 @@ def build_capability_route_decision(
         model=str(source.get("model") or ""),
         tool_call_id=str(tool_call_id or ""),
         _authorization_fingerprint=str(source.get("fingerprint") or ""),
+        _authorization_generation=str(
+            source.get("_authorization_generation") or ""
+        ),
         _request_binding=request_binding,
     )
 
@@ -793,6 +1274,118 @@ def project_capability_route_decision(
         field_name: getattr(decision, field_name)
         for field_name in _PUBLIC_CAPABILITY_ROUTE_FIELDS
     }
+
+
+def project_capability_route_progress_event(
+    route_event: Any,
+) -> dict[str, Any] | None:
+    """Sanitize one Provider-route event identically for every entrypoint."""
+    if not isinstance(route_event, dict):
+        return None
+    public_event = {
+        field_name: route_event.get(field_name)
+        for field_name in _PUBLIC_CAPABILITY_ROUTE_FIELDS
+    }
+    if (
+        public_event.get("capability") != "image_generation"
+        or public_event.get("status") != "verified"
+        or public_event.get("route") != "provider"
+        or not public_event.get("tool_call_id")
+    ):
+        return None
+    return public_event
+
+
+@contextmanager
+def capability_route_event_scope(
+    callback: Callable[..., Any] | None,
+    *,
+    tool_call_id: str,
+) -> Iterator[None]:
+    """Bind one tool call's route-event callback without emitting early."""
+    state = (
+        _CapabilityRouteEventState(
+            callback,
+            tool_call_id=tool_call_id,
+        )
+        if callable(callback)
+        else None
+    )
+    token = _CAPABILITY_ROUTE_EVENT_STATE.set(state)
+    try:
+        yield
+    finally:
+        _CAPABILITY_ROUTE_EVENT_STATE.reset(token)
+
+
+def _decision_matches_current_authorization(
+    decision: CapabilityRouteDecision,
+) -> bool:
+    """Reauthorize the event itself against the current persisted state."""
+    if (
+        decision.capability != "image_generation"
+        or decision.route != "provider"
+        or decision.status != "verified"
+        or not decision.provider
+        or not decision.model
+        or not decision.authorization_fingerprint
+        or not decision.authorization_generation
+    ):
+        return False
+    try:
+        current = verification_runtime_snapshot("image_generation")
+    except Exception:
+        return False
+    return bool(
+        current.get("schema_version") == decision.schema_version
+        and current.get("status") == "verified"
+        and current.get("available")
+        and str(current.get("fingerprint") or "")
+        == decision.authorization_fingerprint
+        and str(current.get("_authorization_generation") or "")
+        == decision.authorization_generation
+        and str(current.get("provider") or "") == decision.provider
+        and str(current.get("model") or "") == decision.model
+    )
+
+
+def emit_capability_route_event_at_provider_io(
+    decision: CapabilityRouteDecision,
+) -> bool:
+    """Emit one public route event at the actual Provider I/O boundary.
+
+    Merely scheduling or starting a tool never calls this function. The final
+    boundary must pass its frozen decision; this function independently
+    reauthorizes it and publishes only the explicit public allowlist.
+    """
+    if not isinstance(decision, CapabilityRouteDecision):
+        return False
+    state = _CAPABILITY_ROUTE_EVENT_STATE.get()
+    if (
+        state is None
+        or not state.tool_call_id
+        or decision.tool_call_id != state.tool_call_id
+        or not _decision_matches_current_authorization(decision)
+    ):
+        return False
+    with state.lock:
+        if state.emitted:
+            return False
+        state.emitted = True
+    public_event = project_capability_route_decision(decision)
+    try:
+        state.callback(
+            "capability_route",
+            "image_generate",
+            None,
+            None,
+            route_event=public_event,
+            tool_call_id=decision.tool_call_id,
+        )
+    except Exception:
+        # Event egress must never change Provider execution semantics.
+        return False
+    return True
 
 
 def _tool_name(tool: Any) -> str:
@@ -888,6 +1481,12 @@ def refresh_agent_capability_runtime(
         agent._registry_tool_names = registry_names
         agent._vision_capability_fingerprint = generation.vision[1]
         agent._image_capability_fingerprint = generation.image_generation[1]
+        agent._vision_capability_authorization_generation = (
+            generation.vision[4]
+        )
+        agent._image_capability_authorization_generation = (
+            generation.image_generation[4]
+        )
         agent._capability_runtime_identity = runtime_identity
         # Preserve the legacy image-only identity for external callers/tests.
         agent._image_runtime_identity = generation.image_generation

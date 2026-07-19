@@ -1,4 +1,5 @@
 import type { Translations } from "./types";
+import { en } from "./en";
 
 export const ga: Translations = {
   common: {
@@ -322,6 +323,7 @@ export const ga: Translations = {
   },
 
   config: {
+    ...en.config,
     configPath: "~/.hermes/config.yaml",
     filters: "Scagairí",
     sections: "Ranna",

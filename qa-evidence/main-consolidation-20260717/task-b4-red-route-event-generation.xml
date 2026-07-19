@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="4" skipped="0" tests="4" time="0.101" timestamp="2026-07-19T17:39:02.741102+08:00" hostname="baideMacBook-Pro.local"><testcase classname="tests.agent.test_image_runtime_route_events" name="test_authorization_generation_detects_persisted_aba_without_public_leak" time="0.030"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'">def test_authorization_generation_detects_persisted_aba_without_public_leak():
+&gt;       first = _verified_snapshot(diagnostic_id="diag-a")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/agent/test_image_runtime_route_events.py:40:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def _verified_snapshot(
+        *,
+        diagnostic_id: str = "diag-a",
+        authorization_generation: int | None = None,
+    ) -&gt; dict[str, object]:
+        state: dict[str, object] = {
+            "schema_version": 1,
+            "fingerprint": "fp-a",
+            "status": "verified",
+            "checked_at": "2026-07-17T00:00:00Z",
+            "diagnostic_id": diagnostic_id,
+        }
+        if authorization_generation is not None:
+            state["authorization_generation"] = authorization_generation
+&gt;       private_generation = image_runtime.verification_authorization_generation(
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            state,
+            expected_fingerprint="fp-a",
+            capability="image_generation",
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'
+
+tests/agent/test_image_runtime_route_events.py:22: AttributeError</failure></testcase><testcase classname="tests.agent.test_image_runtime_route_events" name="test_route_event_scope_emits_once_only_at_provider_io" time="0.001"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x107e7d050&gt;
+
+    def test_route_event_scope_emits_once_only_at_provider_io(monkeypatch):
+&gt;       snapshot = _verified_snapshot(authorization_generation=7)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/agent/test_image_runtime_route_events.py:65:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def _verified_snapshot(
+        *,
+        diagnostic_id: str = "diag-a",
+        authorization_generation: int | None = None,
+    ) -&gt; dict[str, object]:
+        state: dict[str, object] = {
+            "schema_version": 1,
+            "fingerprint": "fp-a",
+            "status": "verified",
+            "checked_at": "2026-07-17T00:00:00Z",
+            "diagnostic_id": diagnostic_id,
+        }
+        if authorization_generation is not None:
+            state["authorization_generation"] = authorization_generation
+&gt;       private_generation = image_runtime.verification_authorization_generation(
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            state,
+            expected_fingerprint="fp-a",
+            capability="image_generation",
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'
+
+tests/agent/test_image_runtime_route_events.py:22: AttributeError</failure></testcase><testcase classname="tests.agent.test_image_runtime_route_events" name="test_route_event_scope_blocks_stale_or_non_provider_decisions" time="0.001"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x107afba50&gt;
+
+    def test_route_event_scope_blocks_stale_or_non_provider_decisions(monkeypatch):
+&gt;       snapshot = _verified_snapshot(authorization_generation=11)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/agent/test_image_runtime_route_events.py:105:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def _verified_snapshot(
+        *,
+        diagnostic_id: str = "diag-a",
+        authorization_generation: int | None = None,
+    ) -&gt; dict[str, object]:
+        state: dict[str, object] = {
+            "schema_version": 1,
+            "fingerprint": "fp-a",
+            "status": "verified",
+            "checked_at": "2026-07-17T00:00:00Z",
+            "diagnostic_id": diagnostic_id,
+        }
+        if authorization_generation is not None:
+            state["authorization_generation"] = authorization_generation
+&gt;       private_generation = image_runtime.verification_authorization_generation(
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            state,
+            expected_fingerprint="fp-a",
+            capability="image_generation",
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'
+
+tests/agent/test_image_runtime_route_events.py:22: AttributeError</failure></testcase><testcase classname="tests.agent.test_image_runtime_route_events" name="test_route_event_scope_is_request_local_under_concurrency" time="0.001"><failure message="AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x107b9f350&gt;
+
+    def test_route_event_scope_is_request_local_under_concurrency(monkeypatch):
+&gt;       snapshot = _verified_snapshot(authorization_generation=13)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/agent/test_image_runtime_route_events.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def _verified_snapshot(
+        *,
+        diagnostic_id: str = "diag-a",
+        authorization_generation: int | None = None,
+    ) -&gt; dict[str, object]:
+        state: dict[str, object] = {
+            "schema_version": 1,
+            "fingerprint": "fp-a",
+            "status": "verified",
+            "checked_at": "2026-07-17T00:00:00Z",
+            "diagnostic_id": diagnostic_id,
+        }
+        if authorization_generation is not None:
+            state["authorization_generation"] = authorization_generation
+&gt;       private_generation = image_runtime.verification_authorization_generation(
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            state,
+            expected_fingerprint="fp-a",
+            capability="image_generation",
+        )
+E       AttributeError: module 'agent.image_runtime' has no attribute 'verification_authorization_generation'
+
+tests/agent/test_image_runtime_route_events.py:22: AttributeError</failure></testcase></testsuite></testsuites>

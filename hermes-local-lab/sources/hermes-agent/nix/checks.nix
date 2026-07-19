@@ -9,7 +9,9 @@
       hermes-agent = self'.packages.default;
       hermesVenv = hermes-agent.hermesVenv;
 
-      configMergeScript = pkgs.callPackage ./configMergeScript.nix { };
+      configMergeScript = pkgs.callPackage ./configMergeScript.nix {
+        python = "${hermesVenv}/bin/python3";
+      };
 
       # Auto-generated config key reference — always in sync with Python
       configKeys = pkgs.runCommand "hermes-config-keys" {} ''
@@ -274,8 +276,8 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
         '';
 
         # ── Config merge + round-trip test ────────────────────────────────
-        # Tests the merge script (Nix activation behavior) across 7
-        # scenarios, then verifies Python's load_config() reads correctly.
+        # Tests the canonical Nix activation writer across 12 scenarios,
+        # including capability epochs and atomic config/.env publication.
         config-roundtrip = let
           # Nix settings used across scenarios
           nixSettings = pkgs.writeText "nix-settings.json" (builtins.toJSON {
@@ -331,6 +333,65 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
               custom_key: "preserved"
               env_passthrough:
                 - USER_VAR
+          '';
+          capabilitySettings = pkgs.writeText "capability-settings.yaml" ''
+            auxiliary:
+              vision:
+                provider: zai
+                model: glm-4.5v
+            image_gen:
+              provider: zhipu-image
+              model: cogview-4
+          '';
+          fixtureH = pkgs.writeText "fixture-h.yaml" ''
+            auxiliary:
+              vision:
+                provider: alibaba
+                model: qwen-vl-max
+            image_gen:
+              provider: dashscope
+              model: wanx-v1
+            _taiji_capability_epochs:
+              vision: 4
+              image_generation: 7
+            _taiji_profile_incarnation: live-incarnation
+            user_only:
+              preserved: true
+          '';
+          replaceSettings = pkgs.writeText "replace-settings.yaml" ''
+            auxiliary:
+              vision:
+                provider: zai
+                model: glm-4.5v
+            image_gen:
+              provider: zhipu-image
+              model: cogview-4
+            _taiji_capability_epochs:
+              vision: 1
+              image_generation: 2
+            _taiji_profile_incarnation: stale-declarative-incarnation
+          '';
+          pairSettings = pkgs.writeText "pair-settings.yaml" ''
+            auxiliary:
+              vision:
+                provider: alibaba
+                model: qwen-vl-max
+            image_gen:
+              provider: dashscope
+              model: wanx-v1
+            _taiji_capability_epochs:
+              vision: 10
+              image_generation: 20
+            _taiji_profile_incarnation: pair-incarnation
+          '';
+          pairEnvironment = pkgs.writeText "pair-environment.json" (builtins.toJSON {
+            NON_SECRET = "managed value";
+          });
+          pairSecrets = pkgs.writeText "pair-secrets.env" ''
+            DASHSCOPE_API_KEY=new-secret
+          '';
+          invalidSecrets = pkgs.writeText "invalid-secrets.env" ''
+            this is not an env assignment
           '';
 
         in pkgs.runCommand "hermes-config-roundtrip" {
@@ -472,6 +533,140 @@ json.dump(load_config(), sys.stdout, default=str)
           echo "PASS: Scenario G"
 
           # ═══════════════════════════════════════════════════════════════
+          # Scenario H: Capability metadata
+          # ═══════════════════════════════════════════════════════════════
+          echo "=== Scenario H: Capability metadata ==="
+          H_HOME=$(mktemp -d)
+          install -m 0600 ${fixtureH} "$H_HOME/config.yaml"
+          ${configMergeScript} ${capabilitySettings} "$H_HOME/config.yaml"
+          H_CONFIG=$(${hermesVenv}/bin/python3 -c '
+import json, sys, yaml
+with open(sys.argv[1], encoding="utf-8") as handle:
+    json.dump(yaml.safe_load(handle) or {}, sys.stdout)
+' "$H_HOME/config.yaml")
+
+          echo "$H_CONFIG" | jq -e '.auxiliary.vision.provider == "zai"' > /dev/null \
+            || fail "H: vision config was not updated"
+          echo "$H_CONFIG" | jq -e '.image_gen.provider == "zhipu-image"' > /dev/null \
+            || fail "H: image-generation config was not updated"
+          echo "$H_CONFIG" | jq -e '._taiji_capability_epochs.vision == 5' > /dev/null \
+            || fail "H: vision epoch did not advance exactly once"
+          echo "$H_CONFIG" | jq -e '._taiji_capability_epochs.image_generation == 8' > /dev/null \
+            || fail "H: image-generation epoch did not advance exactly once"
+          echo "$H_CONFIG" | jq -e '._taiji_profile_incarnation == "live-incarnation"' > /dev/null \
+            || fail "H: current profile incarnation was not preserved"
+          echo "$H_CONFIG" | jq -e '.user_only.preserved == true' > /dev/null \
+            || fail "H: merge removed an unrelated user key"
+          echo "PASS: Scenario H"
+
+          # ═══════════════════════════════════════════════════════════════
+          # Scenario I: Replace preserves incarnation
+          # ═══════════════════════════════════════════════════════════════
+          echo "=== Scenario I: Replace preserves incarnation ==="
+          I_HOME=$(mktemp -d)
+          install -m 0600 ${fixtureH} "$I_HOME/config.yaml"
+          ${configMergeScript} --replace ${replaceSettings} "$I_HOME/config.yaml"
+          I_CONFIG=$(${hermesVenv}/bin/python3 -c '
+import json, sys, yaml
+with open(sys.argv[1], encoding="utf-8") as handle:
+    json.dump(yaml.safe_load(handle) or {}, sys.stdout)
+' "$I_HOME/config.yaml")
+
+          echo "$I_CONFIG" | jq -e 'has("user_only") | not' > /dev/null \
+            || fail "I: replace retained a user-only key"
+          echo "$I_CONFIG" | jq -e '._taiji_profile_incarnation == "live-incarnation"' > /dev/null \
+            || fail "I: stale declarative incarnation replaced the live one"
+          echo "$I_CONFIG" | jq -e '._taiji_capability_epochs.vision == 5' > /dev/null \
+            || fail "I: replace did not preserve and advance vision epoch"
+          echo "$I_CONFIG" | jq -e '._taiji_capability_epochs.image_generation == 8' > /dev/null \
+            || fail "I: replace did not preserve and advance image epoch"
+          echo "PASS: Scenario I"
+
+          # ═══════════════════════════════════════════════════════════════
+          # Scenario J: Declarative env pair commit
+          # ═══════════════════════════════════════════════════════════════
+          echo "=== Scenario J: Declarative env pair commit ==="
+          J_HOME=$(mktemp -d)
+          install -m 0600 ${pairSettings} "$J_HOME/config.yaml"
+          printf '%s\n' \
+            'DASHSCOPE_API_KEY=old-secret' \
+            'OLD_ONLY=must-be-removed' > "$J_HOME/.env"
+          chmod 0600 "$J_HOME/.env"
+          ${configMergeScript} \
+            --env-json ${pairEnvironment} \
+            --env-file ${pairSecrets} \
+            ${pairSettings} "$J_HOME/config.yaml"
+          J_CONFIG=$(${hermesVenv}/bin/python3 -c '
+import json, sys, yaml
+with open(sys.argv[1], encoding="utf-8") as handle:
+    json.dump(yaml.safe_load(handle) or {}, sys.stdout)
+' "$J_HOME/config.yaml")
+
+          echo "$J_CONFIG" | jq -e '._taiji_capability_epochs.vision == 11' > /dev/null \
+            || fail "J: secret change did not advance vision epoch exactly once"
+          echo "$J_CONFIG" | jq -e '._taiji_capability_epochs.image_generation == 21' > /dev/null \
+            || fail "J: secret change did not advance image epoch exactly once"
+          echo "$J_CONFIG" | jq -e '._taiji_profile_incarnation == "pair-incarnation"' > /dev/null \
+            || fail "J: pair commit changed profile incarnation"
+          grep -qx 'DASHSCOPE_API_KEY=new-secret' "$J_HOME/.env" \
+            || fail "J: declared secret was not published"
+          grep -qx "NON_SECRET='managed value'" "$J_HOME/.env" \
+            || fail "J: declared non-secret environment was not published"
+          if grep -q '^OLD_ONLY=' "$J_HOME/.env"; then
+            fail "J: stale env key survived declarative replacement"
+          fi
+          echo "PASS: Scenario J"
+
+          # ═══════════════════════════════════════════════════════════════
+          # Scenario K: Secret idempotency
+          # ═══════════════════════════════════════════════════════════════
+          echo "=== Scenario K: Secret idempotency ==="
+          cp "$J_HOME/config.yaml" "$J_HOME/config.before-k"
+          cp "$J_HOME/.env" "$J_HOME/env.before-k"
+          ${configMergeScript} \
+            --env-json ${pairEnvironment} \
+            --env-file ${pairSecrets} \
+            ${pairSettings} "$J_HOME/config.yaml"
+          cmp -s "$J_HOME/config.before-k" "$J_HOME/config.yaml" \
+            || fail "K: identical activation changed config bytes or epochs"
+          cmp -s "$J_HOME/env.before-k" "$J_HOME/.env" \
+            || fail "K: identical activation changed env bytes"
+          echo "PASS: Scenario K"
+
+          # ═══════════════════════════════════════════════════════════════
+          # Scenario L: Failed publish is not torn
+          # ═══════════════════════════════════════════════════════════════
+          echo "=== Scenario L: Failed publish is not torn ==="
+          L_HOME=$(mktemp -d)
+          install -m 0600 ${fixtureH} "$L_HOME/config.yaml"
+          printf '%s\n' 'DASHSCOPE_API_KEY=old-secret' > "$L_HOME/.env"
+          cp "$L_HOME/config.yaml" "$L_HOME/config.before-l"
+          cp "$L_HOME/.env" "$L_HOME/env.before-l"
+
+          if ${configMergeScript} \
+              --env-json ${pairEnvironment} \
+              --env-file "$L_HOME/does-not-exist.env" \
+              ${capabilitySettings} "$L_HOME/config.yaml"; then
+            fail "L: missing declarative env file unexpectedly succeeded"
+          fi
+          cmp -s "$L_HOME/config.before-l" "$L_HOME/config.yaml" \
+            || fail "L: missing env file partially published config"
+          cmp -s "$L_HOME/env.before-l" "$L_HOME/.env" \
+            || fail "L: missing env file partially published env"
+
+          if ${configMergeScript} \
+              --env-json ${pairEnvironment} \
+              --env-file ${invalidSecrets} \
+              ${capabilitySettings} "$L_HOME/config.yaml"; then
+            fail "L: invalid declarative env file unexpectedly succeeded"
+          fi
+          cmp -s "$L_HOME/config.before-l" "$L_HOME/config.yaml" \
+            || fail "L: invalid env file partially published config"
+          cmp -s "$L_HOME/env.before-l" "$L_HOME/.env" \
+            || fail "L: invalid env file partially published env"
+          echo "PASS: Scenario L"
+
+          # ═══════════════════════════════════════════════════════════════
           # Report
           # ═══════════════════════════════════════════════════════════════
           if [ -n "$ERRORS" ]; then
@@ -482,7 +677,7 @@ json.dump(load_config(), sys.stdout, default=str)
           fi
 
           echo ""
-          echo "=== All 7 merge scenarios passed ==="
+          echo "=== All 12 canonical writer scenarios passed ==="
           mkdir -p $out
           echo "ok" > $out/result
         '';
