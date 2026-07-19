@@ -3,10 +3,14 @@
 import argparse
 import os
 from pathlib import Path
+import subprocess
+import sys
+import threading
 from unittest.mock import patch, call
 
 import pytest
 
+from agent.provider_credentials import credential_transaction
 from hermes_cli.config import set_config_value, config_command
 
 
@@ -124,6 +128,110 @@ class TestConfigYamlRouting:
             "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true" in env_content
             or "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=True" in env_content
         )
+
+    def test_malformed_config_is_preserved_instead_of_replaced(
+        self,
+        _isolated_hermes_home,
+    ):
+        config_path = _isolated_hermes_home / "config.yaml"
+        malformed = b"model:\n  provider: openrouter\nprovider_credentials: [\n"
+        config_path.write_bytes(malformed)
+
+        with pytest.raises(ValueError, match="cannot be read safely"):
+            set_config_value("terminal.backend", "docker")
+
+        assert config_path.read_bytes() == malformed
+
+    def test_duplicate_mapping_config_is_preserved_instead_of_replaced(
+        self,
+        _isolated_hermes_home,
+    ):
+        config_path = _isolated_hermes_home / "config.yaml"
+        ambiguous = b"model: gpt-4o\nmodel: attacker-shadow\n"
+        config_path.write_bytes(ambiguous)
+
+        with pytest.raises(ValueError, match="duplicate"):
+            set_config_value("terminal.backend", "docker")
+
+        assert config_path.read_bytes() == ambiguous
+
+    def test_waits_for_the_shared_config_env_transaction(
+        self,
+        _isolated_hermes_home,
+    ):
+        config_path = _isolated_hermes_home / "config.yaml"
+        config_path.write_text("model: gpt-4o\n", encoding="utf-8")
+        started = threading.Event()
+        finished = threading.Event()
+        errors = []
+
+        def writer():
+            started.set()
+            try:
+                set_config_value("terminal.backend", "docker")
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        with credential_transaction(config_path):
+            thread = threading.Thread(target=writer, daemon=True)
+            thread.start()
+            assert started.wait(1)
+            assert not finished.wait(0.1)
+
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert errors == []
+
+    def test_terminal_config_and_env_recover_after_public_cli_hard_crash(
+        self,
+        _isolated_hermes_home,
+    ):
+        config_path = _isolated_hermes_home / "config.yaml"
+        env_path = _isolated_hermes_home / ".env"
+        config_path.write_text(
+            "terminal:\n  backend: local\n",
+            encoding="utf-8",
+        )
+        env_path.write_text("TERMINAL_ENV=local\n", encoding="utf-8")
+        script = """
+import os
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(home)
+
+import agent.provider_credentials as credentials
+from hermes_cli.config import set_config_value
+
+config_path = home / "config.yaml"
+original_exchange = credentials._atomic_exchange_entries
+
+def crash_after_config_exchange(source, target):
+    result = original_exchange(source, target)
+    if Path(target) == config_path:
+        os._exit(92)
+    return result
+
+credentials._atomic_exchange_entries = crash_after_config_exchange
+set_config_value("terminal.backend", "docker")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(_isolated_hermes_home)],
+            cwd=Path(__file__).parents[2],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 92, result.stderr
+        from agent.provider_credentials import recover_credential_transaction
+
+        assert recover_credential_transaction(config_path) == "recovered"
+        assert "backend: docker" in config_path.read_text(encoding="utf-8")
+        assert env_path.read_text(encoding="utf-8") == "TERMINAL_ENV=docker\n"
 
 
 # ---------------------------------------------------------------------------

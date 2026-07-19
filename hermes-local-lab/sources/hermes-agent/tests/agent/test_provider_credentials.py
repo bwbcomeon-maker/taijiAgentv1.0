@@ -8,6 +8,7 @@ import yaml
 from agent.provider_credentials import (
     AUTH_TYPES,
     auth_schema,
+    credential_transaction,
     credential_secret_env,
     default_credential_ref,
     find_credential,
@@ -145,6 +146,182 @@ def test_named_default_credential_precedes_legacy_env_without_mutating_config(mo
     assert default_credential_ref("alibaba", config_data=config) == "alibaba-default"
     assert resolve_api_key("alibaba", config_data=config) == "named-default"
     assert yaml.safe_dump(config, sort_keys=False) == before
+
+
+def test_explicit_config_path_keeps_nested_profile_transaction_on_same_lock(
+    monkeypatch, tmp_path
+):
+    active_config_path = tmp_path / "active-profile" / "config.yaml"
+    unrelated_config_path = tmp_path / "default-profile" / "config.yaml"
+    active_config_path.parent.mkdir(parents=True)
+    unrelated_config_path.parent.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(unrelated_config_path))
+    monkeypatch.setenv(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+        "named-default",
+    )
+    config = _config()
+    config["provider_credentials"][0]["default"] = True
+
+    with credential_transaction(active_config_path):
+        assert (
+            default_credential_ref(
+                "alibaba",
+                config_data=config,
+                config_path=active_config_path,
+            )
+            == "alibaba-default"
+        )
+        assert (
+            resolve_api_key(
+                "alibaba",
+                config_data=config,
+                config_path=active_config_path,
+            )
+            == "named-default"
+        )
+
+
+def test_explicit_config_path_reads_secret_from_the_same_directory(
+    monkeypatch,
+    tmp_path,
+):
+    active_config_path = tmp_path / "active-profile" / "config.yaml"
+    unrelated_home = tmp_path / "default-profile"
+    active_config_path.parent.mkdir(parents=True)
+    unrelated_home.mkdir(parents=True)
+    config = _config()
+    config["provider_credentials"][0]["default"] = True
+    (active_config_path.parent / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=active-profile-key\n",
+        encoding="utf-8",
+    )
+    (unrelated_home / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=wrong-profile-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(unrelated_home))
+    monkeypatch.delenv(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+        raising=False,
+    )
+
+    assert (
+        default_credential_ref(
+            "alibaba",
+            config_data=config,
+            config_path=active_config_path,
+        )
+        == "alibaba-default"
+    )
+    assert (
+        resolve_api_key(
+            "alibaba",
+            "alibaba-default",
+            config_data=config,
+            config_path=active_config_path,
+        )
+        == "active-profile-key"
+    )
+
+
+def test_persisted_named_secret_wins_over_stale_process_environment(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "active-profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    (config_path.parent / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=fresh-disk-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+        "stale-process-key",
+    )
+
+    assert (
+        resolve_api_key(
+            "alibaba",
+            "alibaba-default",
+            config_data=_config(),
+            config_path=config_path,
+        )
+        == "fresh-disk-key"
+    )
+
+
+def test_deleted_persisted_named_secret_is_not_revived_from_stale_process_environment(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "active-profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    (config_path.parent / ".env").write_text(
+        "UNRELATED_KEY=still-present\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+        "stale-process-key",
+    )
+
+    assert (
+        resolve_api_key(
+            "alibaba",
+            "alibaba-default",
+            config_data=_config(),
+            config_path=config_path,
+        )
+        == ""
+    )
+
+
+def test_duplicate_persisted_named_secret_fails_closed(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "active-profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    (config_path.parent / ".env").write_text(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=older-key\n"
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY=newer-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        resolve_api_key(
+            "alibaba",
+            "alibaba-default",
+            config_data=_config(),
+            config_path=config_path,
+        )
+
+
+def test_named_secret_can_use_process_environment_when_persisted_env_is_absent(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "active-profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    monkeypatch.setenv(
+        "TAIJI_CREDENTIAL_ALIBABA_DEFAULT_API_KEY",
+        "injected-process-key",
+    )
+
+    assert (
+        resolve_api_key(
+            "alibaba",
+            "alibaba-default",
+            config_data=_config(),
+            config_path=config_path,
+        )
+        == "injected-process-key"
+    )
 
 
 def test_unmarked_named_credential_does_not_take_over_legacy_config(monkeypatch):
