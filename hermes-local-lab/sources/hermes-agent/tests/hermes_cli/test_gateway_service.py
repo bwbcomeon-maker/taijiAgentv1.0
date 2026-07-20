@@ -74,6 +74,7 @@ class TestSystemdServiceRefresh:
             calls.append(cmd)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
 
         gateway_cli.systemd_start()
@@ -104,6 +105,7 @@ class TestSystemdServiceRefresh:
             calls.append(cmd)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
 
         gateway_cli.systemd_restart()
@@ -319,7 +321,7 @@ class TestGeneratedSystemdUnits:
         monkeypatch.setattr(
             gateway_cli,
             "_get_restart_drain_timeout",
-            lambda: DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+            lambda **_: DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
         )
         unit = gateway_cli.generate_systemd_unit(system=False)
 
@@ -380,7 +382,7 @@ class TestGeneratedSystemdUnits:
         monkeypatch.setattr(
             gateway_cli,
             "_get_restart_drain_timeout",
-            lambda: DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+            lambda **_: DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
         )
         unit = gateway_cli.generate_systemd_unit(system=True)
 
@@ -742,6 +744,7 @@ class TestGatewaySystemServiceRouting:
 
         monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: calls.append(("refresh", system)))
         monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 12.0)
         monkeypatch.setattr(
@@ -787,6 +790,7 @@ class TestGatewaySystemServiceRouting:
 
         monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: None)
         monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 10.0)
         monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
@@ -846,6 +850,7 @@ class TestGatewaySystemServiceRouting:
 
         monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: None)
         monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
         monkeypatch.setattr(gateway_cli, "_recover_pending_systemd_restart", lambda system=False, previous_pid=None: False)
@@ -876,6 +881,7 @@ class TestGatewaySystemServiceRouting:
     def test_systemd_restart_recovers_failed_planned_restart(self, monkeypatch, capsys):
         monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: None)
         monkeypatch.setattr(
             "gateway.status.read_runtime_status",
@@ -1234,6 +1240,80 @@ class TestSystemUnitHermesHome:
         unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
 
         assert 'HERMES_HOME=/opt/hermes-shared' in unit
+
+    def test_system_unit_reads_target_users_restart_timeout(
+        self, tmp_path, monkeypatch
+    ):
+        calling_home = tmp_path / "root"
+        target_home = tmp_path / "alice"
+        target_config = target_home / ".hermes" / "config.yaml"
+        target_config.parent.mkdir(parents=True)
+        target_config.write_text(
+            "agent:\n  restart_drain_timeout: 321\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            Path,
+            "home",
+            staticmethod(lambda: calling_home),
+        )
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda run_as_user=None: (
+                "alice",
+                "alice",
+                str(target_home),
+            ),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_build_user_local_paths",
+            lambda home, existing: [],
+        )
+
+        unit = gateway_cli.generate_systemd_unit(
+            system=True,
+            run_as_user="alice",
+        )
+
+        assert "TimeoutStopSec=351" in unit
+        assert not calling_home.exists()
+
+    def test_system_unit_render_does_not_create_missing_custom_home(
+        self, tmp_path, monkeypatch
+    ):
+        calling_home = tmp_path / "root"
+        custom_home = tmp_path / "shared" / "hermes"
+        monkeypatch.setattr(
+            Path,
+            "home",
+            staticmethod(lambda: calling_home),
+        )
+        monkeypatch.setenv("HERMES_HOME", str(custom_home))
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda run_as_user=None: (
+                "alice",
+                "alice",
+                str(tmp_path / "alice"),
+            ),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_build_user_local_paths",
+            lambda home, existing: [],
+        )
+
+        unit = gateway_cli.generate_systemd_unit(
+            system=True,
+            run_as_user="alice",
+        )
+
+        assert f"HERMES_HOME={custom_home}" in unit
+        assert not custom_home.exists()
 
     def test_user_unit_unaffected_by_change(self):
         # User-scope units should still use the calling user's HERMES_HOME

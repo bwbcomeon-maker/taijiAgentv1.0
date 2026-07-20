@@ -26,12 +26,14 @@ def test_gateway_run_approval_event_becomes_webui_pending_payload():
             "pattern_key": "recursive delete",
             "pattern_keys": ["recursive delete"],
         },
+        profile_name="alice",
     )
 
     assert payload["command"] == "rm -rf .git"
     assert payload["description"] == "recursive delete"
     assert payload["_session_id"] == "webui-session-1"
     assert payload["_gateway_run_id"] == "run_123"
+    assert payload["_profile_name"] == "alice"
     assert payload["approval_id"]
 
 
@@ -74,6 +76,42 @@ def test_gateway_run_approval_result_marks_not_pending_as_inactive(monkeypatch):
     assert result["resolved"] is False
     assert result["inactive"] is True
     assert result["code"] == "approval_not_pending"
+
+
+def test_gateway_run_approval_result_reuses_bound_profile_header(monkeypatch):
+    from api.gateway_chat import resolve_gateway_run_approval_result
+
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"resolved":true}'
+
+    def fake_urlopen(req, timeout=30):
+        captured["profile"] = req.get_header("X-hermes-profile")
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = resolve_gateway_run_approval_result(
+        {
+            "_gateway_run_id": "run_bound",
+            "_session_id": "webui-session-1",
+            "_profile_name": "alice",
+        },
+        "once",
+    )
+
+    assert result["resolved"] is True
+    assert captured["profile"] == "alice"
 
 
 def test_webui_approval_response_resolves_gateway_run(monkeypatch):

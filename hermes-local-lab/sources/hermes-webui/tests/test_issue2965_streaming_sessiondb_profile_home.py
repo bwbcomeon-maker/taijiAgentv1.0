@@ -90,6 +90,13 @@ def test_streaming_sessiondb_uses_session_profile_state_db(tmp_path, monkeypatch
             self.context_compressor = None
             self._last_error = None
             self.ephemeral_system_prompt = None
+            from agent.image_runtime import (
+                capture_capability_runtime_generation,
+            )
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
 
         def run_conversation(self, **kwargs):
             history = list(kwargs.get("conversation_history") or [])

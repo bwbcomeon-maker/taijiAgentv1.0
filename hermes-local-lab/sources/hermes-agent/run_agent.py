@@ -108,6 +108,12 @@ from model_tools import (
     handle_function_call,
     check_toolset_requirements,
 )
+
+# Stable identity for distinguishing the ordinary module loader from a loader
+# injected by an embedder/test.  Capability refresh may follow an explicit
+# post-construction override, but must not treat restoration of this default as
+# permission to discard the registry that originally built the Agent.
+_DEFAULT_TOOL_DEFINITIONS_LOADER = get_tool_definitions
 from tools.terminal_tool import cleanup_vm, get_active_env, is_persistent_env
 from tools.terminal_tool import (
     set_approval_callback as _set_approval_callback,
@@ -1957,6 +1963,15 @@ class AIAgent:
         """
         self._interrupt_requested = True
         self._interrupt_message = message
+        codex_session = getattr(self, "_codex_session", None)
+        if codex_session is not None:
+            try:
+                codex_session.request_interrupt()
+            except Exception:
+                logger.debug(
+                    "Failed to propagate interrupt to Codex app-server session",
+                    exc_info=True,
+                )
         # Signal all tools to abort any in-flight operations immediately.
         # Scope the interrupt to this agent's execution thread so other
         # agents running in the same process (gateway) are not affected.
@@ -4389,6 +4404,8 @@ class AIAgent:
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
         persist_user_platform_message_id: Optional[str] = None,
+        image_turn_id: Optional[str] = None,
+        image_gate_owner: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         try:
@@ -4407,7 +4424,34 @@ class AIAgent:
         try:
             from agent.image_runtime import refresh_agent_capability_runtime
 
-            refresh_agent_capability_runtime(self)
+            construction_loader = getattr(
+                self,
+                "_tool_definitions_loader",
+                None,
+            )
+            default_loader = getattr(
+                self,
+                "_tool_definitions_default_loader",
+                _DEFAULT_TOOL_DEFINITIONS_LOADER,
+            )
+            current_loader = get_tool_definitions
+            definitions_loader = (
+                construction_loader
+                if (
+                    callable(construction_loader)
+                    and current_loader is default_loader
+                    and construction_loader is not default_loader
+                )
+                else current_loader
+            )
+            refresh_agent_capability_runtime(
+                self,
+                definitions_loader=(
+                    definitions_loader
+                    if callable(definitions_loader)
+                    else None
+                ),
+            )
         except Exception:
             # Capability refresh is fail-closed inside its builder. A transient
             # refresh error must not abort an unrelated user turn.
@@ -4422,6 +4466,8 @@ class AIAgent:
             stream_callback,
             persist_user_message,
             persist_user_platform_message_id,
+            image_turn_id,
+            image_gate_owner,
         )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
@@ -4444,12 +4490,25 @@ class AIAgent:
         user_message: str,
         original_user_message: Any,
         messages: List[Dict[str, Any]],
+        conversation_history: Optional[List[Dict[str, Any]]],
         effective_task_id: str,
+        image_turn_id: str,
+        image_gate_owner: str,
         should_review_memory: bool = False,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.codex_runtime.run_codex_app_server_turn``."""
         from agent.codex_runtime import run_codex_app_server_turn
-        return run_codex_app_server_turn(self, user_message=user_message, original_user_message=original_user_message, messages=messages, effective_task_id=effective_task_id, should_review_memory=should_review_memory)
+        return run_codex_app_server_turn(
+            self,
+            user_message=user_message,
+            original_user_message=original_user_message,
+            messages=messages,
+            conversation_history=conversation_history,
+            effective_task_id=effective_task_id,
+            image_turn_id=image_turn_id,
+            image_gate_owner=image_gate_owner,
+            should_review_memory=should_review_memory,
+        )
 
 def main(
     query: str = None,

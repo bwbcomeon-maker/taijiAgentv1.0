@@ -108,7 +108,7 @@ class TestCustomProvidersInGetProviders:
         """Settings → Providers must not filter out read-only custom providers."""
         src = open("static/panels.js", encoding="utf-8").read()
         assert "filter(p=>p.configurable||p.is_oauth||p.is_custom)" in src
-        assert "Custom provider loaded from config.yaml / hermes model" in src
+        assert "自定义提供商来自管理员配置。请在管理员配置中编辑。" in src
         assert "if(p.configurable){" in src
 
     def test_custom_provider_with_multi_models(self, monkeypatch, tmp_path):

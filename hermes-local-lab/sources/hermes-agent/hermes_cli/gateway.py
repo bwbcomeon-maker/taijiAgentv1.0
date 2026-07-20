@@ -2166,6 +2166,11 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     working_dir = str(PROJECT_ROOT)
     detected_venv = _detect_venv_dir()
     venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
+    system_identity: tuple[str, str, str] | None = None
+    system_hermes_home: str | None = None
+    if system:
+        system_identity = _system_service_identity(run_as_user)
+        system_hermes_home = _hermes_home_for_target_user(system_identity[2])
 
     path_entries = _build_service_path_dirs()
     resolved_node = shutil.which("node")
@@ -2181,12 +2186,23 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     # SIGKILL on the cgroup — otherwise bash/sleep tool-call children left
     # by a force-interrupted agent get reaped by systemd instead of us
     # (#8202). 30s of headroom covers the worst case we've observed.
-    _drain_timeout = int(_get_restart_drain_timeout() or 0)
+    _drain_timeout = int(
+        _get_restart_drain_timeout(
+            config_path=(
+                Path(system_hermes_home) / "config.yaml"
+                if system_hermes_home is not None
+                else None
+            )
+        )
+        or 0
+    )
     restart_timeout = max(60, _drain_timeout) + 30
 
     if system:
-        username, group_name, home_dir = _system_service_identity(run_as_user)
-        hermes_home = _hermes_home_for_target_user(home_dir)
+        assert system_identity is not None
+        assert system_hermes_home is not None
+        username, group_name, home_dir = system_identity
+        hermes_home = system_hermes_home
         profile_arg = _profile_arg(hermes_home)
         # Remap all paths that may resolve under the calling user's home
         # (e.g. /root/) to the target user's home so the service can
@@ -2445,11 +2461,17 @@ def _print_system_scope_remediation(action: str) -> None:
     print_info("         hermes gateway start")
 
 
-def _get_restart_drain_timeout() -> float:
+def _get_restart_drain_timeout(
+    config_path: Path | None = None,
+) -> float:
     """Return the configured gateway restart drain timeout in seconds."""
     raw = os.getenv("HERMES_RESTART_DRAIN_TIMEOUT", "").strip()
     if not raw:
-        cfg = read_raw_config()
+        cfg = (
+            read_raw_config(config_path)
+            if config_path is not None
+            else read_raw_config()
+        )
         agent_cfg = cfg.get("agent", {}) if isinstance(cfg, dict) else {}
         raw = str(
             agent_cfg.get(

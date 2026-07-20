@@ -9,10 +9,26 @@ APP_DIR="$REPO_DIR/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 LOG_DIR="$HOME/.local/state/taiji-agent/logs"
 LOG_FILE="$LOG_DIR/taiji-desktop-launcher.log"
+SOURCE_GATE="$REPO_DIR/scripts/check-clean-worktree.sh"
+TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"
+
+"$SOURCE_GATE" \
+  --mode "$TAIJI_SOURCE_MODE" \
+  --repo-root "$REPO_DIR" \
+  --source-root "$REPO_DIR"
 
 mkdir -p "$LOG_DIR"
 
 TAIJI_SOURCE_ROOT="$REPO_DIR"
+SOURCE_INSTANCE_ID="$(
+  printf '%s' "$TAIJI_SOURCE_ROOT" \
+    | /usr/bin/shasum -a 256 \
+    | /usr/bin/awk '{print substr($1, 1, 16)}'
+)"
+if [ -z "${TAIJI_DESKTOP_USER_DATA_DIR:-}" ]; then
+  TAIJI_DESKTOP_USER_DATA_DIR="$HOME/.local/share/taiji-agent/source-instances/$SOURCE_INSTANCE_ID/electron-user-data"
+fi
+mkdir -p "$TAIJI_DESKTOP_USER_DATA_DIR"
 TAIJI_SOURCE_COMMIT="unknown"
 TAIJI_SOURCE_DIRTY="unknown"
 if [ -x /usr/bin/git ] && /usr/bin/git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -29,6 +45,7 @@ export TAIJI_AGENT_ROOT="$LAB_DIR"
 export TAIJI_SOURCE_ROOT
 export TAIJI_SOURCE_COMMIT
 export TAIJI_SOURCE_DIRTY
+export TAIJI_DESKTOP_USER_DATA_DIR
 
 {
   echo "========================================"
@@ -39,6 +56,8 @@ export TAIJI_SOURCE_DIRTY
   echo "Root: $TAIJI_SOURCE_ROOT"
   echo "Commit: $TAIJI_SOURCE_COMMIT"
   echo "Dirty: $TAIJI_SOURCE_DIRTY"
+  echo "Instance: $SOURCE_INSTANCE_ID"
+  echo "Electron data: $TAIJI_DESKTOP_USER_DATA_DIR"
   echo
 
   if ! command -v npm >/dev/null 2>&1; then

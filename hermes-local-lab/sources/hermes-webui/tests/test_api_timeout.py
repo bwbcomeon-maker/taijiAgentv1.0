@@ -109,7 +109,12 @@ def test_api_rejects_hung_fetch_with_timeout_and_toast():
         api('/api/sessions',{{timeoutMs:20}})
           .then(()=>{{console.error('resolved unexpectedly');process.exit(2);}})
           .catch(err=>{{
-            console.log(JSON.stringify({{message:String(err&&err.message||err),events}}));
+            console.log(JSON.stringify({{
+              message:String(err&&err.message||err),
+              name:String(err&&err.name||''),
+              timeout:err&&err.timeout===true,
+              events
+            }}));
             process.exit(0);
           }});
         setTimeout(()=>{{console.error('api did not reject after timeoutMs');process.exit(3);}},250);
@@ -118,9 +123,10 @@ def test_api_rejects_hung_fetch_with_timeout_and_toast():
     result = _node_eval(script, timeout=1.0)
     assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout.strip())
-    assert "timed out" in payload["message"].lower()
+    assert payload["name"] == "TimeoutError"
+    assert payload["timeout"] is True
     assert any(event.get("aborted") for event in payload["events"]), payload
-    assert any("request timed out" in event.get("msg", "").lower() for event in payload["events"]), payload
+    assert any(event.get("msg") for event in payload["events"]), payload
     assert any(event.get("type") == "error" for event in payload["events"]), payload
 
 
@@ -146,7 +152,12 @@ def test_api_rejects_stalled_response_body_with_timeout():
         api('/api/sessions',{{timeoutMs:20}})
           .then(()=>{{console.error('resolved unexpectedly');process.exit(2);}})
           .catch(err=>{{
-            console.log(JSON.stringify({{message:String(err&&err.message||err),events}}));
+            console.log(JSON.stringify({{
+              message:String(err&&err.message||err),
+              name:String(err&&err.name||''),
+              timeout:err&&err.timeout===true,
+              events
+            }}));
             process.exit(0);
           }});
         setTimeout(()=>{{console.error('api body read did not reject after timeoutMs');process.exit(3);}},250);
@@ -155,7 +166,8 @@ def test_api_rejects_stalled_response_body_with_timeout():
     result = _node_eval(script, timeout=1.0)
     assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout.strip())
-    assert "timed out" in payload["message"].lower()
+    assert payload["name"] == "TimeoutError"
+    assert payload["timeout"] is True
     assert any(event.get("aborted") for event in payload["events"]), payload
 
 
@@ -176,7 +188,12 @@ def test_api_can_suppress_timeout_toast_for_background_pollers():
         api('/api/sessions',{{timeoutMs:20,timeoutToast:false}})
           .then(()=>{{console.error('resolved unexpectedly');process.exit(2);}})
           .catch(err=>{{
-            console.log(JSON.stringify({{message:String(err&&err.message||err),events}}));
+            console.log(JSON.stringify({{
+              message:String(err&&err.message||err),
+              name:String(err&&err.name||''),
+              timeout:err&&err.timeout===true,
+              events
+            }}));
             process.exit(0);
           }});
         setTimeout(()=>{{console.error('api did not reject after timeoutMs');process.exit(3);}},250);
@@ -185,7 +202,8 @@ def test_api_can_suppress_timeout_toast_for_background_pollers():
     result = _node_eval(script, timeout=1.0)
     assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout.strip())
-    assert "timed out" in payload["message"].lower()
+    assert payload["name"] == "TimeoutError"
+    assert payload["timeout"] is True
     assert any(event.get("aborted") for event in payload["events"]), payload
     assert not any("msg" in event for event in payload["events"]), payload
 

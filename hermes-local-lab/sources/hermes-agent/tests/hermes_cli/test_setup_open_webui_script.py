@@ -267,6 +267,8 @@ def test_open_webui_env_update_preserves_group_shared_mode_and_group(
     source_script = _source_only_copy(tmp_path)
     env_path = tmp_path / "profile" / ".env"
     env_path.parent.mkdir(mode=0o2770)
+    if hasattr(os, "chown"):
+        os.chown(env_path.parent, -1, os.getegid())
     env_path.parent.chmod(0o2770)
     env_path.write_text(
         "# retained\nAPI_SERVER_KEY=existing-secret\n",

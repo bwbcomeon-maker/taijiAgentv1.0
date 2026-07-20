@@ -33,14 +33,30 @@ EXIT CODES
   2 — environment/setup failure (server didn't boot, playwright missing, etc.)
 """
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
-PORT = int(os.getenv("SMOKE_PORT", "8796"))
+
+def _select_port():
+    configured = os.getenv("SMOKE_PORT", "").strip()
+    requested = int(configured) if configured else 0
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("127.0.0.1", requested))
+        except OSError as error:
+            raise RuntimeError(
+                f"smoke port {requested} is already occupied; refusing to disturb its owner"
+            ) from error
+        return int(probe.getsockname()[1])
+
+
+PORT = _select_port()
 BASE = f"http://127.0.0.1:{PORT}"
 
 # Pages that must load cleanly. Hash routes are how the SPA exposes views.
@@ -79,6 +95,16 @@ def _wait_for_health(timeout=30):
     return False
 
 
+def _route_browser_request(route):
+    parsed = urllib.parse.urlparse(route.request.url)
+    if parsed.scheme in {"http", "https", "ws", "wss"}:
+        port = parsed.port or (443 if parsed.scheme in {"https", "wss"} else 80)
+        if parsed.hostname not in {"127.0.0.1", "localhost"} or port != PORT:
+            route.abort("blockedbyclient")
+            return
+    route.continue_()
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -108,6 +134,7 @@ def main():
         # Point agent discovery at a path that doesn't exist — the server is
         # designed to boot and serve the UI even when the agent is absent.
         "HERMES_WEBUI_AGENT_DIR": os.path.join(state_dir, "no-agent"),
+        "TAIJI_WEBUI_TEST_NETWORK_BLOCK": "1",
     })
 
     log = open(os.path.join(state_dir, "server.log"), "w")
@@ -131,6 +158,7 @@ def main():
             for path in PAGES:
                 ctx = browser.new_context(base_url=BASE)
                 page = ctx.new_page()
+                page.route("**/*", _route_browser_request)
                 errors = []
                 page.on("console", lambda m: errors.append(("console", m.text))
                         if m.type == "error" else None)

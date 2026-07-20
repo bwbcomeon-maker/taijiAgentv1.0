@@ -12,30 +12,19 @@ Two modes:
             it only sees a lossy text summary. This is the pre-existing
             behaviour and still the right choice for non-vision models.
 
-The decision is made once per message turn by :func:`decide_image_input_mode`.
-It reads ``agent.image_input_mode`` from config.yaml (``auto`` | ``native``
-| ``text``, default ``auto``) and the active model's capability metadata.
+The decision is made once per message turn by :func:`decide_image_input_mode`
+from the active model's capability metadata, including an explicit
+``model.supports_vision`` override for custom/local models:
 
-In ``auto`` mode:
-  - If the user has explicitly configured ``auxiliary.vision.provider``
-    (i.e. not ``auto`` and not empty), we assume they want the text pipeline
-    regardless of the main model — they've opted in to a specific vision
-    backend for a reason (cost, quality, local-only, etc.).
-  - Otherwise, if the active model reports ``supports_vision=True`` in its
-    models.dev metadata, we attach natively.
-  - If the active model reports ``supports_vision=False``, we use the text
-    pipeline.
-  - If capability resolution returns ``None``, routing fails closed with
-    ``ValueError`` instead of guessing.
+  - ``supports_vision=True`` always takes the native fast path. Auxiliary
+    configuration and its enabled toggle cannot override or suppress it.
+  - ``supports_vision=False`` may use the text pipeline only while auxiliary
+    vision is enabled; the runtime boundary separately requires a current,
+    matching verification before Provider I/O.
+  - Unknown capability fails closed with ``ValueError`` instead of guessing.
 
-This keeps ``vision_analyze`` surfaced as a tool in every session — skills
-and agent flows that chain it (browser screenshots, deeper inspection of
-URL-referenced images, style-gating loops) keep working. The routing only
-affects *how user-attached images on the current turn* are presented to the
-main model.
-
-Real Provider verification remains gated to Task B3, and streaming entry
-points remain gated to Task B4; neither is enabled by this routing contract.
+The legacy ``agent.image_input_mode`` preference is no longer authoritative:
+capability truth and the verified fallback are the only safe routing inputs.
 """
 
 from __future__ import annotations
@@ -49,9 +38,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-
-_VALID_MODES = frozenset({"auto", "native", "text"})
 
 
 # Image extensions used by extract_image_refs(). Kept tight on purpose — we
@@ -228,39 +214,22 @@ def _supports_vision_override(
     return None
 
 
-def _coerce_mode(raw: Any) -> str:
-    """Normalize a config value into one of the valid modes."""
-    if not isinstance(raw, str):
-        return "auto"
-    val = raw.strip().lower()
-    if val in _VALID_MODES:
-        return val
-    return "auto"
+def _vision_capability_enabled(cfg: Optional[Dict[str, Any]]) -> bool:
+    """Return False only for an explicit ``auxiliary.vision.enabled: false``.
 
-
-def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when the user configured a specific auxiliary vision backend.
-
-    An explicit override means the user *wants* the text pipeline (they're
-    paying for a dedicated vision model), so we don't silently bypass it.
+    Older configs did not persist an ``enabled`` field, so missing or
+    malformed values retain the legacy enabled behaviour. The configuration
+    API validates new writes as real booleans.
     """
     if not isinstance(cfg, dict):
-        return False
-    aux = cfg.get("auxiliary") or {}
-    if not isinstance(aux, dict):
-        return False
-    vision = aux.get("vision") or {}
+        return True
+    auxiliary = cfg.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        return True
+    vision = auxiliary.get("vision")
     if not isinstance(vision, dict):
-        return False
-
-    provider = str(vision.get("provider") or "").strip().lower()
-    model = str(vision.get("model") or "").strip()
-    base_url = str(vision.get("base_url") or "").strip()
-
-    # "auto" / "" / blank = not explicit
-    if provider in {"", "auto"} and not model and not base_url:
-        return False
-    return True
+        return True
+    return vision.get("enabled") is not False
 
 
 def _lookup_supports_vision(
@@ -302,29 +271,21 @@ def decide_image_input_mode(
       model:    active model slug as it would be sent to the provider.
       cfg:      loaded config.yaml dict, or None. When None, behaves as auto.
     """
-    mode_cfg = "auto"
-    if isinstance(cfg, dict):
-        agent_cfg = cfg.get("agent") or {}
-        if isinstance(agent_cfg, dict):
-            mode_cfg = _coerce_mode(agent_cfg.get("image_input_mode"))
-
-    if mode_cfg == "native":
-        return "native"
-    if mode_cfg == "text":
-        return "text"
-
-    # auto
-    if _explicit_aux_vision_override(cfg):
-        return "text"
-
     supports = _lookup_supports_vision(provider, model, cfg)
     if supports is True:
         return "native"
-    if supports is False:
-        return "text"
-    raise ValueError(
-        f"Image input capability is unknown for provider/model: {provider}/{model}"
-    )
+    if supports is None:
+        raise ValueError(
+            f"Image input capability is unknown for provider/model: {provider}/{model}"
+        )
+
+    # Auxiliary vision is a fallback only for a main model that is explicitly
+    # known to be text-only.  A disabled auxiliary toggle must never suppress
+    # a native-capable main model, while a text-only main must fail closed
+    # before any auxiliary Provider resolution or I/O.
+    if not _vision_capability_enabled(cfg):
+        raise ValueError("Image input capability is disabled")
+    return "text"
 
 
 # Image size handling is REACTIVE rather than proactive: we attempt native

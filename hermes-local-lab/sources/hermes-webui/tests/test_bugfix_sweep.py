@@ -117,10 +117,24 @@ def test_critical_boot_storage_access_is_guarded():
     boot = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
     i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
-    theme_script = re.search(r"<script>\(function\(\)\{[\s\S]*?hermes-theme[\s\S]*?\}\)\(\)</script>", index)
-    font_script = re.search(r"<script>\(function\(\)\{[\s\S]*?hermes-font-size[\s\S]*?\}\)\(\)</script>", index)
-    assert theme_script and "try" in theme_script.group(0)
-    assert font_script and "try" in font_script.group(0)
+    storage_loader = index.index('<script src="static/taiji-storage.js')
+    inline_scripts = re.findall(r"<script>([\s\S]*?)</script>", index)
+    helper_script = next(
+        (script for script in inline_scripts if "if(!window.__taijiStoreGet)" in script),
+        "",
+    )
+    theme_script = next(
+        (script for script in inline_scripts if "sg('theme','light')" in script),
+        "",
+    )
+    font_script = next(
+        (script for script in inline_scripts if "sg('font-size','')" in script),
+        "",
+    )
+    assert helper_script and "try{" in helper_script, "Taiji storage compatibility helper must be guarded"
+    assert theme_script and "try{" in theme_script
+    assert font_script and "try{" in font_script and "dataset.fontSize" in font_script
+    assert storage_loader < index.index(theme_script) < index.index(font_script)
     assert "try{localStorage.removeItem('hermes-webui-server-stopped')" in boot
     assert "try { localStorage.setItem('hermes-lang', resolved); } catch" in i18n
     assert "try { stored = localStorage.getItem('hermes-lang'); } catch" in i18n

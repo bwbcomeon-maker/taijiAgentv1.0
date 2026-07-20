@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -451,12 +452,15 @@ class TestGenerateErrors:
         assert result["success"] is False
         assert result["error_type"] == "empty_response"
 
-    def test_url_download_failure_falls_back_to_bare_url(self):
-        """Mirror of xAI behaviour — if local cache fails, return the URL."""
+    def test_url_download_failure_fails_closed_without_url_leak(self, caplog):
+        """Krea completion is unsuccessful until its bytes are local."""
         import requests as req_lib
         from plugins.image_gen.krea import KreaImageGenProvider
 
-        url = "https://krea.cdn/expired-soon.png"
+        url = (
+            "https://krea.cdn/expired-soon.png"
+            "?X-Amz-Credential=private&X-Amz-Signature=secret"
+        )
         submit = _submit_response()
         poll = _poll_response(_completed_job(url))
 
@@ -464,13 +468,21 @@ class TestGenerateErrors:
              patch("plugins.image_gen.krea.requests.get", return_value=poll), \
              patch(
                  "plugins.image_gen.krea.save_url_image",
-                 side_effect=req_lib.HTTPError("404"),
+                 side_effect=req_lib.HTTPError(f"404 from {url}"),
              ), \
              patch("plugins.image_gen.krea.time.sleep"):
             result = KreaImageGenProvider().generate(prompt="test")
 
-        assert result["success"] is True
-        assert result["image"] == url
+        rendered = json.dumps(result)
+        logs = caplog.text
+        assert result["success"] is False
+        assert result["image"] is None
+        assert result["error_type"] == "image_result_io_failed"
+        assert "X-Amz-" not in rendered
+        assert "secret" not in rendered
+        assert url not in logs
+        assert "X-Amz-" not in logs
+        assert "secret" not in logs
 
     def test_polling_picks_up_completed_at_with_unknown_status(self):
         """``completed_at`` set + unrecognised pending status → still terminal."""

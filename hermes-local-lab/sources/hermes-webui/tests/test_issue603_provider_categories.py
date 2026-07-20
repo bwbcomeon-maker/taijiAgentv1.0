@@ -13,6 +13,7 @@ Validates:
 
 import pytest
 import sys, os
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -22,6 +23,25 @@ from api.onboarding import (
     _build_setup_catalog,
     apply_onboarding_setup,
 )
+
+
+def _apply_setup_in_isolated_profile(tmp_path, monkeypatch, body):
+    """Exercise the public onboarding transaction against an exact temp profile."""
+    config_path = tmp_path / "config.yaml"
+    provider = str(body["provider"])
+    env_var = _SUPPORTED_PROVIDER_SETUPS[provider]["env_var"]
+    monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
+    monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
+    monkeypatch.setattr("api.onboarding.get_onboarding_status", lambda: {"completed": True})
+    monkeypatch.setattr("api.profiles._reload_dotenv", lambda _home: None)
+
+    apply_onboarding_setup({**body, "confirm_overwrite": True})
+
+    saved_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    saved_env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert f"{env_var}=test-key" in saved_env
+    return saved_cfg
 
 
 # ── Backend: provider catalog structure ──────────────────────────────────
@@ -202,87 +222,31 @@ class TestApplyBaseURL:
 
     def test_requires_base_url_writes_user_url(self, tmp_path, monkeypatch):
         """Providers with requires_base_url=True should write user-provided base_url."""
-        config_path = str(tmp_path / "config.yaml")
-        env_path = str(tmp_path / ".env")
-
-        monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
-        monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr("api.onboarding._load_yaml_config", lambda p: {})
-        monkeypatch.setattr(
-            "api.onboarding._normalize_model_for_provider", lambda prov, m: m
-        )
-        monkeypatch.setattr("api.onboarding._write_env_file", lambda p, d: None)
-        monkeypatch.setattr("api.onboarding._save_yaml_config", lambda p, c: None)
-        monkeypatch.setattr("api.onboarding._provider_api_key_present", lambda *a: True)
-        monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
-
-        saved_cfg = {}
-        def mock_save(p, cfg):
-            saved_cfg.update(cfg)
-        monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
-
-        apply_onboarding_setup({
+        saved_cfg = _apply_setup_in_isolated_profile(tmp_path, monkeypatch, {
             "provider": "ollama",
             "model": "qwen3:32b",
             "api_key": "test-key",
             "base_url": "http://my-ollama:11434/v1",
-            "confirm_overwrite": True,
         })
 
         assert saved_cfg["model"]["base_url"] == "http://my-ollama:11434/v1"
 
     def test_default_base_url_written_for_openai(self, tmp_path, monkeypatch):
         """OpenAI should get its default_base_url written to config."""
-        config_path = str(tmp_path / "config.yaml")
-
-        monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
-        monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr("api.onboarding._load_yaml_config", lambda p: {})
-        monkeypatch.setattr(
-            "api.onboarding._normalize_model_for_provider", lambda prov, m: m
-        )
-        monkeypatch.setattr("api.onboarding._write_env_file", lambda p, d: None)
-        monkeypatch.setattr("api.onboarding._provider_api_key_present", lambda *a: True)
-        monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
-
-        saved_cfg = {}
-        def mock_save(p, cfg):
-            saved_cfg.update(cfg)
-        monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
-
-        apply_onboarding_setup({
+        saved_cfg = _apply_setup_in_isolated_profile(tmp_path, monkeypatch, {
             "provider": "openai",
             "model": "gpt-4o",
             "api_key": "test-key",
-            "confirm_overwrite": True,
         })
 
         assert saved_cfg["model"]["base_url"] == "https://api.openai.com/v1"
 
     def test_base_url_stripped_for_anthropic(self, tmp_path, monkeypatch):
         """Anthropic should NOT have base_url in config (Hermes knows the URL)."""
-        config_path = str(tmp_path / "config.yaml")
-
-        monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
-        monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr("api.onboarding._load_yaml_config", lambda p: {})
-        monkeypatch.setattr(
-            "api.onboarding._normalize_model_for_provider", lambda prov, m: m
-        )
-        monkeypatch.setattr("api.onboarding._write_env_file", lambda p, d: None)
-        monkeypatch.setattr("api.onboarding._provider_api_key_present", lambda *a: True)
-        monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
-
-        saved_cfg = {}
-        def mock_save(p, cfg):
-            saved_cfg.update(cfg)
-        monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
-
-        apply_onboarding_setup({
+        saved_cfg = _apply_setup_in_isolated_profile(tmp_path, monkeypatch, {
             "provider": "anthropic",
             "model": "claude-sonnet-4.6",
             "api_key": "test-key",
-            "confirm_overwrite": True,
         })
 
         assert "base_url" not in saved_cfg["model"]
@@ -331,25 +295,12 @@ class TestApplyBaseURLSpecialized:
 
     def _run_setup(self, tmp_path, monkeypatch, provider):
         """Run apply_onboarding_setup with the given provider and return saved_cfg."""
-        config_path = str(tmp_path / "config.yaml")
         model = self._PROVIDER_DEFAULT_MODELS.get(provider, "test-model")
-
-        monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
-        monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr("api.onboarding._load_yaml_config", lambda p: {})
-        monkeypatch.setattr("api.onboarding._normalize_model_for_provider", lambda prov, m: m)
-        monkeypatch.setattr("api.onboarding._write_env_file", lambda p, d: None)
-        monkeypatch.setattr("api.onboarding._provider_api_key_present", lambda *a: True)
-        monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
-
-        saved_cfg = {}
-        def mock_save(p, cfg):
-            saved_cfg.update(cfg)
-        monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
-
-        from api.onboarding import apply_onboarding_setup
-        apply_onboarding_setup({"provider": provider, "model": model, "api_key": "test-key", "confirm_overwrite": True})
-        return saved_cfg
+        return _apply_setup_in_isolated_profile(
+            tmp_path,
+            monkeypatch,
+            {"provider": provider, "model": model, "api_key": "test-key"},
+        )
 
     def test_gemini_gets_default_base_url(self, tmp_path, monkeypatch):
         saved = self._run_setup(tmp_path, monkeypatch, "gemini")

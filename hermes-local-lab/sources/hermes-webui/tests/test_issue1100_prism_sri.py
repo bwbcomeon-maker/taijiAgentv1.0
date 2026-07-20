@@ -1,5 +1,9 @@
 """Tests for #1100 — Prism.js SRI integrity check no longer blocks theme CSS."""
 import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_prism_theme_link_has_no_integrity():
@@ -17,8 +21,8 @@ def test_prism_theme_link_has_no_integrity():
         "prism-theme link must not have integrity attribute (causes intermittent failures)"
 
 
-def test_prism_theme_link_has_crossorigin():
-    """The prism-theme link should still have crossorigin for CORS."""
+def test_prism_theme_link_is_vendored_without_crossorigin():
+    """The offline vendored theme must not depend on CDN/CORS behavior."""
     with open("static/index.html") as f:
         src = f.read()
     m = re.search(
@@ -27,8 +31,8 @@ def test_prism_theme_link_has_crossorigin():
     )
     assert m, "prism-theme link must exist"
     link_tag = m.group(0)
-    assert "crossorigin" in link_tag, \
-        "prism-theme link should still have crossorigin attribute"
+    assert "crossorigin" not in link_tag, \
+        "a same-origin vendored stylesheet does not need crossorigin"
 
 
 def test_prism_theme_version_pinned():
@@ -41,20 +45,23 @@ def test_prism_theme_version_pinned():
     )
     assert m, "prism-theme link must have href"
     href = m.group(1)
-    assert "@1.29.0" in href, \
+    assert href == "static/vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css", \
         f"Prism CSS version must be pinned, found href: {href}"
+    assert (ROOT / href).is_file()
 
 
-def test_prism_js_still_has_integrity():
-    """Prism JS files should keep SRI — they are less affected by CDN edge issues."""
+def test_prism_js_is_vendored_and_version_pinned():
+    """Offline Prism must load from the same-origin, versioned vendor tree."""
     with open("static/index.html") as f:
         src = f.read()
-    # prism-core.min.js
-    assert re.search(r'prism-core\.min\.js[^>]*integrity=', src), \
-        "prism-core.min.js should still have integrity attribute"
-    # prism-autoloader.min.js
-    assert re.search(r'prism-autoloader\.min\.js[^>]*integrity=', src), \
-        "prism-autoloader.min.js should still have integrity attribute"
+    assert (
+        'src="static/vendor/prismjs/1.29.0/prism.min.js"' in src
+    ), "Prism JS must use the pinned vendored copy"
+    assert (
+        ROOT / "static/vendor/prismjs/1.29.0/prism.min.js"
+    ).is_file()
+    assert "cdn.jsdelivr.net/npm/prismjs" not in src
+    assert "unpkg.com/prismjs" not in src
 
 
 def test_boot_js_set_resolved_theme_no_integrity():

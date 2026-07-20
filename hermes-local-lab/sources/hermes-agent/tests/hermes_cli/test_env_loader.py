@@ -29,6 +29,8 @@ def test_user_env_cannot_override_group_shared_transaction_policy(
 ):
     home = tmp_path / "hermes"
     home.mkdir()
+    if hasattr(os, "chown"):
+        os.chown(home, -1, os.getegid())
     home.chmod(0o2770)
     env_file = home / ".env"
     env_file.write_text(
@@ -50,6 +52,8 @@ def test_user_env_repair_never_projects_group_shared_transaction_policy(
 ):
     home = tmp_path / "hermes"
     home.mkdir()
+    if hasattr(os, "chown"):
+        os.chown(home, -1, os.getegid())
     home.chmod(0o2770)
     env_file = home / ".env"
     env_file.write_bytes(b"HERMES_CREDENTIAL_GROUP_SHARED=0\x00\n")

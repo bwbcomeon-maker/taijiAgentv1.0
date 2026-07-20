@@ -316,6 +316,43 @@ class TestFetchModelsDev:
         mock_get.assert_called_once()
         assert "anthropic" in result
 
+    @patch("agent.models_dev.requests.get")
+    def test_fresh_offline_install_uses_bundled_capability_snapshot(
+        self,
+        mock_get,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Known bundled models remain routable with no HOME cache or network.
+
+        Unknown model IDs must still fail closed instead of inheriting a
+        provider- or family-wide guess.
+        """
+        import agent.models_dev as md
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        md._models_dev_cache = {}
+        md._models_dev_cache_time = 0
+        mock_get.side_effect = OSError("offline")
+
+        assert get_model_capabilities(
+            "openrouter",
+            "anthropic/claude-sonnet-4",
+        ).supports_vision is True
+        assert get_model_capabilities(
+            "openrouter",
+            "tencent/hy3-preview",
+        ).supports_vision is False
+        assert get_model_capabilities(
+            "openai-codex",
+            "gpt-4o",
+        ).supports_vision is True
+        assert get_model_capabilities(
+            "openrouter",
+            "brand-new-unknown-model",
+        ) is None
+        mock_get.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # get_model_capabilities — vision via modalities.input

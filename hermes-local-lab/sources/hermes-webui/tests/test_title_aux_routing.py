@@ -12,12 +12,18 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub agent.auxiliary_client so it is importable in the test environment
-# (the real package lives in hermes-agent, which is not installed here).
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
+# Prefer the real package whenever the Agent source is available.  Installing a
+# plain ``agent`` ModuleType during test collection masked the real package for
+# later tests and made unrelated ``agent.*`` imports fail as "not a package".
+try:
+    import agent as _agent_stub
+    import agent.auxiliary_client as _aux_stub
+except ModuleNotFoundError:
+    _agent_stub = types.ModuleType('agent')
+    _agent_stub.__path__ = []
+    _aux_stub = types.ModuleType('agent.auxiliary_client')
+    sys.modules.setdefault('agent', _agent_stub)
+    sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
 _agent_stub.auxiliary_client = _aux_stub
 
 
@@ -788,7 +794,15 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
                     'OPENROUTER_API_KEY': 'profile-openrouter-key',
                 }
                 with patch('api.profiles.get_profile_runtime_env', return_value=runtime_env):
-                    with patch.dict(os.environ, {'HERMES_HOME': default_home, 'OPENROUTER_API_KEY': 'default-openrouter-key'}, clear=False):
+                    with patch.dict(os.environ, {
+                        'HERMES_HOME': default_home,
+                        # This test verifies HERMES_HOME-based profile routing.
+                        # The suite-wide safety fixture pins HERMES_CONFIG_PATH
+                        # to its isolated root, so explicitly disable that
+                        # orthogonal exact-file override for this scope.
+                        'HERMES_CONFIG_PATH': '',
+                        'OPENROUTER_API_KEY': 'default-openrouter-key',
+                    }, clear=False):
                         os.environ.pop('PROFILE_ONLY_KEY', None)
                         hermes_config._LOAD_CONFIG_CACHE.clear()
                         with profiles.profile_env_for_background_worker(session, 'background title'):

@@ -154,6 +154,19 @@ def test_gateway_chat_config_status_reports_fallback_api_server_key_without_expo
     assert "secret-token" not in repr(status)
 
 
+def test_gateway_request_headers_bind_the_session_profile():
+    headers = gateway_chat._gateway_request_headers(
+        "session-a",
+        "gateway-key",
+        profile_name="alice",
+        event_stream=True,
+    )
+
+    assert headers["X-Hermes-Profile"] == "alice"
+    assert headers["X-Hermes-Session-Id"] == "session-a"
+    assert headers["Accept"] == "text/event-stream"
+
+
 def test_gateway_chat_backend_env_wins_over_config_and_stays_safe():
     assert webui_chat_backend_mode(
         {"webui_chat_backend": "gateway"},
@@ -401,6 +414,42 @@ def test_gateway_chat_completion_promotes_image_to_current_assistant_without_med
     assert "structured_result" not in public_text
 
 
+def test_gateway_ingests_image_from_the_bound_named_profile_cache(
+    monkeypatch, tmp_path
+):
+    profile_home = tmp_path / "profiles" / "alice"
+    image = profile_home / "cache" / "images" / "named.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    state_dir = tmp_path / "web"
+    monkeypatch.setattr(config, "STATE_DIR", state_dir)
+    candidate = {
+        "tool_name": "image_generate",
+        "tool_call_id": "named-image-call",
+        "structured_result": {
+            "success": True,
+            "image_ref": image.name,
+            "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+        },
+    }
+
+    artifacts, errors, created_ids = (
+        gateway_chat._ingest_gateway_artifact_candidates(
+            "session-a",
+            "turn-a",
+            [candidate],
+            "stream-a",
+            profile_home=profile_home,
+        )
+    )
+
+    assert errors == []
+    assert len(artifacts) == 1
+    assert created_ids == {artifacts[0]["artifact_id"]}
+
+
 @pytest.mark.parametrize("failure_mode", ["stale", "commit", "save", "crash"])
 def test_gateway_artifact_commit_and_session_save_have_safe_failure_order(
     failure_mode, tmp_path, monkeypatch,
@@ -496,20 +545,20 @@ def test_gateway_artifact_commit_and_session_save_have_safe_failure_order(
     else:
         run()
 
-    manifest = json.loads(
-        (state_dir / "artifacts" / session.session_id / "manifest.json").read_text("utf-8")
+    manifest_path = (
+        state_dir / "artifacts" / session.session_id / "manifest.json"
+    )
+    manifest = (
+        json.loads(manifest_path.read_text("utf-8"))
+        if manifest_path.exists()
+        else {"artifacts": []}
     )
     reloaded = models.Session.load(session.session_id)
     cached = models.SESSIONS.get(session.session_id)
     assert all(not message.get("artifacts") for message in reloaded.messages)
     assert cached is None or all(not message.get("artifacts") for message in cached.messages)
-    if failure_mode in {"save", "crash"}:
-        assert len(manifest["artifacts"]) == 1
-        assert manifest["artifacts"][0]["commit_state"] == "committed"
-        assert len(list((state_dir / "artifacts" / session.session_id).glob("*.png"))) == 1
-    else:
-        assert manifest["artifacts"] == []
-        assert not list((state_dir / "artifacts" / session.session_id).glob("*.png"))
+    assert manifest["artifacts"] == []
+    assert not list((state_dir / "artifacts" / session.session_id).glob("*.png"))
 
 
 def test_gateway_http_401_reports_gateway_auth_not_provider_key():
@@ -673,6 +722,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
 
     s = new_session()
+    s.profile = "alice"
     prior_messages = [
         {"role": "user", "content": "Earlier question", "timestamp": 1.0},
         {"role": "assistant", "content": "Earlier answer", "timestamp": 2.0},
@@ -746,6 +796,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
+    assert captured["headers"]["X-hermes-profile"] == "alice"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert payload["messages"] == list(effective_envelopes[-1].model_messages)
@@ -1379,7 +1430,14 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "chat_completions")
-    monkeypatch.setattr(config, "get_config", lambda: {"agent": {"image_input_mode": "native"}})
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "agent": {"image_input_mode": "native"},
+            "model": {"supports_vision": True},
+        },
+    )
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
@@ -1541,6 +1599,11 @@ def test_gateway_blocks_main_request_when_auxiliary_vision_fails(
     ))
     cfg = {
         "agent": {"image_input_mode": "text"},
+        "model": {
+            "provider": "deepseek",
+            "default": "deepseek-chat",
+            "supports_vision": False,
+        },
         "auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus"}},
     }
     monkeypatch.setattr(config, "get_config", lambda: cfg)
@@ -1628,6 +1691,11 @@ def test_gateway_cancellation_after_first_auxiliary_image_skips_second_and_main_
         ))
     cfg = {
         "agent": {"image_input_mode": "text"},
+        "model": {
+            "provider": "deepseek",
+            "default": "deepseek-chat",
+            "supports_vision": False,
+        },
         "auxiliary": {"vision": {"provider": "alibaba", "model": "qwen3-vl-plus"}},
     }
     monkeypatch.setattr(config, "get_config", lambda: cfg)
@@ -2486,7 +2554,14 @@ def test_gateway_runs_transport_keeps_current_image_attachment_in_input(
     monkeypatch.setattr(models, "SESSIONS", OrderedDict())
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT", "runs")
-    monkeypatch.setattr(config, "get_config", lambda: {"agent": {"image_input_mode": "native"}})
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "agent": {"image_input_mode": "native"},
+            "model": {"supports_vision": True},
+        },
+    )
     monkeypatch.setattr(
         streaming,
         "_load_webui_prefill_context",

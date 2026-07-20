@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 from api.config import (
     get_config,
-    STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
+    STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_SESSION_IDS,
+    STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
@@ -34,6 +35,10 @@ from api.config import (
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
+    get_session_agent_retirement_epoch,
+    get_session_agent_retirement_marker,
+    cache_session_agent_if_current_generation,
+    retire_session_agent_generation,
     resolve_model_provider,
     resolve_custom_provider_connection,
     model_with_provider_context,
@@ -4128,6 +4133,18 @@ def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
 
 
+def _agent_generation_is_current(
+    session_id: str,
+    captured_epoch: int,
+    cancel_event: threading.Event,
+) -> bool:
+    return (
+        not cancel_event.is_set()
+        and get_session_agent_retirement_epoch(session_id)
+        == captured_epoch
+    )
+
+
 def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False) -> bool:
     from api.session_lifecycle import commit_session_memory
 
@@ -4144,6 +4161,17 @@ def _lifecycle_unregister_agent(session_id: str) -> None:
     from api.session_lifecycle import unregister_agent
 
     unregister_agent(session_id)
+
+
+def _lifecycle_prepare_agent_retirement(
+    session_id: str,
+    agent,
+    *,
+    wait: bool = True,
+) -> bool:
+    from api.session_lifecycle import prepare_agent_retirement
+
+    return prepare_agent_retirement(session_id, agent, wait=wait)
 
 
 def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
@@ -4195,6 +4223,178 @@ def _close_cached_agent_entry_at_session_boundary(session_id: str, cache_entry) 
     """Commit and tear down a popped SESSION_AGENT_CACHE entry outside the cache lock."""
     agent = cache_entry[0] if isinstance(cache_entry, tuple) else None
     return _close_evicted_agent_at_session_boundary(session_id, agent)
+
+
+_CANCELLED_AGENT_FINALIZATION_LOCK = threading.Lock()
+
+
+def _mark_agent_cancelled_for_stream(agent, stream_id: str | None) -> str | None:
+    """Attach one immutable cleanup owner to an agent.
+
+    The first cancelling stream owns finalization. A newer worker that happens
+    to discover the retired cache entry must not replace that owner with its own
+    stream id.
+    """
+    if agent is None or not isinstance(stream_id, str) or not stream_id:
+        return None
+    with _CANCELLED_AGENT_FINALIZATION_LOCK:
+        existing = getattr(agent, "_webui_cancelled_stream_id", None)
+        if isinstance(existing, str) and existing:
+            return existing
+        try:
+            agent._webui_cancelled_stream_id = stream_id
+        except Exception:
+            return None
+        return stream_id
+
+
+def _mark_agent_cancelled_for_retired_generation(
+    session_id: str,
+    generation_epoch: int,
+    agent,
+) -> str | None:
+    """Restore the original cancel owner for a stale cached generation."""
+    _, cancelled_stream_id = get_session_agent_retirement_marker(
+        session_id,
+        generation_epoch=generation_epoch,
+    )
+    return _mark_agent_cancelled_for_stream(agent, cancelled_stream_id)
+
+
+def _finalize_cancelled_agent_after_worker(
+    session_id: str,
+    stream_id: str,
+    agent,
+) -> None:
+    """Retire a cancelled agent exactly once after its worker has stopped."""
+    if (
+        agent is None
+        or getattr(agent, "_webui_cancelled_stream_id", None) != stream_id
+    ):
+        return
+    with _CANCELLED_AGENT_FINALIZATION_LOCK:
+        if (
+            getattr(agent, "_webui_cancelled_stream_id", None) != stream_id
+            or getattr(
+                agent,
+                "_webui_cancel_cleanup_complete",
+                False,
+            ) is True
+            or getattr(
+                agent,
+                "_webui_cancel_cleanup_in_progress",
+                False,
+            ) is True
+        ):
+            return
+        try:
+            agent._webui_cancel_cleanup_in_progress = True
+        except Exception:
+            # AIAgent instances are mutable in production. If a test double or
+            # alternate implementation rejects the tombstone, continue so a
+            # cancelled Codex session is not silently retained.
+            pass
+
+    try:
+        from api.config import (
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+        )
+
+        with SESSION_AGENT_CACHE_LOCK:
+            cached = SESSION_AGENT_CACHE.get(session_id)
+            if cached is not None and cached[0] is agent:
+                SESSION_AGENT_CACHE.pop(session_id, None)
+    except Exception:
+        logger.debug(
+            "Failed to remove cancelled agent cache entry for %s",
+            session_id,
+            exc_info=True,
+        )
+    codex_session = getattr(agent, "_codex_session", None)
+    if codex_session is not None:
+        try:
+            codex_session.close()
+        except Exception:
+            logger.debug(
+                "Failed to close cancelled Codex session for %s",
+                session_id,
+                exc_info=True,
+            )
+        finally:
+            try:
+                agent._codex_session = None
+            except Exception:
+                pass
+
+    # Commit only lifecycle segments owned by this old agent and detach it only
+    # if the lifecycle still points to the same object. A successor generation
+    # registered for the same session is never unregistered or shut down.
+    try:
+        safe_to_close_provider = _lifecycle_prepare_agent_retirement(
+            session_id,
+            agent,
+            wait=True,
+        )
+    except Exception:
+        safe_to_close_provider = False
+        logger.debug(
+            "Failed to prepare cancelled agent memory retirement for %s",
+            session_id,
+            exc_info=True,
+        )
+
+    if not safe_to_close_provider:
+        with _CANCELLED_AGENT_FINALIZATION_LOCK:
+            try:
+                agent._webui_cancel_cleanup_in_progress = False
+            except Exception:
+                pass
+        logger.warning(
+            "Cancelled agent for session %s retains uncommitted memory work; "
+            "provider and session DB remain open for lifecycle retry",
+            session_id,
+        )
+        return
+
+    try:
+        shutdown_memory_provider = getattr(
+            agent,
+            "shutdown_memory_provider",
+            None,
+        )
+        if callable(shutdown_memory_provider):
+            shutdown_memory_provider(
+                vars(agent).get("_session_messages", [])
+            )
+    except Exception:
+        logger.debug(
+            "Failed to shut down cancelled agent memory provider for %s",
+            session_id,
+            exc_info=True,
+        )
+
+    try:
+        session_db = getattr(agent, "_session_db", None)
+        if session_db is not None:
+            session_db.close()
+            try:
+                agent._session_db = None
+            except Exception:
+                pass
+    except Exception:
+        logger.debug(
+            "Failed to close cancelled agent session DB for %s",
+            session_id,
+            exc_info=True,
+        )
+    finally:
+        with _CANCELLED_AGENT_FINALIZATION_LOCK:
+            try:
+                agent._webui_cancel_cleanup_complete = True
+                agent._webui_cancel_cleanup_in_progress = False
+            except Exception:
+                pass
 
 
 def _refresh_cached_agent_runtime(agent, agent_kwargs: dict) -> bool:
@@ -4367,9 +4567,21 @@ def _run_agent_streaming(
     When ephemeral=True, session mutations are skipped — used by /btw to get
     a streaming answer without persisting to the parent session.
     """
-    q = STREAMS.get(stream_id)
-    if q is None:
-        return
+    # Claim the stream and publish its cancellation identity atomically. If
+    # cancel wins this lock first, the worker observes no channel and exits
+    # before it can create or cache an AIAgent. If the worker wins, cancel can
+    # always signal this exact Event and retire this session generation.
+    cancel_event = threading.Event()
+    with STREAMS_LOCK:
+        q = STREAMS.get(stream_id)
+        if q is None:
+            return
+        STREAM_SESSION_IDS[stream_id] = session_id
+        CANCEL_FLAGS[stream_id] = cancel_event
+        STREAM_PARTIAL_TEXT[stream_id] = ''
+        STREAM_REASONING_TEXT[stream_id] = ''
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+    _agent_retirement_epoch = get_session_agent_retirement_epoch(session_id)
     persist_msg_text = display_msg if display_msg is not None else msg_text
     register_active_run(
         stream_id,
@@ -4407,14 +4619,6 @@ def _run_agent_streaming(
 
     # MCP discovery runs after the per-stream HERMES_HOME ContextVar is set
     # below, so it sees this session's profile without rewriting os.environ.
-
-    # Sprint 10: create a cancel event for this stream
-    cancel_event = threading.Event()
-    with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
-        STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
     agent = None
     _live_prompt_estimate_tokens = [0]
@@ -4608,6 +4812,12 @@ def _run_agent_streaming(
     # When get_interval() returns >= 10.0 (no active sessions), the ticker exits
     # so no idle readings are emitted and the SSE consumer sees nothing.
     _metering_stop = threading.Event()
+    # A successful non-ephemeral Session.save() is the completion
+    # linearization point.  A Stop request that arrives afterwards may set the
+    # shared cancellation Event before cancel_stream() can acquire the session
+    # lock, but it no longer owns the already-persisted turn and must not hide
+    # its terminal events.
+    _completion_linearized = False
 
     def _metering_ticker():
         while True:
@@ -4629,7 +4839,11 @@ def _run_agent_streaming(
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and event not in ('cancel', 'error'):
+        if (
+            cancel_event.is_set()
+            and not _completion_linearized
+            and event not in ('cancel', 'error')
+        ):
             return
         data = public_egress_scrub(data, surface="stream", event_name=event)
         if run_journal is not None:
@@ -5576,9 +5790,21 @@ def _run_agent_streaming(
 
                 agent = None
                 _identity_mismatch_entry = None
+                _retired_generation_entry = None
+                _retired_generation_epoch = None
                 with SESSION_AGENT_CACHE_LOCK:
                     _cached = SESSION_AGENT_CACHE.get(session_id)
-                    if _cached and _cached[1] == _agent_sig:
+                    _cached_epoch = (
+                        int(_cached[2])
+                        if _cached and len(_cached) > 2
+                        else 0
+                    )
+                    if (
+                        _cached
+                        and _cached[1] == _agent_sig
+                        and _cached_epoch == _agent_retirement_epoch
+                        and not cancel_event.is_set()
+                    ):
                         _cached_agent = _cached[0]
                         if (
                             _cached_agent_matches_session(
@@ -5600,6 +5826,12 @@ def _run_agent_streaming(
                                 session_id,
                                 _cached_agent_session_identity(_cached_agent),
                             )
+                    elif _cached and _cached_epoch != _agent_retirement_epoch:
+                        _retired_generation_entry = SESSION_AGENT_CACHE.pop(
+                            session_id,
+                            None,
+                        )
+                        _retired_generation_epoch = _cached_epoch
                     if agent is not None:
                         # Reopened/cache-hit sessions must register the agent
                         # so later lifecycle commits can find it.
@@ -5614,6 +5846,13 @@ def _run_agent_streaming(
                         _close_cached_agent_entry_at_session_boundary(session_id, _identity_mismatch_entry)
                     except Exception:
                         logger.debug("Failed to close identity-mismatched cached agent for session %s", session_id, exc_info=True)
+                if _retired_generation_entry is not None:
+                    _retired_agent = _retired_generation_entry[0]
+                    _mark_agent_cancelled_for_retired_generation(
+                        session_id,
+                        int(_retired_generation_epoch or 0),
+                        _retired_agent,
+                    )
 
                 if agent is not None:
                     # Refresh volatile runtime credentials selected from provider
@@ -5683,14 +5922,21 @@ def _run_agent_streaming(
                         register_agent(session_id, agent)
                     except Exception:
                         logger.debug("Lifecycle register_agent failed for new session %s", session_id, exc_info=True)
-                    _evicted_items = []
-                    with SESSION_AGENT_CACHE_LOCK:
-                        SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
-                        SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
-                        from api.config import SESSION_AGENT_CACHE_MAX
-                        while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
-                            evicted_sid, evicted_entry = SESSION_AGENT_CACHE.popitem(last=False)
-                            _evicted_items.append((evicted_sid, evicted_entry))
+                    (
+                        _cache_generation_is_current,
+                        _evicted_items,
+                    ) = cache_session_agent_if_current_generation(
+                        session_id,
+                        (
+                            agent,
+                            _agent_sig,
+                            _agent_retirement_epoch,
+                        ),
+                        expected_epoch=_agent_retirement_epoch,
+                        cancel_event=cancel_event,
+                    )
+                    if not _cache_generation_is_current:
+                        _mark_agent_cancelled_for_stream(agent, stream_id)
                     # Commit and close evicted agents outside the cache lock so
                     # concurrent cache users are not blocked by provider I/O.
                     for _evicted_sid, _evicted_entry in _evicted_items:
@@ -5706,7 +5952,7 @@ def _run_agent_streaming(
             with STREAMS_LOCK:
                 AGENT_INSTANCES[stream_id] = agent
                 # Check if cancel was requested during agent initialization
-                if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
+                if cancel_event.is_set():
                     # Cancel arrived during agent creation - interrupt immediately
                     try:
                         agent.interrupt("Cancelled before start")
@@ -5914,6 +6160,8 @@ def _run_agent_streaming(
                 system_message=workspace_system_msg,
                 conversation_history=effective_model_messages[:-1],
                 task_id=session_id,
+                image_turn_id=turn_envelope.turn_id,
+                image_gate_owner=stream_id,
                 persist_user_message=persist_msg_text,
                 persist_user_platform_message_id=(
                     turn_envelope.platform_message_id if turn_envelope is not None else None
@@ -6133,10 +6381,45 @@ def _run_agent_streaming(
                             )
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
-                            from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
-                            with _SAC_L:
-                                _SAC[session_id] = (agent, _agent_sig)
-                                _SAC.move_to_end(session_id)
+                            try:
+                                from api.session_lifecycle import register_agent
+                                register_agent(session_id, agent)
+                            except Exception:
+                                logger.debug(
+                                    "Lifecycle register_agent failed for self-healed session %s",
+                                    session_id,
+                                    exc_info=True,
+                                )
+                            (
+                                _heal_generation_is_current,
+                                _heal_evicted_items,
+                            ) = cache_session_agent_if_current_generation(
+                                session_id,
+                                (
+                                    agent,
+                                    _agent_sig,
+                                    _agent_retirement_epoch,
+                                ),
+                                expected_epoch=_agent_retirement_epoch,
+                                cancel_event=cancel_event,
+                            )
+                            for _evicted_sid, _evicted_entry in _heal_evicted_items:
+                                _close_cached_agent_entry_at_session_boundary(
+                                    _evicted_sid,
+                                    _evicted_entry,
+                                )
+                            if not _heal_generation_is_current:
+                                _mark_agent_cancelled_for_stream(
+                                    agent,
+                                    stream_id,
+                                )
+                                try:
+                                    agent.interrupt(
+                                        "Cancelled before credential retry"
+                                    )
+                                except Exception:
+                                    pass
+                                return
                             # Retry the conversation once with fresh credentials
                             _self_healed = True
                             _token_sent = False
@@ -6152,6 +6435,8 @@ def _run_agent_streaming(
                                         ),
                                     ),
                                     task_id=session_id,
+                                    image_turn_id=turn_envelope.turn_id,
+                                    image_gate_owner=stream_id,
                                     persist_user_message=persist_msg_text,
                                 )
                                 _heal_all_msgs = _heal_result.get('messages') or []
@@ -6517,7 +6802,6 @@ def _run_agent_streaming(
                     surface="stream_tool_calls",
                 ).get("tool_calls", [])
                 s.tool_calls = tool_calls
-                s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
@@ -6791,8 +7075,14 @@ def _run_agent_streaming(
                     )
                     from api.config import STATE_DIR as _ARTIFACT_STATE_DIR
 
+                    _profile_image_source_roots = (
+                        [Path(_profile_home) / "cache" / "images"]
+                        if _profile_home
+                        else None
+                    )
                     _artifact_registry = ArtifactRegistry(
-                        _ARTIFACT_STATE_DIR / "artifacts"
+                        _ARTIFACT_STATE_DIR / "artifacts",
+                        allowed_source_roots=_profile_image_source_roots,
                     )
                     try:
                         _artifact_registry.cleanup_retired()
@@ -6824,6 +7114,11 @@ def _run_agent_streaming(
                     else _display_message
                     for _display_message in s.messages
                 ]
+                _previous_active_stream_id = getattr(
+                    s,
+                    'active_stream_id',
+                    None,
+                )
                 _artifacts_committed = False
                 try:
                     if _artifact_registry is not None and _new_artifact_ids:
@@ -6833,21 +7128,31 @@ def _run_agent_streaming(
                             owner_run_id=stream_id,
                         )
                         _artifacts_committed = True
+                    # Clear writeback ownership only at the persistence
+                    # boundary, while still holding the per-session lock.
+                    # cancel_stream() can signal concurrently, but it cannot
+                    # mutate this session until save either succeeds or the
+                    # ownership value is restored below.
+                    s.active_stream_id = None
                     s.save()
+                    _completion_linearized = True
                 except BaseException:
+                    s.active_stream_id = _previous_active_stream_id
                     s.messages, s.context_messages = _artifact_writeback_snapshot
-                    if (
-                        _artifact_registry is not None
-                        and _new_artifact_ids
-                        and not _artifacts_committed
-                    ):
-                        _artifact_registry.discard_pending_artifacts(
-                            s.session_id,
-                            _new_artifact_ids,
-                            owner_run_id=stream_id,
-                        )
+                    if _artifact_registry is not None and _new_artifact_ids:
+                        if _artifacts_committed:
+                            _artifact_registry.rollback_registered_artifacts(
+                                s.session_id,
+                                _new_artifact_ids,
+                            )
+                        else:
+                            _artifact_registry.discard_pending_artifacts(
+                                s.session_id,
+                                _new_artifact_ids,
+                                owner_run_id=stream_id,
+                            )
                     raise
-                if cancel_event.is_set():
+                if cancel_event.is_set() and not _completion_linearized:
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
                         append_turn_journal_event_for_stream(
@@ -7282,12 +7587,48 @@ def _run_agent_streaming(
                         _AIAgent(**_heal_kwargs),
                         _capability_generation,
                     )
+                    agent = _heal_agent
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
-                    from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
-                    with _SAC2_L:
-                        _SAC2[session_id] = (_heal_agent, _agent_sig)
-                        _SAC2.move_to_end(session_id)
+                    try:
+                        from api.session_lifecycle import register_agent
+                        register_agent(session_id, _heal_agent)
+                    except Exception:
+                        logger.debug(
+                            "Lifecycle register_agent failed for self-healed session %s",
+                            session_id,
+                            exc_info=True,
+                        )
+                    (
+                        _heal_generation_is_current,
+                        _heal_evicted_items,
+                    ) = cache_session_agent_if_current_generation(
+                        session_id,
+                        (
+                            _heal_agent,
+                            _agent_sig,
+                            _agent_retirement_epoch,
+                        ),
+                        expected_epoch=_agent_retirement_epoch,
+                        cancel_event=cancel_event,
+                    )
+                    for _evicted_sid, _evicted_entry in _heal_evicted_items:
+                        _close_cached_agent_entry_at_session_boundary(
+                            _evicted_sid,
+                            _evicted_entry,
+                        )
+                    if not _heal_generation_is_current:
+                        _mark_agent_cancelled_for_stream(
+                            _heal_agent,
+                            stream_id,
+                        )
+                        try:
+                            _heal_agent.interrupt(
+                                "Cancelled before credential retry"
+                            )
+                        except Exception:
+                            pass
+                        return
                     # Retry the conversation
                     _token_sent = False
                     try:
@@ -7302,6 +7643,8 @@ def _run_agent_streaming(
                                 ),
                             ),
                             task_id=session_id,
+                            image_turn_id=turn_envelope.turn_id,
+                            image_gate_owner=stream_id,
                             persist_user_message=persist_msg_text,
                         )
                         # Retry succeeded — persist the result normally
@@ -7444,10 +7787,16 @@ def _run_agent_streaming(
             _reset_hermes_home_override(_hermes_home_override_token)
             _hermes_home_override_token = None
         _clear_thread_env()  # TD1: always clear thread-local context
+        _finalize_cancelled_agent_after_worker(
+            session_id,
+            stream_id,
+            agent,
+        )
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
+            STREAM_SESSION_IDS.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
             STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
@@ -7585,12 +7934,14 @@ def cancel_stream(stream_id: str) -> bool:
     streams = STREAMS
     cancel_flags = CANCEL_FLAGS
     agent_instances = AGENT_INSTANCES
+    stream_session_ids = STREAM_SESSION_IDS
     partial_texts = STREAM_PARTIAL_TEXT
     streams_lock = STREAMS_LOCK
     if stream_id not in streams and getattr(_live_config, 'STREAMS', streams) is not streams:
         streams = _live_config.STREAMS
         cancel_flags = _live_config.CANCEL_FLAGS
         agent_instances = _live_config.AGENT_INSTANCES
+        stream_session_ids = _live_config.STREAM_SESSION_IDS
         partial_texts = _live_config.STREAM_PARTIAL_TEXT
         streams_lock = _live_config.STREAMS_LOCK
 
@@ -7605,7 +7956,27 @@ def cancel_stream(stream_id: str) -> bool:
 
         # Interrupt the AIAgent instance to stop tool execution
         agent = agent_instances.get(stream_id)
+        _raw_cancel_session_id = (
+            getattr(agent, "session_id", None)
+            if agent is not None
+            else stream_session_ids.get(stream_id)
+        )
+        _cancel_session_id = (
+            _raw_cancel_session_id.strip()
+            if isinstance(_raw_cancel_session_id, str)
+            and _raw_cancel_session_id.strip()
+            else None
+        )
+        _cancel_retirement_epoch = (
+            retire_session_agent_generation(
+                _cancel_session_id,
+                stream_id,
+            )
+            if _cancel_session_id
+            else None
+        )
         if agent:
+            _mark_agent_cancelled_for_stream(agent, stream_id)
             try:
                 agent.interrupt("Cancelled by user")
             except Exception as e:
@@ -7647,6 +8018,7 @@ def cancel_stream(stream_id: str) -> bool:
         streams.pop(stream_id, None)
         cancel_flags.pop(stream_id, None)
         agent_instances.pop(stream_id, None)
+        stream_session_ids.pop(stream_id, None)
         # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
         # still be appending tokens. We capture the snapshot two lines below; the
         # streaming finally block handles the cleanup when the thread exits.
@@ -7657,7 +8029,6 @@ def cancel_stream(stream_id: str) -> bool:
         # Session cleanup (get_session + save) must happen OUTSIDE the lock —
         # get_session() acquires LOCK, and the streaming thread does LOCK first
         # then STREAMS_LOCK, so inverting the order here would cause deadlock.
-        _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
         _cancel_partial_text = partial_texts.get(stream_id, '')
         # Fallback: check the live config's partial text map if we used an alias
         # and the text wasn't found in the alias (defensive, matches streams fallback above).
@@ -7676,6 +8047,41 @@ def cancel_stream(stream_id: str) -> bool:
             live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
             if live_tools is not STREAM_LIVE_TOOL_CALLS:
                 _cancel_tool_calls = live_tools.get(stream_id, [])
+
+    # Evict only the cancelled generation after releasing STREAMS_LOCK. Never
+    # acquire SESSION_AGENT_CACHE_LOCK while holding STREAMS_LOCK: chat startup
+    # uses the cache independently and reversing that order can deadlock.
+    if _cancel_session_id and _cancel_retirement_epoch is not None:
+        from api.config import (
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+        )
+
+        _cancelled_cache_entry = None
+        with SESSION_AGENT_CACHE_LOCK:
+            _candidate = SESSION_AGENT_CACHE.get(_cancel_session_id)
+            _candidate_epoch = (
+                int(_candidate[2])
+                if _candidate and len(_candidate) > 2
+                else 0
+            )
+            if (
+                _candidate is not None
+                and (
+                    _candidate[0] is agent
+                    or _candidate_epoch < _cancel_retirement_epoch
+                )
+            ):
+                _cancelled_cache_entry = SESSION_AGENT_CACHE.pop(
+                    _cancel_session_id,
+                    None,
+                )
+        if _cancelled_cache_entry is not None:
+            _mark_agent_cancelled_for_retired_generation(
+                _cancel_session_id,
+                _candidate_epoch,
+                _cancelled_cache_entry[0],
+            )
 
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
     # Acquire the per-session _agent_lock too, mirroring every other session

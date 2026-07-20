@@ -1190,9 +1190,10 @@ class ArtifactRegistry:
     def rollback_registered_artifacts(
         self, session_id: str, artifact_ids: set[str]
     ) -> int:
-        """Remove only artifacts created by an uncommitted migration batch.
+        """Remove only artifacts created by a failed persistence transaction.
 
-        This is intentionally narrower than session retirement: an existing
+        This compensates both migration batches and chat writeback failures.
+        It is intentionally narrower than session retirement: an existing
         session may already own durable artifacts that must survive rollback.
         """
         session_id = _safe_id(session_id, "session_id")

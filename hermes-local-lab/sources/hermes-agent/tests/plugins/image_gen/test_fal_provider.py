@@ -19,6 +19,37 @@ from unittest.mock import MagicMock
 import pytest
 
 
+def _authorized_fal_binding(
+    model: str = "fal-ai/flux-2/klein/9b",
+    *,
+    runtime_identity=None,
+):
+    from agent.image_gen_verification import (
+        ImageGenRequestBinding,
+        authorize_image_gen_request_binding,
+        image_gen_runtime_identity,
+    )
+
+    identity = (
+        runtime_identity
+        if runtime_identity is not None
+        else image_gen_runtime_identity(
+            "fal",
+            {"provider": "fal", "model": model},
+        )
+    )
+    return authorize_image_gen_request_binding(
+        ImageGenRequestBinding(
+            provider="fal",
+            model=model,
+            api_key="pinned-fal-secret",
+            runtime_identity=identity,
+        ),
+        authorization_fingerprint="fal-provider-test-fingerprint",
+        authorization_generation="fal-provider-test-generation",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Provider surface
 # ---------------------------------------------------------------------------
@@ -63,6 +94,15 @@ class TestFalImageGenProviderSurface:
         assert schema["badge"] == "paid"
         env_keys = {entry["key"] for entry in schema.get("env_vars", [])}
         assert "FAL_KEY" in env_keys
+
+    def test_declares_pinned_request_binding_support(self):
+        from plugins.image_gen.fal import FalImageGenProvider
+
+        assert (
+            FalImageGenProvider()
+            ._supports_pinned_image_request_binding
+            is True
+        )
 
 
 class TestFalImageGenProviderAvailability:
@@ -111,7 +151,7 @@ class TestFalImageGenProviderGenerate:
             captured["prompt"] = prompt
             captured["aspect_ratio"] = aspect_ratio
             captured["kwargs"] = kwargs
-            return json.dumps({"success": True, "image": "https://fake/image.png"})
+            return json.dumps({"success": True, "image": "/tmp/fal-image.png"})
 
         monkeypatch.setattr(image_tool, "image_generate_tool", fake_image_generate_tool)
         monkeypatch.setattr(image_tool, "_resolve_fal_model",
@@ -127,7 +167,7 @@ class TestFalImageGenProviderGenerate:
         assert captured["aspect_ratio"] == "square"
         assert captured["kwargs"] == {"seed": 42}
         assert result["success"] is True
-        assert result["image"] == "https://fake/image.png"
+        assert result["image"] == "/tmp/fal-image.png"
         # Stamped fields for the unified response shape
         assert result["provider"] == "fal"
         assert result["prompt"] == "a serene mountain landscape"
@@ -194,6 +234,138 @@ class TestFalImageGenProviderGenerate:
         assert "FAL image generation failed" in result["error"]
         assert result["error_type"] == "RuntimeError"
         assert result["provider"] == "fal"
+
+    def test_generate_forwards_exact_pinned_binding_and_guard(
+        self,
+        monkeypatch,
+    ):
+        import tools.image_generation_tool as image_tool
+        from plugins.image_gen.fal import FalImageGenProvider
+
+        model = "fal-ai/flux-2/klein/9b"
+        binding = _authorized_fal_binding(model)
+        guard = MagicMock()
+        captured = {}
+
+        def fake_image_generate_tool(prompt, aspect_ratio, **kwargs):
+            captured.update(kwargs)
+            return json.dumps(
+                {"success": True, "image": "/tmp/pinned-fal.png"}
+            )
+
+        monkeypatch.setattr(
+            image_tool,
+            "image_generate_tool",
+            fake_image_generate_tool,
+        )
+        monkeypatch.setattr(
+            image_tool,
+            "_resolve_fal_model",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("pinned call read live model config")
+            ),
+        )
+
+        result = FalImageGenProvider().generate(
+            "a pinned image",
+            aspect_ratio="square",
+            model=model,
+            _runtime_binding=binding,
+            _reauth_guard=guard,
+        )
+
+        assert result["success"] is True
+        assert result["model"] == model
+        assert captured["_runtime_binding"] is binding
+        assert captured["_reauth_guard"] is guard
+
+    def test_generate_rejects_noncanonical_pinned_runtime_without_io(
+        self,
+        monkeypatch,
+    ):
+        import tools.image_generation_tool as image_tool
+        from plugins.image_gen.fal import FalImageGenProvider
+
+        calls = []
+        monkeypatch.setattr(
+            image_tool,
+            "image_generate_tool",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        binding = _authorized_fal_binding(
+            runtime_identity={
+                "transport": "fal_queue_sync_client",
+                "endpoint": "https://attacker.example.test",
+                "identity_supported": True,
+                "endpoint_resolved": True,
+            },
+        )
+
+        result = FalImageGenProvider().generate(
+            "must not leave the process",
+            model="fal-ai/flux-2/klein/9b",
+            _runtime_binding=binding,
+            _reauth_guard=lambda: None,
+        )
+
+        assert result["success"] is False
+        assert result["error_type"] == "configuration_error"
+        assert calls == []
+        assert "attacker.example.test" not in json.dumps(result)
+
+    def test_generate_rejects_pinned_binding_without_guard(self, monkeypatch):
+        import tools.image_generation_tool as image_tool
+        from plugins.image_gen.fal import FalImageGenProvider
+
+        calls = []
+        monkeypatch.setattr(
+            image_tool,
+            "image_generate_tool",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        result = FalImageGenProvider().generate(
+            "must not leave the process",
+            model="fal-ai/flux-2/klein/9b",
+            _runtime_binding=_authorized_fal_binding(),
+        )
+
+        assert result["success"] is False
+        assert result["error_type"] == "configuration_error"
+        assert calls == []
+
+    def test_generate_rejects_remote_success_from_legacy_without_url_leak(
+        self,
+        monkeypatch,
+    ):
+        import tools.image_generation_tool as image_tool
+        from plugins.image_gen.fal import FalImageGenProvider
+
+        signed_url = (
+            "https://cdn.example.test/generated.png"
+            "?X-Amz-Credential=private&X-Amz-Signature=secret"
+        )
+        monkeypatch.setattr(
+            image_tool,
+            "image_generate_tool",
+            lambda **_kwargs: json.dumps(
+                {"success": True, "image": signed_url}
+            ),
+        )
+        monkeypatch.setattr(
+            image_tool,
+            "_resolve_fal_model",
+            lambda: ("fal-ai/flux-2/klein/9b", {}),
+        )
+
+        result = FalImageGenProvider().generate("do not expose the URL")
+
+        rendered = json.dumps(result)
+        assert result["success"] is False
+        assert result["image"] is None
+        assert result["error_type"] == "image_result_io_failed"
+        assert "X-Amz-" not in rendered
+        assert "secret" not in rendered
 
     def test_generate_invalid_json_response(self, monkeypatch):
         import tools.image_generation_tool as image_tool

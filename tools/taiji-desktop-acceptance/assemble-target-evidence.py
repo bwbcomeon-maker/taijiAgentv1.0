@@ -50,6 +50,7 @@ DRIVER_KEYS = {
     "desktop_entry_sha256",
     "app_url",
     "webui_origin",
+    "desktop_auth_cookie",
     "model",
     "attachment_probe_sha256",
     "agent_pid",
@@ -60,6 +61,14 @@ DRIVER_KEYS = {
     "js_error_count",
     "unexpected_http_failures",
     "electron_exit_code",
+}
+DESKTOP_AUTH_COOKIE_KEYS = {
+    "name",
+    "present",
+    "http_only",
+    "same_site",
+    "path",
+    "value_format",
 }
 TARGET_SESSION_KEYS = {
     "schema",
@@ -309,10 +318,10 @@ def validate_redacted_app_url(app_url: Any, webui_origin: Any) -> None:
         raise AssemblyError("driver app_url must be an HTTP loopback URL")
     if app.username or app.password or app.fragment:
         raise AssemblyError("driver app_url contains forbidden authority or fragment data")
-    if set(query) != {"taiji_desktop", "taiji_desktop_token"}:
+    if set(query) != {"taiji_desktop"}:
         raise AssemblyError("driver app_url contains unexpected query data")
-    if query.get("taiji_desktop") != ["1"] or query.get("taiji_desktop_token") != ["<redacted>"]:
-        raise AssemblyError("driver app_url must contain one desktop marker and a redacted token")
+    if query.get("taiji_desktop") != ["1"]:
+        raise AssemblyError("driver app_url must contain exactly one desktop marker")
     if origin.scheme != "http" or origin.hostname not in {"127.0.0.1", "localhost"}:
         raise AssemblyError("driver webui_origin must be an HTTP loopback origin")
     if origin.username or origin.password or origin.query or origin.fragment or origin.path not in {"", "/"}:
@@ -321,6 +330,23 @@ def validate_redacted_app_url(app_url: Any, webui_origin: Any) -> None:
     expected_origin = f"{origin.scheme}://{origin.netloc}"
     if app_origin != expected_origin:
         raise AssemblyError("driver app_url and webui_origin do not identify the same App")
+
+
+def validate_desktop_auth_cookie(cookie: Any) -> None:
+    if type(cookie) is not dict:
+        raise AssemblyError("driver desktop_auth_cookie must be an object")
+    require_exact_keys(cookie, DESKTOP_AUTH_COOKIE_KEYS, "driver desktop_auth_cookie")
+    expected = {
+        "name": "taiji_desktop_token",
+        "present": True,
+        "http_only": True,
+        "same_site": "Strict",
+        "path": "/",
+        "value_format": "lowercase-hex-64",
+    }
+    for key, value in expected.items():
+        if type(cookie[key]) is not type(value) or cookie[key] != value:
+            raise AssemblyError(f"driver desktop_auth_cookie {key} is invalid")
 
 
 def validate_driver_result(driver: dict[str, Any], challenge: str) -> None:
@@ -345,6 +371,7 @@ def validate_driver_result(driver: dict[str, Any], challenge: str) -> None:
         require_sha256(driver[key], f"driver {key}")
     require_visible_text(driver["model"], "driver model", maximum=256)
     validate_redacted_app_url(driver["app_url"], driver["webui_origin"])
+    validate_desktop_auth_cookie(driver["desktop_auth_cookie"])
     if driver["screenshot_basename"] != SCREENSHOT_BASENAME:
         raise AssemblyError("driver screenshot basename is not the fixed acceptance filename")
     if driver["diagnostic_basename"] != DIAGNOSTIC_BASENAME:

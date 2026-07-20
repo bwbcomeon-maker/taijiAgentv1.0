@@ -6800,6 +6800,8 @@ class TestRunEvents:
             json.dumps({
                 "success": True,
                 "image": str(image_path),
+                "image_ref": "generated.png",
+                "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
                 "provider": "secret-provider",
                 "prompt": "secret prompt",
             }),
@@ -6818,6 +6820,22 @@ class TestRunEvents:
         assert "https://" not in encoded
         assert "secret prompt" not in encoded
         assert "secret-provider" not in encoded
+
+        complete_cb(
+            "call-image-unbound",
+            "image_generate",
+            {},
+            json.dumps({
+                "success": True,
+                "image": str(image_path),
+            }),
+        )
+        unbound_event = await asyncio.wait_for(
+            adapter._run_streams[run_id].get(),
+            timeout=1,
+        )
+        assert "structured_result" not in unbound_event
+        assert str(image_path) not in json.dumps(unbound_event)
 
         complete_cb(
             "call-terminal-1",

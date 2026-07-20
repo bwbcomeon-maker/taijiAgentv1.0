@@ -225,6 +225,13 @@ def test_concurrent_streams_isolate_profile_config_secret_proxy_and_agent_worker
             main_snapshot["runtime_api_key"] = runtime_api_key
             captures[session_id] = {"agent": main_snapshot}
             agent_read_exit.wait(timeout=10)
+            from agent.image_runtime import (
+                capture_capability_runtime_generation,
+            )
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
 
         def run_conversation(self, **kwargs):
             worker_read_enter.wait(timeout=10)

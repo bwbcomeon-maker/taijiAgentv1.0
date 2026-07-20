@@ -186,7 +186,11 @@ def _images_cache_dir() -> Path:
     from hermes_constants import get_hermes_home
 
     path = get_hermes_home() / "cache" / "images"
-    path.mkdir(parents=True, exist_ok=True)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("image cache path must be a private directory")
+    os.chmod(path, 0o700)
     return path
 
 
@@ -821,14 +825,30 @@ def validated_cache_image_ref(image: Any) -> tuple[str, str] | None:
 
 
 def _atomic_cache_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with temp.open("wb") as handle:
+        descriptor = os.open(
+            temp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, path)
+        os.chmod(path, 0o600)
+        if os.name != "nt":
+            directory_descriptor = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -1159,7 +1179,7 @@ def save_url_image(
 
     Returns the absolute :class:`Path` to the saved file.  Raises on any
     network / HTTP / oversize / non-image-content-type error so callers can
-    fall back to returning the bare URL with a clear error message.
+    fail closed without exposing an ephemeral or signed remote URL.
     """
     if (
         isinstance(max_bytes, bool)
@@ -1244,9 +1264,10 @@ def success_response(
 ) -> Dict[str, Any]:
     """Build a uniform success response dict.
 
-    ``image`` may be an HTTP URL or an absolute filesystem path (for b64
-    providers like OpenAI). Callers that need to pass through additional
-    backend-specific fields can supply ``extra``.
+    ``image`` is the Provider's local cache path. Providers whose upstream
+    returns a remote URL must persist and validate it before reporting
+    success. Callers that need additional backend-specific fields can supply
+    ``extra``.
     """
     payload: Dict[str, Any] = {
         "success": True,

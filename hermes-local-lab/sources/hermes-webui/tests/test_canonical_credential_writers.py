@@ -242,6 +242,7 @@ def test_remove_opencode_shared_alias_preserves_other_provider(
     monkeypatch.setenv("OPENCODE_API_KEY", "shared-secret")
     monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
     monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    monkeypatch.setenv(remaining_env_var, "")
     monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
     monkeypatch.setattr(providers, "invalidate_models_cache", lambda: None)
     monkeypatch.setattr(providers, "reload_config", lambda: None)
@@ -419,6 +420,9 @@ def test_onboarding_captures_active_config_path_once(
     monkeypatch.setattr(onboarding, "_get_config_path", one_lookup)
     monkeypatch.setattr(onboarding, "reload_config", lambda: None)
     monkeypatch.setattr(onboarding, "get_onboarding_status", lambda: {"ok": True})
+    # apply_onboarding_setup projects the saved secret into os.environ. Track
+    # the originally absent key so pytest removes that projection at teardown.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
 
     result = onboarding.apply_onboarding_setup(
         {
@@ -666,6 +670,11 @@ def test_set_provider_key_none_removes_canonical_and_legacy_aliases(
     )
     for key, value in env_values.items():
         monkeypatch.setenv(key, value)
+    if provider_id == "opencode-zen":
+        # Removing the shared alias preserves it for the other OpenCode
+        # provider. Register the generated key with monkeypatch so it cannot
+        # leak into later model-catalog tests.
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "")
     monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
     monkeypatch.setattr(providers, "_get_config_path", lambda: config_path)
     monkeypatch.setattr(providers, "invalidate_models_cache", lambda: None)

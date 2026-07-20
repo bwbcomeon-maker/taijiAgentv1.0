@@ -20,9 +20,12 @@ test runner at ``scripts/run_tests.sh``.
 """
 
 import asyncio
+import ipaddress
 import os
 import re
+import socket
 import sys
+import webbrowser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +35,135 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ── External side-effect guards ───────────────────────────────────────────
+#
+# Unit tests must never open the developer's browser or reach the public
+# internet. A missing OAuth/network mock otherwise has user-visible side
+# effects and can leak real local credentials into a vendor request.
+
+
+def _reject_external_browser(url, *_args, **_kwargs):
+    raise AssertionError(
+        "tests must not open the user's default browser; "
+        f"mock the browser call explicitly (attempted URL: {url!r})"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _block_external_browser(monkeypatch):
+    """Fail closed when a test leaks into the user's real browser.
+
+    A test that verifies browser integration can explicitly monkeypatch the
+    relevant opener after this autouse fixture has installed the guard.
+    """
+    monkeypatch.setattr(webbrowser, "open", _reject_external_browser)
+    monkeypatch.setattr(webbrowser, "open_new", _reject_external_browser)
+    monkeypatch.setattr(webbrowser, "open_new_tab", _reject_external_browser)
+
+
+_REAL_CREATE_CONNECTION = socket.create_connection
+_REAL_SOCKET_CONNECT = socket.socket.connect
+_REAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
+
+_ALLOWED_TEST_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",
+        "192.0.2.0/24",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "::1/128",
+        "2001:db8::/32",
+    )
+)
+
+
+def _test_address_is_allowed(host) -> bool:
+    """Return whether a test destination is local or explicitly reserved.
+
+    Hostnames are checked without DNS resolution so a public hostname cannot
+    become allowed merely because a local proxy maps it into a synthetic IP.
+    """
+    if isinstance(host, bytes):
+        return host.startswith((b"/", b"\0"))
+    if not isinstance(host, str):
+        return False
+
+    normalized = host.strip().lower()
+    if not normalized:
+        return False
+    if normalized.startswith(("/", "\0")):
+        return True  # AF_UNIX filesystem/abstract namespace address
+
+    if (
+        normalized == "localhost"
+        or normalized.endswith(".localhost")
+        or normalized.endswith(".test")
+        or normalized.endswith(".invalid")
+        or normalized.endswith(".example")
+    ):
+        return True
+
+    # Strip an IPv6 scope identifier (for example ``fe80::1%lo0``) before
+    # parsing. It does not change which network contains the address.
+    candidate = normalized.split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return any(address in network for network in _ALLOWED_TEST_NETWORKS)
+
+
+def _address_host(address):
+    if isinstance(address, tuple):
+        return address[0] if address else ""
+    return address
+
+
+def _blocked_create_connection(address, *args, **kwargs):
+    if _test_address_is_allowed(_address_host(address)):
+        return _REAL_CREATE_CONNECTION(address, *args, **kwargs)
+    raise OSError(
+        "hermes-agent test network isolation: outbound socket to "
+        f"{address!r} is blocked; mock the network call or request the "
+        "allow_outbound_network fixture"
+    )
+
+
+def _blocked_socket_connect(sock, address):
+    if _test_address_is_allowed(_address_host(address)):
+        return _REAL_SOCKET_CONNECT(sock, address)
+    raise OSError(
+        "hermes-agent test network isolation: socket.connect to "
+        f"{address!r} is blocked"
+    )
+
+
+def _blocked_socket_connect_ex(sock, address):
+    if _test_address_is_allowed(_address_host(address)):
+        return _REAL_SOCKET_CONNECT_EX(sock, address)
+    raise OSError(
+        "hermes-agent test network isolation: socket.connect_ex to "
+        f"{address!r} is blocked"
+    )
+
+
+# Install the socket gate at conftest import time so collection hooks,
+# background threads, and SDK constructors are protected too.
+socket.create_connection = _blocked_create_connection
+socket.socket.connect = _blocked_socket_connect
+socket.socket.connect_ex = _blocked_socket_connect_ex
+
+
+@pytest.fixture
+def allow_outbound_network(monkeypatch):
+    """Explicitly opt one test into the process's real socket primitives."""
+    monkeypatch.setattr(socket, "create_connection", _REAL_CREATE_CONNECTION)
+    monkeypatch.setattr(socket.socket, "connect", _REAL_SOCKET_CONNECT)
+    monkeypatch.setattr(socket.socket, "connect_ex", _REAL_SOCKET_CONNECT_EX)
+    yield
 
 
 # ── Per-file process isolation ──────────────────────────────────────────────

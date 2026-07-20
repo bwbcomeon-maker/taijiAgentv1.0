@@ -54,6 +54,15 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+def _apply_hermes_tools_profile_env() -> bool:
+    """Load the selected profile only inside this trusted MCP process."""
+    from agent.transports.hermes_tools_profile_env import (
+        apply_hermes_tools_profile_env,
+    )
+
+    return apply_hermes_tools_profile_env()
+
+
 # Tools we expose. Each name MUST match a registered Hermes tool that
 # `model_tools.handle_function_call()` can dispatch.
 #
@@ -191,23 +200,63 @@ def _build_server() -> Any:
                 try:
                     dispatch_kwargs = {}
                     if tool_name == "image_generate":
-                        # The MCP server and handler are long-lived. Capture the
-                        # current combined generation per request so a config
-                        # or verification A→B→A transition cannot leave this
-                        # closure permanently stale. Both values come from the
-                        # same atomic generation object.
-                        caller_fingerprint, caller_generation = (
-                            _capture_image_handler_authorization()
+                        from agent.image_intent import (
+                            begin_image_generation_task,
+                            cleanup_image_generation_task,
                         )
-                        dispatch_kwargs["tool_call_id"] = (
-                            f"mcp-{uuid.uuid4().hex}"
+                        from agent.transports.image_generation_gate_bridge import (
+                            consume_image_generation_gate_lease,
                         )
-                        dispatch_kwargs[
-                            "caller_capability_fingerprint"
-                        ] = caller_fingerprint
-                        dispatch_kwargs[
-                            "caller_capability_generation"
-                        ] = caller_generation
+
+                        lease, gate_error = (
+                            consume_image_generation_gate_lease()
+                        )
+                        if gate_error or lease is None:
+                            return _image_gate_failure(
+                                gate_error
+                                or "image_generation_gate_bridge_missing"
+                            )
+                        begin_error = begin_image_generation_task(
+                            lease.turn_id,
+                            allow_generation=True,
+                            owner_token=lease.owner_token,
+                        )
+                        if begin_error:
+                            return _image_gate_failure(begin_error)
+                        try:
+                            # The MCP server and handler are long-lived. Capture
+                            # the current combined generation per request so a
+                            # config or verification A→B→A transition cannot
+                            # leave this closure permanently stale. Both values
+                            # come from the same atomic generation object.
+                            caller_fingerprint, caller_generation = (
+                                _capture_image_handler_authorization()
+                            )
+                            dispatch_kwargs["tool_call_id"] = (
+                                f"mcp-{uuid.uuid4().hex}"
+                            )
+                            dispatch_kwargs[
+                                "caller_capability_fingerprint"
+                            ] = caller_fingerprint
+                            dispatch_kwargs[
+                                "caller_capability_generation"
+                            ] = caller_generation
+                            dispatch_kwargs[
+                                "image_generation_task_id"
+                            ] = lease.turn_id
+                            dispatch_kwargs[
+                                "image_generation_gate_owner"
+                            ] = lease.owner_token
+                            return handle_function_call(
+                                tool_name,
+                                kwargs or {},
+                                **dispatch_kwargs,
+                            )
+                        finally:
+                            cleanup_image_generation_task(
+                                lease.turn_id,
+                                owner_token=lease.owner_token,
+                            )
                     return handle_function_call(
                         tool_name,
                         kwargs or {},
@@ -244,6 +293,25 @@ def _build_server() -> Any:
     return mcp
 
 
+def _image_gate_failure(error_code: str) -> str:
+    duplicate = error_code == "duplicate_generation_this_turn"
+    return json.dumps(
+        {
+            "success": False,
+            "image": None,
+            "error": (
+                "本轮已执行过一次图像生成，请在下一轮重试。"
+                if duplicate
+                else "本轮未授权执行图像生成。"
+            ),
+            "error_code": error_code,
+            "error_type": error_code,
+            "retryable": False,
+        },
+        ensure_ascii=False,
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """Entry point for `python -m agent.transports.hermes_tools_mcp_server`."""
     argv = argv or sys.argv[1:]
@@ -259,6 +327,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Quiet mode: keep Hermes' own banners off stdout (which is the MCP wire).
     os.environ.setdefault("HERMES_QUIET", "1")
     os.environ.setdefault("HERMES_REDACT_SECRETS", "true")
+    if not _apply_hermes_tools_profile_env():
+        sys.stderr.write(
+            "hermes-tools MCP server refused ambient profile credentials\n"
+        )
+        return 2
 
     try:
         server = _build_server()

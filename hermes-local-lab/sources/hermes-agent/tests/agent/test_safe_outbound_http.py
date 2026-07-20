@@ -15,6 +15,7 @@ import inspect
 import json
 import os
 import socket
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -476,6 +477,9 @@ def test_custom_provider_credential_binding_is_canonical_across_runtime_and_webu
     from agent import custom_vision_providers as custom_vision
     from agent import provider_credentials as credential_store
     from agent.provider_credentials import credential_secret_env
+    webui_root = Path(__file__).resolve().parents[3] / "hermes-webui"
+    monkeypatch.syspath_prepend(str(webui_root))
+    sys.modules.pop("api.model_config", None)
     from api import model_config
 
     violations: list[str] = []

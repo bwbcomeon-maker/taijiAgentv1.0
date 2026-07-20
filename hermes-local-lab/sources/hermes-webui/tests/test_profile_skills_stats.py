@@ -25,11 +25,19 @@ def test_get_profile_skills_stats(tmp_path):
     # Setup skills directory with:
     # 1 compatible & enabled skill ("alpha")
     # 1 compatible & disabled skill ("beta")
-    # 1 incompatible skill ("gamma" - macos only on linux test run)
+    # 1 incompatible skill ("gamma"), selected from the canonical platform
+    # matrix so this remains deterministic on macOS, Linux, and Windows.
+    from agent.skill_utils import skill_matches_platform
+
+    incompatible_platform = next(
+        platform
+        for platform in ("macos", "linux", "windows")
+        if not skill_matches_platform({"platforms": [platform]})
+    )
     profile_home = tmp_path / "auditor"
     _write_skill(profile_home, "alpha")
     _write_skill(profile_home, "beta")
-    _write_skill(profile_home, "gamma", platforms=["macos"])
+    _write_skill(profile_home, "gamma", platforms=[incompatible_platform])
     _write_config(profile_home, ["beta"])
 
     # Explicitly clear the stats cache to ensure we compute fresh
@@ -70,6 +78,7 @@ def test_list_profiles_api_contains_formatted_skills(monkeypatch, tmp_path):
     ]
 
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles, "taiji_single_runtime_mode", lambda: False)
     
     # We patch the upstream list_profiles call to return our FakeProfile list
     try:

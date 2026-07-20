@@ -61,7 +61,7 @@ def test_frontend_matches_agent_command_aliases():
 
 def test_cli_only_response_mentions_webui_and_cli_scope():
     assert "function cliOnlyCommandResponse" in COMMANDS_JS
-    assert "Hermes CLI-only command" in COMMANDS_JS
+    assert "taiji Agent CLI-only command" in COMMANDS_JS
     assert "cannot run inside the WebUI" in COMMANDS_JS
 
 
@@ -70,7 +70,7 @@ def test_browser_cli_only_response_explains_server_side_browser_tools():
     response = COMMANDS_JS[response_idx : response_idx + 900]
     assert "if(name==='browser')" in response
     assert "configured server-side" in response
-    assert "`/browser` itself only works in `hermes chat`" in response
+    assert "`/browser` itself only works in the taiji Agent CLI chat" in response
 
 
 def _run_commands_js(script_body: str) -> dict:
@@ -151,7 +151,7 @@ def test_cli_only_response_helper_uses_canonical_command_name():
         """
     )
 
-    assert "`/browser` is a Hermes CLI-only command" in result["response"]
+    assert "`/browser` is a taiji Agent CLI-only command" in result["response"]
     assert "Attach browser tools" in result["response"]
     assert "configured server-side" in result["response"]
 

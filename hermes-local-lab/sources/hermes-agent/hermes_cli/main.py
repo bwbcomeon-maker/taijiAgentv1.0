@@ -8558,8 +8558,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             print(f"  Run '{recommended_update_command()}' to install.")
         return
 
-    git_dir = PROJECT_ROOT / ".git"
-    if not git_dir.exists():
+    if method != "git":
         print("✗ Not a git repository — cannot check for updates.")
         sys.exit(1)
 
@@ -8940,15 +8939,15 @@ def _cmd_update_impl(args, gateway_mode: bool):
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
     use_zip_update = False
-    git_dir = PROJECT_ROOT / ".git"
+    from hermes_cli.config import detect_install_method
 
-    if not git_dir.exists():
+    install_method = detect_install_method(PROJECT_ROOT)
+
+    if install_method != "git":
         if sys.platform == "win32":
             use_zip_update = True
         else:
-            from hermes_cli.config import detect_install_method
-            method = detect_install_method(PROJECT_ROOT)
-            if method == "pip":
+            if install_method == "pip":
                 _cmd_update_pip(args)
                 return
             print("✗ Not a git repository. Please reinstall:")
@@ -8959,7 +8958,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
     # On Windows, git can fail with "unable to write loose object file: Invalid argument"
     # due to filesystem atomicity issues. Set the recommended workaround.
-    if sys.platform == "win32" and git_dir.exists():
+    if sys.platform == "win32" and install_method == "git":
         subprocess.run(
             [
                 "git",

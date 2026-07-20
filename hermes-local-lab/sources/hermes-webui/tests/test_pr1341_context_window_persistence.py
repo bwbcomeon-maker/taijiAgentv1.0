@@ -40,13 +40,25 @@ def test_streaming_persists_context_fields_on_session_before_save():
     # save and miss removal of the successful-turn persistence call.
     commit_start = src.find("_artifact_writeback_snapshot =", block_start)
     assert commit_start != -1, "Normal artifact/session commit block not found"
-    commit_end = src.find("\n                if cancel_event.is_set():", commit_start)
-    assert commit_end != -1, "Normal commit block end not found"
+    linearized = src.find("_completion_linearized = True", commit_start)
+    assert linearized != -1, "Successful commit must mark completion linearized"
+    commit_end = src.find(
+        "if cancel_event.is_set() and not _completion_linearized:",
+        linearized,
+    )
+    assert commit_end != -1, "Post-commit cancellation guard not found"
     commit_block = src[commit_start:commit_end]
     save_matches = list(re.finditer(r"\n\s+s\.save\(\)", commit_block))
     assert len(save_matches) == 1, "Normal commit block must contain exactly one s.save()"
     save_call = commit_start + save_matches[0].start()
     block = src[block_start:save_call]
+    cancel_before_commit = src.rfind("if cancel_event.is_set():", block_start, commit_start)
+    assert cancel_before_commit != -1, (
+        "Cancellation must be checked before artifact/session commit begins"
+    )
+    assert save_call < linearized < commit_end, (
+        "The single save must complete before linearization and its guarded cancel path"
+    )
 
     # The three fields must all be assigned on s within this block
     assert "s.context_length" in block, (

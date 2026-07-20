@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -252,20 +253,37 @@ class TestGenerate:
         assert "example.com" not in result["image"]
         mock_save_url.assert_called_once()
 
-    def test_url_response_falls_back_to_bare_url_when_download_fails(self, provider):
-        """Cache failure must not turn into a tool error — symmetric with xAI."""
+    def test_url_response_cache_failure_fails_closed_without_url_leak(
+        self,
+        provider,
+        caplog,
+    ):
+        """Signed result URLs must never escape when local persistence fails."""
         import requests as req_lib
 
+        signed_url = (
+            "https://example.com/img.png"
+            "?X-Amz-Credential=private&X-Amz-Signature=secret"
+        )
         fake_client = MagicMock()
         fake_client.images.generate.return_value = _fake_response(
-            b64=None, url="https://example.com/img.png",
+            b64=None,
+            url=signed_url,
         )
 
         with _patched_openai(fake_client), patch(
             "plugins.image_gen.openai.save_url_image",
-            side_effect=req_lib.HTTPError("404 from CDN"),
+            side_effect=req_lib.HTTPError(f"404 from {signed_url}"),
         ):
             result = provider.generate("a cat")
 
-        assert result["success"] is True
-        assert result["image"] == "https://example.com/img.png"
+        rendered = json.dumps(result)
+        logs = caplog.text
+        assert result["success"] is False
+        assert result["image"] is None
+        assert result["error_type"] == "image_result_io_failed"
+        assert "X-Amz-" not in rendered
+        assert "secret" not in rendered
+        assert signed_url not in logs
+        assert "X-Amz-" not in logs
+        assert "secret" not in logs

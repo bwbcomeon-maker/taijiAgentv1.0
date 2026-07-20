@@ -8,20 +8,25 @@ of 4000+ models across 109+ providers.  Provides:
   (reasoning, tools, vision, PDF, audio), modalities, knowledge cutoff,
   open-weights flag, family grouping, deprecation status
 
-Data resolution order (like TypeScript OpenCode):
-  1. Bundled snapshot (ships with the package — offline-first)
-  2. Disk cache (~/.hermes/models_dev_cache.json)
+Data resolution order:
+  1. Fresh in-memory data
+  2. Fresh disk cache (~/.hermes/models_dev_cache.json)
   3. Network fetch (https://models.dev/api.json)
-  4. Background refresh every 60 minutes
+  4. Stale disk cache
+  5. Verified bundled snapshot (last-resort offline fallback)
 
 Other modules should import the dataclasses and query functions from here
 rather than parsing the raw JSON themselves.
 """
 
+import gzip
+import hashlib
+import hmac
 import json
 import logging
 import time
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 MODELS_DEV_URL = "https://models.dev/api.json"
 _MODELS_DEV_CACHE_TTL = 3600  # 1 hour in-memory
+_BUNDLED_SNAPSHOT_SCHEMA_VERSION = 1
+_BUNDLED_SNAPSHOT_RESOURCE = "data/models_dev_snapshot.v1.json.gz"
 
 # In-memory cache
 _models_dev_cache: Dict[str, Any] = {}
@@ -202,6 +209,45 @@ def _load_disk_cache() -> Dict[str, Any]:
     return {}
 
 
+def _load_bundled_snapshot() -> Dict[str, Any]:
+    """Load and verify the versioned models.dev fallback shipped in the wheel."""
+    try:
+        compressed = (
+            resources.files("agent")
+            .joinpath(_BUNDLED_SNAPSHOT_RESOURCE)
+            .read_bytes()
+        )
+        document = json.loads(gzip.decompress(compressed))
+        if not isinstance(document, dict):
+            return {}
+        if document.get("schema_version") != _BUNDLED_SNAPSHOT_SCHEMA_VERSION:
+            return {}
+        if document.get("source") != MODELS_DEV_URL:
+            return {}
+
+        providers = document.get("providers")
+        if not isinstance(providers, dict) or not providers:
+            return {}
+        canonical = json.dumps(
+            providers,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        expected_digest = document.get("registry_sha256")
+        if not isinstance(expected_digest, str):
+            return {}
+        if not hmac.compare_digest(
+            hashlib.sha256(canonical).hexdigest(),
+            expected_digest,
+        ):
+            return {}
+        return providers
+    except Exception as e:
+        logger.debug("Failed to load bundled models.dev snapshot: %s", e)
+        return {}
+
+
 def _disk_cache_age_seconds() -> Optional[float]:
     """Return age (in seconds) of the disk cache file, or None if missing.
 
@@ -238,7 +284,7 @@ def _save_disk_cache(data: Dict[str, Any]) -> None:
 
 
 def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
-    """Fetch models.dev registry. Cache hierarchy: in-mem → disk → network.
+    """Fetch models.dev registry with a verified bundled offline fallback.
 
     Returns the full registry dict keyed by provider ID, or empty dict on failure.
 
@@ -251,6 +297,8 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
       3. Network fetch → on success, save to disk + in-mem and return.
       4. Network fails → fall back to ANY available disk cache (even stale)
          with a short 5 min in-mem grace period before retrying network.
+      5. No usable user cache → load the verified snapshot bundled in the
+         installed package. Unknown model IDs remain absent and fail closed.
 
     When ``force_refresh=True`` (used by ``hermes config refresh``, the
     \"refresh model catalog\" code path), stages 1 and 2 are skipped. The
@@ -314,6 +362,18 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
         if _models_dev_cache:
             _models_dev_cache_time = time.time() - _MODELS_DEV_CACHE_TTL + 300
             logger.debug("Loaded models.dev from disk cache (%d providers)", len(_models_dev_cache))
+
+    # Stage 5: a fresh offline install has neither a user cache nor network.
+    # The bundled snapshot is exact-ID data, not a family/prefix guess, so
+    # callers can retain fail-closed behavior for models absent from it.
+    if not _models_dev_cache:
+        _models_dev_cache = _load_bundled_snapshot()
+        if _models_dev_cache:
+            _models_dev_cache_time = time.time() - _MODELS_DEV_CACHE_TTL + 300
+            logger.debug(
+                "Loaded bundled models.dev snapshot (%d providers)",
+                len(_models_dev_cache),
+            )
 
     return _models_dev_cache
 

@@ -267,10 +267,13 @@ class TestCaptureResponseRoutedToAuxVision:
                    new_callable=lambda: fake_vat):
             resp = cu_tool._capture_response(cap)
 
-        # Aux failure → fall back to multimodal envelope (so the user still
-        # gets *something* useful even if vision is broken).
-        assert isinstance(resp, dict)
-        assert resp.get("_multimodal") is True
+        # A text-only main must never receive pixels after the auxiliary route
+        # failed; return a stable text error instead.
+        assert isinstance(resp, str)
+        body = json.loads(resp)
+        assert body["success"] is False
+        assert body["reason_code"] == "auxiliary_vision_failed"
+        assert "data:image" not in resp
         # Temp file must still be cleaned up.
         assert observed_path["path"]
         assert not os.path.exists(observed_path["path"])
@@ -292,10 +295,11 @@ class TestCaptureResponseRoutedToAuxVision:
                    new_callable=lambda: fake_vat):
             resp = cu_tool._capture_response(cap)
 
-        # Empty analysis is treated as failure — we'd rather show pixels
-        # than embed an empty 'vision_analysis' string into the result.
-        assert isinstance(resp, dict)
-        assert resp.get("_multimodal") is True
+        assert isinstance(resp, str)
+        body = json.loads(resp)
+        assert body["success"] is False
+        assert body["reason_code"] == "auxiliary_vision_failed"
+        assert "data:image" not in resp
 
     def test_invalid_aux_response_falls_back_to_multimodal(self, tmp_cache_dir):
         from tools.computer_use import tool as cu_tool
@@ -314,8 +318,11 @@ class TestCaptureResponseRoutedToAuxVision:
                    new_callable=lambda: fake_vat):
             resp = cu_tool._capture_response(cap)
 
-        assert isinstance(resp, dict)
-        assert resp.get("_multimodal") is True
+        assert isinstance(resp, str)
+        body = json.loads(resp)
+        assert body["success"] is False
+        assert body["reason_code"] == "auxiliary_vision_failed"
+        assert "data:image" not in resp
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +369,12 @@ class TestRoutingDecisionWiring:
                    return_value=True):
             assert cu_tool._should_route_through_aux_vision() is False
 
-    def test_config_load_failure_disables_routing_safely(self):
+    def test_config_load_failure_blocks_capture_safely(self):
         from tools.computer_use import tool as cu_tool
 
         with patch("hermes_cli.config.load_config",
                    side_effect=RuntimeError("config.yaml unreadable")):
-            # No exception should bubble up — fail open by returning False
-            # so the legacy multimodal envelope continues to work.
-            assert cu_tool._should_route_through_aux_vision() is False
+            assert cu_tool._should_route_through_aux_vision() is None
 
     def test_helper_decision_exception_is_swallowed(self):
         from tools.computer_use import tool as cu_tool
@@ -382,7 +387,24 @@ class TestRoutingDecisionWiring:
              patch("hermes_cli.config.load_config", return_value={}), \
              patch.object(vr_mod, "should_route_capture_to_aux_vision",
                           side_effect=ValueError("policy bug")):
-            assert cu_tool._should_route_through_aux_vision() is False
+            assert cu_tool._should_route_through_aux_vision() is None
+
+    def test_blocked_route_never_projects_base64_to_main_model(self):
+        from tools.computer_use import tool as cu_tool
+
+        cap = _make_capture(mode="som")
+        with patch.object(
+            cu_tool,
+            "_should_route_through_aux_vision",
+            return_value=None,
+        ):
+            resp = cu_tool._capture_response(cap)
+
+        assert isinstance(resp, str)
+        body = json.loads(resp)
+        assert body["success"] is False
+        assert body["reason_code"] == "capture_vision_route_blocked"
+        assert "data:image" not in resp
 
 
 # ---------------------------------------------------------------------------

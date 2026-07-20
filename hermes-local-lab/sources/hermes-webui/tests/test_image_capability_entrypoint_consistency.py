@@ -531,12 +531,12 @@ async def test_webui_and_gateway_agent_cache_identity_tracks_capability_snapshot
     [
         (
             "[webui] self-heal: retrying stream after credential refresh",
-            "_SAC[session_id] = (agent, _agent_sig)",
+            "cache_session_agent_if_current_generation(",
             "_heal_result = agent.run_conversation(",
         ),
         (
             "[webui] self-heal (except path): retrying stream after credential refresh",
-            "_SAC2[session_id] = (_heal_agent, _agent_sig)",
+            "cache_session_agent_if_current_generation(",
             "_heal_result = _heal_agent.run_conversation(",
         ),
     ],

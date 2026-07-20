@@ -3,12 +3,17 @@ from pathlib import Path
 
 def test_streaming_initializes_one_run_journal_writer_per_stream():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
-    register_idx = src.index("register_active_run(")
+    worker_idx = src.index("def _run_agent_streaming(")
+    cancel_idx = src.index("cancel_event = threading.Event()", worker_idx)
+    claim_idx = src.index("with STREAMS_LOCK:", cancel_idx)
+    publish_idx = src.index("CANCEL_FLAGS[stream_id] = cancel_event", claim_idx)
+    register_idx = src.index("register_active_run(", publish_idx)
     writer_idx = src.index("RunJournalWriter(session_id, stream_id)", register_idx)
-    cancel_idx = src.index("cancel_event = threading.Event()", writer_idx)
 
     assert "from api.run_journal import RunJournalWriter" in src
-    assert register_idx < writer_idx < cancel_idx
+    assert cancel_idx < claim_idx < publish_idx < register_idx < writer_idx
+    assert src[worker_idx:writer_idx].count("cancel_event = threading.Event()") == 1
+    assert src[worker_idx:writer_idx].count("register_active_run(") == 1
 
 
 def test_streaming_journals_sse_events_before_queue_delivery():

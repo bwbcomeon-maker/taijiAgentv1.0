@@ -7,6 +7,8 @@ implementation in this same file once that phase ships.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hermes_cli.service_manager import (
@@ -432,6 +434,8 @@ def test_seed_supervise_skeleton_creates_expected_layout(tmp_path) -> None:
 
     svc_dir = tmp_path / "gateway-foo"
     svc_dir.mkdir()
+    if hasattr(os, "chown"):
+        os.chown(svc_dir, -1, os.getegid())
 
     _seed_supervise_skeleton(svc_dir)
 
@@ -474,6 +478,8 @@ def test_seed_supervise_skeleton_handles_log_subservice(tmp_path) -> None:
 
     svc_dir = tmp_path / "gateway-foo"
     svc_dir.mkdir()
+    if hasattr(os, "chown"):
+        os.chown(svc_dir, -1, os.getegid())
     (svc_dir / "log").mkdir()  # logger subdir present
 
     _seed_supervise_skeleton(svc_dir)

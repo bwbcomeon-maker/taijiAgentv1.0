@@ -73,15 +73,21 @@ def test_oauth_write_auth_json_uses_chmod_0600_before_rename(monkeypatch, tmp_pa
     )
 
 
-def test_oauth_write_auth_json_source_calls_chmod():
-    """Source-level pin: any future change to _write_auth_json that drops the
-    chmod call must be caught even if the runtime test above is skipped on
-    a filesystem that doesn't support POSIX modes."""
+def test_oauth_write_auth_json_source_fchmods_before_atomic_replace():
+    """Source-level pin for the stronger dirfd-based atomic replacement path."""
     src = (REPO / "api" / "oauth.py").read_text(encoding="utf-8")
-    assert "tmp.chmod(0o600)" in src, (
-        "_write_auth_json must call tmp.chmod(0o600) before tmp.replace() — "
-        "without it, OAuth tokens land world-readable on shared systems."
+    writer_start = src.index("def _write_auth_json_locked(")
+    writer_end = src.index("\ndef _mutate_auth_json(", writer_start)
+    writer = src[writer_start:writer_end]
+    chmod_idx = writer.index("os.fchmod(tmp_fd, stat.S_IRUSR | stat.S_IWUSR)")
+    replace_idx = writer.index("os.replace(")
+    assert chmod_idx < replace_idx, (
+        "The private temp fd must be forced to 0600 before the dirfd-based "
+        "atomic replacement publishes auth.json."
     )
+    assert "os.O_EXCL" in writer and '"O_NOFOLLOW"' in writer
+    assert "src_dir_fd=directory_fd" in writer
+    assert "dst_dir_fd=directory_fd" in writer
 
 
 # ── 2: cron history job_id path-traversal validation ────────────────────────

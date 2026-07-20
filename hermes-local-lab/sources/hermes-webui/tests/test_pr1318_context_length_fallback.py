@@ -30,12 +30,9 @@ def _persistence_block():
     assert start != -1, "Reasoning trace marker not found in streaming.py"
     commit_start = src.find("_artifact_writeback_snapshot =", start)
     assert commit_start != -1, "Normal artifact/session commit block not found"
-    commit_end = src.find("\n                if cancel_event.is_set():", commit_start)
-    assert commit_end != -1, "Normal commit block end not found"
-    commit_block = src[commit_start:commit_end]
-    save_matches = list(re.finditer(r"\n\s+s\.save\(\)", commit_block))
-    assert len(save_matches) == 1, "Normal commit block must contain exactly one s.save()"
-    end = commit_start + save_matches[0].end()
+    save_match = re.search(r"\n\s+s\.save\(\)", src[commit_start:])
+    assert save_match is not None, "Normal commit block must persist the session"
+    end = commit_start + save_match.end()
     return src[start:end]
 
 

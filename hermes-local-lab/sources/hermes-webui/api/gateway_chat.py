@@ -12,6 +12,7 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from api.config import (
@@ -194,6 +195,7 @@ def _gateway_request_headers(
     session_id: str,
     api_key: str,
     *,
+    profile_name: str | None = None,
     event_stream: bool = False,
 ) -> dict[str, str]:
     headers = {
@@ -201,6 +203,11 @@ def _gateway_request_headers(
         "X-Hermes-Session-Id": session_id,
     }
     headers["Accept"] = "text/event-stream" if event_stream else "application/json"
+    normalized_profile = str(profile_name or "").strip()
+    if normalized_profile:
+        # This is a binding assertion, not a request to switch the Gateway
+        # process profile.  The Gateway rejects a mismatch before agent work.
+        headers["X-Hermes-Profile"] = normalized_profile
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         # Scope Gateway long-term continuity to this WebUI conversation
@@ -453,7 +460,13 @@ def _gateway_image_artifact_candidate(payload: dict) -> dict | None:
     )
 
 
-def _gateway_run_approval_payload(session_id: str, event: dict, *, run_id: str = "") -> dict:
+def _gateway_run_approval_payload(
+    session_id: str,
+    event: dict,
+    *,
+    run_id: str = "",
+    profile_name: str = "",
+) -> dict:
     """Convert a Gateway run approval event into the WebUI pending shape."""
     payload = dict(event or {})
     gateway_run_id = str(payload.get("run_id") or run_id or "").strip()
@@ -471,6 +484,9 @@ def _gateway_run_approval_payload(session_id: str, event: dict, *, run_id: str =
         "pattern_key": str(payload.get("pattern_key") or (pattern_keys[0] if pattern_keys else "")),
         "pattern_keys": [str(key) for key in pattern_keys if key],
     }
+    normalized_profile = str(profile_name or "").strip()
+    if normalized_profile:
+        pending["_profile_name"] = normalized_profile
     for key in (
         "approval_type",
         "kind",
@@ -484,9 +500,20 @@ def _gateway_run_approval_payload(session_id: str, event: dict, *, run_id: str =
     return pending
 
 
-def _submit_gateway_run_approval_to_webui(session_id: str, event: dict, *, run_id: str = "") -> dict:
+def _submit_gateway_run_approval_to_webui(
+    session_id: str,
+    event: dict,
+    *,
+    run_id: str = "",
+    profile_name: str = "",
+) -> dict:
     """Store a Gateway approval event in the WebUI approval queue."""
-    pending = _gateway_run_approval_payload(session_id, event, run_id=run_id)
+    pending = _gateway_run_approval_payload(
+        session_id,
+        event,
+        run_id=run_id,
+        profile_name=profile_name,
+    )
     try:
         from api import routes as _routes
 
@@ -558,6 +585,7 @@ def resolve_gateway_run_approval_result(approval: dict, choice: str) -> dict:
     """Resolve a WebUI approval card and keep stale-vs-retryable failure detail."""
     run_id = str((approval or {}).get("_gateway_run_id") or "").strip()
     session_id = str((approval or {}).get("_session_id") or "").strip()
+    profile_name = str((approval or {}).get("_profile_name") or "").strip()
     if not run_id:
         return {"resolved": False, "inactive": True, "code": "missing_run_id"}
     from api.config import get_config
@@ -566,7 +594,11 @@ def resolve_gateway_run_approval_result(approval: dict, choice: str) -> dict:
     base_url = _gateway_base_url(cfg)
     api_key = _gateway_api_key()
     url = f"{base_url}/v1/runs/{urllib.parse.quote(run_id, safe='')}/approval"
-    headers = _gateway_request_headers(session_id, api_key)
+    headers = _gateway_request_headers(
+        session_id,
+        api_key,
+        profile_name=profile_name,
+    )
     req = urllib.request.Request(
         url,
         data=json.dumps({"choice": choice}).encode("utf-8"),
@@ -954,8 +986,15 @@ def _stream_gateway_run_events(
                 })
                 continue
             if event_name == "approval.request":
-                pending = _submit_gateway_run_approval_to_webui(session_id, payload, run_id=run_id)
-                put_gateway_event("approval", pending)
+                pending = _submit_gateway_run_approval_to_webui(
+                    session_id,
+                    payload,
+                    run_id=run_id,
+                    profile_name=str(headers.get("X-Hermes-Profile") or ""),
+                )
+                from api.brand_privacy import public_approval_projection
+
+                put_gateway_event("approval", public_approval_projection(pending))
                 update_active_run(stream_id, phase="gateway-approval", gateway_run_id=run_id)
                 continue
             if event_name == "approval.responded":
@@ -1035,6 +1074,8 @@ def _ingest_gateway_artifact_candidates(
     turn_id: str,
     candidates: list[dict],
     owner_run_id: str,
+    *,
+    profile_home: Path | None = None,
 ) -> tuple[list[dict], list[str], set[str]]:
     """Promote validated image candidates without exposing their source path."""
     if not candidates:
@@ -1045,7 +1086,15 @@ def _ingest_gateway_artifact_candidates(
     )
     from api.config import STATE_DIR
 
-    registry = ArtifactRegistry(STATE_DIR / "artifacts")
+    allowed_source_roots = (
+        [Path(profile_home) / "cache" / "images"]
+        if profile_home is not None
+        else None
+    )
+    registry = ArtifactRegistry(
+        STATE_DIR / "artifacts",
+        allowed_source_roots=allowed_source_roots,
+    )
     try:
         registry.cleanup_retired()
     except Exception:
@@ -1083,6 +1132,19 @@ def _commit_gateway_artifacts(
 
     ArtifactRegistry(STATE_DIR / "artifacts").commit_artifacts(
         session_id, artifact_ids, owner_run_id=owner_run_id
+    )
+
+
+def _rollback_gateway_artifacts(
+    session_id: str, artifact_ids: set[str]
+) -> None:
+    if not artifact_ids:
+        return
+    from api.artifacts import ArtifactRegistry
+    from api.config import STATE_DIR
+
+    ArtifactRegistry(STATE_DIR / "artifacts").rollback_registered_artifacts(
+        session_id, artifact_ids
     )
 
 
@@ -1211,10 +1273,20 @@ def _run_gateway_chat_streaming(
     try:
         s = get_session(session_id)
         from api.config import get_config  # imported lazily to avoid config-cycle churn
+        from api.profiles import get_hermes_home_for_profile
         from agent.image_runtime import (
             capture_capability_runtime_generation,
         )
 
+        gateway_profile = (
+            str(getattr(s, "profile", None) or "default").strip() or "default"
+        )
+        runtime_home_override = str(os.getenv("TAIJI_RUNTIME_HOME") or "").strip()
+        gateway_profile_home = (
+            Path(runtime_home_override).expanduser()
+            if gateway_profile == "default" and runtime_home_override
+            else Path(get_hermes_home_for_profile(gateway_profile))
+        )
         cfg = get_config()
         capability_generation = (
             capture_capability_runtime_generation()
@@ -1242,7 +1314,12 @@ def _run_gateway_chat_streaming(
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
-        headers = _gateway_request_headers(session_id, api_key, event_stream=True)
+        headers = _gateway_request_headers(
+            session_id,
+            api_key,
+            profile_name=gateway_profile,
+            event_stream=True,
+        )
         run_handle.bind_transport(base_url, headers)
         if cancel_event.is_set():
             from api.streaming import cancel_stream
@@ -1477,6 +1554,7 @@ def _run_gateway_chat_streaming(
             str(turn_id or turn_envelope.turn_id),
             artifact_candidates,
             stream_id,
+            profile_home=gateway_profile_home,
         )
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
@@ -1586,11 +1664,17 @@ def _run_gateway_chat_streaming(
                 artifacts_committed = True
                 s.save()
             except BaseException:
-                # A failed commit must never persist a dangling reference.  A
-                # failed save after commit leaves a durable orphan for later
-                # reconciliation, but the live Session projection is restored.
+                # Keep the session and its artifact set atomically visible:
+                # a failed save must compensate an already-committed artifact,
+                # while a failed commit is discarded by the outer finally.
                 for field, value in writeback_snapshot.items():
                     setattr(s, field, value)
+                if artifacts_committed and uncommitted_artifact_ids:
+                    _rollback_gateway_artifacts(
+                        session_id,
+                        uncommitted_artifact_ids,
+                    )
+                    artifacts_committed = False
                 raise
             try:
                 append_turn_journal_event_for_stream(

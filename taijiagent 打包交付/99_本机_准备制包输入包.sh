@@ -4,6 +4,7 @@ umask 022
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SOURCE_GATE="$REPO_ROOT/scripts/check-clean-worktree.sh"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 
 ok() { printf '[OK] %s\n' "$*"; }
@@ -25,12 +26,12 @@ preflight_repo() {
   require_cmd git
   require_cmd gzip
   require_cmd python3
-  git -C "$REPO_ROOT" diff --quiet || fail "源码仓库存在未提交改动，请先提交后再生成发布源码包"
-  git -C "$REPO_ROOT" diff --cached --quiet || fail "源码仓库存在已暂存未提交改动，请先提交后再生成发布源码包"
-  if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]; then
-    git -C "$REPO_ROOT" status --short --untracked-files=all >&2
-    fail "源码仓库存在未跟踪文件，请先提交、删除或加入 .gitignore"
-  fi
+  [ -x "$SOURCE_GATE" ] || fail "缺少正式源码门禁：$SOURCE_GATE"
+  "$SOURCE_GATE" \
+    --mode formal \
+    --repo-root "$REPO_ROOT" \
+    --source-root "$REPO_ROOT" \
+    || fail "本机制包输入必须来自干净本地 main"
 }
 
 write_source_archive() {

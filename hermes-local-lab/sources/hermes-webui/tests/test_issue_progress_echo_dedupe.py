@@ -105,6 +105,13 @@ def test_visible_progress_token_reasoning_and_interim_are_deduped(cleanup_test_s
             self.reasoning_config = None
             self.ephemeral_system_prompt = None
             self._last_error = None
+            from agent.image_runtime import (
+                capture_capability_runtime_generation,
+            )
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
 
         def run_conversation(self, **kwargs):
             self.stream_delta_callback(progress)
@@ -139,6 +146,11 @@ def test_visible_progress_token_reasoning_and_interim_are_deduped(cleanup_test_s
     setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
     fake_hermes_state = types.ModuleType("hermes_state")
     setattr(fake_hermes_state, "SessionDB", mock.Mock(return_value=None))
+    setattr(
+        fake_hermes_state,
+        "install_state_write_guard",
+        mock.Mock(return_value=None),
+    )
     injected = {
         "hermes_cli": fake_hermes_cli,
         "hermes_cli.runtime_provider": fake_runtime_module,

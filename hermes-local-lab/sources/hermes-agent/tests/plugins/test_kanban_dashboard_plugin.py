@@ -8,9 +8,13 @@ REST surface without spinning up the whole dashboard.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import subprocess
 import sys
 import time
+import tomllib
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
@@ -189,6 +193,63 @@ def test_board_query_param_default_overrides_current_board_pointer(client):
         for task in column["tasks"]
     }
     assert pinned_ids == {default_task["id"]}
+
+
+def test_dashboard_manifest_assets_survive_clean_checkout_and_wheel_packaging():
+    """Manifest runtime assets must be source-controlled package inputs.
+
+    Regression: the monorepo-wide ``**/dist/`` ignore rule hid the Kanban
+    dashboard bundle from new worktrees. Existing developer directories kept
+    working only because an old ignored build happened to remain on disk.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    dashboard_dir = repo_root / "plugins" / "kanban" / "dashboard"
+    manifest = json.loads(
+        (dashboard_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    package_data = tomllib.loads(
+        (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    )["tool"]["setuptools"]["package-data"]["plugins"]
+
+    git_root_result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert git_root_result.returncode == 0, git_root_result.stderr
+    git_root = Path(git_root_result.stdout.strip())
+
+    for manifest_key in ("entry", "css"):
+        relative_asset = Path(manifest[manifest_key])
+        assert not relative_asset.is_absolute()
+        assert ".." not in relative_asset.parts
+
+        asset = dashboard_dir / relative_asset
+        assert asset.is_file(), (
+            f"Kanban manifest {manifest_key!r} asset is absent from this "
+            f"checkout: {asset}"
+        )
+        assert asset.stat().st_size > 0, (
+            f"Kanban manifest {manifest_key!r} asset is empty: {asset}"
+        )
+
+        package_relative = asset.relative_to(repo_root / "plugins").as_posix()
+        assert any(fnmatch(package_relative, pattern) for pattern in package_data), (
+            f"{package_relative} is not covered by setuptools package-data"
+        )
+
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--quiet", "--no-index", str(asset)],
+            cwd=git_root,
+            check=False,
+        )
+        assert ignored.returncode == 1, (
+            f"Kanban runtime asset remains ignored and will disappear from a "
+            f"fresh worktree: {asset}"
+        )
 
 
 def test_dashboard_select_filters_use_sdk_value_change_handler():

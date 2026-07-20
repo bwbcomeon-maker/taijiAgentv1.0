@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${TAIJI_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SOURCE_TREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+REPO_ROOT="${TAIJI_REPO_ROOT:-$SOURCE_TREE_ROOT}"
+SOURCE_GATE="$SOURCE_TREE_ROOT/scripts/check-clean-worktree.sh"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
@@ -73,13 +75,12 @@ check_git_clean_and_commit_match() {
   [ "$SKIP_GIT_CHECK" = "1" ] && return 0
   [ -e "$REPO_ROOT/.git" ] || return 0
   have git || fail "缺少 git，无法执行发布预检"
-
-  git -C "$REPO_ROOT" diff --quiet || fail "源码仓库存在未提交改动，不能发布"
-  git -C "$REPO_ROOT" diff --cached --quiet || fail "源码仓库存在已暂存未提交改动，不能发布"
-  if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]; then
-    git -C "$REPO_ROOT" status --short --untracked-files=all >&2
-    fail "源码仓库存在未跟踪文件，不能发布"
-  fi
+  [ -x "$SOURCE_GATE" ] || fail "缺少正式源码门禁：$SOURCE_GATE"
+  "$SOURCE_GATE" \
+    --mode formal \
+    --repo-root "$REPO_ROOT" \
+    --source-root "$SOURCE_TREE_ROOT" \
+    || fail "正式发布必须来自干净本地 main"
 
   local short source_name
   short="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"

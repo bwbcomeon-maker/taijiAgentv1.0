@@ -119,11 +119,13 @@ class TestDetectWebUIVersion:
         assert calls[1][0][:2] == ['diff-index', '--quiet']
 
     def test_dirty_check_hashes_tracked_diff_when_available(self, tmp_path):
-        """Dirty dev-build asset URLs should change on each tracked diff edit."""
+        """Dirty dev-build asset URLs use the cheap tracked-file stat digest."""
         import hashlib
 
-        diff = "diff --git a/static/ui.js b/static/ui.js\n+console.log('dev edit')\n"
-        expected = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
+        tracked_rel = "static/ui.js"
+        expected = hashlib.sha1(
+            f"{tracked_rel}missing".encode("utf-8")
+        ).hexdigest()[:8]
         calls = []
 
         def fake_run_git(args, cwd, timeout=10):
@@ -132,13 +134,13 @@ class TestDetectWebUIVersion:
                 return ('v0.50.123', True)
             if args[:2] == ['diff-index', '--quiet']:
                 return ('git exited with status 1', False)
-            if args[:3] == ['diff', '--binary', 'HEAD']:
-                return (diff, True)
+            if args[:3] == ['diff', '--name-only', '--diff-filter=ACMRTUXB']:
+                return (tracked_rel, True)
             return ('unexpected', False)
 
         result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
-        assert result == f'v0.50.123-dirty-{expected}'
-        assert calls[2][0][:3] == ['diff', '--binary', 'HEAD']
+        assert result == f'v0.50.123-dirty.{expected}'
+        assert calls[2][0][:3] == ['diff', '--name-only', '--diff-filter=ACMRTUXB']
 
     def test_dirty_check_falls_back_when_diff_hash_unavailable(self, tmp_path):
         """If the diff read fails, keep the old best-effort -dirty suffix."""
@@ -174,8 +176,8 @@ class TestDetectWebUIVersion:
         tracked.write_text('edit two\n', encoding='utf-8')
         second = upd._dirty_suffix(tmp_path)
 
-        assert first.startswith('-dirty-')
-        assert second.startswith('-dirty-')
+        assert first.startswith('-dirty.')
+        assert second.startswith('-dirty.')
         assert first != second
 
     def test_dirty_check_timeout_does_not_hide_base_version(self, tmp_path):

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -291,13 +292,21 @@ class XAIImageGenProvider(ImageGenProvider):
             # pattern used by text_to_speech.
             try:
                 saved_path = save_url_image(url, prefix=f"xai_{model_id}")
-            except Exception as exc:
+            except Exception:
+                diagnostic_id = uuid.uuid4().hex
                 logger.warning(
-                    "xAI image URL %s could not be cached (%s); falling back to bare URL.",
-                    url,
-                    exc,
+                    "xAI generated image cache failed "
+                    "diagnostic_id=%s error_code=image_result_io_failed",
+                    diagnostic_id,
                 )
-                image_ref = url
+                return error_response(
+                    error="Generated image could not be persisted.",
+                    error_type="image_result_io_failed",
+                    provider=provider_name,
+                    model=model_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
             else:
                 image_ref = str(saved_path)
         else:

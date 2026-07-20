@@ -28,7 +28,11 @@ def test_upload_limit_constant_matches_server_limit():
     ui = UI_JS.read_text(encoding="utf-8")
     config = CONFIG_PY.read_text(encoding="utf-8")
 
-    assert "window.__HERMES_CONFIG__.maxUploadBytes" in ui
+    assert "window.__TAIJI_CONFIG__" in ui
+    assert "window['__HER'+'MES_CONFIG__']" in ui, (
+        "Legacy boot config remains a compatibility fallback"
+    )
+    assert "MAX_UPLOAD_BYTES=_TAIJI_BOOT_CONFIG.maxUploadBytes" in ui
     assert 'MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)' in config
 
 

@@ -348,6 +348,45 @@ def _mock_vision_response():
     return SimpleNamespace(choices=[choice], model="test/vision", usage=None)
 
 
+def _verified_vision_route():
+    from agent.auxiliary_client import (
+        VisionRequestBinding,
+        authorize_vision_request_binding,
+    )
+
+    snapshot = {
+        "schema_version": 1,
+        "fingerprint": "verified-vision",
+        "_authorization_generation": "verified-generation",
+        "status": "verified",
+        "available": True,
+        "provider": "custom",
+        "model": "test/vision",
+    }
+    binding = authorize_vision_request_binding(
+        VisionRequestBinding(
+            provider="custom",
+            model="test/vision",
+            base_url="https://vision.example.test/v1",
+            api_key="test-secret",
+        ),
+        authorization_fingerprint=snapshot["fingerprint"],
+        authorization_generation=snapshot["_authorization_generation"],
+    )
+    return snapshot, binding
+
+
+def _strict_vision_response(response):
+    async def call(**kwargs):
+        kwargs["resolution_out"].update(
+            provider=kwargs["provider"],
+            model=kwargs["model"],
+        )
+        return response
+
+    return call
+
+
 class TestVisionDispatchLoopSafety:
     """Simulate the full registry.dispatch('vision_analyze') chain and
     verify the event loop stays alive afterwards — the exact scenario
@@ -360,12 +399,13 @@ class TestVisionDispatchLoopSafety:
         from tools.registry import registry
 
         fake_response = _mock_vision_response()
+        snapshot, binding = _verified_vision_route()
 
         with (
             patch(
                 "tools.vision_tools.async_call_llm",
                 new_callable=AsyncMock,
-                return_value=fake_response,
+                side_effect=_strict_vision_response(fake_response),
             ),
             patch(
                 "tools.vision_tools._download_image",
@@ -379,6 +419,26 @@ class TestVisionDispatchLoopSafety:
             patch(
                 "tools.vision_tools._image_to_base64_data_url",
                 return_value="data:image/jpeg;base64,abc",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="openai",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-4.1-mini",
+            ),
+            patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="text",
+            ),
+            patch(
+                "agent.image_runtime.verification_runtime_snapshot",
+                return_value=snapshot,
+            ),
+            patch(
+                "tools.vision_tools.capture_vision_request_binding",
+                return_value=binding,
             ),
         ):
             result_json = registry.dispatch(
@@ -404,12 +464,13 @@ class TestVisionDispatchLoopSafety:
         from tools.registry import registry
 
         fake_response = _mock_vision_response()
+        snapshot, binding = _verified_vision_route()
 
         with (
             patch(
                 "tools.vision_tools.async_call_llm",
                 new_callable=AsyncMock,
-                return_value=fake_response,
+                side_effect=_strict_vision_response(fake_response),
             ),
             patch(
                 "tools.vision_tools._download_image",
@@ -423,6 +484,26 @@ class TestVisionDispatchLoopSafety:
             patch(
                 "tools.vision_tools._image_to_base64_data_url",
                 return_value="data:image/jpeg;base64,abc",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="openai",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-4.1-mini",
+            ),
+            patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="text",
+            ),
+            patch(
+                "agent.image_runtime.verification_runtime_snapshot",
+                return_value=snapshot,
+            ),
+            patch(
+                "tools.vision_tools.capture_vision_request_binding",
+                return_value=binding,
             ),
         ):
             args = {"image_url": "https://example.com/cat.png", "question": "Describe"}

@@ -10,6 +10,7 @@ import os
 from unittest.mock import patch, MagicMock
 
 import pytest
+import yaml
 
 
 @pytest.fixture
@@ -71,22 +72,32 @@ class TestSaveModelChoiceAlwaysDict:
 
 
 class TestProviderPersistsAfterModelSave:
-    def test_update_config_for_provider_uses_atomic_yaml_write(self, config_home):
-        """Provider switches should delegate config writes to atomic_yaml_write."""
+    def test_update_config_for_provider_uses_strict_transactional_write(
+        self,
+        config_home,
+    ):
+        """Provider switches should delegate to the canonical strict writer."""
         from hermes_cli.auth import _update_config_for_provider
 
         config_path = config_home / "config.yaml"
         original_text = config_path.read_text(encoding="utf-8")
 
-        def _boom(path, data, **kwargs):
-            assert path == config_path
-            assert data["model"]["provider"] == "nous"
-            assert data["model"]["base_url"] == "https://inference.example.com/v1"
-            assert data["model"]["default"] == "some-old-model"
-            assert kwargs["sort_keys"] is False
+        def _boom(mutator, *, config_path):
+            assert config_path == config_home / "config.yaml"
+            candidate = yaml.safe_load(original_text)
+            mutator(candidate)
+            assert candidate["model"]["provider"] == "nous"
+            assert (
+                candidate["model"]["base_url"]
+                == "https://inference.example.com/v1"
+            )
+            assert candidate["model"]["default"] == "some-old-model"
             raise OSError("simulated atomic write failure")
 
-        with patch("hermes_cli.auth.atomic_yaml_write", side_effect=_boom) as mock_write:
+        with patch(
+            "agent.provider_credentials.mutate_config_strict",
+            side_effect=_boom,
+        ) as mock_write:
             with pytest.raises(OSError, match="simulated atomic write failure"):
                 _update_config_for_provider(
                     "nous",
@@ -393,4 +404,3 @@ class TestBaseUrlValidation:
 
         saved = get_env_value("GLM_BASE_URL") or ""
         assert saved == "", "Empty input should not save a base URL"
-

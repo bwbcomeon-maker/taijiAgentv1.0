@@ -6053,6 +6053,7 @@ from api.config import (
     LOCK,
     STREAMS,
     STREAMS_LOCK,
+    STREAM_SESSION_IDS,
     CANCEL_FLAGS,
     STREAM_LAST_EVENT_ID,
     SERVER_START_TIME,
@@ -6138,6 +6139,26 @@ def _configuration_mutation_error_response(handler, exc: RuntimeError):
             status=409,
         )
     return bad(handler, str(exc), status=500)
+
+
+def _configuration_io_error_response(handler, exc: OSError):
+    """Return a stable configuration I/O failure without exposing local paths."""
+    diagnostic_id = uuid.uuid4().hex
+    logger.warning(
+        "Configuration I/O failed "
+        "(diagnostic_id=%s, error_type=%s)",
+        diagnostic_id,
+        type(exc).__name__,
+    )
+    return j(
+        handler,
+        {
+            "error": "配置暂时无法保存，请稍后重试。",
+            "error_code": "configuration_io_error",
+            "diagnostic_id": diagnostic_id,
+        },
+        status=500,
+    )
 
 
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
@@ -9745,6 +9766,11 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, get_model_config())
 
+    if parsed.path == "/api/image-capabilities":
+        from api.model_config import get_image_capabilities
+
+        return j(handler, get_image_capabilities())
+
     if parsed.path == "/api/provider-credentials":
         from api.model_config import get_provider_credentials_config
 
@@ -11757,7 +11783,31 @@ def handle_post(handler, parsed) -> bool:
         except (RuntimeError, OSError) as exc:
             if isinstance(exc, RuntimeError):
                 return _configuration_mutation_error_response(handler, exc)
-            return bad(handler, str(exc), status=500)
+            return _configuration_io_error_response(handler, exc)
+
+    if parsed.path == "/api/image-capabilities/configure":
+        from api.model_config import (
+            ImageCapabilityCredentialError,
+            configure_image_capabilities,
+        )
+
+        try:
+            return j(handler, configure_image_capabilities(body))
+        except ImageCapabilityCredentialError as exc:
+            return j(
+                handler,
+                {
+                    "error": str(exc),
+                    "error_code": exc.code,
+                },
+                status=409,
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return _configuration_mutation_error_response(handler, exc)
+        except OSError as exc:
+            return _configuration_io_error_response(handler, exc)
 
     if parsed.path == "/api/provider-credentials":
         from api.model_config import upsert_provider_credential
@@ -16841,6 +16891,7 @@ def _handle_btw(handler, body):
     stream = create_stream_channel()
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
+        STREAM_SESSION_IDS[stream_id] = ephemeral.session_id
     from api.background import track_btw
     track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
     from api.legacy_session_migration import start_legacy_migration_guarded_worker
@@ -16886,6 +16937,7 @@ def _handle_background(handler, body):
     stream = create_stream_channel()
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
+        STREAM_SESSION_IDS[stream_id] = bg.session_id
     task_id = uuid.uuid4().hex[:8]
     from api.background import track_background, complete_background
     parent_sid = body["session_id"]
@@ -17913,6 +17965,7 @@ def _start_chat_stream_for_session(
                 stream = create_stream_channel()
                 with STREAMS_LOCK:
                     STREAMS[stream_id] = stream
+                    STREAM_SESSION_IDS[stream_id] = s.session_id
                 break
 
         # _clear_stale_stream_state owns the same non-reentrant session lock;
@@ -17933,6 +17986,7 @@ def _start_chat_stream_for_session(
             with STREAMS_LOCK:
                 if STREAMS.get(stream_id) is stream:
                     STREAMS.pop(stream_id, None)
+                    STREAM_SESSION_IDS.pop(stream_id, None)
             STREAM_GOAL_RELATED.pop(stream_id, None)
             if getattr(s, "active_stream_id", None) != stream_id:
                 return

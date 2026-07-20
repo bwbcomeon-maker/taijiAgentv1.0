@@ -9,10 +9,18 @@ from tools.url_safety import (
     _is_blocked_ip,
     _global_allow_private_urls,
     _reset_allow_private_cache,
+    _reset_synthetic_dns_mode_cache,
 )
 
 import ipaddress
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_synthetic_dns_detection():
+    _reset_synthetic_dns_mode_cache()
+    yield
+    _reset_synthetic_dns_mode_cache()
 
 
 class TestIsSafeUrl:
@@ -193,6 +201,74 @@ class TestIsSafeUrl:
     def test_qq_multimedia_hostname_dns_failure_still_blocked(self):
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("Name resolution failed")):
             assert is_safe_url("https://multimedia.nt.qq.com.cn/download?id=123") is False
+
+    def test_distinct_multi_probe_fake_ip_dns_allows_hostname_mapping(self):
+        """Transparent proxy Fake-IP mappings are not treated as origin peers."""
+        answers = {
+            "example.com": "198.18.0.10",
+            "github.com": "198.18.0.11",
+            "public-looking.example": "198.18.0.12",
+        }
+
+        def fake_getaddrinfo(hostname, *_args, **_kwargs):
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    (answers[hostname], 0),
+                )
+            ]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            assert is_safe_url("https://public-looking.example/path") is True
+            assert (
+                is_always_blocked_url(
+                    "https://public-looking.example/path"
+                )
+                is False
+            )
+
+    def test_single_reused_fake_ip_answer_does_not_enable_proxy_mode(self):
+        """One synthetic answer cannot opt an attacker-controlled host out."""
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("198.18.0.23", 0),
+                )
+            ],
+        ):
+            assert is_safe_url("https://public-looking.example/path") is False
+
+    def test_fake_ip_literal_remains_blocked_in_synthetic_dns_mode(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_SYNTHETIC_DNS_MODE", "true")
+        assert is_safe_url("https://198.18.0.23/path") is False
+        assert is_always_blocked_url("https://198.18.0.23/path") is True
+
+    def test_metadata_hostname_remains_blocked_in_synthetic_dns_mode(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_SYNTHETIC_DNS_MODE", "true")
+        assert (
+            is_safe_url(
+                "http://metadata.google.internal/computeMetadata/v1/"
+            )
+            is False
+        )
+        assert (
+            is_always_blocked_url(
+                "http://metadata.google.internal/computeMetadata/v1/"
+            )
+            is True
+        )
 
 
 class TestIsBlockedIp:

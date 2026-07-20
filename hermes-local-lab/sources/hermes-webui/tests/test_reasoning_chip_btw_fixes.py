@@ -26,6 +26,8 @@ import re
 REPO = pathlib.Path(__file__).resolve().parent.parent
 INDEX = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+ICONS_JS = (REPO / "static" / "icons.js").read_text(encoding="utf-8")
+TAIJI_HOME_JS = (REPO / "static" / "taiji-home.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
@@ -88,17 +90,23 @@ class TestReasoningChipIcon:
     rendering consistency with the other composer chips."""
 
     def test_chip_button_contains_svg_with_currentColor(self):
-        # Locate the chip button and confirm it contains a stroke="currentColor" SVG
+        # Locate the chip button and confirm it uses the shared, self-hosted SVG
+        # hydrator.  The current shell deliberately keeps raw SVG path markup in
+        # icons.js instead of duplicating it in index.html.
         m = re.search(
-            r'<button class="composer-reasoning-chip"[^>]*>([\s\S]*?)</button>',
+            r'<button class="[^"]*\bcomposer-reasoning-chip\b[^"]*"[^>]*>([\s\S]*?)</button>',
             INDEX,
         )
         assert m, "composer-reasoning-chip button not found"
         btn_body = m.group(1)
-        assert 'stroke="currentColor"' in btn_body, (
-            "reasoning chip must use stroke='currentColor' SVG matching other chips"
+        assert 'class="taiji-icon composer-reasoning-icon composer-control-icon"' in btn_body
+        assert 'data-icon="gauge"' in btn_body
+        assert "'gauge':" in ICONS_JS
+        assert "stroke:currentColor" in STYLE_CSS
+        assert "node.innerHTML=li(name,size)" in TAIJI_HOME_JS, (
+            "reasoning chip must be hydrated through the shared currentColor SVG "
+            "icon pipeline matching the other composer controls"
         )
-        assert '<svg' in btn_body, "reasoning chip must contain an <svg> icon"
 
     def test_apply_reasoning_chip_label_has_no_emoji(self):
         # Locate _applyReasoningChip and confirm the label assignment doesn't
@@ -338,15 +346,16 @@ class TestResizeHandlerSymmetry:
     open, the dropdown must be re-positioned so it stays aligned under its chip."""
 
     def test_resize_repositions_reasoning_dropdown(self):
-        # The global resize handler must handle both composerModelDropdown AND
-        # composerReasoningDropdown to keep them aligned when the window resizes.
-        m = re.search(
-            r"window\.addEventListener\(\s*['\"]resize['\"][\s\S]*?\}\s*\)\s*;",
+        # Desktop popovers now share one floating-panel registry.  Reasoning must
+        # register with it and the global resize listener must refresh the whole
+        # registry, which includes model and reasoning dropdowns.
+        assert "window.addEventListener('resize',_refreshTaijiFloatingPanels);" in UI_JS
+        assert "function _refreshTaijiFloatingPanels()" in UI_JS
+        assert "positionTaijiFloatingPanel(panel,anchor,panel._taijiFloatingOptions||{});" in UI_JS
+        reasoning_position = re.search(
+            r"function\s+_positionReasoningDropdown\b[\s\S]*?(?=^function\s|\Z)",
             UI_JS,
+            re.MULTILINE,
         )
-        assert m, "window resize handler not found in ui.js"
-        handler = m.group(0)
-        assert "composerReasoningDropdown" in handler, (
-            "window resize handler must also re-position composerReasoningDropdown "
-            "while it's open (symmetric with the existing model-dropdown branch)"
-        )
+        assert reasoning_position, "_positionReasoningDropdown not found in ui.js"
+        assert "window.positionTaijiFloatingPanel(dd,anchor" in reasoning_position.group(0)

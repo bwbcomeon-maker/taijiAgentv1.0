@@ -36,8 +36,11 @@ def test_rtl_bootstrap_script_runs_synchronously_in_head():
     html = INDEX.read_text(encoding="utf-8")
     # The bootstrap should appear before </head>
     head_close = html.index("</head>")
-    bootstrap_idx = html.index("localStorage.getItem('hermes-rtl')")
-    assert bootstrap_idx < head_close, "RTL bootstrap must run in <head> before paint"
+    helper_idx = html.index("window.__taijiStoreGet")
+    bootstrap_idx = html.index("sg('rtl','')")
+    assert helper_idx < bootstrap_idx < head_close, (
+        "storage helper and RTL bootstrap must run in order before paint"
+    )
     assert "chat-content-rtl" in html
 
 

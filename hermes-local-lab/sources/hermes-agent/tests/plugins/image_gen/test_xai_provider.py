@@ -182,36 +182,43 @@ class TestGenerate:
         assert call_args[0] == "https://imgen.x.ai/xai-tmp-imgen-test.jpeg"
         assert call_kwargs.get("prefix", "").startswith("xai_")
 
-    def test_url_response_falls_back_to_bare_url_when_download_fails(self):
-        """If caching the URL fails (network blip, 404 in-flight), the
-        provider must NOT hard-error — fall through to returning the bare
-        URL so the agent surface at least sees *something*.  The gateway's
-        existing URL-send fallback then has a chance to succeed; if it
-        too 404s, the user gets the original (now legible) error rather
-        than an opaque "image generation failed" tool result.
-        """
+    def test_url_response_cache_failure_fails_closed_without_url_leak(
+        self,
+        caplog,
+    ):
+        """An expired/signed xAI URL is not a valid successful artifact."""
         import requests as req_lib
         from plugins.image_gen.xai import XAIImageGenProvider
 
+        signed_url = (
+            "https://imgen.x.ai/xai-tmp-imgen-already-404.jpeg"
+            "?X-Amz-Credential=private&X-Amz-Signature=secret"
+        )
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
         mock_resp.json.return_value = {
-            "data": [{"url": "https://imgen.x.ai/xai-tmp-imgen-already-404.jpeg"}],
+            "data": [{"url": signed_url}],
         }
 
         with patch("plugins.image_gen.xai.requests.post", return_value=mock_resp), \
              patch(
                  "plugins.image_gen.xai.save_url_image",
-                 side_effect=req_lib.HTTPError("404 from CDN"),
+                 side_effect=req_lib.HTTPError(f"404 from {signed_url}"),
              ):
             provider = XAIImageGenProvider()
             result = provider.generate(prompt="A cat playing piano")
 
-        assert result["success"] is True, (
-            "Cache failure must not turn into a tool error — gateway gets a chance to retry"
-        )
-        assert result["image"] == "https://imgen.x.ai/xai-tmp-imgen-already-404.jpeg"
+        rendered = json.dumps(result)
+        logs = caplog.text
+        assert result["success"] is False
+        assert result["image"] is None
+        assert result["error_type"] == "image_result_io_failed"
+        assert "X-Amz-" not in rendered
+        assert "secret" not in rendered
+        assert signed_url not in logs
+        assert "X-Amz-" not in logs
+        assert "secret" not in logs
 
     def test_api_error(self):
         import requests as req_lib

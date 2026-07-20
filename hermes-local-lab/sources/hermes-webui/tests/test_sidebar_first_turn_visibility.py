@@ -16,9 +16,14 @@ class TestSidebarFirstTurnVisibility:
             "send() must optimistically upsert the active session into the sidebar "
             "as soon as the local user message is pushed."
         )
-        push_idx = src.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+        send_idx = src.index("async function send()")
+        push_idx = src.index("S.messages.push(userMsg);", send_idx)
+        render_idx = src.index("renderMessages();", push_idx)
+        thinking_idx = src.index("appendThinking('',{pending:true});", render_idx)
+        busy_idx = src.index("setBusy(true);", thinking_idx)
         helper_idx = src.index("upsertActiveSessionForLocalTurn", push_idx)
         start_idx = src.index("api('/api/chat/start'", push_idx)
+        assert push_idx < render_idx < thinking_idx < busy_idx < helper_idx < start_idx
         assert helper_idx < start_idx, (
             "The sidebar row must be rendered before /api/chat/start returns so "
             "tool calls are reachable while the first agent turn is still running."

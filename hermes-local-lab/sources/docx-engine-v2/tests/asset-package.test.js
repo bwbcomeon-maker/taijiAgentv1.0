@@ -46,6 +46,8 @@ async function makeSourcePackage(workspace) {
       '  B --> C[模板渲染]',
       '```',
       '',
+      '以下为独立上传的系统总体架构图。',
+      '',
       '![系统总体架构](architecture.png)',
       '',
       '## 二、实施安排',

@@ -4,11 +4,26 @@ import base64
 import importlib
 import json
 import logging
+import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
+
+
+_PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l"
+    "EQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def _write_cached_png(home: Path, name: str) -> Path:
+    image = home / "cache" / "images" / name
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(_PNG_1X1)
+    return image
 
 
 def _verified_snapshot(
@@ -71,6 +86,39 @@ def _image_binding(
             or f"authorization-generation:{fingerprint}"
         ),
     )
+
+
+def _handle_image_generate_with_gate(
+    image_generation_tool: Any,
+    arguments: dict[str, Any],
+    **kwargs: Any,
+) -> str:
+    """Invoke one Provider-boundary test through a legitimate one-shot gate."""
+    from agent.image_intent import (
+        begin_image_generation_task,
+        cleanup_image_generation_task,
+    )
+
+    token = uuid.uuid4().hex
+    task_id = f"provider-boundary-{token}"
+    owner = f"provider-boundary-owner-{token}"
+    assert (
+        begin_image_generation_task(
+            task_id,
+            allow_generation=True,
+            owner_token=owner,
+        )
+        is None
+    )
+    try:
+        return image_generation_tool._handle_image_generate(
+            arguments,
+            image_generation_task_id=task_id,
+            image_generation_gate_owner=owner,
+            **kwargs,
+        )
+    finally:
+        cleanup_image_generation_task(task_id, owner_token=owner)
 
 
 def _vision_binding(
@@ -173,7 +221,8 @@ def test_image_aba_snapshot_rejects_binding_from_intermediate_generation(
     )
 
     result = json.loads(
-        image_generation_tool._handle_image_generate(
+        _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "aba image"},
             caller_capability_fingerprint=snapshot_a["fingerprint"],
             caller_capability_generation=snapshot_a[
@@ -248,7 +297,8 @@ def test_image_old_a_binding_cannot_revive_after_persisted_a_b_a(
     )
 
     result = json.loads(
-        image_generation_tool._handle_image_generate(
+        _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "reject revived A binding"},
             caller_capability_fingerprint=fingerprint,
             caller_capability_generation=final_snapshot[
@@ -265,6 +315,7 @@ def test_image_old_a_binding_cannot_revive_after_persisted_a_b_a(
 
 def test_image_dispatch_passes_reauth_guard_to_provider_io_seam(
     monkeypatch,
+    tmp_path,
 ):
     from agent import image_gen_registry, image_runtime
     from agent.image_gen_provider import ImageGenProvider
@@ -279,6 +330,8 @@ def test_image_dispatch_passes_reauth_guard_to_provider_io_seam(
         model="gpt-image-2",
     )
     binding = _image_binding(fingerprint=fingerprint)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cached_image = _write_cached_png(tmp_path, "guarded-provider.png")
     provider_io: list[str] = []
 
     class Provider(ImageGenProvider):
@@ -296,7 +349,7 @@ def test_image_dispatch_passes_reauth_guard_to_provider_io_seam(
             return {
                 "success": True,
                 "provider": self.name,
-                "image": "/tmp/guarded-provider.png",
+                "image": str(cached_image),
             }
 
     monkeypatch.setattr(
@@ -321,7 +374,8 @@ def test_image_dispatch_passes_reauth_guard_to_provider_io_seam(
     )
 
     result = json.loads(
-        image_generation_tool._handle_image_generate(
+        _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "guard provider io"},
             caller_capability_fingerprint=fingerprint,
             caller_capability_generation=snapshot[
@@ -431,7 +485,8 @@ def test_forged_or_tampered_image_binding_fails_before_provider_io(
     )
 
     result = json.loads(
-        image_generation_tool._handle_image_generate(
+        _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "reject forged image binding"},
             caller_capability_fingerprint=fingerprint,
             caller_capability_generation=snapshot[
@@ -502,6 +557,7 @@ def test_image_probe_guard_accepts_only_same_persisted_verifying_generation(
 
 def test_custom_image_uses_only_deep_frozen_binding_material(
     monkeypatch,
+    tmp_path,
 ):
     """Endpoint, secret, network policy and timeout come from one immutable binding."""
     from agent import custom_image_providers, image_runtime
@@ -545,6 +601,8 @@ def test_custom_image_uses_only_deep_frozen_binding_material(
         model=model,
     )
     outbound: list[dict[str, Any]] = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cached_image = _write_cached_png(tmp_path, "pinned-custom-image.png")
 
     @contextmanager
     def request_pinned_https(**kwargs):
@@ -589,11 +647,12 @@ def test_custom_image_uses_only_deep_frozen_binding_material(
     monkeypatch.setattr(
         custom_image_providers,
         "save_b64_image",
-        lambda *_args, **_kwargs: "/tmp/pinned-custom-image.png",
+        lambda *_args, **_kwargs: str(cached_image),
     )
 
     result = json.loads(
-        image_generation_tool._handle_image_generate(
+        _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "pinned custom image", "aspect_ratio": "portrait"},
             caller_capability_fingerprint=fingerprint,
             caller_capability_generation=snapshot[
@@ -673,7 +732,8 @@ def test_custom_image_transport_exception_redacts_bound_secret_and_endpoint(
     )
 
     with caplog.at_level(logging.DEBUG):
-        result_text = image_generation_tool._handle_image_generate(
+        result_text = _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "redact custom transport failure"},
             caller_capability_fingerprint=fingerprint,
             caller_capability_generation=snapshot[
@@ -1287,7 +1347,8 @@ def test_custom_image_constructor_failure_never_falls_back_to_fal(
     )
 
     result = json.loads(
-        image_generation_tool._handle_image_generate(
+        _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "do not fall back"},
             caller_capability_fingerprint=fingerprint,
             caller_capability_generation=snapshot[
@@ -1551,7 +1612,8 @@ def test_image_provider_exception_redacts_secret_and_endpoint(
     )
 
     with caplog.at_level(logging.DEBUG):
-        result_text = image_generation_tool._handle_image_generate(
+        result_text = _handle_image_generate_with_gate(
+            image_generation_tool,
             {"prompt": "redact image error"},
             caller_capability_fingerprint=fingerprint,
             caller_capability_generation=snapshot[

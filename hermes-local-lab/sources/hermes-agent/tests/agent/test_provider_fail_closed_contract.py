@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -18,21 +20,12 @@ def _value_error_failure(label: str, call: Callable[[], Any]) -> str | None:
     return f"{label}: expected ValueError, but no exception was raised"
 
 
-class _RecordingEnvironment:
-    def __init__(self, calls: list[str]) -> None:
-        self._calls = calls
-
-    def get(self, key: str, default: Any = None) -> Any:
-        self._calls.append(key)
-        return default
-
-
 def _provider_entry(**overrides: Any) -> dict[str, Any]:
     entry = {
         "id": "router",
         "name": "Router Images",
         "base_url": "https://images.example.com/v1",
-        "api_key_env": "TAIJI_IMAGE_CUSTOM_ROUTER_API_KEY",
+        "credential_ref": "custom-router",
         "models": ["configured-image-model"],
         "default_model": "configured-image-model",
     }
@@ -120,35 +113,16 @@ def test_builtin_known_image_models_resolve_exactly(
         http_calls.append("post")
         raise AssertionError("known-model characterization reached HTTP")
 
-    monkeypatch.setattr(dashscope.requests, "post", record_http)
-    monkeypatch.setattr(doubao.requests, "post", record_http)
-    monkeypatch.setattr(qianfan.requests, "post", record_http)
-    monkeypatch.setattr(zhipu_image.requests, "post", record_http)
-    monkeypatch.setattr(minimax_image.requests, "post", record_http)
-    monkeypatch.setattr(
-        dashscope,
-        "_resolve_api_key",
-        lambda *args, **kwargs: credential_calls.append("dashscope") or "",
-    )
-    monkeypatch.setattr(doubao, "_load_image_gen_config", lambda: {})
-    doubao_env_calls: list[str] = []
-    monkeypatch.setattr(
-        doubao,
-        "os",
-        SimpleNamespace(environ=_RecordingEnvironment(doubao_env_calls)),
-    )
-
-    def forbidden_required(*args: Any, **kwargs: Any) -> list[str]:
-        del args, kwargs
-        credential_calls.append("missing_required")
-        return ["forbidden"]
-
-    for module in (qianfan, zhipu_image, minimax_image):
-        monkeypatch.setattr(module, "missing_required", forbidden_required)
+    for module in (dashscope, doubao, qianfan, zhipu_image, minimax_image):
         monkeypatch.setattr(
             module,
-            "env_value",
-            lambda *args, **kwargs: credential_calls.append("env_value") or "",
+            "post_json",
+            lambda *args, **kwargs: record_http(*args, **kwargs),
+        )
+        monkeypatch.setattr(
+            module,
+            "provider_api_key",
+            lambda *args, **kwargs: credential_calls.append("secret") or "",
         )
 
     cases = (
@@ -163,7 +137,6 @@ def test_builtin_known_image_models_resolve_exactly(
         assert result["model"] == model
 
     assert credential_calls == []
-    assert "ARK_API_KEY" not in doubao_env_calls
     assert http_calls == []
 
 
@@ -226,32 +199,12 @@ def test_builtin_unknown_image_models_fail_before_credential_lookup(
             http_calls.append("post")
             raise AssertionError("unknown model reached HTTP")
 
-        monkeypatch.setattr(module.requests, "post", record_http)
-        if label == "dashscope":
-            monkeypatch.setattr(
-                module,
-                "_resolve_api_key",
-                lambda *args, **kwargs: credential_calls.append("secret") or "",
-            )
-        elif label == "doubao":
-            monkeypatch.setattr(module, "_load_image_gen_config", lambda: {})
-            monkeypatch.setattr(
-                module,
-                "os",
-                SimpleNamespace(environ=_RecordingEnvironment(credential_calls)),
-            )
-        else:
-            monkeypatch.setattr(
-                module,
-                "missing_required",
-                lambda *args, **kwargs: credential_calls.append("required")
-                or ["forbidden"],
-            )
-            monkeypatch.setattr(
-                module,
-                "env_value",
-                lambda *args, **kwargs: credential_calls.append("secret") or "",
-            )
+        monkeypatch.setattr(module, "post_json", record_http)
+        monkeypatch.setattr(
+            module,
+            "provider_api_key",
+            lambda *args, **kwargs: credential_calls.append("secret") or "",
+        )
 
         failure = _value_error_failure(
             f"{label} resolver",
@@ -298,20 +251,23 @@ def test_custom_image_model_requires_explicit_allow_custom_model_id(
     from agent import custom_image_providers
 
     failures: list[str] = []
-    env_calls: list[str] = []
+    credential_calls: list[str] = []
     http_calls: list[str] = []
     save_calls: list[str] = []
     monkeypatch.setattr(
         custom_image_providers,
-        "os",
-        SimpleNamespace(
-            getenv=lambda key, default="": env_calls.append(key) or default,
-        ),
+        "_entry_api_key",
+        lambda *args, **kwargs: credential_calls.append("secret") or "",
     )
     monkeypatch.setattr(
-        custom_image_providers.requests,
-        "post",
-        lambda *args, **kwargs: http_calls.append("post"),
+        custom_image_providers,
+        "request_pinned_https",
+        lambda *args, **kwargs: http_calls.append("public"),
+    )
+    monkeypatch.setattr(
+        custom_image_providers,
+        "request_via_trusted_proxy",
+        lambda *args, **kwargs: http_calls.append("proxy"),
     )
     monkeypatch.setattr(
         custom_image_providers,
@@ -375,7 +331,7 @@ def test_custom_image_model_requires_explicit_allow_custom_model_id(
     if selected != "unlisted-image-model":
         failures.append(f"opt-in custom provider changed model to {selected!r}")
 
-    assert env_calls == []
+    assert credential_calls == []
     assert http_calls == []
     assert save_calls == []
     assert failures == []
@@ -386,6 +342,9 @@ def test_unknown_vision_model_and_capability_fail_closed(
     tmp_path: Any,
 ) -> None:
     from agent import image_routing
+    webui_root = Path(__file__).resolve().parents[3] / "hermes-webui"
+    monkeypatch.syspath_prepend(str(webui_root))
+    sys.modules.pop("api.model_config", None)
     from api import model_config
 
     failures: list[str] = []
@@ -415,14 +374,25 @@ def test_unknown_vision_model_and_capability_fail_closed(
     monkeypatch.setattr(model_config, "get_vision_config", lambda: {"ok": True})
 
     saved_providers: list[str] = []
-    original_save = model_config._save_yaml_config_file
+    original_commit = model_config._commit_expected_config_env
 
-    def record_save(path: Any, data: dict[str, Any]) -> None:
-        vision = (data.get("auxiliary") or {}).get("vision") or {}
+    def record_commit(
+        path: Any,
+        *,
+        expected_config: dict[str, Any],
+        desired_config: dict[str, Any],
+        env_updates: dict[str, str | None],
+    ) -> None:
+        vision = (desired_config.get("auxiliary") or {}).get("vision") or {}
         saved_providers.append(str(vision.get("provider") or ""))
-        original_save(path, data)
+        original_commit(
+            path,
+            expected_config=expected_config,
+            desired_config=desired_config,
+            env_updates=env_updates,
+        )
 
-    monkeypatch.setattr(model_config, "_save_yaml_config_file", record_save)
+    monkeypatch.setattr(model_config, "_commit_expected_config_env", record_commit)
 
     failure = _value_error_failure(
         "unknown ZAI vision model",

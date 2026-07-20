@@ -35,13 +35,14 @@ STATIC_JS = sorted(
 # Top-of-line: `function NAME(`
 TOP_LEVEL_FN_RE = re.compile(r"^function\s+([A-Za-z_\$][A-Za-z_\$0-9]*)\s*\(", re.MULTILINE)
 
-# `window.NAME = <rhs>` where rhs is the next non-space chunk.
-# We only care about the *value shape* of rhs. Lookahead must be long enough
-# to see `function(` (8 chars) even after some whitespace; we use 32 chars to
-# be safe against newlines and odd indenting.
+# `window.NAME = <rhs>` where rhs is the remainder of the current statement.
+# Capture the complete first-line RHS instead of a fixed-width prefix: a long
+# but otherwise benign identifier such as
+# `window.captureExpertTeamWorkspaceFormState =
+# captureExpertTeamWorkspaceFormState` must not be truncated into an
+# unclassifiable token.
 WINDOW_ASSIGN_RE = re.compile(
-    r"window\.([A-Za-z_\$][A-Za-z_\$0-9]*)\s*=\s*([^=].{0,32})",
-    re.DOTALL,
+    r"window\.([A-Za-z_\$][A-Za-z_\$0-9]*)\s*=\s*(?![=])([^;\n]+)",
 )
 
 
@@ -70,8 +71,11 @@ def _classify_rhs(rhs: str) -> str:
     # Numeric literal: int or decimal
     if re.match(r"-?\d", rhs):
         return "number"
-    # Bare identifier reference: looks like `_foo;` or `_foo,` or `_foo ` etc.
+    # Bare identifier reference: either the complete captured RHS or a token
+    # followed by a statement delimiter/operator.
     # Allow ||, &&, ? chains too (e.g. `window.X = window.X || false;`).
+    if re.fullmatch(r"[A-Za-z_\$][A-Za-z_\$0-9]*", rhs):
+        return "identifier"
     if re.match(r"[A-Za-z_\$][A-Za-z_\$0-9]*[\s;,)|&?.]", rhs):
         return "identifier"
     return "other"
@@ -149,3 +153,15 @@ def test_inflight_state_limits_no_longer_collides_with_window_config():
         "Stale call sites to the old function name `_inflightStateLimits()` "
         "remain in ui.js (#2771). Update them to `_getInflightStateLimits()`."
     )
+
+
+def test_long_identifier_window_exposure_is_not_truncated_or_misclassified():
+    """Long function references remain benign global exposures."""
+    source = (
+        "window.captureExpertTeamWorkspaceFormState="
+        "captureExpertTeamWorkspaceFormState;\n"
+    )
+    match = WINDOW_ASSIGN_RE.search(source)
+    assert match is not None
+    assert match.group(2) == "captureExpertTeamWorkspaceFormState"
+    assert _classify_rhs(match.group(2)) == "identifier"

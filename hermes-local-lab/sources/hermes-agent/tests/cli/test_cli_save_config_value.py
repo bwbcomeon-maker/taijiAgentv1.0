@@ -1,6 +1,7 @@
 """Tests for save_config_value() in cli.py — atomic write behavior."""
 
 from contextlib import contextmanager
+import os
 import stat
 from unittest.mock import ANY, MagicMock
 
@@ -242,6 +243,8 @@ class TestSaveConfigValueAtomic:
         monkeypatch.setenv("HERMES_HOME", str(home))
         monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
         monkeypatch.delenv("HERMES_MANAGED", raising=False)
+        if hasattr(os, "chown"):
+            os.chown(home, -1, os.getegid())
         home.chmod(0o2770)
         config_env.chmod(0o640)
 

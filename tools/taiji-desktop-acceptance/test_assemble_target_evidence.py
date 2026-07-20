@@ -37,6 +37,7 @@ DRIVER_KEYS = {
     "desktop_entry_sha256",
     "app_url",
     "webui_origin",
+    "desktop_auth_cookie",
     "model",
     "attachment_probe_sha256",
     "agent_pid",
@@ -189,11 +190,16 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             "electron_executable": str(ELECTRON_PATH),
             "electron_executable_sha256": sha256(self.electron),
             "desktop_entry_sha256": sha256(self.desktop_entry),
-            "app_url": (
-                "http://127.0.0.1:18787/?taiji_desktop=1&"
-                "taiji_desktop_token=%3Credacted%3E"
-            ),
+            "app_url": "http://127.0.0.1:18787/?taiji_desktop=1",
             "webui_origin": "http://127.0.0.1:18787",
+            "desktop_auth_cookie": {
+                "name": "taiji_desktop_token",
+                "present": True,
+                "http_only": True,
+                "same_site": "Strict",
+                "path": "/",
+                "value_format": "lowercase-hex-64",
+            },
             "model": "openai/gpt-test",
             "attachment_probe_sha256": "7" * 64,
             "agent_pid": 4243,
@@ -372,13 +378,16 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
         cases = {
             "unknown field": lambda payload: payload.update({"unexpected": True}),
             "failed check": lambda payload: payload["checks"].update({"attachment_flow": False}),
-            "secret URL": lambda payload: payload.update(
+            "token URL": lambda payload: payload.update(
                 {
                     "app_url": (
                         "http://127.0.0.1:18787/?taiji_desktop=1&"
-                        "taiji_desktop_token=secret"
+                        f"taiji_desktop_token={'a' * 64}"
                     )
                 }
+            ),
+            "unsafe cookie": lambda payload: payload["desktop_auth_cookie"].update(
+                {"http_only": False}
             ),
             "wrong executable": lambda payload: payload.update(
                 {"electron_executable": "/tmp/electron"}

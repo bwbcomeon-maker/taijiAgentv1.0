@@ -9,10 +9,117 @@ build helper assembles a server when the SDK is present.
 from __future__ import annotations
 
 import json
+import os
+import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+
+from agent.transports.image_generation_gate_bridge import (
+    ImageGenerationGateBridge,
+)
+
+
+_IMAGE_GATE_BRIDGE_ENV = "HERMES_IMAGE_GENERATION_GATE_BRIDGE"
+_IMAGE_GATE_BRIDGE_ID_ENV = "HERMES_IMAGE_GENERATION_GATE_BRIDGE_ID"
+_IMAGE_GATE_PUBLIC_KEY_ENV = "HERMES_IMAGE_GENERATION_GATE_PUBLIC_KEY"
+_TEST_IMAGE_GATE_BRIDGES = []
+
+
+@pytest.fixture(autouse=True)
+def _close_test_image_gate_bridges():
+    yield
+    while _TEST_IMAGE_GATE_BRIDGES:
+        _TEST_IMAGE_GATE_BRIDGES.pop().close()
+
+
+def _arm_image_gate_broker(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    allow_generation: bool = True,
+    expires_at: float | None = None,
+    task_id: str = "task-test-001",
+    turn_id: str | None = None,
+    owner_token: str = "owner-test-001",
+) -> ImageGenerationGateBridge:
+    del tmp_path
+    resolved_turn_id = turn_id or task_id
+    bridge = ImageGenerationGateBridge()
+    _TEST_IMAGE_GATE_BRIDGES.append(bridge)
+    if allow_generation:
+        bridge.arm(
+            task_id=task_id,
+            turn_id=resolved_turn_id,
+            owner_token=owner_token,
+            allow_generation=True,
+            ttl_seconds=(
+                60.0
+                if expires_at is None
+                else expires_at - time.time()
+            ),
+        )
+    monkeypatch.setenv(_IMAGE_GATE_BRIDGE_ENV, bridge.path)
+    monkeypatch.setenv(_IMAGE_GATE_BRIDGE_ID_ENV, bridge.bridge_id)
+    monkeypatch.setenv(_IMAGE_GATE_PUBLIC_KEY_ENV, bridge.public_key)
+    return bridge
+
+
+def _build_image_only_server(monkeypatch, calls):
+    from agent import image_runtime
+    from agent.transports import hermes_tools_mcp_server as m
+    import mcp.server.fastmcp as fastmcp_module
+    import model_tools
+
+    class FakeFastMCP:
+        def __init__(self, *_args, **_kwargs):
+            self.handlers = {}
+
+        def add_tool(self, handler, *, name, description):
+            self.handlers[name] = handler
+
+    monkeypatch.setattr(fastmcp_module, "FastMCP", FakeFastMCP)
+    monkeypatch.setattr(
+        model_tools,
+        "get_tool_definitions",
+        lambda **_kwargs: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "image_generate",
+                    "description": "Generate an image.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"prompt": {"type": "string"}},
+                        "required": ["prompt"],
+                    },
+                },
+            }
+        ],
+    )
+
+    def fake_handle(name, kwargs, **dispatch_kwargs):
+        calls.append((name, kwargs, dispatch_kwargs))
+        return json.dumps({"success": True})
+
+    monkeypatch.setattr(model_tools, "handle_function_call", fake_handle)
+    monkeypatch.setattr(
+        image_runtime,
+        "capture_capability_runtime_generation",
+        lambda: SimpleNamespace(
+            stable=True,
+            image_generation=(
+                1,
+                "mcp-image-generation-current",
+                "verified",
+                True,
+                "mcp-authorization-current",
+            ),
+        ),
+    )
+    return m._build_server()
 
 
 class TestModuleSurface:
@@ -52,6 +159,27 @@ class TestModuleSurface:
             "skill_view",
         ):
             assert required in EXPOSED_TOOLS, f"missing {required!r}"
+
+    def test_image_gate_identity_is_absent_from_public_tool_schema(self):
+        from tools.image_generation_tool import IMAGE_GENERATE_SCHEMA
+
+        serialized_schema = json.dumps(
+            IMAGE_GENERATE_SCHEMA.get("parameters") or {},
+            sort_keys=True,
+        )
+
+        for trusted_field in (
+            "image_generation_task_id",
+            "image_generation_turn_id",
+            "image_generation_gate_owner",
+            "owner_token",
+            "bridge_id",
+            "challenge",
+            "response_id",
+            "epoch",
+            "signature",
+        ):
+            assert trusted_field not in serialized_schema
 
     def test_agent_loop_tools_not_exposed(self):
         """delegate_task / memory / session_search / todo require the
@@ -100,8 +228,180 @@ class TestModuleSurface:
                 f"{orch_tool!r} missing from codex callback"
             )
 
+    def test_mcp_image_handler_consumes_one_live_turn_authorization_once(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _arm_image_gate_broker(tmp_path, monkeypatch)
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        first = json.loads(
+            server.handlers["image_generate"](prompt="draw a cat")
+        )
+        duplicate = json.loads(
+            server.handlers["image_generate"](prompt="draw a second cat")
+        )
+
+        assert first["success"] is True
+        assert duplicate["success"] is False
+        assert duplicate["error_code"] == "duplicate_generation_this_turn"
+        assert len(calls) == 1
+        assert calls[0][2]["image_generation_task_id"] == "task-test-001"
+        assert (
+            calls[0][2]["image_generation_gate_owner"]
+            == "owner-test-001"
+        )
+
+    def test_mcp_image_handler_denies_non_image_turn_lease(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _arm_image_gate_broker(
+            tmp_path,
+            monkeypatch,
+            allow_generation=False,
+        )
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        denied = json.loads(
+            server.handlers["image_generate"](prompt="draw a cat")
+        )
+
+        assert denied["success"] is False
+        assert denied["error_code"] == "image_generation_not_requested"
+        assert calls == []
+
+    def test_mcp_image_handler_denies_missing_turn_lease(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.delenv(_IMAGE_GATE_BRIDGE_ENV, raising=False)
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        denied = json.loads(
+            server.handlers["image_generate"](prompt="draw a cat")
+        )
+
+        assert denied["success"] is False
+        assert denied["error_code"] == "image_generation_gate_bridge_missing"
+        assert calls == []
+
+    def test_mcp_image_handler_denies_expired_turn_lease(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _arm_image_gate_broker(
+            tmp_path,
+            monkeypatch,
+            expires_at=time.time() - 1.0,
+        )
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        denied = json.loads(
+            server.handlers["image_generate"](prompt="draw a cat")
+        )
+
+        assert denied["success"] is False
+        assert denied["error_code"] == "image_generation_gate_bridge_expired"
+        assert calls == []
+
+    @pytest.mark.parametrize("mode", [0o644, 0o666])
+    def test_mcp_image_handler_denies_insecure_broker_socket_permissions(
+        self,
+        tmp_path,
+        monkeypatch,
+        mode,
+    ):
+        bridge = _arm_image_gate_broker(tmp_path, monkeypatch)
+        broker_path = Path(bridge.path) / "broker.sock"
+        os.chmod(broker_path, mode)
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        try:
+            denied = json.loads(
+                server.handlers["image_generate"](prompt="draw a cat")
+            )
+        finally:
+            os.chmod(broker_path, 0o600)
+
+        assert denied["success"] is False
+        assert denied["error_code"] == "image_generation_gate_bridge_insecure"
+        assert calls == []
+
+    def test_mcp_image_handler_denies_symlink_broker_socket(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        bridge = _arm_image_gate_broker(tmp_path, monkeypatch)
+        broker_path = Path(bridge.path) / "broker.sock"
+        broker_path.unlink()
+        broker_path.symlink_to(Path(bridge.path) / "attacker.sock")
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        denied = json.loads(
+            server.handlers["image_generate"](prompt="draw a cat")
+        )
+
+        assert denied["success"] is False
+        assert denied["error_code"] == "image_generation_gate_bridge_insecure"
+        assert calls == []
+
+    def test_mcp_image_handler_denies_non_socket_broker_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        bridge = _arm_image_gate_broker(tmp_path, monkeypatch)
+        broker_path = Path(bridge.path) / "broker.sock"
+        broker_path.unlink()
+        broker_path.write_text("not a socket", encoding="utf-8")
+        os.chmod(broker_path, 0o600)
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        denied = json.loads(
+            server.handlers["image_generate"](prompt="draw a cat")
+        )
+
+        assert denied["success"] is False
+        assert denied["error_code"] == "image_generation_gate_bridge_insecure"
+        assert calls == []
+
+    def test_mcp_image_handler_denies_insecure_bridge_directory(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        bridge = _arm_image_gate_broker(tmp_path, monkeypatch)
+        bridge_root = Path(bridge.path)
+        os.chmod(bridge_root, 0o755)
+        calls = []
+        server = _build_image_only_server(monkeypatch, calls)
+
+        try:
+            denied = json.loads(
+                server.handlers["image_generate"](prompt="draw a cat")
+            )
+        finally:
+            os.chmod(bridge_root, 0o700)
+
+        assert denied["success"] is False
+        assert denied["error_code"] == "image_generation_gate_bridge_insecure"
+        assert calls == []
+
     def test_mcp_image_handler_refreshes_private_capability_generation_per_request(
         self,
+        tmp_path,
         monkeypatch,
     ):
         """One long-lived MCP handler must follow A→B→A request generations."""
@@ -184,6 +484,12 @@ class TestModuleSurface:
         )
 
         server = m._build_server()
+        _arm_image_gate_broker(
+            tmp_path,
+            monkeypatch,
+            task_id="task-generation-a",
+            owner_token="owner-generation-a",
+        )
         server.handlers["image_generate"](prompt="draw generation a")
         generation["value"] = SimpleNamespace(
             stable=True,
@@ -195,6 +501,12 @@ class TestModuleSurface:
                 "mcp-authorization-b",
             ),
         )
+        _arm_image_gate_broker(
+            tmp_path,
+            monkeypatch,
+            task_id="task-generation-b",
+            owner_token="owner-generation-b",
+        )
         server.handlers["image_generate"](prompt="draw generation b")
         generation["value"] = SimpleNamespace(
             stable=True,
@@ -205,6 +517,12 @@ class TestModuleSurface:
                 True,
                 "mcp-authorization-a-after-aba",
             ),
+        )
+        _arm_image_gate_broker(
+            tmp_path,
+            monkeypatch,
+            task_id="task-generation-a-after-aba",
+            owner_token="owner-generation-a-after-aba",
         )
         server.handlers["image_generate"](prompt="draw generation a again")
         server.handlers["web_search"](q="cat")
@@ -254,6 +572,7 @@ class TestModuleSurface:
 
     def test_old_mcp_image_handler_fails_stale_before_provider_boundary(
         self,
+        tmp_path,
         monkeypatch,
     ):
         """Rotating capability state must make an existing handler inert."""
@@ -333,6 +652,7 @@ class TestModuleSurface:
         )
 
         server = m._build_server()
+        _arm_image_gate_broker(tmp_path, monkeypatch)
         result = json.loads(
             server.handlers["image_generate"](prompt="draw a cat")
         )
@@ -351,9 +671,22 @@ class TestMain:
         def boom_build(*a, **kw):
             raise ImportError("mcp not installed")
 
+        monkeypatch.setattr(m, "_apply_hermes_tools_profile_env", lambda: True)
         monkeypatch.setattr(m, "_build_server", boom_build)
         rc = m.main(["--verbose"])
         assert rc == 2
+
+    def test_main_refuses_ambient_profile_credentials(self, monkeypatch):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        build_calls = []
+        monkeypatch.setattr(m, "_apply_hermes_tools_profile_env", lambda: False)
+        monkeypatch.setattr(m, "_build_server", lambda: build_calls.append(True))
+
+        rc = m.main([])
+
+        assert rc == 2
+        assert build_calls == []
 
     def test_main_handles_keyboard_interrupt(self, monkeypatch):
         import agent.transports.hermes_tools_mcp_server as m
@@ -362,6 +695,7 @@ class TestMain:
             def run(self):
                 raise KeyboardInterrupt()
 
+        monkeypatch.setattr(m, "_apply_hermes_tools_profile_env", lambda: True)
         monkeypatch.setattr(m, "_build_server", lambda: FakeServer())
         rc = m.main([])
         assert rc == 0
@@ -373,6 +707,7 @@ class TestMain:
             def run(self):
                 raise RuntimeError("boom")
 
+        monkeypatch.setattr(m, "_apply_hermes_tools_profile_env", lambda: True)
         monkeypatch.setattr(m, "_build_server", lambda: CrashingServer())
         rc = m.main([])
         assert rc == 1

@@ -240,7 +240,7 @@ def test_locale_alias_resolution_and_precedence_logic():
     assert result["bad"] is None
     assert result["preferred1"] == "zh"
     assert result["preferred2"] == "zh-Hant"
-    assert result["preferred3"] == "en"
+    assert result["preferred3"] == "zh"
 
 
 def test_set_locale_normalizes_alias_and_persists_canonical_key():

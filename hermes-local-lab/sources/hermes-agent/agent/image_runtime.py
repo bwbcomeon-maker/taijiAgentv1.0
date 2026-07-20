@@ -570,6 +570,7 @@ def current_vision_runtime_snapshot() -> dict[str, Any]:
     vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
     if not isinstance(vision_cfg, dict):
         vision_cfg = {}
+    explicitly_disabled = vision_cfg.get("enabled") is False
     resolved_material = resolve_vision_material(vision_cfg, config_data)
     effective_cfg = resolved_material.vision_cfg
     effective_config_data = resolved_material.config_data
@@ -656,7 +657,11 @@ def current_vision_runtime_snapshot() -> dict[str, Any]:
         else "unconfigured"
     )
     reason_code = ""
-    if not resolved:
+    if explicitly_disabled:
+        configured = False
+        status = "disabled"
+        reason_code = "disabled"
+    elif not resolved:
         status = "configured_unverified"
         reason_code = "unresolved_effective_config"
     elif not configured:
@@ -944,9 +949,8 @@ def resolve_image_input_route(
 ) -> ImageInputRouteDecision:
     """Resolve native/text attachment routing from one combined generation."""
     from agent.image_routing import (
-        _coerce_mode,
-        _explicit_aux_vision_override,
         _lookup_supports_vision,
+        _vision_capability_enabled,
     )
 
     explicit_generation = generation is not None
@@ -984,74 +988,7 @@ def resolve_image_input_route(
             )
 
     config = cfg if isinstance(cfg, dict) else {}
-    agent_cfg = config.get("agent")
-    mode = _coerce_mode(
-        agent_cfg.get("image_input_mode")
-        if isinstance(agent_cfg, dict)
-        else "auto"
-    )
-    if mode == "native":
-        return ImageInputRouteDecision(
-            schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
-            fingerprint=_image_input_route_fingerprint(
-                start,
-                status="verified",
-                reason_code="explicit_native_mode",
-                route="main_model",
-                mode="native",
-                provider=str(provider or ""),
-                model=str(model or ""),
-            ),
-            status="verified",
-            reason_code="explicit_native_mode",
-            route="main_model",
-            mode="native",
-            provider=str(provider or ""),
-            model=str(model or ""),
-            _generation=start,
-        )
     supports_vision = _lookup_supports_vision(provider, model, config)
-    wants_auxiliary = bool(
-        mode == "text"
-        or (mode == "auto" and _explicit_aux_vision_override(config))
-        or (mode == "auto" and supports_vision is False)
-    )
-
-    if wants_auxiliary:
-        if not bool(vision_snapshot.get("available")):
-            return _blocked_image_input_route(
-                start,
-                reason_code=str(
-                    vision_snapshot.get("reason_code")
-                    or "verification_required"
-                ),
-                provider=str(vision_snapshot.get("provider") or ""),
-                model=str(vision_snapshot.get("model") or ""),
-                status=str(
-                    vision_snapshot.get("status")
-                    or "configured_unverified"
-                ),
-            )
-        return ImageInputRouteDecision(
-            schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
-            fingerprint=_image_input_route_fingerprint(
-                start,
-                status="verified",
-                reason_code="auxiliary_vision_verified",
-                route="auxiliary_vision",
-                mode="text",
-                provider=str(vision_snapshot.get("provider") or ""),
-                model=str(vision_snapshot.get("model") or ""),
-            ),
-            status="verified",
-            reason_code="auxiliary_vision_verified",
-            route="auxiliary_vision",
-            mode="text",
-            provider=str(vision_snapshot.get("provider") or ""),
-            model=str(vision_snapshot.get("model") or ""),
-            _generation=start,
-        )
-
     if supports_vision is True:
         return ImageInputRouteDecision(
             schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
@@ -1072,17 +1009,52 @@ def resolve_image_input_route(
             model=str(model or ""),
             _generation=start,
         )
-
-    reason_code = (
-        "main_model_vision_unsupported"
-        if supports_vision is False
-        else "main_model_capability_unknown"
-    )
-    return _blocked_image_input_route(
-        start,
-        reason_code=reason_code,
-        provider=provider,
-        model=model,
+    if supports_vision is None:
+        return _blocked_image_input_route(
+            start,
+            reason_code="main_model_capability_unknown",
+            provider=provider,
+            model=model,
+        )
+    if not _vision_capability_enabled(config):
+        return _blocked_image_input_route(
+            start,
+            reason_code="vision_disabled",
+            provider=provider,
+            model=model,
+        )
+    if not bool(vision_snapshot.get("available")):
+        return _blocked_image_input_route(
+            start,
+            reason_code=str(
+                vision_snapshot.get("reason_code")
+                or "verification_required"
+            ),
+            provider=str(vision_snapshot.get("provider") or ""),
+            model=str(vision_snapshot.get("model") or ""),
+            status=str(
+                vision_snapshot.get("status")
+                or "configured_unverified"
+            ),
+        )
+    return ImageInputRouteDecision(
+        schema_version=CAPABILITY_VERIFICATION_SCHEMA_VERSION,
+        fingerprint=_image_input_route_fingerprint(
+            start,
+            status="verified",
+            reason_code="auxiliary_vision_verified",
+            route="auxiliary_vision",
+            mode="text",
+            provider=str(vision_snapshot.get("provider") or ""),
+            model=str(vision_snapshot.get("model") or ""),
+        ),
+        status="verified",
+        reason_code="auxiliary_vision_verified",
+        route="auxiliary_vision",
+        mode="text",
+        provider=str(vision_snapshot.get("provider") or ""),
+        model=str(vision_snapshot.get("model") or ""),
+        _generation=start,
     )
 
 

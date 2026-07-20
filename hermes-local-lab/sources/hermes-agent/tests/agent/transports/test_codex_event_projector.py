@@ -225,6 +225,119 @@ class TestMcpToolCallProjection:
         ).messages
         assert "error" in msgs[1]["content"]
 
+    def test_hermes_image_completion_has_canonical_callback_envelope(
+        self,
+    ) -> None:
+        """Transcript names stay namespaced, callback names do not.
+
+        The WebUI's private artifact bridge intentionally accepts only the
+        canonical ``image_generate`` tool name.  A successful Hermes MCP
+        completion therefore needs a separate callback envelope instead of
+        weakening that allowlist.
+        """
+        image_result = json.dumps(
+            {
+                "success": True,
+                "image": "/tmp/cache/images/generated.png",
+            }
+        )
+        item = {
+            "type": "mcpToolCall",
+            "id": "image-1",
+            "server": "hermes-tools",
+            "tool": "image_generate",
+            "status": "completed",
+            "arguments": {"prompt": "draw a cat"},
+            "result": {
+                "content": [{"type": "text", "text": image_result}],
+            },
+            "error": None,
+        }
+
+        projection = CodexEventProjector().project(
+            {"method": "item/completed", "params": {"item": item}}
+        )
+
+        assert (
+            projection.messages[0]["tool_calls"][0]["function"]["name"]
+            == "mcp.hermes-tools.image_generate"
+        )
+        assert len(projection.tool_completions) == 1
+        completion = projection.tool_completions[0]
+        assert completion.tool_call_id == (
+            projection.messages[0]["tool_calls"][0]["id"]
+        )
+        assert completion.function_name == "image_generate"
+        assert completion.function_args == {"prompt": "draw a cat"}
+        assert completion.function_result == image_result
+        assert completion.is_error is False
+
+    def test_failed_hermes_image_completion_cannot_replay_success_payload(
+        self,
+    ) -> None:
+        """A contradictory failed item must never carry success to callbacks."""
+        item = {
+            "type": "mcpToolCall",
+            "id": "image-failed",
+            "server": "hermes-tools",
+            "tool": "image_generate",
+            "status": "failed",
+            "arguments": {"prompt": "draw a cat"},
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "success": True,
+                        "image": "/tmp/cache/images/should-not-escape.png",
+                    }),
+                }],
+            },
+            "error": {"code": -1, "message": "cancelled"},
+        }
+
+        completion = CodexEventProjector().project(
+            {"method": "item/completed", "params": {"item": item}}
+        ).tool_completions[0]
+
+        assert completion.is_error is True
+        decoded = json.loads(completion.function_result)
+        assert decoded["success"] is False
+        assert "should-not-escape.png" not in completion.function_result
+
+    def test_duplicate_completed_item_is_idempotent(self) -> None:
+        item = {
+            "type": "mcpToolCall",
+            "id": "image-duplicate",
+            "server": "hermes-tools",
+            "tool": "image_generate",
+            "status": "completed",
+            "arguments": {"prompt": "draw once"},
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "success": True,
+                        "image": "/tmp/cache/images/once.png",
+                    }),
+                }],
+            },
+            "error": None,
+        }
+        notification = {
+            "method": "item/completed",
+            "params": {"item": item},
+        }
+        projector = CodexEventProjector()
+
+        first = projector.project(notification)
+        duplicate = projector.project(notification)
+
+        assert len(first.messages) == 2
+        assert len(first.tool_completions) == 1
+        assert duplicate.messages == []
+        assert duplicate.tool_completions == []
+        assert duplicate.is_tool_iteration is False
+
 
 class TestUserAndOpaqueProjection:
     def test_user_message_text_fragments_only(self) -> None:

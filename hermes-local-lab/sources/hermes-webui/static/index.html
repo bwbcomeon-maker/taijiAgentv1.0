@@ -73,6 +73,67 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<style>
+/* image-capability-center-styles:start */
+.image-capability-center{display:grid;gap:14px;min-width:0}
+.image-capability-center[aria-busy="true"]{cursor:progress}
+.image-capability-center-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.image-capability-center-head>div{display:grid;gap:4px;min-width:0}
+.image-capability-center-head strong{font-size:15px;color:var(--text)}
+.image-capability-center-head span,.image-capability-center-note{font-size:12px;line-height:1.55;color:var(--muted)}
+.image-capability-center-status{display:grid;gap:3px;padding:11px 12px;border:1px solid var(--border2);border-radius:var(--radius,8px);background:var(--code-bg)}
+.image-capability-center-status strong{font-size:13px;color:var(--text)}
+.image-capability-center-status span{font-size:12px;line-height:1.5;color:var(--muted)}
+.image-capability-center-status[data-state="ok"]{border-color:var(--green,#16a46c)}
+.image-capability-center-status[data-state="warn"]{border-color:var(--yellow,#d98a16)}
+.image-capability-center-status[data-state="danger"]{border-color:var(--red,#d93d4a)}
+.image-capability-center-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
+.image-capability-center-card{display:grid;align-content:start;gap:12px;min-width:0;padding:14px;border:1px solid var(--border2);border-radius:var(--radius-lg,12px);background:var(--panel-bg,var(--code-bg))}
+.image-capability-center-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.image-capability-center-card-title{display:grid;gap:3px;min-width:0}
+.image-capability-center-card-title strong{font-size:14px;color:var(--text)}
+.image-capability-center-card-title span{font-size:12px;line-height:1.45;color:var(--muted)}
+.image-capability-center-switch{display:inline-flex;align-items:center;gap:7px;min-height:44px;white-space:nowrap;cursor:pointer;font-size:12px;font-weight:600;color:var(--text)}
+.image-capability-center-switch input{width:18px;height:18px;accent-color:var(--accent)}
+.image-capability-center-switch:focus-within{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
+.image-capability-center-state-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.image-capability-center-state{display:grid;gap:3px;min-width:0;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--code-bg)}
+.image-capability-center-state span{font-size:11px;color:var(--muted)}
+.image-capability-center-state strong{font-size:12px;line-height:1.45;color:var(--text);overflow-wrap:anywhere}
+.image-capability-center-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.image-capability-center-field{display:grid;align-content:start;gap:5px;min-width:0}
+.image-capability-center-field--wide{grid-column:1/-1}
+.image-capability-center-field label,.image-capability-center-field>span{font-size:12px;font-weight:600;color:var(--text)}
+.image-capability-center-field select,.image-capability-center-field input{width:100%;min-width:0;min-height:40px;padding:8px 9px;border:1px solid var(--border2);border-radius:7px;background:var(--code-bg);color:var(--text);font:inherit}
+.image-capability-center-field select:focus-visible,.image-capability-center-field input:focus-visible,.image-capability-center button:focus-visible,.image-capability-center summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.image-capability-center-help{font-size:11px;line-height:1.5;color:var(--muted)}
+.image-capability-center-advanced{border-top:1px solid var(--border);padding-top:9px}
+.image-capability-center-advanced summary{min-height:40px;display:flex;align-items:center;cursor:pointer;font-size:12px;font-weight:600;color:var(--text)}
+.image-capability-center-endpoint-fields,.image-capability-center-credential-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding-top:8px}
+.image-capability-center-verification{min-height:34px;margin:0;padding:8px 10px;border-radius:7px;background:var(--code-bg);font-size:12px;line-height:1.5;color:var(--muted)}
+.image-capability-center-footer{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;padding-top:2px}
+.image-capability-center-footer>div{display:grid;gap:4px;min-width:0}
+.image-capability-center-error{min-height:18px;margin:0;font-size:12px;line-height:1.5;color:var(--red,#d93d4a)}
+.image-capability-center-save{min-height:44px;min-width:148px;font-weight:700}
+.image-capability-legacy[hidden]{display:none!important}
+@media (max-width: 720px){
+  .image-capability-center-grid,.image-capability-center-fields,.image-capability-center-state-grid,.image-capability-center-endpoint-fields,.image-capability-center-credential-fields{grid-template-columns:minmax(0,1fr)}
+  .image-capability-center-field--wide{grid-column:auto}
+  .image-capability-center-head,.image-capability-center-card-head,.image-capability-center-footer{align-items:stretch;flex-direction:column}
+  .image-capability-center-head button,.image-capability-center-save{width:100%}
+  .image-capability-center-switch{align-self:flex-start}
+}
+@media (prefers-reduced-motion: reduce){
+  .image-capability-center,.image-capability-center *{scroll-behavior:auto!important;transition:none!important;animation:none!important}
+}
+/* image-capability-center-styles:end */
+</style>
+<style>
+.project-chip:focus-visible,.profile-card:focus-visible{
+  outline:2px solid var(--accent-bg-strong);
+  outline-offset:2px;
+}
+</style>
   <link rel="stylesheet" href="static/vendor/xterm/5.3.0/xterm.css">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -95,7 +156,9 @@
   <script src="static/vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js" defer></script>
   <!-- PWA service worker registration -->
   <script>
-    if ('serviceWorker' in navigator) {
+    // Sandboxed HTML/plugin previews intentionally lack allow-same-origin.
+    // They must not probe navigator.serviceWorker or re-register the shell SW.
+    if (window.top === window && 'serviceWorker' in navigator) {
       window.addEventListener('load', function() {
         navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
           console.warn('[pwa] Service worker registration failed:', err);
@@ -1384,7 +1447,7 @@
                 <div class="settings-section-title">模型配置</div>
                 <div class="settings-section-meta">只影响 CLI 和新会话；正在运行中的回复不会被热切换。</div>
               </div>
-              <button class="btn-tiny" type="button" onclick="loadModelConfigPanel(true)">刷新状态</button>
+              <button class="btn-tiny" id="btnReloadAllModelConfig" type="button" onclick="refreshModelAndImageCapabilities()">刷新状态</button>
             </div>
             <p class="model-config-hint" id="modelConfigDraftStatus" aria-live="polite"></p>
 
@@ -1483,6 +1546,120 @@
                 </section>
 
                 <section class="model-config-panel model-config-image-capabilities" id="modelConfigImageCapabilities">
+                  <!-- image-capability-center:start -->
+                  <div class="image-capability-center" id="imageCapabilityCenter" data-state="loading" aria-busy="true">
+                    <div class="image-capability-center-head">
+                      <div>
+                        <strong>图片能力中心</strong>
+                        <span>在一个页面管理图片理解和图片生成；配置状态与当前实际路由分别显示。</span>
+                      </div>
+                      <button class="btn-tiny" id="btnReloadImageCapabilityCenter" type="button" onclick="loadImageCapabilityCenter(true)">刷新图片能力</button>
+                    </div>
+                    <div class="image-capability-center-status" id="imageCapabilityCenterStatus" data-state="neutral" role="status" aria-live="polite" aria-atomic="true">
+                      <strong id="imageCapabilityCenterStatusTitle">正在读取图片能力</strong>
+                      <span id="imageCapabilityCenterStatusDetail">只读取脱敏配置，不会显示已保存的密钥。</span>
+                    </div>
+                    <div class="image-capability-center-grid">
+                      <section class="image-capability-center-card" data-image-capability="vision" aria-labelledby="imageCapabilityVisionTitle">
+                        <div class="image-capability-center-card-head">
+                          <div class="image-capability-center-card-title">
+                            <strong id="imageCapabilityVisionTitle">图片理解</strong>
+                            <span>分析上传的图片、截图和表格截图。</span>
+                          </div>
+                          <label class="image-capability-center-switch" for="imageCapabilityVisionEnabled">
+                            <input id="imageCapabilityVisionEnabled" type="checkbox" role="switch" aria-describedby="imageCapabilityVisionDisabledHint">
+                            <span>启用辅助图片理解</span>
+                          </label>
+                        </div>
+                        <div class="image-capability-center-state-grid">
+                          <div class="image-capability-center-state">
+                            <span>配置状态</span>
+                            <strong id="imageCapabilityVisionConfigStatus">正在读取</strong>
+                          </div>
+                          <div class="image-capability-center-state">
+                            <span>实际路由</span>
+                            <strong id="imageCapabilityVisionRoute">正在读取</strong>
+                          </div>
+                        </div>
+                        <p class="image-capability-center-help" id="imageCapabilityVisionDisabledHint">关闭后不再调用辅助识图 Provider；主模型原生支持图片时仍会直接处理。已选择的平台、模型和凭据会保留。</p>
+                        <div class="image-capability-center-fields">
+                          <div class="image-capability-center-field">
+                            <label for="imageCapabilityVisionProvider">Provider</label>
+                            <select id="imageCapabilityVisionProvider" aria-describedby="imageCapabilityVisionAuth"></select>
+                          </div>
+                          <div class="image-capability-center-field">
+                            <label for="imageCapabilityVisionModel">模型</label>
+                            <select id="imageCapabilityVisionModel"></select>
+                          </div>
+                          <div class="image-capability-center-field image-capability-center-field--wide">
+                            <label for="imageCapabilityVisionCredential">平台凭据</label>
+                            <select id="imageCapabilityVisionCredential" aria-describedby="imageCapabilityVisionAuth"></select>
+                            <span class="image-capability-center-help" id="imageCapabilityVisionAuth">正在读取认证方式。</span>
+                          </div>
+                        </div>
+                        <div class="image-capability-center-credential-fields" id="imageCapabilityVisionCredentialFields" aria-live="polite"></div>
+                        <details class="image-capability-center-advanced">
+                          <summary>高级连接设置</summary>
+                          <div class="image-capability-center-endpoint-fields" id="imageCapabilityVisionEndpointFields"></div>
+                        </details>
+                        <p class="image-capability-center-verification" id="imageCapabilityVisionVerification" aria-live="polite">尚未验证图片理解。</p>
+                      </section>
+
+                      <section class="image-capability-center-card" data-image-capability="image_generation" aria-labelledby="imageCapabilityGenerationTitle">
+                        <div class="image-capability-center-card-head">
+                          <div class="image-capability-center-card-title">
+                            <strong id="imageCapabilityGenerationTitle">图片生成</strong>
+                            <span>根据提示词生成图片，不影响正文写作。</span>
+                          </div>
+                          <label class="image-capability-center-switch" for="imageCapabilityGenerationEnabled">
+                            <input id="imageCapabilityGenerationEnabled" type="checkbox" role="switch" aria-describedby="imageCapabilityGenerationDisabledHint">
+                            <span>启用图片生成</span>
+                          </label>
+                        </div>
+                        <div class="image-capability-center-state-grid">
+                          <div class="image-capability-center-state">
+                            <span>配置状态</span>
+                            <strong id="imageCapabilityGenerationConfigStatus">正在读取</strong>
+                          </div>
+                          <div class="image-capability-center-state">
+                            <span>实际路由</span>
+                            <strong id="imageCapabilityGenerationRoute">正在读取</strong>
+                          </div>
+                        </div>
+                        <p class="image-capability-center-help" id="imageCapabilityGenerationDisabledHint">关闭只停止出图路由，重新启用时仍保留原 Provider、模型和凭据。</p>
+                        <div class="image-capability-center-fields">
+                          <div class="image-capability-center-field">
+                            <label for="imageCapabilityGenerationProvider">Provider</label>
+                            <select id="imageCapabilityGenerationProvider" aria-describedby="imageCapabilityGenerationAuth"></select>
+                          </div>
+                          <div class="image-capability-center-field">
+                            <label for="imageCapabilityGenerationModel">模型</label>
+                            <select id="imageCapabilityGenerationModel"></select>
+                          </div>
+                          <div class="image-capability-center-field image-capability-center-field--wide">
+                            <label for="imageCapabilityGenerationCredential">平台凭据</label>
+                            <select id="imageCapabilityGenerationCredential" aria-describedby="imageCapabilityGenerationAuth"></select>
+                            <span class="image-capability-center-help" id="imageCapabilityGenerationAuth">正在读取认证方式。</span>
+                          </div>
+                        </div>
+                        <div class="image-capability-center-credential-fields" id="imageCapabilityGenerationCredentialFields" aria-live="polite"></div>
+                        <details class="image-capability-center-advanced">
+                          <summary>高级连接设置</summary>
+                          <div class="image-capability-center-endpoint-fields" id="imageCapabilityGenerationEndpointFields"></div>
+                        </details>
+                        <p class="image-capability-center-verification" id="imageCapabilityGenerationVerification" aria-live="polite">尚未验证图片生成。</p>
+                      </section>
+                    </div>
+                    <div class="image-capability-center-footer">
+                      <div>
+                        <p class="image-capability-center-note" id="imageCapabilityVerificationCost">保存后会分别验证已启用的能力；生图验证会生成一张测试图，可能产生少量费用。</p>
+                        <p class="image-capability-center-error" id="imageCapabilityCenterError" role="alert" aria-live="assertive"></p>
+                      </div>
+                      <button class="sm-btn image-capability-center-save" id="btnSaveVerifyImageCapabilityCenter" type="button" aria-describedby="imageCapabilityVerificationCost imageCapabilityCenterError" aria-busy="false" onclick="saveAndVerifyImageCapabilityCenter()">保存并验证</button>
+                    </div>
+                  </div>
+                  <!-- image-capability-center:end -->
+                  <div class="image-capability-legacy" id="legacyImageCapabilityControls" hidden aria-hidden="true">
                   <div class="model-config-panel-head model-config-image-capabilities-head">
                     <div>
                       <strong>图片能力</strong>
@@ -1744,6 +1921,7 @@
                     <div class="model-config-template-row" aria-label="国产图片模型模板">
                       <span>通义万相</span><span>豆包 Seedream</span><span>百度千帆</span><span>腾讯混元</span><span>智谱 GLM-Image</span><span>MiniMax</span><span>讯飞 HiDream</span><span>可灵</span><span>自定义 HTTP</span>
                     </div>
+                  </div>
                   </div>
                   </div>
                 </section>
@@ -2014,7 +2192,7 @@
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
               <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              <div id="settingsPasswordEnvLock" data-i18n="password_env_var_locked" style="display:none;margin-top:6px;padding:8px 10px;font-size:11px;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;line-height:1.45">A system-level password override is active. Remove the override and restart the app before managing the password here.</div>
+              <div id="settingsPasswordEnvLock" data-i18n="password_env_var_locked" style="display:none;margin-top:6px;padding:8px 10px;font-size:11px;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;line-height:1.45">A system-level password override (HERMES_WEBUI_PASSWORD) is active. Remove HERMES_WEBUI_PASSWORD and restart the app before managing the password here.</div>
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
@@ -2238,6 +2416,759 @@
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/taiji-home.js?v=__WEBUI_VERSION__" defer></script>
+<script>
+/* image-capability-center-runtime:start */
+(function(){
+  'use strict';
+
+  const IMAGE_CAPABILITIES_API='/api/image-capabilities';
+  const IMAGE_CAPABILITY_META={
+    vision:{
+      title:'图片理解',
+      prefix:'imageCapabilityVision',
+      aliases:['vision']
+    },
+    image_generation:{
+      title:'图片生成',
+      prefix:'imageCapabilityGeneration',
+      aliases:['image_generation','image','image_gen']
+    }
+  };
+  let imageCapabilityData=null;
+  let imageCapabilityOperationGeneration=0;
+  let imageCapabilityBusy=false;
+  let imageCapabilityRequestInFlight=false;
+  let imageCapabilityLoadInFlight=false;
+  let imageCapabilityDirty=false;
+  let imageCapabilityBaselineIdentity='';
+  let imageCapabilityPendingRequest=null;
+  const imageCapabilityCredentialDraftIds={vision:{},image_generation:{}};
+
+  function imageCapabilityElement(id){return document.getElementById(id);}
+  function imageCapabilityText(id,value){
+    const element=imageCapabilityElement(id);
+    if(element)element.textContent=String(value===undefined||value===null?'':value);
+  }
+  function imageCapabilityArray(value){return Array.isArray(value)?value:[];}
+  function imageCapabilityAliases(capability){
+    return (IMAGE_CAPABILITY_META[capability]||{}).aliases||[capability];
+  }
+  function imageCapabilityConfig(data,capability){
+    const capabilities=(data&&data.capabilities)||{};
+    for(const key of imageCapabilityAliases(capability)){
+      if(capabilities[key]&&typeof capabilities[key]==='object')return capabilities[key];
+    }
+    return {};
+  }
+  function imageCapabilityScopedValue(value,capability){
+    if(!value||typeof value!=='object'||Array.isArray(value))return value;
+    for(const key of imageCapabilityAliases(capability)){
+      if(value[key]!==undefined)return value[key];
+    }
+    return value;
+  }
+  function imageCapabilityProviderSupports(row,capability){
+    const capabilities=row&&row.capabilities;
+    if(Array.isArray(capabilities)){
+      return imageCapabilityAliases(capability).some(alias=>capabilities.includes(alias));
+    }
+    if(capabilities&&typeof capabilities==='object'){
+      return imageCapabilityAliases(capability).some(alias=>!!capabilities[alias]);
+    }
+    return false;
+  }
+  function imageCapabilityProviderId(row,capability){
+    const providerIds=row&&row.provider_ids;
+    if(providerIds&&typeof providerIds==='object'&&!Array.isArray(providerIds)){
+      for(const key of imageCapabilityAliases(capability)){
+        if(providerIds[key])return String(providerIds[key]);
+      }
+    }
+    if(Array.isArray(providerIds)&&providerIds.length)return String(providerIds[0]);
+    if(typeof providerIds==='string'&&providerIds)return providerIds;
+    return String((row&&(row.id||row.provider_family))||'');
+  }
+  function imageCapabilityProviderRows(data,capability){
+    return imageCapabilityArray(data&&data.providers).filter(row=>
+      row&&row.selectable!==false&&imageCapabilityProviderSupports(row,capability)
+    );
+  }
+  function imageCapabilityProviderRow(data,capability,providerId){
+    return imageCapabilityProviderRows(data,capability).find(row=>
+      imageCapabilityProviderId(row,capability)===String(providerId||'')
+    )||null;
+  }
+  function imageCapabilityNormalizeModels(row,capability){
+    const raw=imageCapabilityScopedValue(row&&row.models,capability);
+    return imageCapabilityArray(raw).map(item=>{
+      if(item&&typeof item==='object'){
+        const id=String(item.id||item.value||item.model||'');
+        return {id,label:String(item.label||item.name||id)};
+      }
+      const id=String(item||'');
+      return {id,label:id};
+    }).filter(item=>item.id);
+  }
+  function imageCapabilityDefaultModel(row,capability){
+    const raw=imageCapabilityScopedValue(row&&row.default_models,capability);
+    return String(raw&&typeof raw==='object'?(raw.id||raw.value||''):(raw||''));
+  }
+  function imageCapabilityNormalizeFields(row,fieldName,capability){
+    const raw=imageCapabilityScopedValue(row&&row[fieldName],capability);
+    if(Array.isArray(raw))return raw;
+    if(raw&&typeof raw==='object'){
+      return Object.entries(raw).map(([name,field])=>
+        field&&typeof field==='object'?Object.assign({name},field):{name,label:String(field||name)}
+      );
+    }
+    return [];
+  }
+  function imageCapabilityCreateOption(value,label,disabled){
+    const option=document.createElement('option');
+    option.value=String(value||'');
+    option.textContent=String(label||value||'');
+    option.disabled=!!disabled;
+    return option;
+  }
+  function imageCapabilityReplaceOptions(select,options,currentValue){
+    if(!select)return;
+    select.replaceChildren(...options);
+    const current=String(currentValue||'');
+    if(current&&!options.some(option=>option.value===current)){
+      select.appendChild(imageCapabilityCreateOption(current,'当前配置：'+current,true));
+    }
+    select.value=current&&Array.from(select.options).some(option=>option.value===current)
+      ?current
+      :(select.options[0]?select.options[0].value:'');
+  }
+  function imageCapabilityAuthLabel(row){
+    if(!row)return '当前 Provider 不在可选目录中。';
+    const authType=String(row.auth_type||'api_key');
+    if(authType==='oauth'||row.oauth_managed)return '认证由授权服务托管，页面不会要求或显示密钥。';
+    if(imageCapabilityIsNoAuth(authType))return '此 Provider 不需要凭据。';
+    if(row.auth_editable===false)return String(row.auth_message||'当前认证方式不可在此页面修改。');
+    if(row.supports_named_credentials)return '可选择已保存的命名凭据；密钥只在新建时输入且不会回显。';
+    return '当前 Provider 暂不支持在统一中心新建命名凭据，请先在提供商设置完成认证。';
+  }
+  function imageCapabilityIsNoAuth(authType){
+    authType=String(authType||'').trim().toLowerCase();
+    return authType==='no_auth'||authType==='none';
+  }
+  function imageCapabilityCredentialRows(data,row){
+    const family=String((row&&row.provider_family)||'');
+    return imageCapabilityArray(data&&data.provider_credentials).filter(credential=>
+      credential&&String(credential.provider_family||'')===family
+    );
+  }
+  function imageCapabilityRenderCredentialOptions(capability,row,currentRef){
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const select=imageCapabilityElement(meta.prefix+'Credential');
+    const credentials=imageCapabilityCredentialRows(imageCapabilityData,row);
+    const options=[imageCapabilityCreateOption('','使用平台默认凭据')];
+    credentials.forEach(credential=>{
+      const configured=credential.configured===false?'（未配置）':'';
+      const suffix=credential.default?'（默认）':configured;
+      options.push(imageCapabilityCreateOption(
+        credential.id,
+        String(credential.label||credential.id)+' '+suffix,
+        credential.configured===false
+      ));
+    });
+    imageCapabilityReplaceOptions(select,options,currentRef);
+  }
+  function imageCapabilityRenderCredentialFields(capability,row,currentRef){
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const host=imageCapabilityElement(meta.prefix+'CredentialFields');
+    if(!host)return;
+    host.replaceChildren();
+    const authType=String((row&&row.auth_type)||'api_key');
+    const canEdit=!!row&&row.auth_editable!==false&&authType!=='oauth'&&!imageCapabilityIsNoAuth(authType)&&!row.oauth_managed;
+    const fields=imageCapabilityNormalizeFields(row,'credential_fields',capability);
+    if(currentRef){
+      const note=document.createElement('p');
+      note.className='image-capability-center-help';
+      note.textContent='已选择命名凭据。密钥不会回显；更换账号时请选择其他凭据或新建凭据。';
+      host.appendChild(note);
+      return;
+    }
+    if(!canEdit||!row.supports_named_credentials||!fields.length)return;
+    fields.forEach((field,index)=>{
+      const name=String((field&&field.name)||('credential_'+index));
+      const wrapper=document.createElement('div');
+      wrapper.className='image-capability-center-field';
+      const label=document.createElement('label');
+      const id=meta.prefix+'CredentialField'+index;
+      label.htmlFor=id;
+      label.textContent=String((field&&field.label)||name);
+      const input=document.createElement('input');
+      input.id=id;
+      input.type=field&&field.secret===false?'text':'password';
+      input.autocomplete='off';
+      input.placeholder=String((field&&field.placeholder)||'留空则继续使用平台默认凭据');
+      input.dataset.credentialField=name;
+      input.dataset.capability=capability;
+      if(input.type==='password')input.dataset.secretField='true';
+      wrapper.append(label,input);
+      host.appendChild(wrapper);
+    });
+  }
+  function imageCapabilityFieldValue(config,name){
+    const endpointValues=(config&&config.endpoint_values)||{};
+    if(endpointValues[name]!==undefined)return endpointValues[name];
+    const options=(config&&config.options)||{};
+    return options[name]===undefined?'':options[name];
+  }
+  function imageCapabilityRenderEndpointFields(capability,row,config){
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const host=imageCapabilityElement(meta.prefix+'EndpointFields');
+    if(!host)return;
+    host.replaceChildren();
+    const fields=imageCapabilityNormalizeFields(row,'endpoint_fields',capability);
+    if(!fields.length){
+      const note=document.createElement('p');
+      note.className='image-capability-center-help';
+      note.textContent='当前 Provider 使用平台默认连接参数。';
+      host.appendChild(note);
+      return;
+    }
+    fields.forEach((field,index)=>{
+      const name=String((field&&field.name)||('endpoint_'+index));
+      const id=meta.prefix+'EndpointField'+index;
+      const wrapper=document.createElement('div');
+      wrapper.className='image-capability-center-field';
+      const label=document.createElement('label');
+      label.htmlFor=id;
+      label.textContent=String((field&&field.label)||name);
+      const choices=imageCapabilityArray(field&&field.options);
+      let input;
+      if(choices.length){
+        input=document.createElement('select');
+        choices.forEach(choice=>{
+          const value=choice&&typeof choice==='object'?String(choice.value||choice.id||''):String(choice||'');
+          const text=choice&&typeof choice==='object'?String(choice.label||choice.name||value):value;
+          input.appendChild(imageCapabilityCreateOption(value,text));
+        });
+      }else{
+        input=document.createElement('input');
+        input.type=field&&field.secret?'password':'text';
+        input.placeholder=String((field&&field.placeholder)||'');
+        input.autocomplete='off';
+      }
+      input.id=id;
+      input.dataset.endpointField=name;
+      input.dataset.capability=capability;
+      input.required=!!(field&&field.required);
+      input.value=String(imageCapabilityFieldValue(config,name)||'');
+      wrapper.append(label,input);
+      if(field&&field.help){
+        const help=document.createElement('span');
+        help.className='image-capability-center-help';
+        help.textContent=String(field.help);
+        wrapper.appendChild(help);
+      }
+      host.appendChild(wrapper);
+    });
+  }
+  function imageCapabilityRenderModels(capability,row,currentModel){
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const select=imageCapabilityElement(meta.prefix+'Model');
+    const models=imageCapabilityNormalizeModels(row,capability);
+    const preferred=String(currentModel||imageCapabilityDefaultModel(row,capability)||'');
+    imageCapabilityReplaceOptions(
+      select,
+      models.map(model=>imageCapabilityCreateOption(model.id,model.label)),
+      preferred
+    );
+  }
+  function imageCapabilityEnabled(config){
+    return typeof config.enabled==='boolean'?config.enabled:!!(config.provider&&config.model);
+  }
+  function imageCapabilityVerificationLabel(verification){
+    const status=String((verification&&verification.status)||'');
+    if(status==='verified')return '已验证，可用于实际请求。';
+    if(status==='failed')return '验证失败：'+String(verification.message||'请检查 Provider、模型和凭据。');
+    if(status==='superseded')return '未验证：本请求已被较新配置取代。';
+    if(status==='verifying')return '正在验证，请稍候。';
+    if(status==='configured_unverified')return '已配置，尚未验证。';
+    if(status==='unconfigured')return '尚未完成配置。';
+    if(status==='disabled')return '能力已停用，配置仍保留。';
+    return '尚未验证。';
+  }
+  function imageCapabilityConfigLabel(capability,config){
+    if(!imageCapabilityEnabled(config)){
+      return capability==='vision'
+        ?'辅助识图已停用（主模型原生识图不受影响）'
+        :'已停用（配置保留）';
+    }
+    if(!config.provider||!config.model)return '配置不完整';
+    const status=String((config.verification&&config.verification.status)||'');
+    return status==='verified'?'已配置 · 已验证':'已配置 · 待验证';
+  }
+  function imageCapabilityVisionRouteLabel(data){
+    const route=((data&&data.effective_route)||{}).vision||{};
+    const name=String(route.route||'unavailable');
+    if(name==='disabled')return '已停用';
+    if(name==='main_model_vision')return '主模型原生识图';
+    if(name==='auxiliary_vision'){
+      const detail=[route.provider,route.model].filter(Boolean).join(' / ');
+      return '辅助识图模型'+(detail?' · '+detail:'');
+    }
+    return '当前无可用识图路由';
+  }
+  function imageCapabilityGenerationRouteLabel(data){
+    const route=((data&&data.effective_route)||{}).image_generation||{};
+    const name=String(route.route||'unavailable');
+    if(name==='disabled')return '已停用';
+    if(name==='image_generation_provider'){
+      const detail=[route.provider,route.model].filter(Boolean).join(' / ');
+      return '生图 Provider'+(detail?' · '+detail:'');
+    }
+    return '当前无可用生图路由';
+  }
+  function imageCapabilityRenderCapability(capability,config){
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const enabled=imageCapabilityElement(meta.prefix+'Enabled');
+    const provider=imageCapabilityElement(meta.prefix+'Provider');
+    const rows=imageCapabilityProviderRows(imageCapabilityData,capability);
+    const providerOptions=rows.map(row=>{
+      const option=imageCapabilityCreateOption(
+        imageCapabilityProviderId(row,capability),
+        row.label||row.name||row.provider_family
+      );
+      option.dataset.providerFamily=String(row.provider_family||'');
+      return option;
+    });
+    imageCapabilityReplaceOptions(provider,providerOptions,config.provider);
+    const selectedRow=imageCapabilityProviderRow(imageCapabilityData,capability,provider&&provider.value);
+    if(enabled)enabled.checked=imageCapabilityEnabled(config);
+    imageCapabilityRenderModels(capability,selectedRow,config.model);
+    imageCapabilityRenderCredentialOptions(capability,selectedRow,config.credential_ref);
+    imageCapabilityRenderCredentialFields(capability,selectedRow,config.credential_ref);
+    imageCapabilityRenderEndpointFields(capability,selectedRow,config);
+    imageCapabilityText(meta.prefix+'Auth',imageCapabilityAuthLabel(selectedRow));
+    imageCapabilityText(meta.prefix+'ConfigStatus',imageCapabilityConfigLabel(capability,config));
+    imageCapabilityText(
+      meta.prefix+'Verification',
+      capability==='vision'&&!imageCapabilityEnabled(config)
+        ?'辅助识图已停用；主模型原生识图不受影响。'
+        :imageCapabilityVerificationLabel(config.verification)
+    );
+    imageCapabilityText(
+      meta.prefix+'Route',
+      capability==='vision'
+        ?imageCapabilityVisionRouteLabel(imageCapabilityData)
+        :imageCapabilityGenerationRouteLabel(imageCapabilityData)
+    );
+  }
+  function imageCapabilityOverallState(data){
+    const vision=imageCapabilityConfig(data,'vision');
+    const image=imageCapabilityConfig(data,'image_generation');
+    const enabled=[vision,image].filter(imageCapabilityEnabled);
+    if(!enabled.length){
+      return {
+        state:'neutral',
+        title:'辅助识图与图片生成均未启用',
+        detail:'主模型如原生支持图片仍会直接处理；现有 Provider、模型和凭据均会保留。'
+      };
+    }
+    if(enabled.some(config=>!config.provider||!config.model)){
+      return {state:'danger',title:'存在未完成的图片能力配置',detail:'请补全已启用能力的 Provider 和模型后再保存。'};
+    }
+    const verified=enabled.filter(config=>String((config.verification||{}).status||'')==='verified').length;
+    if(verified===enabled.length)return {state:'ok',title:'已启用图片能力均已验证',detail:'实际路由与配置状态已分开显示。'};
+    return {state:'warn',title:'图片能力已配置，仍需验证',detail:'点击“保存并验证”后分别查看图片理解和图片生成结果。'};
+  }
+  function imageCapabilityRenderData(data){
+    Object.keys(imageCapabilityCredentialDraftIds).forEach(capability=>{
+      imageCapabilityCredentialDraftIds[capability]={};
+    });
+    imageCapabilityData=data||{};
+    imageCapabilityRenderCapability('vision',imageCapabilityConfig(imageCapabilityData,'vision'));
+    imageCapabilityRenderCapability('image_generation',imageCapabilityConfig(imageCapabilityData,'image_generation'));
+    const overall=imageCapabilityOverallState(imageCapabilityData);
+    const status=imageCapabilityElement('imageCapabilityCenterStatus');
+    if(status)status.dataset.state=overall.state;
+    imageCapabilityText('imageCapabilityCenterStatusTitle',overall.title);
+    imageCapabilityText('imageCapabilityCenterStatusDetail',overall.detail);
+    imageCapabilityText('imageCapabilityCenterError','');
+    const center=imageCapabilityElement('imageCapabilityCenter');
+    if(center)center.dataset.state='ready';
+    imageCapabilityBaselineIdentity=imageCapabilityDraftIdentity();
+    imageCapabilityDirty=false;
+    imageCapabilityPendingRequest=null;
+  }
+  function imageCapabilitySetBusy(busy){
+    imageCapabilityBusy=!!busy;
+    const center=imageCapabilityElement('imageCapabilityCenter');
+    const save=imageCapabilityElement('btnSaveVerifyImageCapabilityCenter');
+    const reloadAll=imageCapabilityElement('btnReloadAllModelConfig');
+    if(center){
+      center.setAttribute('aria-busy',String(!!busy));
+      center.querySelectorAll('button,input,select').forEach(control=>{control.disabled=busy;});
+    }
+    if(save)save.setAttribute('aria-busy',String(!!busy));
+    if(reloadAll)reloadAll.disabled=!!busy;
+  }
+  function imageCapabilityRequest(url,options){
+    if(typeof window.api==='function')return window.api(url,options);
+    const requestOptions=Object.assign({credentials:'same-origin'},options||{});
+    delete requestOptions.timeoutMs;
+    delete requestOptions.timeoutToast;
+    requestOptions.headers=Object.assign({'Content-Type':'application/json'},requestOptions.headers||{});
+    return window.fetch(url,requestOptions).then(async response=>{
+      const body=await response.json().catch(()=>({}));
+      if(!response.ok){
+        const error=new Error(body.error||body.message||('HTTP '+response.status));
+        error.code=String(body.error_code||'');
+        error.status=response.status;
+        throw error;
+      }
+      return body;
+    });
+  }
+  function imageCapabilityDraftIdentity(){
+    const center=imageCapabilityElement('imageCapabilityCenter');
+    if(!center)return '';
+    return JSON.stringify(Array.from(center.querySelectorAll('input,select')).map(control=>[
+      control.id,
+      control.type==='checkbox'?!!control.checked:String(control.value||'')
+    ]));
+  }
+  function imageCapabilityRequestId(){
+    if(window.crypto&&typeof window.crypto.randomUUID==='function'){
+      return window.crypto.randomUUID();
+    }
+    return 'image-capability-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+  }
+  function imageCapabilityIdempotencyKey(revision){
+    const identity=String(revision||'')+'|'+imageCapabilityDraftIdentity();
+    if(imageCapabilityPendingRequest&&imageCapabilityPendingRequest.identity===identity){
+      return imageCapabilityPendingRequest.requestId;
+    }
+    const requestId=imageCapabilityRequestId();
+    imageCapabilityPendingRequest={identity,requestId};
+    return requestId;
+  }
+  function imageCapabilityEndpointValues(capability){
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const host=imageCapabilityElement(meta.prefix+'EndpointFields');
+    const values={};
+    if(!host)return values;
+    host.querySelectorAll('[data-endpoint-field]').forEach(input=>{
+      if(String(input.value||'').trim())values[input.dataset.endpointField]=String(input.value).trim();
+    });
+    return values;
+  }
+  function imageCapabilityNewCredential(capability,row,currentRef){
+    if(currentRef||!row||!row.supports_named_credentials)return null;
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const host=imageCapabilityElement(meta.prefix+'CredentialFields');
+    const inputs=host?Array.from(host.querySelectorAll('[data-credential-field]')):[];
+    const apiKeyInput=inputs.find(input=>input.dataset.credentialField==='api_key')||inputs[0];
+    const apiKey=String((apiKeyInput&&apiKeyInput.value)||'').trim();
+    if(!apiKey)return null;
+    return {
+      id:imageCapabilityCredentialDraftId(capability,row),
+      provider_family:String(row.provider_family||''),
+      label:String(row.label||row.name||row.provider_family||'图片能力')+' '+(capability==='vision'?'识图':'生图'),
+      api_key:apiKey,
+      default:false,
+      operation:'create',
+      managed_by:'image-capability-center',
+      source_capability:capability,
+      source_provider_id:imageCapabilityProviderId(row,capability)
+    };
+  }
+  function imageCapabilityCredentialDraftId(capability,row){
+    const family=String((row&&row.provider_family)||'provider').toLowerCase()
+      .replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'provider';
+    const providerId=imageCapabilityProviderId(row,capability);
+    const key=family+'|'+providerId;
+    const bucket=imageCapabilityCredentialDraftIds[capability]
+      ||(imageCapabilityCredentialDraftIds[capability]={});
+    if(bucket[key])return bucket[key];
+    const suffix=capability==='vision'?'vision':'image-generation';
+    const random=imageCapabilityRequestId().toLowerCase()
+      .replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
+    bucket[key]='ui-'+family+'-'+suffix+'-'+random;
+    return bucket[key];
+  }
+  function imageCapabilityCollectCapability(capability,credentialUpdates){
+    const meta=IMAGE_CAPABILITY_META[capability];
+    const enabled=!!((imageCapabilityElement(meta.prefix+'Enabled')||{}).checked);
+    const provider=String(((imageCapabilityElement(meta.prefix+'Provider')||{}).value)||'');
+    const model=String(((imageCapabilityElement(meta.prefix+'Model')||{}).value)||'');
+    const currentRef=String(((imageCapabilityElement(meta.prefix+'Credential')||{}).value)||'');
+    const row=imageCapabilityProviderRow(imageCapabilityData,capability,provider);
+    const credential=imageCapabilityNewCredential(capability,row,currentRef);
+    if(credential)credentialUpdates.push(credential);
+    if(enabled&&(!provider||!model))throw new Error(IMAGE_CAPABILITY_META[capability].title+'已启用，请选择 Provider 和模型。');
+    return {
+      enabled,
+      provider,
+      model,
+      credential_ref:credential?credential.id:currentRef,
+      endpoint_values:imageCapabilityEndpointValues(capability)
+    };
+  }
+  function imageCapabilityBuildPayload(){
+    const revision=String((imageCapabilityData&&imageCapabilityData.revision)||'').trim();
+    if(!/^[0-9a-f]{64}$/i.test(revision)){
+      throw new Error('图片能力配置版本缺失，请先刷新图片能力。');
+    }
+    const credential_updates=[];
+    const vision=imageCapabilityCollectCapability('vision',credential_updates);
+    const imageGeneration=imageCapabilityCollectCapability('image_generation',credential_updates);
+    const verify=[];
+    if(vision.enabled)verify.push('vision');
+    if(imageGeneration.enabled)verify.push('image_generation');
+    return {
+      expected_revision:revision,
+      request_id:imageCapabilityIdempotencyKey(revision),
+      capabilities:{vision,image_generation:imageGeneration},
+      credential_updates,
+      verify
+    };
+  }
+  function imageCapabilityMarkDraftChanged(event){
+    const target=event&&event.target;
+    if(!target||!target.closest||!target.closest('#imageCapabilityCenter'))return;
+    imageCapabilityOperationGeneration++;
+    imageCapabilityPendingRequest=null;
+    const capability=String(target.dataset.capability||(
+      target.id&&target.id.startsWith('imageCapabilityVision')?'vision':
+      target.id&&target.id.startsWith('imageCapabilityGeneration')?'image_generation':''
+    ));
+    if(capability&&target.id.endsWith('Provider')){
+      const meta=IMAGE_CAPABILITY_META[capability];
+      const row=imageCapabilityProviderRow(imageCapabilityData,capability,target.value);
+      imageCapabilityRenderModels(capability,row,'');
+      imageCapabilityRenderCredentialOptions(capability,row,'');
+      imageCapabilityRenderCredentialFields(capability,row,'');
+      imageCapabilityRenderEndpointFields(capability,row,{});
+      imageCapabilityText(meta.prefix+'Auth',imageCapabilityAuthLabel(row));
+    }else if(capability&&target.id.endsWith('Credential')){
+      const meta=IMAGE_CAPABILITY_META[capability];
+      const provider=String(((imageCapabilityElement(meta.prefix+'Provider')||{}).value)||'');
+      const row=imageCapabilityProviderRow(imageCapabilityData,capability,provider);
+      imageCapabilityRenderCredentialFields(capability,row,target.value);
+    }
+    imageCapabilityDirty=imageCapabilityDraftIdentity()!==imageCapabilityBaselineIdentity;
+    if(!imageCapabilityDirty){
+      const overall=imageCapabilityOverallState(imageCapabilityData||{});
+      const status=imageCapabilityElement('imageCapabilityCenterStatus');
+      if(status)status.dataset.state=overall.state;
+      imageCapabilityText('imageCapabilityCenterStatusTitle',overall.title);
+      imageCapabilityText('imageCapabilityCenterStatusDetail',overall.detail);
+      return;
+    }
+    if(capability){
+      const meta=IMAGE_CAPABILITY_META[capability];
+      imageCapabilityText(meta.prefix+'ConfigStatus','有未保存更改');
+    }
+    const status=imageCapabilityElement('imageCapabilityCenterStatus');
+    if(status)status.dataset.state='warn';
+    imageCapabilityText('imageCapabilityCenterStatusTitle','图片能力配置有未保存更改');
+    imageCapabilityText(
+      'imageCapabilityCenterStatusDetail',
+      imageCapabilityRequestInFlight
+        ?'配置已更改，本次结果将被忽略。'
+        :'实际路由仍显示当前已生效状态。'
+    );
+  }
+  async function imageCapabilityConfirmReload(force){
+    if(!force||!imageCapabilityDirty)return true;
+    const title='刷新并放弃图片能力草稿？';
+    const message='图片能力有未保存更改。刷新后将使用服务器上的配置，当前编辑内容和未保存密钥会被清除。';
+    if(typeof window.showConfirmDialog==='function'){
+      return !!(await window.showConfirmDialog({
+        title,
+        message,
+        confirmLabel:'刷新并放弃',
+        danger:true,
+        focusCancel:true
+      }));
+    }
+    return typeof window.confirm==='function'?window.confirm(title+'\n\n'+message):false;
+  }
+  async function loadImageCapabilityCenter(force,options){
+    const center=imageCapabilityElement('imageCapabilityCenter');
+    if(!center)return imageCapabilityData;
+    if(imageCapabilityRequestInFlight||imageCapabilityLoadInFlight){
+      imageCapabilityText('imageCapabilityCenterStatusDetail','当前操作尚未结束，请完成后再刷新。');
+      return imageCapabilityData;
+    }
+    if(imageCapabilityDirty&&!force){
+      imageCapabilityText('imageCapabilityCenterStatusDetail','检测到未保存草稿，已保留当前编辑内容。');
+      return imageCapabilityData;
+    }
+    const opts=options||{};
+    if(!opts.skipDirtyConfirm&&!(await imageCapabilityConfirmReload(force))){
+      return imageCapabilityData;
+    }
+    if(imageCapabilityRequestInFlight||imageCapabilityLoadInFlight)return imageCapabilityData;
+    const operation=++imageCapabilityOperationGeneration;
+    imageCapabilityLoadInFlight=true;
+    imageCapabilitySetBusy(true);
+    center.dataset.state='loading';
+    imageCapabilityText('imageCapabilityCenterError','');
+    imageCapabilityText('imageCapabilityCenterStatusTitle','正在读取图片能力');
+    imageCapabilityText('imageCapabilityCenterStatusDetail','正在从当前配置档读取脱敏状态。');
+    try{
+      const result=await imageCapabilityRequest(IMAGE_CAPABILITIES_API);
+      if(operation !== imageCapabilityOperationGeneration)return;
+      imageCapabilityRenderData(result||{});
+    }catch(error){
+      if(operation !== imageCapabilityOperationGeneration)return;
+      center.dataset.state='error';
+      const status=imageCapabilityElement('imageCapabilityCenterStatus');
+      if(status)status.dataset.state='danger';
+      imageCapabilityText('imageCapabilityCenterStatusTitle','图片能力读取失败');
+      imageCapabilityText('imageCapabilityCenterStatusDetail','请检查本地服务后重试。');
+      imageCapabilityText('imageCapabilityCenterError','读取失败：'+String((error&&error.message)||error||'未知错误'));
+    }finally{
+      imageCapabilityLoadInFlight=false;
+      imageCapabilitySetBusy(imageCapabilityRequestInFlight);
+    }
+    return imageCapabilityData;
+  }
+  async function refreshModelAndImageCapabilities(){
+    if(imageCapabilityRequestInFlight||imageCapabilityLoadInFlight){
+      imageCapabilityText('imageCapabilityCenterStatusDetail','当前操作尚未结束，请完成后再刷新。');
+      return imageCapabilityData;
+    }
+    if(!(await imageCapabilityConfirmReload(true)))return imageCapabilityData;
+    if(typeof window.loadModelConfigPanel==='function'){
+      await window.loadModelConfigPanel(true);
+    }
+    return loadImageCapabilityCenter(true,{skipDirtyConfirm:true});
+  }
+  function imageCapabilityApplyVerificationResults(result){
+    const rows=(result&&result.verification_results)||{};
+    if(rows.vision)imageCapabilityText('imageCapabilityVisionVerification',imageCapabilityVerificationLabel(rows.vision));
+    if(rows.image_generation)imageCapabilityText('imageCapabilityGenerationVerification',imageCapabilityVerificationLabel(rows.image_generation));
+  }
+  async function saveAndVerifyImageCapabilityCenter(){
+    if(imageCapabilityBusy||imageCapabilityRequestInFlight||imageCapabilityLoadInFlight)return;
+    let payload;
+    try{
+      payload=imageCapabilityBuildPayload();
+    }catch(error){
+      imageCapabilityText('imageCapabilityCenterError',String((error&&error.message)||error));
+      return;
+    }
+    const operation=++imageCapabilityOperationGeneration;
+    const draftIdentity=imageCapabilityDraftIdentity();
+    imageCapabilityRequestInFlight=true;
+    imageCapabilitySetBusy(true);
+    imageCapabilityText('imageCapabilityCenterError','');
+    imageCapabilityText('imageCapabilityCenterStatusTitle','正在保存并验证');
+    imageCapabilityText(
+      'imageCapabilityCenterStatusDetail',
+      payload.verify.includes('image_generation')
+        ?'生图验证会生成一张测试图，请稍候。'
+        :'正在保存并验证已启用的图片能力。'
+    );
+    try{
+      const result=await imageCapabilityRequest(IMAGE_CAPABILITIES_API+'/configure',{
+        method:'POST',
+        body:JSON.stringify(payload),
+        timeoutMs:195000,
+        timeoutToast:false
+      });
+      if(operation !== imageCapabilityOperationGeneration||draftIdentity!==imageCapabilityDraftIdentity()){
+        if(result&&/^[0-9a-f]{64}$/i.test(String(result.revision||''))){
+          imageCapabilityData=Object.assign({},imageCapabilityData||{},{
+            revision:String(result.revision)
+          });
+        }
+        imageCapabilityPendingRequest=null;
+        imageCapabilityText('imageCapabilityCenterStatusTitle','配置已在请求期间更改');
+        imageCapabilityText('imageCapabilityCenterStatusDetail','旧请求的本次结果已忽略，请重新保存并验证。');
+        return;
+      }
+      imageCapabilityPendingRequest=null;
+      imageCapabilityRenderData(result||{});
+      imageCapabilityApplyVerificationResults(result||{});
+      const superseded=String((result&&result.request_status)||'')==='superseded';
+      const failed=Object.values((result&&result.verification_results)||{}).some(row=>String((row&&row.status)||'')==='failed');
+      const status=imageCapabilityElement('imageCapabilityCenterStatus');
+      if(status)status.dataset.state=(failed||superseded)?'warn':'ok';
+      imageCapabilityText(
+        'imageCapabilityCenterStatusTitle',
+        superseded
+          ?'本请求已被较新配置取代，未执行旧配置验证'
+          :(failed?'配置已保存，部分验证失败':'图片能力已保存并完成验证')
+      );
+      imageCapabilityText(
+        'imageCapabilityCenterStatusDetail',
+        superseded
+          ?'当前显示为最新服务器状态，请核对后再决定是否重新验证。'
+          :(failed?'请查看两张能力卡中的独立验证结果。':'实际路由会按已验证配置生效。')
+      );
+    }catch(error){
+      if(operation !== imageCapabilityOperationGeneration)return;
+      const status=imageCapabilityElement('imageCapabilityCenterStatus');
+      if(status)status.dataset.state='danger';
+      const errorCode=String(
+        (error&&error.code)
+        ||(error&&error.payload&&error.payload.error_code)
+        ||''
+      );
+      const conflict=errorCode==='configuration_conflict';
+      const timedOut=!!(error&&(error.timeout===true||error.name==='TimeoutError'));
+      if(conflict)imageCapabilityPendingRequest=null;
+      imageCapabilityText(
+        'imageCapabilityCenterStatusTitle',
+        conflict
+          ?'配置已被其他窗口更新'
+          :(timedOut?'验证等待超时':'图片能力保存失败')
+      );
+      imageCapabilityText(
+        'imageCapabilityCenterStatusDetail',
+        conflict
+          ?'当前草稿尚未写入。请点击“刷新图片能力”核对最新配置后再修改。'
+          :(timedOut
+            ?'请求可能仍在服务器处理中。请勿刷新或修改配置，可再次点击“保存并验证”用同一请求查询结果。'
+            :'原配置保持不变，请按错误提示处理后重试。')
+      );
+      imageCapabilityText('imageCapabilityCenterError','保存失败：'+String((error&&error.message)||error||'未知错误'));
+    }finally{
+      imageCapabilityRequestInFlight=false;
+      imageCapabilitySetBusy(imageCapabilityLoadInFlight);
+    }
+  }
+  function imageCapabilityBind(){
+    const center=imageCapabilityElement('imageCapabilityCenter');
+    if(!center||center.dataset.bound==='true')return;
+    center.dataset.bound='true';
+    center.addEventListener('change',imageCapabilityMarkDraftChanged);
+    center.addEventListener('input',event=>{
+      if(event.target&&event.target.matches('[data-credential-field],[data-endpoint-field]')){
+        imageCapabilityMarkDraftChanged(event);
+      }
+    });
+    loadImageCapabilityCenter();
+  }
+
+  window.loadImageCapabilityCenter=loadImageCapabilityCenter;
+  window.refreshModelAndImageCapabilities=refreshModelAndImageCapabilities;
+  window.saveAndVerifyImageCapabilityCenter=saveAndVerifyImageCapabilityCenter;
+  window.taijiImageCapabilityCenter={
+    buildPayload:imageCapabilityBuildPayload,
+    hasUnsavedChanges:()=>imageCapabilityDirty,
+    providerRowsForCapability:imageCapabilityProviderRows,
+    routeLabel:imageCapabilityVisionRouteLabel,
+    verificationLabel:imageCapabilityVerificationLabel
+  };
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',imageCapabilityBind,{once:true});
+  }else{
+    imageCapabilityBind();
+  }
+})();
+/* image-capability-center-runtime:end */
+</script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->
 <div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">

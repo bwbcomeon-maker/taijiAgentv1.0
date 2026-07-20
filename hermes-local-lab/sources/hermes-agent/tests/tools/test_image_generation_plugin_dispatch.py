@@ -5,6 +5,7 @@ import json
 import os
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,18 @@ import yaml
 
 from agent import image_gen_registry
 from agent.image_gen_provider import ImageGenProvider
+
+
+_PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def _write_cached_png(home: Path, name: str = "codex-test.png") -> Path:
+    image = home / "cache" / "images" / name
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(_PNG_1X1)
+    return image
 
 
 @pytest.fixture(autouse=True)
@@ -22,14 +35,20 @@ def _reset_registry():
 
 
 class _FakeCodexProvider(ImageGenProvider):
+    def __init__(self, image: str | None = None) -> None:
+        self._image = image
+
     @property
     def name(self) -> str:
         return "codex"
 
     def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        image = self._image or str(
+            _write_cached_png(Path(os.environ["HERMES_HOME"]))
+        )
         return {
             "success": True,
-            "image": "/tmp/codex-test.png",
+            "image": str(image),
             "model": "gpt-5.2-codex",
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
@@ -56,8 +75,52 @@ class TestPluginDispatch:
 
         assert payload["success"] is True
         assert payload["provider"] == "codex"
-        assert payload["image"] == "/tmp/codex-test.png"
+        assert payload["image"] == str(
+            tmp_path / "cache" / "images" / "codex-test.png"
+        )
+        assert payload["image_ref"] == "codex-test.png"
+        assert len(payload["sha256"]) == 64
         assert payload["aspect_ratio"] == "square"
+
+    def test_dispatch_rejects_success_outside_generated_image_cache(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from agent import image_gen_registry as registry_module
+        from hermes_cli import plugins as plugins_module
+        from tools import image_generation_tool
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_read_configured_image_provider",
+            lambda: "codex",
+        )
+        monkeypatch.setattr(
+            plugins_module,
+            "_ensure_plugins_discovered",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            registry_module,
+            "get_provider",
+            lambda name: (
+                _FakeCodexProvider("/tmp/outside-generated-cache.png")
+                if name == "codex"
+                else None
+            ),
+        )
+
+        dispatched = image_generation_tool._dispatch_to_plugin_provider(
+            "draw cat",
+            "square",
+        )
+        payload = json.loads(dispatched)
+
+        assert payload["success"] is False
+        assert payload["image"] is None
+        assert payload["error_code"] == "provider_contract"
 
     def test_dispatch_reports_missing_registered_provider(self, monkeypatch, tmp_path):
         from tools import image_generation_tool
@@ -283,6 +346,111 @@ class TestPluginDispatch:
             for profile in ("A", "B")
         }
 
+    def test_configured_fal_dispatch_consumes_pinned_binding(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from agent import image_gen_registry as registry_module
+        from agent.image_gen_verification import (
+            ImageGenRequestBinding,
+            authorize_image_gen_request_binding,
+            image_gen_runtime_identity,
+        )
+        from agent.image_runtime import build_capability_route_decision
+        from hermes_cli import plugins as plugins_module
+        from plugins.image_gen.fal import FalImageGenProvider
+        from tools import image_generation_tool
+
+        model = "fal-ai/flux-2/klein/9b"
+        fingerprint = "configured-fal-dispatch-fingerprint"
+        generation = "configured-fal-dispatch-generation"
+        binding = authorize_image_gen_request_binding(
+            ImageGenRequestBinding(
+                provider="fal",
+                model=model,
+                api_key="pinned-fal-dispatch-secret",
+                runtime_identity=image_gen_runtime_identity(
+                    "fal",
+                    {"provider": "fal", "model": model},
+                ),
+            ),
+            authorization_fingerprint=fingerprint,
+            authorization_generation=generation,
+        )
+        snapshot = {
+            "schema_version": 1,
+            "fingerprint": fingerprint,
+            "_authorization_generation": generation,
+            "status": "verified",
+            "available": True,
+            "provider": "fal",
+            "model": model,
+        }
+        decision = build_capability_route_decision(
+            "image_generation",
+            snapshot=snapshot,
+            route="provider",
+            request_binding=binding,
+        )
+        monkeypatch.setenv("FAL_KEY", "ambient-key-must-not-be-used")
+        monkeypatch.setattr(
+            plugins_module,
+            "_ensure_plugins_discovered",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            registry_module,
+            "get_provider",
+            lambda name: FalImageGenProvider() if name == "fal" else None,
+        )
+        reauth_calls = []
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_same_authorization_snapshot",
+            lambda value: reauth_calls.append(value) or True,
+        )
+        captured = {}
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        generated_image = _write_cached_png(
+            tmp_path,
+            "configured-fal.png",
+        )
+
+        def fake_image_generate_tool(prompt, aspect_ratio, **kwargs):
+            kwargs["_reauth_guard"]()
+            captured.update(kwargs)
+            return json.dumps(
+                {
+                    "success": True,
+                    "image": str(generated_image),
+                }
+            )
+
+        monkeypatch.setattr(
+            image_generation_tool,
+            "image_generate_tool",
+            fake_image_generate_tool,
+        )
+
+        result = json.loads(
+            image_generation_tool._dispatch_to_plugin_provider(
+                "draw from pinned FAL",
+                "square",
+                runtime_snapshot=snapshot,
+                route_decision=decision,
+            )
+        )
+
+        assert result["success"] is True
+        assert result["image"] == str(generated_image)
+        assert result["model"] == model
+        assert captured["_runtime_binding"] is binding
+        assert captured["_runtime_binding"].api_key == (
+            "pinned-fal-dispatch-secret"
+        )
+        assert len(reauth_calls) == 2
+
 
 @pytest.mark.parametrize(
     ("module_name", "class_name", "provider_name", "model"),
@@ -468,6 +636,10 @@ def test_image_provider_boundary_final_reauth_blocks_state_drift_without_io(
     from agent import image_runtime
     from agent import image_gen_registry as registry_module
     from agent.image_gen_verification import ImageGenRequestBinding
+    from agent.image_intent import (
+        begin_image_generation_task,
+        cleanup_image_generation_task,
+    )
     from hermes_cli import plugins as plugins_module
     from tools import image_generation_tool
 
@@ -573,15 +745,27 @@ def test_image_provider_boundary_final_reauth_blocks_state_drift_without_io(
         lambda name: provider if name == "codex" else None,
     )
 
-    result = json.loads(
-        image_generation_tool._handle_image_generate(
-            {"prompt": "draw the boundary", "aspect_ratio": "square"},
-            caller_capability_fingerprint=verified["fingerprint"],
-            caller_capability_generation=verified[
-                "_authorization_generation"
-            ],
-        )
+    turn_id = "provider-boundary-drift-turn"
+    owner = "provider-boundary-drift-owner"
+    begin_image_generation_task(
+        turn_id,
+        allow_generation=True,
+        owner_token=owner,
     )
+    try:
+        result = json.loads(
+            image_generation_tool._handle_image_generate(
+                {"prompt": "draw the boundary", "aspect_ratio": "square"},
+                caller_capability_fingerprint=verified["fingerprint"],
+                caller_capability_generation=verified[
+                    "_authorization_generation"
+                ],
+                image_generation_task_id=turn_id,
+                image_generation_gate_owner=owner,
+            )
+        )
+    finally:
+        cleanup_image_generation_task(turn_id, owner_token=owner)
 
     violations = []
     if len(build_calls) != 1:
@@ -599,11 +783,16 @@ def test_image_provider_boundary_final_reauth_blocks_state_drift_without_io(
 
 def test_image_dispatch_uses_private_pinned_binding_after_ambient_rotation(
     monkeypatch,
+    tmp_path,
 ):
     """Ambient credentials changed after reauth must not replace the private binding."""
     from agent import image_runtime
     from agent import image_gen_registry as registry_module
     from agent.image_gen_verification import ImageGenRequestBinding
+    from agent.image_intent import (
+        begin_image_generation_task,
+        cleanup_image_generation_task,
+    )
     from hermes_cli import plugins as plugins_module
     from tools import image_generation_tool
 
@@ -696,6 +885,11 @@ def test_image_dispatch_uses_private_pinned_binding_after_ambient_rotation(
         lambda *args, **kwargs: None,
     )
     provider_calls = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    generated_image = _write_cached_png(
+        tmp_path,
+        "pinned-binding.png",
+    )
 
     class BindingAwareProvider(ImageGenProvider):
         _supports_pinned_image_request_binding = True
@@ -711,7 +905,7 @@ def test_image_dispatch_uses_private_pinned_binding_after_ambient_rotation(
                 "success": True,
                 "provider": "codex",
                 "model": kwargs.get("model"),
-                "image": "/tmp/pinned-binding.png",
+                "image": str(generated_image),
             }
 
     provider = BindingAwareProvider()
@@ -721,15 +915,27 @@ def test_image_dispatch_uses_private_pinned_binding_after_ambient_rotation(
         lambda name: provider if name == "codex" else None,
     )
 
-    result = json.loads(
-        image_generation_tool._handle_image_generate(
-            {"prompt": "draw the pinned route", "aspect_ratio": "portrait"},
-            caller_capability_fingerprint=verified["fingerprint"],
-            caller_capability_generation=verified[
-                "_authorization_generation"
-            ],
-        )
+    turn_id = "provider-pinned-binding-turn"
+    owner = "provider-pinned-binding-owner"
+    begin_image_generation_task(
+        turn_id,
+        allow_generation=True,
+        owner_token=owner,
     )
+    try:
+        result = json.loads(
+            image_generation_tool._handle_image_generate(
+                {"prompt": "draw the pinned route", "aspect_ratio": "portrait"},
+                caller_capability_fingerprint=verified["fingerprint"],
+                caller_capability_generation=verified[
+                    "_authorization_generation"
+                ],
+                image_generation_task_id=turn_id,
+                image_generation_gate_owner=owner,
+            )
+        )
+    finally:
+        cleanup_image_generation_task(turn_id, owner_token=owner)
 
     observed_binding = (
         provider_calls[0].get("_runtime_binding")

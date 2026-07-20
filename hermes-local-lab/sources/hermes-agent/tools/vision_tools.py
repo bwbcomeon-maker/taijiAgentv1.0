@@ -1348,6 +1348,21 @@ def check_vision_requirements() -> bool:
     when the auto chain would have served the request (issue #31179).
     """
     try:
+        from agent.auxiliary_client import _read_main_model, _read_main_provider
+        from agent.image_routing import decide_image_input_mode
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        provider = _read_main_provider()
+        model = _read_main_model()
+        mode = decide_image_input_mode(provider, model, cfg)
+        if mode == "native":
+            return _supports_media_in_tool_results(provider, model)
+        if mode != "text":
+            return False
+    except Exception:
+        return False
+    try:
         from agent.auxiliary_client import resolve_vision_provider_client
     except ImportError:
         return False
@@ -1468,12 +1483,17 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         _model = _read_main_model()
         _cfg = load_config()
         _mode = decide_image_input_mode(_provider, _model, _cfg)
-        if _mode == "native" and _supports_media_in_tool_results(_provider, _model):
-            logger.info(
-                "vision_analyze: native fast path (provider=%s, model=%s)",
-                _provider, _model,
+        if _mode == "native":
+            if _supports_media_in_tool_results(_provider, _model):
+                logger.info(
+                    "vision_analyze: native fast path (provider=%s, model=%s)",
+                    _provider, _model,
+                )
+                return _vision_analyze_native(image_url, question)
+            return _blocked_vision_result(
+                "native_tool_media_unsupported",
+                "当前主模型虽支持识图，但其工具结果通道不支持安全传回图片。",
             )
-            return _vision_analyze_native(image_url, question)
     except Exception as exc:
         logger.warning(
             "vision_analyze route decision failed closed: %s",

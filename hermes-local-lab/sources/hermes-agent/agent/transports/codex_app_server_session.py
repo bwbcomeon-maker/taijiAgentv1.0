@@ -24,19 +24,36 @@ call is synchronous and behaves like AIAgent's existing chat_completions loop.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from agent.redact import redact_sensitive_text
 from agent.transports.codex_app_server import (
     CodexAppServerClient,
     CodexAppServerError,
 )
-from agent.transports.codex_event_projector import CodexEventProjector
+from agent.transports.codex_event_projector import (
+    CodexEventProjector,
+    ProjectedToolCompletion,
+)
+from agent.transports.image_generation_gate_bridge import (
+    IMAGE_GENERATION_GATE_BRIDGE_ENV,
+    IMAGE_GENERATION_GATE_BRIDGE_ID_ENV,
+    IMAGE_GENERATION_GATE_PUBLIC_KEY_ENV,
+    ImageGenerationGateBridge,
+    ImageGenerationGateTurnHandle,
+)
+from agent.transports.hermes_tools_profile_env import (
+    CodexProfileEnvironment,
+    capture_codex_profile_environment as _capture_codex_profile_environment,
+    capture_codex_profile_execution_env as _capture_codex_profile_execution_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +83,9 @@ class TurnResult:
 
     final_text: str = ""
     projected_messages: list[dict] = field(default_factory=list)
+    tool_completions: list[ProjectedToolCompletion] = field(
+        default_factory=list
+    )
     tool_iterations: int = 0
     interrupted: bool = False
     error: Optional[str] = None  # Set if turn ended in a non-recoverable error
@@ -85,6 +105,59 @@ class TurnResult:
 # items when an interrupt or upstream error tears the turn down before the
 # normal completion path fires. Mirrors openclaw beta.8 fix.
 _TURN_ABORTED_MARKERS = ("<turn_aborted>", "<turn_aborted/>")
+
+
+def _image_gate_mcp_config_args(
+    bridge_path: str,
+    bridge_id: str,
+    public_key: str,
+    hermes_tools_env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Inject the bridge root and non-secret verifier into hermes-tools only.
+
+    Passing this value through ``CodexAppServerClient(env=...)`` would expose
+    it to the app-server process and every command Codex launches.  Codex's
+    per-MCP ``env`` table scopes the value to the trusted hermes-tools child;
+    task/turn/owner capability values cross only the live signed broker
+    response. The public key may be visible in process arguments, but cannot
+    mint an authorization; its private key remains in trusted parent memory.
+    """
+    overrides: list[tuple[str, Any]] = [
+        ('mcp_servers."hermes-tools".command', sys.executable),
+        (
+            'mcp_servers."hermes-tools".args',
+            ["-m", "agent.transports.hermes_tools_mcp_server"],
+        ),
+        ('mcp_servers."hermes-tools".startup_timeout_sec', 30.0),
+        ('mcp_servers."hermes-tools".tool_timeout_sec', 600.0),
+    ]
+    for env_name, raw_value in (
+        (IMAGE_GENERATION_GATE_BRIDGE_ENV, bridge_path),
+        (IMAGE_GENERATION_GATE_BRIDGE_ID_ENV, bridge_id),
+        (IMAGE_GENERATION_GATE_PUBLIC_KEY_ENV, public_key),
+    ):
+        key = f'mcp_servers."hermes-tools".env.{env_name}'
+        overrides.append((key, str(raw_value)))
+    allowed_profile_selectors = {
+        "HERMES_HOME",
+        "HERMES_CONFIG_PATH",
+        "TAIJI_RUNTIME_HOME",
+        "HERMES_TOOLS_PROFILE_ENV_REQUIRED",
+    }
+    for env_name, raw_value in sorted(
+        (hermes_tools_env or {}).items()
+    ):
+        if env_name not in allowed_profile_selectors:
+            raise ValueError(
+                "hermes-tools MCP arguments accept profile selectors only"
+            )
+        key = f'mcp_servers."hermes-tools".env.{env_name}'
+        overrides.append((key, str(raw_value)))
+    args: list[str] = []
+    for key, raw_value in overrides:
+        value = json.dumps(raw_value, ensure_ascii=True)
+        args.extend(["-c", f"{key}={value}"])
+    return args
 
 
 def _coerce_turn_input_text(user_input: Any) -> str:
@@ -204,6 +277,8 @@ class CodexAppServerSession:
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        execution_env: Optional[dict[str, str]] = None,
+        hermes_tools_env: Optional[dict[str, str]] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
@@ -218,6 +293,23 @@ class CodexAppServerSession:
         self._on_event = on_event  # Display hook (kawaii spinner ticks etc.)
         self._routing = request_routing or _ServerRequestRouting()
         self._client_factory = client_factory or CodexAppServerClient
+        captured_profile_environment = (
+            _capture_codex_profile_environment()
+            if execution_env is None or hermes_tools_env is None
+            else None
+        )
+        self._execution_env = dict(
+            execution_env
+            if execution_env is not None
+            else captured_profile_environment.codex_env
+        )
+        self._hermes_tools_env = dict(
+            hermes_tools_env
+            if hermes_tools_env is not None
+            else captured_profile_environment.hermes_tools_env
+        )
+        self._image_gate_bridge = ImageGenerationGateBridge()
+        self._turn_guard = threading.Lock()
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
@@ -240,7 +332,15 @@ class CodexAppServerSession:
             return self._thread_id
         if self._client is None:
             self._client = self._client_factory(
-                codex_bin=self._codex_bin, codex_home=self._codex_home
+                codex_bin=self._codex_bin,
+                codex_home=self._codex_home,
+                extra_args=_image_gate_mcp_config_args(
+                    self._image_gate_bridge.path,
+                    self._image_gate_bridge.bridge_id,
+                    self._image_gate_bridge.public_key,
+                    self._hermes_tools_env,
+                ),
+                env=self._execution_env,
             )
         self._client.initialize(
             client_name="hermes",
@@ -303,6 +403,7 @@ class CodexAppServerSession:
                 pass
             self._client = None
         self._thread_id = None
+        self._image_gate_bridge.close()
 
     def __enter__(self) -> "CodexAppServerSession":
         return self
@@ -359,6 +460,58 @@ class CodexAppServerSession:
     # ---------- per-turn ----------
 
     def run_turn(
+        self,
+        user_input: Any,
+        *,
+        turn_timeout: float = 600.0,
+        notification_poll_timeout: float = 0.25,
+        post_tool_quiet_timeout: float = 90.0,
+        image_generation_task_id: str = "",
+        image_generation_turn_id: str = "",
+        image_generation_gate_owner: str = "",
+        allow_image_generation: bool = False,
+    ) -> TurnResult:
+        """Run one turn while exposing only its short-lived image gate."""
+        if not self._turn_guard.acquire(blocking=False):
+            return TurnResult(
+                error=(
+                    "codex app-server session already has an active turn; "
+                    "refusing overlapping turn"
+                ),
+                should_retire=True,
+            )
+        task_id = str(image_generation_task_id or "").strip()
+        turn_id = str(image_generation_turn_id or "").strip() or task_id
+        owner_token = str(image_generation_gate_owner or "").strip()
+        turn_handle: ImageGenerationGateTurnHandle | None = None
+        if allow_image_generation and task_id and turn_id and owner_token:
+            try:
+                turn_handle = self._image_gate_bridge.arm(
+                    task_id=task_id,
+                    turn_id=turn_id,
+                    owner_token=owner_token,
+                    allow_generation=True,
+                    ttl_seconds=min(max(turn_timeout + 30.0, 30.0), 3600.0),
+                )
+            except Exception:
+                logger.warning(
+                    "Could not arm Codex image gate bridge; image generation "
+                    "will remain fail-closed for this turn",
+                    exc_info=True,
+                )
+        try:
+            return self._run_turn_impl(
+                user_input,
+                turn_timeout=turn_timeout,
+                notification_poll_timeout=notification_poll_timeout,
+                post_tool_quiet_timeout=post_tool_quiet_timeout,
+            )
+        finally:
+            if turn_handle is not None:
+                self._image_gate_bridge.disarm(turn_handle)
+            self._turn_guard.release()
+
+    def _run_turn_impl(
         self,
         user_input: Any,
         *,
@@ -504,6 +657,10 @@ class CodexAppServerSession:
                     proj = projector.project(pending)
                     if proj.messages:
                         result.projected_messages.extend(proj.messages)
+                    if proj.tool_completions:
+                        result.tool_completions.extend(
+                            proj.tool_completions
+                        )
                     if proj.is_tool_iteration:
                         result.tool_iterations += 1
                         last_tool_completion_at = time.monotonic()
@@ -545,6 +702,10 @@ class CodexAppServerSession:
             projection = projector.project(note)
             if projection.messages:
                 result.projected_messages.extend(projection.messages)
+            if projection.tool_completions:
+                result.tool_completions.extend(
+                    projection.tool_completions
+                )
             if projection.is_tool_iteration:
                 result.tool_iterations += 1
                 # Arm/refresh the post-tool quiet watchdog whenever a

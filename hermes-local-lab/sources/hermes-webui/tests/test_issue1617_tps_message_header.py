@@ -21,7 +21,7 @@ CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 def test_tps_renders_in_message_header_not_global_titlebar():
     assert "msg-tps-inline" in UI_JS, "assistant message headers need a TPS chip hook"
     assert "msg-tps-inline" in CSS, "TPS header chip needs an explicit CSS hook"
-    assert "_assistantRoleHtml(tsTitle='', tpsText='')" in UI_JS, (
+    assert "function _assistantRoleHtml(tsTitle='', tpsText=''" in UI_JS, (
         "assistant role/header rendering should accept the per-message TPS text"
     )
     assert "_formatTurnTps" in UI_JS, "TPS formatting should be centralized"

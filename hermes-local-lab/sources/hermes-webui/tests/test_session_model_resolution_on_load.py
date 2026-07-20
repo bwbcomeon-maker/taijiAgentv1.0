@@ -12,28 +12,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
-def _extract_function(src: str, signature: str) -> str:
+def _extract_load_session(src: str) -> str:
+    signature = "async function loadSession(sid"
     start = src.find(signature)
     assert start >= 0, f"missing function signature: {signature}"
-    brace = src.find("{", start)
-    assert brace >= 0, f"missing function body for: {signature}"
-    depth = 0
-    for idx in range(brace, len(src)):
-        ch = src[idx]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : idx + 1]
-    raise AssertionError(f"unterminated function body for: {signature}")
+    end = src.find("\nfunction _forceChatSessionPanel(", start)
+    assert end > start, "loadSession boundary not found"
+    return src[start:end]
 
 
 def test_load_session_initial_metadata_request_defers_model_resolution_until_after_state_assignment():
-    body = _extract_function(SESSIONS_JS, "async function loadSession(sid")
+    body = _extract_load_session(SESSIONS_JS)
     fast_metadata_fetch = "messages=0&resolve_model=0"
     deferred_metadata_fetch = "messages=0&resolve_model=1"
-    assignment = "S.session=data.session"
+    assignment = "S.session=typeof sanitizeSessionRuntimeFields"
 
     assert fast_metadata_fetch in body[: body.index(assignment)], (
         "loadSession() first paint must use the metadata fast path so session "

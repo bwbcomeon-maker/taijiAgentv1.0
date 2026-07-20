@@ -560,7 +560,7 @@
       closeProjectPanel(true);
     };
     projectPanelKeyClose=event=>{
-      if(event.key==='Escape') closeProjectPanel(true);
+      if(event.key==='Escape') closeProjectPanel(true,true);
     };
     setTimeout(()=>{
       document.addEventListener('click',projectPanelClickClose);
@@ -568,10 +568,57 @@
     },0);
   }
 
-  function closeProjectPanel(render=false){
+  function focusProjectFilterTrigger(){
+    const trigger=$('taijiProjectFilterTrigger');
+    if(trigger&&typeof trigger.focus==='function') trigger.focus({preventScroll:true});
+  }
+
+  function captureProjectFilterFocus(container){
+    const focused=document.activeElement;
+    if(!container||!focused||!container.contains(focused)) return null;
+    if(focused.id==='taijiProjectSearch'){
+      return {
+        id:focused.id,
+        selectionStart:focused.selectionStart,
+        selectionEnd:focused.selectionEnd
+      };
+    }
+    if(focused.id) return {id:focused.id};
+    const action=focused.closest&&focused.closest('[data-taiji-project-action]');
+    if(!action) return null;
+    const projectHost=action.closest&&action.closest('[data-project-id]');
+    return {
+      action:action.dataset.taijiProjectAction||'',
+      projectId:action.dataset.projectId||(projectHost&&projectHost.dataset.projectId)||''
+    };
+  }
+
+  function restoreProjectFilterFocus(container,snapshot){
+    if(!container||!snapshot) return;
+    let target=null;
+    if(snapshot.id) target=container.querySelector(`#${snapshot.id}`);
+    if(!target&&snapshot.action){
+      target=Array.from(container.querySelectorAll('[data-taiji-project-action]')).find(candidate=>{
+        const host=candidate.closest&&candidate.closest('[data-project-id]');
+        const projectId=candidate.dataset.projectId||(host&&host.dataset.projectId)||'';
+        return (candidate.dataset.taijiProjectAction||'')===snapshot.action&&projectId===snapshot.projectId;
+      })||null;
+    }
+    if(!target||typeof target.focus!=='function') return;
+    target.focus({preventScroll:true});
+    if(target.id==='taijiProjectSearch'&&typeof target.setSelectionRange==='function'){
+      const length=String(target.value||'').length;
+      const start=Math.min(Number(snapshot.selectionStart)||0,length);
+      const end=Math.min(Number(snapshot.selectionEnd)||start,length);
+      target.setSelectionRange(start,end);
+    }
+  }
+
+  function closeProjectPanel(render=false,restoreFocus=false){
     state.projectPanelOpen=false;
     unbindProjectPanelClose();
     if(render) renderProjectFilters();
+    if(restoreFocus) focusProjectFilterTrigger();
   }
 
   function openProjectPanel(){
@@ -592,7 +639,7 @@
       event.stopPropagation();
     }
     if(state.projectPanelOpen){
-      closeProjectPanel(true);
+      closeProjectPanel(true,true);
     }else{
       openProjectPanel();
     }
@@ -822,6 +869,9 @@
     }
     closeProjectPanel(false);
     renderRecentSessions();
+    // The filter surface is rebuilt above. Return keyboard users to the new
+    // trigger instead of dropping focus on <body> after selecting a project.
+    focusProjectFilterTrigger();
   }
 
   function showProjectMenuForSession(sid,anchorEl,event){
@@ -1021,9 +1071,10 @@
   function renderProjectFilters(){
     const container=$('taijiProjectFilters');
     if(!container) return;
+    const focusSnapshot=captureProjectFilterFocus(container);
     const projectCount=state.projects.length;
     const activeName=activeProjectName();
-    const active=activeName?' is-active':'';
+    const activeClass=activeName?' is-active':'';
     const label=escapeHtml(`分组 ${projectCount}`);
     const title=escapeHtml(activeName?`当前分组：${activeName}`:'会话分组');
     const expanded=state.projectPanelOpen?'true':'false';
@@ -1032,7 +1083,7 @@
     const chevron=typeof li==='function'?li(state.projectPanelOpen?'chevron-up':'chevron-down',14):'';
     const searchIcon=typeof li==='function'?li('search',14):'';
     const plusIcon=typeof li==='function'?li('plus',14):'';
-    container.innerHTML=`<button class="taiji-project-filter-trigger${active}" id="taijiProjectFilterTrigger" type="button" aria-haspopup="dialog" aria-expanded="${expanded}" aria-controls="taijiProjectPanel" data-taiji-project-action="toggle" title="${title}">
+    container.innerHTML=`<button class="taiji-project-filter-trigger${activeClass}" id="taijiProjectFilterTrigger" type="button" aria-haspopup="dialog" aria-expanded="${expanded}" aria-controls="taijiProjectPanel" data-taiji-project-action="toggle" title="${title}">
       <span id="taijiProjectFilterLabel">${label}</span><span class="taiji-project-filter-trigger-icon" aria-hidden="true">${chevron}</span>
     </button>
     <div class="taiji-project-panel" id="taijiProjectPanel" role="dialog" aria-label="会话分组"${hidden}>
@@ -1042,6 +1093,7 @@
       <button class="taiji-project-panel-create" type="button" data-taiji-project-action="create">${plusIcon}<span>新建分组</span></button>
     </div>`;
     renderProjectPanel();
+    restoreProjectFilterFocus(container,focusSnapshot);
   }
 
   function syncSessionFilterButtons(){

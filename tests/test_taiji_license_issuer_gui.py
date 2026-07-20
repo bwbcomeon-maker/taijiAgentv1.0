@@ -13,7 +13,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CORE_JS = ROOT / "tools" / "taiji-license-issuer" / "issuer-core.js"
 APP_BUNDLE = ROOT / "tools" / "taiji-license-issuer" / "启动太极License签发工具.app"
-AGENT_PYTHON = ROOT / "hermes-local-lab" / "sources" / "hermes-agent" / "venv" / "bin" / "python"
+AGENT_PYTHON = Path(
+    os.environ.get(
+        "TAIJI_AGENT_PYTHON",
+        ROOT / "hermes-local-lab" / "sources" / "hermes-agent" / "venv" / "bin" / "python",
+    )
+)
 AGENT_DIR = ROOT / "hermes-local-lab" / "sources" / "hermes-agent"
 TEST_MACHINE_CODE = "sha256:" + "c" * 64
 OTHER_MACHINE_CODE = "sha256:" + "d" * 64

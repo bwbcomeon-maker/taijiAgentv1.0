@@ -1523,10 +1523,6 @@ def cleanup_task_resources(agent, task_id: str) -> None:
     except Exception as e:
         if agent.verbose_logging:
             logger.warning(f"Failed to cleanup browser for task {task_id}: {e}")
-
-
-
-
 def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):
     """Streaming variant of _interruptible_api_call for real-time token delivery.
 

@@ -536,9 +536,17 @@ def test_chat_start_persists_pending_turn_metadata_for_reload_recovery(cleanup_t
     rebuild the in-flight conversation instead of showing a blank session.
     """
     routes_src = (REPO_ROOT / "api/routes.py").read_text()
-    assert 's.active_stream_id = stream_id' in routes_src
-    assert 's.pending_user_message = msg' in routes_src
-    assert 's.pending_attachments = attachments' in routes_src
+    helper_start = routes_src.index("def _prepare_chat_start_session_for_stream(")
+    helper_end = routes_src.index("\ndef _is_hidden_empty_session(", helper_start)
+    helper = routes_src[helper_start:helper_end]
+    assert 's.active_stream_id = stream_id' in helper
+    assert 'persisted_msg = display_msg if display_msg is not None else msg' in helper
+    assert 's.pending_user_message = persisted_msg' in helper
+    assert 's.pending_attachments = attachments' in helper
+    assert helper.index('s.pending_user_message = persisted_msg') < helper.index('s.save()')
+    caller_start = routes_src.index("_prepare_chat_start_session_for_stream(", helper_end)
+    registration = routes_src.index("STREAMS[stream_id] = stream", caller_start)
+    assert caller_start < registration
     assert '"active_stream_id": getattr(s, "active_stream_id", None)' in routes_src
     assert '"pending_user_message": getattr(s, "pending_user_message", None)' in routes_src
 

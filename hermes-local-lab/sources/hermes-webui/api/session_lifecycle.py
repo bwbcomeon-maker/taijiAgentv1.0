@@ -92,6 +92,48 @@ def unregister_agent(session_id: str) -> None:
         _condition.notify_all()
 
 
+def prepare_agent_retirement(
+    session_id: str,
+    agent,
+    *,
+    wait: bool = True,
+) -> bool:
+    """Flush work owned by ``agent`` and detach it without touching a successor.
+
+    Cancellation can retire an old AIAgent while a new generation for the same
+    WebUI session is already registered.  A session-wide ``unregister_agent``
+    would erase that successor.  This helper instead commits only until no
+    uncommitted segment is owned by the retiring agent, then clears the
+    lifecycle's current-agent pointer only when it still points at that exact
+    object.  ``False`` preserves the old provider handle for a later retry.
+    """
+    if not session_id or agent is None:
+        return True
+
+    while True:
+        with _condition:
+            entry = _sessions.get(session_id)
+            if entry is None:
+                return True
+            committed_generation = entry["committed_generation"]
+            owns_uncommitted_segment = any(
+                segment["end"] > committed_generation
+                and segment.get("agent") is agent
+                for segment in entry["segments"]
+            )
+            if not owns_uncommitted_segment:
+                if entry.get("agent") is agent:
+                    entry["agent"] = None
+                _condition.notify_all()
+                return True
+
+        # commit_session_memory serializes against an in-flight commit. It may
+        # first flush an older segment owned by another generation; loop until
+        # this retiring agent has no dirty segment left.
+        if not commit_session_memory(session_id, agent=agent, wait=wait):
+            return False
+
+
 def mark_turn_completed(session_id: str, *, agent=None) -> int:
     if not session_id:
         return 0

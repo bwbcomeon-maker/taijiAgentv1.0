@@ -545,12 +545,22 @@ def test_xai_loopback_login_timeout_falls_back_to_manual_paste(monkeypatch):
             }
         ),
     )
+    browser_calls: list[str] = []
+    monkeypatch.setattr(
+        auth_mod.webbrowser,
+        "open",
+        lambda url: browser_calls.append(url) or False,
+    )
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        creds = auth_mod._xai_oauth_loopback_login(manual_paste=False)
+        creds = auth_mod._xai_oauth_loopback_login(
+            manual_paste=False,
+            open_browser=False,
+        )
 
     rendered = buf.getvalue()
+    assert browser_calls == []
     assert "xAI loopback callback timed out." in rendered
     assert "--manual-paste" in rendered
     assert captured["prompt_calls"] == 1
@@ -614,10 +624,20 @@ def test_xai_loopback_login_timeout_noninteractive_reraises(monkeypatch):
         "_prompt_manual_callback_paste",
         lambda *_a, **_k: pytest.fail("manual-paste fallback should not run"),
     )
+    browser_calls: list[str] = []
+    monkeypatch.setattr(
+        auth_mod.webbrowser,
+        "open",
+        lambda url: browser_calls.append(url) or False,
+    )
 
     with contextlib.redirect_stdout(io.StringIO()):
         with pytest.raises(auth_mod.AuthError) as exc:
-            auth_mod._xai_oauth_loopback_login(manual_paste=False)
+            auth_mod._xai_oauth_loopback_login(
+                manual_paste=False,
+                open_browser=False,
+            )
+    assert browser_calls == []
     assert exc.value.code == "xai_callback_timeout"
 
 

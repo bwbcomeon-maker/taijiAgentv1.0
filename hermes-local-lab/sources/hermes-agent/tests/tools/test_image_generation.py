@@ -9,6 +9,7 @@ tests/tools/test_managed_media_gateways.py.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -498,3 +499,329 @@ class TestManagedGatewayErrorTranslation:
 
         with pytest.raises(ConnectionError):
             image_tool._submit_fal_request("fal-ai/flux-2-pro", {"prompt": "x"})
+
+
+class TestFalResultMaterialization:
+    """FAL must cross the same local-cache boundary as every other provider."""
+
+    def test_success_materializes_remote_result_before_return(
+        self, image_tool, monkeypatch, tmp_path,
+    ):
+        class Handler:
+            @staticmethod
+            def get():
+                return {
+                    "images": [
+                        {
+                            "url": (
+                                "https://cdn.example.test/generated.png"
+                                "?signature=private"
+                            ),
+                            "width": 1024,
+                            "height": 1024,
+                        }
+                    ]
+                }
+
+        cached = tmp_path / "fal_generated.png"
+        seen: list[str] = []
+        monkeypatch.setattr(image_tool, "_resolve_fal_model", lambda: (
+            image_tool.DEFAULT_MODEL,
+            image_tool.FAL_MODELS[image_tool.DEFAULT_MODEL],
+        ))
+        monkeypatch.setattr(image_tool, "fal_key_is_configured", lambda: True)
+        monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway", lambda: None)
+        monkeypatch.setattr(image_tool, "_submit_fal_request", lambda *_a, **_kw: Handler())
+
+        def materialize(url, **_kwargs):
+            seen.append(url)
+            return cached
+
+        monkeypatch.setattr(image_tool, "save_url_image", materialize, raising=False)
+
+        result = json.loads(image_tool.image_generate_tool("a quiet mountain"))
+
+        assert result == {"success": True, "image": str(cached)}
+        assert seen == [
+            "https://cdn.example.test/generated.png?signature=private"
+        ]
+        assert "signature=private" not in json.dumps(result)
+
+    def test_materialization_failure_fails_closed_without_remote_url(
+        self, image_tool, monkeypatch,
+    ):
+        signed_url = (
+            "https://cdn.example.test/generated.png"
+            "?X-Amz-Credential=private&X-Amz-Signature=secret"
+        )
+
+        class Handler:
+            @staticmethod
+            def get():
+                return {"images": [{"url": signed_url}]}
+
+        monkeypatch.setattr(image_tool, "_resolve_fal_model", lambda: (
+            image_tool.DEFAULT_MODEL,
+            image_tool.FAL_MODELS[image_tool.DEFAULT_MODEL],
+        ))
+        monkeypatch.setattr(image_tool, "fal_key_is_configured", lambda: True)
+        monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway", lambda: None)
+        monkeypatch.setattr(image_tool, "_submit_fal_request", lambda *_a, **_kw: Handler())
+
+        def fail_materialize(_url, **_kwargs):
+            raise ValueError(f"download failed for {signed_url}")
+
+        monkeypatch.setattr(
+            image_tool,
+            "save_url_image",
+            fail_materialize,
+            raising=False,
+        )
+
+        result = json.loads(image_tool.image_generate_tool("a quiet mountain"))
+        serialized = json.dumps(result)
+
+        assert result["success"] is False
+        assert result["image"] is None
+        assert result["error_type"] == "image_result_io_failed"
+        assert "X-Amz-" not in serialized
+        assert "secret" not in serialized
+
+
+def _authorized_fal_binding(model: str):
+    from agent.image_gen_verification import (
+        ImageGenRequestBinding,
+        authorize_image_gen_request_binding,
+        image_gen_runtime_identity,
+    )
+
+    return authorize_image_gen_request_binding(
+        ImageGenRequestBinding(
+            provider="fal",
+            model=model,
+            api_key="pinned-fal-secret",
+            runtime_identity=image_gen_runtime_identity(
+                "fal",
+                {"provider": "fal", "model": model},
+            ),
+        ),
+        authorization_fingerprint="fal-tool-test-fingerprint",
+        authorization_generation="fal-tool-test-generation",
+    )
+
+
+class TestFalPinnedRequestBinding:
+    """Pinned FAL calls must never fall back to mutable config or env."""
+
+    def test_pinned_direct_request_uses_exact_key_and_reauths_each_io_seam(
+        self,
+        image_tool,
+        monkeypatch,
+        tmp_path,
+    ):
+        model = "fal-ai/z-image/turbo"
+        events = []
+
+        class Handler:
+            @staticmethod
+            def get():
+                events.append("get")
+                return {
+                    "images": [
+                        {
+                            "url": (
+                                "https://cdn.example.test/generated.png"
+                                "?signature=private"
+                            )
+                        }
+                    ]
+                }
+
+        class PinnedClient:
+            def submit(self, submitted_model, *, arguments, headers):
+                events.append(
+                    ("submit", submitted_model, arguments["prompt"])
+                )
+                assert headers["x-idempotency-key"]
+                return Handler()
+
+        class FalClientModule:
+            @staticmethod
+            def SyncClient(*, key):
+                events.append(("client", key))
+                return PinnedClient()
+
+        monkeypatch.setattr(image_tool, "fal_client", FalClientModule())
+        monkeypatch.setattr(
+            image_tool,
+            "_resolve_fal_model",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("pinned request read live model config")
+            ),
+        )
+        monkeypatch.setattr(
+            image_tool,
+            "fal_key_is_configured",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("pinned request read ambient FAL_KEY")
+            ),
+        )
+        monkeypatch.setattr(
+            image_tool,
+            "_resolve_managed_fal_gateway",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("pinned request selected live gateway")
+            ),
+        )
+        cached = tmp_path / "pinned-fal.png"
+
+        def save(url, **_kwargs):
+            events.append(("save", url))
+            return cached
+
+        monkeypatch.setattr(image_tool, "save_url_image", save)
+
+        def guard():
+            events.append("guard")
+
+        result = json.loads(
+            image_tool.image_generate_tool(
+                "a pinned FAL image",
+                _runtime_binding=_authorized_fal_binding(model),
+                _reauth_guard=guard,
+            )
+        )
+
+        assert result == {"success": True, "image": str(cached)}
+        assert events == [
+            ("client", "pinned-fal-secret"),
+            "guard",
+            ("submit", model, "a pinned FAL image"),
+            "guard",
+            "get",
+            "guard",
+            (
+                "save",
+                "https://cdn.example.test/generated.png?signature=private",
+            ),
+        ]
+
+    def test_stale_guard_blocks_submit_and_cache(
+        self,
+        image_tool,
+        monkeypatch,
+    ):
+        from agent.image_gen_verification import (
+            ImageGenRequestAuthorizationError,
+        )
+
+        model = "fal-ai/z-image/turbo"
+        submit_calls = []
+        save_calls = []
+
+        class PinnedClient:
+            def submit(self, *_args, **_kwargs):
+                submit_calls.append(True)
+                raise AssertionError("stale request reached FAL")
+
+        class FalClientModule:
+            @staticmethod
+            def SyncClient(*, key):
+                assert key == "pinned-fal-secret"
+                return PinnedClient()
+
+        monkeypatch.setattr(image_tool, "fal_client", FalClientModule())
+        monkeypatch.setattr(
+            image_tool,
+            "save_url_image",
+            lambda *_args, **_kwargs: save_calls.append(True),
+        )
+
+        def stale_guard():
+            raise ImageGenRequestAuthorizationError(
+                "capability_caller_stale"
+            )
+
+        with pytest.raises(ImageGenRequestAuthorizationError) as exc_info:
+            image_tool.image_generate_tool(
+                "must not reach FAL",
+                _runtime_binding=_authorized_fal_binding(model),
+                _reauth_guard=stale_guard,
+            )
+
+        assert exc_info.value.error_code == "capability_caller_stale"
+        assert submit_calls == []
+        assert save_calls == []
+
+    def test_upscale_path_reauths_submit_get_and_download(
+        self,
+        image_tool,
+        monkeypatch,
+        tmp_path,
+    ):
+        model = "fal-ai/flux-2-pro"
+        events = []
+
+        class Handler:
+            def __init__(self, submitted_model):
+                self.submitted_model = submitted_model
+
+            def get(self):
+                events.append(("get", self.submitted_model))
+                if self.submitted_model == image_tool.UPSCALER_MODEL:
+                    return {
+                        "image": {
+                            "url": "https://cdn.example.test/upscaled.png"
+                        }
+                    }
+                return {
+                    "images": [
+                        {"url": "https://cdn.example.test/original.png"}
+                    ]
+                }
+
+        class PinnedClient:
+            def submit(self, submitted_model, **_kwargs):
+                events.append(("submit", submitted_model))
+                return Handler(submitted_model)
+
+        class FalClientModule:
+            @staticmethod
+            def SyncClient(*, key):
+                assert key == "pinned-fal-secret"
+                return PinnedClient()
+
+        monkeypatch.setattr(image_tool, "fal_client", FalClientModule())
+        cached = tmp_path / "upscaled.png"
+        monkeypatch.setattr(
+            image_tool,
+            "save_url_image",
+            lambda url, **_kwargs: (
+                events.append(("save", url)) or cached
+            ),
+        )
+
+        def guard():
+            events.append("guard")
+
+        result = json.loads(
+            image_tool.image_generate_tool(
+                "upscale safely",
+                _runtime_binding=_authorized_fal_binding(model),
+                _reauth_guard=guard,
+            )
+        )
+
+        assert result["success"] is True
+        assert events == [
+            "guard",
+            ("submit", model),
+            "guard",
+            ("get", model),
+            "guard",
+            ("submit", image_tool.UPSCALER_MODEL),
+            "guard",
+            ("get", image_tool.UPSCALER_MODEL),
+            "guard",
+            ("save", "https://cdn.example.test/upscaled.png"),
+        ]

@@ -12,7 +12,16 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.main import cmd_update
+
+
+@pytest.fixture(autouse=True)
+def _source_checkout_during_mocked_update_flow():
+    """Keep subprocess mocks focused on update commands, not install detection."""
+    with patch("hermes_cli.config._is_git_source_checkout", return_value=True):
+        yield
 
 
 def _make_run_side_effect(
@@ -134,4 +143,3 @@ class TestUpdateYesConfigMigration:
 
 class TestUpdateYesStashRestore:
     """--yes auto-restores the pre-update autostash without prompting."""
-

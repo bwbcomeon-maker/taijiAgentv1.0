@@ -360,7 +360,14 @@ class TestCaptureResponse:
             def focus_app(self, app, raise_window=False): ...
 
         cu_tool.reset_backend_for_tests()
-        with patch.object(cu_tool, "_get_backend", return_value=FakeBackend()):
+        with (
+            patch.object(cu_tool, "_get_backend", return_value=FakeBackend()),
+            patch.object(
+                cu_tool,
+                "_should_route_through_aux_vision",
+                return_value=False,
+            ),
+        ):
             out = cu_tool.handle_computer_use({"action": "capture", "mode": "vision"})
 
         assert isinstance(out, dict)
@@ -398,7 +405,14 @@ class TestCaptureResponse:
             def focus_app(self, app, raise_window=False): ...
 
         cu_tool.reset_backend_for_tests()
-        with patch.object(cu_tool, "_get_backend", return_value=FakeBackend()):
+        with (
+            patch.object(cu_tool, "_get_backend", return_value=FakeBackend()),
+            patch.object(
+                cu_tool,
+                "_should_route_through_aux_vision",
+                return_value=False,
+            ),
+        ):
             out = cu_tool.handle_computer_use({"action": "capture", "mode": "som"})
         assert isinstance(out, dict)
         text_part = next(p for p in out["content"] if p.get("type") == "text")
@@ -582,7 +596,14 @@ class TestCaptureResponse:
             def focus_app(self, app, raise_window=False): ...
 
         cu_tool.reset_backend_for_tests()
-        with patch.object(cu_tool, "_get_backend", return_value=FakeBackend()):
+        with (
+            patch.object(cu_tool, "_get_backend", return_value=FakeBackend()),
+            patch.object(
+                cu_tool,
+                "_should_route_through_aux_vision",
+                return_value=False,
+            ),
+        ):
             out = cu_tool.handle_computer_use({"action": "capture", "mode": "som"})
 
         assert isinstance(out, dict) and out["_multimodal"] is True

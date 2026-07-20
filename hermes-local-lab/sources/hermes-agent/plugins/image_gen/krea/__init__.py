@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -509,13 +510,21 @@ class KreaImageGenProvider(ImageGenProvider):
         # what we do for xAI / OpenAI URL responses (#26942).
         try:
             saved_path = save_url_image(image_url, prefix=f"krea_{model_id}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            diagnostic_id = uuid.uuid4().hex
             logger.warning(
-                "Krea image URL %s could not be cached (%s); falling back to bare URL.",
-                image_url,
-                exc,
+                "Krea generated image cache failed "
+                "diagnostic_id=%s error_code=image_result_io_failed",
+                diagnostic_id,
             )
-            image_ref = image_url
+            return error_response(
+                error="Generated image could not be persisted.",
+                error_type="image_result_io_failed",
+                provider="krea",
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         else:
             image_ref = str(saved_path)
 

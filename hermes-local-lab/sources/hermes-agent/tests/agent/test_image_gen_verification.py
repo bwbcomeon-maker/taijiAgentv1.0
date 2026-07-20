@@ -416,6 +416,11 @@ def test_dashscope_fingerprint_tracks_canonical_runtime_endpoint_env_drift(
                 "minimax_images",
                 "https://api.minimax.io/v1/image_generation",
             ),
+            (
+                "fal",
+                "fal_queue_sync_client",
+                "https://queue.fal.run",
+            ),
         ):
             runtime_identity = resolver(
                 builtin_provider,
@@ -429,7 +434,7 @@ def test_dashscope_fingerprint_tracks_canonical_runtime_endpoint_env_drift(
                 violations.append(
                     f"{builtin_provider} canonical endpoint is missing"
                 )
-        for blocked_external_provider in ("xai", "fal"):
+        for blocked_external_provider in ("xai",):
             runtime_identity = resolver(
                 blocked_external_provider,
                 {"provider": blocked_external_provider},
@@ -1336,6 +1341,58 @@ def test_custom_legacy_secret_prefers_exact_config_env_over_process_env(
 
     resolved = image_gen_secret_value(
         "custom:router",
+        "",
+        config_b,
+        config_path=path_b,
+    )
+
+    assert resolved == "profile-b-secret"
+
+
+def test_fal_legacy_secret_prefers_exact_config_env_over_process_env(
+    monkeypatch,
+    tmp_path,
+):
+    """A pinned FAL binding must not inherit another profile's ambient key."""
+    from agent.image_gen_verification import image_gen_secret_value
+
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    profile_a.mkdir()
+    profile_b.mkdir()
+    path_a = profile_a / "config.yaml"
+    path_b = profile_b / "config.yaml"
+    config_b = {
+        "image_gen": {
+            "provider": "fal",
+            "model": "fal-ai/flux-2/klein/9b",
+        }
+    }
+    path_a.write_text(
+        json.dumps(
+            {
+                "image_gen": {
+                    "provider": "fal",
+                    "model": "fal-ai/flux-2/klein/9b",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path_b.write_text(json.dumps(config_b), encoding="utf-8")
+    (profile_a / ".env").write_text(
+        "FAL_KEY=profile-a-secret\n",
+        encoding="utf-8",
+    )
+    (profile_b / ".env").write_text(
+        "FAL_KEY=profile-b-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(path_a))
+    monkeypatch.setenv("FAL_KEY", "profile-a-secret")
+
+    resolved = image_gen_secret_value(
+        "fal",
         "",
         config_b,
         config_path=path_b,

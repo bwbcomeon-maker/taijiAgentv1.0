@@ -216,19 +216,26 @@ class TestServerSideInvariantPreserved:
     pure frontend bug, but pin the server-side wiring so a refactor of
     ``set_provider_key`` cannot silently regress it."""
 
-    def test_set_provider_key_invalidates_cache(self):
-        src = (REPO / "api" / "providers.py").read_text(encoding="utf-8")
-        # set_provider_key is the canonical write path — both add and remove
-        # flow through it (remove_provider_key calls set_provider_key(pid, None)).
-        m = re.search(
-            r"def set_provider_key\([^)]*\).*?(?=\ndef |\Z)",
-            src,
-            re.DOTALL,
+    def test_set_provider_key_invalidates_cache(self, monkeypatch, tmp_path):
+        import api.config as config
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(providers, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "")
+        invalidations = []
+        monkeypatch.setattr(
+            providers,
+            "invalidate_models_cache",
+            lambda: invalidations.append("invalidated"),
         )
-        assert m, "set_provider_key not found in api/providers.py"
-        body = m.group(0)
-        assert "invalidate_models_cache()" in body, (
-            "set_provider_key must call invalidate_models_cache() so the "
-            "server-side TTL cache is flushed on every add/remove. Without "
-            "this, even a perfectly-cached frontend would receive stale data."
+
+        added = providers.set_provider_key("openai", "sk-test-key-123")
+        removed = providers.set_provider_key("openai", None)
+
+        assert added["ok"] is True
+        assert removed["ok"] is True
+        assert invalidations == ["invalidated", "invalidated"], (
+            "Both the public add and remove paths must flush the model cache."
         )

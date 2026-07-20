@@ -39,7 +39,10 @@ def test_stream_start_refreshes_waiting_status_after_stream_id_arrives():
     active_idx = MESSAGES_JS.find("S.activeStreamId = streamId;")
     assert active_idx != -1
     refresh_idx = MESSAGES_JS.find("appendThinking('',{pending:true})", active_idx)
-    attach_idx = MESSAGES_JS.find("attachLiveStream(activeSid, streamId, uploadedNames);", active_idx)
+    attach_idx = MESSAGES_JS.find(
+        "attachLiveStream(activeSid, streamId, uploaded, {retryText:text});",
+        active_idx,
+    )
     assert refresh_idx != -1
     assert attach_idx != -1
     assert refresh_idx < attach_idx

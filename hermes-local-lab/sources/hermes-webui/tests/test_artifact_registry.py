@@ -1206,6 +1206,7 @@ def _run_legacy_image_turn(
     result_success=True,
     cancel_after_tool=False,
     failure_mode=None,
+    profile_home=None,
 ):
     import api.config as config
     import api.models as models
@@ -1224,8 +1225,18 @@ def _run_legacy_image_turn(
     monkeypatch.setattr(config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / "web", raising=False)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
-    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
-    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: tmp_path)
+    resolved_profile_home = Path(profile_home or tmp_path)
+    monkeypatch.setattr(
+        profiles,
+        "get_active_hermes_home",
+        lambda: resolved_profile_home,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda _profile: resolved_profile_home,
+    )
     monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
     monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(tmp_path))
     config.STREAMS.clear()
@@ -1240,7 +1251,7 @@ def _run_legacy_image_turn(
     )
     stream_id = f"stream-{sid}"
     turn_id = f"turn-{sid}"
-    source = tmp_path / "cache" / "images" / "generated.png"
+    source = resolved_profile_home / "cache" / "images" / "generated.png"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(PNG_1X1)
     tool_result = json.dumps({
@@ -1251,6 +1262,7 @@ def _run_legacy_image_turn(
         session_id=sid,
         workspace=str(tmp_path),
         model="test-model",
+        profile="alice" if profile_home is not None else None,
         active_stream_id=stream_id,
         pending_user_message="generate an image",
         pending_started_at=1.0,
@@ -1442,6 +1454,35 @@ def test_legacy_streaming_promotes_image_callback_without_media(
 
 
 @pytest.mark.requires_agent_modules
+def test_legacy_streaming_promotes_image_from_named_profile_cache(
+    monkeypatch, tmp_path
+):
+    profile_home = tmp_path / "profiles" / "alice"
+
+    saved, artifact_root, _events = _run_legacy_image_turn(
+        monkeypatch,
+        tmp_path,
+        profile_home=profile_home,
+    )
+
+    assistant = next(
+        message for message in reversed(saved.messages)
+        if message.get("role") == "assistant"
+    )
+    assert len(assistant["artifacts"]) == 1
+    artifact_id = assistant["artifacts"][0]["artifact_id"]
+
+    from api.artifacts import ArtifactRegistry
+
+    assert (
+        ArtifactRegistry(artifact_root)
+        .authorize(saved.session_id, artifact_id)
+        .read_bytes()
+        == PNG_1X1
+    )
+
+
+@pytest.mark.requires_agent_modules
 @pytest.mark.parametrize(
     ("result_success", "cancel_after_tool"),
     [(False, False), (True, True)],
@@ -1475,14 +1516,13 @@ def test_legacy_artifact_commit_and_session_save_have_safe_failure_order(
     cached = models.SESSIONS.get(saved.session_id)
     assert all(not message.get("artifacts") for message in saved.messages)
     assert cached is None or all(not message.get("artifacts") for message in cached.messages)
-    manifest = json.loads(
-        (artifact_root / saved.session_id / "manifest.json").read_text("utf-8")
+    manifest_path = artifact_root / saved.session_id / "manifest.json"
+    manifest = (
+        json.loads(manifest_path.read_text("utf-8"))
+        if manifest_path.exists()
+        else {"artifacts": []}
     )
-    if failure_mode == "commit":
-        assert manifest["artifacts"] == []
-    else:
-        assert len(manifest["artifacts"]) == 1
-        assert manifest["artifacts"][0]["commit_state"] == "committed"
+    assert manifest["artifacts"] == []
 
 
 @pytest.mark.parametrize("operation", ["clear", "delete"])

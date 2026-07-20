@@ -47,11 +47,11 @@ class TestCopyTextFunction:
         src = _src("ui.js")
         assert "function _fallbackCopy" in src, \
             "Must have a separate _fallbackCopy function"
-        # Clipboard API call must .catch() to fallback
-        m = re.search(r"navigator\.clipboard\.writeText\(text\)", src)
-        assert m, "Must call clipboard API"
-        after = src[m.start():m.start() + 300]
-        assert "_fallbackCopy" in after, \
+        start = src.index("function _copyText(text)")
+        end = src.index("function _fallbackCopy(text)", start)
+        copy_fn = src[start:end]
+        assert "navigator.clipboard.writeText(text)" in copy_fn, "Must call clipboard API"
+        assert ".catch(" in copy_fn and "_fallbackCopy(text)" in copy_fn, \
             "clipboard.writeText must .catch() → _fallbackCopy"
 
     def test_fallbackCopy_uses_execCommand(self):

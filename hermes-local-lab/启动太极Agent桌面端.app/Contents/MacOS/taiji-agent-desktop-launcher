@@ -10,6 +10,8 @@ APP_DIR="$REPO_DIR/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 LOG_DIR="$HOME/.local/state/taiji-agent/logs"
 LOG_FILE="$LOG_DIR/taiji-desktop-launcher.log"
+SOURCE_GATE="$REPO_DIR/scripts/check-clean-worktree.sh"
+TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"
 
 mkdir -p "$LOG_DIR"
 exec >>"$LOG_FILE" 2>&1
@@ -20,6 +22,14 @@ show_error() {
   escaped="$(printf '%s' "$message" | sed 's/\\/\\\\/g; s/"/\\"/g')"
   /usr/bin/osascript -e "display dialog \"$escaped\" with title \"太极 Agent 启动失败\" buttons {\"好\"} default button \"好\"" >/dev/null 2>&1 || true
 }
+
+if ! "$SOURCE_GATE" \
+  --mode "$TAIJI_SOURCE_MODE" \
+  --repo-root "$REPO_DIR" \
+  --source-root "$REPO_DIR"; then
+  show_error "源码状态校验未通过。正式启动仅允许干净的 main；开发调试请显式设置 TAIJI_SOURCE_MODE=development。"
+  exit 1
+fi
 
 echo "========================================"
 echo "太极 Agent 桌面端启动器"
@@ -49,6 +59,15 @@ if [ ! -x "$ELECTRON_BIN" ]; then
 fi
 
 TAIJI_SOURCE_ROOT="$REPO_DIR"
+SOURCE_INSTANCE_ID="$(
+  printf '%s' "$TAIJI_SOURCE_ROOT" \
+    | /usr/bin/shasum -a 256 \
+    | /usr/bin/awk '{print substr($1, 1, 16)}'
+)"
+if [ -z "${TAIJI_DESKTOP_USER_DATA_DIR:-}" ]; then
+  TAIJI_DESKTOP_USER_DATA_DIR="$HOME/.local/share/taiji-agent/source-instances/$SOURCE_INSTANCE_ID/electron-user-data"
+fi
+mkdir -p "$TAIJI_DESKTOP_USER_DATA_DIR"
 TAIJI_SOURCE_COMMIT="unknown"
 TAIJI_SOURCE_DIRTY="unknown"
 if [ -x /usr/bin/git ] && /usr/bin/git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -65,12 +84,15 @@ export TAIJI_AGENT_ROOT="$LAB_DIR"
 export TAIJI_SOURCE_ROOT
 export TAIJI_SOURCE_COMMIT
 export TAIJI_SOURCE_DIRTY
+export TAIJI_DESKTOP_USER_DATA_DIR
 
 echo "Electron: $ELECTRON_BIN"
 echo "Root: $TAIJI_SOURCE_ROOT"
 echo "Commit: $TAIJI_SOURCE_COMMIT"
 echo "Dirty: $TAIJI_SOURCE_DIRTY"
-RUNNER="$LOG_DIR/taiji-desktop-electron-runner.sh"
+echo "Instance: $SOURCE_INSTANCE_ID"
+echo "Electron data: $TAIJI_DESKTOP_USER_DATA_DIR"
+RUNNER="$LOG_DIR/taiji-desktop-electron-runner-$SOURCE_INSTANCE_ID.sh"
 cat >"$RUNNER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -86,6 +108,7 @@ export TAIJI_AGENT_ROOT="$LAB_DIR"
 export TAIJI_SOURCE_ROOT="$TAIJI_SOURCE_ROOT"
 export TAIJI_SOURCE_COMMIT="$TAIJI_SOURCE_COMMIT"
 export TAIJI_SOURCE_DIRTY="$TAIJI_SOURCE_DIRTY"
+export TAIJI_DESKTOP_USER_DATA_DIR="$TAIJI_DESKTOP_USER_DATA_DIR"
 cd "$APP_DIR"
 exec "$ELECTRON_BIN" "$APP_DIR" >>"$LOG_FILE" 2>&1
 EOF

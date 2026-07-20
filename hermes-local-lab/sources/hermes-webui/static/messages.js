@@ -3357,7 +3357,7 @@ function startApprovalPolling(sid) {
       if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
       else {
         _clearApprovalPendingForSession(sid);
-        _hideApprovalCardIfOwner(sid, true);
+        _hideApprovalCardIfOwner(sid);
         if (!S.busy) stopApprovalPollingForSession(sid);
       }
     });
@@ -3367,7 +3367,7 @@ function startApprovalPolling(sid) {
       if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
       else {
         _clearApprovalPendingForSession(sid);
-        _hideApprovalCardIfOwner(sid, true);
+        _hideApprovalCardIfOwner(sid);
         if (!S.busy) stopApprovalPollingForSession(sid);
       }
     });
@@ -3406,7 +3406,7 @@ async function refreshApprovalPendingForSession(sid) {
       if (!_approvalPollingSessionId) startApprovalPolling(sid);
     } else {
       _clearApprovalPendingForSession(sid);
-      _hideApprovalCardIfOwner(sid, true);
+      _hideApprovalCardIfOwner(sid);
     }
   } catch(_e) {
     // Loading a conversation should not fail just because the approval check is unavailable.
@@ -3429,7 +3429,7 @@ function _startApprovalFallbackPoll(sid) {
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else {
         _clearApprovalPendingForSession(sid);
-        _hideApprovalCardIfOwner(sid, true);
+        _hideApprovalCardIfOwner(sid);
         if (!S.busy) stopApprovalPollingForSession(sid);
       }
     } catch(e) { /* ignore poll errors */ }

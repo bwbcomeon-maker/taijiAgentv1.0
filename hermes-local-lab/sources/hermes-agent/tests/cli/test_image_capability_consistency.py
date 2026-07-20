@@ -162,7 +162,7 @@ def test_native_route_uses_same_combined_generation(monkeypatch):
     assert decision.generation.cache_identity == generation.cache_identity
 
 
-def test_explicit_native_route_preserves_user_override_with_stable_generation(
+def test_known_text_only_main_cannot_force_native_with_stale_override(
     monkeypatch,
 ):
     generation = _generation(
@@ -195,11 +195,74 @@ def test_explicit_native_route_preserves_user_override_with_stable_generation(
         generation=generation,
     )
 
+    assert decision.mode == "blocked"
+    assert decision.status == "configured_unverified"
+    assert decision.reason_code == "verification_required"
+    assert decision.route == "blocked"
+    assert decision.generation.cache_identity == generation.cache_identity
+
+
+def test_disabled_auxiliary_does_not_block_native_main_route(
+    monkeypatch,
+):
+    generation = _generation()
+    _install_runtime(monkeypatch, generation=generation)
+    monkeypatch.setattr(
+        image_routing,
+        "_lookup_supports_vision",
+        lambda *_args, **_kwargs: True,
+    )
+
+    decision = image_runtime.resolve_image_input_route(
+        "vision-provider",
+        "vision-model",
+        {
+            "agent": {"image_input_mode": "native"},
+            "auxiliary": {
+                "vision": {
+                    "enabled": False,
+                    "provider": "vision-provider",
+                    "model": "vision-model",
+                }
+            },
+        },
+        generation=generation,
+    )
+
     assert decision.mode == "native"
     assert decision.status == "verified"
-    assert decision.reason_code == "explicit_native_mode"
+    assert decision.reason_code == "main_model_supports_vision"
     assert decision.route == "main_model"
-    assert decision.generation.cache_identity == generation.cache_identity
+
+
+def test_disabled_auxiliary_blocks_known_text_only_main_route(monkeypatch):
+    generation = _generation()
+    _install_runtime(monkeypatch, generation=generation)
+    monkeypatch.setattr(
+        image_routing,
+        "_lookup_supports_vision",
+        lambda *_args, **_kwargs: False,
+    )
+
+    decision = image_runtime.resolve_image_input_route(
+        "text-provider",
+        "text-model",
+        {
+            "auxiliary": {
+                "vision": {
+                    "enabled": False,
+                    "provider": "vision-provider",
+                    "model": "vision-model",
+                }
+            },
+        },
+        generation=generation,
+    )
+
+    assert decision.mode == "blocked"
+    assert decision.status == "configured_unverified"
+    assert decision.reason_code == "vision_disabled"
+    assert decision.route == "blocked"
 
 
 def test_frozen_auxiliary_route_seals_exact_generation_binding(monkeypatch):

@@ -240,12 +240,17 @@ verify_source_archive_checksum() {
 }
 
 create_source_archive_from_git() {
-  local repo_root short archive_name
-  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
-  [ -d "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
+  local repo_root source_gate short archive_name
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+  source_gate="$repo_root/scripts/check-clean-worktree.sh"
+  [ -e "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
   require_cmd git
-  git -C "$repo_root" diff --quiet || fail "源码仓库存在未提交改动，请先提交后再生成发布源码包"
-  git -C "$repo_root" diff --cached --quiet || fail "源码仓库存在已暂存未提交改动，请先提交后再生成发布源码包"
+  [ -x "$source_gate" ] || fail "缺少正式源码门禁：$source_gate"
+  "$source_gate" \
+    --mode formal \
+    --repo-root "$repo_root" \
+    --source-root "$repo_root" \
+    || fail "发布源码包必须来自干净本地 main"
   short="$(git -C "$repo_root" rev-parse --short=8 HEAD)"
   archive_name="taiji-agentv1.0-kylin-build-src-$short.tar.gz"
   info "使用 git archive 生成源码包：$archive_name"

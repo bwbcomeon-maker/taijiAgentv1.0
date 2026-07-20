@@ -27,6 +27,7 @@ import pathlib
 
 JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
 CSS = pathlib.Path(__file__).parent.parent / "static" / "style.css"
+INDEX = pathlib.Path(__file__).parent.parent / "static" / "index.html"
 
 
 def _js() -> str:
@@ -35,6 +36,10 @@ def _js() -> str:
 
 def _css() -> str:
     return CSS.read_text(encoding="utf-8")
+
+
+def _index() -> str:
+    return INDEX.read_text(encoding="utf-8")
 
 
 def test_no_project_filter_sentinel_declared():
@@ -85,13 +90,17 @@ def test_unassigned_chip_only_shown_when_relevant():
     )
 
 
-def test_unassigned_chip_label_and_handler():
-    """The chip label should be 'Unassigned' and clicking it should set the sentinel."""
+def test_unassigned_chip_label_handler_and_keyboard_access():
+    """The localized chip must support click, Enter, and Space activation."""
     js = _js()
-    assert "noneChip.textContent='Unassigned';" in js, (
-        "The Unassigned chip must display the label 'Unassigned'"
-    )
-    assert "_activeProject=NO_PROJECT_FILTER" in js, (
+    assert "noneChip.textContent=t('session_project_filter_unassigned');" in js
+    assert "noneChip.title=t('session_project_filter_unassigned_title');" in js
+    assert "noneChip.setAttribute('role','button');" in js
+    assert "noneChip.tabIndex=0;" in js
+    assert "noneChip.setAttribute('aria-pressed'" in js
+    assert "event.key==='Enter'||event.key===' '" in js
+    assert "event.preventDefault();" in js
+    assert "const activateUnassignedProjects=()=>_activateProjectFilter(NO_PROJECT_FILTER,'unassigned');" in js, (
         "Clicking the Unassigned chip must set _activeProject to the sentinel"
     )
     # Active-state contract — the chip must reflect when it's the active filter.
@@ -118,12 +127,9 @@ def test_empty_state_message_for_unassigned_filter():
     """When the Unassigned filter is active and no sessions match, the empty-state
     message should be specific to that filter rather than generic project text."""
     js = _js()
-    assert "'No unassigned sessions.'" in js, (
-        "Empty-state copy must be specific when the Unassigned filter is active"
-    )
-    assert "_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.'" in js, (
-        "Empty-state copy must branch on the active filter"
-    )
+    assert "_activeProject===NO_PROJECT_FILTER" in js
+    assert "t('session_project_filter_empty_unassigned')" in js
+    assert "t('session_project_filter_empty_project')" in js
 
 
 def test_all_chip_clear_clears_unassigned_filter_too():
@@ -139,8 +145,48 @@ def test_all_chip_clear_clears_unassigned_filter_too():
     js = _js()
     # Find the "All" chip handler. It must clear _activeProject to null and
     # NOT preserve any unassigned-flag state.
-    assert "allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};" in js, (
+    assert "const activateAllProjects=()=>_activateProjectFilter(null,'all');" in js, (
         "The All chip handler must reset _activeProject to null. If a parallel "
         "_showNoneProject boolean is reintroduced, this test will catch it because "
         "the handler will need additional state to reset."
     )
+
+
+def test_every_project_filter_chip_supports_keyboard_and_exposes_selection():
+    """Real project chips must be as accessible as All and Unassigned."""
+    js = _js()
+    assert "chip.setAttribute('role','button');" in js
+    assert "chip.tabIndex=0;" in js
+    assert "chip.setAttribute('aria-pressed',p.project_id===_activeProject?'true':'false');" in js
+    assert "chip.dataset.projectFilterKey=p.project_id;" in js
+    assert "chip.onkeydown=(event)=>{" in js
+    assert "event.key==='Enter'||event.key===' '" in js
+    assert "event.target!==event.currentTarget||event.repeat" in js
+    assert "activateProject();" in js
+    assert "chip.click()" not in js
+
+
+def test_project_filter_rerender_restores_trigger_focus():
+    """Filtering rebuilds the sidebar, so focus must move to the replacement chip."""
+    js = _js()
+    assert "let _pendingProjectFilterFocus=null;" in js
+    assert "function _activateProjectFilter(projectId,focusKey){" in js
+    assert "_pendingProjectFilterFocus=focusKey;" in js
+    assert "function _restoreProjectFilterFocus(bar){" in js
+    assert "candidate.dataset.projectFilterKey===focusKey" in js
+    assert "target.focus({preventScroll:true});" in js
+    assert "_restoreProjectFilterFocus(bar);" in js
+
+
+def test_project_and_profile_cards_have_visible_keyboard_focus():
+    css = _index()
+    assert ".project-chip:focus-visible,.profile-card:focus-visible{" in css
+    assert "outline:2px solid var(--accent-bg-strong);" in css
+    assert "outline-offset:2px;" in css
+
+
+def test_project_filter_copy_is_localized_in_english_and_chinese():
+    i18n = (JS.parent / "i18n.js").read_text(encoding="utf-8")
+    assert "session_project_filter_unassigned: 'Unassigned'" in i18n
+    assert "session_project_filter_unassigned: '未分配'" in i18n
+    assert "session_project_filter_unassigned_title: '显示尚未分配到项目的会话'" in i18n

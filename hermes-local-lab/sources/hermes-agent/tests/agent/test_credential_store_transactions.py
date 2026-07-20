@@ -2777,6 +2777,7 @@ def test_group_shared_transaction_uses_exact_group_modes(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", "1")
@@ -2813,6 +2814,7 @@ def test_group_shared_transaction_skips_cross_owner_chmod_when_mode_matches(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     config_path.write_text("provider: shared\n", encoding="utf-8")
@@ -2901,6 +2903,7 @@ def test_group_shared_policy_is_frozen_for_nested_transactions(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     monkeypatch.delenv("HERMES_CREDENTIAL_GROUP_SHARED", raising=False)
@@ -2926,6 +2929,7 @@ def test_group_shared_manifest_rejects_world_readable_target_mode(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     transaction_id = "1" * 32
@@ -2978,6 +2982,7 @@ def test_group_shared_recovery_rejects_unsafe_pending_target_mode(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     config_path.write_text("provider: before\n", encoding="utf-8")
@@ -3033,6 +3038,7 @@ def test_group_shared_pending_artifacts_use_exact_mode_and_gid(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     config_path.write_text("provider: before\n", encoding="utf-8")
@@ -3088,6 +3094,7 @@ def test_group_shared_transaction_migrates_legacy_private_pending_intent(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     config_path.write_text("provider: before\n", encoding="utf-8")
@@ -3140,6 +3147,7 @@ def test_group_shared_legacy_migration_persists_marker_across_interruption(
 ):
     profile_root = tmp_path / "profile"
     profile_root.mkdir()
+    os.chown(profile_root, -1, os.getegid())
     profile_root.chmod(0o2770)
     config_path = profile_root / "config.yaml"
     config_path.write_text("provider: before\n", encoding="utf-8")

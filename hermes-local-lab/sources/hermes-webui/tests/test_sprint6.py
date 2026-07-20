@@ -53,6 +53,10 @@ def test_server_py_has_no_html_string():
     txt = (REPO_ROOT / "server.py").read_text()
     assert 'HTML = r"""' not in txt, "server.py still contains inline HTML string"
     assert "doctype html" not in txt.lower(), "server.py still contains raw HTML"
+    gate = (REPO_ROOT / "api/desktop_access.py").read_text()
+    assert '"desktop-launch-only.html"' in gate
+    assert 'parsed.path.startswith("/api/")' in gate
+    assert 'status=403' in gate
 
 # ── Phase D: remaining endpoint validation ──
 

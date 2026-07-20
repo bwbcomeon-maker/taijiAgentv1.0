@@ -9,6 +9,13 @@ LOG_DIR="$LAB_DIR/logs"
 AGENT_URL="http://127.0.0.1:18642/health"
 WEBUI_URL="http://127.0.0.1:18787"
 WEBUI_HEALTH_URL="$WEBUI_URL/health"
+SOURCE_GATE="$REPO_DIR/scripts/check-clean-worktree.sh"
+TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"
+
+"$SOURCE_GATE" \
+  --mode "$TAIJI_SOURCE_MODE" \
+  --repo-root "$REPO_DIR" \
+  --source-root "$REPO_DIR"
 
 TAIJI_SOURCE_ROOT="$REPO_DIR"
 TAIJI_SOURCE_COMMIT="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')"

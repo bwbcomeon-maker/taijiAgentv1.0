@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ROOT_DIR="${TAIJI_RELEASE_REPO_ROOT:-$SCRIPT_ROOT}"
+SOURCE_GATE="$SCRIPT_ROOT/scripts/check-clean-worktree.sh"
 EVIDENCE_VALIDATOR="$SCRIPT_ROOT/scripts/validate-taiji-release-evidence.py"
 EVIDENCE_ATTESTATION_PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
@@ -32,6 +33,13 @@ run_step() {
       printf '[FAIL] %s\n' "$name" >&2
     fi
   fi
+}
+
+check_canonical_source() {
+  "$SOURCE_GATE" \
+    --mode formal \
+    --repo-root "$ROOT_DIR" \
+    --source-root "$SCRIPT_ROOT"
 }
 
 run_root_tests() {
@@ -182,6 +190,14 @@ validate_release_evidence() {
 }
 
 main() {
+  info "check_canonical_source"
+  if ! check_canonical_source; then
+    fail "正式发布必须来自干净本地 main"
+    printf '\n太极 Agent 销售就绪门禁未通过：%s 项失败。\n' "$failures" >&2
+    exit 1
+  fi
+  ok "check_canonical_source"
+
   run_step "run_root_tests" run_root_tests
   run_step "run_desktop_evidence_tool_tests" run_desktop_evidence_tool_tests
   run_step "run_agent_tests" run_agent_tests

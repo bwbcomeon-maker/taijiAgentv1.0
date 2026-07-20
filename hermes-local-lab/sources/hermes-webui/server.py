@@ -1,5 +1,5 @@
 """Taiji Agent web service entrypoint."""
-import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -26,8 +26,9 @@ _bootstrap_agent_import_path()
 
 # ── Test-mode network isolation ─────────────────────────────────────────────
 # When test network blocking is enabled in the environment, refuse
-# outbound socket connections to anything that is not loopback / RFC1918 /
-# link-local / reserved-TLD. This catches accidental real outbound (forgotten
+# outbound socket connections to anything that is not loopback, an AF_UNIX
+# socket, or an inert RFC documentation/test destination. This catches
+# accidental real outbound (forgotten
 # mocks, leaked credentials triggering SDK init, new code paths bypassing an
 # existing mock) so the test suite stays hermetic and fast.
 #
@@ -44,60 +45,47 @@ if (
 ).strip() in ("1", "true", "yes"):
     _REAL_CREATE_CONN = socket.create_connection
     _REAL_SOCK_CONNECT = socket.socket.connect
+    _REAL_SOCK_CONNECT_EX = socket.socket.connect_ex
 
-    import re as _re
-
-    def _re_match_unique_local_ipv6(h):
-        """Match IPv6 fc00::/7 (canonical syntax). Tighter than startswith('fc')
-        so we don't mistakenly classify hostnames like 'food.example.com' as local."""
-        return bool(_re.match(r"^f[cd][0-9a-f]{0,2}:", h))
+    _TEST_ALLOWED_NETWORKS = tuple(
+        ipaddress.ip_network(cidr)
+        for cidr in (
+            "127.0.0.0/8",
+            "192.0.2.0/24",
+            "198.51.100.0/24",
+            "203.0.113.0/24",
+            "::1/128",
+            "2001:db8::/32",
+        )
+    )
 
     def _addr_is_local(host):
+        if isinstance(host, bytes):
+            return host.startswith((b"/", b"\0"))
         if not isinstance(host, str):
             return False
         h = host.strip().lower()
         if not h:
             return False
-        # IPv6 unique-local fc00::/7: require hex pair + colon to avoid
-        # matching hostnames like "food.example.com" or "fdsa.test".
-        if h in ("::1", "0:0:0:0:0:0:0:1") or h.startswith("fe80:") or _re_match_unique_local_ipv6(h):
+        if h.startswith(("/", "\0")):
             return True
         if h == "localhost" or h.endswith(".localhost"):
             return True
-        if h.endswith(".local") or h.endswith(".test") or h.endswith(".invalid"):
+        if h.endswith((".test", ".invalid", ".example")):
             return True
-        if h == "example.com" or h.endswith(".example.com"):
-            return True
-        if h == "example.net" or h.endswith(".example.net"):
-            return True
-        if h == "example.org" or h.endswith(".example.org"):
-            return True
-        if h.endswith(".example"):
-            return True
-        if h and h[0].isdigit() and h.count(".") == 3:
-            try:
-                o1, o2, o3, o4 = [int(p) for p in h.split(".")]
-            except ValueError:
-                return False
-            if o1 == 127:
-                return True
-            if o1 == 10:
-                return True
-            if o1 == 192 and o2 == 168:
-                return True
-            if o1 == 172 and 16 <= o2 <= 31:
-                return True
-            if o1 == 169 and o2 == 254:
-                return True
-            if o1 == 203 and o2 == 0 and o3 == 113:
-                return True
-        return False
+        try:
+            address = ipaddress.ip_address(h.split("%", 1)[0])
+        except ValueError:
+            return False
+        return any(address in network for network in _TEST_ALLOWED_NETWORKS)
+
+    def _address_host(address):
+        if isinstance(address, tuple):
+            return address[0] if address else ""
+        return address
 
     def _blocked_create_connection(address, *a, **kw):
-        try:
-            host = address[0]
-        except (TypeError, IndexError):
-            host = ""
+        host = _address_host(address)
         if _addr_is_local(host):
             return _REAL_CREATE_CONN(address, *a, **kw)
         raise OSError(
@@ -105,25 +93,52 @@ if (
         )
 
     def _blocked_socket_connect(self, address):
-        try:
-            host = address[0]
-        except (TypeError, IndexError):
-            host = ""
+        host = _address_host(address)
         if _addr_is_local(host):
             return _REAL_SOCK_CONNECT(self, address)
         raise OSError(
             f"taiji test network isolation (server.py): socket.connect to {address!r} blocked"
         )
 
-    socket.create_connection = _blocked_create_connection
-    socket.socket.connect = _blocked_socket_connect
+    def _blocked_socket_connect_ex(self, address):
+        host = _address_host(address)
+        if _addr_is_local(host):
+            return _REAL_SOCK_CONNECT_EX(self, address)
+        raise OSError(
+            f"taiji test network isolation (server.py): socket.connect_ex to {address!r} blocked"
+        )
+
+    for _guard in (
+        _blocked_create_connection,
+        _blocked_socket_connect,
+        _blocked_socket_connect_ex,
+    ):
+        _guard._taiji_test_network_block = True
+
+    # pytest installs the same fail-closed contract in its own process before
+    # product modules are imported. Preserve that outer guard instead of
+    # replacing it with a second wrapper whose identity/error contract differs.
+    # A standalone test-server subprocess has no marked guard, so it still gets
+    # the server-side protection below.
+    _existing_guards = (
+        socket.create_connection,
+        socket.socket.connect,
+        socket.socket.connect_ex,
+    )
+    if not all(
+        getattr(guard, "_taiji_test_network_block", False)
+        for guard in _existing_guards
+    ):
+        socket.create_connection = _blocked_create_connection
+        socket.socket.connect = _blocked_socket_connect
+        socket.socket.connect_ex = _blocked_socket_connect_ex
 
 
 try:
     import resource
 except ImportError:  # pragma: no cover - resource is Unix-only
     resource = None
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -157,60 +172,14 @@ def _bridge_taiji_environment() -> None:
 
 _bridge_taiji_environment()
 
-_CSP_CONNECT_BASE = (
-    "'self' http://127.0.0.1:* http://localhost:* "
-    "ws://127.0.0.1:* ws://localhost:*"
-)
-_CSP_EXTRA_CONNECT_RE = re.compile(
-    r"^(?:https?|wss?)://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
-)
-
-
-def _valid_csp_extra_connect_source(source: str) -> bool:
-    match = _CSP_EXTRA_CONNECT_RE.fullmatch(source)
-    if not match:
-        return False
-    port = match.group("port")
-    if not port or port == "*":
-        return True
-    try:
-        return 1 <= int(port) <= 65535
-    except ValueError:
-        return False
-
-
-def _csp_extra_connect_src() -> str:
-    raw = (
-        os.getenv("TAIJI_WEBUI_CSP_CONNECT_EXTRA")
-        or os.getenv(_legacy_key("HER", "MES_WEBUI_CSP_CONNECT_EXTRA"), "")
-    ).strip()
-    if not raw:
-        return ""
-    sources = raw.split()
-    if not sources or any(not _valid_csp_extra_connect_source(src) for src in sources):
-        logger.warning("Ignoring invalid TAIJI_WEBUI_CSP_CONNECT_EXTRA value")
-        return ""
-    return " " + " ".join(sources)
-
-
-def _build_csp_report_only_policy() -> str:
-    connect_src = _CSP_CONNECT_BASE + _csp_extra_connect_src()
-    return (
-        "default-src 'self'; "
-        "base-uri 'self'; "
-        "object-src 'none'; "
-        "frame-ancestors 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: blob:; "
-        "font-src 'self' data:; "
-        "media-src 'self' data: blob:; "
-        f"connect-src {connect_src}; "
-        "report-uri /api/csp-report; report-to csp-endpoint"
-    )
-
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
+from api.csp import build_csp_report_only_policy as _build_csp_report_only_policy
+from api.desktop_access import (
+    desktop_access_required as _desktop_access_required,
+    desktop_access_token as _desktop_access_token,
+    enforce_desktop_access as _enforce_desktop_access,
+)
 from api.helpers import j, get_profile_cookie, _CLIENT_DISCONNECT_ERRORS
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
@@ -218,107 +187,10 @@ from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 
 
-_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-
-
 def _truthy_env(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in _TRUE_ENV_VALUES
-
-
-def _desktop_access_required() -> bool:
-    return _truthy_env("TAIJI_DESKTOP_ONLY")
-
-
-def _desktop_access_token() -> str:
-    return os.getenv("TAIJI_DESKTOP_ACCESS_TOKEN", "").strip()
-
-
-def _cookie_value(cookie_header, name: str) -> str:
-    if not cookie_header:
-        return ""
-    for part in str(cookie_header).split(";"):
-        key, sep, value = part.strip().partition("=")
-        if sep and key == name:
-            return value.strip()
-    return ""
-
-
-def _request_has_desktop_access(handler, parsed) -> bool:
-    expected = _desktop_access_token()
-    if not expected:
-        return False
-
-    candidates = []
-    try:
-        candidates.extend(parse_qs(parsed.query).get("taiji_desktop_token", []))
-    except Exception:
-        pass
-    try:
-        header_token = handler.headers.get("X-Taiji-Desktop-Token")
-        if header_token:
-            candidates.append(header_token)
-    except Exception:
-        pass
-    try:
-        cookie_token = _cookie_value(handler.headers.get("Cookie"), "taiji_desktop_token")
-        if cookie_token:
-            candidates.append(cookie_token)
-    except Exception:
-        pass
-
-    for candidate in candidates:
-        if candidate and hmac.compare_digest(str(candidate), expected):
-            handler._taiji_desktop_access_granted = True
-            return True
-    return False
-
-
-def _desktop_access_exempt_path(path: str) -> bool:
-    return path == "/health"
-
-
-def _send_desktop_launch_only(handler, parsed) -> None:
-    message = "请从桌面应用启动太极 Agent"
-    if parsed.path.startswith("/api/"):
-        return j(handler, {"error": message}, status=403)
-
-    body = f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>太极 Agent</title>
-  <style>
-    :root {{ color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f9fc; color: #172033; }}
-    main {{ width: min(560px, calc(100vw - 48px)); text-align: center; }}
-    h1 {{ margin: 0 0 12px; font-size: 26px; font-weight: 650; letter-spacing: 0; }}
-    p {{ margin: 0; color: #4d5a6d; line-height: 1.7; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>{message}</h1>
-    <p>当前入口仅用于应用内部通信。请关闭此页面，从系统桌面入口打开并使用。</p>
-  </main>
-</body>
-</html>""".encode("utf-8")
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/html; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
-def _enforce_desktop_access(handler, parsed) -> bool:
-    if not _desktop_access_required():
-        return True
-    if _desktop_access_exempt_path(parsed.path):
-        return True
-    if _request_has_desktop_access(handler, parsed):
-        return True
-    _send_desktop_launch_only(handler, parsed)
-    return False
+    return os.getenv(name, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def _safe_request_path(raw_path) -> str:

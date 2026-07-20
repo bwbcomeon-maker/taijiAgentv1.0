@@ -111,6 +111,26 @@ def test_taiji_project_dropdown_exposes_crud_actions():
     assert ".taiji-project-panel-action.is-danger" in STYLE_CSS
 
 
+def test_taiji_project_dropdown_restores_keyboard_focus_after_dom_rebuild():
+    assert "function focusProjectFilterTrigger()" in HOME_JS
+    assert "function captureProjectFilterFocus(container)" in HOME_JS
+    assert "function restoreProjectFilterFocus(container,snapshot)" in HOME_JS
+    assert "const focusSnapshot=captureProjectFilterFocus(container);" in HOME_JS
+    assert "restoreProjectFilterFocus(container,focusSnapshot);" in HOME_JS
+    assert "closeProjectPanel(true,true)" in HOME_JS
+    select_start = HOME_JS.index("function selectProjectFromPanel(projectId)")
+    select_end = HOME_JS.index("function showProjectMenuForSession", select_start)
+    select_body = HOME_JS[select_start:select_end]
+    assert select_body.index("renderRecentSessions();") < select_body.index(
+        "focusProjectFilterTrigger();"
+    )
+    focus_style = _declarations(
+        _rule_body(STYLE_CSS, ".taiji-home-shell .taiji-project-panel-row:focus")
+    )
+    assert focus_style.get("outline", "").startswith("2px solid")
+    assert focus_style.get("outline-offset") == "2px"
+
+
 def test_taiji_project_filter_status_explains_active_scope_and_clear_action():
     status_start = HOME_JS.index("function activeFilterLabel(")
     status_body = HOME_JS[

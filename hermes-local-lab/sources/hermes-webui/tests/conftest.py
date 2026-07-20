@@ -14,14 +14,18 @@ PATH DISCOVERY:
     4. System python3 as a last resort
 """
 import json
+import ipaddress
 import os
 import pathlib
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import urllib.error
+import webbrowser
 import pytest
 
 # ── Repo root discovery ────────────────────────────────────────────────────
@@ -32,25 +36,49 @@ HOME       = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 
 # ── Test server config ────────────────────────────────────────────────────
-# Port and state dir auto-derive from the repo path when no env var is set,
-# giving every worktree its own isolated port (20000-29999) and state directory.
+# Port and state dir auto-derive from the repo path and pytest process when no
+# env var is set, giving concurrent runs in the same worktree separate server
+# resources. This is intentionally process-scoped: a second pytest invocation
+# must never kill or delete the first invocation's server/state.
 # Override with HERMES_WEBUI_TEST_PORT / HERMES_WEBUI_TEST_STATE_DIR to pin.
 
-def _auto_test_port(repo_root) -> int:
-    """Map repo path to a unique port in 20000-29999 (10k range = near-zero collisions).
-    Far from system port ranges and Linux ephemeral ports (32768+).
-    Override with HERMES_WEBUI_TEST_PORT to use a specific port."""
+def _auto_test_port(repo_root, process_id=None) -> int:
+    """Map repo path + pytest PID into the 20000-29999 test port range."""
     import hashlib
-    h = int(hashlib.md5(str(repo_root).encode()).hexdigest(), 16)
-    return 20000 + (h % 10000)
+    repo_offset = int(hashlib.md5(str(repo_root).encode()).hexdigest(), 16) % 10000
+    pid = os.getpid() if process_id is None else int(process_id)
+    return 20000 + ((repo_offset + pid) % 10000)
 
-def _auto_state_dir_name(repo_root) -> str:
+def _auto_state_dir_name(repo_root, process_id=None) -> str:
     import hashlib
     h = hashlib.md5(str(repo_root).encode()).hexdigest()[:8]
-    return f"webui-test-{h}"
+    pid = os.getpid() if process_id is None else int(process_id)
+    return f"webui-test-{h}-{pid}"
 
-TEST_PORT      = int(os.getenv('HERMES_WEBUI_TEST_PORT',
-                               str(_auto_test_port(REPO_ROOT))))
+
+def _port_is_available(port: int) -> bool:
+    """Return True only when a loopback listener can safely bind this port."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", int(port)))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def _select_auto_test_port(repo_root) -> int:
+    """Select a free process-scoped port without signalling its current owner."""
+    first = _auto_test_port(repo_root)
+    for offset in range(1000):
+        candidate = 20000 + ((first - 20000 + offset) % 10000)
+        if _port_is_available(candidate):
+            return candidate
+    raise RuntimeError("unable to find a free Hermes WebUI test port")
+
+_EXPLICIT_TEST_PORT = os.getenv('HERMES_WEBUI_TEST_PORT')
+TEST_PORT      = int(_EXPLICIT_TEST_PORT) if _EXPLICIT_TEST_PORT else _select_auto_test_port(REPO_ROOT)
 TEST_BASE      = f"http://127.0.0.1:{TEST_PORT}"
 TEST_STATE_DIR = pathlib.Path(os.getenv(
     'HERMES_WEBUI_TEST_STATE_DIR',
@@ -61,6 +89,11 @@ TEST_CUSTOMER_WORKSPACE_ROOT = (
     HOME
     / ".cache"
     / f"taiji-webui-customer-{_auto_state_dir_name(REPO_ROOT)}"
+)
+TEST_SERVER_LOG = TEST_STATE_DIR / "server-test.log"
+TEST_SERVER_FAILURE_LOG = (
+    pathlib.Path(tempfile.gettempdir())
+    / f"taiji-webui-test-server-{TEST_PORT}-{os.getpid()}.log"
 )
 
 # Publish at module level so api.config, _pytest_port.py, and any test module
@@ -79,6 +112,21 @@ os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # ~/.hermes/config.yaml.  Override it before any product modules are imported so
 # tests that read/write config.yaml stay inside the isolated test home.
 os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
+
+
+def _reject_external_browser(url, *_args, **_kwargs):
+    raise AssertionError(
+        "tests must not open the user's default browser; "
+        f"mock the browser call explicitly (attempted URL: {url!r})"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _block_external_browser(monkeypatch):
+    """Fail closed when a WebUI test leaks into the user's real browser."""
+    monkeypatch.setattr(webbrowser, "open", _reject_external_browser)
+    monkeypatch.setattr(webbrowser, "open_new", _reject_external_browser)
+    monkeypatch.setattr(webbrowser, "open_new_tab", _reject_external_browser)
 
 
 @pytest.fixture(autouse=True)
@@ -136,6 +184,92 @@ def _rederive_default_hermes_home():
             prof_mod._DEFAULT_HERMES_HOME = prof_mod._resolve_base_hermes_home()
         except Exception:
             pass
+
+
+def _clear_loaded_mapping(module, name, lock_name=None):
+    """Clear one already-imported in-process registry without importing product code."""
+    mapping = getattr(module, name, None)
+    if mapping is None or not callable(getattr(mapping, "clear", None)):
+        return
+    lock = getattr(module, lock_name, None) if lock_name else None
+    try:
+        if lock is None:
+            mapping.clear()
+        else:
+            with lock:
+                mapping.clear()
+    except Exception:
+        # Cleanup must not hide the test's real assertion.  A malformed fake
+        # registry will be replaced/restored by that test's own monkeypatch.
+        pass
+
+
+def _reset_loaded_runtime_state():
+    """Remove mutable runtime state that must never cross a pytest boundary.
+
+    WebUI unit tests exercise streaming and self-update code in the pytest
+    process.  Those production modules intentionally keep streams, active
+    runs, cached agents, and update summaries alive across requests.  In tests,
+    however, a failed assertion used to leave those registries populated.  A
+    later update test would then wait for a synthetic stream forever while
+    holding ``_apply_lock``, causing a cascade of unrelated failures.
+
+    Only modules already imported by a test are touched, so this fixture does
+    not make lightweight/static tests import the full runtime.
+    """
+    config_module = sys.modules.get("api.config")
+    if config_module is not None:
+        for mapping_name, lock_name in (
+            ("STREAMS", "STREAMS_LOCK"),
+            ("ACTIVE_RUNS", "ACTIVE_RUNS_LOCK"),
+            ("SESSION_AGENT_CACHE", "SESSION_AGENT_CACHE_LOCK"),
+            ("CANCEL_FLAGS", None),
+            ("AGENT_INSTANCES", None),
+            ("SESSION_AGENT_LOCKS", None),
+            ("STREAM_PARTIAL_TEXT", None),
+            ("STREAM_REASONING_TEXT", None),
+            ("STREAM_LIVE_TOOL_CALLS", None),
+        ):
+            _clear_loaded_mapping(config_module, mapping_name, lock_name)
+
+    updates_module = sys.modules.get("api.updates")
+    if updates_module is not None:
+        cache_lock = getattr(updates_module, "_cache_lock", None)
+        try:
+            if cache_lock is None:
+                _clear_loaded_mapping(updates_module, "_summary_cache")
+            else:
+                with cache_lock:
+                    summary_cache = getattr(updates_module, "_summary_cache", None)
+                    if callable(getattr(summary_cache, "clear", None)):
+                        summary_cache.clear()
+        except Exception:
+            pass
+        update_cache = getattr(updates_module, "_update_cache", None)
+        if isinstance(update_cache, dict):
+            update_cache.clear()
+            update_cache.update({
+                "webui": None,
+                "agent": None,
+                "checked_at": 0,
+                "include_agent": True,
+            })
+        if hasattr(updates_module, "_check_in_progress"):
+            updates_module._check_in_progress = False
+
+    hermes_config = sys.modules.get("hermes_cli.config")
+    if hermes_config is not None:
+        for cache_name in ("_LOAD_CONFIG_CACHE", "_RAW_CONFIG_CACHE"):
+            _clear_loaded_mapping(hermes_config, cache_name)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_in_process_runtime_state():
+    """Give every test a clean WebUI runtime-state boundary."""
+    _reset_loaded_runtime_state()
+    yield
+    _reset_loaded_runtime_state()
+
 
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'
@@ -274,86 +408,70 @@ os.execv = _pytest_session_safe_execv
 # regression like the one PR #1970 introduced where a new code path bypassed
 # an existing mock and tried to hit the real LM Studio host.
 #
-# This module-level monkey-patch wraps socket.create_connection so any
-# non-loopback / non-RFC1918 / non-link-local / non-TEST-NET destination
-# raises OSError("hermes test network isolation").  Tests that deliberately
+# This module-level monkey-patch wraps all socket connection primitives so any
+# non-loopback / non-documentation destination raises
+# OSError("hermes test network isolation"). Tests that deliberately
 # attempt outbound (only test_dns_resolution_failure today) opt back in
 # explicitly via the `allow_outbound_network` fixture below.
 #
 # Allowed destinations (silent pass-through):
 #   - 127.0.0.0/8     loopback
 #   - ::1             IPv6 loopback
-#   - 192.168.0.0/16  RFC1918 private
-#   - 10.0.0.0/8      RFC1918 private
-#   - 172.16.0.0/12   RFC1918 private (16-31)
-#   - 169.254.0.0/16  link-local (covers IMDS — already separately blocked
-#                     by AWS_EC2_METADATA_DISABLED, but allowed at the socket
-#                     layer because IMDS-using tests mock the response)
-#   - 203.0.113.0/24  RFC5737 TEST-NET-3 (used as documentation IPs in tests)
-#   - hostnames `localhost`, `*.local`, `*.test`, `*.example`, `*.example.com`
-#     `*.example.net`, `*.example.org`, `*.invalid` (RFC2606/6761 reserved)
+#   - AF_UNIX filesystem/abstract-namespace sockets
+#   - RFC documentation networks (TEST-NET-1/2/3 and 2001:db8::/32)
+#   - hostnames `localhost`, `*.localhost`, `*.test`, `*.example`,
+#     and `*.invalid`
 #
 # A test that opts in via the `allow_outbound_network` fixture sees the real
-# socket.create_connection.
+# socket primitives.
 import socket as _hermes_test_socket
 _REAL_CREATE_CONNECTION = _hermes_test_socket.create_connection
 _REAL_SOCKET_CONNECT = _hermes_test_socket.socket.connect
+_REAL_SOCKET_CONNECT_EX = _hermes_test_socket.socket.connect_ex
+
+_HERMES_ALLOWED_TEST_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",
+        "192.0.2.0/24",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "::1/128",
+        "2001:db8::/32",
+    )
+)
 
 
 def _hermes_addr_is_local(host: str) -> bool:
-    """Return True for loopback / RFC1918 / link-local / reserved-TLD hosts."""
+    """Return True only for loopback, Unix, or inert test destinations."""
+    if isinstance(host, bytes):
+        return host.startswith((b"/", b"\0"))
     if not isinstance(host, str):
         return False
     h = host.strip().lower()
     if not h:
         return False
-    # IPv6 loopback / link-local
-    # IPv6 unique-local: fc00::/7 — any address starting with fc?? or fd?? (?? = hex pair).
-    # Loose "startswith('fc')" / "startswith('fd')" would also match the hostnames
-    # "food.example.com" or "fdsa.test", so require the second char to be a hex
-    # digit followed by either a colon or another hex digit (canonical IPv6 syntax).
-    import re as _re
-    if h in ('::1', '0:0:0:0:0:0:0:1') or h.startswith('fe80:') or _re.match(r'^f[cd][0-9a-f]{0,2}:', h):
+    if h.startswith(("/", "\0")):
         return True
-    # Hostname allow-list (RFC2606/6761 reserved TLDs + localhost)
-    if h == 'localhost' or h.endswith('.localhost'):
+    if h == "localhost" or h.endswith(".localhost"):
         return True
-    if h.endswith('.local') or h.endswith('.test') or h.endswith('.invalid'):
+    if h.endswith((".test", ".invalid", ".example")):
         return True
-    if h == 'example.com' or h.endswith('.example.com'):
-        return True
-    if h == 'example.net' or h.endswith('.example.net'):
-        return True
-    if h == 'example.org' or h.endswith('.example.org'):
-        return True
-    if h.endswith('.example'):
-        return True
-    # IPv4 — parse octets if it looks like a dotted quad
-    if h[0].isdigit() and h.count('.') == 3:
-        try:
-            o1, o2, o3, o4 = [int(p) for p in h.split('.')]
-        except ValueError:
-            return False
-        if o1 == 127:                          # loopback
-            return True
-        if o1 == 10:                           # RFC1918 10.0.0.0/8
-            return True
-        if o1 == 192 and o2 == 168:            # RFC1918 192.168.0.0/16
-            return True
-        if o1 == 172 and 16 <= o2 <= 31:       # RFC1918 172.16.0.0/12
-            return True
-        if o1 == 169 and o2 == 254:            # link-local 169.254.0.0/16
-            return True
-        if o1 == 203 and o2 == 0 and o3 == 113:  # RFC5737 TEST-NET-3
-            return True
-    return False
+    try:
+        address = ipaddress.ip_address(h.split("%", 1)[0])
+    except ValueError:
+        return False
+    return any(address in network for network in _HERMES_ALLOWED_TEST_NETWORKS)
+
+
+def _hermes_address_host(address):
+    if isinstance(address, tuple):
+        return address[0] if address else ""
+    return address
 
 
 def _hermes_blocked_create_connection(address, *a, **kw):
-    try:
-        host = address[0]
-    except (TypeError, IndexError):
-        host = ""
+    host = _hermes_address_host(address)
     if _hermes_addr_is_local(host):
         return _REAL_CREATE_CONNECTION(address, *a, **kw)
     raise OSError(
@@ -364,10 +482,7 @@ def _hermes_blocked_create_connection(address, *a, **kw):
 
 
 def _hermes_blocked_socket_connect(self, address):
-    try:
-        host = address[0]
-    except (TypeError, IndexError):
-        host = ""
+    host = _hermes_address_host(address)
     if _hermes_addr_is_local(host):
         return _REAL_SOCKET_CONNECT(self, address)
     raise OSError(
@@ -375,15 +490,33 @@ def _hermes_blocked_socket_connect(self, address):
     )
 
 
+def _hermes_blocked_socket_connect_ex(self, address):
+    host = _hermes_address_host(address)
+    if _hermes_addr_is_local(host):
+        return _REAL_SOCKET_CONNECT_EX(self, address)
+    raise OSError(
+        f"hermes test network isolation: socket.connect_ex to {address!r} is blocked."
+    )
+
+
+for _guard in (
+    _hermes_blocked_create_connection,
+    _hermes_blocked_socket_connect,
+    _hermes_blocked_socket_connect_ex,
+):
+    _guard._taiji_test_network_block = True
+
+
 _hermes_test_socket.create_connection = _hermes_blocked_create_connection
 _hermes_test_socket.socket.connect = _hermes_blocked_socket_connect
+_hermes_test_socket.socket.connect_ex = _hermes_blocked_socket_connect_ex
 
 
 @pytest.fixture
 def allow_outbound_network(monkeypatch):
     """Opt-in to real outbound network for the duration of one test.
 
-    Swaps `socket.create_connection` and `socket.socket.connect` back to the
+    Swaps all three socket connection primitives back to the
     real (unwrapped) implementations for this test only, then monkeypatch
     teardown restores the wrapped versions. Direct swap is more reliable
     than a module-global toggle on CI runners where wrapper-closure
@@ -395,6 +528,7 @@ def allow_outbound_network(monkeypatch):
     """
     monkeypatch.setattr(_hermes_test_socket, "create_connection", _REAL_CREATE_CONNECTION)
     monkeypatch.setattr(_hermes_test_socket.socket, "connect", _REAL_SOCKET_CONNECT)
+    monkeypatch.setattr(_hermes_test_socket.socket, "connect_ex", _REAL_SOCKET_CONNECT_EX)
     yield
 
 
@@ -497,9 +631,11 @@ def _post(base, path, body=None):
             return {}
 
 
-def _wait_for_server(base, timeout=20):
+def _wait_for_server(base, timeout=20, proc=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
         try:
             with urllib.request.urlopen(base + "/health", timeout=2) as r:
                 if json.loads(r.read()).get("status") == "ok":
@@ -525,17 +661,14 @@ def test_server():
     Start an isolated test server on TEST_PORT with a clean state directory.
     Paths are discovered dynamically -- no hardcoded absolute path assumptions.
     """
-    # Kill any leftover process on the test port before starting.
-    # Stale servers from QA harness runs or prior test sessions cause
-    # conftest to think the server is already up, producing false failures.
-    try:
-        import subprocess as _sp
-        _sp.run(['fuser', '-k', f'{TEST_PORT}/tcp'],
-                capture_output=True, timeout=5)
-    except Exception:
-        pass
-    import time as _time
-    _time.sleep(0.5)  # brief pause to let the port release
+    # Never kill an existing port owner. A collision may be another full test
+    # run or a live development task, so fail closed with an actionable error.
+    if not _port_is_available(TEST_PORT):
+        pytest.fail(
+            f"Hermes WebUI test port {TEST_PORT} is already occupied; "
+            "refusing to signal or reuse the existing process. "
+            "Unset HERMES_WEBUI_TEST_PORT for automatic per-process isolation."
+        )
 
     # Clean slate
     if TEST_STATE_DIR.exists():
@@ -644,7 +777,7 @@ def test_server():
     if HERMES_AGENT:
         env["HERMES_WEBUI_AGENT_DIR"] = str(HERMES_AGENT)
 
-    server_log_path = TEST_STATE_DIR / "server-test.log"
+    server_log_path = TEST_SERVER_LOG
     server_log = server_log_path.open("w", encoding="utf-8")
     proc = subprocess.Popen(
         [VENV_PYTHON, str(SERVER_SCRIPT)],
@@ -654,7 +787,7 @@ def test_server():
         stderr=subprocess.STDOUT,
     )
 
-    if not _wait_for_server(TEST_BASE, timeout=20):
+    if not _wait_for_server(TEST_BASE, timeout=20, proc=proc):
         proc.kill()
         try:
             proc.wait(timeout=5)
@@ -675,12 +808,22 @@ def test_server():
     try:
         yield proc
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        unexpected_exit = proc.poll() is not None
+        if not unexpected_exit:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        server_log.flush()
         server_log.close()
+
+        if unexpected_exit and server_log_path.exists():
+            try:
+                shutil.copy2(server_log_path, TEST_SERVER_FAILURE_LOG)
+            except Exception:
+                pass
 
         try:
             shutil.rmtree(TEST_STATE_DIR)
@@ -690,6 +833,22 @@ def test_server():
             shutil.rmtree(TEST_CUSTOMER_WORKSPACE_ROOT)
         except Exception:
             pass
+
+
+@pytest.fixture(autouse=True)
+def _fail_fast_if_test_server_exits(test_server):
+    """Stop at the first unexpected server exit instead of cascading failures."""
+    if test_server.poll() is not None:
+        pytest.fail(
+            f"Test server exited with code {test_server.returncode} before test setup.\n"
+            f"--- server log tail ---\n{server_log_tail(TEST_SERVER_LOG)}"
+        )
+    yield
+    if test_server.poll() is not None:
+        pytest.fail(
+            f"Test server exited with code {test_server.returncode} during the test.\n"
+            f"--- server log tail ---\n{server_log_tail(TEST_SERVER_LOG)}"
+        )
 
 
 # ── Test base URL ─────────────────────────────────────────────────────────────

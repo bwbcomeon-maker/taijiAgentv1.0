@@ -1442,6 +1442,8 @@ class TestChatCompletionsEndpoint:
                         _json.dumps({
                             "success": True,
                             "image": str(image_path),
+                            "image_ref": "generated.png",
+                            "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
                             "provider": "test-provider",
                             "prompt": "secret prompt",
                         }),
@@ -3741,3 +3743,83 @@ class TestSessionKeyHeader:
             assert resp.status == 200
             data = await resp.json()
             assert data["features"]["session_key_header"] == "X-Hermes-Session-Key"
+
+
+# ---------------------------------------------------------------------------
+# X-Hermes-Profile header (fail-closed profile binding)
+# ---------------------------------------------------------------------------
+
+
+class TestProfileBindingHeader:
+    def test_matching_profile_is_accepted(self, auth_adapter):
+        request = MagicMock()
+        request.headers = {"X-Hermes-Profile": "alice"}
+
+        with patch(
+            "hermes_cli.profiles.get_active_profile_name",
+            return_value="alice",
+        ):
+            profile, error = auth_adapter._parse_profile_binding_header(request)
+
+        assert profile == "alice"
+        assert error is None
+
+    def test_mismatched_profile_is_rejected_before_agent_execution(
+        self, auth_adapter
+    ):
+        request = MagicMock()
+        request.headers = {"X-Hermes-Profile": "bob"}
+
+        with patch(
+            "hermes_cli.profiles.get_active_profile_name",
+            return_value="alice",
+        ):
+            profile, error = auth_adapter._parse_profile_binding_header(request)
+
+        assert profile is None
+        assert error is not None
+        assert error.status == 409
+        payload = json.loads(error.text)
+        assert payload["error"]["code"] == "profile_mismatch"
+
+    def test_invalid_profile_is_rejected(self, auth_adapter):
+        request = MagicMock()
+        request.headers = {"X-Hermes-Profile": "../../default"}
+
+        profile, error = auth_adapter._parse_profile_binding_header(request)
+
+        assert profile is None
+        assert error is not None
+        assert error.status == 400
+
+    @pytest.mark.asyncio
+    async def test_chat_mismatch_never_executes_agent(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as client:
+            with (
+                patch(
+                    "hermes_cli.profiles.get_active_profile_name",
+                    return_value="alice",
+                ),
+                patch.object(
+                    auth_adapter,
+                    "_run_agent",
+                    new_callable=AsyncMock,
+                ) as run_agent,
+            ):
+                response = await client.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "Authorization": "Bearer sk-secret",
+                        "X-Hermes-Profile": "bob",
+                    },
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                payload = await response.json()
+
+        assert response.status == 409
+        assert payload["error"]["code"] == "profile_mismatch"
+        run_agent.assert_not_called()

@@ -104,6 +104,11 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
             self.reasoning_config = None
             self.ephemeral_system_prompt = None
             self._last_error = None
+            from agent.image_runtime import capture_capability_runtime_generation
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
 
         def run_conversation(self, **kwargs):
             # Return full history + new reply (matches real agent behavior)
@@ -169,6 +174,7 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
                 stream_id=fake_stream_id,
             )
     finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
         for k, prev in _saved.items():
             if prev is _MISSING:
                 sys.modules.pop(k, None)

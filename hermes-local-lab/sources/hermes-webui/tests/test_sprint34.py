@@ -9,8 +9,8 @@ Covers:
   3. _provider_oauth_authenticated() returns False for unknown/API-key providers
   4. _status_from_runtime() marks copilot/openai-codex as provider_ready when
      credentials exist
-  5. _status_from_runtime() gives a helpful "hermes auth" note (not "API key")
-     for OAuth providers that have no credentials yet
+  5. _status_from_runtime() gives an actionable administrator-authentication
+     note (not "API Key") for OAuth providers that have no credentials yet
   6. API route /api/onboarding/status reflects OAuth-ready state
 """
 
@@ -182,21 +182,17 @@ class TestStatusFromRuntimeOAuth:
         assert result["provider_ready"] is False
         assert result["setup_state"] == "provider_incomplete"
 
-    def test_oauth_incomplete_note_mentions_hermes_auth(self, tmp_path):
-        """When OAuth provider is incomplete, note should mention hermes auth/model."""
+    def test_oauth_incomplete_note_mentions_admin_authentication(self, tmp_path):
+        """When OAuth is incomplete, the note should give an actionable auth path."""
         result = self._call("openai-codex", "codex-mini-latest", tmp_path)
         note = result["provider_note"]
-        assert "hermes auth" in note or "hermes model" in note, (
-            f"Expected 'hermes auth' or 'hermes model' in note, got: {note!r}"
-        )
+        assert "认证" in note and "重新加载" in note, note
 
     def test_oauth_incomplete_note_does_not_say_api_key(self, tmp_path):
-        """OAuth provider incomplete note must not say 'API key' — that's misleading."""
+        """OAuth provider incomplete note must not say API key — that's misleading."""
         result = self._call("copilot", "gpt-5.4", tmp_path)
         note = result["provider_note"]
-        assert "API key" not in note, (
-            f"Note misleadingly mentions 'API key' for OAuth provider: {note!r}"
-        )
+        assert "api key" not in note.casefold(), note
 
     def test_standard_provider_incomplete_note_still_says_api_key(self, tmp_path):
         """For a standard API-key provider (openrouter), note should still say API key."""
@@ -204,9 +200,7 @@ class TestStatusFromRuntimeOAuth:
         result = self._call("openrouter", "anthropic/claude-sonnet-4.6", tmp_path)
         assert result["provider_ready"] is False
         note = result["provider_note"]
-        assert "API key" in note, (
-            f"Expected 'API key' in note for openrouter, got: {note!r}"
-        )
+        assert "api key" in note.casefold(), note
 
 
 # ── 6. API endpoint reflects OAuth-ready state ───────────────────────────────

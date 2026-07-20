@@ -307,7 +307,9 @@ def test_every_ui_mutation_delegates_to_the_single_v2_runner():
 
 def test_cancel_requires_confirmation_and_keeps_stream_while_cancellation_is_pending():
     body = _function_body(UI_JS, "async function cancelExpertTeamRun", "function _expertTeamRunIdFromStageButton")
-    assert "window.confirm" in body
+    assert "showConfirmDialog" in body
+    assert "focusCancel:true" in body
+    assert "window.confirm" not in body
     assert "workflow_state==='cancelled'" in body
     assert "data.cancelled_stream" in body
     clear_index = body.index("S.activeStreamId=null")
@@ -315,6 +317,36 @@ def test_cancel_requires_confirmation_and_keeps_stream_while_cancellation_is_pen
     assert terminal_index < clear_index
     assert "workflow_state==='cancelling'" in body
     assert "停止请求已提交" in body
+
+
+def test_destructive_expert_team_actions_use_accessible_confirmation():
+    helper = _function_body(
+        ACTIONS_JS,
+        "async function requestExpertTeamConfirmation",
+        "function officeMutationKey",
+    )
+    assert "window.showConfirmDialog" in helper
+    assert "focusCancel:true" in helper
+    assert "return false" in helper
+
+    close = _function_body(
+        ACTIONS_JS,
+        "function closeExpertTeamOfficeDrawer",
+        "function handleExpertTeamOfficeDrawerKeydown",
+    )
+    revision = _function_body(
+        ACTIONS_JS,
+        "async function submitExpertTeamOfficeRevision",
+        "async function startExpertTeamOfficeAuthorizerHandoff",
+    )
+    presentation = _function_body(
+        ACTIONS_JS,
+        "async function handleExpertTeamPresentationAction",
+        "if(typeof window!=='undefined'){",
+    )
+    for body in (close, revision, presentation):
+        assert "requestExpertTeamConfirmation" in body
+        assert "danger:true" in body
 
 
 def test_stage_input_and_stage_review_mutations_carry_exact_subresource_identity():

@@ -18,6 +18,7 @@ const INSTALLED_WEBUI_ENTRIES = new Set([
 ]);
 const SESSION_RE = /^[0-9a-f]{32}$/;
 const CHALLENGE_RE = /^[0-9a-f]{64,128}$/;
+const DESKTOP_TOKEN_RE = /^[0-9a-f]{64}$/;
 const INCIDENT_RE = /^inc-[0-9a-f]{12,32}$/;
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
 const PUBLIC_VERSION_RE = /^(?:v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?|[0-9a-f]{7,40}(?:-dirty(?:\.[0-9a-f]{7,40})?)?)$/;
@@ -104,25 +105,71 @@ function buildProbeCode(challenge, sessionId) {
   return `TAIJI-ATTACHMENT-PROBE-${digest.slice(0, 32)}`;
 }
 
-function validateDesktopTarget(target) {
-  if (!target || target.type !== "page") throw new Error("CDP target is not an Electron page target");
-  if (typeof target.webSocketDebuggerUrl !== "string" || !target.webSocketDebuggerUrl.startsWith("ws://127.0.0.1:")) {
-    throw new Error("Electron page target has no loopback CDP websocket");
-  }
+function validateDesktopAppUrl(rawUrl) {
   let parsed;
   try {
-    parsed = new URL(String(target.url || ""));
+    parsed = new URL(String(rawUrl || ""));
   } catch (_) {
     throw new Error("Electron page target URL is invalid");
   }
   if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(parsed.hostname)) {
     throw new Error("Electron page target is not a loopback App URL");
   }
-  if (parsed.searchParams.get("taiji_desktop") !== "1") throw new Error("Electron page target is missing the desktop marker");
-  if (!String(parsed.searchParams.get("taiji_desktop_token") || "").trim()) {
-    throw new Error("Electron page target is missing the desktop token");
+  if (parsed.searchParams.has("taiji_desktop_token")) {
+    throw new Error("Electron page target must not expose the desktop token");
   }
-  return { origin: parsed.origin, url: parsed.toString(), websocket: target.webSocketDebuggerUrl };
+  const markerValues = parsed.searchParams.getAll("taiji_desktop");
+  if (markerValues.length !== 1 || markerValues[0] !== "1") {
+    throw new Error("Electron page target is missing the desktop marker");
+  }
+  if ([...parsed.searchParams.keys()].some((name) => name !== "taiji_desktop")) {
+    throw new Error("Electron page target has an unexpected query parameter");
+  }
+  return { origin: parsed.origin, url: parsed.toString() };
+}
+
+function validateDesktopTarget(target) {
+  if (!target || target.type !== "page") throw new Error("CDP target is not an Electron page target");
+  if (typeof target.webSocketDebuggerUrl !== "string" || !target.webSocketDebuggerUrl.startsWith("ws://127.0.0.1:")) {
+    throw new Error("Electron page target has no loopback CDP websocket");
+  }
+  return {
+    ...validateDesktopAppUrl(target.url),
+    websocket: target.webSocketDebuggerUrl,
+  };
+}
+
+function validateDesktopAuthCookies(cookies, appOrigin) {
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(String(appOrigin || ""));
+  } catch (_) {
+    throw new Error("desktop auth cookie origin is invalid");
+  }
+  if (parsedOrigin.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(parsedOrigin.hostname)) {
+    throw new Error("desktop auth cookie origin is not loopback HTTP");
+  }
+  const matches = (Array.isArray(cookies) ? cookies : []).filter(
+    (cookie) => cookie && cookie.name === "taiji_desktop_token",
+  );
+  if (matches.length !== 1) throw new Error("expected exactly one desktop auth cookie");
+  const cookie = matches[0];
+  const domain = String(cookie.domain || "").replace(/^\./, "");
+  if (domain !== parsedOrigin.hostname) throw new Error("desktop auth cookie has the wrong host");
+  if (cookie.path !== "/") throw new Error("desktop auth cookie has the wrong path");
+  if (cookie.httpOnly !== true) throw new Error("desktop auth cookie is not HttpOnly");
+  if (cookie.sameSite !== "Strict") throw new Error("desktop auth cookie is not SameSite Strict");
+  if (!DESKTOP_TOKEN_RE.test(String(cookie.value || ""))) {
+    throw new Error("desktop auth cookie has an invalid value format");
+  }
+  return {
+    name: "taiji_desktop_token",
+    present: true,
+    http_only: true,
+    same_site: "Strict",
+    path: "/",
+    value_format: "lowercase-hex-64",
+  };
 }
 
 function redactDesktopUrl(raw) {
@@ -371,6 +418,22 @@ function buildDriverResult(measurements) {
   if (!Number.isSafeInteger(measurements.webPid) || measurements.webPid <= 1) throw new Error("driver result has invalid WebUI pid");
   if (measurements.exitCode !== 0) throw new Error("Electron did not exit successfully after closing its window");
   if (typeof measurements.model !== "string" || !measurements.model.trim()) throw new Error("driver result has no model identity");
+  const validatedApp = validateDesktopAppUrl(measurements.appUrl);
+  if (String(measurements.webuiOrigin || "") !== validatedApp.origin) {
+    throw new Error("driver app URL and WebUI origin do not identify the same App");
+  }
+  const desktopAuthCookie = measurements.desktopAuthCookie;
+  if (
+    !desktopAuthCookie
+    || desktopAuthCookie.name !== "taiji_desktop_token"
+    || desktopAuthCookie.present !== true
+    || desktopAuthCookie.http_only !== true
+    || desktopAuthCookie.same_site !== "Strict"
+    || desktopAuthCookie.path !== "/"
+    || desktopAuthCookie.value_format !== "lowercase-hex-64"
+  ) {
+    throw new Error("driver result has no verified desktop auth cookie");
+  }
   for (const [key, value] of [
     ["electron executable", measurements.electronExecutableSha256],
     ["desktop entry", measurements.desktopEntrySha256],
@@ -386,8 +449,9 @@ function buildDriverResult(measurements) {
     electron_executable: ELECTRON_PATH,
     electron_executable_sha256: measurements.electronExecutableSha256,
     desktop_entry_sha256: measurements.desktopEntrySha256,
-    app_url: redactDesktopUrl(measurements.appUrl),
-    webui_origin: measurements.webuiOrigin,
+    app_url: validatedApp.url,
+    webui_origin: validatedApp.origin,
+    desktop_auth_cookie: { ...desktopAuthCookie },
     model: String(measurements.model || ""),
     attachment_probe_sha256: measurements.probeSha256,
     agent_pid: measurements.agentPid,
@@ -941,6 +1005,11 @@ async function runAcceptance(args) {
       client.send("Log.enable"),
       client.send("DOM.enable"),
     ]);
+    const cookieResult = await client.send("Network.getAllCookies");
+    const desktopAuthCookie = validateDesktopAuthCookies(
+      cookieResult?.cookies,
+      desktop.origin,
+    );
     await client.send("Page.reload", { ignoreCache: true });
     await waitFor(async () => evaluate(client, `(() => ({
       ready: document.readyState === "complete" && typeof send === "function" && typeof switchPanel === "function",
@@ -1158,6 +1227,7 @@ async function runAcceptance(args) {
       desktopEntrySha256,
       appUrl: desktop.url,
       webuiOrigin: desktop.origin,
+      desktopAuthCookie,
       model,
       probeSha256,
       agentPid,
@@ -1226,6 +1296,7 @@ module.exports = {
   redactDesktopUrl,
   supportBundleIsSafe,
   terminateManagedProcess,
+  validateDesktopAuthCookies,
   validateDesktopTarget,
 };
 

@@ -130,6 +130,8 @@ def test_upsert_env_preserves_group_shared_mode_and_group(
     mod = load_module()
     home = tmp_path / "shared-home"
     home.mkdir(mode=0o2770)
+    if hasattr(os, "chown"):
+        os.chown(home, -1, os.getegid())
     home.chmod(0o2770)
     env_path = home / ".env"
     env_path.write_text(
@@ -275,6 +277,8 @@ def test_atomic_state_write_uses_active_credential_access_policy(
     home = tmp_path / f"home-{group_shared}-{managed or 'local'}"
     if group_shared == "1":
         home.mkdir(mode=0o2770)
+        if hasattr(os, "chown"):
+            os.chown(home, -1, os.getegid())
         home.chmod(0o2770)
     monkeypatch.setenv("HERMES_CREDENTIAL_GROUP_SHARED", group_shared)
     if managed is None:

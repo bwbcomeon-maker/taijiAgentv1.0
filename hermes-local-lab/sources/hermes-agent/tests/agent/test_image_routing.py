@@ -10,8 +10,6 @@ import pytest
 
 from agent.image_routing import (
     _coerce_capability_bool,
-    _coerce_mode,
-    _explicit_aux_vision_override,
     _lookup_supports_vision,
     _supports_vision_override,
     build_native_content_parts,
@@ -20,71 +18,21 @@ from agent.image_routing import (
 )
 
 
-# ─── _coerce_mode ────────────────────────────────────────────────────────────
-
-
-class TestCoerceMode:
-    def test_valid_modes_pass_through(self):
-        assert _coerce_mode("auto") == "auto"
-        assert _coerce_mode("native") == "native"
-        assert _coerce_mode("text") == "text"
-
-    def test_case_insensitive(self):
-        assert _coerce_mode("NATIVE") == "native"
-        assert _coerce_mode("Auto") == "auto"
-
-    def test_invalid_falls_back_to_auto(self):
-        assert _coerce_mode("nonsense") == "auto"
-        assert _coerce_mode("") == "auto"
-        assert _coerce_mode(None) == "auto"
-        assert _coerce_mode(42) == "auto"
-
-    def test_strips_whitespace(self):
-        assert _coerce_mode("  native  ") == "native"
-
-
-# ─── _explicit_aux_vision_override ───────────────────────────────────────────
-
-
-class TestExplicitAuxVisionOverride:
-    def test_none_config(self):
-        assert _explicit_aux_vision_override(None) is False
-
-    def test_empty_config(self):
-        assert _explicit_aux_vision_override({}) is False
-
-    def test_default_auto_is_not_explicit(self):
-        cfg = {"auxiliary": {"vision": {"provider": "auto", "model": "", "base_url": ""}}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-    def test_provider_set_is_explicit(self):
-        cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": ""}}}
-        assert _explicit_aux_vision_override(cfg) is True
-
-    def test_model_set_is_explicit(self):
-        cfg = {"auxiliary": {"vision": {"provider": "auto", "model": "google/gemini-2.5-flash"}}}
-        assert _explicit_aux_vision_override(cfg) is True
-
-    def test_base_url_set_is_explicit(self):
-        cfg = {"auxiliary": {"vision": {"provider": "auto", "base_url": "http://localhost:11434"}}}
-        assert _explicit_aux_vision_override(cfg) is True
-
-
 # ─── decide_image_input_mode ─────────────────────────────────────────────────
 
 
 class TestDecideImageInputMode:
-    def test_explicit_native_overrides_everything(self):
+    def test_explicit_native_does_not_override_known_text_only_main_model(self):
         cfg = {"agent": {"image_input_mode": "native"}}
-        # Non-vision model, aux-vision explicitly configured: native still wins.
+        # Capability truth wins over a stale/manual routing preference.
         cfg["auxiliary"] = {"vision": {"provider": "openrouter", "model": "foo"}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=False):
-            assert decide_image_input_mode("openrouter", "some-non-vision-model", cfg) == "native"
+            assert decide_image_input_mode("openrouter", "some-non-vision-model", cfg) == "text"
 
-    def test_explicit_text_overrides_everything(self):
+    def test_native_capability_wins_over_explicit_text_preference(self):
         cfg = {"agent": {"image_input_mode": "text"}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
-            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "text"
+            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
 
     def test_auto_with_vision_capable_model(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
@@ -99,11 +47,11 @@ class TestDecideImageInputMode:
             with pytest.raises(ValueError, match="capability is unknown"):
                 decide_image_input_mode("openrouter", "brand-new-slug", {})
 
-    def test_auto_respects_aux_vision_override_even_for_vision_model(self):
-        """If the user configured a dedicated vision backend, don't bypass it."""
+    def test_auto_native_model_wins_over_auxiliary_configuration(self):
+        """A configured auxiliary backend is only a fallback for text-only mains."""
         cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
-            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "text"
+            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
 
     def test_none_config_is_auto(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
@@ -113,6 +61,35 @@ class TestDecideImageInputMode:
         cfg = {"agent": {"image_input_mode": "weird-value"}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
             assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
+
+    @pytest.mark.parametrize("mode", ["auto", "native", "text"])
+    def test_disabled_auxiliary_does_not_block_native_main_model(self, mode):
+        cfg = {
+            "agent": {"image_input_mode": mode},
+            "auxiliary": {
+                "vision": {
+                    "enabled": False,
+                    "provider": "openrouter",
+                    "model": "google/gemini-2.5-flash",
+                }
+            },
+        }
+        with patch("agent.image_routing._lookup_supports_vision", return_value=True):
+            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
+
+    def test_disabled_auxiliary_blocks_known_text_only_main_model(self):
+        cfg = {
+            "auxiliary": {
+                "vision": {
+                    "enabled": False,
+                    "provider": "openrouter",
+                    "model": "google/gemini-2.5-flash",
+                }
+            },
+        }
+        with patch("agent.image_routing._lookup_supports_vision", return_value=False):
+            with pytest.raises(ValueError, match="capability is disabled"):
+                decide_image_input_mode("openrouter", "text-only", cfg)
 
     def test_auto_uses_text_for_text_only_modalities_even_with_attachment_flag(self):
         registry = {
@@ -282,15 +259,13 @@ class TestAutoModeRespectsOverride:
             with pytest.raises(ValueError, match="capability is unknown"):
                 decide_image_input_mode("custom", "unknown", {})
 
-    def test_explicit_aux_vision_override_still_wins(self):
-        # If the user has configured a dedicated vision aux backend, respect
-        # it even when supports_vision: true is also set.
+    def test_native_capability_still_wins_over_explicit_auxiliary(self):
         cfg = {
             "model": {"supports_vision": True},
             "auxiliary": {"vision": {"provider": "openrouter", "model": "gemini-2.5-pro"}},
         }
         with patch("agent.models_dev.get_model_capabilities", return_value=None):
-            assert decide_image_input_mode("custom", "qwen3.6-35b", cfg) == "text"
+            assert decide_image_input_mode("custom", "qwen3.6-35b", cfg) == "native"
 
 
 # ─── build_native_content_parts ──────────────────────────────────────────────

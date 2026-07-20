@@ -49,6 +49,26 @@ test("the source command launcher never silently redirects to a stale app bundle
   assert.match(commandLauncher, /Electron\.app\/Contents\/MacOS\/Electron/);
 });
 
+for (const [label, source] of [
+  ["command", commandLauncher],
+  ["app", appLauncher],
+]) {
+  test(`${label} desktop launcher isolates Electron single-instance state by physical source root`, () => {
+    assert.match(source, /SOURCE_INSTANCE_ID/);
+    assert.match(source, /shasum -a 256/);
+    assert.match(source, /TAIJI_DESKTOP_USER_DATA_DIR/);
+    assert.match(source, /source-instances/);
+  });
+}
+
+test("Electron applies a source launcher user-data override before acquiring its singleton lock", () => {
+  const configureIndex = mainSource.indexOf("configureDesktopUserDataDir();");
+  const lockIndex = mainSource.indexOf("app.requestSingleInstanceLock()");
+  assert.notEqual(configureIndex, -1);
+  assert.notEqual(lockIndex, -1);
+  assert.ok(configureIndex < lockIndex);
+});
+
 test("Electron boot and runtime logs preserve the exact source provenance", () => {
   assert.match(mainSource, /TAIJI_SOURCE_ROOT/);
   assert.match(mainSource, /TAIJI_SOURCE_COMMIT/);
@@ -56,4 +76,22 @@ test("Electron boot and runtime logs preserve the exact source provenance", () =
   assert.match(mainSource, /sourceRoot=/);
   assert.match(mainSource, /sourceCommit=/);
   assert.match(mainSource, /sourceDirty=/);
+});
+
+test("Electron authenticates the desktop session without putting the bearer token in the URL", () => {
+  const cookieIndex = mainSource.indexOf("webContents.session.cookies.set");
+  const loadIndex = mainSource.indexOf(
+    "await mainWindow.loadURL(target.toString())",
+    cookieIndex,
+  );
+  assert.notEqual(cookieIndex, -1);
+  assert.notEqual(loadIndex, -1);
+  assert.ok(cookieIndex < loadIndex);
+  assert.match(mainSource, /name:\s*"taiji_desktop_token"/);
+  assert.match(mainSource, /httpOnly:\s*true/);
+  assert.match(mainSource, /sameSite:\s*"strict"/);
+  assert.doesNotMatch(
+    mainSource,
+    /searchParams\.set\("taiji_desktop_token"/,
+  );
 });

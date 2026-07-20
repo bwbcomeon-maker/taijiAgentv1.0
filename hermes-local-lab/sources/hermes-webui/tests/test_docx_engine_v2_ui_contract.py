@@ -122,7 +122,9 @@ def test_docx_engine_workbench_covers_feedback_and_recovery_states():
     assert "data-docx-engine-status" in ui_js
     assert "template_package_path" in ui_js
     assert "replace_existing" in ui_js
-    assert "确定要覆盖已安装模板吗" in ui_js
+    assert "title:'覆盖已安装模板？'" in ui_js
+    assert "confirmLabel:'覆盖模板'" in ui_js
+    assert "focusCancel:true" in ui_js
     assert "确认已在 WPS/Word 打开 DOCX" in ui_js
     assert "正在记录 WPS 验收结果" in ui_js
     assert "审核人来自本次可信复核会话" in ui_js

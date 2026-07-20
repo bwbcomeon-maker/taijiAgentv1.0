@@ -661,11 +661,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "electron_executable": "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
                     "electron_executable_sha256": "4" * 64,
                     "desktop_entry_sha256": "5" * 64,
-                    "app_url": (
-                        "http://127.0.0.1:18787/?taiji_desktop=1&"
-                        "taiji_desktop_token=%3Credacted%3E"
-                    ),
+                    "app_url": "http://127.0.0.1:18787/?taiji_desktop=1",
                     "webui_origin": "http://127.0.0.1:18787",
+                    "desktop_auth_cookie": {
+                        "name": "taiji_desktop_token",
+                        "present": True,
+                        "http_only": True,
+                        "same_site": "Strict",
+                        "path": "/",
+                        "value_format": "lowercase-hex-64",
+                    },
                     "model": "openai/gpt-test",
                     "attachment_probe_sha256": "6" * 64,
                     "agent_pid": 4243,
@@ -1131,6 +1136,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                         f'export TAIJI_OFFLINE_REHEARSAL_DIR="{tmp_path / "offline"}"',
                         f'export TAIJI_TARGET_VERIFICATION_DIR="{tmp_path / "target"}"',
                         f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
+                        "check_canonical_source() { :; }",
                         "run_root_tests() { :; }",
                         "run_desktop_evidence_tool_tests() { :; }",
                         "run_agent_tests() { :; }",
@@ -1280,12 +1286,15 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             delivery.mkdir(parents=True)
             script = delivery / source_script.name
             shutil.copy2(source_script, script)
+            gate_dir = repo_root / "scripts"
+            gate_dir.mkdir()
+            shutil.copy2(ROOT / "scripts/check-clean-worktree.sh", gate_dir)
             (repo_root / ".gitignore").write_text(
                 "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.tar.gz\n"
                 "/taijiagent 打包交付/SHA256SUMS.txt\n",
                 encoding="utf-8",
             )
-            subprocess.run(["git", "init", "-q", str(repo_root)], check=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo_root)], check=True)
             subprocess.run(
                 ["git", "-C", str(repo_root), "config", "user.email", "test@example.invalid"],
                 check=True,
@@ -1426,16 +1435,26 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_desktop_web_access_uses_private_token_and_sanitized_logs(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
         server_py = read_text("hermes-local-lab/sources/hermes-webui/server.py")
+        desktop_access_py = read_text(
+            "hermes-local-lab/sources/hermes-webui/api/desktop_access.py"
+        )
 
         self.assertIn("TAIJI_DESKTOP_ONLY", main_js)
         self.assertIn("TAIJI_DESKTOP_ACCESS_TOKEN", main_js)
         self.assertIn("taiji_desktop_token", main_js)
+        self.assertIn("webContents.session.cookies.set", main_js)
+        self.assertIn("httpOnly: true", main_js)
+        self.assertIn('sameSite: "strict"', main_js)
+        self.assertNotIn('searchParams.set("taiji_desktop_token"', main_js)
         self.assertIn('appendDesktopLog(desktopLog, "loading desktop workspace")', main_js)
         self.assertNotIn("loading ${target.toString()}", main_js)
 
-        self.assertIn("def _desktop_access_required", server_py)
-        self.assertIn("def _request_has_desktop_access", server_py)
-        self.assertIn("请从桌面应用启动太极 Agent", server_py)
+        self.assertIn("desktop_access_required as _desktop_access_required", server_py)
+        self.assertIn("enforce_desktop_access as _enforce_desktop_access", server_py)
+        self.assertIn("def desktop_access_required", desktop_access_py)
+        self.assertIn("def request_has_desktop_access", desktop_access_py)
+        self.assertIn("def enforce_desktop_access", desktop_access_py)
+        self.assertIn("请从桌面应用启动太极 Agent", desktop_access_py)
         self.assertNotIn("Then open:", server_py)
         self.assertNotIn("Remote access:", server_py)
 
@@ -2058,8 +2077,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("99_本机_准备制包输入包.sh", docs)
         self.assertIn("!/taijiagent 打包交付/99_本机_准备制包输入包.sh", gitignore)
         self.assertIn("/taijiagent-制包机输入-*.tar.gz", gitignore)
-        self.assertIn('git -C "$REPO_ROOT" diff --quiet', preflight)
-        self.assertIn('git -C "$REPO_ROOT" diff --cached --quiet', preflight)
+        self.assertIn("check-clean-worktree.sh", preflight)
+        self.assertIn("--mode formal", preflight)
+        self.assertIn('--repo-root "$REPO_ROOT"', preflight)
+        self.assertIn('--source-root "$SOURCE_TREE_ROOT"', preflight)
         self.assertIn("taiji-agentv1.0-kylin-build-src-*.tar.gz", preflight)
         self.assertIn("SHA256SUMS.txt", preflight)
         self.assertIn("生成的安装包", preflight)

@@ -62,8 +62,109 @@ class ProjectionResult:
     `item/completed` event)."""
 
     messages: list[dict] = field(default_factory=list)
+    tool_completions: list["ProjectedToolCompletion"] = field(
+        default_factory=list
+    )
     is_tool_iteration: bool = False
     final_text: Optional[str] = None  # Set when an agentMessage completes
+
+
+@dataclass(frozen=True)
+class ProjectedToolCompletion:
+    """Private lifecycle envelope for AIAgent's ordinary tool callbacks.
+
+    ``function_name`` is canonical at the Hermes callback boundary.  The
+    transcript message may remain namespaced (for example
+    ``mcp.hermes-tools.image_generate``), but WebUI artifact ingestion must
+    continue to accept only the exact, trusted ``image_generate`` name.
+    """
+
+    tool_call_id: str
+    function_name: str
+    function_args: dict[str, Any]
+    function_result: Any
+    is_error: bool = False
+
+
+_FAILED_TOOL_STATUSES = frozenset({
+    "cancelled",
+    "canceled",
+    "failed",
+    "interrupted",
+    "rejected",
+})
+
+
+def _completion_key(item: dict) -> str:
+    """Return an immutable item key so replayed completion events dedupe."""
+    item_type = str(item.get("type") or "")
+    item_id = str(item.get("id") or "")
+    if item_id:
+        return f"{item_type}:{item_id}"
+    try:
+        encoded = json.dumps(
+            item,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        encoded = repr(item)
+    digest = hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()
+    return f"{item_type}:sha256:{digest}"
+
+
+def _tool_status_is_error(item: dict) -> bool:
+    return str(item.get("status") or "").strip().lower() in (
+        _FAILED_TOOL_STATUSES
+    )
+
+
+def _failed_callback_result(item: dict) -> str:
+    """Build a failure-only result that cannot smuggle a success artifact."""
+    error = item.get("error")
+    if isinstance(error, dict):
+        detail = error.get("message") or error.get("code") or "tool failed"
+    else:
+        detail = error or item.get("status") or "tool failed"
+    return json.dumps(
+        {
+            "success": False,
+            "error": str(detail),
+            "error_code": "codex_tool_failed",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _mcp_callback_result(result: Any) -> Any:
+    """Unwrap Codex/FastMCP content into Hermes' ordinary tool result shape."""
+    if not isinstance(result, dict):
+        return result
+    for key in ("structuredContent", "structured_content"):
+        structured = result.get(key)
+        if isinstance(structured, dict):
+            return structured
+    content = result.get("content")
+    if isinstance(content, list):
+        text_parts = [
+            str(block.get("text"))
+            for block in content
+            if isinstance(block, dict) and block.get("text") is not None
+        ]
+        if len(text_parts) == 1:
+            return text_parts[0]
+        if text_parts:
+            return "\n".join(text_parts)
+    return result
+
+
+def _mcp_callback_name(server: str, tool: str) -> str:
+    """Canonicalize only the trusted Hermes MCP server's tool surface."""
+    if server == "hermes-tools":
+        return tool
+    return f"mcp.{server}.{tool}"
 
 
 class CodexEventProjector:
@@ -74,6 +175,7 @@ class CodexEventProjector:
 
     def __init__(self) -> None:
         self._pending_reasoning: list[str] = []
+        self._completed_item_keys: set[str] = set()
 
     def project(self, notification: dict) -> ProjectionResult:
         """Project a single notification. Idempotent for non-completion events;
@@ -91,6 +193,10 @@ class CodexEventProjector:
         item = params.get("item") or {}
         item_type = item.get("type") or ""
         item_id = item.get("id") or ""
+        completion_key = _completion_key(item)
+        if completion_key in self._completed_item_keys:
+            return ProjectionResult()
+        self._completed_item_keys.add(completion_key)
 
         if item_type == "agentMessage":
             return self._project_agent_message(item)
@@ -171,8 +277,19 @@ class CodexEventProjector:
             "tool_call_id": call_id,
             "content": output,
         }
+        is_error = bool(exit_code is not None and exit_code != 0)
         return ProjectionResult(
-            messages=[assistant_msg, tool_msg], is_tool_iteration=True
+            messages=[assistant_msg, tool_msg],
+            tool_completions=[
+                ProjectedToolCompletion(
+                    tool_call_id=call_id,
+                    function_name="exec_command",
+                    function_args=args,
+                    function_result=output,
+                    is_error=is_error,
+                )
+            ],
+            is_tool_iteration=True,
         )
 
     def _project_file_change(self, item: dict, item_id: str) -> ProjectionResult:
@@ -210,8 +327,23 @@ class CodexEventProjector:
             "tool_call_id": call_id,
             "content": f"apply_patch status={status}, {n} change(s)",
         }
+        is_error = _tool_status_is_error(item)
         return ProjectionResult(
-            messages=[assistant_msg, tool_msg], is_tool_iteration=True
+            messages=[assistant_msg, tool_msg],
+            tool_completions=[
+                ProjectedToolCompletion(
+                    tool_call_id=call_id,
+                    function_name="apply_patch",
+                    function_args=args,
+                    function_result=(
+                        _failed_callback_result(item)
+                        if is_error
+                        else tool_msg["content"]
+                    ),
+                    is_error=is_error,
+                )
+            ],
+            is_tool_iteration=True,
         )
 
     def _project_mcp_tool_call(self, item: dict, item_id: str) -> ProjectionResult:
@@ -251,8 +383,24 @@ class CodexEventProjector:
             "tool_call_id": call_id,
             "content": content,
         }
+        is_error = bool(error) or _tool_status_is_error(item)
+        callback_result = (
+            _failed_callback_result(item)
+            if is_error
+            else _mcp_callback_result(result)
+        )
         return ProjectionResult(
-            messages=[assistant_msg, tool_msg], is_tool_iteration=True
+            messages=[assistant_msg, tool_msg],
+            tool_completions=[
+                ProjectedToolCompletion(
+                    tool_call_id=call_id,
+                    function_name=_mcp_callback_name(server, tool),
+                    function_args=args,
+                    function_result=callback_result,
+                    is_error=is_error,
+                )
+            ],
+            is_tool_iteration=True,
         )
 
     def _project_dynamic_tool_call(
@@ -291,8 +439,23 @@ class CodexEventProjector:
             "tool_call_id": call_id,
             "content": content,
         }
+        is_error = item.get("success") is False or _tool_status_is_error(item)
         return ProjectionResult(
-            messages=[assistant_msg, tool_msg], is_tool_iteration=True
+            messages=[assistant_msg, tool_msg],
+            tool_completions=[
+                ProjectedToolCompletion(
+                    tool_call_id=call_id,
+                    function_name=tool,
+                    function_args=args,
+                    function_result=(
+                        _failed_callback_result(item)
+                        if is_error
+                        else content
+                    ),
+                    is_error=is_error,
+                )
+            ],
+            is_tool_iteration=True,
         )
 
     def _project_opaque(self, item: dict, item_type: str) -> ProjectionResult:

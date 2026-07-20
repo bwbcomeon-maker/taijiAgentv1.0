@@ -160,6 +160,45 @@ def test_readiness_reports_configured_but_unavailable_without_provider_auth(monk
     assert "Codex" not in status["public_message"]
 
 
+def test_explicitly_disabled_image_generation_short_circuits_provider_io(
+    monkeypatch,
+):
+    from tools import image_generation_tool as image_tool
+
+    monkeypatch.setattr(
+        image_tool,
+        "_load_image_gen_config",
+        lambda: {
+            "enabled": False,
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        },
+    )
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("disabled readiness must not inspect providers")
+
+    monkeypatch.setattr(
+        image_tool,
+        "_read_image_gen_verification_snapshot",
+        _unexpected,
+    )
+    monkeypatch.setattr(
+        image_tool,
+        "_iter_image_generation_providers",
+        _unexpected,
+    )
+    monkeypatch.setattr(image_tool, "check_fal_api_key", _unexpected)
+
+    status = image_tool.get_image_generation_readiness()
+
+    assert status["configured"] is True
+    assert status["available"] is False
+    assert status["reason_code"] == "disabled"
+    assert status["provider"] == "dashscope"
+    assert status["model"] == "qwen-image-2.0-pro"
+
+
 def test_provider_availability_allows_probe_but_not_public_ready_before_verification(monkeypatch):
     from tools import image_generation_tool as image_tool
 

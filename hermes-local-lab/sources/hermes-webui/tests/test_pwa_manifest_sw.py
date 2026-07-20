@@ -210,15 +210,21 @@ class TestIndexHtmlIntegration:
             "index.html must register the service worker"
         )
 
+    def test_index_registers_service_worker_only_in_the_top_level_shell(self):
+        src = INDEX.read_text(encoding="utf-8")
+        assert "window.top === window && 'serviceWorker' in navigator" in src, (
+            "sandboxed previews must not access navigator.serviceWorker"
+        )
+
     def test_index_uses_version_placeholders_for_static_assets(self):
         src = INDEX.read_text(encoding="utf-8")
         assert "sw.js?v=__WEBUI_VERSION__" in src
         assert "static/ui.js?v=__WEBUI_VERSION__" in src
 
-    def test_taiji_shell_assets_share_cache_bust_suffix(self):
+    def test_taiji_shell_assets_share_canonical_version_placeholder(self):
         src = INDEX.read_text(encoding="utf-8")
         sw = SW.read_text(encoding="utf-8")
-        expected = "__WEBUI_VERSION__-taiji-shell-34"
+        expected = "__WEBUI_VERSION__"
         for asset in (
             "static/icons.js",
             "static/style.css",
@@ -234,11 +240,12 @@ class TestIndexHtmlIntegration:
         shell_versions = set(
             re.findall(
                 r"(?:static/(?:icons\.js|style\.css|ui\.js|panels\.js|boot\.js|taiji-home\.js)|sw\.js)"
-                r"\?v=__WEBUI_VERSION__-taiji-shell-(\d+)",
+                r"\?v=([^\"']+)",
                 src,
             )
         )
-        assert shell_versions == {"34"}
+        assert shell_versions == {expected}
+        assert "taiji-shell-" not in src
 
     def test_index_versions_stylesheet(self):
         """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST
@@ -318,9 +325,9 @@ class TestIndexHtmlIntegration:
         are present on first paint.
         """
         src = INDEX.read_text(encoding="utf-8")
-        preload_pos = src.find('href="static/pwa-startup.js?v=__WEBUI_VERSION__-taiji-shell-34"')
-        script_pos = src.find('src="static/pwa-startup.js?v=__WEBUI_VERSION__-taiji-shell-34"')
-        ui_pos = src.find('static/ui.js?v=__WEBUI_VERSION__-taiji-shell-34')
+        preload_pos = src.find('href="static/pwa-startup.js?v=__WEBUI_VERSION__"')
+        script_pos = src.find('src="static/pwa-startup.js?v=__WEBUI_VERSION__"')
+        ui_pos = src.find('static/ui.js?v=__WEBUI_VERSION__')
         assert preload_pos != -1, "index.html must preload the PWA startup helper"
         assert script_pos != -1, "index.html must load the PWA startup helper"
         assert ui_pos != -1, "index.html must load the main UI bundle"

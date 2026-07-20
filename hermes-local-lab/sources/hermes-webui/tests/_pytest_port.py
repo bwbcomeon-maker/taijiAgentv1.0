@@ -3,7 +3,7 @@ Shared test server constants for use in individual test files.
 
 Instead of hardcoding ``BASE = "http://127.0.0.1:8788"`` in every test file,
 import from here so the port and state dir are always consistent with
-what conftest.py computed for this worktree.
+what conftest.py computed for this pytest process.
 
 Usage::
 
@@ -12,20 +12,23 @@ Usage::
 conftest.py publishes ``HERMES_WEBUI_TEST_PORT`` and
 ``HERMES_WEBUI_TEST_STATE_DIR`` to ``os.environ`` at module level
 (before any test file is imported), so this module always reads the
-correct values.  The auto-derivation fallback matches conftest's logic
-exactly, so standalone imports also work correctly.
+correct values. The fallback uses the same process-scoped first candidate as
+conftest; normal pytest collection always consumes the final selected values
+through the published environment variables.
 """
 import hashlib
 import os
 import pathlib
 
-def _auto_test_port(repo_root: pathlib.Path) -> int:
-    h = int(hashlib.md5(str(repo_root).encode()).hexdigest(), 16)
-    return 20000 + (h % 10000)
+def _auto_test_port(repo_root: pathlib.Path, process_id=None) -> int:
+    repo_offset = int(hashlib.md5(str(repo_root).encode()).hexdigest(), 16) % 10000
+    pid = os.getpid() if process_id is None else int(process_id)
+    return 20000 + ((repo_offset + pid) % 10000)
 
-def _auto_state_dir_name(repo_root: pathlib.Path) -> str:
+def _auto_state_dir_name(repo_root: pathlib.Path, process_id=None) -> str:
     h = hashlib.md5(str(repo_root).encode()).hexdigest()[:8]
-    return f"webui-test-{h}"
+    pid = os.getpid() if process_id is None else int(process_id)
+    return f"webui-test-{h}-{pid}"
 
 _TESTS_DIR   = pathlib.Path(__file__).parent.resolve()
 _REPO_ROOT   = _TESTS_DIR.parent.resolve()

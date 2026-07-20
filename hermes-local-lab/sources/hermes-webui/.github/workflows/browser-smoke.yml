@@ -40,3 +40,6 @@ jobs:
 
       - name: Run browser smoke
         run: python tests/browser_smoke.py
+
+      - name: Run project and profile keyboard smoke
+        run: python tests/project_profile_keyboard_browser_smoke.py

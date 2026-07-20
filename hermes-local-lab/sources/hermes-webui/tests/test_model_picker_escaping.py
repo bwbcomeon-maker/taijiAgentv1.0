@@ -15,6 +15,10 @@ def test_model_picker_escapes_provider_supplied_model_labels():
 
 def test_providers_panel_escapes_load_error_text():
     src = (ROOT / "static" / "panels.js").read_text()
+    start = src.index("async function loadProvidersPanel")
+    end = src.index("async function _refreshProviderQuota", start)
+    panel = src[start:end]
 
-    assert "Failed to load providers: '+esc(e.message||String(e))+'" in src
-    assert "Failed to load providers: '+e.message+'" not in src
+    assert "加载提供商失败：'+esc(e.message||String(e))+'" in panel
+    assert "加载提供商失败：'+e.message+'" not in panel
+    assert "加载提供商失败：'+(e.message||String(e))" not in panel

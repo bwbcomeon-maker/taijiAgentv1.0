@@ -7,20 +7,31 @@ deadline timeouts. These tests pin all of that without spawning real codex.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 import threading
 import time
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 from typing import Any, Optional
 
 import pytest
 
 import agent.transports.codex_app_server_session as session_mod
+from agent.transports.image_generation_gate_bridge import (
+    consume_image_generation_gate_lease,
+)
 from agent.transports.codex_app_server_session import (
+    CodexProfileEnvironment,
     CodexAppServerSession,
     TurnResult,
     _ServerRequestRouting,
     _approval_choice_to_codex_decision,
+    _capture_codex_profile_environment,
     _coerce_turn_input_text,
+    _image_gate_mcp_config_args,
 )
 
 
@@ -115,6 +126,444 @@ def make_session(client: FakeClient, **kwargs) -> CodexAppServerSession:
     )
 
 
+def _bridge_config_from_client_args(
+    captured: dict,
+) -> tuple[Path, str, str]:
+    assert captured["env"]["HERMES_HOME"] == ""
+    assert captured["env"]["HERMES_CONFIG_PATH"] == ""
+    extra_args = captured["extra_args"]
+    assert extra_args[0::2] == ["-c"] * (len(extra_args) // 2)
+    overrides = dict(
+        item.split("=", 1)
+        for item in extra_args[1::2]
+    )
+    root_key = (
+        'mcp_servers."hermes-tools".env.'
+        "HERMES_IMAGE_GENERATION_GATE_BRIDGE"
+    )
+    bridge_id_key = (
+        'mcp_servers."hermes-tools".env.'
+        "HERMES_IMAGE_GENERATION_GATE_BRIDGE_ID"
+    )
+    public_key_key = (
+        'mcp_servers."hermes-tools".env.'
+        "HERMES_IMAGE_GENERATION_GATE_PUBLIC_KEY"
+    )
+    expected_env_keys = {
+        root_key,
+        bridge_id_key,
+        public_key_key,
+    }
+    assert expected_env_keys < set(overrides)
+    assert json.loads(
+        overrides['mcp_servers."hermes-tools".command']
+    ) == session_mod.sys.executable
+    assert json.loads(
+        overrides['mcp_servers."hermes-tools".args']
+    ) == ["-m", "agent.transports.hermes_tools_mcp_server"]
+    root = Path(json.loads(overrides[root_key]))
+    bridge_id = json.loads(overrides[bridge_id_key])
+    public_key = json.loads(overrides[public_key_key])
+    assert (root / "broker.sock").exists()
+    return root, bridge_id, public_key
+
+
+class TestCodexProfileExecutionEnv:
+    def test_context_profile_wins_over_taiji_root_in_fresh_child(
+        self, tmp_path, monkeypatch,
+    ):
+        runtime_root = tmp_path / "runtime"
+        profile_home = runtime_root / "profiles" / "alice"
+        profile_home.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text(
+            "model:\n  provider: alice\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_root))
+        monkeypatch.setenv("HERMES_HOME", str(runtime_root))
+
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        token = set_hermes_home_override(profile_home)
+        try:
+            profile_environment = _capture_codex_profile_environment()
+        finally:
+            reset_hermes_home_override(token)
+
+        assert isinstance(profile_environment, CodexProfileEnvironment)
+        assert profile_environment.codex_env["HERMES_HOME"] == ""
+        assert profile_environment.codex_env["HERMES_CONFIG_PATH"] == ""
+        assert profile_environment.codex_env["TAIJI_RUNTIME_HOME"] == ""
+        assert profile_environment.hermes_tools_env["HERMES_HOME"] == str(
+            profile_home
+        )
+        assert profile_environment.hermes_tools_env[
+            "HERMES_CONFIG_PATH"
+        ] == str(
+            profile_home / "config.yaml"
+        )
+
+        child_env = os.environ.copy()
+        child_env.update(profile_environment.hermes_tools_env)
+        observed = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from hermes_constants import "
+                    "get_config_path,get_hermes_home;"
+                    "print(get_hermes_home());print(get_config_path())"
+                ),
+            ],
+            cwd=str(Path(__file__).parents[3]),
+            env=child_env,
+            text=True,
+        ).splitlines()
+        assert observed == [
+            str(profile_home),
+            str(profile_home / "config.yaml"),
+        ]
+
+    def test_concurrent_profiles_capture_and_spawn_without_cross_talk(
+        self, tmp_path, monkeypatch,
+    ):
+        runtime_root = tmp_path / "runtime"
+        homes = {
+            name: runtime_root / "profiles" / name
+            for name in ("alice", "bob")
+        }
+        for home in homes.values():
+            home.mkdir(parents=True)
+            (home / "config.yaml").write_text("{}\n", encoding="utf-8")
+        monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_root))
+        monkeypatch.setenv("HERMES_HOME", str(runtime_root))
+
+        barrier = threading.Barrier(2)
+        observed: dict[str, tuple[str, str]] = {}
+
+        def worker(name: str) -> None:
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+
+            token = set_hermes_home_override(homes[name])
+            try:
+                barrier.wait(timeout=5)
+                profile_environment = _capture_codex_profile_environment()
+                child_env = os.environ.copy()
+                child_env.update(profile_environment.hermes_tools_env)
+                output = subprocess.check_output(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "from hermes_constants import "
+                            "get_config_path,get_hermes_home;"
+                            "print(get_hermes_home());"
+                            "print(get_config_path())"
+                        ),
+                    ],
+                    cwd=str(Path(__file__).parents[3]),
+                    env=child_env,
+                    text=True,
+                ).splitlines()
+                observed[name] = (output[0], output[1])
+            finally:
+                reset_hermes_home_override(token)
+
+        threads = [
+            threading.Thread(target=worker, args=(name,))
+            for name in homes
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+
+        assert observed == {
+            name: (str(home), str(home / "config.yaml"))
+            for name, home in homes.items()
+        }
+
+    def test_profile_secrets_are_not_in_codex_env_or_mcp_arguments(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        runtime_root = tmp_path / "runtime"
+        profile_home = runtime_root / "profiles" / "alice"
+        profile_home.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text(
+            "terminal:\n  backend: docker\n",
+            encoding="utf-8",
+        )
+        (profile_home / ".env").write_text(
+            "FAL_KEY=alice-fal-secret\n"
+            "FIRECRAWL_API_KEY=alice-web-secret\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_root))
+        monkeypatch.setenv("HERMES_HOME", str(runtime_root))
+        monkeypatch.setenv("FAL_KEY", "ambient-default-secret")
+        monkeypatch.setenv(
+            "FIRECRAWL_API_KEY",
+            "ambient-default-web-secret",
+        )
+
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        token = set_hermes_home_override(profile_home)
+        try:
+            profile_environment = _capture_codex_profile_environment()
+            args = _image_gate_mcp_config_args(
+                "/tmp/private-bridge",
+                "a" * 32,
+                "public-key",
+                profile_environment.hermes_tools_env,
+            )
+        finally:
+            reset_hermes_home_override(token)
+
+        assert profile_environment.codex_env["FAL_KEY"] == ""
+        assert (
+            profile_environment.codex_env["FIRECRAWL_API_KEY"]
+            == ""
+        )
+        serialized_args = "\n".join(args)
+        assert "alice-fal-secret" not in serialized_args
+        assert "alice-web-secret" not in serialized_args
+        assert "ambient-default-secret" not in serialized_args
+        assert "ambient-default-web-secret" not in serialized_args
+        overrides = dict(
+            item.split("=", 1)
+            for item in args[1::2]
+        )
+        assert json.loads(
+            overrides[
+                'mcp_servers."hermes-tools".env.HERMES_HOME'
+            ]
+        ) == str(profile_home)
+        assert json.loads(
+            overrides[
+                'mcp_servers."hermes-tools".env.'
+                "HERMES_TOOLS_PROFILE_ENV_REQUIRED"
+            ]
+        ) == "1"
+
+    def test_profiles_with_different_keys_remain_isolated(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        runtime_root = tmp_path / "runtime"
+        homes = {
+            name: runtime_root / "profiles" / name
+            for name in ("alice", "bob")
+        }
+        for name, home in homes.items():
+            home.mkdir(parents=True)
+            (home / "config.yaml").write_text("{}\n", encoding="utf-8")
+            (home / ".env").write_text(
+                f"FAL_KEY={name}-fal-secret\n",
+                encoding="utf-8",
+            )
+        monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_root))
+        monkeypatch.setenv("FAL_KEY", "ambient-fal-secret")
+
+        observed: dict[str, CodexProfileEnvironment] = {}
+
+        def worker(name: str) -> None:
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+
+            token = set_hermes_home_override(homes[name])
+            try:
+                observed[name] = _capture_codex_profile_environment()
+            finally:
+                reset_hermes_home_override(token)
+
+        threads = [
+            threading.Thread(target=worker, args=(name,))
+            for name in homes
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+        assert {
+            name: environment.profile_env["FAL_KEY"]
+            for name, environment in observed.items()
+        } == {
+            "alice": "alice-fal-secret",
+            "bob": "bob-fal-secret",
+        }
+        assert all(
+            environment.codex_env["FAL_KEY"] == ""
+            for environment in observed.values()
+        )
+
+    def test_missing_profile_key_cannot_fall_back_to_ambient_or_other_profile(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        runtime_root = tmp_path / "runtime"
+        alice_home = runtime_root / "profiles" / "alice"
+        bob_home = runtime_root / "profiles" / "bob"
+        for home in (alice_home, bob_home):
+            home.mkdir(parents=True)
+            (home / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (alice_home / ".env").write_text("", encoding="utf-8")
+        (bob_home / ".env").write_text(
+            "FIRECRAWL_API_KEY=bob-web-secret\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TAIJI_RUNTIME_HOME", str(runtime_root))
+        monkeypatch.setenv(
+            "FIRECRAWL_API_KEY",
+            "ambient-default-web-secret",
+        )
+
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        captured = {}
+        for name, home in (("alice", alice_home), ("bob", bob_home)):
+            token = set_hermes_home_override(home)
+            try:
+                captured[name] = _capture_codex_profile_environment()
+            finally:
+                reset_hermes_home_override(token)
+
+        assert "FIRECRAWL_API_KEY" not in captured["alice"].profile_env
+        assert (
+            captured["bob"].profile_env["FIRECRAWL_API_KEY"]
+            == "bob-web-secret"
+        )
+        assert (
+            captured["alice"].codex_env["FIRECRAWL_API_KEY"]
+            == ""
+        )
+        assert captured["bob"].codex_env["FIRECRAWL_API_KEY"] == ""
+
+        observed = {}
+        for name, environment in captured.items():
+            child_env = os.environ.copy()
+            child_env.update(environment.codex_env)
+            child_env.update(environment.hermes_tools_env)
+            raw = subprocess.check_output(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json,os;"
+                        "from agent.transports.hermes_tools_mcp_server "
+                        "import _apply_hermes_tools_profile_env;"
+                        "applied=_apply_hermes_tools_profile_env();"
+                        "print(json.dumps({"
+                        "'applied':applied,"
+                        "'key':os.environ.get('FIRECRAWL_API_KEY')"
+                        "}))"
+                    ),
+                ],
+                cwd=str(Path(__file__).parents[3]),
+                env=child_env,
+                text=True,
+            )
+            observed[name] = json.loads(raw)
+
+        assert observed["alice"] == {
+            "applied": True,
+            "key": None,
+        }
+        assert observed["bob"] == {
+            "applied": True,
+            "key": "bob-web-secret",
+        }
+
+    @pytest.mark.parametrize(
+        ("profile_value", "expected_mcp_value"),
+        [
+            (None, None),
+            ("alice-profile-secret", "alice-profile-secret"),
+        ],
+    )
+    def test_arbitrary_custom_provider_key_env_is_scoped_to_mcp_child(
+        self,
+        tmp_path,
+        monkeypatch,
+        profile_value,
+        expected_mcp_value,
+    ):
+        profile_home = tmp_path / "runtime" / "profiles" / "alice"
+        profile_home.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text(
+            "providers:\n"
+            "  custom-router:\n"
+            "    base_url: https://router.example/v1\n"
+            "    key_env: FOO\n",
+            encoding="utf-8",
+        )
+        (profile_home / ".env").write_text(
+            "" if profile_value is None else f"FOO={profile_value}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("FOO", "ambient-root-secret")
+
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        token = set_hermes_home_override(profile_home)
+        try:
+            environment = _capture_codex_profile_environment()
+        finally:
+            reset_hermes_home_override(token)
+
+        assert environment.codex_env["FOO"] == ""
+        child_env = os.environ.copy()
+        child_env.update(environment.codex_env)
+        child_env.update(environment.hermes_tools_env)
+        raw = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json,os;"
+                    "from agent.transports.hermes_tools_mcp_server "
+                    "import _apply_hermes_tools_profile_env;"
+                    "applied=_apply_hermes_tools_profile_env();"
+                    "print(json.dumps({"
+                    "'applied':applied,"
+                    "'key':os.environ.get('FOO')"
+                    "}))"
+                ),
+            ],
+            cwd=str(Path(__file__).parents[3]),
+            env=child_env,
+            text=True,
+        )
+        assert json.loads(raw) == {
+            "applied": True,
+            "key": expected_mcp_value,
+        }
+
+
 # ---- choice mapping ----
 
 class TestApprovalChoiceMapping:
@@ -170,6 +619,290 @@ class TestLifecycle:
         s.close()
         s.close()
         assert client._closed is True
+
+    def test_aiagent_interrupt_propagates_to_codex_session(self):
+        from run_agent import AIAgent
+
+        agent = object.__new__(AIAgent)
+        agent._codex_session = Mock()
+        agent._execution_thread_id = None
+        agent._interrupt_thread_signal_pending = False
+        agent._tool_worker_threads = set()
+        agent._tool_worker_threads_lock = threading.Lock()
+        agent._active_children = set()
+        agent._active_children_lock = threading.Lock()
+        agent.quiet_mode = True
+
+        agent.interrupt("stop")
+
+        agent._codex_session.request_interrupt.assert_called_once_with()
+        assert agent._interrupt_requested is True
+        assert agent._interrupt_message == "stop"
+
+    def test_turn_authorization_is_live_and_always_disarmed(self):
+        client = FakeClient()
+        captured = {}
+        observed = {}
+
+        def factory(**kwargs):
+            captured.update(kwargs)
+            return client
+
+        def request_handler(method, params):
+            if method == "thread/start":
+                return {"thread": {"id": "thread-fake-001"}}
+            if method == "turn/start":
+                bridge_root, bridge_id, public_key = (
+                    _bridge_config_from_client_args(captured)
+                )
+                observed["root"] = bridge_root
+                authorization, error = (
+                    consume_image_generation_gate_lease(
+                        path=str(bridge_root),
+                        bridge_id=bridge_id,
+                        public_key=public_key,
+                    )
+                )
+                assert error is None
+                assert authorization is not None
+                observed["authorization"] = authorization
+                observed["socket_mode"] = (
+                    (bridge_root / "broker.sock").stat().st_mode & 0o777
+                )
+                observed["dir_mode"] = (
+                    bridge_root.stat().st_mode & 0o777
+                )
+                return {"turn": {"id": "turn-fake-001"}}
+            return {}
+
+        client._request_handler = request_handler
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        s = CodexAppServerSession(
+            cwd="/tmp",
+            client_factory=factory,
+        )
+
+        result = s.run_turn(
+            "generate a cat image",
+            image_generation_task_id="turn-task-001",
+            image_generation_gate_owner="turn-owner-001",
+            allow_image_generation=True,
+            turn_timeout=2.0,
+        )
+
+        assert result.error is None
+        authorization = observed["authorization"]
+        assert authorization.task_id == "turn-task-001"
+        assert authorization.turn_id == "turn-task-001"
+        assert authorization.owner_token == "turn-owner-001"
+        assert authorization.allow_generation is True
+        assert observed["socket_mode"] == 0o600
+        assert observed["dir_mode"] == 0o700
+        assert list(observed["root"].glob("*.json")) == []
+        assert observed["root"].exists()
+        s.close()
+        assert not observed["root"].exists()
+
+    def test_turn_start_failure_still_disarms_live_authorization(self):
+        from agent.transports.codex_app_server import CodexAppServerError
+
+        client = FakeClient()
+        captured = {}
+        observed = {}
+
+        def factory(**kwargs):
+            captured.update(kwargs)
+            return client
+
+        def request_handler(method, params):
+            if method == "thread/start":
+                return {"thread": {"id": "thread-fake-001"}}
+            if method == "turn/start":
+                observed["config"] = _bridge_config_from_client_args(
+                    captured
+                )
+                raise CodexAppServerError(
+                    code=-32603,
+                    message="turn failed",
+                )
+            return {}
+
+        client._request_handler = request_handler
+        s = CodexAppServerSession(
+            cwd="/tmp",
+            client_factory=factory,
+        )
+
+        result = s.run_turn(
+            "generate a cat image",
+            image_generation_task_id="turn-task-failure",
+            image_generation_gate_owner="turn-owner-failure",
+            allow_image_generation=True,
+            turn_timeout=2.0,
+        )
+
+        assert result.error is not None
+        bridge_root, bridge_id, public_key = observed["config"]
+        authorization, error = consume_image_generation_gate_lease(
+            path=str(bridge_root),
+            bridge_id=bridge_id,
+            public_key=public_key,
+        )
+        assert authorization is None
+        assert error == "image_generation_not_requested"
+        s.close()
+
+    def test_image_gate_identity_never_enters_model_input_or_tool_schema(self):
+        client = FakeClient()
+        observed = {}
+
+        def request_handler(method, params):
+            if method == "thread/start":
+                return {"thread": {"id": "thread-fake-001"}}
+            if method == "turn/start":
+                observed["input"] = params["input"][0]["text"]
+                return {"turn": {"id": "turn-fake-001"}}
+            return {}
+
+        client._request_handler = request_handler
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        session = make_session(client)
+        result = session.run_turn(
+            "generate a cat image",
+            image_generation_task_id="trusted-task-id",
+            image_generation_turn_id="trusted-turn-id",
+            image_generation_gate_owner="trusted-owner-token",
+            allow_image_generation=True,
+            turn_timeout=2.0,
+        )
+
+        assert result.error is None
+        assert observed["input"] == "generate a cat image"
+        assert "trusted-task-id" not in observed["input"]
+        assert "trusted-turn-id" not in observed["input"]
+        assert "trusted-owner-token" not in observed["input"]
+        session.close()
+
+    def test_bridge_root_is_scoped_to_hermes_tools_child_environment(self):
+        bridge_path = "/tmp/private bridge"
+        args = _image_gate_mcp_config_args(
+            bridge_path,
+            "non-secret-bridge-id",
+            "non-secret-public-key",
+        )
+
+        assert args[0::2] == ["-c"] * 7
+        overrides = dict(
+            item.split("=", 1)
+            for item in args[1::2]
+        )
+        assert json.loads(
+            overrides['mcp_servers."hermes-tools".command']
+        ) == session_mod.sys.executable
+        assert json.loads(
+            overrides[
+                'mcp_servers."hermes-tools".env.'
+                "HERMES_IMAGE_GENERATION_GATE_BRIDGE"
+            ]
+        ) == bridge_path
+        assert json.loads(
+            overrides[
+                'mcp_servers."hermes-tools".env.'
+                "HERMES_IMAGE_GENERATION_GATE_BRIDGE_ID"
+            ]
+        ) == "non-secret-bridge-id"
+        assert json.loads(
+            overrides[
+                'mcp_servers."hermes-tools".env.'
+                "HERMES_IMAGE_GENERATION_GATE_PUBLIC_KEY"
+            ]
+        ) == "non-secret-public-key"
+        assert "trusted-task-id" not in " ".join(args)
+        assert "trusted-turn-id" not in " ".join(args)
+        assert "trusted-owner-token" not in " ".join(args)
+
+    def test_denied_image_turn_creates_no_active_or_lease_files(self):
+        session = make_session(FakeClient())
+
+        with patch.object(
+            session,
+            "_run_turn_impl",
+            return_value=TurnResult(final_text="denied"),
+        ):
+            result = session.run_turn(
+                "do not generate an image",
+                image_generation_task_id="task-denied",
+                image_generation_turn_id="turn-denied",
+                image_generation_gate_owner="owner-denied",
+                allow_image_generation=False,
+            )
+
+        assert result.final_text == "denied"
+        bridge_root = Path(session._image_gate_bridge.path)
+        assert not (bridge_root / "active.json").exists()
+        assert list(bridge_root.glob("lease-*.json")) == []
+        assert {path.name for path in bridge_root.iterdir()} == {
+            "broker.sock"
+        }
+        session.close()
+
+    def test_overlapping_turn_is_rejected_without_waiting_or_rearming_bridge(
+        self,
+    ):
+        client = FakeClient()
+        session = make_session(client)
+        entered = threading.Event()
+        release = threading.Event()
+        first_result = {}
+
+        def blocking_turn(*_args, **_kwargs):
+            entered.set()
+            assert release.wait(timeout=2)
+            return TurnResult(final_text="first")
+
+        with patch.object(session, "_run_turn_impl", side_effect=blocking_turn):
+            worker = threading.Thread(
+                target=lambda: first_result.setdefault(
+                    "value",
+                    session.run_turn("first"),
+                )
+            )
+            worker.start()
+            assert entered.wait(timeout=1)
+
+            started_at = time.monotonic()
+            overlap = session.run_turn(
+                "second",
+                image_generation_task_id="task-second",
+                image_generation_turn_id="turn-second",
+                image_generation_gate_owner="owner-second",
+                allow_image_generation=True,
+            )
+            elapsed = time.monotonic() - started_at
+
+            assert overlap.should_retire is True
+            assert "overlapping turn" in str(overlap.error)
+            assert elapsed < 0.2
+            bridge_root = Path(session._image_gate_bridge.path)
+            assert not (bridge_root / "active.json").exists()
+            assert list(bridge_root.glob("lease-*.json")) == []
+            assert {path.name for path in bridge_root.iterdir()} == {
+                "broker.sock"
+            }
+
+            release.set()
+            worker.join(timeout=2)
+            assert not worker.is_alive()
+            assert first_result["value"].final_text == "first"
+        session.close()
 
 
 # ---- turn loop ----

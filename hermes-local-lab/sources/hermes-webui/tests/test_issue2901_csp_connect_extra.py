@@ -45,7 +45,7 @@ def test_csp_connect_src_rejects_directive_injection(monkeypatch, caplog):
 
     assert "https://metrics.example.com" not in policy
     assert "script-src *" not in policy
-    assert "Ignoring invalid HERMES_WEBUI_CSP_CONNECT_EXTRA" in caplog.text
+    assert "Ignoring invalid TAIJI_WEBUI_CSP_CONNECT_EXTRA" in caplog.text
 
 
 def test_csp_connect_src_rejects_paths(monkeypatch):

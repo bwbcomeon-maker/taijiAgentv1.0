@@ -39,6 +39,11 @@ run_datagen_sonnet.sh
 source-data/*
 run_datagen_megascience_glm4-6.sh
 data/*
+# The verified offline models.dev capability snapshot is package source, not
+# mutable runtime data. Keep only this versioned asset trackable.
+!agent/data/
+agent/data/*
+!agent/data/models_dev_snapshot.v1.json.gz
 node_modules/
 browser-use/
 agent-browser/
@@ -92,3 +97,7 @@ docs/superpowers/*
 # also created in-repo when an agent operates in this checkout). Plans, audit
 # logs, and per-session caches are never artifacts of the codebase.
 .hermes/
+
+# Persistent coordination inode for credential transactions.  It contains no
+# source data and is intentionally retained between writers at runtime.
+/.taiji-credential-transaction.lock

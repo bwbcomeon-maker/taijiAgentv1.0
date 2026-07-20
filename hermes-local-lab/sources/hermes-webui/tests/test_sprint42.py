@@ -33,6 +33,24 @@ _UI_JS = REPO_ROOT / 'static' / 'ui.js'
 def _read_sessions_js():
     return _SESSIONS_JS.read_text(encoding='utf-8')
 
+
+def _stable_test_capability_generation():
+    """Return one immutable capability generation for streaming test doubles."""
+    from agent.image_runtime import CapabilityRuntimeGeneration
+
+    return CapabilityRuntimeGeneration(
+        vision=(1, "sprint42-vision", "verified", True, "vision-generation"),
+        image_generation=(
+            1,
+            "sprint42-image-generation",
+            "verified",
+            True,
+            "image-generation",
+        ),
+        stable=True,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestSessionDBInjection(unittest.TestCase):
@@ -124,6 +142,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         import api.streaming as streaming
 
         captured = {}
+        capability_generation = _stable_test_capability_generation()
         fake_session_db = object()
         resolve_runtime_provider = mock.Mock(
             return_value={
@@ -154,7 +173,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 self.pending_attachments = []
                 self.pending_started_at = None
 
-            def save(self, touch_updated_at=True):
+            def save(self, touch_updated_at=True, **_kwargs):
                 self._saved = True
 
             def compact(self):
@@ -203,6 +222,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 self.reasoning_config = None
                 self.ephemeral_system_prompt = None
                 self._last_error = None
+                self._capability_runtime_identity = capability_generation.identity
 
             def run_conversation(self, **kwargs):
                 captured["run_kwargs"] = kwargs
@@ -233,6 +253,10 @@ class TestRuntimeRouteInjection(unittest.TestCase):
              mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai-codex", None)), \
              mock.patch("api.config.get_config", return_value={}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch(
+                 "agent.image_runtime.capture_capability_runtime_generation",
+                 return_value=capability_generation,
+             ), \
              mock.patch.dict(
                  sys.modules,
                  {
@@ -264,6 +288,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         import api.streaming as streaming
 
         captured = {}
+        capability_generation = _stable_test_capability_generation()
 
         class CapturingAgent:
             def __init__(
@@ -305,6 +330,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 self.ephemeral_system_prompt = None
                 self._last_error = None
                 self.interim_assistant_callback = interim_assistant_callback
+                self._capability_runtime_identity = capability_generation.identity
                 captured["agent"] = self
 
             def run_conversation(self, **kwargs):
@@ -379,6 +405,10 @@ class TestRuntimeRouteInjection(unittest.TestCase):
              mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai-codex", None)), \
              mock.patch("api.config.get_config", return_value={}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch(
+                 "agent.image_runtime.capture_capability_runtime_generation",
+                 return_value=capability_generation,
+             ), \
              mock.patch.dict(sys.modules, {
                  "hermes_cli": fake_hermes_cli,
                  "hermes_cli.runtime_provider": fake_rt_module,
@@ -425,6 +455,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
         captured = {}
         submit_payloads = []
+        capability_generation = _stable_test_capability_generation()
 
         class FakeEntry:
             def __init__(self, value):
@@ -447,6 +478,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 captured["init_kwargs"] = {
                     "clarify_callback": clarify_callback,
                 }
+                self._capability_runtime_identity = capability_generation.identity
 
             def run_conversation(self, **kwargs):
                 if self.clarify_callback:
@@ -532,6 +564,10 @@ class TestRuntimeRouteInjection(unittest.TestCase):
              mock.patch.object(streaming, "get_config", return_value={"clarify": {"timeout": 300}}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
              mock.patch("api.clarify.submit_pending", side_effect=fake_submit_pending), \
+             mock.patch(
+                 "agent.image_runtime.capture_capability_runtime_generation",
+                 return_value=capability_generation,
+             ), \
              mock.patch.dict(sys.modules, {
                 "hermes_cli": fake_hermes_cli,
                 "hermes_cli.runtime_provider": fake_rt_module,
@@ -831,6 +867,11 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
                 self.reasoning_config = None
                 self.ephemeral_system_prompt = None
                 self._last_error = None
+                from agent.image_runtime import capture_capability_runtime_generation
+
+                generation = capture_capability_runtime_generation()
+                assert generation.stable
+                self._capability_runtime_identity = generation.identity
 
             def run_conversation(self, **kwargs):
                 return {

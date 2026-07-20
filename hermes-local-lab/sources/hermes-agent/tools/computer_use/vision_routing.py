@@ -22,23 +22,15 @@ screenshot be returned as multimodal content (main model handles vision
 natively) or pre-analysed via the auxiliary vision pipeline so the main
 model only ever sees text?
 
-Behaviour (mirrors ``vision_analyze`` for consistency)
-------------------------------------------------------
-* If the user explicitly configured ``auxiliary.vision`` (any of
-  ``provider``, ``model``, or ``base_url`` non-empty / not ``"auto"``),
-  the screenshot is routed through the aux vision pipeline. Users who
-  pay for a dedicated vision model usually want it used.
-* Otherwise, if the active main model+provider can carry an image inside
-  a tool-result message AND the model reports ``supports_vision=True``
-  in models.dev metadata, return ``False`` (use the multimodal path).
-* In every other case (non-vision main model, provider that does not
-  accept multimodal tool results, lookup failure), route through aux
-  vision so the main model receives a text description it can act on.
-
-The decision intentionally fails *closed* (i.e. towards aux routing) when
-metadata is missing or ambiguous: returning a screenshot to a model that
-cannot read it is a hard tool failure, while routing it through aux costs
-one extra LLM call and yields a usable description.
+Behaviour (mirrors the canonical image-input router)
+----------------------------------------------------
+* A main model explicitly known to support vision uses the native route,
+  provided its tool-result transport can safely carry image media.
+* A main model explicitly known to be text-only may use the auxiliary
+  pipeline only while that capability is enabled.
+* Unknown model capability, unknown/unsupported native transport, and a
+  disabled auxiliary fallback all fail closed before any image bytes or
+  Provider request are emitted.
 """
 
 from __future__ import annotations
@@ -49,49 +41,22 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when ``auxiliary.vision`` carries a non-default user override.
-
-    Mirrors ``agent.image_routing._explicit_aux_vision_override`` so the
-    capture path and the user-attached-image path agree on what counts as
-    an explicit user request for the aux vision pipeline. ``provider:
-    "auto"``, blank values, or a missing block all count as *not*
-    explicit.
-    """
-    if not isinstance(cfg, dict):
-        return False
-    aux = cfg.get("auxiliary") or {}
-    if not isinstance(aux, dict):
-        return False
-    vision = aux.get("vision") or {}
-    if not isinstance(vision, dict):
-        return False
-
-    provider = str(vision.get("provider") or "").strip().lower()
-    model = str(vision.get("model") or "").strip()
-    base_url = str(vision.get("base_url") or "").strip()
-
-    if provider in ("", "auto") and not model and not base_url:
-        return False
-    return True
-
-
-def _lookup_supports_vision(provider: str, model: str) -> Optional[bool]:
-    """Return models.dev ``supports_vision`` for *(provider, model)* or None."""
-    if not provider or not model:
-        return None
+def _lookup_supports_vision(
+    provider: str,
+    model: str,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Optional[bool]:
+    """Use the canonical override-aware main-model capability resolver."""
     try:
-        from agent.models_dev import get_model_capabilities
-        caps = get_model_capabilities(provider, model)
+        from agent.image_routing import _lookup_supports_vision as resolve
+
+        return resolve(provider, model, cfg)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug(
             "computer_use vision_routing: caps lookup failed for %s:%s — %s",
             provider, model, exc,
         )
         return None
-    if caps is None:
-        return None
-    return bool(getattr(caps, "supports_vision", False))
 
 
 def _provider_accepts_multimodal_tool_result(provider: str, model: str) -> Optional[bool]:
@@ -134,16 +99,24 @@ def should_route_capture_to_aux_vision(
       caller should keep the existing multimodal envelope (main model
       handles vision natively).
     """
-    if _explicit_aux_vision_override(cfg):
-        return True
-
-    accepts_tool_image = _provider_accepts_multimodal_tool_result(provider, model)
-    if accepts_tool_image is None or accepts_tool_image is False:
-        return True
-
-    supports_vision = _lookup_supports_vision(provider, model)
+    supports_vision = _lookup_supports_vision(provider, model, cfg)
     if supports_vision is True:
+        accepts_tool_image = _provider_accepts_multimodal_tool_result(
+            provider,
+            model,
+        )
+        if accepts_tool_image is None:
+            raise RuntimeError("native_tool_media_unknown")
+        if accepts_tool_image is False:
+            raise RuntimeError("native_tool_media_unsupported")
         return False
+    if supports_vision is None:
+        raise RuntimeError("main_model_capability_unknown")
+
+    from agent.image_routing import _vision_capability_enabled
+
+    if not _vision_capability_enabled(cfg):
+        raise RuntimeError("vision_disabled")
     return True
 
 

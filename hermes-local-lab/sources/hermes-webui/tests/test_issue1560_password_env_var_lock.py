@@ -75,6 +75,10 @@ def test_settings_html_has_password_env_lock_banner():
         'settingsPasswordEnvLock banner element required (revealed when env var set)'
     assert 'data-i18n="password_env_var_locked"' in html, \
         'banner must use the i18n key password_env_var_locked'
+    banner_start = html.index('id="settingsPasswordEnvLock"')
+    banner_end = html.index('</div>', banner_start)
+    assert 'HERMES_WEBUI_PASSWORD' in html[banner_start:banner_end], \
+        'fallback banner must name the env var without exposing its value'
 
 
 # ── Frontend: env-locked logic (static/panels.js) ─────────────────────────
@@ -147,6 +151,12 @@ def test_i18n_password_env_var_locked_placeholder_in_all_locales():
                or 'password_env_var_locked_placeholder:' not in blocks[loc]]
     assert not missing, \
         f"Locales missing password_env_var_locked_placeholder: {missing}"
+    for loc in LOCALES:
+        block = blocks[loc]
+        idx = block.index('password_env_var_locked_placeholder:')
+        line_end = block.index('\n', idx)
+        assert 'HERMES_WEBUI_PASSWORD' in block[idx:line_end], \
+            f"{loc}: locked placeholder must name HERMES_WEBUI_PASSWORD"
 
 
 def test_i18n_locked_string_mentions_env_var_name_in_all_locales():

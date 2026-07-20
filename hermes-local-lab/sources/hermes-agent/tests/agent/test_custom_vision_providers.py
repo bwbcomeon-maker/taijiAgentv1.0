@@ -334,8 +334,8 @@ def test_named_custom_vision_rejects_endpoint_override_before_client_build(
         def close(self):
             return None
 
-    def fake_build(provider_name, *, async_mode):
-        build_calls.append((provider_name, async_mode))
+    def fake_build(provider_name, *, async_mode, binding=None):
+        build_calls.append((provider_name, async_mode, binding))
         return _UnusedHttpClient()
 
     def fake_resolve(provider, model=None, **kwargs):
@@ -366,7 +366,7 @@ def test_named_custom_vision_rejects_endpoint_override_before_client_build(
     assert provider == "custom:relay"
     assert client is not None
     assert model == "relay-vl"
-    assert build_calls == [("custom:relay", False)]
+    assert build_calls == [("custom:relay", False, None)]
     assert resolve_calls == [
         (
             "custom",

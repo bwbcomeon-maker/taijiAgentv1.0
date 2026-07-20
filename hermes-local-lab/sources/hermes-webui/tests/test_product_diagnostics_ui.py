@@ -116,7 +116,12 @@ def test_desktop_acceptance_smoke_rejects_web_and_covers_only_app_sizes():
     for expected in (
         "chromium.connectOverCDP",
         'taiji_desktop=1',
-        'taiji_desktop_token=',
+        "assertDesktopLaunchUrl(page.url())",
+        "assertDesktopAuthCookie(page, appUrl)",
+        'cookie.name === "taiji_desktop_token"',
+        'cookie.httpOnly === true',
+        'cookie.sameSite === "Strict"',
+        'DESKTOP_TOKEN_RE.test(String(cookie.value || ""))',
         "window.resizeTo(1120, 720)",
         "window.resizeTo(1440, 900)",
         'page.waitForEvent("download",',
@@ -129,6 +134,25 @@ def test_desktop_acceptance_smoke_rejects_web_and_covers_only_app_sizes():
         assert excluded not in smoke
     for web_fallback in ("chromium.launch", ".goto("):
         assert web_fallback not in smoke
+    assert 'page.url().includes("taiji_desktop_token=")' not in smoke
+    assert "taiji_desktop_token=<redacted>" not in smoke
+
+
+def test_managed_dialog_smoke_uses_cookie_auth_without_query_secret():
+    smoke = read("tests/managed_dialog_electron_smoke.js")
+
+    for expected in (
+        "chromium.connectOverCDP",
+        "assertDesktopLaunchUrl(page.url())",
+        "assertDesktopAuthCookie(page, appUrl)",
+        'cookie.name === "taiji_desktop_token"',
+        'cookie.httpOnly === true',
+        'cookie.sameSite === "Strict"',
+        'DESKTOP_TOKEN_RE.test(String(cookie.value || ""))',
+    ):
+        assert expected in smoke
+    assert 'page.url().includes("taiji_desktop_token=")' not in smoke
+    assert "taiji_desktop_token=<redacted>" not in smoke
 
 
 def test_desktop_acceptance_smoke_allows_only_the_handled_missing_expert_run_404():

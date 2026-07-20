@@ -50,8 +50,8 @@ def test_chat_completions_turn_uses_standard_reconciliation_and_sanitization(mon
         calls.append(("dedupe", len(messages)))
         return list(messages)
 
-    def sanitize(messages, *, cfg=None):
-        calls.append(("sanitize", cfg))
+    def sanitize(messages, *, cfg=None, capability_generation=None):
+        calls.append(("sanitize", (cfg, capability_generation)))
         return list(messages)
 
     monkeypatch.setattr(gateway_chat, "reconciled_state_db_messages_for_session", reconciled)
@@ -69,6 +69,7 @@ def test_chat_completions_turn_uses_standard_reconciliation_and_sanitization(mon
     )
 
     assert [name for name, _ in calls] == ["reconciled", "new_turn", "dedupe", "sanitize"]
+    assert calls[-1][1][0] == {"test": True}
     assert [message["role"] for message in messages] == [
         "system",
         "user",

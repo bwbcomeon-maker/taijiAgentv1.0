@@ -4777,6 +4777,7 @@ STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
 CANCEL_FLAGS: dict = {}
 AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
+STREAM_SESSION_IDS: dict = {}  # stream_id -> session_id, registered before worker setup
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated during streaming (#1361 §A)
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
@@ -4835,6 +4836,96 @@ import collections
 SESSION_AGENT_CACHE: collections.OrderedDict = collections.OrderedDict()  # LRU cache
 SESSION_AGENT_CACHE_MAX = 50  # Maximum cached agents (each holds full conversation history)
 SESSION_AGENT_CACHE_LOCK = threading.Lock()
+SESSION_AGENT_RETIREMENT_EPOCHS: dict[str, int] = {}
+SESSION_AGENT_RETIREMENT_STREAM_IDS: dict[tuple[str, int], str] = {}
+SESSION_AGENT_RETIREMENT_LOCK = threading.Lock()
+
+
+def get_session_agent_retirement_epoch(session_id: str) -> int:
+    with SESSION_AGENT_RETIREMENT_LOCK:
+        return int(SESSION_AGENT_RETIREMENT_EPOCHS.get(session_id, 0))
+
+
+def get_session_agent_retirement_marker(
+    session_id: str,
+    *,
+    generation_epoch: int | None = None,
+) -> tuple[int, str | None]:
+    """Return the cancellation marker that first retired ``generation_epoch``.
+
+    A later turn can observe and pop an older cache entry before the cancelling
+    thread reaches ``SESSION_AGENT_CACHE_LOCK``.  The marker therefore belongs
+    to the retirement epoch, not to whichever newer stream happens to discover
+    the stale entry.  Keeping the original stream id immutable lets the old
+    worker's ``finally`` own resource cleanup without ever targeting the new
+    generation.
+    """
+    with SESSION_AGENT_RETIREMENT_LOCK:
+        current_epoch = int(SESSION_AGENT_RETIREMENT_EPOCHS.get(session_id, 0))
+        if generation_epoch is None:
+            marker_epoch = current_epoch
+        else:
+            later_marker_epochs = (
+                epoch
+                for marker_session_id, epoch
+                in SESSION_AGENT_RETIREMENT_STREAM_IDS
+                if marker_session_id == session_id
+                and int(generation_epoch) < epoch <= current_epoch
+            )
+            marker_epoch = min(later_marker_epochs, default=current_epoch)
+        return (
+            marker_epoch,
+            SESSION_AGENT_RETIREMENT_STREAM_IDS.get(
+                (session_id, marker_epoch)
+            ),
+        )
+
+
+def retire_session_agent_generation(
+    session_id: str,
+    cancelled_stream_id: str | None = None,
+) -> int:
+    """Advance the session generation and bind it to the cancelling stream."""
+    with SESSION_AGENT_RETIREMENT_LOCK:
+        next_epoch = int(SESSION_AGENT_RETIREMENT_EPOCHS.get(session_id, 0)) + 1
+        SESSION_AGENT_RETIREMENT_EPOCHS[session_id] = next_epoch
+        if isinstance(cancelled_stream_id, str) and cancelled_stream_id:
+            SESSION_AGENT_RETIREMENT_STREAM_IDS.setdefault(
+                (session_id, next_epoch),
+                cancelled_stream_id,
+            )
+        return next_epoch
+
+
+def cache_session_agent_if_current_generation(
+    session_id: str,
+    cache_entry: tuple,
+    *,
+    expected_epoch: int,
+    cancel_event: threading.Event,
+) -> tuple[bool, list[tuple[str, tuple]]]:
+    """Atomically validate a generation and publish its agent cache entry.
+
+    Lock order is retirement -> cache. Cancellation advances retirement under
+    the former before it ever acquires the latter, so it either prevents this
+    store or observes and evicts it; there is no check-then-store gap.
+    """
+    evicted_items: list[tuple[str, tuple]] = []
+    with SESSION_AGENT_RETIREMENT_LOCK:
+        if (
+            cancel_event.is_set()
+            or int(SESSION_AGENT_RETIREMENT_EPOCHS.get(session_id, 0))
+            != int(expected_epoch)
+        ):
+            return False, evicted_items
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[session_id] = cache_entry
+            SESSION_AGENT_CACHE.move_to_end(session_id)
+            while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
+                evicted_items.append(
+                    SESSION_AGENT_CACHE.popitem(last=False)
+                )
+    return True, evicted_items
 
 
 def _evict_session_agent(session_id: str) -> None:

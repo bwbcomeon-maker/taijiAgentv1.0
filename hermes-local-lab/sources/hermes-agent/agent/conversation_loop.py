@@ -126,6 +126,150 @@ def _ra():
     return run_agent
 
 
+def _run_deterministic_image_intent(
+    agent: Any,
+    *,
+    original_user_message: Any,
+    conversation_history: Optional[List[Dict[str, Any]]],
+    messages: List[Dict[str, Any]],
+    effective_task_id: str,
+    image_turn_id: str,
+    image_gate_owner: str,
+) -> None:
+    """Route deterministic image intent before the ordinary model loop.
+
+    Classification failures keep the ordinary model loop available but close
+    image generation for this turn. Once tool execution has started, failures
+    must keep the gate in its current state so a later model tool call cannot
+    produce a second provider request.
+    """
+    try:
+        from agent.image_intent import (
+            ImageIntentAction,
+            begin_image_generation_task,
+            build_image_clarify_response,
+            build_image_generate_response,
+            decide_image_intent,
+            image_generation_gate_scope,
+            prompt_from_image_clarification,
+        )
+
+        image_intent_text = (
+            original_user_message
+            if isinstance(original_user_message, str)
+            else _summarize_user_message_for_log(original_user_message)
+        )
+        image_decision = decide_image_intent(
+            image_intent_text,
+            previous_turn_messages=conversation_history,
+        )
+    except Exception:
+        logger.warning(
+            "Image intent classification failed; image generation is closed "
+            "while the ordinary model loop continues",
+            exc_info=True,
+        )
+        try:
+            from agent.image_intent import begin_image_generation_task
+
+            begin_image_generation_task(
+                image_turn_id,
+                allow_generation=False,
+                owner_token=image_gate_owner,
+            )
+        except Exception:
+            pass
+        return
+
+    begin_image_generation_task(
+        image_turn_id,
+        allow_generation=(
+            image_decision.action is ImageIntentAction.GENERATE
+        ),
+        owner_token=image_gate_owner,
+    )
+    direct_image_prompt = None
+
+    try:
+        if (
+            image_decision.action is ImageIntentAction.GENERATE
+            and "image_generate" in agent.valid_tool_names
+        ):
+            direct_image_prompt = image_decision.prompt
+        elif (
+            image_decision.action is ImageIntentAction.CLARIFY
+            and image_decision.clarification is not None
+            and "clarify" in agent.valid_tool_names
+        ):
+            begin_image_generation_task(
+                image_turn_id,
+                allow_generation=False,
+                owner_token=image_gate_owner,
+            )
+            clarify_response = build_image_clarify_response(
+                image_decision.clarification
+            )
+            messages.append(
+                agent._build_assistant_message(
+                    clarify_response,
+                    "tool_calls",
+                )
+            )
+            with image_generation_gate_scope(
+                image_turn_id,
+                image_gate_owner,
+            ):
+                agent._execute_tool_calls(
+                    clarify_response,
+                    messages,
+                    effective_task_id,
+                    0,
+                )
+            try:
+                clarify_payload = json.loads(
+                    str(messages[-1].get("content") or "")
+                )
+            except (TypeError, ValueError, AttributeError):
+                clarify_payload = {}
+            direct_image_prompt = prompt_from_image_clarification(
+                clarify_payload,
+                original_prompt=image_intent_text,
+            )
+            if direct_image_prompt:
+                begin_image_generation_task(
+                    image_turn_id,
+                    allow_generation=True,
+                    owner_token=image_gate_owner,
+                )
+
+        if direct_image_prompt:
+            image_response = build_image_generate_response(
+                direct_image_prompt
+            )
+            messages.append(
+                agent._build_assistant_message(
+                    image_response,
+                    "tool_calls",
+                )
+            )
+            with image_generation_gate_scope(
+                image_turn_id,
+                image_gate_owner,
+            ):
+                agent._execute_tool_calls(
+                    image_response,
+                    messages,
+                    effective_task_id,
+                    0,
+                )
+    except Exception:
+        logger.warning(
+            "Deterministic image tool routing failed; preserving the task gate "
+            "and continuing through the model loop",
+            exc_info=True,
+        )
+
+
 def _nous_entitlement_message(capability: str) -> str:
     try:
         from hermes_cli.nous_account import (
@@ -375,6 +519,50 @@ def run_conversation(
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
     persist_user_platform_message_id: Optional[str] = None,
+    image_turn_id: Optional[str] = None,
+    image_gate_owner: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run one conversation while owning exactly one image-generation lease."""
+    resolved_image_turn_id = (
+        str(image_turn_id or "").strip() or uuid.uuid4().hex
+    )
+    resolved_image_gate_owner = (
+        str(image_gate_owner or "").strip() or uuid.uuid4().hex
+    )
+    try:
+        return _run_conversation_impl(
+            agent,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            stream_callback,
+            persist_user_message,
+            persist_user_platform_message_id,
+            image_turn_id=resolved_image_turn_id,
+            image_gate_owner=resolved_image_gate_owner,
+        )
+    finally:
+        from agent.image_intent import cleanup_image_generation_task
+
+        cleanup_image_generation_task(
+            resolved_image_turn_id,
+            owner_token=resolved_image_gate_owner,
+        )
+
+
+def _run_conversation_impl(
+    agent,
+    user_message: str,
+    system_message: str = None,
+    conversation_history: List[Dict[str, Any]] = None,
+    task_id: str = None,
+    stream_callback: Optional[callable] = None,
+    persist_user_message: Optional[str] = None,
+    persist_user_platform_message_id: Optional[str] = None,
+    *,
+    image_turn_id: str,
+    image_gate_owner: str,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -788,9 +976,26 @@ def run_conversation(
             user_message=user_message,
             original_user_message=original_user_message,
             messages=messages,
+            conversation_history=conversation_history,
             effective_task_id=effective_task_id,
+            image_turn_id=image_turn_id,
+            image_gate_owner=image_gate_owner,
             should_review_memory=_should_review_memory,
         )
+
+    # Deterministically route high-confidence image requests through the
+    # ordinary tool executor after the codex app-server bypass. Provider I/O,
+    # progress callbacks, cancellation and route events remain owned by the
+    # normal image_generate tool path.
+    _run_deterministic_image_intent(
+        agent,
+        original_user_message=original_user_message,
+        conversation_history=conversation_history,
+        messages=messages,
+        effective_task_id=effective_task_id,
+        image_turn_id=image_turn_id,
+        image_gate_owner=image_gate_owner,
+    )
 
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
@@ -3829,7 +4034,18 @@ def run_conversation(
                     except Exception:
                         pass
 
-                agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                from agent.image_intent import image_generation_gate_scope
+
+                with image_generation_gate_scope(
+                    image_turn_id,
+                    image_gate_owner,
+                ):
+                    agent._execute_tool_calls(
+                        assistant_message,
+                        messages,
+                        effective_task_id,
+                        api_call_count,
+                    )
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
@@ -4623,5 +4839,9 @@ def run_conversation(
     return result
 
 
+# ``run_conversation`` is a lifecycle wrapper around the historical
+# implementation. Expose the wrapped callable so source-based compatibility
+# checks and tooling continue to inspect the real conversation loop.
+run_conversation.__wrapped__ = _run_conversation_impl
 
 __all__ = ["run_conversation"]

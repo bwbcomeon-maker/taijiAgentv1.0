@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import socket
+import stat
 import struct
 import zlib
 from pathlib import Path
@@ -268,6 +270,77 @@ def test_gateway_image_envelope_rejects_url_base64_and_non_cache_paths(
         assert _structured_tool_result_for_gateway(
             "image_generate", {"success": True, "image": image}
         ) is None
+
+
+def test_gateway_image_envelope_preserves_tool_bound_name_and_digest(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    from gateway.platforms.api_server import _structured_tool_result_for_gateway
+
+    image = tmp_path / "home" / "cache" / "images" / "generated.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(PNG_1PX)
+    for structured_result in (
+        {
+            "success": True,
+            "image": str(image),
+            "image_ref": "different.png",
+            "sha256": hashlib.sha256(PNG_1PX).hexdigest(),
+        },
+        {
+            "success": True,
+            "image": str(image),
+            "image_ref": image.name,
+            "sha256": "0" * 64,
+        },
+    ):
+        assert (
+            _structured_tool_result_for_gateway(
+                "image_generate",
+                structured_result,
+            )
+            is None
+        )
+    digest = hashlib.sha256(PNG_1PX).hexdigest()
+    assert _structured_tool_result_for_gateway(
+        "image_generate",
+        {
+            "success": True,
+            "image": str(image),
+            "image_ref": image.name,
+            "sha256": digest,
+        },
+    ) == {
+        "success": True,
+        "image_ref": image.name,
+        "sha256": digest,
+    }
+
+
+def test_image_cache_files_are_private_and_parent_directory_is_fsynced(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    import agent.image_gen_provider as provider
+
+    fsync_kinds: list[str] = []
+    real_fsync = os.fsync
+
+    def observing_fsync(descriptor: int):
+        mode = os.fstat(descriptor).st_mode
+        fsync_kinds.append(
+            "directory" if stat.S_ISDIR(mode) else "regular"
+        )
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(provider.os, "fsync", observing_fsync)
+    path = provider.save_b64_image(base64.b64encode(PNG_1PX).decode("ascii"))
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert "regular" in fsync_kinds
+    assert "directory" in fsync_kinds
 
 
 @pytest.mark.parametrize("payload", [PNG_1PX, JPEG_2PX])

@@ -38,9 +38,15 @@ def test_footer_timestamp_uses_richer_format_for_older_messages():
 
 def test_timestamp_footer_stays_on_visible_response_segments():
     assert "if(hasVisibleBody){" in UI_JS
-    assert 'seg.insertAdjacentHTML(\'beforeend\', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);' in UI_JS, (
+    start = UI_JS.index("const hasVisibleBody=")
+    end = UI_JS.index("_assistantTurnBlocks(currentAssistantTurn).appendChild(seg);", start)
+    block = UI_JS[start:end]
+    assert "const bodyBlock=String(content||'').trim()?" in block
+    insertion = block[block.index("seg.insertAdjacentHTML('beforeend', `${filesHtml}${bodyBlock}"):]
+    assert "${footHtml}`);" in insertion, (
         "Footer timestamp should stay attached to visible response segments"
     )
+    assert insertion.index("${bodyBlock}") < insertion.index("${footHtml}")
     assert "assistantThinking.set(rawIdx, thinkingText);" in UI_JS, (
         "Thinking-only assistant segments should preserve thinking for the shared activity dropdown without rendering a footer"
     )

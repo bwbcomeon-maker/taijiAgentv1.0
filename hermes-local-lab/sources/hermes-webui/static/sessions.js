@@ -1839,6 +1839,22 @@ let _allProjects = [];  // cached project list
 // double-underscore prefixes provide.
 const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
+let _pendingProjectFilterFocus=null;
+
+function _activateProjectFilter(projectId,focusKey){
+  _activeProject=projectId;
+  _pendingProjectFilterFocus=focusKey;
+  renderSessionListFromCache();
+}
+
+function _restoreProjectFilterFocus(bar){
+  const focusKey=_pendingProjectFilterFocus;
+  _pendingProjectFilterFocus=null;
+  if(!focusKey||!bar) return;
+  const target=Array.from(bar.querySelectorAll('.project-chip'))
+    .find(candidate=>candidate.dataset.projectFilterKey===focusKey);
+  if(target&&typeof target.focus==='function') target.focus({preventScroll:true});
+}
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
@@ -4103,8 +4119,20 @@ function renderSessionListFromCache(){
     // "All" chip
     const allChip=document.createElement('span');
     allChip.className='project-chip'+(!_activeProject?' active':'');
-    allChip.textContent='全部';
-    allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};
+    allChip.textContent=t('session_project_filter_all');
+    allChip.setAttribute('role','button');
+    allChip.tabIndex=0;
+    allChip.setAttribute('aria-pressed',!_activeProject?'true':'false');
+    allChip.dataset.projectFilterKey='all';
+    const activateAllProjects=()=>_activateProjectFilter(null,'all');
+    allChip.onclick=activateAllProjects;
+    allChip.onkeydown=(event)=>{
+      if(event.target!==event.currentTarget||event.repeat) return;
+      if(event.key==='Enter'||event.key===' '){
+        event.preventDefault();
+        activateAllProjects();
+      }
+    };
     bar.appendChild(allChip);
     // "Unassigned" chip — only when there are sessions with no project to
     // filter to. Hidden in the common case where every session is already
@@ -4112,15 +4140,31 @@ function renderSessionListFromCache(){
     if(hasUnprojected){
       const noneChip=document.createElement('span');
       noneChip.className='project-chip no-project'+(_activeProject===NO_PROJECT_FILTER?' active':'');
-      noneChip.textContent='未分配';
-      noneChip.title='Show conversations not yet assigned to a project';
-      noneChip.onclick=()=>{_activeProject=NO_PROJECT_FILTER;renderSessionListFromCache();};
+      noneChip.textContent=t('session_project_filter_unassigned');
+      noneChip.title=t('session_project_filter_unassigned_title');
+      noneChip.setAttribute('role','button');
+      noneChip.tabIndex=0;
+      noneChip.setAttribute('aria-pressed',_activeProject===NO_PROJECT_FILTER?'true':'false');
+      noneChip.dataset.projectFilterKey='unassigned';
+      const activateUnassignedProjects=()=>_activateProjectFilter(NO_PROJECT_FILTER,'unassigned');
+      noneChip.onclick=activateUnassignedProjects;
+      noneChip.onkeydown=(event)=>{
+        if(event.target!==event.currentTarget||event.repeat) return;
+        if(event.key==='Enter'||event.key===' '){
+          event.preventDefault();
+          activateUnassignedProjects();
+        }
+      };
       bar.appendChild(noneChip);
     }
     // Project chips
     for(const p of _allProjects){
       const chip=document.createElement('span');
       chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
+      chip.setAttribute('role','button');
+      chip.tabIndex=0;
+      chip.setAttribute('aria-pressed',p.project_id===_activeProject?'true':'false');
+      chip.dataset.projectFilterKey=p.project_id;
       if(p.color){
         const dot=document.createElement('span');
         dot.className='color-dot';
@@ -4131,9 +4175,19 @@ function renderSessionListFromCache(){
       nameSpan.textContent=p.name;
       chip.appendChild(nameSpan);
       let _pClickTimer=null;
+      const activateProject=()=>_activateProjectFilter(p.project_id,p.project_id);
       chip.onclick=(e)=>{
         clearTimeout(_pClickTimer);
-        _pClickTimer=setTimeout(()=>{_pClickTimer=null;_activeProject=p.project_id;renderSessionListFromCache();},220);
+        _pClickTimer=setTimeout(()=>{_pClickTimer=null;activateProject();},220);
+      };
+      chip.onkeydown=(event)=>{
+        if(event.target!==event.currentTarget||event.repeat) return;
+        if(event.key==='Enter'||event.key===' '){
+          event.preventDefault();
+          clearTimeout(_pClickTimer);
+          _pClickTimer=null;
+          activateProject();
+        }
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
@@ -4147,6 +4201,7 @@ function renderSessionListFromCache(){
     addBtn.onclick=(e)=>{e.stopPropagation();_startProjectCreate(bar,addBtn);};
     bar.appendChild(addBtn);
     list.appendChild(bar);
+    _restoreProjectFilterFocus(bar);
   }
   // Profile filter toggle (show sessions from other profiles).
   // Cross-profile rows live SERVER-SIDE behind ?all_profiles=1, so the toggle
@@ -4184,7 +4239,9 @@ function renderSessionListFromCache(){
   } else if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
+    empty.textContent=_activeProject===NO_PROJECT_FILTER
+      ?t('session_project_filter_empty_unassigned')
+      :t('session_project_filter_empty_project');
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));

@@ -35,5 +35,11 @@ def test_done_and_restore_replace_marker_only_assistant_with_error_toast():
     assert "_isMarkerOnlyAssistantMessage(msg)" in src
     assert "msg.content='**Error:** No response received after context compression. Please retry.'" in src
     assert "internal preserved-task-list compression marker" in src
-    assert "_markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages)" in src
-    assert "showToast('No response received after context compression. Please retry.',5000,'error')" in src
+    replacement = "_markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages)"
+    toast = "showToast('上下文压缩后未收到回复。请重试。',5000,'error')"
+    assert src.count(replacement) == 2, (
+        "Both normal completion and settled restore must replace a marker-only assistant"
+    )
+    assert src.count(toast) == 2, (
+        "Both terminal paths must surface the same localized error toast"
+    )

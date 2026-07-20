@@ -24,15 +24,18 @@ import json
 import logging
 import os
 import datetime
+import re
 import threading
 import uuid
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from agent.image_gen_verification import (
     CAPABILITY_VERIFICATION_SCHEMA_VERSION,
     image_gen_provider_target,
 )
+from agent.image_gen_provider import save_url_image
 
 # fal_client is imported lazily — see _load_fal_client(). Pulling it
 # eagerly added ~64 ms to every CLI cold start because
@@ -77,6 +80,10 @@ from tools.tool_backend_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ImageResultIOError(RuntimeError):
+    """Fail-closed marker for a generated image that could not be cached."""
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +558,70 @@ def _build_fal_payload(
 # ---------------------------------------------------------------------------
 # Upscaler
 # ---------------------------------------------------------------------------
-def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, Any]]:
+def _require_pinned_fal_binding(value: Any, *, model: str):
+    """Validate the exact direct-FAL runtime captured for this request."""
+    from agent.image_gen_runtime_contracts import (
+        builtin_image_runtime_contract,
+    )
+    from agent.image_gen_verification import (
+        require_image_gen_request_binding,
+    )
+
+    binding = require_image_gen_request_binding(
+        value,
+        provider="fal",
+        model=model,
+    )
+    expected = builtin_image_runtime_contract("fal")
+    identity = binding.runtime_identity
+    if (
+        str(identity.get("transport") or "")
+        != str(expected.get("transport") or "")
+        or str(identity.get("endpoint") or "").rstrip("/")
+        != str(expected.get("endpoint") or "").rstrip("/")
+    ):
+        raise ValueError("pinned FAL runtime identity does not match target")
+    return binding
+
+
+def _pinned_fal_client(api_key: str):
+    """Create a request-local client from the sealed key, never ambient env."""
+    client_module = _load_fal_client()
+    client_factory = getattr(client_module, "SyncClient", None)
+    if not callable(client_factory):
+        raise RuntimeError("fal_client SyncClient is unavailable")
+    return client_factory(key=api_key)
+
+
+def _submit_pinned_fal_request(
+    client: Any,
+    model: str,
+    arguments: Dict[str, Any],
+    *,
+    reauth_guard: Any,
+):
+    """Reauthorize at the last seam before one request-local FAL submit."""
+    reauth_guard()
+    return client.submit(
+        model,
+        arguments=arguments,
+        headers={"x-idempotency-key": str(uuid.uuid4())},
+    )
+
+
+def _pinned_fal_result(handler: Any, *, reauth_guard: Any):
+    """Reauthorize immediately before the queue handle performs network I/O."""
+    reauth_guard()
+    return handler.get()
+
+
+def _upscale_image(
+    image_url: str,
+    original_prompt: str,
+    *,
+    request_client: Any = None,
+    reauth_guard: Any = None,
+) -> Optional[Dict[str, Any]]:
     """Upscale an image using FAL.ai's Clarity Upscaler.
 
     Returns upscaled image dict, or None on failure (caller falls back to
@@ -572,8 +642,23 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
             "enable_safety_checker": UPSCALER_SAFETY_CHECKER,
         }
 
-        handler = _submit_fal_request(UPSCALER_MODEL, arguments=upscaler_arguments)
-        result = handler.get()
+        if request_client is not None:
+            handler = _submit_pinned_fal_request(
+                request_client,
+                UPSCALER_MODEL,
+                upscaler_arguments,
+                reauth_guard=reauth_guard,
+            )
+            result = _pinned_fal_result(
+                handler,
+                reauth_guard=reauth_guard,
+            )
+        else:
+            handler = _submit_fal_request(
+                UPSCALER_MODEL,
+                arguments=upscaler_arguments,
+            )
+            result = handler.get()
 
         if result and "image" in result:
             upscaled_image = result["image"]
@@ -593,6 +678,8 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
         return None
 
     except Exception as e:
+        if str(getattr(e, "error_code", "") or ""):
+            raise
         logger.error("Error upscaling image: %s", e, exc_info=True)
         return None
 
@@ -608,6 +695,8 @@ def image_generate_tool(
     num_images: Optional[int] = None,
     output_format: Optional[str] = None,
     seed: Optional[int] = None,
+    _runtime_binding: Any = None,
+    _reauth_guard: Any = None,
 ) -> str:
     """Generate an image from a text prompt using the configured FAL model.
 
@@ -616,10 +705,29 @@ def image_generate_tool(
     per-model via the ``supports`` whitelist (unsupported overrides are
     silently dropped so legacy callers don't break when switching models).
 
-    Returns a JSON string with ``{"success": bool, "image": url | None,
+    Returns a JSON string with ``{"success": bool, "image": local_path | None,
     "error": str, "error_type": str}``.
     """
-    model_id, meta = _resolve_fal_model()
+    pinned_binding = None
+    request_client = None
+    if _runtime_binding is not None:
+        if not callable(_reauth_guard):
+            raise ValueError("pinned FAL request authorization guard is missing")
+        pinned_model = str(
+            getattr(_runtime_binding, "model", "") or ""
+        ).strip()
+        if pinned_model not in FAL_MODELS:
+            raise ValueError("pinned FAL model is unsupported")
+        pinned_binding = _require_pinned_fal_binding(
+            _runtime_binding,
+            model=pinned_model,
+        )
+        model_id, meta = pinned_model, FAL_MODELS[pinned_model]
+        request_client = _pinned_fal_client(pinned_binding.api_key)
+    else:
+        if _reauth_guard is not None:
+            raise ValueError("pinned FAL request binding is missing")
+        model_id, meta = _resolve_fal_model()
 
     debug_call_data = {
         "model": model_id,
@@ -644,7 +752,13 @@ def image_generate_tool(
         if not prompt or not isinstance(prompt, str) or len(prompt.strip()) == 0:
             raise ValueError("Prompt is required and must be a non-empty string")
 
-        if not (fal_key_is_configured() or _resolve_managed_fal_gateway()):
+        if (
+            pinned_binding is None
+            and not (
+                fal_key_is_configured()
+                or _resolve_managed_fal_gateway()
+            )
+        ):
             raise ValueError(_build_no_backend_setup_message())
 
         aspect_lc = (aspect_ratio or DEFAULT_ASPECT_RATIO).lower().strip()
@@ -674,8 +788,20 @@ def image_generate_tool(
             meta.get("display", model_id), model_id, prompt[:80],
         )
 
-        handler = _submit_fal_request(model_id, arguments=arguments)
-        result = handler.get()
+        if request_client is not None:
+            handler = _submit_pinned_fal_request(
+                request_client,
+                model_id,
+                arguments,
+                reauth_guard=_reauth_guard,
+            )
+            result = _pinned_fal_result(
+                handler,
+                reauth_guard=_reauth_guard,
+            )
+        else:
+            handler = _submit_fal_request(model_id, arguments=arguments)
+            result = handler.get()
 
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
 
@@ -699,7 +825,12 @@ def image_generate_tool(
             }
 
             if should_upscale:
-                upscaled_image = _upscale_image(img["url"], prompt.strip())
+                upscaled_image = _upscale_image(
+                    img["url"],
+                    prompt.strip(),
+                    request_client=request_client,
+                    reauth_guard=_reauth_guard,
+                )
                 if upscaled_image:
                     formatted_images.append(upscaled_image)
                     continue
@@ -717,9 +848,31 @@ def image_generate_tool(
             len(formatted_images), generation_time, upscaled_count, model_id,
         )
 
+        remote_image = str(formatted_images[0].get("url") or "").strip()
+        if not remote_image:
+            raise _ImageResultIOError("Generated image could not be persisted.")
+        safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", model_id).strip("._-")
+        if request_client is not None:
+            _reauth_guard()
+        try:
+            cached_image = save_url_image(
+                remote_image,
+                prefix=f"fal_{safe_model[:80] or 'image'}",
+            )
+        except Exception:
+            diagnostic_id = uuid.uuid4().hex
+            logger.warning(
+                "FAL generated image cache failed "
+                "diagnostic_id=%s error_code=image_result_io_failed",
+                diagnostic_id,
+            )
+            raise _ImageResultIOError(
+                "Generated image could not be persisted."
+            ) from None
+
         response_data = {
             "success": True,
-            "image": formatted_images[0]["url"] if formatted_images else None,
+            "image": str(cached_image),
         }
 
         debug_call_data["success"] = True
@@ -731,15 +884,27 @@ def image_generate_tool(
         return json.dumps(response_data, indent=2, ensure_ascii=False)
 
     except Exception as e:
+        if str(getattr(e, "error_code", "") or ""):
+            raise
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
-        error_msg = f"Error generating image: {str(e)}"
+        is_result_io_error = isinstance(e, _ImageResultIOError)
+        public_error = (
+            "Generated image could not be persisted."
+            if is_result_io_error
+            else str(e)
+        )
+        error_msg = f"Error generating image: {public_error}"
         logger.error("%s", error_msg, exc_info=True)
 
         response_data = {
             "success": False,
             "image": None,
-            "error": str(e),
-            "error_type": type(e).__name__,
+            "error": public_error,
+            "error_type": (
+                "image_result_io_failed"
+                if is_result_io_error
+                else type(e).__name__
+            ),
         }
 
         debug_call_data["error"] = error_msg
@@ -901,6 +1066,22 @@ def get_image_generation_readiness() -> Dict[str, Any]:
     image_cfg = _load_image_gen_config()
     provider = str(image_cfg.get("provider") or "").strip().lower()
     model = str(image_cfg.get("model") or "").strip()
+    if image_cfg.get("enabled") is False:
+        return {
+            "configured": bool(provider or model),
+            "available": False,
+            "reason_code": "disabled",
+            "public_message": _image_gen_public_message("disabled"),
+            "provider": provider,
+            "model": model,
+            "verification_status": "disabled",
+            "verification_schema_version": (
+                CAPABILITY_VERIFICATION_SCHEMA_VERSION
+            ),
+            "verification_fingerprint": "",
+            "capability_fingerprint": "",
+            "runtime_fingerprint": "",
+        }
     provider_target = image_gen_provider_target(provider)
     verification = _read_image_gen_verification_snapshot(image_cfg)
     verification_status = str(
@@ -1551,6 +1732,28 @@ def _dispatch_to_plugin_provider(
             "provider_contract",
             "图像生成 Provider 返回了无效响应。",
         )
+    if result.get("success") is True:
+        from agent.image_gen_provider import (
+            _images_cache_dir,
+            validated_cache_image_ref,
+        )
+
+        verified = validated_cache_image_ref(result.get("image"))
+        if verified is None:
+            return _image_boundary_failure(
+                "provider_contract",
+                "图像生成 Provider 未返回有效的本地缓存图片。",
+            )
+        image_ref, digest = verified
+        result = dict(result)
+        result["image"] = str(_images_cache_dir() / image_ref)
+        result["image_ref"] = image_ref
+        result["sha256"] = digest
+    elif result.get("success") is not False:
+        return _image_boundary_failure(
+            "provider_contract",
+            "图像生成 Provider 返回了无效响应。",
+        )
     return json.dumps(result)
 
 
@@ -1613,6 +1816,40 @@ def _handle_image_generate(args, **kw):
             authorization_generation=current_generation,
         ),
     )
+    from agent.image_intent import (
+        claim_image_generation,
+        current_image_generation_gate,
+    )
+
+    gate_context = current_image_generation_gate()
+    gate_task_id = str(
+        kw.get("image_generation_task_id")
+        or (gate_context[0] if gate_context else "")
+    )
+    gate_owner = str(
+        kw.get("image_generation_gate_owner")
+        or (gate_context[1] if gate_context else "")
+    )
+    gate_error = claim_image_generation(
+        gate_task_id,
+        owner_token=gate_owner,
+    )
+    if gate_error:
+        return json.dumps(
+            {
+                "success": False,
+                "image": None,
+                "error": (
+                    "本轮未授权执行图像生成。"
+                    if gate_error != "duplicate_generation_this_turn"
+                    else "本轮已执行过一次图像生成，请在下一轮重试。"
+                ),
+                "error_code": gate_error,
+                "error_type": gate_error,
+                "retryable": False,
+            },
+            ensure_ascii=False,
+        )
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).

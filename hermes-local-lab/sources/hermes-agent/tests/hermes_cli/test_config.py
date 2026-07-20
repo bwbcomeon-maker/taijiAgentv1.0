@@ -252,6 +252,52 @@ class TestSaveAndLoadRoundtrip:
             assert saved["agent"]["max_turns"] == 42
             assert "max_turns" not in saved
 
+    def test_pre_reload_save_reference_keeps_optional_sentinel_identity(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import importlib
+        import hermes_cli.config as config_module
+
+        old_save_config = config_module.save_config
+        old_load_snapshot = config_module.load_config_snapshot
+        old_sentinels = (
+            config_module._CONFIG_MERGE_MISSING,
+            config_module._NO_CONFIG_SNAPSHOT,
+            config_module._NO_RAW_CONFIG_SNAPSHOT,
+        )
+        old_error_types = (
+            config_module.ManagedConfigurationError,
+            config_module.ConfigurationConflictError,
+            config_module.WebConfigValidationError,
+        )
+
+        importlib.reload(config_module)
+
+        assert old_sentinels == (
+            config_module._CONFIG_MERGE_MISSING,
+            config_module._NO_CONFIG_SNAPSHOT,
+            config_module._NO_RAW_CONFIG_SNAPSHOT,
+        )
+        assert old_error_types == (
+            config_module.ManagedConfigurationError,
+            config_module.ConfigurationConflictError,
+            config_module.WebConfigValidationError,
+        )
+        monkeypatch.delenv("TAIJI_RUNTIME_HOME", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        old_save_config({"agent": {"max_turns": 17}})
+        draft = old_load_snapshot()
+        draft.config["agent"]["max_turns"] = 18
+        old_save_config(draft.config, snapshot_token=draft.token)
+
+        saved = yaml.safe_load(
+            (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert saved["agent"]["max_turns"] == 18
+
     def test_save_config_normalizes_legacy_root_level_max_turns(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             save_config({"model": "test/custom-model", "max_turns": 37})

@@ -20,9 +20,67 @@ function loadPlaywright() {
 const { chromium } = loadPlaywright();
 const cdpEndpoint = process.env.TAIJI_DESKTOP_CDP || "http://127.0.0.1:9233";
 const evidenceDir = process.env.TAIJI_DESKTOP_EVIDENCE_DIR || "";
+const DESKTOP_TOKEN_RE = /^[0-9a-f]{64}$/;
 
 function assertState(condition, message, detail) {
   assert.ok(condition, `${message}${detail ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
+}
+
+function assertDesktopLaunchUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || ""));
+  } catch (_error) {
+    assertState(false, "Desktop App URL is invalid");
+  }
+  assertState(
+    parsed.protocol === "http:" && ["127.0.0.1", "localhost"].includes(parsed.hostname),
+    "Desktop App URL is not loopback HTTP",
+    parsed.toString(),
+  );
+  assertState(
+    !parsed.searchParams.has("taiji_desktop_token"),
+    "Desktop App URL exposes the desktop token",
+    parsed.toString(),
+  );
+  const markerValues = parsed.searchParams.getAll("taiji_desktop");
+  assertState(
+    markerValues.length === 1 && markerValues[0] === "1",
+    "Desktop App URL is missing its unique desktop marker",
+    parsed.toString(),
+  );
+  assertState(
+    [...parsed.searchParams.keys()].every((name) => name === "taiji_desktop"),
+    "Desktop App URL has an unexpected query parameter",
+    parsed.toString(),
+  );
+  return parsed;
+}
+
+async function assertDesktopAuthCookie(page, appUrl) {
+  const cookies = await page.context().cookies(appUrl.origin);
+  const matches = cookies.filter((cookie) => cookie && cookie.name === "taiji_desktop_token");
+  assertState(matches.length === 1, "Desktop App must have exactly one desktop auth cookie");
+  const cookie = matches[0];
+  assertState(
+    String(cookie.domain || "").replace(/^\./, "") === appUrl.hostname,
+    "Desktop auth cookie has the wrong host",
+  );
+  assertState(cookie.path === "/", "Desktop auth cookie has the wrong path");
+  assertState(cookie.httpOnly === true, "Desktop auth cookie is not HttpOnly");
+  assertState(cookie.sameSite === "Strict", "Desktop auth cookie is not SameSite Strict");
+  assertState(
+    DESKTOP_TOKEN_RE.test(String(cookie.value || "")),
+    "Desktop auth cookie value does not use the required lowercase hex format",
+  );
+  return {
+    name: "taiji_desktop_token",
+    present: true,
+    http_only: true,
+    same_site: "Strict",
+    path: "/",
+    value_format: "lowercase-hex-64",
+  };
 }
 
 async function onboardingStatus(page) {
@@ -50,11 +108,8 @@ async function run() {
   const pages = browser.contexts().flatMap((context) => context.pages());
   const page = pages.find((candidate) => candidate.url().includes("taiji_desktop=1"));
   assertState(page, "No real Taiji Electron BrowserWindow was found", pages.map((item) => item.url()));
-  assertState(
-    page.url().includes("taiji_desktop_token="),
-    "Desktop token is missing; refusing to treat a normal Web page as App acceptance",
-    page.url(),
-  );
+  const appUrl = assertDesktopLaunchUrl(page.url());
+  const desktopAuthCookie = await assertDesktopAuthCookie(page, appUrl);
 
   const jsErrors = [];
   page.on("pageerror", (error) => jsErrors.push(`pageerror: ${error.message}`));
@@ -63,7 +118,7 @@ async function run() {
   });
 
   const originalSize = await page.evaluate(() => ({ width: outerWidth, height: outerHeight }));
-  const results = { appUrl: page.url().replace(/taiji_desktop_token=[^&]+/, "taiji_desktop_token=<redacted>") };
+  const results = { appUrl: appUrl.toString(), desktopAuthCookie };
   try {
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForDesktopReady(page);
@@ -202,6 +257,9 @@ async function run() {
     process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
   } finally {
     await page.evaluate(({ width, height }) => window.resizeTo(width, height), originalSize).catch(() => {});
+    // Release the attach-only CDP connection on both success and assertion
+    // failure so this CLI cannot hang after it has produced a result.
+    await browser.close().catch(() => {});
   }
 }
 

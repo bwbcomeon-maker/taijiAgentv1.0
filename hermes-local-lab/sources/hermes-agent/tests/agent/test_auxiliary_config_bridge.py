@@ -8,7 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 import yaml
@@ -238,29 +238,106 @@ class TestGatewayBridgeCodeParity:
 # ── Vision model override tests ──────────────────────────────────────────────
 
 
-class TestVisionModelOverride:
-    """Test that AUXILIARY_VISION_MODEL env var overrides the default model in the handler."""
+class TestVisionModelAuthorization:
+    """Environment hints cannot bypass the verified auxiliary route."""
 
-    def test_env_var_overrides_default(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_env_var_does_not_override_verified_model(self, monkeypatch):
         monkeypatch.setenv("AUXILIARY_VISION_MODEL", "openai/gpt-4o")
+        from agent.auxiliary_client import VisionRequestBinding
         from tools.vision_tools import _handle_vision_analyze
-        with patch("tools.vision_tools.vision_analyze_tool", new_callable=MagicMock) as mock_tool:
-            mock_tool.return_value = '{"success": true}'
-            _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
-            call_args = mock_tool.call_args
-            # 3rd positional arg = model
-            assert call_args[0][2] == "openai/gpt-4o"
 
-    def test_default_model_when_no_override(self, monkeypatch):
+        snapshot = {
+            "schema_version": 1,
+            "fingerprint": "verified-vision",
+            "_authorization_generation": "verified-generation",
+            "status": "verified",
+            "available": True,
+            "provider": "alibaba",
+            "model": "qwen3-vl-plus",
+        }
+        binding = VisionRequestBinding(
+            provider="alibaba",
+            model="qwen3-vl-plus",
+            base_url="https://vision.example.test/v1",
+            api_key="test-secret",
+        )
+        with (
+            patch(
+                "tools.vision_tools.vision_analyze_tool",
+                new_callable=AsyncMock,
+            ) as mock_tool,
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="openai",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-4.1-mini",
+            ),
+            patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="text",
+            ),
+            patch(
+                "agent.image_runtime.verification_runtime_snapshot",
+                return_value=snapshot,
+            ),
+            patch(
+                "tools.vision_tools.capture_vision_request_binding",
+                return_value=binding,
+            ),
+        ):
+            mock_tool.return_value = '{"success": true}'
+            await _handle_vision_analyze(
+                {"image_url": "http://test.jpg", "question": "test"}
+            )
+            call_args = mock_tool.call_args
+            assert call_args.args[2] == "qwen3-vl-plus"
+            assert call_args.kwargs["provider"] == "alibaba"
+            assert call_args.kwargs["strict_target"] is True
+
+    @pytest.mark.asyncio
+    async def test_missing_verification_never_uses_implicit_default(self, monkeypatch):
         monkeypatch.delenv("AUXILIARY_VISION_MODEL", raising=False)
         from tools.vision_tools import _handle_vision_analyze
-        with patch("tools.vision_tools.vision_analyze_tool", new_callable=MagicMock) as mock_tool:
+
+        with (
+            patch(
+                "tools.vision_tools.vision_analyze_tool",
+                new_callable=AsyncMock,
+            ) as mock_tool,
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="openai",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="gpt-4.1-mini",
+            ),
+            patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="text",
+            ),
+            patch(
+                "agent.image_runtime.verification_runtime_snapshot",
+                return_value={
+                    "schema_version": 1,
+                    "status": "unverified",
+                    "available": False,
+                    "reason_code": "vision_not_verified",
+                },
+            ),
+        ):
             mock_tool.return_value = '{"success": true}'
-            _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
-            call_args = mock_tool.call_args
-            # With no AUXILIARY_VISION_MODEL env var, model should be None
-            # (the centralized call_llm router picks the provider default)
-            assert call_args[0][2] is None
+            result = json.loads(
+                await _handle_vision_analyze(
+                    {"image_url": "http://test.jpg", "question": "test"}
+                )
+            )
+            assert result["success"] is False
+            assert result["error_code"] == "vision_not_verified"
+            mock_tool.assert_not_called()
 
 
 # ── DEFAULT_CONFIG shape tests ───────────────────────────────────────────────

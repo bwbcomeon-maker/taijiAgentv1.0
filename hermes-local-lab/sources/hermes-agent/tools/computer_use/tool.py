@@ -485,14 +485,22 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
         # multimodal envelope was returned unconditionally, so non-vision
         # main models tripped HTTP 404 / 400 at the provider boundary even
         # when auxiliary.vision was explicitly configured to handle this.
-        if _should_route_through_aux_vision():
+        route_through_aux = _should_route_through_aux_vision()
+        if route_through_aux is None:
+            return _capture_vision_error_response(
+                cap,
+                summary,
+                reason_code="capture_vision_route_blocked",
+            )
+        if route_through_aux:
             routed = _route_capture_through_aux_vision(cap, summary)
             if routed is not None:
                 return routed
-            # Aux routing was requested but failed (no vision client, aux
-            # call raised, etc.). Fall through to the multimodal envelope —
-            # better to surface a tool-result error from the main model
-            # than to silently drop the screenshot entirely.
+            return _capture_vision_error_response(
+                cap,
+                summary,
+                reason_code="auxiliary_vision_failed",
+            )
 
         # Detect actual image format from base64 magic bytes so the MIME type
         # matches what the data contains (cua-driver may return JPEG or PNG).
@@ -540,14 +548,35 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
 # auxiliary.vision routing for captured screenshots (#24015)
 # ---------------------------------------------------------------------------
 
-def _should_route_through_aux_vision() -> bool:
+def _capture_vision_error_response(
+    cap: CaptureResult,
+    summary: str,
+    *,
+    reason_code: str,
+) -> str:
+    """Return a text-only capture error without projecting screenshot bytes."""
+    return json.dumps(
+        {
+            "success": False,
+            "reason_code": reason_code,
+            "mode": cap.mode,
+            "width": cap.width,
+            "height": cap.height,
+            "app": cap.app,
+            "window_title": cap.window_title,
+            "summary": summary,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _should_route_through_aux_vision() -> Optional[bool]:
     """Return True when ``_capture_response`` should hand the PNG to aux vision.
 
     Reads the active main provider/model and the loaded config and asks the
-    routing helper. Any failure (config import, runtime override missing,
-    etc.) returns False so the existing multimodal envelope continues to be
-    returned — fail open on the routing decision so a broken config can
-    never silently drop the screenshot for vision-capable main models.
+    routing helper. ``None`` means the route could not be proven safe; the
+    caller must return a text-only blocked result and never guess that the
+    main model can accept screenshot bytes.
     """
     try:
         from agent.auxiliary_client import _read_main_model, _read_main_provider
@@ -557,19 +586,19 @@ def _should_route_through_aux_vision() -> bool:
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("computer_use: aux-vision routing import failed: %s", exc)
-        return False
+        return None
     try:
         provider = _read_main_provider()
         model = _read_main_model()
         cfg = load_config()
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("computer_use: aux-vision routing config read failed: %s", exc)
-        return False
+        return None
     try:
         return bool(should_route_capture_to_aux_vision(provider, model, cfg))
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("computer_use: aux-vision routing decision failed: %s", exc)
-        return False
+        return None
 
 
 def _route_capture_through_aux_vision(

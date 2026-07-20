@@ -11808,6 +11808,15 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .expert-team-office-drawer-actions{justify-content:flex-end;border-top:1px solid var(--border);border-bottom:0}
 .expert-team-office-live{min-height:22px;padding:0 20px 10px;color:var(--muted)}
 .expert-team-office-drawer :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+/* The Taiji skin has late transparent-surface overrides. Keep the visible
+   project option's keyboard focus indicator above those overrides. */
+.taiji-home-shell .taiji-project-panel-row:focus,
+.taiji-home-shell .taiji-project-panel-row:focus-visible{
+  outline:2px solid var(--accent,#078cac)!important;
+  outline-offset:2px;
+  border-color:rgba(8,176,197,.46)!important;
+  background:rgba(214,244,250,.72)!important;
+}
 @media (max-width: 720px){
   .expert-team-office-drawer{width:100vw;border-left:0}
   .expert-team-office-drawer::before{display:none}

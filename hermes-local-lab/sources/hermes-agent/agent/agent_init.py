@@ -947,7 +947,17 @@ def init_agent(
                   " → ".join(f"{f['model']} ({f['provider']})" for f in agent._fallback_chain))
 
     # Get available tools with filtering
-    agent.tools = _ra().get_tool_definitions(
+    # Keep the exact loader that built this Agent's registry.  Callers may
+    # provide a wrapped or injected loader (tests, embedders, custom runtimes);
+    # a later capability refresh must not silently switch back to the module
+    # default and replace that caller-owned registry with a different one.
+    agent._tool_definitions_loader = _ra().get_tool_definitions
+    agent._tool_definitions_default_loader = getattr(
+        _ra(),
+        "_DEFAULT_TOOL_DEFINITIONS_LOADER",
+        agent._tool_definitions_loader,
+    )
+    agent.tools = agent._tool_definitions_loader(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
@@ -1735,7 +1745,7 @@ def init_agent(
 
         refresh_agent_capability_runtime(
             agent,
-            definitions_loader=_ra().get_tool_definitions,
+            definitions_loader=agent._tool_definitions_loader,
         )
     except Exception:
         pass

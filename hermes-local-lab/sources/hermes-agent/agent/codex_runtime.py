@@ -26,13 +26,80 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+def _replay_codex_tool_callbacks(agent, turn: Any) -> None:
+    """Bridge completed Codex tools into AIAgent's standard lifecycle hooks.
+
+    Codex app-server owns the inner tool loop, so Hermes' ordinary executor
+    never fires these callbacks. Replay only after a successful terminal turn:
+    this gives cancellation/failure a hard no-publication boundary and lets
+    WebUI keep its strict canonical ``image_generate`` artifact allowlist.
+    """
+    if getattr(turn, "interrupted", False) or getattr(turn, "error", None):
+        return
+    starts = getattr(agent, "tool_start_callback", None)
+    completes = getattr(agent, "tool_complete_callback", None)
+    if starts is None and completes is None:
+        return
+
+    seen_call_ids: set[str] = set()
+    hermes_mcp_prefix = "mcp.hermes-tools."
+    for completion in getattr(turn, "tool_completions", ()) or ():
+        call_id = str(getattr(completion, "tool_call_id", "") or "")
+        if not call_id or call_id in seen_call_ids:
+            continue
+        seen_call_ids.add(call_id)
+        function_name = str(
+            getattr(completion, "function_name", "") or ""
+        )
+        if function_name.startswith(hermes_mcp_prefix):
+            function_name = function_name[len(hermes_mcp_prefix):]
+        function_args = getattr(completion, "function_args", {})
+        if not isinstance(function_args, dict):
+            function_args = {}
+        function_result = getattr(completion, "function_result", "")
+        if getattr(completion, "is_error", False):
+            function_result = json.dumps(
+                {
+                    "success": False,
+                    "error": "Codex tool execution failed",
+                    "error_code": "codex_tool_failed",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        if starts is not None:
+            try:
+                starts(call_id, function_name, function_args)
+            except Exception:
+                logger.debug(
+                    "Codex tool start callback raised",
+                    exc_info=True,
+                )
+        if completes is not None:
+            try:
+                completes(
+                    call_id,
+                    function_name,
+                    function_args,
+                    function_result,
+                )
+            except Exception:
+                logger.debug(
+                    "Codex tool complete callback raised",
+                    exc_info=True,
+                )
+
+
 def run_codex_app_server_turn(
     agent,
     *,
     user_message: str,
     original_user_message: Any,
     messages: List[Dict[str, Any]],
+    conversation_history: List[Dict[str, Any]] | None,
     effective_task_id: str,
+    image_turn_id: str,
+    image_gate_owner: str,
     should_review_memory: bool = False,
 ) -> Dict[str, Any]:
     """Codex app-server runtime path. Hands the entire turn to a `codex
@@ -42,7 +109,10 @@ def run_codex_app_server_turn(
     Called from run_conversation() when agent.api_mode == "codex_app_server".
     Returns the same dict shape as the chat_completions path.
     """
-    from agent.transports.codex_app_server_session import CodexAppServerSession
+    from agent.transports.codex_app_server_session import (
+        CodexAppServerSession,
+        _capture_codex_profile_environment,
+    )
 
     # Lazy session: one CodexAppServerSession per AIAgent instance.
     # Spawned on first turn, reused across turns, closed at AIAgent
@@ -57,17 +127,48 @@ def run_codex_app_server_turn(
             approval_callback = _get_approval_callback()
         except Exception:
             approval_callback = None
+        profile_environment = _capture_codex_profile_environment()
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
             approval_callback=approval_callback,
+            execution_env=profile_environment.codex_env,
+            hermes_tools_env=profile_environment.hermes_tools_env,
         )
 
     # NOTE: the user message is ALREADY appended to messages by the
     # standard run_conversation() flow (line ~11823) before the early
     # return reaches us. Do NOT append again — that would duplicate.
 
+    allow_image_generation = False
     try:
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        from agent.image_intent import ImageIntentAction, decide_image_intent
+        from agent.transports.codex_app_server_session import (
+            _coerce_turn_input_text,
+        )
+
+        intent_text = _coerce_turn_input_text(original_user_message)
+        intent = decide_image_intent(
+            intent_text,
+            previous_turn_messages=conversation_history,
+        )
+        allow_image_generation = (
+            intent.action is ImageIntentAction.GENERATE
+        )
+    except Exception:
+        logger.warning(
+            "Codex image intent classification failed; image generation "
+            "will remain fail-closed for this turn",
+            exc_info=True,
+        )
+
+    try:
+        turn = agent._codex_session.run_turn(
+            user_input=user_message,
+            image_generation_task_id=effective_task_id,
+            image_generation_turn_id=image_turn_id,
+            image_generation_gate_owner=image_gate_owner,
+            allow_image_generation=allow_image_generation,
+        )
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         # Crash → unconditionally drop the session so the next turn
@@ -110,6 +211,7 @@ def run_codex_app_server_turn(
     # is exactly what curator.py / sessions DB expect.
     if turn.projected_messages:
         messages.extend(turn.projected_messages)
+    _replay_codex_tool_callbacks(agent, turn)
 
     # Counter ticks for the agent-improvement loop.
     # _turns_since_memory and _user_turn_count are ALREADY incremented

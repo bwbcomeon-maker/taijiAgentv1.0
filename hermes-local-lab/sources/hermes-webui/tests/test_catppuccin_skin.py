@@ -10,6 +10,16 @@ CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
+def _early_appearance_init_block():
+    anchor = "themes={light:1,dark:1,system:1}"
+    anchor_idx = INDEX_HTML.find(anchor)
+    assert anchor_idx != -1, "Early appearance bootstrap is missing"
+    start_idx = INDEX_HTML.rfind("<script", 0, anchor_idx)
+    end_idx = INDEX_HTML.find("</script>", anchor_idx)
+    assert start_idx != -1 and end_idx != -1
+    return INDEX_HTML[start_idx:end_idx]
+
+
 def test_catppuccin_skin_present_in_picker_list():
     """The Catppuccin skin must be exposed in the generated picker grid."""
     assert "{name:'Catppuccin'" in BOOT_JS, "Catppuccin skin missing from _SKINS"
@@ -43,12 +53,11 @@ def test_catppuccin_skin_palette_has_latte_and_mocha_tokens():
         assert token in CSS, f"Catppuccin Mocha token missing: {token}"
 
 
-def test_catppuccin_skin_is_opt_in_and_preserves_default_dark():
+def test_catppuccin_skin_is_opt_in_and_preserves_default_appearance():
     """Adding Catppuccin must not silently migrate existing users."""
-    init_script_idx = INDEX_HTML.find("var themes=")
-    end_idx = INDEX_HTML.find("</script>", init_script_idx)
-    init_block = INDEX_HTML[init_script_idx:end_idx]
-    assert "||'dark'" in init_block, "Default theme must remain dark"
+    init_block = _early_appearance_init_block()
+    assert "sg('theme','light')" in init_block
+    assert "?'taiji-light-glass':rawSkin" in init_block
     forbidden = [
         "catppuccin-migrated",
         "skin-catppuccin-migrated",

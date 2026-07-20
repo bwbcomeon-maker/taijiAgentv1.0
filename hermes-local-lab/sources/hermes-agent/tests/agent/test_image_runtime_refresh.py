@@ -787,6 +787,64 @@ def test_vision_runtime_fails_closed_when_secure_secret_resolution_rejects_env(
     assert snapshot["reason_code"] == "vision_not_configured"
 
 
+def test_vision_runtime_honors_explicit_disabled_flag(
+    monkeypatch,
+    tmp_path,
+):
+    from agent import image_gen_verification, image_runtime
+    from agent import provider_credentials
+    from hermes_cli import config as hermes_config
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config",
+        lambda: {
+            "auxiliary": {
+                "vision": {
+                    "enabled": False,
+                    "provider": "alibaba",
+                    "model": "qwen3-vl-plus",
+                    "endpoint_mode": "public",
+                    "region": "cn-beijing",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        hermes_config,
+        "load_env",
+        lambda: {"DASHSCOPE_API_KEY": "configured-secret"},
+    )
+    monkeypatch.setattr(
+        provider_credentials,
+        "resolve_secret_env_value",
+        lambda *_args, **_kwargs: "configured-secret",
+    )
+    monkeypatch.setattr(
+        image_gen_verification,
+        "image_gen_runtime_context",
+        lambda: SimpleNamespace(config_path=config_path),
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "active_profile_name",
+        lambda: "default",
+    )
+    monkeypatch.setattr(
+        image_runtime,
+        "vision_verification_state_path",
+        lambda _profile: tmp_path / "vision-state.json",
+    )
+
+    snapshot = image_runtime.current_vision_runtime_snapshot()
+
+    assert snapshot["configured"] is False
+    assert snapshot["available"] is False
+    assert snapshot["status"] == "disabled"
+    assert snapshot["reason_code"] == "disabled"
+
+
 def test_capability_route_decision_is_frozen_and_projects_only_public_identity():
     """A routing decision is immutable and never projects authorization data."""
     from agent import image_runtime

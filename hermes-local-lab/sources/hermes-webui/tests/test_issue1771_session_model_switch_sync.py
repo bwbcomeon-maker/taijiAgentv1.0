@@ -75,6 +75,7 @@ function $(id) {
   return {textContent: '', style: {}, classList: {add(){}, remove(){}, toggle(){}, contains(){return false;}}, appendChild(){}, appendChildNode(){}};
 }
 function t(key) { return key; }
+function productDisplayName(name) { return name; }
 function syncModelChip() { calls.syncModelChip++; }
 function renderModelDropdown() { calls.renderModelDropdown++; }
 function _positionModelDropdown() { calls.positionModelDropdown++; }
@@ -91,6 +92,7 @@ const _liveModelFetchPending = new Set();
 const document = {
   title: '',
   baseURI: 'http://127.0.0.1/hermes/',
+  querySelector(_selector) { return null; },
   createElement(tag) { return {tagName: tag.toUpperCase(), className: '', textContent: '', appendChild(){}}; },
   createTextNode(text) { return {textContent: text}; },
 };

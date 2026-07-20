@@ -3247,7 +3247,21 @@ async function resumeExpertTeamRun(btn){
 async function cancelExpertTeamRun(btn,options={}){
   const sid=typeof S!=='undefined'&&S.session&&S.session.session_id||'';
   if(!sid)return false;
-  if(!options.skipConfirm&&typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('确定停止当前专家团生成吗？已生成的阶段成果会保留。'))return false;
+  if(!options.skipConfirm){
+    if(typeof showConfirmDialog!=='function'){
+      if(typeof showToast==='function')showToast('确认弹窗尚未就绪，未执行停止操作。');
+      return false;
+    }
+    const confirmed=await showConfirmDialog({
+      title:'停止专家团生成？',
+      message:'已生成的阶段成果会保留。',
+      confirmLabel:'停止生成',
+      cancelLabel:'继续生成',
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed)return false;
+  }
   try{
     const result=await runExpertTeamMutation(btn,{
       action:options.action||'cancel',
@@ -10867,9 +10881,23 @@ async function installDocxEngineTemplate(button){
     return null;
   }
   const replaceExisting=_docxEngineChecked(root,'replace_existing');
-  if(replaceExisting&&typeof confirm==='function'&&!confirm('确定要覆盖已安装模板吗？覆盖后旧模板文件会被新模板包替换。')){
-    _setDocxEngineStatus(root,'已取消覆盖已安装模板。','info');
-    return null;
+  if(replaceExisting){
+    if(typeof showConfirmDialog!=='function'){
+      _setDocxEngineStatus(root,'确认弹窗尚未就绪，未执行覆盖操作。','error');
+      return null;
+    }
+    const confirmed=await showConfirmDialog({
+      title:'覆盖已安装模板？',
+      message:'覆盖后，旧模板文件会被新模板包替换。',
+      confirmLabel:'覆盖模板',
+      cancelLabel:'保留旧模板',
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed){
+      _setDocxEngineStatus(root,'已取消覆盖已安装模板。','info');
+      return null;
+    }
   }
   _docxEngineSetBusy(root,true);
   _setDocxEngineStatus(root,replaceExisting?'正在更新已安装模板...':'正在安装模板包...','busy');

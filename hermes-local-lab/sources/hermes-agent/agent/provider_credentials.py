@@ -66,6 +66,7 @@ PROVIDER_FAMILY_ALIASES = {
 LEGACY_API_KEY_ENV = {
     "alibaba_dashscope": ("DASHSCOPE_API_KEY",),
     "doubao": ("ARK_API_KEY",),
+    "fal": ("FAL_KEY",),
     "qianfan": ("QIANFAN_API_KEY",),
     "zhipu": ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
     "minimax": ("MINIMAX_API_KEY",),

@@ -39,6 +39,13 @@ def mock_args():
     return SimpleNamespace()
 
 
+@pytest.fixture(autouse=True)
+def _source_checkout_during_mocked_update_flow():
+    """Keep subprocess mocks focused on update commands, not install detection."""
+    with patch("hermes_cli.config._is_git_source_checkout", return_value=True):
+        yield
+
+
 class TestCmdUpdateBranchFallback:
     """cmd_update falls back to main when current branch has no remote counterpart."""
 
@@ -150,6 +157,7 @@ class TestCmdUpdateBranchFallback:
         import subprocess as _subprocess
         build_ok = _subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch.object(hm, "_is_termux_env", return_value=False), \
+             patch.object(hm, "_web_ui_build_needed", return_value=True), \
              patch.object(hm, "_run_with_idle_timeout", return_value=build_ok) as mock_idle:
             cmd_update(mock_args)
 

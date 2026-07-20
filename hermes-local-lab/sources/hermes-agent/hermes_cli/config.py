@@ -384,6 +384,81 @@ def get_managed_update_command() -> Optional[str]:
     return None
 
 
+def _is_git_source_checkout(project_root: Path) -> bool:
+    """Return whether ``project_root`` is tracked Hermes source in a Git worktree.
+
+    ``project_root`` may be the repository toplevel, a linked worktree whose
+    ``.git`` is a file, or a tracked subtree of a larger repository.  Requiring
+    both source markers to be tracked prevents an unrelated parent repository
+    from turning a nested site-packages directory into a source install.
+    """
+    try:
+        project_root = project_root.resolve(strict=True)
+        probe = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "rev-parse",
+                "--show-toplevel",
+                "--git-common-dir",
+                "--is-inside-work-tree",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+
+    lines = probe.stdout.splitlines()
+    if probe.returncode != 0 or len(lines) != 3 or lines[2].strip() != "true":
+        return False
+
+    try:
+        repository_root = Path(lines[0].strip()).resolve(strict=True)
+        common_dir = Path(lines[1].strip())
+        if not common_dir.is_absolute():
+            common_dir = project_root / common_dir
+        common_dir = common_dir.resolve(strict=True)
+        project_relative = project_root.relative_to(repository_root)
+    except (OSError, ValueError):
+        return False
+
+    if not common_dir.is_dir():
+        return False
+
+    source_markers = (
+        project_relative / "pyproject.toml",
+        project_relative / "hermes_cli" / "config.py",
+    )
+    try:
+        tracked = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                *(marker.as_posix() for marker in source_markers),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+
+    tracked_paths = {
+        line.strip().replace("\\", "/")
+        for line in tracked.stdout.splitlines()
+        if line.strip()
+    }
+    expected_paths = {marker.as_posix() for marker in source_markers}
+    return tracked.returncode == 0 and expected_paths <= tracked_paths
+
+
 def detect_install_method(project_root: Optional[Path] = None) -> str:
     """Detect how Hermes was installed: 'docker', 'nixos', 'homebrew', 'git', or 'pip'.
 
@@ -391,7 +466,7 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     1. Stamped ``~/.hermes/.install_method`` file (written by installers)
     2. HERMES_MANAGED env / .managed marker (NixOS, Homebrew)
     3. Container detection (/.dockerenv, /run/.containerenv, cgroup)
-    4. .git directory presence -> 'git'
+    4. Tracked source inside a real Git worktree -> 'git'
     5. Fallback -> 'pip'
     """
     stamp = get_hermes_home() / ".install_method"
@@ -409,7 +484,7 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
         return "docker"
     if project_root is None:
         project_root = Path(__file__).parent.parent.resolve()
-    if (project_root / ".git").is_dir():
+    if _is_git_source_checkout(Path(project_root)):
         return "git"
     return "pip"
 
@@ -534,41 +609,47 @@ def format_managed_message(
     )
 
 
-class ManagedConfigurationError(RuntimeError):
-    """Machine-detectable rejection for package-manager-owned state."""
+# ``importlib.reload()`` re-executes this module in the existing module dict.
+# Keep public exception identities stable so callers that imported an exception
+# before a reload can still catch failures raised by functions defined after it.
+if "ManagedConfigurationError" not in globals():
+    class ManagedConfigurationError(RuntimeError):
+        """Machine-detectable rejection for package-manager-owned state."""
 
-    code = "managed_configuration"
+        code = "managed_configuration"
 
-    def __init__(
-        self,
-        action: str,
-        managed_system: Optional[str] = None,
-    ):
-        self.action = action
-        self.managed_system = managed_system or get_managed_system()
-        super().__init__(
-            format_managed_message(action, self.managed_system)
-        )
-
-
-class ConfigurationConflictError(RuntimeError):
-    """A stale loaded snapshot conflicts with a concurrent disk mutation."""
-
-    code = "configuration_conflict"
-
-    def __init__(self, path: tuple[Any, ...]):
-        self.path = path
-        rendered_path = ".".join(str(part) for part in path) or "<root>"
-        super().__init__(
-            "Configuration changed concurrently at "
-            f"{rendered_path}; reload the configuration and retry"
-        )
+        def __init__(
+            self,
+            action: str,
+            managed_system: Optional[str] = None,
+        ):
+            self.action = action
+            self.managed_system = managed_system or get_managed_system()
+            super().__init__(
+                format_managed_message(action, self.managed_system)
+            )
 
 
-class WebConfigValidationError(ValueError):
-    """Reject an unsafe browser-originated configuration without echoing it."""
+if "ConfigurationConflictError" not in globals():
+    class ConfigurationConflictError(RuntimeError):
+        """A stale loaded snapshot conflicts with a concurrent disk mutation."""
 
-    code = "invalid_web_configuration"
+        code = "configuration_conflict"
+
+        def __init__(self, path: tuple[Any, ...]):
+            self.path = path
+            rendered_path = ".".join(str(part) for part in path) or "<root>"
+            super().__init__(
+                "Configuration changed concurrently at "
+                f"{rendered_path}; reload the configuration and retry"
+            )
+
+
+if "WebConfigValidationError" not in globals():
+    class WebConfigValidationError(ValueError):
+        """Reject unsafe browser-originated configuration without echoing it."""
+
+        code = "invalid_web_configuration"
 
 
 def managed_error(action: str = "modify configuration"):
@@ -4773,9 +4854,16 @@ def _validate_raw_config_snapshot(token: str | None) -> None:
         raise ConfigurationConflictError(("<raw-config>",))
 
 
-_CONFIG_MERGE_MISSING = object()
-_NO_CONFIG_SNAPSHOT = object()
-_NO_RAW_CONFIG_SNAPSHOT = object()
+# ``importlib.reload()`` re-executes this module in the existing module dict.
+# Preserve sentinel identity so functions imported before a reload do not
+# compare their captured default arguments against newly-created objects and
+# misread an omitted argument as explicitly provided.
+if "_CONFIG_MERGE_MISSING" not in globals():
+    _CONFIG_MERGE_MISSING = object()
+if "_NO_CONFIG_SNAPSHOT" not in globals():
+    _NO_CONFIG_SNAPSHOT = object()
+if "_NO_RAW_CONFIG_SNAPSHOT" not in globals():
+    _NO_RAW_CONFIG_SNAPSHOT = object()
 
 
 def _merge_values_equal(left: Any, right: Any) -> bool:
@@ -5413,7 +5501,11 @@ def _rehydrate_projected_config(
         if (
             projected_by_name is not None
             and desired_by_name is not None
-            and _is_named_item_list(runtime_base)
+            # An empty runtime list is a valid, unambiguous identity map for
+            # the first named item.  `_is_named_item_list([])` is deliberately
+            # false, so use the unique-name index here to preserve the safe
+            # empty -> named transition used by trusted CLI writers.
+            and _items_by_unique_name(runtime_base) is not None
             and len(projected_base) == len(runtime_base)
         ):
             runtime_by_projected_name = {
@@ -5555,37 +5647,46 @@ def cfg_get(cfg: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> A
 
 
 
-@_credential_files_locked
-def read_raw_config() -> Dict[str, Any]:
-    """Read ~/.hermes/config.yaml as-is, without merging defaults or migrating.
+def read_raw_config(config_path: Path | None = None) -> Dict[str, Any]:
+    """Read config YAML as-is, without merging defaults or migrating.
 
     Returns the raw YAML dict, or ``{}`` if the file doesn't exist or can't
     be parsed.  Use this for lightweight config reads where you just need a
     single value and don't want the overhead of ``load_config()``'s deep-merge
     + migration pipeline.
 
+    This reader is intentionally side-effect free. Configuration writers use
+    atomic replacement, so a bounded read does not need to enter the mutable
+    credential transaction (which creates the credential directory and lock
+    files). That distinction matters when rendering a service unit for another
+    user whose home may not exist or be writable by the caller.
+
     Cached on the config file's (mtime_ns, size) — same strategy as
     ``load_config()``. Returns a deepcopy on every call since some callers
     mutate the result before passing to ``save_config()``.
     """
     with _CONFIG_LOCK:
+        resolved_config_path = (
+            Path(config_path)
+            if config_path is not None
+            else get_config_path()
+        )
         try:
-            config_path = get_config_path()
-            st = config_path.stat()
+            st = resolved_config_path.stat()
             cache_key = (st.st_mtime_ns, st.st_size)
         except (FileNotFoundError, OSError):
             return {}
 
-        path_key = str(config_path)
+        path_key = str(resolved_config_path)
         cached = _RAW_CONFIG_CACHE.get(path_key)
         if cached is not None and cached[:2] == cache_key:
             return copy.deepcopy(cached[2])
 
         try:
-            with open(config_path, encoding="utf-8") as f:
+            with open(resolved_config_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
         except Exception as e:
-            _warn_config_parse_failure(config_path, e)
+            _warn_config_parse_failure(resolved_config_path, e)
             return {}
 
         if not isinstance(data, dict):

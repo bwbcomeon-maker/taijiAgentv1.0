@@ -70,16 +70,22 @@ def test_context_indicator_wrap_reserves_base_slot():
 
 def test_taiji_context_indicator_slot_matches_send_button_width():
     """Taiji desktop skin reserves the same slot width as the send button."""
-    selector = (
+    indicator_selector = (
         ':root[data-skin="taiji-light-glass"] .taiji-home-shell '
         "#composerWrap #ctxIndicatorWrap"
     )
-    wrap = _declarations(_rule_body(CSS, selector))
+    send_selector = (
+        ':root[data-skin="taiji-light-glass"] .taiji-home-shell '
+        "#composerWrap #btnSend"
+    )
+    wrap = _declarations(_rule_bodies(CSS, indicator_selector)[-1])
+    send = _declarations(_rule_bodies(CSS, send_selector)[-1])
 
     assert wrap.get("display") == "inline-flex!important"
-    assert wrap.get("width") == "46px!important"
-    assert wrap.get("min-width") == "46px!important"
-    assert wrap.get("height") == "46px!important"
+    for prop in ("width", "min-width", "height"):
+        assert wrap.get(prop) == send.get(prop), (
+            f"Context indicator {prop} must match the active Taiji send button"
+        )
 
 
 def test_taiji_composer_right_uses_content_sized_control_cluster():

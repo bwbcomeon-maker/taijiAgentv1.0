@@ -118,7 +118,14 @@ def test_rendered_session_reference_is_internal_link():
     assert "function _markdownAnchor" in UI_JS
     assert "class=\"session-link\"" in UI_JS
     assert "const sessionLink=e.target.closest('a.session-link[href]');" in UI_JS
-    assert "loadSession(decodeURIComponent(m[1]))" in UI_JS
+    handler_start = UI_JS.index("const sessionLink=e.target.closest('a.session-link[href]');")
+    handler_end = UI_JS.index("const workspaceLink=", handler_start)
+    handler = UI_JS[handler_start:handler_end]
+    assert "e.preventDefault()" in handler
+    assert "try{return decodeURIComponent(m[1]);}catch(_){return m[1];}" in handler
+    assert "if(typeof openChatSession==='function') openChatSession(sid);" in handler
+    assert "else loadSession(sid);" in handler
+    assert "window.open" not in handler
 
 
 def test_streaming_markdown_keeps_session_refs_internal():

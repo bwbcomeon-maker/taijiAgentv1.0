@@ -130,8 +130,8 @@ def test_taiji_composer_uses_svg_controls_instead_of_png_pseudo_icons():
     assert "#composerWrap #btnMic::after" not in STYLE_CSS
     assert "background-image:var(--taiji-action-attach)" not in STYLE_CSS
     assert "background-image:var(--taiji-action-voice)" not in STYLE_CSS
-    assert "static/icons.js?v=__WEBUI_VERSION__-taiji-shell-34" in INDEX_HTML
-    assert "static/style.css?v=__WEBUI_VERSION__-taiji-shell-34" in INDEX_HTML
+    assert "static/icons.js?v=__WEBUI_VERSION__" in INDEX_HTML
+    assert "static/style.css?v=__WEBUI_VERSION__" in INDEX_HTML
 
 
 def test_taiji_composer_layout_does_not_clip_or_force_optional_toolsets():
@@ -229,8 +229,8 @@ def test_taiji_redesign_nav_and_composer_visual_weight_are_unified():
 
     composer_rule_start = STYLE_CSS.rindex(".taiji-home-shell #composerWrap .composer-control{")
     composer_rule = STYLE_CSS[composer_rule_start : STYLE_CSS.index("}", composer_rule_start)]
-    assert "height:44px" in composer_rule
-    assert "border-radius:12px" in composer_rule
+    assert "height:40px" in composer_rule
+    assert "border-radius:11px" in composer_rule
 
     assert ".taiji-home-shell #composerWrap .composer-workspace-group:has(.composer-workspace-chip[data-ui-visibility-hidden=\"1\"])" in STYLE_CSS
     assert ".taiji-home-shell #composerWrap .composer-control:empty" in STYLE_CSS
@@ -303,7 +303,7 @@ def test_taiji_secondary_collapse_expands_workspace_in_final_override():
     assert "grid-template-columns:var(--taiji-brand-w) minmax(0,1fr)!important" in collapsed_rule
 
     toggle_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell[data-secondary-collapsed="1"] .taiji-secondary-toggle{')
-    assert "left:calc(var(--taiji-shell-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important" in toggle_rule
+    assert "left:calc(var(--taiji-layout-pad) + var(--taiji-brand-w) + (var(--taiji-gap) / 2))!important" in toggle_rule
 
     expanded_messages_rule = _css_rule(':root[data-taiji-desktop="1"][data-skin="taiji-light-glass"] .taiji-home-shell.taiji-chat-has-messages main.main.taiji-real-main #mainChat .messages-shell{')
     assert "width:min(860px,calc(100% - 72px))!important" in expanded_messages_rule
@@ -364,12 +364,16 @@ def test_lucide_registry_contains_all_taiji_shell_icons():
 
 
 def test_taiji_user_avatar_cache_bust_and_asset_source_are_locked():
-    assert "taiji-shell-21" not in INDEX_HTML
-    assert "taiji-shell-22" not in INDEX_HTML
-    assert "taiji-shell-23" not in INDEX_HTML
-    assert "taiji-shell-32" not in INDEX_HTML
-    assert "taiji-shell-33" not in INDEX_HTML
-    assert "taiji-shell-34" in INDEX_HTML
+    for asset in (
+        "static/icons.js",
+        "static/style.css",
+        "static/ui.js",
+        "static/panels.js",
+        "static/boot.js",
+        "static/taiji-home.js",
+    ):
+        assert f"{asset}?v=__WEBUI_VERSION__" in INDEX_HTML
+    assert "taiji-shell-" not in INDEX_HTML
 
     user_avatar_start = STYLE_CSS.rindex('.taiji-home-shell main.main.taiji-real-main .msg-row[data-role="user"]::after{')
     user_avatar = STYLE_CSS[user_avatar_start : STYLE_CSS.index("}", user_avatar_start)]
@@ -492,7 +496,7 @@ def test_taiji_workspace_composer_controls_have_distinct_semantics():
 
     group_rule_start = STYLE_CSS.rindex(':root[data-skin="taiji-light-glass"] .taiji-home-shell #composerWrap .composer-workspace-group{')
     group_rule = STYLE_CSS[group_rule_start : STYLE_CSS.index("}", group_rule_start)]
-    assert "gap:8px!important" in group_rule
+    assert "gap:6px!important" in group_rule
     assert "border:0!important" in group_rule
     assert "background:transparent!important" in group_rule
 

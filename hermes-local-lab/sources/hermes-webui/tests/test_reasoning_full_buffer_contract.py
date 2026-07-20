@@ -127,6 +127,11 @@ def test_standard_stream_buffers_reasoning_and_tool_reasoning_until_completion(
             self.reasoning_config = None
             self.ephemeral_system_prompt = None
             self._last_error = None
+            from agent.image_runtime import capture_capability_runtime_generation
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
 
         def run_conversation(self, **kwargs):
             self.reasoning_callback(chunks[0])

@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 import run_agent
+from agent.transports.codex_event_projector import ProjectedToolCompletion
 from agent.transports.codex_app_server_session import CodexAppServerSession, TurnResult
 
 
@@ -231,6 +232,180 @@ class TestRunConversationCodexPath:
         ):
             agent.run_conversation("hi")
         assert not client_mock.chat.completions.create.called
+
+    def test_successful_mcp_image_replays_canonical_tool_callbacks(
+        self, monkeypatch,
+    ):
+        """Codex transcript projection alone is not an artifact event.
+
+        Replay the private completion through AIAgent's ordinary callbacks,
+        using the canonical Hermes name while preserving the namespaced name
+        in transcript messages.
+        """
+        callback_result = (
+            '{"success":true,"image":'
+            '"/tmp/cache/images/codex-generated.png"}'
+        )
+
+        def completed_image_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="done",
+                projected_messages=[
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "codex_mcp_image-1",
+                            "type": "function",
+                            "function": {
+                                "name": "mcp.hermes-tools.image_generate",
+                                "arguments": '{"prompt":"draw a cat"}',
+                            },
+                        }],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "codex_mcp_image-1",
+                        "content": callback_result,
+                    },
+                    {"role": "assistant", "content": "done"},
+                ],
+                tool_completions=[
+                    ProjectedToolCompletion(
+                        tool_call_id="codex_mcp_image-1",
+                        function_name="image_generate",
+                        function_args={"prompt": "draw a cat"},
+                        function_result=callback_result,
+                        is_error=False,
+                    )
+                ],
+                tool_iterations=1,
+                interrupted=False,
+                error=None,
+                turn_id="turn-image",
+                thread_id="thread-image",
+            )
+
+        monkeypatch.setattr(
+            CodexAppServerSession, "run_turn", completed_image_turn
+        )
+        monkeypatch.setattr(
+            CodexAppServerSession,
+            "ensure_started",
+            lambda self: "thread-image",
+        )
+        agent = _make_codex_agent()
+        starts = []
+        completes = []
+        agent.tool_start_callback = lambda *args: starts.append(args)
+        agent.tool_complete_callback = lambda *args: completes.append(args)
+
+        result = agent.run_conversation("画一只猫")
+
+        assert result["completed"] is True
+        assert starts == [(
+            "codex_mcp_image-1",
+            "image_generate",
+            {"prompt": "draw a cat"},
+        )]
+        assert completes == [(
+            "codex_mcp_image-1",
+            "image_generate",
+            {"prompt": "draw a cat"},
+            callback_result,
+        )]
+        projected_name = result["messages"][-3]["tool_calls"][0][
+            "function"
+        ]["name"]
+        assert projected_name == "mcp.hermes-tools.image_generate"
+
+    def test_duplicate_completion_replay_is_idempotent(self, monkeypatch):
+        completion = ProjectedToolCompletion(
+            tool_call_id="codex_mcp_image-once",
+            function_name="image_generate",
+            function_args={"prompt": "draw once"},
+            function_result=(
+                '{"success":true,"image":'
+                '"/tmp/cache/images/once.png"}'
+            ),
+            is_error=False,
+        )
+
+        def duplicate_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="done",
+                projected_messages=[],
+                tool_completions=[completion, completion],
+                tool_iterations=1,
+                turn_id="turn-once",
+                thread_id="thread-once",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", duplicate_turn)
+        monkeypatch.setattr(
+            CodexAppServerSession,
+            "ensure_started",
+            lambda self: "thread-once",
+        )
+        agent = _make_codex_agent()
+        completes = []
+        agent.tool_complete_callback = lambda *args: completes.append(args)
+
+        agent.run_conversation("画一次")
+
+        assert len(completes) == 1
+        assert completes[0][0] == "codex_mcp_image-once"
+
+    @pytest.mark.parametrize(
+        ("interrupted", "error"),
+        [
+            (True, "user interrupted"),
+            (False, "turn failed"),
+        ],
+    )
+    def test_cancelled_or_failed_turn_does_not_publish_tool_callbacks(
+        self, monkeypatch, interrupted, error,
+    ):
+        def incomplete_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="",
+                projected_messages=[],
+                tool_completions=[
+                    ProjectedToolCompletion(
+                        tool_call_id="codex_mcp_image-discard",
+                        function_name="image_generate",
+                        function_args={"prompt": "discard"},
+                        function_result=(
+                            '{"success":true,"image":'
+                            '"/tmp/cache/images/discard.png"}'
+                        ),
+                        is_error=False,
+                    )
+                ],
+                tool_iterations=1,
+                interrupted=interrupted,
+                error=error,
+                turn_id="turn-discard",
+                thread_id="thread-discard",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", incomplete_turn)
+        monkeypatch.setattr(
+            CodexAppServerSession,
+            "ensure_started",
+            lambda self: "thread-discard",
+        )
+        agent = _make_codex_agent()
+        starts = []
+        completes = []
+        agent.tool_start_callback = lambda *args: starts.append(args)
+        agent.tool_complete_callback = lambda *args: completes.append(args)
+
+        result = agent.run_conversation("取消或失败")
+
+        assert result["completed"] is False
+        assert starts == []
+        assert completes == []
 
 
 class TestReviewForkApiModeDowngrade:

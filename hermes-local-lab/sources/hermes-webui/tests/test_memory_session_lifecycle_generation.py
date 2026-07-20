@@ -174,6 +174,54 @@ def test_explicit_new_agent_commit_cannot_clear_old_dirty_segment():
     assert lifecycle.has_uncommitted_work(sid) is False
 
 
+def test_prepare_old_agent_retirement_preserves_registered_successor():
+    lifecycle = _fresh_lifecycle()
+    old_agent = RecordingAgent()
+    old_agent.release.set()
+    new_agent = RecordingAgent()
+    new_agent.release.set()
+    sid = "cancelled-old-with-successor"
+
+    lifecycle.register_agent(sid, old_agent)
+    lifecycle.mark_turn_completed(sid, agent=old_agent)
+    lifecycle.register_agent(sid, new_agent)
+
+    assert lifecycle.prepare_agent_retirement(sid, old_agent) is True
+    assert old_agent.calls == 1
+
+    # Future implicit ownership must still resolve to the successor. The old
+    # generation's teardown must never unregister the newly registered agent.
+    lifecycle.mark_turn_completed(sid)
+    assert lifecycle.commit_session_memory(sid) is True
+    assert new_agent.calls == 1
+
+
+def test_prepare_old_agent_retirement_fails_closed_on_dirty_commit_error():
+    lifecycle = _fresh_lifecycle()
+    old_agent = RecordingAgent()
+    old_agent.release.set()
+    old_agent.failures_remaining = 1
+    new_agent = RecordingAgent()
+    new_agent.release.set()
+    sid = "cancelled-old-dirty-failure"
+
+    lifecycle.register_agent(sid, old_agent)
+    lifecycle.mark_turn_completed(sid, agent=old_agent)
+    lifecycle.register_agent(sid, new_agent)
+
+    assert lifecycle.prepare_agent_retirement(sid, old_agent) is False
+    assert lifecycle.has_uncommitted_work(sid) is True
+    assert old_agent.calls == 1
+
+    # A later retry still finds the preserved old segment owner, while the
+    # successor remains the owner for future generations.
+    assert lifecycle.prepare_agent_retirement(sid, old_agent) is True
+    lifecycle.mark_turn_completed(sid)
+    assert lifecycle.commit_session_memory(sid) is True
+    assert old_agent.calls == 2
+    assert new_agent.calls == 1
+
+
 def test_registered_session_without_completed_turn_is_not_committed():
     lifecycle = _fresh_lifecycle()
     agent = RecordingAgent()
@@ -316,26 +364,43 @@ def test_evict_session_agent_waits_for_inflight_commit_before_closing_db():
 def test_lru_eviction_commits_outside_cache_lock():
     """LRU eviction must collect under SESSION_AGENT_CACHE_LOCK and commit only
     after leaving that lock; provider extraction can be slow I/O."""
+    import api.config as config_mod
     import api.streaming as streaming_mod
 
-    src = Path(streaming_mod.__file__).read_text(encoding="utf-8")
-    marker = "_evicted_items = []"
-    collect_start = src.index(marker)
-    lock_start = src.index("with SESSION_AGENT_CACHE_LOCK:", collect_start)
-    lock_end = src.index("# Commit and close evicted agents outside the cache lock", lock_start)
-    locked_section = src[lock_start:lock_end]
-    outside_section = src[lock_end:src.index("logger.debug('[webui] Created new agent", lock_end)]
+    config_src = Path(config_mod.__file__).read_text(encoding="utf-8")
+    helper_start = config_src.index(
+        "def cache_session_agent_if_current_generation("
+    )
+    helper_end = config_src.index(
+        "\ndef _evict_session_agent(",
+        helper_start,
+    )
+    helper_section = config_src[helper_start:helper_end]
+    retirement_lock = helper_section.index(
+        "with SESSION_AGENT_RETIREMENT_LOCK:"
+    )
+    cache_lock = helper_section.index(
+        "with SESSION_AGENT_CACHE_LOCK:"
+    )
 
-    assert "commit_session_memory" not in locked_section
-    assert "_lifecycle_commit" not in locked_section
-    assert "SESSION_AGENT_CACHE.popitem" in locked_section
-    assert "_close_evicted_agent_at_session_boundary" in outside_section
-    helper_start = src.index("def _close_evicted_agent_at_session_boundary")
-    helper_end = src.index("\ndef _refresh_cached_agent_runtime", helper_start)
-    helper_section = src[helper_start:helper_end]
-    assert "_lifecycle_commit_session_memory" in helper_section
-    assert "wait=True" in helper_section
-    assert "outside the cache lock" in outside_section
+    assert retirement_lock < cache_lock
+    assert "commit_session_memory" not in helper_section
+    assert "_lifecycle_commit" not in helper_section
+    assert "SESSION_AGENT_CACHE.popitem" in helper_section
+
+    stream_src = Path(streaming_mod.__file__).read_text(encoding="utf-8")
+    publish_call = stream_src.index(
+        ") = cache_session_agent_if_current_generation("
+    )
+    close_loop = stream_src.index(
+        "for _evicted_sid, _evicted_entry in _evicted_items:",
+        publish_call,
+    )
+    close_call = stream_src.index(
+        "_close_evicted_agent_at_session_boundary(",
+        close_loop,
+    )
+    assert publish_call < close_loop < close_call
 
 
 def test_clear_session_evicts_outside_session_lock():

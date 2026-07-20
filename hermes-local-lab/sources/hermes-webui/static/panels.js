@@ -5741,11 +5741,21 @@ async function loadProfilesPanel() {
       explainer.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name">配置文件说明</div>
-            <div class="profile-card-meta">配置文件用于管理智能体工作方式；文件范围由管理员统一配置。</div>
+            <div class="profile-card-name">${esc(t('profile_help_card_title'))}</div>
+            <div class="profile-card-meta">${esc(t('profile_help_card_meta'))}</div>
           </div>
         </div>`;
-      explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
+      explainer.setAttribute('role', 'button');
+      explainer.tabIndex = 0;
+      explainer.setAttribute('aria-label', t('profile_help_card_title'));
+      const openProfileConceptHelp = () => _renderProfileConceptHelp(data.active || 'default');
+      explainer.onclick = openProfileConceptHelp;
+      explainer.onkeydown = (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openProfileConceptHelp();
+        }
+      };
       panel.appendChild(explainer);
     }
     if (!data.profiles || !data.profiles.length) {
@@ -5763,6 +5773,11 @@ async function loadProfilesPanel() {
       const card = document.createElement('div');
       card.className = 'profile-card';
       card.dataset.name = p.name;
+      const isSelected = !!(_currentProfileDetail && _currentProfileDetail.name === p.name);
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
+      card.setAttribute('aria-label', p.name);
+      card.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
@@ -5780,8 +5795,16 @@ async function loadProfilesPanel() {
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;
-      card.onclick = () => openProfileDetail(p.name, card);
-      if (_currentProfileDetail && _currentProfileDetail.name === p.name) card.classList.add('active');
+      const openCard = () => openProfileDetail(p.name, card);
+      card.onclick = openCard;
+      card.onkeydown = (event) => {
+        if (event.target !== event.currentTarget || event.repeat) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openCard();
+        }
+      };
+      if (isSelected) card.classList.add('active');
       panel.appendChild(card);
     }
     // Re-render detail with fresh data if we have one and we're not in a form
@@ -5800,14 +5823,14 @@ function _renderProfileConceptHelp(activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = '配置与工作区';
+  title.textContent = t('profile_help_concept_title');
   body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
-        <div class="detail-card-title">配置决定怎么做，工作区决定做什么</div>
-        <div class="detail-row"><div class="detail-row-label">配置</div><div class="detail-row-value">Agent 身份、记忆、技能、模型/提供商配置和已连接工具。研究员、写作者、市场人员或开发者等角色需要不同上下文或能力时，可以创建独立配置。</div></div>
-        <div class="detail-row"><div class="detail-row-label">工作区</div><div class="detail-row-value">磁盘上的项目或产品文件夹。建议每个仓库/产品使用一个工作区，使聊天、终端和文件浏览都指向正确文件。</div></div>
-        <div class="detail-row"><div class="detail-row-label">组合使用</div><div class="detail-row-value">配置可以有默认工作区，但会话中仍可切换工作区。配置回答“谁在工作？”，工作区回答“在哪里工作？”。</div></div>
+        <div class="detail-card-title">${esc(t('profile_help_concept_heading'))}</div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profile_help_profile_label'))}</div><div class="detail-row-value">${esc(t('profile_help_profile_detail'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profile_help_workspace_label'))}</div><div class="detail-row-value">${esc(t('profile_help_workspace_detail'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profile_help_combined_label'))}</div><div class="detail-row-value">${esc(t('profile_help_combined_detail'))}</div></div>
       </div>
     </div>`;
   body.style.display = '';
@@ -5885,9 +5908,15 @@ function openProfileDetail(name, el){
   if (!_profilesCache || !_profilesCache.profiles) return;
   const p = _profilesCache.profiles.find(x => x.name === name);
   if (!p) return;
-  document.querySelectorAll('.profile-card').forEach(e => e.classList.remove('active'));
+  document.querySelectorAll('.profile-card').forEach(e => {
+    e.classList.remove('active');
+    e.setAttribute('aria-pressed', 'false');
+  });
   const target = el || document.querySelector(`.profile-card[data-name="${CSS.escape(name)}"]`);
-  if (target) target.classList.add('active');
+  if (target) {
+    target.classList.add('active');
+    target.setAttribute('aria-pressed', 'true');
+  }
   _profilePreFormDetail = null;
   _renderProfileDetail(p, _profilesCache.active);
 }
@@ -11029,6 +11058,7 @@ function _imageGenCredentialDraftHasValues(){
 function _modelConfigAnySecretDraft(){
  let dirty=false;
  document.querySelectorAll('[data-secret-field="true"]').forEach(input=>{
+  if(input&&typeof input.closest==='function'&&input.closest('#imageCapabilityCenter')) return;
   if(String(input.value||'').trim()) dirty=true;
  });
  return dirty;
@@ -11065,6 +11095,7 @@ function _modelConfigDraftIdentity(){
   values.push(String(input.dataset.imageGenCredential||'')+'='+String(input.value||''));
  });
  document.querySelectorAll('[data-endpoint-field]').forEach(input=>{
+  if(input&&typeof input.closest==='function'&&input.closest('#imageCapabilityCenter')) return;
   values.push(String(input.dataset.endpointCapability||'')+':'+String(input.dataset.endpointField||'')+'='+String(input.value||''));
  });
  return JSON.stringify(values);
@@ -11087,7 +11118,10 @@ function _clearModelConfigSecrets(scope,providerId){
  const target=String(scope||'all');
  const clear=id=>{const input=$(id);if(input) input.value='';};
  if(target==='all'){
-  document.querySelectorAll('[data-secret-field="true"]').forEach(input=>{input.value='';});
+  document.querySelectorAll('[data-secret-field="true"]').forEach(input=>{
+   if(input&&typeof input.closest==='function'&&input.closest('#imageCapabilityCenter')) return;
+   input.value='';
+  });
   _clearCapabilityProviderDraftSecrets('vision');
   _clearCapabilityProviderDraftSecrets('image');
   return;

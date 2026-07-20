@@ -114,6 +114,11 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
             self.tool_progress_callback = kwargs.get("tool_progress_callback")
             self.reasoning_callback = kwargs.get("reasoning_callback")
             self.clarify_callback = kwargs.get("clarify_callback")
+            from agent.image_runtime import capture_capability_runtime_generation
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
             home = get_hermes_home()
             self.constructed_home = str(home)
             self._cached_system_prompt = (home / "SOUL.md").read_text(encoding="utf-8")
@@ -149,7 +154,7 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
     fake_hermes_cli = types.ModuleType("hermes_cli")
     fake_hermes_cli.runtime_provider = fake_runtime_module
     fake_hermes_state = types.ModuleType("hermes_state")
-    fake_hermes_state.SessionDB = lambda: None
+    fake_hermes_state.SessionDB = lambda **_kwargs: None
     fake_hermes_state.install_state_write_guard = lambda _guard: None
 
     def home_for_profile(profile_name):

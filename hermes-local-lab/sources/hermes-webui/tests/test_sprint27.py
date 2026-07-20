@@ -31,20 +31,32 @@ def post(path, body=None):
         return json.loads(e.read()), e.code
 
 
+def _current_bot_name():
+    settings, status = get("/api/settings")
+    assert status == 200
+    return settings["bot_name"]
+
+
+def _restore_bot_name(bot_name):
+    _, status = post("/api/settings", {"bot_name": bot_name})
+    assert status == 200
+
+
 # ── Default value ─────────────────────────────────────────────────────────
 
 def test_settings_default_bot_name():
-    """GET /api/settings should return bot_name defaulting to 'Hermes'."""
+    """GET /api/settings should return bot_name defaulting to 'taiji Agent'."""
     d, status = get("/api/settings")
     assert status == 200
     assert "bot_name" in d
-    assert d["bot_name"] == "Hermes"
+    assert d["bot_name"] == "taiji Agent"
 
 
 # ── Round-trip ────────────────────────────────────────────────────────────
 
 def test_settings_set_bot_name():
     """POST /api/settings with bot_name should persist and round-trip."""
+    original = _current_bot_name()
     try:
         d, status = post("/api/settings", {"bot_name": "TestBot"})
         assert status == 200
@@ -52,56 +64,65 @@ def test_settings_set_bot_name():
         d2, _ = get("/api/settings")
         assert d2.get("bot_name") == "TestBot"
     finally:
-        post("/api/settings", {"bot_name": "Hermes"})
+        _restore_bot_name(original)
 
 
 def test_settings_bot_name_special_chars():
     """bot_name with safe special characters should persist correctly."""
+    original = _current_bot_name()
     try:
         d, status = post("/api/settings", {"bot_name": "My Assistant 2.0"})
         assert status == 200
         d2, _ = get("/api/settings")
         assert d2.get("bot_name") == "My Assistant 2.0"
     finally:
-        post("/api/settings", {"bot_name": "Hermes"})
+        _restore_bot_name(original)
 
 
 # ── Server-side sanitization ──────────────────────────────────────────────
 
-def test_settings_empty_bot_name_defaults_to_hermes():
-    """Posting an empty bot_name should default to 'Hermes' server-side."""
+def test_settings_empty_bot_name_defaults_to_taiji_agent():
+    """Posting an empty bot_name should default to 'taiji Agent' server-side."""
+    original = _current_bot_name()
     try:
         d, status = post("/api/settings", {"bot_name": ""})
         assert status == 200
-        assert d.get("bot_name") == "Hermes"
+        assert d.get("bot_name") == "taiji Agent"
         d2, _ = get("/api/settings")
-        assert d2.get("bot_name") == "Hermes"
+        assert d2.get("bot_name") == "taiji Agent"
     finally:
-        post("/api/settings", {"bot_name": "Hermes"})
+        _restore_bot_name(original)
 
 
-def test_settings_whitespace_bot_name_defaults_to_hermes():
-    """Posting a whitespace-only bot_name should default to 'Hermes'."""
+def test_settings_whitespace_bot_name_defaults_to_taiji_agent():
+    """Posting a whitespace-only bot_name should default to 'taiji Agent'."""
+    original = _current_bot_name()
     try:
         d, status = post("/api/settings", {"bot_name": "   "})
         assert status == 200
-        assert d.get("bot_name") == "Hermes"
+        assert d.get("bot_name") == "taiji Agent"
     finally:
-        post("/api/settings", {"bot_name": "Hermes"})
+        _restore_bot_name(original)
 
 
 # ── Login page rendering ──────────────────────────────────────────────────
 
 def test_login_page_shows_default_bot_name():
-    """GET /login should contain 'Hermes' in title and h1 when default."""
-    html, status = get_raw("/login")
-    assert status == 200
-    assert "<title>Hermes" in html
-    assert "<h1>Hermes</h1>" in html
+    """GET /login should contain 'taiji Agent' in title and h1 when default."""
+    original = _current_bot_name()
+    try:
+        post("/api/settings", {"bot_name": ""})
+        html, status = get_raw("/login")
+        assert status == 200
+        assert "<title>taiji Agent" in html
+        assert "<h1>taiji Agent</h1>" in html
+    finally:
+        _restore_bot_name(original)
 
 
 def test_login_page_shows_custom_bot_name():
     """GET /login should reflect the configured bot_name."""
+    original = _current_bot_name()
     try:
         post("/api/settings", {"bot_name": "Aria"})
         html, status = get_raw("/login")
@@ -109,7 +130,7 @@ def test_login_page_shows_custom_bot_name():
         assert "<title>Aria" in html
         assert "<h1>Aria</h1>" in html
     finally:
-        post("/api/settings", {"bot_name": "Hermes"})
+        _restore_bot_name(original)
 
 
 def test_login_page_empty_name_does_not_crash():
@@ -124,6 +145,7 @@ def test_login_page_empty_name_does_not_crash():
 
 def test_login_page_xss_escaped():
     """bot_name with HTML special chars should be escaped in the login page."""
+    original = _current_bot_name()
     try:
         post("/api/settings", {"bot_name": "<script>alert(1)</script>"})
         html, status = get_raw("/login")
@@ -133,4 +155,4 @@ def test_login_page_xss_escaped():
         # Escaped form should appear
         assert "&lt;script&gt;" in html
     finally:
-        post("/api/settings", {"bot_name": "Hermes"})
+        _restore_bot_name(original)

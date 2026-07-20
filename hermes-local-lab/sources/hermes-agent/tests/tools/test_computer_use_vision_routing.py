@@ -20,91 +20,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# _explicit_aux_vision_override
-# ---------------------------------------------------------------------------
-
-class TestExplicitAuxVisionOverride:
-    """Mirror agent.image_routing — config detection must agree across paths."""
-
-    def test_returns_false_for_none_cfg(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        assert _explicit_aux_vision_override(None) is False
-
-    def test_returns_false_for_non_dict_cfg(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        assert _explicit_aux_vision_override("not-a-dict") is False
-        assert _explicit_aux_vision_override([]) is False
-
-    def test_returns_false_when_auxiliary_block_missing(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        assert _explicit_aux_vision_override({}) is False
-        assert _explicit_aux_vision_override({"model": {"default": "x"}}) is False
-
-    def test_returns_false_when_vision_block_missing(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"compression": {"provider": "openai"}}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-    def test_returns_false_for_blank_provider_no_model_no_base_url(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": {"provider": "", "model": "", "base_url": ""}}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-    def test_returns_false_for_provider_auto(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": {"provider": "auto"}}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-    def test_returns_false_for_provider_AUTO_uppercase(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": {"provider": "  AUTO  "}}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-    def test_returns_true_for_explicit_provider(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": {"provider": "openrouter"}}}
-        assert _explicit_aux_vision_override(cfg) is True
-
-    def test_returns_true_for_explicit_model_only(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": {"model": "google/gemini-2.5-flash"}}}
-        assert _explicit_aux_vision_override(cfg) is True
-
-    def test_returns_true_for_explicit_base_url_only(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": {"base_url": "http://localhost:1234/v1"}}}
-        assert _explicit_aux_vision_override(cfg) is True
-
-    def test_returns_true_for_provider_auto_plus_explicit_model(self):
-        """``provider: auto`` + an explicit model still counts as override."""
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {
-            "auxiliary": {
-                "vision": {"provider": "auto", "model": "claude-3-haiku"},
-            }
-        }
-        assert _explicit_aux_vision_override(cfg) is True
-
-    def test_handles_non_dict_vision_block(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": "not-a-dict"}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-
-# ---------------------------------------------------------------------------
 # should_route_capture_to_aux_vision
 # ---------------------------------------------------------------------------
 
 class TestRouteDecision:
-    """End-to-end policy: explicit override > tool-result support > vision caps."""
+    """End-to-end policy: main capability truth precedes auxiliary fallback."""
 
-    def test_explicit_override_routes_to_aux_even_for_vision_main(self):
-        """Issue #24015 core repro: explicit aux config must win.
-
-        Even if the main model fully supports vision (Anthropic / Claude),
-        an explicit ``auxiliary.vision`` block means the user wants their
-        configured backend used. Don't silently bypass it.
-        """
+    def test_native_main_wins_even_with_explicit_auxiliary_config(self):
         from tools.computer_use import vision_routing
 
         cfg = {
@@ -121,7 +43,7 @@ class TestRouteDecision:
                           return_value=True):
             assert vision_routing.should_route_capture_to_aux_vision(
                 "anthropic", "claude-opus-4-5", cfg
-            ) is True
+            ) is False
 
     def test_non_vision_main_model_routes_to_aux(self):
         """The reported #24015 scenario: tencent/hy3-preview has no vision."""
@@ -148,44 +70,43 @@ class TestRouteDecision:
                 "anthropic", "claude-opus-4-5", None
             ) is False
 
-    def test_provider_rejects_multimodal_tool_results_routes_to_aux(self):
-        """Some providers' tool-result messages won't carry images at all."""
+    def test_native_main_with_unsupported_tool_media_fails_closed(self):
         from tools.computer_use import vision_routing
 
         with patch.object(vision_routing, "_lookup_supports_vision", return_value=True), \
              patch.object(vision_routing,
                           "_provider_accepts_multimodal_tool_result",
                           return_value=False):
-            assert vision_routing.should_route_capture_to_aux_vision(
-                "some-aggregator", "some-vision-model", {}
-            ) is True
+            with pytest.raises(RuntimeError, match="native_tool_media_unsupported"):
+                vision_routing.should_route_capture_to_aux_vision(
+                    "some-aggregator", "some-vision-model", {}
+                )
 
     def test_unknown_provider_capabilities_fail_closed(self):
-        """When tool-result lookup returns None, route to aux (safe default)."""
         from tools.computer_use import vision_routing
 
         with patch.object(vision_routing, "_lookup_supports_vision", return_value=True), \
              patch.object(vision_routing,
                           "_provider_accepts_multimodal_tool_result",
                           return_value=None):
-            assert vision_routing.should_route_capture_to_aux_vision(
-                "exotic-provider", "exotic-model", {}
-            ) is True
+            with pytest.raises(RuntimeError, match="native_tool_media_unknown"):
+                vision_routing.should_route_capture_to_aux_vision(
+                    "exotic-provider", "exotic-model", {}
+                )
 
     def test_unknown_vision_capability_fails_closed(self):
-        """When models.dev has no entry, prefer aux over a likely 404."""
         from tools.computer_use import vision_routing
 
         with patch.object(vision_routing, "_lookup_supports_vision", return_value=None), \
              patch.object(vision_routing,
                           "_provider_accepts_multimodal_tool_result",
                           return_value=True):
-            assert vision_routing.should_route_capture_to_aux_vision(
-                "openrouter", "novel/never-seen-model", {}
-            ) is True
+            with pytest.raises(RuntimeError, match="main_model_capability_unknown"):
+                vision_routing.should_route_capture_to_aux_vision(
+                    "openrouter", "novel/never-seen-model", {}
+                )
 
-    def test_explicit_override_wins_over_unknown_caps(self):
-        """Explicit aux config wins regardless of unknown caps elsewhere."""
+    def test_explicit_auxiliary_does_not_override_unknown_main_capability(self):
         from tools.computer_use import vision_routing
 
         cfg = {"auxiliary": {"vision": {"provider": "openrouter"}}}
@@ -193,9 +114,56 @@ class TestRouteDecision:
              patch.object(vision_routing,
                           "_provider_accepts_multimodal_tool_result",
                           return_value=None):
-            assert vision_routing.should_route_capture_to_aux_vision(
-                "openrouter", "tencent/hy3-preview", cfg
-            ) is True
+            with pytest.raises(RuntimeError, match="main_model_capability_unknown"):
+                vision_routing.should_route_capture_to_aux_vision(
+                    "openrouter", "tencent/hy3-preview", cfg
+                )
+
+    def test_disabled_auxiliary_blocks_known_text_only_main(self):
+        from tools.computer_use import vision_routing
+
+        cfg = {
+            "auxiliary": {
+                "vision": {
+                    "enabled": False,
+                    "provider": "openrouter",
+                    "model": "google/gemini-2.5-flash",
+                }
+            }
+        }
+        with patch.object(
+            vision_routing,
+            "_lookup_supports_vision",
+            return_value=False,
+        ):
+            with pytest.raises(RuntimeError, match="vision_disabled"):
+                vision_routing.should_route_capture_to_aux_vision(
+                    "deepseek", "deepseek-v4-pro", cfg
+                )
+
+    def test_custom_main_honors_configured_native_capability_override(self):
+        from tools.computer_use import vision_routing
+
+        cfg = {"model": {"supports_vision": True}}
+        with (
+            patch(
+                "agent.models_dev.get_model_capabilities",
+                return_value=None,
+            ),
+            patch.object(
+                vision_routing,
+                "_provider_accepts_multimodal_tool_result",
+                return_value=True,
+            ),
+        ):
+            assert (
+                vision_routing.should_route_capture_to_aux_vision(
+                    "custom",
+                    "local-vision-model",
+                    cfg,
+                )
+                is False
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +216,6 @@ class TestModuleSurface:
         assert callable(vision_routing.should_route_capture_to_aux_vision)
 
     @pytest.mark.parametrize("name", [
-        "_explicit_aux_vision_override",
         "_lookup_supports_vision",
         "_provider_accepts_multimodal_tool_result",
     ])

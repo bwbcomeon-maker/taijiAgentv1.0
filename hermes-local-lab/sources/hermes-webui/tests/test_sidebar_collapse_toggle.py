@@ -316,12 +316,12 @@ class TestFlashPreventionScript:
     """The inline <script> in <head> sets data-sidebar-collapsed before CSS."""
 
     def test_inline_script_exists(self):
-        assert "hermes-webui-sidebar-collapsed" in HTML, \
+        assert "sg('webui-sidebar-collapsed','')" in HTML, \
             "Inline flash-prevention script missing from index.html"
 
     def test_inline_script_uses_correct_dataset_key(self):
         # The dataset attribute on <html> must match what CSS targets
-        script_idx = HTML.index("hermes-webui-sidebar-collapsed")
+        script_idx = HTML.index("sg('webui-sidebar-collapsed','')")
         # Find the enclosing <script>...</script>
         open_tag = HTML.rfind("<script>", 0, script_idx)
         close_tag = HTML.index("</script>", script_idx)
@@ -331,7 +331,7 @@ class TestFlashPreventionScript:
 
     def test_inline_script_runs_before_stylesheet(self):
         # The script must appear before the main stylesheet <link>
-        script_idx = HTML.index("hermes-webui-sidebar-collapsed")
+        script_idx = HTML.index("sg('webui-sidebar-collapsed','')")
         css_idx = HTML.index('href="static/style.css')
         assert script_idx < css_idx, \
             "Flash-prevention script must run before stylesheet to avoid paint flash"

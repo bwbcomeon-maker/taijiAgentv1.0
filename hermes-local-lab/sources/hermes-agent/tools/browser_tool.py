@@ -79,10 +79,12 @@ try:
     from tools.url_safety import (
         is_safe_url as _is_safe_url,
         is_always_blocked_url as _is_always_blocked_url,
+        is_synthetic_fake_ip_hostname as _is_synthetic_fake_ip_hostname,
     )
 except Exception:
     _is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
     _is_always_blocked_url = lambda url: True  # noqa: E731 — fail-closed on the floor too
+    _is_synthetic_fake_ip_hostname = lambda hostname, addresses: False  # noqa: E731
 # Browser-provider ABC + registry — PR #25214 moved the per-vendor providers
 # (Browserbase / Browser Use / Firecrawl) out of ``tools/browser_providers/``
 # and into ``plugins/browser/<vendor>/``. The dispatcher consults the
@@ -1041,6 +1043,11 @@ def _url_is_private(url: str) -> bool:
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
         except socket.gaierror:
             return False  # DNS fail → not private, let the normal path fail
+        if _is_synthetic_fake_ip_hostname(
+            hostname,
+            [sockaddr[0] for _, _, _, _, sockaddr in addr_info],
+        ):
+            return False
         for _, _, _, _, sockaddr in addr_info:
             try:
                 ip = ipaddress.ip_address(sockaddr[0])

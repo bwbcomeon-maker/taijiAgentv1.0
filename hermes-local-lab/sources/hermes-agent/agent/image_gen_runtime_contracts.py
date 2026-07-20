@@ -6,6 +6,10 @@ from typing import Any
 
 
 _BUILTIN_IMAGE_RUNTIME_CONTRACTS: dict[str, dict[str, str]] = {
+    "fal": {
+        "transport": "fal_queue_sync_client",
+        "endpoint": "https://queue.fal.run",
+    },
     "dashscope": {
         "transport": "dashscope_native_image_generation",
         "endpoint": "",

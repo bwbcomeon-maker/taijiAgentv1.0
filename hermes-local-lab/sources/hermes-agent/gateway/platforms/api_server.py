@@ -107,6 +107,11 @@ def _structured_tool_result_for_gateway(tool_name: str, result: Any) -> Dict[str
     if verified_ref is None:
         return None
     image_ref, digest = verified_ref
+    if (
+        str(parsed.get("image_ref") or "").strip() != image_ref
+        or str(parsed.get("sha256") or "").strip().lower() != digest
+    ):
+        return None
     return {"success": True, "image_ref": image_ref, "sha256": digest}
 
 
@@ -1095,13 +1100,15 @@ class APIServerAdapter(BasePlatformAdapter):
         the no-key branch only exists for tests or unsupported manual wiring.
         """
         if not self._api_key:
-            return None
+            _, profile_error = self._parse_profile_binding_header(request)
+            return profile_error
 
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
             if hmac.compare_digest(token, self._api_key):
-                return None  # Auth OK
+                _, profile_error = self._parse_profile_binding_header(request)
+                return profile_error
 
         logger.warning(
             "API server rejected invalid API key: %s",
@@ -1124,6 +1131,62 @@ class APIServerAdapter(BasePlatformAdapter):
     # (e.g. ``agent:main:webui:dm:user-42``) while staying small enough
     # that the sanitized form is safe to pass into Honcho / state.db.
     _MAX_SESSION_HEADER_LEN = 256
+
+    def _parse_profile_binding_header(
+        self, request: "web.Request"
+    ) -> tuple[Optional[str], Optional["web.Response"]]:
+        """Require an explicitly bound client profile to match this process.
+
+        The header never switches profiles. It only turns a caller's expected
+        profile into a fail-closed assertion, preventing a WebUI session from
+        silently using another Gateway process profile and its credentials.
+        """
+        raw = request.headers.get("X-Hermes-Profile", "").strip()
+        if not raw:
+            return None, None
+        if len(raw) > self._MAX_SESSION_HEADER_LEN or re.search(
+            r"[\r\n\x00]", raw
+        ):
+            return None, web.json_response(
+                _openai_error(
+                    "Invalid profile binding",
+                    code="invalid_profile",
+                ),
+                status=400,
+            )
+        try:
+            from hermes_cli.profiles import (
+                get_active_profile_name,
+                normalize_profile_name,
+                validate_profile_name,
+            )
+
+            requested = normalize_profile_name(raw)
+            validate_profile_name(requested)
+            active = normalize_profile_name(get_active_profile_name())
+            validate_profile_name(active)
+        except (TypeError, ValueError):
+            return None, web.json_response(
+                _openai_error(
+                    "Invalid profile binding",
+                    code="invalid_profile",
+                ),
+                status=400,
+            )
+        if requested != active:
+            logger.warning(
+                "API server rejected profile mismatch: requested=%s active=%s",
+                requested,
+                active,
+            )
+            return None, web.json_response(
+                _openai_error(
+                    "Requested profile does not match the Gateway runtime",
+                    code="profile_mismatch",
+                ),
+                status=409,
+            )
+        return requested, None
 
     def _parse_session_key_header(
         self, request: "web.Request"
@@ -1447,6 +1510,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "realtime_voice": False,
                 "session_continuity_header": "X-Hermes-Session-Id",
                 "session_key_header": "X-Hermes-Session-Key",
+                "profile_binding_header": "X-Hermes-Profile",
                 "cors": bool(self._cors_origins),
             },
             "endpoints": {

@@ -154,7 +154,7 @@ bash scripts/taiji-release-check.sh
 }
 ```
 
-结构化桌面会话必须使用 `taiji.desktop.acceptance.v1` schema，记录安装态 Electron PID/绝对 executable、executable 与 desktop entry 摘要、`electron-cdp` 连接、桌面 token、明确未使用 Web fallback，并把模型对话、附件、关窗退出、诊断导出全部记录为真实通过。`desktop-driver-result.json` 必须保留严格 `taiji.desktop.acceptance-driver.v1` 原始结果，使模型身份、附件探针摘要、Agent/WebUI PID 与 Electron 退出码可追溯；门禁会对其字段集、摘要及与会话/顶层证据的 challenge、session、Electron、desktop entry、checks 等关键字段做交叉校验。截图必须是至少 800×600 的完整 RGB8 或 RGBA8 PNG；诊断文件必须是 App 导出的 `taiji.product.support-bundle.v1` JSON，且 `overall` 必须与七个组件状态按产品诊断规则一致。会话、截图、诊断导出和驱动原始结果的 basename 和 inode 必须均不同，证据目录本身不能是符号链接。
+结构化桌面会话必须使用 `taiji.desktop.acceptance.v1` schema，记录安装态 Electron PID/绝对 executable、executable 与 desktop entry 摘要、`electron-cdp` 连接、明确未使用 Web fallback，并把模型对话、附件、关窗退出、诊断导出全部记录为真实通过。`desktop-driver-result.json` 必须保留严格 `taiji.desktop.acceptance-driver.v1` 原始结果：`app_url` 只能是同源 loopback HTTP URL 且 query 仅包含唯一 `taiji_desktop=1` 标记；桌面鉴权只能由 `desktop_auth_cookie` 的无值元数据证明（唯一、同 host、`Path=/`、HttpOnly、SameSite Strict、值格式为 64 位小写十六进制），不得把 token 值写入 URL、日志或证据。该原始结果还需使模型身份、附件探针摘要、Agent/WebUI PID 与 Electron 退出码可追溯；门禁会对其字段集、摘要及与会话/顶层证据的 challenge、session、Electron、desktop entry、checks 等关键字段做交叉校验。截图必须是至少 800×600 的完整 RGB8 或 RGBA8 PNG；诊断文件必须是 App 导出的 `taiji.product.support-bundle.v1` JSON，且 `overall` 必须与七个组件状态按产品诊断规则一致。会话、截图、诊断导出和驱动原始结果的 basename 和 inode 必须均不同，证据目录本身不能是符号链接。
 
 门禁会对交付目录生成确定性文件清单摘要：源码包、DEB、sidecar、manifest、`.build-success`、构建报告、安装/诊断/桌面验收脚本、`验收工具/`、说明文档、`Packages/Packages.gz`、离线仓库 `SHA256SUMS.txt` 以及每一个依赖 DEB 都在签名闭包内；只排除证据目录和易变构建/诊断日志。目标证据闭包还会校验结构化会话、桌面 App 截图、诊断导出和驱动原始结果摘要，并要求 commit 与当前仓库 HEAD、challenge 与本次放行命令一致。签名后任一交付文件或目标证据绑定文件被替换，旧签名都会失效。没有这些当前产物的真实证据时，状态必须写成“目标机桌面 App 未实时验证”。
 

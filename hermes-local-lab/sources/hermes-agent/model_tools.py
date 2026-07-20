@@ -883,6 +883,8 @@ def handle_function_call(
     skip_pre_tool_call_hook: bool = False,
     caller_capability_fingerprint: Optional[str] = None,
     caller_capability_generation: Optional[str] = None,
+    image_generation_task_id: Optional[str] = None,
+    image_generation_gate_owner: Optional[str] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1002,6 +1004,12 @@ def handle_function_call(
                     caller_capability_generation
                 )
                 dispatch_kwargs["tool_call_id"] = tool_call_id or ""
+                dispatch_kwargs["image_generation_task_id"] = (
+                    image_generation_task_id or ""
+                )
+                dispatch_kwargs["image_generation_gate_owner"] = (
+                    image_generation_gate_owner or ""
+                )
             result = registry.dispatch(
                 function_name,
                 function_args,

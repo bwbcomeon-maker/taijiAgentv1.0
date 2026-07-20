@@ -635,8 +635,8 @@ def test_logout_clears_stale_active_codex_without_provider_credentials(tmp_path,
     assert "provider: auto" in config_text
 
 
-def test_reset_config_provider_uses_atomic_yaml_write(tmp_path, monkeypatch):
-    """Logout config reset should delegate the YAML write atomically."""
+def test_reset_config_provider_uses_strict_transactional_write(tmp_path, monkeypatch):
+    """Logout config reset should delegate to the canonical strict writer."""
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -653,14 +653,18 @@ def test_reset_config_provider_uses_atomic_yaml_write(tmp_path, monkeypatch):
 
     from hermes_cli.auth import _reset_config_provider
 
-    def _boom(path, data, **kwargs):
-        assert path == config_path
-        assert data["model"]["provider"] == "auto"
-        assert data["model"]["base_url"] == "https://openrouter.ai/api/v1"
-        assert kwargs["sort_keys"] is False
+    def _boom(mutator, *, config_path):
+        assert config_path == hermes_home / "config.yaml"
+        candidate = yaml.safe_load(original_text)
+        mutator(candidate)
+        assert candidate["model"]["provider"] == "auto"
+        assert candidate["model"]["base_url"] == "https://openrouter.ai/api/v1"
         raise OSError("simulated atomic write failure")
 
-    with patch("hermes_cli.auth.atomic_yaml_write", side_effect=_boom) as mock_write:
+    with patch(
+        "agent.provider_credentials.mutate_config_strict",
+        side_effect=_boom,
+    ) as mock_write:
         with pytest.raises(OSError, match="simulated atomic write failure"):
             _reset_config_provider()
 

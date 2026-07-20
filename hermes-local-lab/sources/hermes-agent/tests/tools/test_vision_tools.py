@@ -1434,6 +1434,86 @@ class TestVisionRequirements:
         result = check_vision_requirements()
         assert isinstance(result, bool)
 
+    def test_disabled_auxiliary_does_not_hide_native_tool_or_resolve_provider(
+        self,
+    ):
+        with (
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={
+                    "auxiliary": {
+                        "vision": {
+                            "enabled": False,
+                            "provider": "openrouter",
+                            "model": "google/gemini-2.5-flash",
+                        }
+                    }
+                },
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_vision_provider_client",
+                side_effect=AssertionError(
+                    "native vision must not resolve an auxiliary Provider"
+                ),
+            ) as resolve_provider,
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="anthropic",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="claude-sonnet-4",
+            ),
+            patch(
+                "agent.image_routing._lookup_supports_vision",
+                return_value=True,
+            ),
+            patch(
+                "tools.vision_tools._supports_media_in_tool_results",
+                return_value=True,
+            ),
+        ):
+            assert check_vision_requirements() is True
+            resolve_provider.assert_not_called()
+
+    def test_disabled_auxiliary_hides_tool_for_text_only_main_without_provider_io(
+        self,
+    ):
+        with (
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={
+                    "auxiliary": {
+                        "vision": {
+                            "enabled": False,
+                            "provider": "openrouter",
+                            "model": "google/gemini-2.5-flash",
+                        }
+                    }
+                },
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_provider",
+                return_value="deepseek",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model",
+                return_value="deepseek-v4-pro",
+            ),
+            patch(
+                "agent.image_routing._lookup_supports_vision",
+                return_value=False,
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_vision_provider_client",
+                side_effect=AssertionError(
+                    "disabled auxiliary vision must not resolve a Provider"
+                ),
+            ) as resolve_provider,
+        ):
+            assert check_vision_requirements() is False
+            resolve_provider.assert_not_called()
+
     def test_check_requirements_accepts_codex_auth(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         (tmp_path / "auth.json").write_text(

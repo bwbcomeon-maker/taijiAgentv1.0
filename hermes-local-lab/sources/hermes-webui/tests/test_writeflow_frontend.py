@@ -92,15 +92,19 @@ def test_writing_expert_center_primary_copy_is_chinese_and_clean():
 def test_writeflow_expert_center_interactions_are_chat_first():
     fn_start = PANELS_JS.index("async function summonWriteflowTeam")
     fn_body = PANELS_JS[fn_start : PANELS_JS.index("function _writeflowModeLabel", fn_start)]
+    payload_start = PANELS_JS.index("function _writeflowExpertTeamStartPayload")
+    payload_body = PANELS_JS[payload_start:fn_start]
 
     assert "let WRITEFLOW_TEAMS = []" in PANELS_JS
     assert "function openWriteflowTeamModal" in PANELS_JS
     assert "function summonWriteflowTeam" in PANELS_JS
     assert "data-example-prompt" in PANELS_JS
     assert "modalPrompt.value = prompt" in PANELS_JS
-    assert "sendExpertTeamAction({" in fn_body
+    assert "typeof window.sendExpertTeamAction!=='function'" in fn_body
+    assert "hardRefreshWebUIClient" in fn_body
+    assert "window.sendExpertTeamAction(_writeflowExpertTeamStartPayload(" in fn_body
     assert "sendWriteflowAction({" not in fn_body
-    assert "team_id: team.id" in fn_body
+    assert "team_id:team.id" in payload_body
     assert "new_session: true" in fn_body
     assert "open_new_window" not in fn_body
     assert "new_window" not in fn_body

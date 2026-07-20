@@ -99,6 +99,11 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
             self.session_id = sid
             self.context_compressor = None
             self.ephemeral_system_prompt = None
+            from agent.image_runtime import capture_capability_runtime_generation
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
 
         def run_conversation(self, **kwargs):
             captured["conversation_history"] = copy.deepcopy(
@@ -231,6 +236,11 @@ def test_legacy_final_save_validates_visible_assistant_fields_only(monkeypatch, 
             self.session_id = sid
             self.context_compressor = None
             self.ephemeral_system_prompt = None
+            from agent.image_runtime import capture_capability_runtime_generation
+
+            generation = capture_capability_runtime_generation()
+            assert generation.stable
+            self._capability_runtime_identity = generation.identity
 
         def run_conversation(self, **kwargs):
             return {

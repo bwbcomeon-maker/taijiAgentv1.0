@@ -312,7 +312,10 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     active_const_idx = done_block.find("const isActiveSession=_isSessionCurrentPane(activeSid);")
     viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
-    session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
+    session_update_idx = done_block.find(
+        "S.session=(typeof sanitizeSessionRuntimeFields==='function'",
+        active_guard_idx,
+    )
     render_idx = done_block.find("renderMessages(", active_guard_idx)
     load_dir_idx = done_block.find("preservePreview", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)

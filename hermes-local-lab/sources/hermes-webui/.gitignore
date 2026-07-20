@@ -40,6 +40,11 @@ Thumbs.db
 # Markdown docs at docs/*.md are intentionally trackable for contributor docs.
 docs/*
 !docs/*.md
+!docs/images/
+docs/images/*
+!docs/images/update-banner-whats-new-after.png
+!docs/images/ui-sessions.png
+!docs/images/ui-workspace.png
 !docs/ui-ux/
 !docs/ui-ux/**
 !docs/rfcs/

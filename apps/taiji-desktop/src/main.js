@@ -64,8 +64,42 @@ function applySecurityProfile(env) {
 
 function configureDesktopUserDataDir() {
   const override = process.env.TAIJI_DESKTOP_USER_DATA_DIR;
-  if (!override) return;
-  app.setPath("userData", path.resolve(override));
+  if (override) {
+    app.setPath("userData", path.resolve(override));
+    return;
+  }
+  if (app.isPackaged) return;
+
+  // Source/debug instances from different worktrees must not compete for
+  // Electron's global singleton lock.  Otherwise launching worktree B can
+  // silently focus stale worktree A before B validates its own source/runtime.
+  const appPath = path.resolve(app.getAppPath());
+  const candidateRoot = path.resolve(
+    process.env.TAIJI_SOURCE_ROOT || path.join(appPath, "..", "..")
+  );
+  let physicalRoot = candidateRoot;
+  try {
+    physicalRoot = fs.realpathSync.native(candidateRoot);
+  } catch (_) {
+    // The source provenance gate will report an invalid root later.  Keep the
+    // singleton namespace deterministic even when the path no longer exists.
+  }
+  const sourceInstanceId = crypto
+    .createHash("sha256")
+    .update(physicalRoot)
+    .digest("hex")
+    .slice(0, 16);
+  const dataBase = process.env.XDG_DATA_HOME
+    || path.join(systemAccountHome(), ".local", "share");
+  const isolatedUserData = path.join(
+    dataBase,
+    "taiji-agent",
+    "source-instances",
+    sourceInstanceId,
+    "electron-user-data"
+  );
+  process.env.TAIJI_DESKTOP_USER_DATA_DIR = isolatedUserData;
+  app.setPath("userData", isolatedUserData);
 }
 
 configureDesktopUserDataDir();
@@ -496,7 +530,14 @@ async function startRuntime() {
 
   const target = new URL(`http://127.0.0.1:${webuiPort}`);
   target.searchParams.set("taiji_desktop", "1");
-  target.searchParams.set("taiji_desktop_token", runtimeEnv.TAIJI_DESKTOP_ACCESS_TOKEN || "");
+  await mainWindow.webContents.session.cookies.set({
+    url: target.origin,
+    name: "taiji_desktop_token",
+    value: runtimeEnv.TAIJI_DESKTOP_ACCESS_TOKEN || "",
+    path: "/",
+    httpOnly: true,
+    sameSite: "strict"
+  });
   appendDesktopLog(desktopLog, "loading desktop workspace");
   if (iconPath) {
     mainWindow.setIcon(iconPath);

@@ -8,7 +8,10 @@ network hosts.
 The ordinary private-address check can be disabled via
 ``security.allow_private_urls: true`` for explicit local-network workflows.
 Cloud metadata, link-local, and the benchmark/Fake-IP range
-``198.18.0.0/15`` remain a non-negotiable floor in every mode.
+``198.18.0.0/15`` remain a non-negotiable floor when addressed directly.
+Transparent proxies that demonstrably map multiple independent public
+hostnames into distinct Fake-IP addresses are treated as hostname-preserving
+proxy indirection; metadata hostnames and direct Fake-IP literals still block.
 
 Limitations (documented, not fixable at pre-flight level):
   - DNS rebinding (TOCTOU): an attacker-controlled DNS server with TTL=0
@@ -25,6 +28,7 @@ import ipaddress
 import logging
 import os
 import socket
+import threading
 from urllib.parse import urlparse
 
 from utils import is_truthy_value
@@ -62,11 +66,14 @@ _ALWAYS_BLOCKED_IPS = frozenset({
     ipaddress.ip_address("::ffff:169.254.169.253"),
     ipaddress.ip_address("::ffff:100.100.100.200"),
 })
+_FAKE_IP_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("::ffff:198.18.0.0/111"),
+)
 _ALWAYS_BLOCKED_NETWORKS = (
     ipaddress.ip_network("169.254.0.0/16"),    # Entire link-local range (no legit agent target)
     ipaddress.ip_network("::ffff:169.254.0.0/112"), # IPv4-mapped link-local range
-    ipaddress.ip_network("198.18.0.0/15"),     # Benchmark/Fake-IP must never be an origin peer
-    ipaddress.ip_network("::ffff:198.18.0.0/111"),  # IPv4-mapped Fake-IP range
+    *_FAKE_IP_NETWORKS,  # Benchmark/Fake-IP must never be a literal origin peer
 )
 
 # Exact HTTPS hostnames allowed to resolve to ordinary private-space IPs.
@@ -87,6 +94,110 @@ _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 # Cached after first read so we don't hit the filesystem on every URL check.
 _allow_private_resolved = False
 _cached_allow_private: bool = False
+_synthetic_dns_mode_resolved = False
+_cached_synthetic_dns_mode = False
+_synthetic_dns_mode_lock = threading.Lock()
+_SYNTHETIC_DNS_PROBE_HOSTS = ("example.com", "github.com")
+
+
+def _is_fake_ip_address(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    return any(ip in network for network in _FAKE_IP_NETWORKS)
+
+
+def _synthetic_fake_ip_dns_active() -> bool:
+    """Detect transparent-proxy DNS that maps public names into 198.18/15.
+
+    A single Fake-IP answer is not sufficient: an attacker-controlled DNS
+    record could otherwise opt itself out of SSRF checks. Both independent
+    public probes must resolve exclusively into the Fake-IP range and produce
+    at least two distinct synthetic addresses. Direct Fake-IP URL literals
+    remain blocked regardless of this result.
+    """
+    global _synthetic_dns_mode_resolved, _cached_synthetic_dns_mode
+    with _synthetic_dns_mode_lock:
+        if _synthetic_dns_mode_resolved:
+            return _cached_synthetic_dns_mode
+
+        override = os.getenv("HERMES_SYNTHETIC_DNS_MODE", "").strip().lower()
+        if override in {"true", "1", "yes"}:
+            _cached_synthetic_dns_mode = True
+            _synthetic_dns_mode_resolved = True
+            return True
+        if override in {"false", "0", "no"}:
+            _synthetic_dns_mode_resolved = True
+            return False
+
+        synthetic_addresses: set[str] = set()
+        try:
+            for probe in _SYNTHETIC_DNS_PROBE_HOSTS:
+                probe_addresses: set[str] = set()
+                for _, _, _, _, sockaddr in socket.getaddrinfo(
+                    probe,
+                    None,
+                    socket.AF_UNSPEC,
+                    socket.SOCK_STREAM,
+                ):
+                    try:
+                        resolved = ipaddress.ip_address(sockaddr[0])
+                    except ValueError:
+                        continue
+                    if not _is_fake_ip_address(resolved):
+                        _synthetic_dns_mode_resolved = True
+                        return False
+                    probe_addresses.add(str(resolved))
+                if not probe_addresses:
+                    _synthetic_dns_mode_resolved = True
+                    return False
+                synthetic_addresses.update(probe_addresses)
+        except (OSError, socket.gaierror):
+            _synthetic_dns_mode_resolved = True
+            return False
+
+        _cached_synthetic_dns_mode = len(synthetic_addresses) >= 2
+        _synthetic_dns_mode_resolved = True
+        return _cached_synthetic_dns_mode
+
+
+def _reset_synthetic_dns_mode_cache() -> None:
+    """Reset transparent-proxy DNS detection (tests only)."""
+    global _synthetic_dns_mode_resolved, _cached_synthetic_dns_mode
+    with _synthetic_dns_mode_lock:
+        _synthetic_dns_mode_resolved = False
+        _cached_synthetic_dns_mode = False
+
+
+def is_synthetic_fake_ip_hostname(
+    hostname: str,
+    addresses: list[str] | tuple[str, ...],
+) -> bool:
+    """Return whether all answers are proxy-owned Fake-IP mappings.
+
+    Literal IP hostnames are deliberately excluded. The browser will connect
+    using the original hostname, allowing the already-active transparent proxy
+    to recover the real destination without treating its synthetic address as
+    an origin peer.
+    """
+    normalized = str(hostname or "").strip().lower().rstrip(".")
+    if not normalized or normalized in _BLOCKED_HOSTNAMES:
+        return False
+    try:
+        ipaddress.ip_address(normalized)
+        return False
+    except ValueError:
+        pass
+    parsed_addresses = []
+    for address in addresses:
+        try:
+            parsed_addresses.append(ipaddress.ip_address(address))
+        except ValueError:
+            return False
+    return (
+        bool(parsed_addresses)
+        and all(_is_fake_ip_address(ip) for ip in parsed_addresses)
+        and _synthetic_fake_ip_dns_active()
+    )
 
 
 def _global_allow_private_urls() -> bool:
@@ -239,11 +350,24 @@ def is_always_blocked_url(url: str) -> bool:
         except socket.gaierror:
             return False
 
+        resolved_ip_strings = [
+            sockaddr[0]
+            for _family, _, _, _, sockaddr in addr_info
+        ]
+        synthetic_fake_ip_mapping = is_synthetic_fake_ip_hostname(
+            hostname,
+            resolved_ip_strings,
+        )
         for _family, _, _, _, sockaddr in addr_info:
             ip_str = sockaddr[0]
             try:
                 resolved = ipaddress.ip_address(ip_str)
             except ValueError:
+                continue
+            if (
+                synthetic_fake_ip_mapping
+                and _is_fake_ip_address(resolved)
+            ):
                 continue
             if resolved in _ALWAYS_BLOCKED_IPS or any(
                 resolved in net for net in _ALWAYS_BLOCKED_NETWORKS
@@ -310,11 +434,22 @@ def is_safe_url(url: str) -> bool:
             logger.warning("Blocked request — DNS resolution failed for: %s", hostname)
             return False
 
+        resolved_ip_strings = [
+            sockaddr[0]
+            for _, _, _, _, sockaddr in addr_info
+        ]
+        synthetic_fake_ip_mapping = is_synthetic_fake_ip_hostname(
+            hostname,
+            resolved_ip_strings,
+        )
         for family, _, _, _, sockaddr in addr_info:
             ip_str = sockaddr[0]
             try:
                 ip = ipaddress.ip_address(ip_str)
             except ValueError:
+                continue
+
+            if synthetic_fake_ip_mapping and _is_fake_ip_address(ip):
                 continue
 
             # Always block cloud metadata IPs and link-local, even with toggle on

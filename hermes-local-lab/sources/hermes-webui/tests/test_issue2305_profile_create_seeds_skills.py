@@ -24,6 +24,7 @@
 import os
 import sys
 import threading
+import importlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType
@@ -33,6 +34,13 @@ import pytest
 
 # Import the module under test directly (isolated from any real HERMES_HOME env).
 import api.profiles as profiles_mod
+
+try:
+    _real_hermes_cli = importlib.import_module('hermes_cli')
+    _real_hermes_cli_profiles = importlib.import_module('hermes_cli.profiles')
+except ModuleNotFoundError:
+    _real_hermes_cli = None
+    _real_hermes_cli_profiles = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -69,23 +77,33 @@ def _install_hermes_cli_profiles_mock(create_impl, seed_impl):
     mock = ModuleType('hermes_cli.profiles')
     mock.create_profile = create_impl
     mock.seed_profile_skills = seed_impl
-    sys.modules['hermes_cli'] = ModuleType('hermes_cli')
+    if _real_hermes_cli is None:
+        pytest.skip('hermes_cli package is required for profile credential transactions')
+    sys.modules['hermes_cli'] = _real_hermes_cli
     sys.modules['hermes_cli.profiles'] = mock
+    _real_hermes_cli.profiles = mock
     return mock
 
 
 def _remove_hermes_cli():
-    for key in list(sys.modules):
-        if key == 'hermes_cli' or key.startswith('hermes_cli.'):
-            del sys.modules[key]
+    """Remove only the mocked profiles leaf; keep the real parent package.
 
-
-# Module references saved at import time so we can restore the real hermes_cli
-# after each test that overwrites sys.modules['hermes_cli.profiles'].  This
-# prevents the `FallbackDoesNotCrash` tests from finding a deleted entry and
-# incorrectly skipping.
-_real_hermes_cli = sys.modules.get('hermes_cli')
-_real_hermes_cli_profiles = sys.modules.get('hermes_cli.profiles')
+    Replacing ``hermes_cli`` with a plain ``ModuleType`` made it cease to be a
+    package.  New credential-transaction code then correctly imports
+    ``hermes_cli.config`` and failed before the profile behavior under test was
+    reached.  It also evicted unrelated lazily imported CLI modules for every
+    later test in the process.
+    """
+    sys.modules.pop('hermes_cli.profiles', None)
+    if _real_hermes_cli is None:
+        sys.modules.pop('hermes_cli', None)
+        return
+    sys.modules['hermes_cli'] = _real_hermes_cli
+    if getattr(_real_hermes_cli, 'profiles', None) is not _real_hermes_cli_profiles:
+        try:
+            delattr(_real_hermes_cli, 'profiles')
+        except AttributeError:
+            pass
 
 
 def _restore_real_hermes_cli():
@@ -93,6 +111,7 @@ def _restore_real_hermes_cli():
         sys.modules['hermes_cli'] = _real_hermes_cli
     if _real_hermes_cli_profiles is not None:
         sys.modules['hermes_cli.profiles'] = _real_hermes_cli_profiles
+        _real_hermes_cli.profiles = _real_hermes_cli_profiles
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -404,9 +423,9 @@ class TestHermesCliUnavailableFallbackDoesNotCrash:
         mock.create_profile = fake_create
         # NO seed_profile_skills attribute — absence causes ImportError in the
         # import statement inside create_profile_api.
-        fake_hermes_cli = ModuleType('hermes_cli')
-        sys.modules['hermes_cli'] = fake_hermes_cli
+        sys.modules['hermes_cli'] = real_hermes_cli
         sys.modules['hermes_cli.profiles'] = mock
+        real_hermes_cli.profiles = mock
 
         try:
             with caplog.at_level(std_logging.DEBUG):
@@ -417,6 +436,7 @@ class TestHermesCliUnavailableFallbackDoesNotCrash:
             _remove_hermes_cli()
             sys.modules['hermes_cli'] = real_hermes_cli
             sys.modules['hermes_cli.profiles'] = real_mod
+            real_hermes_cli.profiles = real_mod
 
         # Profile is still created.
         assert result['name'] == 'nohermesprofile'

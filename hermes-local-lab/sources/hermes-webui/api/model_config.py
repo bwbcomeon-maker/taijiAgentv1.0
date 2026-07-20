@@ -15,10 +15,13 @@ import importlib
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 import threading
+import time
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
@@ -36,6 +39,7 @@ from agent.provider_credentials import (
     default_credential_ref,
     load_credential,
     load_credential_config,
+    load_credential_snapshot,
     mutate_config_env_strict,
     normalize_credential_id,
     provider_family,
@@ -98,6 +102,51 @@ logger = logging.getLogger(__name__)
 
 _DURABLE_MUTATION_REFRESH_WARNING = "durable_mutation_refresh_pending"
 _UNSET_SECRET_VALUE = object()
+_IMAGE_CAPABILITY_REVISION_NONCE_KEY = (
+    "_taiji_image_capability_revision_nonce"
+)
+_IMAGE_CAPABILITY_REQUEST_CACHE_TTL_SECONDS = 10 * 60
+_IMAGE_CAPABILITY_REQUEST_CACHE_CAPACITY = 512
+_IMAGE_CAPABILITY_CREDENTIAL_MANAGER = "image-capability-center"
+
+
+class ImageCapabilityCredentialError(ValueError):
+    """A stable, machine-readable image-center credential safety error."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class _ImageCapabilityCachedError:
+    """Secret-free replay descriptor; never retains an exception traceback."""
+
+    kind: str
+    code: str
+    message: str
+
+
+@dataclass
+class _ImageCapabilityRequestEntry:
+    payload_digest: str
+    event: threading.Event = dataclass_field(
+        default_factory=threading.Event
+    )
+    result: dict[str, Any] | None = None
+    error: _ImageCapabilityCachedError | None = None
+    touched_at: float = dataclass_field(default_factory=time.monotonic)
+
+
+_IMAGE_CAPABILITY_REQUEST_LOCK = threading.RLock()
+_IMAGE_CAPABILITY_REQUESTS: "OrderedDict[tuple[str, str], _ImageCapabilityRequestEntry]" = (
+    OrderedDict()
+)
+_IMAGE_CAPABILITY_PROBE_LOCKS_GUARD = threading.Lock()
+_IMAGE_CAPABILITY_PROBE_LOCKS: dict[
+    tuple[str, str],
+    Any,
+] = {}
 
 
 @dataclass(frozen=True)
@@ -475,6 +524,145 @@ def _commit_expected_config_env(
         env_updates,
         config_path=config_path,
     )
+
+
+def _image_capability_revision(
+    config_data: dict[str, Any],
+    *,
+    env_sha256: str = hashlib.sha256(b"").hexdigest(),
+) -> str:
+    """Return an opaque digest of durable config and credential state."""
+    projection = {
+        "config": config_data,
+        "env_sha256": str(env_sha256 or ""),
+    }
+    serialized = json.dumps(
+        projection,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _image_capability_request_digest(body: dict[str, Any]) -> str:
+    payload = {
+        key: value
+        for key, value in body.items()
+        if key != "request_id"
+    }
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _cacheable_image_capability_error(
+    exc: BaseException,
+) -> _ImageCapabilityCachedError:
+    """Reduce an owner failure to a fixed, secret-free replay description."""
+    if isinstance(exc, ImageCapabilityCredentialError):
+        messages = {
+            "image_capability_credential_shared": (
+                "该凭据已被多个图片能力引用，图片能力中心不会覆盖共享凭据。"
+            ),
+            "image_capability_credential_collision": (
+                "凭据 ID 已存在且不属于当前图片能力草稿，请刷新后重试。"
+            ),
+        }
+        code = (
+            exc.code
+            if exc.code in messages
+            else "image_capability_credential_rejected"
+        )
+        return _ImageCapabilityCachedError(
+            kind="credential",
+            code=code,
+            message=messages.get(
+                code,
+                "图片能力凭据更新被安全策略拒绝，请刷新后重试。",
+            ),
+        )
+
+    from hermes_cli.config import ConfigurationConflictError
+
+    if isinstance(exc, ConfigurationConflictError):
+        return _ImageCapabilityCachedError(
+            kind="configuration_conflict",
+            code="configuration_conflict",
+            message="配置已被其他请求更新，请刷新后重试。",
+        )
+    if isinstance(exc, ValueError):
+        return _ImageCapabilityCachedError(
+            kind="validation",
+            code="image_capability_validation_failed",
+            message="图片能力请求校验失败，请修正后重试。",
+        )
+    if isinstance(exc, OSError):
+        return _ImageCapabilityCachedError(
+            kind="io",
+            code="image_capability_io_failed",
+            message="图片能力配置写入失败，请检查本机文件状态后重试。",
+        )
+    return _ImageCapabilityCachedError(
+        kind="internal",
+        code="image_capability_internal_error",
+        message="图片能力请求执行失败，请稍后重试。",
+    )
+
+
+def _replayed_image_capability_error(
+    cached: _ImageCapabilityCachedError,
+) -> BaseException:
+    """Create a fresh exception so waiters cannot inherit owner traceback."""
+    if cached.kind == "credential":
+        return ImageCapabilityCredentialError(
+            cached.code,
+            cached.message,
+        )
+    if cached.kind == "configuration_conflict":
+        from hermes_cli.config import ConfigurationConflictError
+
+        return ConfigurationConflictError(
+            ("image_capabilities", "revision")
+        )
+    if cached.kind == "validation":
+        return ValueError(cached.message)
+    if cached.kind == "io":
+        return OSError(cached.message)
+    return RuntimeError(cached.message)
+
+
+def _prune_image_capability_requests(now: float) -> None:
+    expired = [
+        key
+        for key, entry in _IMAGE_CAPABILITY_REQUESTS.items()
+        if entry.event.is_set()
+        and now - entry.touched_at
+        > _IMAGE_CAPABILITY_REQUEST_CACHE_TTL_SECONDS
+    ]
+    for key in expired:
+        _IMAGE_CAPABILITY_REQUESTS.pop(key, None)
+    while (
+        len(_IMAGE_CAPABILITY_REQUESTS)
+        >= _IMAGE_CAPABILITY_REQUEST_CACHE_CAPACITY
+    ):
+        evictable = next(
+            (
+                key
+                for key, entry in _IMAGE_CAPABILITY_REQUESTS.items()
+                if entry.event.is_set()
+            ),
+            None,
+        )
+        if evictable is None:
+            break
+        _IMAGE_CAPABILITY_REQUESTS.pop(evictable, None)
 
 
 def _provider_credential_used_by(config_data: dict[str, Any], credential_id: str) -> list[str]:
@@ -1646,23 +1834,38 @@ def get_image_gen_config() -> dict[str, Any]:
 def _get_image_gen_config_unlocked(
     *,
     refresh_runtime: bool = True,
+    config_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if refresh_runtime:
         reload_config()
     config_path = _get_config_path()
-    config_data = load_credential_config(config_path)
-    image_cfg = config_data.get("image_gen")
+    exact_config_data = (
+        config_data
+        if isinstance(config_data, dict)
+        else load_credential_config(config_path)
+    )
+    image_cfg = exact_config_data.get("image_gen")
     if not isinstance(image_cfg, dict):
         image_cfg = {}
     active_provider = str(image_cfg.get("provider") or "").strip()
     active_model = str(image_cfg.get("model") or "").strip()
+    enabled = (
+        image_cfg["enabled"]
+        if isinstance(image_cfg.get("enabled"), bool)
+        else bool(active_provider and active_model)
+    )
+    explicitly_disabled = image_cfg.get("enabled") is False
     active_options = image_cfg.get("options")
     if not isinstance(active_options, dict):
         active_options = {}
     provider_rows = _image_gen_provider_rows(active_provider)
     active_public_provider = _public_image_gen_provider_id(active_provider)
     active_row = next(
-        (row for row in provider_rows if str(row.get("id") or "") == active_public_provider),
+        (
+            row
+            for row in provider_rows
+            if str(row.get("id") or "") == active_public_provider
+        ),
         {},
     )
     endpoint_names = {
@@ -1678,24 +1881,42 @@ def _get_image_gen_config_unlocked(
         for name in endpoint_names
         if name in active_options
     }
+    verification = (
+        _public_image_gen_verification(
+            image_cfg,
+            profile=_active_profile_name(),
+            snapshot=_capture_image_gen_config_snapshot_unlocked(
+                config_path=Path(config_path),
+                config_data=exact_config_data,
+            ),
+        )
+        if not explicitly_disabled
+        else {
+            "status": "disabled",
+            "checked_at": "",
+            "error_code": "",
+            "message": "图片生成已停用，原配置和凭据仍保留。",
+            "diagnostic_id": "",
+        }
+    )
     return {
         "ok": True,
         "profile": _active_profile_name(),
         "config": _public_config_summary(config_path),
         "image_gen": {
+            "enabled": enabled,
             "provider": _public_image_gen_provider_id(active_provider),
             "model": active_model,
             "use_gateway": bool(image_cfg.get("use_gateway")),
             "credential_ref": str(image_cfg.get("credential_ref") or "").strip(),
             "options": dict(endpoint_values),
             "endpoint_values": endpoint_values,
-            "verification": _public_image_gen_verification(
-                image_cfg,
-                profile=_active_profile_name(),
-            ),
+            "verification": verification,
         },
         "providers": provider_rows,
-        "custom_image_providers": get_custom_image_provider_configs().get("providers", []),
+        "custom_image_providers": get_custom_image_provider_configs().get(
+            "providers", []
+        ),
     }
 
 
@@ -2304,15 +2525,18 @@ def _capture_vision_config_snapshot() -> _VisionConfigSnapshot:
 def _capture_vision_config_snapshot_unlocked(
     *,
     config_path: Path | None = None,
+    config_data: dict[str, Any] | None = None,
 ) -> _VisionConfigSnapshot:
     exact_config_path = Path(config_path or _get_config_path())
     profile = _active_profile_name()
-    raw_config_data = load_credential_config(exact_config_path)
+    raw_config_data = (
+        config_data
+        if isinstance(config_data, dict)
+        else load_credential_config(exact_config_path)
+    )
     raw_auxiliary = raw_config_data.get("auxiliary")
     raw_vision_cfg = (
-        raw_auxiliary.get("vision")
-        if isinstance(raw_auxiliary, dict)
-        else {}
+        raw_auxiliary.get("vision") if isinstance(raw_auxiliary, dict) else {}
     )
     if not isinstance(raw_vision_cfg, dict):
         raw_vision_cfg = {}
@@ -2693,11 +2917,51 @@ def _vision_test_response(
     return {key: response[key] for key in _VISION_VERIFICATION_PUBLIC_FIELDS}
 
 
-def test_vision_config() -> dict[str, Any]:
-    reload_config()
-    snapshot = _capture_vision_config_snapshot()
+def test_vision_config(
+    *,
+    snapshot: _VisionConfigSnapshot | None = None,
+) -> dict[str, Any]:
+    if snapshot is None:
+        reload_config()
+        config_path = Path(_get_config_path())
+        with credential_transaction(config_path):
+            config_data = load_credential_config(config_path)
+            auxiliary = config_data.get("auxiliary")
+            raw_vision_cfg = (
+                auxiliary.get("vision")
+                if isinstance(auxiliary, dict)
+                else {}
+            )
+            if not isinstance(raw_vision_cfg, dict):
+                raw_vision_cfg = {}
+            explicitly_disabled = raw_vision_cfg.get("enabled") is False
+            disabled_provider = str(
+                raw_vision_cfg.get("provider") or ""
+            ).strip().lower()
+            disabled_model = str(raw_vision_cfg.get("model") or "").strip()
+            snapshot = (
+                None
+                if explicitly_disabled
+                else _capture_vision_config_snapshot()
+            )
+    else:
+        explicitly_disabled = False
+        disabled_provider = snapshot.provider
+        disabled_model = snapshot.model
     checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     diagnostic_id = uuid.uuid4().hex
+    if explicitly_disabled:
+        return _vision_test_response(
+            ok=False,
+            status="disabled",
+            checked_at=checked_at,
+            provider=disabled_provider,
+            model=disabled_model,
+            error_code="capability_disabled",
+            message="看图识别已停用，未执行真实图片探测。",
+            diagnostic_id=diagnostic_id,
+        )
+    assert snapshot is not None
     if not snapshot.effective_config_resolved and snapshot.provider:
         return _vision_test_response(
             ok=False,
@@ -3041,10 +3305,15 @@ def _capture_image_gen_config_snapshot() -> _ImageGenConfigSnapshot:
 def _capture_image_gen_config_snapshot_unlocked(
     *,
     config_path: Path | None = None,
+    config_data: dict[str, Any] | None = None,
 ) -> _ImageGenConfigSnapshot:
     exact_config_path = Path(config_path or _get_config_path())
     profile = _active_profile_name()
-    raw_config_data = load_credential_config(exact_config_path)
+    raw_config_data = (
+        config_data
+        if isinstance(config_data, dict)
+        else load_credential_config(exact_config_path)
+    )
     raw_image_cfg = raw_config_data.get("image_gen")
     if not isinstance(raw_image_cfg, dict):
         raw_image_cfg = {}
@@ -3177,9 +3446,10 @@ def _public_image_gen_verification(
     image_cfg: dict[str, Any],
     *,
     profile: str,
+    snapshot: _ImageGenConfigSnapshot | None = None,
 ) -> dict[str, Any]:
-    snapshot = _capture_image_gen_config_snapshot()
-    preflight_failure = _image_gen_preflight_failure(snapshot)
+    exact_snapshot = snapshot or _capture_image_gen_config_snapshot()
+    preflight_failure = _image_gen_preflight_failure(exact_snapshot)
     if preflight_failure is not None:
         status, error_code, message = preflight_failure
         return {
@@ -3190,7 +3460,7 @@ def _public_image_gen_verification(
             "diagnostic_id": "",
         }
     state = _read_image_gen_verification_state(profile)
-    fingerprint = snapshot.fingerprint
+    fingerprint = exact_snapshot.fingerprint
     persisted_status = verification_status_from_state(
         state, expected_fingerprint=fingerprint
     )
@@ -3394,6 +3664,7 @@ def _execute_image_gen_probe(
     *,
     diagnostic_id: str,
     reauth_guard: Any,
+    probe_binding: ImageGenRequestBinding,
 ) -> tuple[bool, str, str]:
     ok = False
     error_code = "image_gen_probe_failed"
@@ -3429,7 +3700,7 @@ def _execute_image_gen_probe(
         can_attempt = bool(
             selected
             and (
-                snapshot.probe_binding is not None
+                probe_binding is not None
                 if binding_aware
                 else (
                     selected.is_available()
@@ -3450,7 +3721,7 @@ def _execute_image_gen_probe(
                 "model": snapshot.model,
             }
             if binding_aware:
-                probe_kwargs["_runtime_binding"] = snapshot.probe_binding
+                probe_kwargs["_runtime_binding"] = probe_binding
                 probe_kwargs["_reauth_guard"] = reauth_guard
             result = selected.generate(
                 **probe_kwargs,
@@ -3510,11 +3781,46 @@ def _execute_image_gen_probe(
     return ok, error_code, message
 
 
-def test_image_gen_config() -> dict[str, Any]:
-    reload_config()
-    snapshot = _capture_image_gen_config_snapshot()
+def test_image_gen_config(
+    *,
+    snapshot: _ImageGenConfigSnapshot | None = None,
+) -> dict[str, Any]:
+    if snapshot is None:
+        reload_config()
+        config_path = Path(_get_config_path())
+        with credential_transaction(config_path):
+            config_data = load_credential_config(config_path)
+            raw_image_cfg = config_data.get("image_gen")
+            if not isinstance(raw_image_cfg, dict):
+                raw_image_cfg = {}
+            explicitly_disabled = raw_image_cfg.get("enabled") is False
+            disabled_provider = str(
+                raw_image_cfg.get("provider") or ""
+            ).strip().lower()
+            disabled_model = str(raw_image_cfg.get("model") or "").strip()
+            snapshot = (
+                None
+                if explicitly_disabled
+                else _capture_image_gen_config_snapshot()
+            )
+    else:
+        explicitly_disabled = False
+        disabled_provider = snapshot.provider
+        disabled_model = snapshot.model
     checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     diagnostic_id = uuid.uuid4().hex
+    if explicitly_disabled:
+        return _image_gen_test_response(
+            ok=False,
+            status="disabled",
+            checked_at=checked_at,
+            provider=disabled_provider,
+            model=disabled_model,
+            error_code="capability_disabled",
+            message="图片生成已停用，未执行真实生成探测。",
+            diagnostic_id=diagnostic_id,
+        )
+    assert snapshot is not None
     preflight_failure = _image_gen_preflight_failure(snapshot)
     if preflight_failure is None and snapshot.probe_binding is None:
         preflight_failure = (
@@ -3580,6 +3886,7 @@ def test_image_gen_config() -> dict[str, Any]:
             snapshot,
             diagnostic_id=diagnostic_id,
             reauth_guard=reauth_guard,
+            probe_binding=probe_binding,
         )
     finally:
         reset_hermes_config_path_override(config_path_token)
@@ -3812,26 +4119,38 @@ def get_vision_config() -> dict[str, Any]:
 def _get_vision_config_unlocked(
     *,
     refresh_runtime: bool = True,
+    config_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if refresh_runtime:
         reload_config()
     config_path = Path(_get_config_path())
-    config_data = load_credential_config(config_path)
-    auxiliary = config_data.get("auxiliary")
+    exact_config_data = (
+        config_data
+        if isinstance(config_data, dict)
+        else load_credential_config(config_path)
+    )
+    auxiliary = exact_config_data.get("auxiliary")
     vision_cfg = auxiliary.get("vision") if isinstance(auxiliary, dict) else {}
     if not isinstance(vision_cfg, dict):
         vision_cfg = {}
     snapshot = _capture_vision_config_snapshot_unlocked(
-        config_path=config_path
+        config_path=config_path,
+        config_data=exact_config_data,
     )
     provider = snapshot.provider
     model = snapshot.model
+    enabled = (
+        vision_cfg["enabled"]
+        if isinstance(vision_cfg.get("enabled"), bool)
+        else bool(provider and model)
+    )
+    explicitly_disabled = vision_cfg.get("enabled") is False
     base_url = snapshot.base_url
     api_mode = snapshot.api_mode
     key_status = _vision_key_status(
         provider,
         vision_cfg,
-        config_data=config_data,
+        config_data=exact_config_data,
         config_path=config_path,
         allow_process_fallback=False,
     )
@@ -3843,11 +4162,29 @@ def _get_vision_config_unlocked(
         name = str(field.get("name") or "").strip()
         if name and name in vision_cfg:
             endpoint_values[name] = str(vision_cfg.get(name) or "").strip()
+    verification = (
+        _public_vision_verification(
+            vision_cfg,
+            key_status,
+            profile=snapshot.profile,
+            config_data=exact_config_data,
+            snapshot=snapshot,
+        )
+        if not explicitly_disabled
+        else {
+            "status": "disabled",
+            "checked_at": "",
+            "error_code": "",
+            "message": "看图识别已停用，原配置和凭据仍保留。",
+            "diagnostic_id": "",
+        }
+    )
     return {
         "ok": True,
         "profile": snapshot.profile,
         "config": _public_config_summary(config_path),
         "vision": {
+            "enabled": enabled,
             "provider": provider,
             "model": model,
             "base_url": base_url,
@@ -3858,18 +4195,12 @@ def _get_vision_config_unlocked(
             "workspace_id": str(vision_cfg.get("workspace_id") or "").strip(),
             "endpoint_values": endpoint_values,
             "key_status": key_status,
-            "verification": _public_vision_verification(
-                vision_cfg,
-                key_status,
-                profile=snapshot.profile,
-                config_data=config_data,
-                snapshot=snapshot,
-            ),
+            "verification": verification,
         },
         "providers": _vision_provider_rows(
             provider,
             vision_cfg,
-            config_data=config_data,
+            config_data=exact_config_data,
             config_path=config_path,
             allow_process_fallback=False,
         ),
@@ -3883,6 +4214,9 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = body.get("api_key")
     credential_ref = str(body.get("credential_ref") or "").strip()
+    requested_enabled = body.get("enabled") if "enabled" in body else None
+    if requested_enabled is not None and not isinstance(requested_enabled, bool):
+        raise ValueError("enabled must be a boolean")
     if not provider_id:
         raise ValueError("provider is required")
     named_custom_entry: dict[str, Any] | None = None
@@ -4042,6 +4376,8 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
                 vision_cfg.pop(name, None)
             vision_cfg["provider"] = provider_id
             vision_cfg["model"] = model_id
+            if requested_enabled is not None:
+                vision_cfg["enabled"] = requested_enabled
             if provider_id == "alibaba":
                 vision_cfg["credential_ref"] = credential_ref
                 vision_cfg.pop("api_key", None)
@@ -5001,6 +5337,9 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     model_id = requested_model_id
     api_key = body.get("api_key")
     credential_ref = str(body.get("credential_ref") or "").strip()
+    requested_enabled = body.get("enabled") if "enabled" in body else None
+    if requested_enabled is not None and not isinstance(requested_enabled, bool):
+        raise ValueError("enabled must be a boolean")
     credentials = body.get("credentials")
     if not isinstance(credentials, dict):
         credentials = {}
@@ -5167,6 +5506,8 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
             image_cfg["provider"] = provider_id
             if model_id:
                 image_cfg["model"] = model_id
+            if requested_enabled is not None:
+                image_cfg["enabled"] = requested_enabled
             image_cfg["use_gateway"] = False
             if provider_id == "dashscope":
                 image_cfg["credential_ref"] = credential_ref
@@ -5231,6 +5572,1136 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _image_capability_provider_metadata(
+    vision_rows: list[dict[str, Any]],
+    image_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one secret-free, server-driven Provider catalog for both cards."""
+    merged: dict[str, dict[str, Any]] = {}
+
+    def add(capability: str, row: dict[str, Any]) -> None:
+        provider_id = str(row.get("id") or "").strip()
+        if not provider_id:
+            return
+        family = provider_family(row.get("provider_family") or provider_id)
+        auth_type = str(row.get("auth_type") or "api_key").strip().lower()
+        auth_contract = normalized_setup_contract(
+            {"auth_type": auth_type},
+            provider_family=family,
+            capabilities=(capability,),
+            transport=str(row.get("transport") or ""),
+        )
+        auth_editable = bool(
+            row.get("auth_editable", auth_contract["auth_editable"])
+        )
+        auth_message = str(
+            row.get("auth_message") or auth_contract["auth_message"]
+        )
+        custom = bool(row.get("custom")) or provider_id.startswith("custom:")
+        key = f"{capability}:{provider_id}" if custom else family
+        default_named_credentials = bool(
+            (capability == "vision" and provider_id == "alibaba")
+            or (
+                capability == "image_generation"
+                and _internal_image_gen_provider_id(provider_id) == "dashscope"
+            )
+        )
+        entry = merged.setdefault(
+            key,
+            {
+                "provider_family": family,
+                "label": str(row.get("name") or provider_id),
+                "capabilities": [],
+                "provider_ids": {},
+                "auth_type": auth_type,
+                "auth_editable": auth_editable,
+                "auth_message": auth_message,
+                "support_level": "compatible" if custom else "native",
+                "supports_named_credentials": bool(
+                    row.get(
+                        "supports_named_credentials",
+                        default_named_credentials,
+                    )
+                ),
+                "models": {},
+                "default_models": {},
+                "credential_fields": {},
+                "endpoint_fields": {},
+                "selectable": True,
+            },
+        )
+        if capability not in entry["capabilities"]:
+            entry["capabilities"].append(capability)
+        entry["provider_ids"][capability] = provider_id
+        entry["models"][capability] = list(row.get("models") or [])
+        entry["default_models"][capability] = str(
+            row.get("default_model") or ""
+        )
+        entry["credential_fields"][capability] = list(
+            row.get("credential_fields") or []
+        )
+        entry["endpoint_fields"][capability] = list(
+            row.get("endpoint_fields") or []
+        )
+        entry["supports_named_credentials"] = bool(
+            entry["supports_named_credentials"]
+            and row.get(
+                "supports_named_credentials",
+                default_named_credentials,
+            )
+        )
+        if not auth_editable and entry["auth_editable"]:
+            entry["auth_editable"] = False
+            entry["auth_message"] = auth_message
+        if row.get("policy_blocked") or row.get("integration_status") in {
+            "planned",
+            "unsupported",
+            "blocked",
+        }:
+            entry["selectable"] = False
+
+    for row in vision_rows:
+        if isinstance(row, dict):
+            add("vision", row)
+    for row in image_rows:
+        if isinstance(row, dict):
+            add("image_generation", row)
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            item["support_level"] != "native",
+            item["label"],
+        ),
+    )
+
+
+def _effective_vision_route(
+    config_data: dict[str, Any],
+    vision: dict[str, Any],
+) -> dict[str, str]:
+    """Describe the path an uploaded image will actually take."""
+    provider = str(vision.get("provider") or "")
+    model = str(vision.get("model") or "")
+    model_cfg = _safe_model_cfg(config_data)
+    main_provider = str(model_cfg.get("provider") or "").strip()
+    main_model = str(
+        model_cfg.get("default")
+        or model_cfg.get("model")
+        or model_cfg.get("name")
+        or ""
+    ).strip()
+    try:
+        from agent.image_routing import decide_image_input_mode
+
+        main_routing_config = copy.deepcopy(config_data)
+        auxiliary = main_routing_config.get("auxiliary")
+        if isinstance(auxiliary, dict):
+            auxiliary.pop("vision", None)
+            if not auxiliary:
+                main_routing_config.pop("auxiliary", None)
+        mode = decide_image_input_mode(
+            main_provider,
+            main_model,
+            main_routing_config,
+        )
+    except Exception:
+        mode = "unknown"
+    if mode == "native":
+        return {
+            "route": "main_model_vision",
+            "provider": main_provider,
+            "model": main_model,
+        }
+    if not vision.get("enabled"):
+        return {
+            "route": "disabled",
+            "provider": provider,
+            "model": model,
+        }
+    verification_status = str(
+        (vision.get("verification") or {}).get("status") or ""
+    )
+    if mode == "text" and verification_status == "verified":
+        return {
+            "route": "auxiliary_vision",
+            "provider": provider,
+            "model": model,
+        }
+    return {
+        "route": "unavailable",
+        "provider": provider or main_provider,
+        "model": model or main_model,
+    }
+
+
+def _effective_image_generation_route(
+    image_generation: dict[str, Any],
+) -> dict[str, str]:
+    """Describe the route from the same fingerprint-checked public snapshot."""
+    provider = str(image_generation.get("provider") or "")
+    model = str(image_generation.get("model") or "")
+    if not image_generation.get("enabled"):
+        return {
+            "route": "disabled",
+            "provider": provider,
+            "model": model,
+        }
+    verification = image_generation.get("verification")
+    verification_status = str(
+        verification.get("status")
+        if isinstance(verification, dict)
+        else ""
+    )
+    if verification_status == "verified":
+        return {
+            "route": "image_generation_provider",
+            "provider": provider,
+            "model": model,
+        }
+    return {
+        "route": "unavailable",
+        "provider": provider,
+        "model": model,
+    }
+
+
+def _stage_image_capability_credential(
+    config_data: dict[str, Any],
+    body: dict[str, Any],
+    env_updates: dict[str, str | None],
+    selected_capabilities: dict[str, dict[str, Any]],
+) -> tuple[bool, bool]:
+    """Stage one named credential in the shared config/env transaction."""
+    credential_id = normalize_credential_id(body.get("id"))
+    family = provider_family(body.get("provider_family") or body.get("provider"))
+    if not family:
+        raise ValueError("provider_family is required")
+    auth_type = str(body.get("auth_type") or "api_key").strip().lower()
+    if auth_type != "api_key":
+        raise ValueError("only api_key credentials are supported")
+    operation = str(body.get("operation") or "").strip().lower()
+    managed_by = str(body.get("managed_by") or "").strip()
+    source_capability = str(body.get("source_capability") or "").strip()
+    source_provider_id = str(body.get("source_provider_id") or "").strip().lower()
+    if (
+        operation != "create"
+        or managed_by != _IMAGE_CAPABILITY_CREDENTIAL_MANAGER
+        or source_capability not in {"vision", "image_generation"}
+        or not source_provider_id
+    ):
+        raise ValueError(
+            "new image capability credentials require explicit center ownership"
+        )
+    selected_source = selected_capabilities.get(source_capability)
+    if not isinstance(selected_source, dict):
+        raise ValueError(
+            "credential source_capability must be included in capabilities"
+        )
+    selected_provider_id = str(
+        selected_source.get("provider") or ""
+    ).strip().lower()
+    if selected_provider_id != source_provider_id:
+        raise ValueError(
+            "credential source_provider_id must match the selected Provider"
+        )
+    selected_ref = str(
+        selected_source.get("credential_ref") or ""
+    ).strip()
+    if (
+        not selected_ref
+        or normalize_credential_id(selected_ref) != credential_id
+    ):
+        raise ValueError(
+            "credential update must be explicitly selected by its capability"
+        )
+    if provider_family(selected_provider_id) != family:
+        raise ValueError(
+            "credential provider_family must match the selected Provider"
+        )
+    requested_default = body.get("default") if "default" in body else None
+    if requested_default is not None and not isinstance(requested_default, bool):
+        raise ValueError("default must be a boolean")
+    previous_config = copy.deepcopy(config_data)
+    previous_index, previous_row = _provider_credential_row(
+        config_data,
+        credential_id,
+    )
+    intended_uses = set(
+        _provider_credential_used_by(config_data, credential_id)
+    )
+    capability_paths = {
+        "vision": "auxiliary.vision",
+        "image_generation": "image_gen",
+    }
+    for capability, selected in selected_capabilities.items():
+        path = capability_paths[capability]
+        intended_uses.discard(path)
+        requested_ref = str(selected.get("credential_ref") or "").strip()
+        if (
+            requested_ref
+            and normalize_credential_id(requested_ref) == credential_id
+        ):
+            intended_uses.add(path)
+    if len(intended_uses) > 1:
+        raise ImageCapabilityCredentialError(
+            "image_capability_credential_shared",
+            "该凭据已被多个图片能力引用，图片能力中心不会覆盖共享凭据。",
+        )
+    if previous_row is not None:
+        _validate_provider_credential_secret_env(previous_row)
+        if (
+            previous_row.get("managed_by")
+            != _IMAGE_CAPABILITY_CREDENTIAL_MANAGER
+            or previous_row.get("source_capability") != source_capability
+            or str(previous_row.get("source_provider_id") or "")
+            .strip()
+            .lower()
+            != source_provider_id
+            or provider_family(previous_row.get("provider_family")) != family
+        ):
+            raise ImageCapabilityCredentialError(
+                "image_capability_credential_collision",
+                "凭据 ID 已存在且不属于当前图片能力草稿，请刷新后重试。",
+            )
+    default_value = (
+        requested_default
+        if requested_default is not None
+        else bool(previous_row and previous_row.get("default"))
+    )
+    if default_value:
+        rows = config_data.get("provider_credentials")
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or not row.get("default"):
+                continue
+            try:
+                row_id = normalize_credential_id(row.get("id"))
+            except ValueError:
+                continue
+            if (
+                row_id != credential_id
+                and provider_family(row.get("provider_family")) == family
+            ):
+                raise ValueError(
+                    "当前 Provider 已有默认凭据，请先取消原默认凭据。"
+                )
+    secret_env = credential_secret_env(credential_id)
+    stored = {
+        "id": credential_id,
+        "provider_family": family,
+        "label": str(body.get("label") or "").strip() or credential_id,
+        "auth_type": auth_type,
+        "secret_env": secret_env,
+        "managed_by": _IMAGE_CAPABILITY_CREDENTIAL_MANAGER,
+        "source_capability": source_capability,
+        "source_provider_id": source_provider_id,
+    }
+    if default_value:
+        stored["default"] = True
+    _replace_provider_credential_row(
+        config_data,
+        credential_id,
+        stored,
+        preferred_index=previous_index,
+    )
+    secret = body.get("api_key")
+    if secret is None:
+        secret = body.get("secret")
+    secret_value = str(secret or "").strip()
+    if secret_value:
+        env_updates[secret_env] = secret_value
+    authorization_fields = (
+        "provider_family",
+        "auth_type",
+        "secret_env",
+        "default",
+    )
+    authorization_changed = bool(
+        secret_value
+        or previous_row is None
+        or any(
+            previous_row.get(field) != stored.get(field)
+            for field in authorization_fields
+        )
+    )
+    used_by = set(
+        _provider_credential_used_by(previous_config, credential_id)
+    ) | set(_provider_credential_used_by(config_data, credential_id))
+    return (
+        bool(authorization_changed and "auxiliary.vision" in used_by),
+        bool(authorization_changed and "image_gen" in used_by),
+    )
+
+
+def _stage_vision_capability(
+    config_data: dict[str, Any],
+    body: dict[str, Any],
+    *,
+    config_path: Path,
+) -> None:
+    enabled = body["enabled"]
+    provider_id = str(body.get("provider") or "").strip().lower()
+    requested_model_id = str(body.get("model") or "").strip()
+    auxiliary = config_data.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        auxiliary = {}
+    vision_cfg = auxiliary.get("vision")
+    if not isinstance(vision_cfg, dict):
+        vision_cfg = {}
+    if not enabled:
+        vision_cfg["enabled"] = False
+        auxiliary["vision"] = vision_cfg
+        config_data["auxiliary"] = auxiliary
+        bump_capability_config_epochs(
+            config_data,
+            CAPABILITY_CONFIG_EPOCH_VISION,
+        )
+        return
+    named_custom_entry: dict[str, Any] | None = None
+    if provider_id.startswith("custom:"):
+        try:
+            from agent.custom_vision_providers import (
+                find_custom_vision_provider_entry,
+            )
+
+            named_custom_entry = find_custom_vision_provider_entry(
+                provider_id,
+                config_data,
+            )
+        except ImportError:
+            named_custom_entry = None
+    if provider_id not in _VISION_PROVIDER_META and named_custom_entry is None:
+        raise ValueError(f"unknown vision provider: {provider_id}")
+    meta = _VISION_PROVIDER_META.get(provider_id) or {
+        "default_model": named_custom_entry["default_model"],
+        "models": [{"id": item} for item in named_custom_entry["models"]],
+    }
+    model_id = requested_model_id or str(meta.get("default_model") or "").strip()
+    if not model_id:
+        models = meta.get("models") if isinstance(meta.get("models"), list) else []
+        if models:
+            model_id = str((models[0] or {}).get("id") or "").strip()
+    if not model_id:
+        raise ValueError("model is required")
+    _validate_provider_model_choice(
+        provider_id,
+        model_id,
+        meta,
+        capability="vision",
+    )
+    endpoint_values = body.get("endpoint_values") or {}
+    if not isinstance(endpoint_values, dict):
+        raise ValueError("vision.endpoint_values must be an object")
+    endpoint_updates: dict[str, str] = {}
+    for field in meta.get("endpoint_fields") or []:
+        if not isinstance(field, dict) or field.get("secret"):
+            continue
+        name = str(field.get("name") or "").strip()
+        if not name:
+            continue
+        default_value = {
+            "endpoint_mode": "public",
+            "region": "cn-beijing",
+        }.get(name, "")
+        value = str(endpoint_values.get(name) or default_value).strip()
+        if field.get("required") and not value:
+            raise ValueError(f"{name} is required")
+        endpoint_updates[name] = value
+    base_url = str(endpoint_values.get("base_url") or "").strip().rstrip("/")
+    if provider_id == "alibaba":
+        endpoint_mode = str(
+            endpoint_values.get("endpoint_mode") or "public"
+        ).strip().lower()
+        region = str(
+            endpoint_values.get("region") or "cn-beijing"
+        ).strip().lower()
+        workspace_id = str(
+            endpoint_values.get("workspace_id") or ""
+        ).strip().lower()
+        base_url = build_vision_base_url(
+            endpoint_mode=endpoint_mode,
+            region=region,
+            workspace_prefix=workspace_id,
+            custom_url=base_url,
+        )
+        canonical = {
+            "endpoint_mode": endpoint_mode,
+            "region": region,
+            "workspace_id": workspace_id,
+            "base_url": base_url,
+        }
+        for name in tuple(endpoint_updates):
+            if name in canonical:
+                endpoint_updates[name] = canonical[name]
+    if meta.get("requires_base_url") and not base_url:
+        raise ValueError("base_url is required for custom vision provider")
+    credential_ref = str(body.get("credential_ref") or "").strip()
+    if provider_id == "alibaba" and not credential_ref:
+        credential_ref = default_credential_ref(
+            provider_id,
+            config_data=config_data,
+            config_path=config_path,
+            allow_process_fallback=False,
+        )
+    if credential_ref:
+        credential_ref = normalize_credential_id(credential_ref)
+        row = load_credential(credential_ref, config_data=config_data)
+        if provider_family(row.get("provider_family")) != provider_family(
+            provider_id
+        ):
+            raise ValueError("所选凭据不属于当前 Provider。")
+    if credential_ref and provider_id != "alibaba":
+        raise ValueError("credential_ref is only supported for Alibaba vision")
+    previous_provider = str(
+        vision_cfg.get("provider") or ""
+    ).strip().lower()
+    owned_names = {
+        str(name).strip()
+        for name in (vision_cfg.get("endpoint_field_names") or [])
+        if str(name).strip()
+    }
+    previous_meta = _VISION_PROVIDER_META.get(previous_provider) or {}
+    owned_names.update(
+        str(field.get("name") or "").strip()
+        for field in (previous_meta.get("endpoint_fields") or [])
+        if isinstance(field, dict) and not field.get("secret")
+    )
+    owned_names.discard("")
+    for name in owned_names:
+        vision_cfg.pop(name, None)
+    vision_cfg["enabled"] = enabled
+    vision_cfg["provider"] = provider_id
+    vision_cfg["model"] = model_id
+    vision_cfg.pop("api_key", None)
+    vision_cfg.pop("api_mode", None)
+    if provider_id == "alibaba":
+        vision_cfg["credential_ref"] = credential_ref
+    else:
+        vision_cfg.pop("credential_ref", None)
+        vision_cfg.pop("base_url", None)
+    for name, value in endpoint_updates.items():
+        if value:
+            vision_cfg[name] = value
+        else:
+            vision_cfg.pop(name, None)
+    if endpoint_updates:
+        vision_cfg["endpoint_field_names"] = sorted(endpoint_updates)
+    else:
+        vision_cfg.pop("endpoint_field_names", None)
+    auxiliary["vision"] = vision_cfg
+    config_data["auxiliary"] = auxiliary
+    bump_capability_config_epochs(
+        config_data,
+        CAPABILITY_CONFIG_EPOCH_VISION,
+    )
+
+
+def _stage_image_generation_capability(
+    config_data: dict[str, Any],
+    body: dict[str, Any],
+    *,
+    config_path: Path,
+) -> None:
+    enabled = body["enabled"]
+    requested_provider_id = str(body.get("provider") or "").strip().lower()
+    requested_model_id = str(body.get("model") or "").strip()
+    image_cfg = config_data.get("image_gen")
+    if not isinstance(image_cfg, dict):
+        image_cfg = {}
+    if not enabled:
+        image_cfg["enabled"] = False
+        config_data["image_gen"] = image_cfg
+        bump_capability_config_epochs(
+            config_data,
+            CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+        )
+        return
+    provider_id = _internal_image_gen_provider_id(requested_provider_id)
+    model_contract = _image_gen_provider_model_contract(
+        requested_provider_id,
+        config_data=config_data,
+    )
+    model_id = requested_model_id or str(
+        model_contract.get("default_model") or ""
+    ).strip()
+    if not model_id:
+        models = (
+            model_contract.get("models")
+            if isinstance(model_contract.get("models"), list)
+            else []
+        )
+        if models:
+            model_id = str((models[0] or {}).get("id") or "").strip()
+    if not model_id:
+        raise ValueError("model is required")
+    _validate_provider_model_choice(
+        requested_provider_id,
+        model_id,
+        model_contract,
+        capability="image generation",
+    )
+    rows = _image_gen_provider_rows(provider_id)
+    selected = next(
+        (
+            row
+            for row in rows
+            if str(row.get("id") or "") == requested_provider_id
+        ),
+        None,
+    )
+    if selected is None:
+        raise ValueError(
+            f"unknown image generation provider: {requested_provider_id}"
+        )
+    selected_custom = bool(selected.get("custom"))
+    selected_domestic = (
+        bool(selected.get("domestic"))
+        if "domestic" in selected
+        else provider_id in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS
+    )
+    selected_status = str(
+        selected.get("integration_status")
+        or (
+            "custom"
+            if selected_custom
+            else (
+                "stable"
+                if provider_id in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS
+                else "external"
+            )
+        )
+    )
+    if selected.get("policy_blocked") or (
+        not selected_custom
+        and (not selected_domestic or selected_status != "stable")
+    ):
+        raise ValueError(
+            "生成图片主配置只支持中国可用的稳定 Provider，请切换到国产生图服务。"
+        )
+    credential_ref = str(body.get("credential_ref") or "").strip()
+    if credential_ref and provider_id != "dashscope":
+        raise ValueError(
+            "credential_ref is only supported for DashScope image generation"
+        )
+    if provider_id == "dashscope" and not credential_ref:
+        credential_ref = default_credential_ref(
+            provider_id,
+            config_data=config_data,
+            config_path=config_path,
+            allow_process_fallback=False,
+        )
+    if credential_ref:
+        credential_ref = normalize_credential_id(credential_ref)
+        row = load_credential(credential_ref, config_data=config_data)
+        if provider_family(row.get("provider_family")) != provider_family(
+            provider_id
+        ):
+            raise ValueError("所选凭据不属于当前 Provider。")
+    endpoint_values = body.get("endpoint_values") or {}
+    if not isinstance(endpoint_values, dict):
+        raise ValueError(
+            "image_generation.endpoint_values must be an object"
+        )
+    endpoint_fields = (
+        selected.get("endpoint_fields")
+        if isinstance(selected.get("endpoint_fields"), list)
+        else []
+    )
+    option_updates: dict[str, str] = {}
+    for field in endpoint_fields:
+        if not isinstance(field, dict) or field.get("secret"):
+            continue
+        name = str(field.get("name") or "").strip()
+        if not name:
+            continue
+        value = str(endpoint_values.get(name) or "").strip()
+        if field.get("required") and not value:
+            raise ValueError(f"{name} is required")
+        option_updates[name] = value
+    previous_provider = str(
+        image_cfg.get("provider") or ""
+    ).strip().lower()
+    previous_public_provider = _public_image_gen_provider_id(
+        previous_provider
+    )
+    previous_row = next(
+        (
+            row
+            for row in rows
+            if str(row.get("id") or "") == previous_public_provider
+        ),
+        {},
+    )
+    owned_names = {
+        str(name).strip()
+        for name in (image_cfg.get("endpoint_field_names") or [])
+        if str(name).strip()
+    }
+    owned_names.update(
+        str(field.get("name") or "").strip()
+        for field in (previous_row.get("endpoint_fields") or [])
+        if isinstance(field, dict) and not field.get("secret")
+    )
+    if not previous_row and previous_provider == "dashscope":
+        owned_names.update(
+            {"endpoint_mode", "workspace_id", "region", "base_url"}
+        )
+    owned_names.discard("")
+    options = image_cfg.get("options")
+    if not isinstance(options, dict):
+        options = {}
+    for name in owned_names:
+        options.pop(name, None)
+    for name, value in option_updates.items():
+        if value:
+            options[name] = value
+        else:
+            options.pop(name, None)
+    image_cfg["enabled"] = enabled
+    image_cfg["provider"] = provider_id
+    image_cfg["model"] = model_id
+    image_cfg["use_gateway"] = False
+    image_cfg.pop("api_key", None)
+    if provider_id == "dashscope":
+        image_cfg["credential_ref"] = credential_ref
+    else:
+        image_cfg.pop("credential_ref", None)
+    if options:
+        image_cfg["options"] = options
+    else:
+        image_cfg.pop("options", None)
+    endpoint_names = sorted(
+        str(field.get("name") or "").strip()
+        for field in endpoint_fields
+        if isinstance(field, dict)
+        and not field.get("secret")
+        and str(field.get("name") or "").strip()
+    )
+    if endpoint_names:
+        image_cfg["endpoint_field_names"] = endpoint_names
+    else:
+        image_cfg.pop("endpoint_field_names", None)
+    config_data["image_gen"] = image_cfg
+    bump_capability_config_epochs(
+        config_data,
+        CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+    )
+
+
+def get_image_capabilities() -> dict[str, Any]:
+    """Return one canonical, secret-free picture capability snapshot."""
+    config_path = Path(_get_config_path())
+    with credential_transaction(config_path):
+        reload_config()
+        credential_snapshot = load_credential_snapshot(config_path)
+        config_data = credential_snapshot.config
+        vision_payload = _get_vision_config_unlocked(
+            refresh_runtime=False,
+            config_data=config_data,
+        )
+        image_payload = _get_image_gen_config_unlocked(
+            refresh_runtime=False,
+            config_data=config_data,
+        )
+        credentials_payload = _public_provider_credentials_config(config_data)
+        revision = _image_capability_revision(
+            config_data,
+            env_sha256=credential_snapshot.env_sha256,
+        )
+        effective_vision_route = _effective_vision_route(
+            config_data,
+            dict(vision_payload.get("vision") or {}),
+        )
+        effective_image_generation_route = _effective_image_generation_route(
+            dict(image_payload.get("image_gen") or {})
+        )
+    vision = dict(vision_payload.get("vision") or {})
+    image_generation = dict(image_payload.get("image_gen") or {})
+    vision_rows = list(vision_payload.get("providers") or [])
+    image_rows = list(image_payload.get("providers") or [])
+    return {
+        "ok": True,
+        "profile": _active_profile_name(),
+        "revision": revision,
+        "capabilities": {
+            "vision": vision,
+            "image_generation": image_generation,
+        },
+        "providers": _image_capability_provider_metadata(
+            vision_rows,
+            image_rows,
+        ),
+        "vision_providers": vision_rows,
+        "image_gen_providers": image_rows,
+        "provider_credentials": list(credentials_payload.get("credentials") or []),
+        "effective_route": {
+            "vision": effective_vision_route,
+            "image_generation": effective_image_generation_route,
+        },
+    }
+
+
+def _image_capability_probe_lock(
+    config_path: Path,
+    profile: str,
+) -> Any:
+    key = (
+        str(config_path.expanduser().resolve(strict=False)),
+        str(profile or "default"),
+    )
+    with _IMAGE_CAPABILITY_PROBE_LOCKS_GUARD:
+        lock = _IMAGE_CAPABILITY_PROBE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _IMAGE_CAPABILITY_PROBE_LOCKS[key] = lock
+        return lock
+
+
+def _superseded_image_capability_probe_result(
+    capability: str,
+    requested: dict[str, Any],
+) -> dict[str, Any]:
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    provider = str(requested.get("provider") or "").strip().lower()
+    model = str(requested.get("model") or "").strip()
+    diagnostic_id = uuid.uuid4().hex
+    if capability == "vision":
+        return _vision_test_response(
+            ok=False,
+            status="superseded",
+            checked_at=checked_at,
+            provider=provider,
+            model=model,
+            error_code="vision_probe_superseded",
+            message=("识图配置在真实探测前已被更新，本次旧请求未调用 Provider。"),
+            diagnostic_id=diagnostic_id,
+        )
+    return _image_gen_test_response(
+        ok=False,
+        status="superseded",
+        checked_at=checked_at,
+        provider=provider,
+        model=model,
+        error_code="image_gen_probe_superseded",
+        message=("生图配置在真实探测前已被更新，本次旧请求未调用 Provider。"),
+        diagnostic_id=diagnostic_id,
+    )
+
+
+def _run_committed_image_capability_probe(
+    *,
+    config_path: Path,
+    profile: str,
+    committed_revision: str,
+    capability: str,
+    requested: dict[str, Any],
+    probe: Any,
+    snapshot: Any,
+) -> dict[str, Any]:
+    """Probe an immutable commit-time target after one last revision check.
+
+    The cross-process credential transaction is released before Provider I/O.
+    A legacy writer may therefore commit immediately after this check, but it
+    cannot retarget this request because the probe only consumes ``snapshot``.
+    """
+    with _image_capability_probe_lock(config_path, profile):
+        with credential_transaction(config_path):
+            current = load_credential_snapshot(config_path)
+            current_revision = _image_capability_revision(
+                current.config,
+                env_sha256=current.env_sha256,
+            )
+            if current_revision != committed_revision:
+                return _superseded_image_capability_probe_result(
+                    capability,
+                    requested,
+                )
+        return probe(snapshot=snapshot)
+
+
+def _configure_image_capabilities_once(
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Save one revision-checked image capability request."""
+    expected_revision = str(body["expected_revision"]).strip().lower()
+    capabilities = body.get("capabilities")
+    if not isinstance(capabilities, dict):
+        raise ValueError("capabilities is required")
+    unknown_capabilities = set(capabilities) - {
+        "vision",
+        "image_generation",
+    }
+    if unknown_capabilities:
+        raise ValueError("capabilities contains an unknown capability")
+    credential_updates = body.get("credential_updates") or []
+    if not isinstance(credential_updates, list) or not all(
+        isinstance(item, dict) for item in credential_updates
+    ):
+        raise ValueError("credential_updates must be a list")
+    verify = body.get("verify") or []
+    if not isinstance(verify, list):
+        raise ValueError("verify must be a list")
+    verify_set = {str(item or "").strip() for item in verify}
+    if verify_set - {"vision", "image_generation"}:
+        raise ValueError("verify contains an unknown capability")
+    selected: dict[str, dict[str, Any]] = {}
+    for capability in ("vision", "image_generation"):
+        raw = capabilities.get(capability)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            raise ValueError(f"{capability} must be an object")
+        if not isinstance(raw.get("enabled"), bool):
+            raise ValueError(f"{capability}.enabled must be a boolean")
+        if any(key in raw for key in ("api_key", "secret", "credentials")):
+            raise ValueError(
+                "capability secrets must be supplied through credential_updates"
+            )
+        selected[capability] = dict(raw)
+    for capability in verify_set:
+        if capability not in selected:
+            raise ValueError(
+                "verify requires the capability to be included in capabilities"
+            )
+        if not selected[capability].get("enabled"):
+            raise ValueError("verify requires an enabled capability")
+    if not selected and not credential_updates:
+        raise ValueError("no image capability changes were supplied")
+    config_path = Path(_get_config_path())
+    invalidate_vision = "vision" in selected
+    invalidate_image = "image_generation" in selected
+    credential_invalidate_vision = False
+    credential_invalidate_image = False
+    committed_profile = _active_profile_name()
+    committed_probe_snapshots: dict[str, Any] = {}
+    with (
+        _image_capability_probe_lock(
+            config_path,
+            committed_profile,
+        ),
+        credential_transaction(config_path),
+    ):
+        with _cfg_lock:
+            credential_snapshot = load_credential_snapshot(config_path)
+            original_config = credential_snapshot.config
+            if (
+                _image_capability_revision(
+                    original_config,
+                    env_sha256=credential_snapshot.env_sha256,
+                )
+                != expected_revision
+            ):
+                from hermes_cli.config import ConfigurationConflictError
+
+                raise ConfigurationConflictError(("image_capabilities", "revision"))
+            desired_config = copy.deepcopy(original_config)
+            desired_config[_IMAGE_CAPABILITY_REVISION_NONCE_KEY] = uuid.uuid4().hex
+            env_updates: dict[str, str | None] = {}
+            for update in credential_updates:
+                credential_vision, credential_image = (
+                    _stage_image_capability_credential(
+                        desired_config,
+                        update,
+                        env_updates,
+                        selected,
+                    )
+                )
+                credential_invalidate_vision = (
+                    credential_invalidate_vision or credential_vision
+                )
+                credential_invalidate_image = (
+                    credential_invalidate_image or credential_image
+                )
+                invalidate_vision = invalidate_vision or credential_vision
+                invalidate_image = invalidate_image or credential_image
+            if "vision" in selected:
+                _stage_vision_capability(
+                    desired_config,
+                    selected["vision"],
+                    config_path=config_path,
+                )
+            if "image_generation" in selected:
+                _stage_image_generation_capability(
+                    desired_config,
+                    selected["image_generation"],
+                    config_path=config_path,
+                )
+            if credential_invalidate_vision and "vision" not in selected:
+                bump_capability_config_epochs(
+                    desired_config,
+                    CAPABILITY_CONFIG_EPOCH_VISION,
+                )
+            if credential_invalidate_image and "image_generation" not in selected:
+                bump_capability_config_epochs(
+                    desired_config,
+                    CAPABILITY_CONFIG_EPOCH_IMAGE_GENERATION,
+                )
+            _commit_expected_config_env(
+                config_path,
+                expected_config=original_config,
+                desired_config=desired_config,
+                env_updates=env_updates,
+            )
+            committed_snapshot = load_credential_snapshot(config_path)
+            committed_revision = _image_capability_revision(
+                committed_snapshot.config,
+                env_sha256=committed_snapshot.env_sha256,
+            )
+            if "vision" in verify_set:
+                committed_probe_snapshots["vision"] = (
+                    _capture_vision_config_snapshot_unlocked(
+                        config_path=config_path,
+                        config_data=committed_snapshot.config,
+                    )
+                )
+            if "image_generation" in verify_set:
+                committed_probe_snapshots["image_generation"] = (
+                    _capture_image_gen_config_snapshot_unlocked(
+                        config_path=config_path,
+                        config_data=committed_snapshot.config,
+                    )
+                )
+        vision_token = (
+            _capture_vision_verification_invalidation() if invalidate_vision else None
+        )
+        image_token = (
+            _capture_image_gen_verification_invalidation() if invalidate_image else None
+        )
+    warnings = list(
+        _invoke_durable_mutation_post_commit(
+            "configure_image_capabilities",
+            invalidate_vision=invalidate_vision,
+            invalidate_image=invalidate_image,
+            vision_invalidation_token=vision_token,
+            image_invalidation_token=image_token,
+        )
+    )
+    verification_results: dict[str, Any] = {}
+    verification_probes = {
+        "vision": test_vision_config,
+        "image_generation": test_image_gen_config,
+    }
+    for capability in ("vision", "image_generation"):
+        if capability not in verify_set:
+            continue
+        try:
+            verification_results[capability] = _run_committed_image_capability_probe(
+                config_path=config_path,
+                profile=committed_profile,
+                committed_revision=committed_revision,
+                capability=capability,
+                requested=selected[capability],
+                probe=verification_probes[capability],
+                snapshot=committed_probe_snapshots[capability],
+            )
+        except Exception:
+            diagnostic_id = uuid.uuid4().hex
+            logger.warning(
+                "Image capability verification failed after save "
+                "(capability=%s, diagnostic_id=%s)",
+                capability,
+                diagnostic_id,
+            )
+            verification_results[capability] = {
+                "ok": False,
+                "status": "failed",
+                "checked_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "provider": "",
+                "model": "",
+                "error_code": "verification_internal_error",
+                "message": "配置已保存，但验证暂时无法执行，请稍后重试。",
+                "diagnostic_id": diagnostic_id,
+            }
+            warnings.append(f"{capability}_verification_failed_after_save")
+    result = get_image_capabilities()
+    result["verification_results"] = verification_results
+    result["committed_revision"] = committed_revision
+    probe_was_superseded = any(
+        str(item.get("status") or "") == "superseded"
+        for item in verification_results.values()
+        if isinstance(item, dict)
+    )
+    result["request_status"] = (
+        "superseded"
+        if probe_was_superseded
+        or str(result.get("revision") or "") != committed_revision
+        else "applied"
+    )
+    return _merge_post_commit_warnings(result, warnings)
+
+
+def configure_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
+    """Save once per request id and reject stale browser drafts."""
+    expected_revision = str(body.get("expected_revision") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_revision):
+        raise ValueError("expected_revision must be a 64-character revision")
+    request_id = str(body.get("request_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", request_id):
+        raise ValueError("request_id must be an 8-128 character identifier")
+
+    digest = _image_capability_request_digest(body)
+    config_scope = str(
+        Path(_get_config_path()).expanduser().resolve(strict=False)
+    )
+    key = (config_scope, request_id)
+    owner = False
+    now = time.monotonic()
+    with _IMAGE_CAPABILITY_REQUEST_LOCK:
+        _prune_image_capability_requests(now)
+        entry = _IMAGE_CAPABILITY_REQUESTS.get(key)
+        if entry is None:
+            if (
+                len(_IMAGE_CAPABILITY_REQUESTS)
+                >= _IMAGE_CAPABILITY_REQUEST_CACHE_CAPACITY
+            ):
+                raise RuntimeError(
+                    "image capability request capacity is exhausted"
+                )
+            entry = _ImageCapabilityRequestEntry(
+                payload_digest=digest,
+                touched_at=now,
+            )
+            _IMAGE_CAPABILITY_REQUESTS[key] = entry
+            owner = True
+        elif entry.payload_digest != digest:
+            raise ValueError(
+                "request_id was already used for a different payload"
+            )
+        else:
+            entry.touched_at = now
+            _IMAGE_CAPABILITY_REQUESTS.move_to_end(key)
+
+    if not owner:
+        if not entry.event.wait(timeout=180):
+            raise RuntimeError(
+                "image capability request is still in progress"
+            )
+        with _IMAGE_CAPABILITY_REQUEST_LOCK:
+            entry.touched_at = time.monotonic()
+            if entry.error is not None:
+                raise _replayed_image_capability_error(entry.error)
+            if entry.result is None:
+                raise RuntimeError(
+                    "image capability request completed without a result"
+                )
+            return copy.deepcopy(entry.result)
+
+    try:
+        result = _configure_image_capabilities_once(body)
+    except BaseException as exc:
+        with _IMAGE_CAPABILITY_REQUEST_LOCK:
+            entry.error = _cacheable_image_capability_error(exc)
+            entry.touched_at = time.monotonic()
+            entry.event.set()
+        raise
+    with _IMAGE_CAPABILITY_REQUEST_LOCK:
+        entry.result = copy.deepcopy(result)
+        entry.touched_at = time.monotonic()
+        entry.event.set()
+    return result
+
+
 def get_model_config() -> dict[str, Any]:
     with credential_transaction(_get_config_path()):
         return _get_model_config_unlocked()
@@ -5253,6 +6724,9 @@ def _get_model_config_unlocked(
     )
     vision_config = _get_vision_config_unlocked(refresh_runtime=False)
     provider_credentials = get_provider_credentials_config().get("credentials", [])
+    vision = dict(vision_config.get("vision") or {})
+    vision_rows = list(vision_config.get("providers") or [])
+    image_rows = list(image_gen_config.get("providers") or [])
     return {
         "ok": True,
         "profile": _active_profile_name(),
@@ -5266,10 +6740,17 @@ def _get_model_config_unlocked(
         },
         "providers": get_providers().get("providers", []),
         "auxiliary": get_auxiliary_models(),
-        "vision": vision_config.get("vision", {}),
-        "vision_providers": vision_config.get("providers", []),
+        "vision": vision,
+        "vision_providers": vision_rows,
         "image_gen": image_gen_config.get("image_gen", {}),
-        "image_gen_providers": image_gen_config.get("providers", []),
+        "image_gen_providers": image_rows,
+        "image_capability_providers": _image_capability_provider_metadata(
+            vision_rows,
+            image_rows,
+        ),
+        "effective_route": {
+            "vision": _effective_vision_route(config_data, vision)
+        },
         "provider_credentials": provider_credentials,
         "custom": {"supported": True, "key_env": _CUSTOM_MODEL_KEY_ENV},
     }

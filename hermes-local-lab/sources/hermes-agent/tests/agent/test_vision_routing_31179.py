@@ -219,8 +219,12 @@ class TestVisionToolGating:
 
     def test_check_vision_succeeds_for_aliased_openai(self, isolated_home, monkeypatch):
         """The user's exact reported scenario: provider=openai unhides
-        vision_analyze instead of silently dropping it."""
+        vision_analyze for a main model explicitly declared text-only."""
         _write_config(isolated_home, """
+model:
+  provider: custom
+  default: local-text-model
+  supports_vision: false
 auxiliary:
   vision:
     provider: openai

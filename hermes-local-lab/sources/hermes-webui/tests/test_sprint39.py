@@ -8,11 +8,14 @@ Covers:
 - apply_onboarding_setup refuses to write config/env files when SKIP_ONBOARDING is set
 """
 import os
+import pathlib
+import tempfile
 import unittest
 import unittest.mock
 from unittest.mock import patch
 
 import api.onboarding as mod
+import yaml
 
 
 _READY_RUNTIME = {
@@ -129,58 +132,58 @@ class TestApplyOnboardingKeySync(unittest.TestCase):
 
     def test_api_key_set_in_os_environ_after_apply(self):
         """After apply_onboarding_setup with a key, os.environ must have the key."""
-        import pathlib
-
         os.environ.pop("OPENAI_API_KEY", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = pathlib.Path(tmp) / "config.yaml"
+            with patch("api.onboarding.reload_config"), \
+                 patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
+                 patch("api.onboarding._get_config_path", return_value=config_path), \
+                 patch("api.profiles._reload_dotenv"):
+                mod.apply_onboarding_setup({
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-test-key-123",
+                })
 
-        mock_cfg = {"model": {"provider": "openai", "default": "gpt-4o"}}
-
-        with patch("api.onboarding._load_yaml_config", return_value=mock_cfg), \
-             patch("api.onboarding._save_yaml_config"), \
-             patch("api.onboarding._write_env_file"), \
-             patch("api.onboarding.reload_config"), \
-             patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
-             patch("api.onboarding._get_config_path", return_value=pathlib.Path("/tmp/fake.yaml")), \
-             patch("api.onboarding._load_env_file", return_value={}), \
-             patch("api.onboarding._provider_api_key_present", return_value=False), \
-             patch("api.onboarding._get_active_hermes_home", return_value=pathlib.Path("/tmp")):
-
-            mod.apply_onboarding_setup({
-                "provider": "openai",
-                "model": "gpt-4o",
-                "api_key": "sk-test-key-123",
-            })
-
-        self.assertEqual(os.environ.get("OPENAI_API_KEY"), "sk-test-key-123",
-                         "OPENAI_API_KEY must be set directly on os.environ after apply")
-        os.environ.pop("OPENAI_API_KEY", None)
+            self.assertEqual(os.environ.get("OPENAI_API_KEY"), "sk-test-key-123",
+                             "OPENAI_API_KEY must be projected after the transaction")
+            self.assertIn(
+                "OPENAI_API_KEY=sk-test-key-123",
+                (pathlib.Path(tmp) / ".env").read_text(encoding="utf-8"),
+            )
+            saved_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_cfg["model"]["provider"], "openai")
+            os.environ.pop("OPENAI_API_KEY", None)
 
     def test_no_key_provided_does_not_set_environ(self):
         """If no api_key is given (key already present), os.environ is not clobbered."""
-        import pathlib
-
         os.environ["OPENAI_API_KEY"] = "sk-existing-key"
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = pathlib.Path(tmp) / "config.yaml"
+            config_path.write_text(
+                "model:\n  provider: openai\n  default: gpt-4o\n",
+                encoding="utf-8",
+            )
+            (pathlib.Path(tmp) / ".env").write_text(
+                "OPENAI_API_KEY=sk-existing-key\n",
+                encoding="utf-8",
+            )
+            with patch("api.onboarding.reload_config"), \
+                 patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
+                 patch("api.onboarding._get_config_path", return_value=config_path), \
+                 patch("api.profiles._reload_dotenv"):
+                mod.apply_onboarding_setup({
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "confirm_overwrite": True,
+                })
 
-        mock_cfg = {"model": {"provider": "openai", "default": "gpt-4o"}}
-
-        with patch("api.onboarding._load_yaml_config", return_value=mock_cfg), \
-             patch("api.onboarding._save_yaml_config"), \
-             patch("api.onboarding._write_env_file"), \
-             patch("api.onboarding.reload_config"), \
-             patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
-             patch("api.onboarding._get_config_path", return_value=pathlib.Path("/tmp/fake.yaml")), \
-             patch("api.onboarding._load_env_file", return_value={"OPENAI_API_KEY": "sk-existing-key"}), \
-             patch("api.onboarding._provider_api_key_present", return_value=True), \
-             patch("api.onboarding._get_active_hermes_home", return_value=pathlib.Path("/tmp")):
-
-            mod.apply_onboarding_setup({
-                "provider": "openai",
-                "model": "gpt-4o",
-            })
-
-        # Key must be unchanged
-        self.assertEqual(os.environ.get("OPENAI_API_KEY"), "sk-existing-key")
-        os.environ.pop("OPENAI_API_KEY", None)
+            self.assertEqual(os.environ.get("OPENAI_API_KEY"), "sk-existing-key")
+            self.assertEqual(
+                (pathlib.Path(tmp) / ".env").read_text(encoding="utf-8"),
+                "OPENAI_API_KEY=sk-existing-key\n",
+            )
+            os.environ.pop("OPENAI_API_KEY", None)
 
 
 class TestApplyOnboardingSkipGuard(unittest.TestCase):
@@ -188,47 +191,39 @@ class TestApplyOnboardingSkipGuard(unittest.TestCase):
 
     def test_apply_setup_blocked_when_skip_env_set(self):
         """SKIP_ONBOARDING=1 → apply_onboarding_setup never touches disk."""
-        save_yaml_mock = unittest.mock.MagicMock()
-        write_env_mock = unittest.mock.MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = pathlib.Path(tmp) / "config.yaml"
+            with patch.dict(os.environ, {"HERMES_WEBUI_SKIP_ONBOARDING": "1"}, clear=False), \
+                 patch("api.onboarding._get_config_path", return_value=config_path), \
+                 patch("api.onboarding.save_settings"), \
+                 patch("api.onboarding.get_onboarding_status", return_value={"completed": True}):
+                mod.apply_onboarding_setup({
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "should-not-be-saved",
+                })
 
-        with patch.dict(os.environ, {"HERMES_WEBUI_SKIP_ONBOARDING": "1"}, clear=False), \
-             patch("api.onboarding._save_yaml_config", save_yaml_mock), \
-             patch("api.onboarding._write_env_file", write_env_mock), \
-             patch("api.onboarding.save_settings"), \
-             patch("api.onboarding.get_onboarding_status", return_value={"completed": True}):
-            mod.apply_onboarding_setup({
-                "provider": "openai",
-                "model": "gpt-4o",
-                "api_key": "should-not-be-saved",
-            })
-
-        save_yaml_mock.assert_not_called()
-        write_env_mock.assert_not_called()
+            self.assertFalse(config_path.exists())
+            self.assertFalse((pathlib.Path(tmp) / ".env").exists())
 
     def test_apply_setup_proceeds_normally_without_skip_env(self):
         """Without SKIP_ONBOARDING, apply_onboarding_setup writes config as usual."""
-        import pathlib
-        save_yaml_mock = unittest.mock.MagicMock()
-
-        mock_cfg = {"model": {"provider": "openai", "default": "gpt-4o"}}
         env = {k: v for k, v in os.environ.items() if k != "HERMES_WEBUI_SKIP_ONBOARDING"}
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = pathlib.Path(tmp) / "config.yaml"
+            with patch.dict(os.environ, env, clear=True), \
+                 patch("api.onboarding.reload_config"), \
+                 patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
+                 patch("api.onboarding._get_config_path", return_value=config_path), \
+                 patch("api.profiles._reload_dotenv"):
+                mod.apply_onboarding_setup({
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-test-key-123",
+                })
 
-        with patch.dict(os.environ, env, clear=True), \
-             patch("api.onboarding._load_yaml_config", return_value=mock_cfg), \
-             patch("api.onboarding._save_yaml_config", save_yaml_mock), \
-             patch("api.onboarding._write_env_file"), \
-             patch("api.onboarding.reload_config"), \
-             patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
-             patch("api.onboarding._get_config_path", return_value=pathlib.Path("/tmp/fake.yaml")), \
-             patch("api.onboarding._load_env_file", return_value={"OPENAI_API_KEY": "existing"}), \
-             patch("api.onboarding._provider_api_key_present", return_value=True), \
-             patch("api.onboarding._get_active_hermes_home", return_value=pathlib.Path("/tmp")):
-            mod.apply_onboarding_setup({
-                "provider": "openai",
-                "model": "gpt-4o",
-            })
-
-        save_yaml_mock.assert_called_once()
+            self.assertTrue(config_path.exists())
+            self.assertTrue((pathlib.Path(tmp) / ".env").exists())
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ def test_workspace_panel_sync_updates_edge_toggle_state_and_accessibility():
     assert "edgeToggleBtn: $('btnWorkspacePanelEdgeToggle')" in BOOT_JS
     assert "edgeToggleBtn.classList.toggle('active',isOpen)" in BOOT_JS
     assert "edgeToggleBtn.setAttribute('aria-expanded',isOpen?'true':'false')" in BOOT_JS
-    assert "edgeToggleBtn.disabled=!canBrowse" in BOOT_JS
+    assert "edgeToggleBtn.disabled=!workspaceFilesVisible||!canBrowse" in BOOT_JS
 
 
 def test_changelog_mentions_workspace_panel_reopen_affordance():

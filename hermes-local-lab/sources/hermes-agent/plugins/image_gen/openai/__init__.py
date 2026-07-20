@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.image_gen_provider import (
@@ -273,13 +274,21 @@ class OpenAIImageGenProvider(ImageGenProvider):
             # it expires — same rationale as the xAI provider (#26942).
             try:
                 saved_path = save_url_image(url, prefix=f"openai_{tier_id}")
-            except Exception as exc:
+            except Exception:
+                diagnostic_id = uuid.uuid4().hex
                 logger.warning(
-                    "OpenAI image URL %s could not be cached (%s); falling back to bare URL.",
-                    url,
-                    exc,
+                    "OpenAI generated image cache failed "
+                    "diagnostic_id=%s error_code=image_result_io_failed",
+                    diagnostic_id,
                 )
-                image_ref = url
+                return error_response(
+                    error="Generated image could not be persisted.",
+                    error_type="image_result_io_failed",
+                    provider="openai",
+                    model=tier_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
             else:
                 image_ref = str(saved_path)
         else:

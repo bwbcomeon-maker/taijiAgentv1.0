@@ -37,6 +37,7 @@ const {
   redactDesktopUrl,
   supportBundleIsSafe,
   terminateManagedProcess,
+  validateDesktopAuthCookies,
   validateDesktopTarget,
 } = require("./run-installed-electron-acceptance.js");
 
@@ -254,10 +255,10 @@ test("probe code is challenge-bound and absent from the model prompt", () => {
   assert.equal(PROBE_PROMPT.includes("TAIJI-ATTACHMENT-PROBE-"), false);
 });
 
-test("validateDesktopTarget requires a real desktop marker, token and page websocket", () => {
+test("validateDesktopTarget requires a marker-only App URL and rejects query tokens", () => {
   const target = {
     type: "page",
-    url: "http://127.0.0.1:18787/?taiji_desktop=1&taiji_desktop_token=secret",
+    url: "http://127.0.0.1:18787/?taiji_desktop=1",
     webSocketDebuggerUrl: "ws://127.0.0.1:49123/devtools/page/abc",
   };
   assert.equal(validateDesktopTarget(target).origin, "http://127.0.0.1:18787");
@@ -266,10 +267,61 @@ test("validateDesktopTarget requires a real desktop marker, token and page webso
     /desktop marker/,
   );
   assert.throws(
-    () => validateDesktopTarget({ ...target, url: "http://127.0.0.1:18787/?taiji_desktop=1" }),
-    /desktop token/,
+    () => validateDesktopTarget({
+      ...target,
+      url: "http://127.0.0.1:18787/?taiji_desktop=1&taiji_desktop_token=" + "a".repeat(64),
+    }),
+    /must not expose the desktop token/,
+  );
+  assert.throws(
+    () => validateDesktopTarget({ ...target, url: `${target.url}&debug=1` }),
+    /unexpected query/,
   );
   assert.throws(() => validateDesktopTarget({ ...target, type: "other" }), /page target/);
+});
+
+test("validateDesktopAuthCookies requires one strict HttpOnly host cookie without exposing its value", () => {
+  const token = "a".repeat(64);
+  const cookies = [
+    {
+      name: "taiji_desktop_token",
+      value: token,
+      domain: "127.0.0.1",
+      path: "/",
+      httpOnly: true,
+      sameSite: "Strict",
+    },
+  ];
+  assert.deepEqual(
+    validateDesktopAuthCookies(cookies, "http://127.0.0.1:18787"),
+    {
+      name: "taiji_desktop_token",
+      present: true,
+      http_only: true,
+      same_site: "Strict",
+      path: "/",
+      value_format: "lowercase-hex-64",
+    },
+  );
+  for (const invalid of [
+    [{ ...cookies[0], httpOnly: false }],
+    [{ ...cookies[0], sameSite: "Lax" }],
+    [{ ...cookies[0], path: "/app" }],
+    [{ ...cookies[0], value: "A".repeat(64) }],
+    [{ ...cookies[0], value: "a".repeat(63) }],
+    [{ ...cookies[0], domain: "example.com" }],
+    [cookies[0], { ...cookies[0] }],
+  ]) {
+    let message = "";
+    assert.throws(
+      () => validateDesktopAuthCookies(invalid, "http://127.0.0.1:18787"),
+      (error) => {
+        message = String(error.message || error);
+        return true;
+      },
+    );
+    assert.equal(message.includes(token), false);
+  }
 });
 
 test("redactDesktopUrl never exposes the desktop token", () => {
@@ -428,8 +480,16 @@ test("buildDriverResult is fail-closed and emits no desktop token", () => {
     electronPid: 4242,
     electronExecutableSha256: "3".repeat(64),
     desktopEntrySha256: "4".repeat(64),
-    appUrl: "http://127.0.0.1:18787/?taiji_desktop=1&taiji_desktop_token=secret",
+    appUrl: "http://127.0.0.1:18787/?taiji_desktop=1",
     webuiOrigin: "http://127.0.0.1:18787",
+    desktopAuthCookie: {
+      name: "taiji_desktop_token",
+      present: true,
+      http_only: true,
+      same_site: "Strict",
+      path: "/",
+      value_format: "lowercase-hex-64",
+    },
     model: "openai/gpt-test",
     probeSha256: "5".repeat(64),
     agentPid: 4243,
@@ -448,10 +508,34 @@ test("buildDriverResult is fail-closed and emits no desktop token", () => {
   const result = buildDriverResult(measurements);
   assert.equal(result.schema, "taiji.desktop.acceptance-driver.v1");
   assert.equal(result.app_url.includes("secret"), false);
+  assert.deepEqual(result.desktop_auth_cookie, measurements.desktopAuthCookie);
+  assert.equal(JSON.stringify(result).includes("a".repeat(64)), false);
   assert.deepEqual(result.checks, measurements.checks);
   assert.throws(
     () => buildDriverResult({ ...measurements, checks: { ...measurements.checks, window_close_exit: false } }),
     /driver check failed: window_close_exit/,
+  );
+  assert.throws(
+    () => buildDriverResult({
+      ...measurements,
+      desktopAuthCookie: { ...measurements.desktopAuthCookie, http_only: false },
+    }),
+    /desktop auth cookie/,
+  );
+  assert.throws(
+    () => buildDriverResult({
+      ...measurements,
+      appUrl: `${measurements.appUrl}&taiji_desktop_token=${"a".repeat(64)}`,
+    }),
+    /must not expose the desktop token/,
+  );
+  assert.throws(
+    () => buildDriverResult({ ...measurements, appUrl: `${measurements.appUrl}&debug=1` }),
+    /unexpected query/,
+  );
+  assert.throws(
+    () => buildDriverResult({ ...measurements, webuiOrigin: "http://127.0.0.1:19999" }),
+    /same App/,
   );
   assert.throws(() => buildDriverResult({ ...measurements, jsErrors: ["boom"] }), /JavaScript errors/);
   assert.throws(() => buildDriverResult({ ...measurements, model: "" }), /model identity/);

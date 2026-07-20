@@ -81,6 +81,8 @@ def _install_fake_hermes_cli(monkeypatch, *, provider_id: str, live_ids, raise_o
 
 def _configure(monkeypatch, tmp_path, *, provider: str, default: str = ""):
     monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(
         config,

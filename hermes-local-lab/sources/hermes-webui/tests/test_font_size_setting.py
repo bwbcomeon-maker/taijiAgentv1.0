@@ -50,10 +50,13 @@ class TestFontSizeBootScript:
 
     def test_boot_script_reads_hermes_font_size(self):
         html = _read("static/index.html")
-        assert "hermes-font-size" in html, (
-            "index.html boot script must read 'hermes-font-size' from localStorage"
+        storage_loader = html.index('<script src="static/taiji-storage.js')
+        font_read = html.index("sg('font-size','')")
+        assert storage_loader < font_read, (
+            "Taiji storage compatibility must load before the pre-paint font read"
         )
-        assert "data-font-size" in html, (
+        font_boot = html[html.rfind("<script>", 0, font_read):html.index("</script>", font_read)]
+        assert "try{" in font_boot and "dataset.fontSize=fs" in font_boot, (
             "boot script must set document.documentElement.dataset.fontSize"
         )
 

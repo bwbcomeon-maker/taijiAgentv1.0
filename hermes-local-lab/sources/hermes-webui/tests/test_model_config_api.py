@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import base64
+import hashlib
 import inspect
 import multiprocessing
 import os
@@ -108,6 +109,42 @@ def _half_commit_process_writer(
             ),
             encoding="utf-8",
         )
+
+
+def _legacy_image_config_process_writer(
+    config_path: str,
+    model: str,
+    api_key: str,
+    start_event,
+    completed_event,
+    result_queue,
+) -> None:
+    """Emulate an older writer that does not know the WebUI probe lock."""
+    path = Path(config_path)
+    os.environ["HERMES_HOME"] = str(path.parent)
+    os.environ["HERMES_CONFIG_PATH"] = str(path)
+    from agent.provider_credentials import mutate_config_env_strict
+
+    if not start_event.wait(timeout=10):
+        result_queue.put(("error", "probe barrier timed out"))
+        completed_event.set()
+        return
+
+    try:
+        def mutate(config_data):
+            image_cfg = config_data.setdefault("image_gen", {})
+            image_cfg["model"] = model
+
+        mutate_config_env_strict(
+            mutate,
+            {"DASHSCOPE_API_KEY": api_key},
+            config_path=path,
+        )
+        result_queue.put(("ok", model))
+    except BaseException as exc:
+        result_queue.put(("error", type(exc).__name__))
+    finally:
+        completed_event.set()
 
 
 def _credential_config_process_reader(
@@ -7974,6 +8011,2095 @@ def test_probe_cache_accepts_runtime_home_parent_symlink(monkeypatch, tmp_path):
     assert owned is not None
     assert model_config._remove_probe_cleanup_candidate(candidate) is True
     assert not result_path.exists()
+
+
+def _image_capability_test_provider_rows(monkeypatch):
+    monkeypatch.setattr(
+        model_config,
+        "_vision_provider_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "alibaba",
+                "name": "阿里云百炼",
+                "provider_family": "alibaba_dashscope",
+                "models": [{"id": "qwen3-vl-plus", "label": "Qwen3 VL Plus"}],
+                "default_model": "qwen3-vl-plus",
+                "auth_type": "api_key",
+                "credential_fields": [],
+                "endpoint_fields": [],
+                "supports_named_credentials": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "dashscope",
+                "name": "通义 Qwen-Image",
+                "provider_family": "alibaba_dashscope",
+                "models": [
+                    {"id": "qwen-image-2.0-pro", "label": "Qwen Image 2.0 Pro"}
+                ],
+                "default_model": "qwen-image-2.0-pro",
+                "auth_type": "api_key",
+                "credential_fields": [],
+                "endpoint_fields": [],
+                "supports_named_credentials": True,
+                "domestic": True,
+                "integration_status": "stable",
+                "policy_blocked": False,
+            }
+        ],
+    )
+
+
+def _image_capability_configure_body(
+    tmp_path: Path,
+    payload: dict,
+    *,
+    request_id: str,
+) -> dict:
+    body = dict(payload)
+    env_path = tmp_path / ".env"
+    env_sha256 = hashlib.sha256(
+        env_path.read_bytes() if env_path.exists() else b""
+    ).hexdigest()
+    body["expected_revision"] = model_config._image_capability_revision(
+        _read_config(tmp_path),
+        env_sha256=env_sha256,
+    )
+    body["request_id"] = request_id
+    return body
+
+
+def _current_image_capability_revision(tmp_path: Path) -> str:
+    snapshot = credential_store.load_credential_snapshot(tmp_path / "config.yaml")
+    return model_config._image_capability_revision(
+        snapshot.config,
+        env_sha256=snapshot.env_sha256,
+    )
+
+
+def test_image_capabilities_snapshot_exposes_enabled_catalog_and_effective_route(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "openai",
+                    "default": "gpt-4.1",
+                    "supports_vision": True,
+                },
+                "auxiliary": {
+                    "vision": {
+                        "enabled": False,
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                        "api_key": "do-not-echo-secret",
+                    }
+                },
+                "image_gen": {
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = model_config.get_image_capabilities()
+
+    assert result["capabilities"]["vision"]["enabled"] is False
+    assert result["capabilities"]["vision"]["verification"]["status"] == "disabled"
+    assert result["capabilities"]["image_generation"]["enabled"] is True
+    assert result["effective_route"]["vision"] == {
+        "route": "main_model_vision",
+        "provider": "openai",
+        "model": "gpt-4.1",
+    }
+    assert result["effective_route"]["image_generation"]["route"] == "unavailable"
+    assert result["providers"] == [
+        {
+            "provider_family": "alibaba_dashscope",
+            "label": "阿里云百炼",
+            "capabilities": ["vision", "image_generation"],
+            "provider_ids": {
+                "vision": "alibaba",
+                "image_generation": "dashscope",
+            },
+            "auth_type": "api_key",
+            "auth_editable": True,
+            "auth_message": "填写平台签发的 API Key；密钥只保存在本机。",
+            "support_level": "native",
+            "supports_named_credentials": True,
+            "models": {
+                "vision": [
+                    {"id": "qwen3-vl-plus", "label": "Qwen3 VL Plus"}
+                ],
+                "image_generation": [
+                    {
+                        "id": "qwen-image-2.0-pro",
+                        "label": "Qwen Image 2.0 Pro",
+                    }
+                ],
+            },
+            "default_models": {
+                "vision": "qwen3-vl-plus",
+                "image_generation": "qwen-image-2.0-pro",
+            },
+            "credential_fields": {
+                "vision": [],
+                "image_generation": [],
+            },
+            "endpoint_fields": {
+                "vision": [],
+                "image_generation": [],
+            },
+            "selectable": True,
+        }
+    ]
+    assert len(result["revision"]) == 64
+    assert "do-not-echo-secret" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_image_capability_provider_metadata_projects_canonical_auth_contract():
+    providers = model_config._image_capability_provider_metadata(
+        [
+            {
+                "id": "credential-free-vision",
+                "name": "免认证识图",
+                "provider_family": "credential-free",
+                "models": [],
+                "auth_type": "no_auth",
+                "auth_editable": False,
+                "auth_message": "canonical no-auth guidance",
+            }
+        ],
+        [],
+    )
+
+    assert providers == [
+        {
+            "provider_family": "credential-free",
+            "label": "免认证识图",
+            "capabilities": ["vision"],
+            "provider_ids": {"vision": "credential-free-vision"},
+            "auth_type": "no_auth",
+            "auth_editable": False,
+            "auth_message": "canonical no-auth guidance",
+            "support_level": "native",
+            "supports_named_credentials": False,
+            "models": {"vision": []},
+            "default_models": {"vision": ""},
+            "credential_fields": {"vision": []},
+            "endpoint_fields": {"vision": []},
+            "selectable": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("config_data", "vision", "expected"),
+    (
+        (
+            {
+                "model": {
+                    "provider": "openai",
+                    "default": "gpt-4.1",
+                    "supports_vision": True,
+                }
+            },
+            {
+                "enabled": True,
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "verification": {"status": "verified"},
+            },
+            {
+                "route": "main_model_vision",
+                "provider": "openai",
+                "model": "gpt-4.1",
+            },
+        ),
+        (
+            {
+                "model": {
+                    "provider": "deepseek",
+                    "default": "deepseek-chat",
+                    "supports_vision": False,
+                }
+            },
+            {
+                "enabled": True,
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "verification": {"status": "verified"},
+            },
+            {
+                "route": "auxiliary_vision",
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+            },
+        ),
+    ),
+)
+def test_effective_vision_route_reports_actual_runtime_path(
+    config_data,
+    vision,
+    expected,
+):
+    assert model_config._effective_vision_route(config_data, vision) == expected
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_effective_vision_route_keeps_native_main_ahead_of_auxiliary(
+    enabled,
+):
+    vision = {
+        "enabled": enabled,
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+        "verification": {"status": "verified"},
+    }
+    config_data = {
+        "model": {
+            "provider": "openai",
+            "default": "gpt-4.1",
+            "supports_vision": True,
+        },
+        "auxiliary": {"vision": dict(vision)},
+    }
+
+    assert model_config._effective_vision_route(config_data, vision) == {
+        "route": "main_model_vision",
+        "provider": "openai",
+        "model": "gpt-4.1",
+    }
+
+
+def test_effective_image_generation_route_uses_same_public_snapshot():
+    assert model_config._effective_image_generation_route(
+        {
+            "enabled": True,
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "verification": {"status": "verified"},
+        }
+    ) == {
+        "route": "image_generation_provider",
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+    }
+
+
+def test_disabled_vision_probe_has_no_verification_or_provider_io(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "auxiliary": {
+                    "vision": {
+                        "enabled": False,
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_begin_vision_probe",
+        lambda *_args, **_kwargs: pytest.fail(
+            "disabled vision must not write verification state"
+        ),
+    )
+
+    result = model_config.test_vision_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "disabled"
+    assert result["error_code"] == "capability_disabled"
+    assert not list(tmp_path.glob("*vision*verification*"))
+
+
+def test_disabled_image_generation_probe_has_no_verification_or_provider_io(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "image_gen": {
+                    "enabled": False,
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_begin_image_gen_probe",
+        lambda *_args, **_kwargs: pytest.fail(
+            "disabled image generation must not write verification state"
+        ),
+    )
+
+    result = model_config.test_image_gen_config()
+
+    assert result["ok"] is False
+    assert result["status"] == "disabled"
+    assert result["error_code"] == "capability_disabled"
+    assert not list(tmp_path.glob("*image*verification*"))
+
+
+def test_configure_image_capabilities_requires_revision_and_request_id_before_write(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="expected_revision"):
+        model_config.configure_image_capabilities(
+            {
+                "capabilities": {
+                    "vision": {
+                        "enabled": False,
+                        "provider": "",
+                        "model": "",
+                    }
+                }
+            }
+        )
+
+    with pytest.raises(ValueError, match="request_id"):
+        model_config.configure_image_capabilities(
+            {
+                "expected_revision": model_config._image_capability_revision(
+                    {}
+                ),
+                "capabilities": {
+                    "vision": {
+                        "enabled": False,
+                        "provider": "",
+                        "model": "",
+                    }
+                },
+            }
+        )
+    assert _read_config(tmp_path) == {}
+
+
+def test_configure_image_capabilities_rejects_stale_client_before_probe(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli.config import ConfigurationConflictError
+
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    probe_calls = []
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        lambda **_kwargs: probe_calls.append("probe")
+        or {"ok": True, "status": "verified"},
+    )
+    initial_revision = model_config._image_capability_revision({})
+    payload = {
+        "expected_revision": initial_revision,
+        "capabilities": {
+            "image_generation": {
+                "enabled": True,
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "credential_ref": "",
+                "endpoint_values": {},
+            }
+        },
+        "credential_updates": [],
+        "verify": ["image_generation"],
+    }
+
+    first = model_config.configure_image_capabilities(
+        {**payload, "request_id": "stale-first"}
+    )
+    with pytest.raises(ConfigurationConflictError):
+        model_config.configure_image_capabilities(
+            {**payload, "request_id": "stale-second"}
+        )
+
+    assert first["revision"] != initial_revision
+    assert probe_calls == ["probe"]
+
+
+def test_configure_image_capabilities_reuses_idempotent_result_and_probe_once(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    probe_calls = []
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        lambda **_kwargs: probe_calls.append("probe")
+        or {"ok": True, "status": "verified"},
+    )
+    body = {
+        "expected_revision": model_config._image_capability_revision({}),
+        "request_id": "idempotent-image-save",
+        "capabilities": {
+            "image_generation": {
+                "enabled": True,
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "credential_ref": "",
+                "endpoint_values": {},
+            }
+        },
+        "credential_updates": [],
+        "verify": ["image_generation"],
+    }
+
+    first = model_config.configure_image_capabilities(body)
+    repeated = model_config.configure_image_capabilities(dict(body))
+
+    assert repeated == first
+    assert probe_calls == ["probe"]
+    with pytest.raises(ValueError, match="different payload"):
+        model_config.configure_image_capabilities(
+            {
+                **body,
+                "verify": [],
+            }
+        )
+    assert probe_calls == ["probe"]
+
+
+def test_configure_image_capabilities_same_request_waiters_share_one_probe(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    probe_calls = []
+    probe_calls_lock = threading.Lock()
+
+    def blocking_probe(**_kwargs):
+        with probe_calls_lock:
+            probe_calls.append("probe")
+        probe_started.set()
+        assert release_probe.wait(timeout=10)
+        return {
+            "ok": True,
+            "status": "verified",
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        }
+
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        blocking_probe,
+    )
+    body = _image_capability_configure_body(
+        tmp_path,
+        {
+            "capabilities": {
+                "image_generation": {
+                    "enabled": True,
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                    "credential_ref": "",
+                    "endpoint_values": {},
+                }
+            },
+            "credential_updates": [],
+            "verify": ["image_generation"],
+        },
+        request_id="same-request-concurrent",
+    )
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        owner = executor.submit(
+            model_config.configure_image_capabilities,
+            body,
+        )
+        assert probe_started.wait(timeout=5)
+        waiter = executor.submit(
+            model_config.configure_image_capabilities,
+            dict(body),
+        )
+        release_probe.set()
+        owner_result = owner.result(timeout=10)
+        waiter_result = waiter.result(timeout=10)
+    finally:
+        release_probe.set()
+        executor.shutdown(wait=True)
+
+    assert waiter_result == owner_result
+    assert probe_calls == ["probe"]
+
+
+def test_image_capability_request_cache_does_not_retain_exception_or_secret(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    secret_marker = "sk-cache-must-not-survive"
+    owner_started = threading.Event()
+    release_owner = threading.Event()
+
+    def fail_once(_body):
+        owner_started.set()
+        assert release_owner.wait(timeout=10)
+        raise ValueError(f"invalid credential {secret_marker}")
+
+    monkeypatch.setattr(
+        model_config,
+        "_configure_image_capabilities_once",
+        fail_once,
+    )
+    body = {
+        "expected_revision": model_config._image_capability_revision({}),
+        "request_id": "safe-exception-cache",
+    }
+    config_scope = str((tmp_path / "config.yaml").resolve(strict=False))
+    cache_key = (config_scope, body["request_id"])
+    with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+        saved_entries = list(model_config._IMAGE_CAPABILITY_REQUESTS.items())
+        model_config._IMAGE_CAPABILITY_REQUESTS.clear()
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        owner = executor.submit(
+            model_config.configure_image_capabilities,
+            body,
+        )
+        assert owner_started.wait(timeout=5)
+        waiter = executor.submit(
+            model_config.configure_image_capabilities,
+            dict(body),
+        )
+        time.sleep(0.05)
+        release_owner.set()
+        with pytest.raises(ValueError) as owner_error:
+            owner.result(timeout=10)
+        with pytest.raises(ValueError) as waiter_error:
+            waiter.result(timeout=10)
+
+        with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+            cached_error = model_config._IMAGE_CAPABILITY_REQUESTS[
+                cache_key
+            ].error
+
+        assert secret_marker in str(owner_error.value)
+        assert secret_marker not in str(waiter_error.value)
+        assert waiter_error.value is not owner_error.value
+        assert not isinstance(cached_error, BaseException)
+        assert secret_marker not in repr(cached_error)
+        assert not hasattr(cached_error, "__traceback__")
+    finally:
+        release_owner.set()
+        executor.shutdown(wait=True)
+        with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+            model_config._IMAGE_CAPABILITY_REQUESTS.clear()
+            model_config._IMAGE_CAPABILITY_REQUESTS.update(saved_entries)
+
+
+def test_image_capability_request_cache_replays_stable_credential_error_code(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+    def reject_collision(_body):
+        raise model_config.ImageCapabilityCredentialError(
+            "image_capability_credential_collision",
+            "凭据 ID 已存在且不属于当前图片能力草稿，请刷新后重试。",
+        )
+
+    monkeypatch.setattr(
+        model_config,
+        "_configure_image_capabilities_once",
+        reject_collision,
+    )
+    body = {
+        "expected_revision": model_config._image_capability_revision({}),
+        "request_id": "stable-credential-replay",
+    }
+    with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+        saved_entries = list(model_config._IMAGE_CAPABILITY_REQUESTS.items())
+        model_config._IMAGE_CAPABILITY_REQUESTS.clear()
+
+    try:
+        with pytest.raises(
+            model_config.ImageCapabilityCredentialError
+        ) as owner_error:
+            model_config.configure_image_capabilities(body)
+        with pytest.raises(
+            model_config.ImageCapabilityCredentialError
+        ) as replayed_error:
+            model_config.configure_image_capabilities(dict(body))
+
+        assert owner_error.value.code == (
+            "image_capability_credential_collision"
+        )
+        assert replayed_error.value.code == owner_error.value.code
+        assert replayed_error.value is not owner_error.value
+    finally:
+        with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+            model_config._IMAGE_CAPABILITY_REQUESTS.clear()
+            model_config._IMAGE_CAPABILITY_REQUESTS.update(saved_entries)
+
+
+def test_configure_image_capabilities_same_revision_concurrent_writers_probe_once(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli.config import ConfigurationConflictError
+
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    probe_calls = []
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        lambda **_kwargs: (
+            probe_calls.append("probe")
+            or {
+                "ok": True,
+                "status": "verified",
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+            }
+        ),
+    )
+    real_configure_once = model_config._configure_image_capabilities_once
+    both_owners_ready = threading.Barrier(2)
+
+    def configure_once_after_both_owners(body):
+        both_owners_ready.wait(timeout=10)
+        return real_configure_once(body)
+
+    monkeypatch.setattr(
+        model_config,
+        "_configure_image_capabilities_once",
+        configure_once_after_both_owners,
+    )
+    payload = {
+        "expected_revision": _current_image_capability_revision(tmp_path),
+        "capabilities": {
+            "image_generation": {
+                "enabled": True,
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "credential_ref": "",
+                "endpoint_values": {},
+            }
+        },
+        "credential_updates": [],
+        "verify": ["image_generation"],
+    }
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        futures = [
+            executor.submit(
+                model_config.configure_image_capabilities,
+                {
+                    **payload,
+                    "request_id": request_id,
+                },
+            )
+            for request_id in (
+                "same-revision-writer-a",
+                "same-revision-writer-b",
+            )
+        ]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result(timeout=10))
+            except BaseException as exc:
+                outcomes.append(exc)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert sum(isinstance(item, dict) for item in outcomes) == 1
+    assert sum(isinstance(item, ConfigurationConflictError) for item in outcomes) == 1
+    assert probe_calls == ["probe"]
+
+
+def test_configure_image_capabilities_fails_closed_when_all_cache_entries_inflight(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    config_scope = str((tmp_path / "config.yaml").resolve(strict=False))
+    with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+        saved_entries = list(model_config._IMAGE_CAPABILITY_REQUESTS.items())
+        model_config._IMAGE_CAPABILITY_REQUESTS.clear()
+        for index in range(2):
+            model_config._IMAGE_CAPABILITY_REQUESTS[
+                (config_scope, f"inflight-{index}")
+            ] = model_config._ImageCapabilityRequestEntry(
+                payload_digest=f"digest-{index}",
+            )
+    monkeypatch.setattr(
+        model_config,
+        "_IMAGE_CAPABILITY_REQUEST_CACHE_CAPACITY",
+        2,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_configure_image_capabilities_once",
+        lambda _body: pytest.fail(
+            "capacity exhaustion must reject before configuration work"
+        ),
+    )
+    body = {
+        "expected_revision": _current_image_capability_revision(tmp_path),
+        "request_id": "capacity-rejected-request",
+        "capabilities": {
+            "vision": {
+                "enabled": False,
+                "provider": "",
+                "model": "",
+            }
+        },
+        "credential_updates": [],
+        "verify": [],
+    }
+
+    try:
+        with pytest.raises(RuntimeError, match="capacity is exhausted"):
+            model_config.configure_image_capabilities(body)
+        with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+            assert list(model_config._IMAGE_CAPABILITY_REQUESTS) == [
+                (config_scope, "inflight-0"),
+                (config_scope, "inflight-1"),
+            ]
+            assert not any(
+                entry.event.is_set()
+                for entry in model_config._IMAGE_CAPABILITY_REQUESTS.values()
+            )
+    finally:
+        with model_config._IMAGE_CAPABILITY_REQUEST_LOCK:
+            model_config._IMAGE_CAPABILITY_REQUESTS.clear()
+            model_config._IMAGE_CAPABILITY_REQUESTS.update(saved_entries)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("main_model", "unused_secret"),
+)
+def test_image_capability_revision_changes_for_all_durable_configuration_state(
+    monkeypatch,
+    tmp_path,
+    mutation,
+):
+    from hermes_cli.config import ConfigurationConflictError
+
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    secret_env = "TAIJI_CREDENTIAL_UNUSED_API_KEY"
+    initial_config = {
+        "model": {
+            "provider": "deepseek",
+            "default": "deepseek-chat",
+        },
+        "provider_credentials": [
+            {
+                "id": "unused",
+                "provider_family": "zhipu",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+            }
+        ],
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(initial_config, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=secret-a\n",
+        encoding="utf-8",
+    )
+    old_revision = _current_image_capability_revision(tmp_path)
+
+    if mutation == "main_model":
+
+        def change_main(config_data):
+            config_data["model"]["default"] = "deepseek-reasoner"
+
+        credential_store.mutate_config_env_strict(
+            change_main,
+            {},
+            config_path=tmp_path / "config.yaml",
+        )
+    else:
+        credential_store.mutate_config_env_strict(
+            lambda _config_data: None,
+            {secret_env: "secret-b"},
+            config_path=tmp_path / "config.yaml",
+        )
+
+    assert _current_image_capability_revision(tmp_path) != old_revision
+    with pytest.raises(ConfigurationConflictError):
+        model_config.configure_image_capabilities(
+            {
+                "expected_revision": old_revision,
+                "request_id": f"stale-after-{mutation}",
+                "capabilities": {
+                    "vision": {
+                        "enabled": False,
+                        "provider": "",
+                        "model": "",
+                    }
+                },
+                "credential_updates": [],
+                "verify": [],
+            }
+        )
+
+
+def test_get_image_capabilities_builds_routes_from_one_credential_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    snapshot_config = {
+        "model": {
+            "provider": "deepseek",
+            "default": "deepseek-chat",
+            "supports_vision": False,
+        },
+        "auxiliary": {
+            "vision": {
+                "enabled": True,
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+            }
+        },
+        "image_gen": {
+            "enabled": True,
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+        },
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(snapshot_config, sort_keys=False),
+        encoding="utf-8",
+    )
+    captured_snapshot = SimpleNamespace(
+        config=snapshot_config,
+        env_sha256=hashlib.sha256(b"").hexdigest(),
+    )
+    monkeypatch.setattr(
+        model_config,
+        "load_credential_snapshot",
+        lambda _path: captured_snapshot,
+    )
+    seen_config_objects = []
+
+    def vision_payload(*, refresh_runtime, config_data):
+        assert refresh_runtime is False
+        seen_config_objects.append(config_data)
+        return {
+            "vision": {
+                **snapshot_config["auxiliary"]["vision"],
+                "verification": {"status": "verified"},
+            },
+            "providers": [],
+        }
+
+    def image_payload(*, refresh_runtime, config_data):
+        assert refresh_runtime is False
+        seen_config_objects.append(config_data)
+        return {
+            "image_gen": {
+                **snapshot_config["image_gen"],
+                "verification": {"status": "verified"},
+            },
+            "providers": [],
+        }
+
+    monkeypatch.setattr(
+        model_config,
+        "_get_vision_config_unlocked",
+        vision_payload,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_get_image_gen_config_unlocked",
+        image_payload,
+    )
+
+    result = model_config.get_image_capabilities()
+
+    assert seen_config_objects == [snapshot_config, snapshot_config]
+    assert result["effective_route"]["vision"] == {
+        "route": "auxiliary_vision",
+        "provider": "alibaba",
+        "model": "qwen3-vl-plus",
+    }
+    assert result["effective_route"]["image_generation"] == {
+        "route": "image_generation_provider",
+        "provider": "dashscope",
+        "model": "qwen-image-2.0-pro",
+    }
+
+
+def test_newer_config_commit_supersedes_old_probe_before_provider_io(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    image_rows = model_config._image_gen_provider_rows("dashscope")
+    image_rows[0]["models"].append({"id": "qwen-image", "label": "Qwen Image"})
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: image_rows,
+    )
+    old_commit_waiting = threading.Event()
+    release_old_after_new = threading.Event()
+    hook_calls = {"value": 0}
+    hook_lock = threading.Lock()
+
+    def pause_first_after_commit(*_args, **_kwargs):
+        with hook_lock:
+            hook_calls["value"] += 1
+            call_number = hook_calls["value"]
+        if call_number == 1:
+            old_commit_waiting.set()
+            assert release_old_after_new.wait(timeout=10)
+        return []
+
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        pause_first_after_commit,
+    )
+    provider_calls = []
+
+    def provider_probe(*, snapshot):
+        provider_calls.append(snapshot.model)
+        return {
+            "ok": True,
+            "status": "verified",
+            "provider": snapshot.provider,
+            "model": snapshot.model,
+        }
+
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        provider_probe,
+    )
+    base_payload = {
+        "capabilities": {
+            "image_generation": {
+                "enabled": True,
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "credential_ref": "",
+                "endpoint_values": {},
+            }
+        },
+        "credential_updates": [],
+        "verify": ["image_generation"],
+    }
+    old_body = _image_capability_configure_body(
+        tmp_path,
+        base_payload,
+        request_id="superseded-probe-old",
+    )
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        old_future = executor.submit(
+            model_config.configure_image_capabilities,
+            old_body,
+        )
+        assert old_commit_waiting.wait(timeout=5)
+        new_body = _image_capability_configure_body(
+            tmp_path,
+            {
+                **base_payload,
+                "capabilities": {
+                    "image_generation": {
+                        **base_payload["capabilities"]["image_generation"],
+                        "model": "qwen-image",
+                    }
+                },
+            },
+            request_id="superseded-probe-new",
+        )
+        new_result = model_config.configure_image_capabilities(new_body)
+        release_old_after_new.set()
+        old_result = old_future.result(timeout=10)
+    finally:
+        release_old_after_new.set()
+        executor.shutdown(wait=True)
+
+    assert provider_calls == ["qwen-image"]
+    assert new_result["request_status"] == "applied"
+    assert new_result["verification_results"]["image_generation"] == {
+        "ok": True,
+        "status": "verified",
+        "provider": "dashscope",
+        "model": "qwen-image",
+    }
+    assert old_result["request_status"] == "superseded"
+    assert (
+        old_result["verification_results"]["image_generation"]["status"] == "superseded"
+    )
+    assert (
+        old_result["verification_results"]["image_generation"]["error_code"]
+        == "image_gen_probe_superseded"
+    )
+    assert (
+        old_result["verification_results"]["image_generation"]["model"]
+        == "qwen-image-2.0-pro"
+    )
+    assert old_result["committed_revision"] != old_result["revision"]
+
+
+def test_committed_probe_never_retargets_after_legacy_cross_process_write(
+    monkeypatch,
+    tmp_path,
+):
+    """R1 must retain its commit-time target after the revision lock is released."""
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "DASHSCOPE_API_KEY=r1-private-key\n",
+        encoding="utf-8",
+    )
+    image_rows = model_config._image_gen_provider_rows("dashscope")
+    image_rows[0]["models"].append(
+        {"id": "qwen-image", "label": "Qwen Image"}
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: image_rows,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+
+    context = multiprocessing.get_context("spawn")
+    probe_entered = context.Event()
+    writer_completed = context.Event()
+    writer_result = context.Queue()
+    writer = context.Process(
+        target=_legacy_image_config_process_writer,
+        args=(
+            str(tmp_path / "config.yaml"),
+            "qwen-image",
+            "r2-private-key",
+            probe_entered,
+            writer_completed,
+            writer_result,
+        ),
+    )
+    observed = {}
+    real_test_image_gen_config = model_config.test_image_gen_config
+
+    def probe_after_exact_revision_barrier(*, snapshot=None):
+        probe_entered.set()
+        assert writer_completed.wait(timeout=10)
+        if snapshot is None:
+            return real_test_image_gen_config()
+        return real_test_image_gen_config(snapshot=snapshot)
+
+    def capture_provider_boundary(
+        snapshot,
+        *,
+        diagnostic_id,
+        reauth_guard,
+        probe_binding=None,
+    ):
+        observed.update(
+            snapshot_model=snapshot.model,
+            snapshot_fingerprint=snapshot.fingerprint,
+            runtime_binding=probe_binding,
+            runtime_binding_model=(
+                probe_binding.model if probe_binding is not None else ""
+            ),
+            runtime_binding_api_key=(
+                probe_binding.api_key if probe_binding is not None else ""
+            ),
+            authorization_fingerprint=(
+                probe_binding.authorization_fingerprint
+                if probe_binding is not None
+                else ""
+            ),
+            authorization_generation=(
+                probe_binding.authorization_generation
+                if probe_binding is not None
+                else ""
+            ),
+        )
+        return True, "", "真实生图验证通过。"
+
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        probe_after_exact_revision_barrier,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_execute_image_gen_probe",
+        capture_provider_boundary,
+    )
+    body = _image_capability_configure_body(
+        tmp_path,
+        {
+            "capabilities": {
+                "image_generation": {
+                    "enabled": True,
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                    "credential_ref": "",
+                    "endpoint_values": {},
+                }
+            },
+            "credential_updates": [],
+            "verify": ["image_generation"],
+        },
+        request_id="immutable-r1-probe-target",
+    )
+
+    writer.start()
+    try:
+        result = model_config.configure_image_capabilities(body)
+        assert writer_result.get(timeout=10) == ("ok", "qwen-image")
+    finally:
+        probe_entered.set()
+        writer_completed.set()
+        writer.join(timeout=10)
+        if writer.is_alive():
+            writer.terminate()
+            writer.join(timeout=5)
+
+    assert writer.exitcode == 0
+    assert _read_config(tmp_path)["image_gen"]["model"] == "qwen-image"
+    assert "DASHSCOPE_API_KEY=r2-private-key" in (
+        tmp_path / ".env"
+    ).read_text(encoding="utf-8")
+    assert observed["snapshot_model"] == "qwen-image-2.0-pro"
+    assert observed["runtime_binding_model"] == "qwen-image-2.0-pro"
+    assert observed["runtime_binding_api_key"] == "r1-private-key"
+    assert observed["authorization_fingerprint"] == (
+        observed["snapshot_fingerprint"]
+    )
+    assert observed["authorization_generation"]
+    assert result["request_status"] == "superseded"
+    assert (
+        result["verification_results"]["image_generation"]["model"]
+        == "qwen-image-2.0-pro"
+    )
+
+
+def test_profile_probe_blocks_same_profile_commit_without_blocking_other_profile_read(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    image_rows = model_config._image_gen_provider_rows("dashscope")
+    image_rows[0]["models"].append({"id": "qwen-image", "label": "Qwen Image"})
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: image_rows,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    first_probe_started = threading.Event()
+    release_first_probe = threading.Event()
+    provider_calls = []
+    provider_calls_lock = threading.Lock()
+
+    def blocking_first_provider_probe(*, snapshot):
+        with provider_calls_lock:
+            provider_calls.append(snapshot.model)
+            call_number = len(provider_calls)
+        if call_number == 1:
+            first_probe_started.set()
+            assert release_first_probe.wait(timeout=10)
+        return {
+            "ok": True,
+            "status": "verified",
+            "provider": snapshot.provider,
+            "model": snapshot.model,
+        }
+
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        blocking_first_provider_probe,
+    )
+    real_commit = model_config._commit_expected_config_env
+    second_commit_entered = threading.Event()
+    commit_calls = {"value": 0}
+    commit_calls_lock = threading.Lock()
+
+    def record_commit(*args, **kwargs):
+        with commit_calls_lock:
+            commit_calls["value"] += 1
+            call_number = commit_calls["value"]
+        if call_number == 2:
+            second_commit_entered.set()
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(
+        model_config,
+        "_commit_expected_config_env",
+        record_commit,
+    )
+    first_payload = {
+        "capabilities": {
+            "image_generation": {
+                "enabled": True,
+                "provider": "dashscope",
+                "model": "qwen-image-2.0-pro",
+                "credential_ref": "",
+                "endpoint_values": {},
+            }
+        },
+        "credential_updates": [],
+        "verify": ["image_generation"],
+    }
+    first_body = _image_capability_configure_body(
+        tmp_path,
+        first_payload,
+        request_id="profile-lock-first",
+    )
+    config_path = tmp_path / "config.yaml"
+
+    def read_from_other_profile():
+        with model_config._image_capability_probe_lock(
+            config_path,
+            "other-profile",
+        ):
+            return credential_store.load_credential_snapshot(config_path)
+
+    executor = ThreadPoolExecutor(max_workers=3)
+    try:
+        first_future = executor.submit(
+            model_config.configure_image_capabilities,
+            first_body,
+        )
+        assert first_probe_started.wait(timeout=5)
+        other_profile_snapshot = executor.submit(read_from_other_profile).result(
+            timeout=2
+        )
+        second_body = _image_capability_configure_body(
+            tmp_path,
+            {
+                **first_payload,
+                "capabilities": {
+                    "image_generation": {
+                        **first_payload["capabilities"]["image_generation"],
+                        "model": "qwen-image",
+                    }
+                },
+            },
+            request_id="profile-lock-second",
+        )
+        second_future = executor.submit(
+            model_config.configure_image_capabilities,
+            second_body,
+        )
+        same_profile_commit_waited = not second_commit_entered.wait(timeout=0.3)
+        config_while_waiting = _read_config(tmp_path)
+        release_first_probe.set()
+        first_result = first_future.result(timeout=10)
+        second_result = second_future.result(timeout=10)
+    finally:
+        release_first_probe.set()
+        executor.shutdown(wait=True)
+
+    assert other_profile_snapshot.config["image_gen"]["model"] == ("qwen-image-2.0-pro")
+    assert same_profile_commit_waited is True
+    assert config_while_waiting["image_gen"]["model"] == ("qwen-image-2.0-pro")
+    assert (
+        first_result["verification_results"]["image_generation"]["status"] == "verified"
+    )
+    assert (
+        first_result["verification_results"]["image_generation"]["model"]
+        == "qwen-image-2.0-pro"
+    )
+    assert second_result["request_status"] == "applied"
+    assert provider_calls == [
+        "qwen-image-2.0-pro",
+        "qwen-image",
+    ]
+
+
+def test_configure_image_capabilities_commits_config_and_secret_once_then_verifies(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    commit_calls = []
+    real_commit = model_config._commit_expected_config_env
+
+    def record_commit(*args, **kwargs):
+        commit_calls.append((args, kwargs))
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(model_config, "_commit_expected_config_env", record_commit)
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "test_vision_config",
+        lambda **_kwargs: {"ok": True, "status": "verified"},
+    )
+    monkeypatch.setattr(
+        model_config,
+        "test_image_gen_config",
+        lambda **_kwargs: {"ok": True, "status": "verified"},
+    )
+
+    result = model_config.configure_image_capabilities(
+        _image_capability_configure_body(
+            tmp_path,
+            {
+            "credential_updates": [
+                {
+                    "id": "image-center-vision",
+                    "provider_family": "alibaba",
+                    "label": "图片能力识图凭据",
+                    "api_key": "vision-secret-value",
+                    "operation": "create",
+                    "managed_by": "image-capability-center",
+                    "source_capability": "vision",
+                    "source_provider_id": "alibaba",
+                },
+                {
+                    "id": "image-center-generation",
+                    "provider_family": "alibaba",
+                    "label": "图片能力生图凭据",
+                    "api_key": "image-secret-value",
+                    "operation": "create",
+                    "managed_by": "image-capability-center",
+                    "source_capability": "image_generation",
+                    "source_provider_id": "dashscope",
+                },
+            ],
+            "capabilities": {
+                "vision": {
+                    "enabled": True,
+                    "provider": "alibaba",
+                    "model": "qwen3-vl-plus",
+                    "credential_ref": "image-center-vision",
+                    "endpoint_values": {},
+                },
+                "image_generation": {
+                    "enabled": True,
+                    "provider": "dashscope",
+                    "model": "qwen-image-2.0-pro",
+                    "credential_ref": "image-center-generation",
+                    "endpoint_values": {},
+                },
+            },
+            "verify": ["vision", "image_generation"],
+            },
+            request_id="commit-secret-once",
+        )
+    )
+
+    assert len(commit_calls) == 1
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["enabled"] is True
+    assert saved["auxiliary"]["vision"]["credential_ref"] == "image-center-vision"
+    assert saved["image_gen"]["enabled"] is True
+    assert (
+        saved["image_gen"]["credential_ref"]
+        == "image-center-generation"
+    )
+    credential_rows = {
+        row["id"]: row for row in saved["provider_credentials"]
+    }
+    assert credential_rows["image-center-vision"]["managed_by"] == (
+        "image-capability-center"
+    )
+    assert credential_rows["image-center-vision"]["source_capability"] == (
+        "vision"
+    )
+    assert credential_rows["image-center-generation"]["source_capability"] == (
+        "image_generation"
+    )
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "vision-secret-value" in env_text
+    assert "image-secret-value" in env_text
+    assert not list(tmp_path.glob("*.bak"))
+    assert result["verification_results"] == {
+        "vision": {"ok": True, "status": "verified"},
+        "image_generation": {"ok": True, "status": "verified"},
+    }
+    assert "vision-secret-value" not in json.dumps(result, ensure_ascii=False)
+    assert "image-secret-value" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_image_capability_center_rejects_non_owned_credential_id_collision(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    original = {
+        "provider_credentials": [
+            {
+                "id": "ui-alibaba-dashscope-vision-collision",
+                "provider_family": "alibaba_dashscope",
+                "label": "平台共享凭据",
+                "auth_type": "api_key",
+                "secret_env": (
+                    "TAIJI_CREDENTIAL_UI_ALIBABA_DASHSCOPE_VISION_COLLISION_API_KEY"
+                ),
+            }
+        ]
+    }
+    original_env = (
+        "TAIJI_CREDENTIAL_UI_ALIBABA_DASHSCOPE_VISION_COLLISION_API_KEY="
+        "keep-existing\n"
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(original_env, encoding="utf-8")
+
+    with pytest.raises(ValueError) as raised:
+        model_config.configure_image_capabilities(
+            _image_capability_configure_body(
+                tmp_path,
+                {
+                    "credential_updates": [
+                        {
+                            "id": "ui-alibaba-dashscope-vision-collision",
+                            "provider_family": "alibaba_dashscope",
+                            "api_key": "must-not-overwrite",
+                            "operation": "create",
+                            "managed_by": "image-capability-center",
+                            "source_capability": "vision",
+                            "source_provider_id": "alibaba",
+                        }
+                    ],
+                    "capabilities": {
+                        "vision": {
+                            "enabled": True,
+                            "provider": "alibaba",
+                            "model": "qwen3-vl-plus",
+                            "credential_ref": (
+                                "ui-alibaba-dashscope-vision-collision"
+                            ),
+                            "endpoint_values": {},
+                        }
+                    },
+                    "verify": [],
+                },
+                request_id="credential-id-collision",
+            )
+        )
+
+    assert getattr(raised.value, "code", "") == (
+        "image_capability_credential_collision"
+    )
+    assert _read_config(tmp_path) == original
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == original_env
+
+
+def test_image_capability_center_rejects_shared_owned_credential_retry(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    credential_id = "image-center-shared"
+    secret_env = "TAIJI_CREDENTIAL_IMAGE_CENTER_SHARED_API_KEY"
+    original = {
+        "provider_credentials": [
+            {
+                "id": credential_id,
+                "provider_family": "alibaba_dashscope",
+                "label": "中心旧凭据",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+                "managed_by": "image-capability-center",
+                "source_capability": "vision",
+                "source_provider_id": "alibaba",
+            }
+        ],
+        "auxiliary": {
+            "vision": {
+                "enabled": True,
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "credential_ref": credential_id,
+            }
+        },
+        "image_gen": {
+            "enabled": True,
+            "provider": "dashscope",
+            "model": "qwen-image-2.0-pro",
+            "credential_ref": credential_id,
+        },
+    }
+    original_env = f"{secret_env}=keep-existing\n"
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(original_env, encoding="utf-8")
+
+    with pytest.raises(ValueError) as raised:
+        model_config.configure_image_capabilities(
+            _image_capability_configure_body(
+                tmp_path,
+                {
+                    "credential_updates": [
+                        {
+                            "id": credential_id,
+                            "provider_family": "alibaba_dashscope",
+                            "api_key": "must-not-overwrite",
+                            "operation": "create",
+                            "managed_by": "image-capability-center",
+                            "source_capability": "vision",
+                            "source_provider_id": "alibaba",
+                        }
+                    ],
+                    "capabilities": {
+                        "vision": {
+                            "enabled": True,
+                            "provider": "alibaba",
+                            "model": "qwen3-vl-plus",
+                            "credential_ref": credential_id,
+                            "endpoint_values": {},
+                        }
+                    },
+                    "verify": [],
+                },
+                request_id="shared-credential-retry",
+            )
+        )
+
+    assert getattr(raised.value, "code", "") == (
+        "image_capability_credential_shared"
+    )
+    assert _read_config(tmp_path) == original
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == original_env
+
+
+def test_image_capability_center_allows_owned_unshared_idempotent_retry(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    credential_id = "image-center-vision-retry"
+    secret_env = "TAIJI_CREDENTIAL_IMAGE_CENTER_VISION_RETRY_API_KEY"
+    original = {
+        "provider_credentials": [
+            {
+                "id": credential_id,
+                "provider_family": "alibaba_dashscope",
+                "label": "中心识图凭据",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+                "managed_by": "image-capability-center",
+                "source_capability": "vision",
+                "source_provider_id": "alibaba",
+            }
+        ],
+        "auxiliary": {
+            "vision": {
+                "enabled": True,
+                "provider": "alibaba",
+                "model": "qwen3-vl-plus",
+                "credential_ref": credential_id,
+            }
+        },
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=old-secret\n",
+        encoding="utf-8",
+    )
+
+    result = model_config.configure_image_capabilities(
+        _image_capability_configure_body(
+            tmp_path,
+            {
+                "credential_updates": [
+                    {
+                        "id": credential_id,
+                        "provider_family": "alibaba_dashscope",
+                        "label": "中心识图凭据",
+                        "api_key": "retried-secret",
+                        "operation": "create",
+                        "managed_by": "image-capability-center",
+                        "source_capability": "vision",
+                        "source_provider_id": "alibaba",
+                    }
+                ],
+                "capabilities": {
+                    "vision": {
+                        "enabled": True,
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                        "credential_ref": credential_id,
+                        "endpoint_values": {},
+                    }
+                },
+                "verify": [],
+            },
+            request_id="owned-credential-retry",
+        )
+    )
+
+    saved_row = _read_config(tmp_path)["provider_credentials"][0]
+    assert saved_row["managed_by"] == "image-capability-center"
+    assert saved_row["source_capability"] == "vision"
+    assert saved_row["source_provider_id"] == "alibaba"
+    assert "retried-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert result["request_status"] == "applied"
+
+
+def test_configure_image_capabilities_keeps_save_success_when_probe_crashes(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "test_vision_config",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            PermissionError("/private/runtime/secret-state.json")
+        ),
+    )
+
+    result = model_config.configure_image_capabilities(
+        _image_capability_configure_body(
+            tmp_path,
+            {
+            "credential_updates": [
+                {
+                    "id": "alibaba-shared",
+                    "provider_family": "alibaba",
+                    "api_key": "probe-crash-secret",
+                    "operation": "create",
+                    "managed_by": "image-capability-center",
+                    "source_capability": "vision",
+                    "source_provider_id": "alibaba",
+                }
+            ],
+            "capabilities": {
+                "vision": {
+                    "enabled": True,
+                    "provider": "alibaba",
+                    "model": "qwen3-vl-plus",
+                    "credential_ref": "alibaba-shared",
+                    "endpoint_values": {},
+                }
+            },
+            "verify": ["vision"],
+            },
+            request_id="probe-crash-save",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["verification_results"]["vision"]["ok"] is False
+    assert (
+        result["verification_results"]["vision"]["error_code"]
+        == "verification_internal_error"
+    )
+    assert "vision_verification_failed_after_save" in result["warnings"]
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "/private/runtime" not in serialized
+    assert "probe-crash-secret" not in serialized
+    assert _read_config(tmp_path)["auxiliary"]["vision"]["enabled"] is True
+    assert "probe-crash-secret" in (tmp_path / ".env").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_configure_image_capabilities_rejects_unknown_capability_before_write(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    original = {"unrelated": {"keep": True}}
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown capability"):
+        model_config.configure_image_capabilities(
+            _image_capability_configure_body(
+                tmp_path,
+                {
+                "credential_updates": [
+                    {
+                        "id": "alibaba-shared",
+                        "provider_family": "alibaba",
+                        "api_key": "must-not-be-written",
+                    }
+                ],
+                "capabilities": {
+                    "image_gen_typo": {
+                        "enabled": True,
+                        "provider": "dashscope",
+                        "model": "qwen-image-2.0-pro",
+                    }
+                },
+                "verify": [],
+                },
+                request_id="unknown-capability",
+            )
+        )
+
+    assert _read_config(tmp_path) == original
+    assert not (tmp_path / ".env").exists()
+
+
+def test_configure_image_capabilities_rejects_credential_only_verify(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="verify requires the capability to be included",
+    ):
+        model_config.configure_image_capabilities(
+            _image_capability_configure_body(
+                tmp_path,
+                {
+                "credential_updates": [
+                    {
+                        "id": "alibaba-shared",
+                        "provider_family": "alibaba",
+                        "api_key": "must-not-be-written",
+                    }
+                ],
+                "capabilities": {},
+                "verify": ["vision"],
+                },
+                request_id="credential-only-verify",
+            )
+        )
+
+    assert _read_config(tmp_path) == {}
+    assert not (tmp_path / ".env").exists()
+
+
+def test_configure_image_capabilities_cas_failure_leaves_both_files_untouched(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    _image_capability_test_provider_rows(monkeypatch)
+    original_config = {"unrelated": {"keep": True}}
+    original_env = "EXISTING_SECRET=keep-me\n"
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original_config),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(original_env, encoding="utf-8")
+    monkeypatch.setattr(
+        model_config,
+        "_commit_expected_config_env",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("credential config changed before the paired update")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="credential config changed"):
+        model_config.configure_image_capabilities(
+            _image_capability_configure_body(
+                tmp_path,
+                {
+                "credential_updates": [
+                    {
+                        "id": "alibaba-shared",
+                        "provider_family": "alibaba",
+                        "api_key": "must-not-survive",
+                        "operation": "create",
+                        "managed_by": "image-capability-center",
+                        "source_capability": "vision",
+                        "source_provider_id": "alibaba",
+                    }
+                ],
+                "capabilities": {
+                    "vision": {
+                        "enabled": True,
+                        "provider": "alibaba",
+                        "model": "qwen3-vl-plus",
+                        "credential_ref": "alibaba-shared",
+                        "endpoint_values": {},
+                    },
+                },
+                "verify": [],
+                },
+                request_id="paired-cas-failure",
+            )
+        )
+
+    assert _read_config(tmp_path) == original_config
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == original_env
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_configure_image_capabilities_can_disable_stale_providers_without_revalidation(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    monkeypatch.setattr(
+        model_config,
+        "_vision_provider_rows",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+    original = {
+        "auxiliary": {
+            "vision": {
+                "provider": "removed-vision-provider",
+                "model": "legacy-vision-model",
+            }
+        },
+        "image_gen": {
+            "provider": "fal",
+            "model": "legacy-image-model",
+        },
+    }
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(original),
+        encoding="utf-8",
+    )
+
+    model_config.configure_image_capabilities(
+        _image_capability_configure_body(
+            tmp_path,
+            {
+            "capabilities": {
+                "vision": {
+                    "enabled": False,
+                    "provider": "removed-vision-provider",
+                    "model": "legacy-vision-model",
+                },
+                "image_generation": {
+                    "enabled": False,
+                    "provider": "fal",
+                    "model": "legacy-image-model",
+                },
+            },
+            "credential_updates": [],
+            "verify": [],
+            },
+            request_id="disable-stale-providers",
+        )
+    )
+
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"] == {
+        **original["auxiliary"]["vision"],
+        "enabled": False,
+    }
+    assert saved["image_gen"] == {
+        **original["image_gen"],
+        "enabled": False,
+    }
+
+
+def test_configure_image_capabilities_rejects_non_boolean_enabled():
+    with pytest.raises(ValueError, match="vision.enabled must be a boolean"):
+        model_config.configure_image_capabilities(
+            {
+                "expected_revision": model_config._image_capability_revision(
+                    {}
+                ),
+                "request_id": "non-boolean-enabled",
+                "capabilities": {
+                    "vision": {
+                        "enabled": "false",
+                        "provider": "",
+                        "model": "",
+                    }
+                }
+            }
+        )
+
+
+def test_image_capabilities_routes_are_registered():
+    source = Path(routes.__file__).read_text(encoding="utf-8")
+    assert 'parsed.path == "/api/image-capabilities"' in source
+    assert 'parsed.path == "/api/image-capabilities/configure"' in source
+
+
+def test_image_capabilities_configure_route_redacts_oserror(monkeypatch):
+    responses = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {})
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200: responses.append(
+            (payload, status)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "configure_image_capabilities",
+        lambda _body: (_ for _ in ()).throw(
+            OSError("/private/runtime/secret-config.yaml")
+        ),
+    )
+
+    assert routes.handle_post(
+        object(),
+        SimpleNamespace(path="/api/image-capabilities/configure"),
+    ) is True
+    payload, status = responses[0]
+    assert status == 500
+    assert payload["error_code"] == "configuration_io_error"
+    assert len(payload["diagnostic_id"]) == 32
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "/private/runtime" not in serialized
+    assert "secret-config" not in serialized
+
+
+def test_image_capabilities_configure_route_returns_stable_credential_error(
+    monkeypatch,
+):
+    responses = []
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {})
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200: responses.append(
+            (payload, status)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "configure_image_capabilities",
+        lambda _body: (_ for _ in ()).throw(
+            model_config.ImageCapabilityCredentialError(
+                "image_capability_credential_collision",
+                "credential collision",
+            )
+        ),
+    )
+
+    assert routes.handle_post(
+        object(),
+        SimpleNamespace(path="/api/image-capabilities/configure"),
+    ) is True
+    payload, status = responses[0]
+    assert status == 409
+    assert payload == {
+        "error": "credential collision",
+        "error_code": "image_capability_credential_collision",
+    }
 
 
 _B3_VERIFICATION_SCHEMA_VERSION = 1

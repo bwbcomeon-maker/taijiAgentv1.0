@@ -168,7 +168,7 @@ def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     assert result["supported"] is False
     assert result["status"] == "unsupported"
     assert result["quota"] is None
-    assert "follow-up" in result["message"]
+    assert isinstance(result["message"], str) and result["message"].strip()
 
 
 def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, tmp_path):

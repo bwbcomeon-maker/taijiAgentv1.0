@@ -10,6 +10,7 @@ Covers:
 """
 import pathlib
 import re
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -87,13 +88,16 @@ class TestApplyOnboardingOAuthPath(unittest.TestCase):
         self.assertEqual(result, mock_status)
 
     def test_unsupported_provider_does_not_write_config_yaml(self):
-        """OAuth path must not call _save_yaml_config — no config mutation."""
-        with patch.object(mod, "save_settings"), \
-             patch.object(mod, "get_onboarding_status", return_value={}), \
-             patch.object(mod, "_save_yaml_config") as mock_save_yaml:
-            mod.apply_onboarding_setup({"provider": "copilot", "model": "gpt-4o"})
+        """OAuth path marks completion without entering the credential transaction."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = pathlib.Path(tmp) / "config.yaml"
+            with patch.object(mod, "save_settings"), \
+                 patch.object(mod, "get_onboarding_status", return_value={}), \
+                 patch.object(mod, "_get_config_path", return_value=config_path):
+                mod.apply_onboarding_setup({"provider": "copilot", "model": "gpt-4o"})
 
-        mock_save_yaml.assert_not_called()
+            self.assertFalse(config_path.exists())
+            self.assertFalse((pathlib.Path(tmp) / ".env").exists())
 
 
 # ── Frontend: i18n keys ────────────────────────────────────────────────────

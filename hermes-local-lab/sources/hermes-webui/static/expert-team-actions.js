@@ -17,6 +17,19 @@
   let officeAuthorizerAbortController=null;
   const OFFICE_REQUIRED_CHECKS=['document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct','headers_footers_pagination','no_placeholders_or_workflow_text'];
   const OFFICE_ISSUE_SEVERITY={file_or_hash_mismatch:'blocking',required_check_failed:'blocking',title_or_genre_mismatch:'blocking',placeholder_content:'blocking',security_issue:'blocking',upstream_gate_issue:'blocking',duplicate_figure:'blocking',visual_alignment:'condition',minor_typography:'condition',pagination_preference:'condition'};
+  async function requestExpertTeamConfirmation(options={}){
+    const dialog=typeof window!=='undefined'&&window.showConfirmDialog;
+    if(typeof dialog!=='function'){
+      if(typeof showToast==='function')showToast('确认弹窗尚未就绪，未执行此操作。');
+      return false;
+    }
+    try{
+      return !!(await dialog({...options,focusCancel:true}));
+    }catch(_error){
+      if(typeof showToast==='function')showToast('无法打开确认弹窗，未执行此操作。');
+      return false;
+    }
+  }
   function officeMutationKey(card,kind){
     const uuid=(typeof crypto!=='undefined'&&crypto&&typeof crypto.randomUUID==='function')?crypto.randomUUID():`${Date.now().toString(36)}-${(++mutationNonce).toString(36)}`;
     return `expert-team:${card.runId}:${card.version}:office:${kind}:${uuid}`;
@@ -144,7 +157,15 @@
   function officeDrawerIsDirty(drawer){return !!(drawer&&officeDrawerDraftState(drawer)!==String(drawer._expertTeamOfficeBaseline||''));}
   function closeExpertTeamOfficeDrawer(btn,force){
     const drawer=officeDrawer(btn);if(!drawer)return false;
-    if(!force&&officeDrawerIsDirty(drawer)&&typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('验收草稿尚未提交，确定关闭吗？'))return false;
+    if(!force&&officeDrawerIsDirty(drawer)){
+      return requestExpertTeamConfirmation({
+        title:'关闭 Office 验收？',
+        message:'验收草稿尚未提交，关闭后本次草稿将被丢弃。',
+        confirmLabel:'丢弃并关闭',
+        cancelLabel:'继续编辑',
+        danger:true,
+      }).then(confirmed=>confirmed?closeExpertTeamOfficeDrawer(btn,true):false);
+    }
     abortExpertTeamOfficeAuthorizerHandoff();
     const closingCard=activeExpertTeamCard(btn);
     if(drawer.dataset.officeReviewSessionStatus==='ready'&&typeof api==='function'){
@@ -235,7 +256,14 @@
     const drawer=officeDrawer(btn);const card=activeExpertTeamCard(btn);
     const ids=Array.from(drawer&&drawer.querySelectorAll('[data-office-revision-issue]:checked')||[]).map(item=>item.dataset.officeRevisionIssue).filter(Boolean);
     if(!ids.length){if(typeof showToast==='function')showToast('请先选择要退回修改的问题。');return false;}
-    if(typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('退回后，影响范围和目标阶段将由服务端根据问题类型派生。确定继续吗？'))return false;
+    const confirmed=await requestExpertTeamConfirmation({
+      title:'退回专家团修改？',
+      message:'退回后，影响范围和目标阶段将由服务端根据问题类型派生。',
+      confirmLabel:'确认退回',
+      cancelLabel:'继续验收',
+      danger:true,
+    });
+    if(!confirmed)return false;
     if(btn.disabled)return false;btn.disabled=true;btn.setAttribute('aria-busy','true');
     try{const result=await api('/api/expert-teams/office-revisions/create',{method:'POST',body:JSON.stringify(officeRevisionMutationPayload(card,ids))});if(result&&result.run)applyExpertTeamActionResponse(result);if(typeof showToast==='function')showToast('已按结构化问题退回修改。');return true;}
     catch(error){if(typeof showToast==='function')showToast('退回修改失败：'+(error&&error.message||error));return false;}
@@ -821,7 +849,14 @@
       return typeof resumeExpertTeamRun==='function'?resumeExpertTeamRun(btn):false;
     }
     if(action==='regenerate_unverified'){
-      if(typeof window!=='undefined'&&typeof window.confirm==='function'&&!window.confirm('已有结果可能尚未核验。放弃本次结果并重新生成会产生额外模型消耗，确定继续吗？'))return false;
+      const confirmed=await requestExpertTeamConfirmation({
+        title:'重新生成未核验结果？',
+        message:'已有结果可能尚未核验。放弃本次结果并重新生成会产生额外模型消耗。',
+        confirmLabel:'放弃并重新生成',
+        cancelLabel:'保留当前结果',
+        danger:true,
+      });
+      if(!confirmed)return false;
       return typeof resumeExpertTeamRun==='function'?resumeExpertTeamRun(btn):false;
     }
     if(action==='cancel'){

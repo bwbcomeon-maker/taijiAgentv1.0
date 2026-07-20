@@ -57,6 +57,7 @@ DRIVER_KEYS = {
     "desktop_entry_sha256",
     "app_url",
     "webui_origin",
+    "desktop_auth_cookie",
     "model",
     "attachment_probe_sha256",
     "agent_pid",
@@ -67,6 +68,14 @@ DRIVER_KEYS = {
     "js_error_count",
     "unexpected_http_failures",
     "electron_exit_code",
+}
+DESKTOP_AUTH_COOKIE_KEYS = {
+    "name",
+    "present",
+    "http_only",
+    "same_site",
+    "path",
+    "value_format",
 }
 
 OFFLINE_KEYS = {
@@ -498,16 +507,33 @@ def validate_driver_app_urls(app_url: Any, webui_origin: Any) -> None:
         raise EvidenceError("桌面驱动 app_url 必须是 HTTP loopback URL")
     if app.username or app.password or app.fragment:
         raise EvidenceError("桌面驱动 app_url 含禁止的授权或 fragment 数据")
-    if set(query) != {"taiji_desktop", "taiji_desktop_token"}:
+    if set(query) != {"taiji_desktop"}:
         raise EvidenceError("桌面驱动 app_url 含未知 query 数据")
-    if query.get("taiji_desktop") != ["1"] or query.get("taiji_desktop_token") != ["<redacted>"]:
-        raise EvidenceError("桌面驱动 app_url 未保留唯一桌面标记或 token 未脱敏")
+    if query.get("taiji_desktop") != ["1"]:
+        raise EvidenceError("桌面驱动 app_url 未保留唯一桌面标记")
     if origin.scheme != "http" or origin.hostname not in {"127.0.0.1", "localhost"}:
         raise EvidenceError("桌面驱动 webui_origin 必须是 HTTP loopback origin")
     if origin.username or origin.password or origin.query or origin.fragment or origin.path not in {"", "/"}:
         raise EvidenceError("桌面驱动 webui_origin 不能含认证、query、fragment 或 path")
     if f"{app.scheme}://{app.netloc}" != f"{origin.scheme}://{origin.netloc}":
         raise EvidenceError("桌面驱动 app_url 与 webui_origin 不是同一 App")
+
+
+def validate_driver_desktop_auth_cookie(cookie: Any) -> None:
+    if type(cookie) is not dict:
+        raise EvidenceError("桌面驱动 desktop_auth_cookie 必须是 object")
+    require_exact_keys(cookie, DESKTOP_AUTH_COOKIE_KEYS, "桌面驱动 desktop_auth_cookie")
+    expected = {
+        "name": "taiji_desktop_token",
+        "present": True,
+        "http_only": True,
+        "same_site": "Strict",
+        "path": "/",
+        "value_format": "lowercase-hex-64",
+    }
+    for key, value in expected.items():
+        if type(cookie[key]) is not type(value) or cookie[key] != value:
+            raise EvidenceError(f"桌面驱动 desktop_auth_cookie.{key} 不合法")
 
 
 def validate_attestation(args: argparse.Namespace, evidence_payload: bytes) -> None:
@@ -985,6 +1011,7 @@ def validate_target_driver(
         validate_sha256(driver[key], f"driver.{key}")
     validate_driver_visible_text(driver["model"], "driver.model", maximum=256)
     validate_driver_app_urls(driver["app_url"], driver["webui_origin"])
+    validate_driver_desktop_auth_cookie(driver["desktop_auth_cookie"])
     if driver["screenshot_basename"] != SCREENSHOT_BASENAME:
         raise EvidenceError("桌面 App 驱动截图必须使用固定 basename")
     if driver["diagnostic_basename"] != DIAGNOSTIC_BASENAME:
