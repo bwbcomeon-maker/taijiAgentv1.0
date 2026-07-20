@@ -1,5 +1,7 @@
 # Main 全量整合、清理与发布门禁审计
 
+> **2026-07-21 闭环补充：** 本文是 2026-07-20 当时状态的历史快照，不应继续作为当前清理状态的唯一依据。后续只读审计发现，本文关于 `codex/image-capability-center` 五个提交“有效能力已全部 hand-port、P1 为 0”的判断不完整：WebUI 命名凭据元数据遗漏了 ZAI 视觉与国产图片生成 Provider。该缺口已由 `39e5771c` 修复；原受保护服务已按用户明确授权退出，分支/worktree 在恢复引用和最终回归后进入安全清理。当前结论、测试、Electron 对抗证据和清理结果以 [main-consolidation-closure-2026-07-21.md](./main-consolidation-closure-2026-07-21.md) 为准。
+
 **日期：** 2026-07-20
 
 **正式仓库：** `/Users/bwb/Documents/工作/taiji-agentv1.0`
