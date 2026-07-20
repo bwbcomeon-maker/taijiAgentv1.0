@@ -21,6 +21,8 @@
 - 并行任务仍在运行时，不得修改、合并、删除、重启或清理其分支、worktree、进程和依赖目录。只有任务明确结束、最终提交稳定、工作树干净且相关测试/构建进程退出后，才进入整合。
 - 删除分支或 worktree 前，必须完成一次全量审计：本地/远端 refs、所有 worktree 状态、未跟踪文件、未提交 diff、仅分支提交、reflog/悬空提交及运行/发布目录。任何尚未确认价值的内容先建立可回滚备份引用或归档，不得直接删除。
 - 任何接受显式仓库路径的审计/验收工具，都必须清除 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR`、`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES` 等环境定位变量，并用“污染环境变量后显式路径仍获胜”的对抗性测试证明不会串库。
+- 把原独立仓库源码导入 monorepo 时，不能把 `git add -A` 或本机文件仍存在当成完整性证明：原仓库已跟踪文件会被父/嵌套 `.gitignore` 静默吞掉。删除旧 Git 元数据前，必须对每个源仓库运行 `scripts/check-imported-source-tree.py`，逐路径证明源 commit 的文件在父仓库中已跟踪；刚完成导入时还必须使用 `--require-content-match` 做 blob 和可执行位对账。
+- 源码导入提交后必须从该提交的 `git archive` 或全新 clone 做一次关键构建/测试，禁止复用 ignored 文件、旧构建目录或嵌套仓库对象制造假绿。被宽泛 ignore 命中的有效上游文件应按精确路径 `git add -f`，不得为省事而整体放宽规则并引入生成垃圾。
 - 清理前的回滚引用统一放在 `refs/backup/`，不能重新伪装成普通开发分支；至少保留到下一次完整发布验证后 30 天。到期删除前仍须复查归档校验和、悬空提交和远端状态，禁止在未审计时运行 `git gc --prune`。
 - 已合并且干净的临时分支/worktree应及时清理；正式根目录保留 `main`，不得长期停留在功能分支。默认不 push，除非用户明确要求。
 
