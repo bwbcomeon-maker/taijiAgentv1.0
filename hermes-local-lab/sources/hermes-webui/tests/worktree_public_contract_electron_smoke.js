@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const {
   assertNavigationParity,
+  buildAcceptanceProvenance,
   captureAuditedScreenshot,
   collectSourceFingerprint,
   inspectTaijiNavigation,
@@ -661,13 +662,11 @@ async function main() {
         "03-narrow-remove-confirm.png",
         "04-removed-refreshed.png",
       ],
-      acceptance_provenance: {
-        source: sourceFingerprint,
-        desktop_app_source: "isolated_worktree",
-        runtime_config: runtimeConfig,
-        user_data: { type: "isolated_temporary" },
-        navigation: navigationParity,
-      },
+      acceptance_provenance: buildAcceptanceProvenance({
+        sourceFingerprint,
+        runtimeConfig,
+        navigationParity,
+      }),
       screenshot_sanity: screenshotSanity,
       checks: {
         daily_configuration_navigation_parity: true,

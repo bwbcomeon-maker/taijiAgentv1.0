@@ -111,7 +111,22 @@ function installDailyEquivalentRuntimeConfig(runtimeHome, { capability_overrides
 }
 
 function gitValue(repoRoot, args) {
-  const result = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
+  const env = { ...process.env };
+  for (const name of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  ]) {
+    delete env[name];
+  }
+  const result = spawnSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env,
+  });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${String(result.stderr || "").trim()}`);
   }
@@ -129,11 +144,34 @@ function collectSourceFingerprint({ repoRoot, webuiDir, staticFiles = DEFAULT_ST
     if (!fs.existsSync(file)) throw new Error(`static fingerprint input missing: ${relativeName}`);
     hashes[relativeName] = sha256File(file);
   }
+  const branch = gitValue(repoRoot, ["branch", "--show-current"]);
+  const gitDir = path.resolve(repoRoot, gitValue(repoRoot, ["rev-parse", "--git-dir"]));
+  const gitCommonDir = path.resolve(repoRoot, gitValue(repoRoot, ["rev-parse", "--git-common-dir"]));
+  const primaryWorktree = gitDir === gitCommonDir;
+  const checkoutType = primaryWorktree
+    ? (branch === "main"
+      ? "formal_main_primary_worktree"
+      : (branch ? "primary_non_main" : "detached_primary_worktree"))
+    : "linked_worktree";
   return {
-    branch: gitValue(repoRoot, ["branch", "--show-current"]),
+    branch,
     commit: gitValue(repoRoot, ["rev-parse", "HEAD"]),
     dirty: Boolean(gitValue(repoRoot, ["status", "--porcelain"])),
+    checkout_type: checkoutType,
     static_files_sha256: hashes,
+  };
+}
+
+function buildAcceptanceProvenance({ sourceFingerprint, runtimeConfig, navigationParity }) {
+  if (!sourceFingerprint || !sourceFingerprint.checkout_type) {
+    throw new Error("source fingerprint checkout_type is required");
+  }
+  return {
+    source: sourceFingerprint,
+    desktop_app_source: sourceFingerprint.checkout_type,
+    runtime_config: runtimeConfig,
+    user_data: { type: "isolated_temporary" },
+    navigation: navigationParity,
   };
 }
 
@@ -295,6 +333,7 @@ module.exports = {
   DAILY_EQUIVALENT_VISIBLE_NAV,
   assertNavigationParity,
   assertScreenshotSanity,
+  buildAcceptanceProvenance,
   captureAuditedScreenshot,
   collectSourceFingerprint,
   inspectTaijiNavigation,
