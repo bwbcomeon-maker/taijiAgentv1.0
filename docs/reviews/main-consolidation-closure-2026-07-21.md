@@ -6,7 +6,7 @@
 
 **正式分支：** `main`
 
-**产品代码基线：** `4ad82d1ab874e3fd16c3211a162ae1c935cb9592`
+**产品代码基线：** `62fc8a0698169cd5768d8b6bb8a0da1334494402`
 
 **当前状态：** 有效成果已整合进正式 `main`，旧分支、worktree、临时运行残留和重复本地 Git 元数据均已在可回滚归档后清理；全量回归、干净归档复验、真实 Electron 验收和最终环境审计均已完成。
 
@@ -37,6 +37,8 @@
 | `e7e54064` | 关闭 Electron 验收中的 CAS、幂等、串源、旧结果、终态 console、外联和 late-child 假绿 | 验收工具与专门测试 |
 | `350b5114` | 固化最终整合、Electron 验收、恢复引用和清理边界 | 审计文档 |
 | `4ad82d1a` | 补回 193 个被父仓库忽略规则静默漏掉的上游源码/资产，并建立导入完整性永久门禁 | 源码、资产、测试与规则 |
+| `db892a68` | 记录已完成的清理、归档校验、干净归档复验和外部边界 | 审计文档 |
+| `62fc8a06` | 默认模式拒绝父索引用 gitlink/submodule 冒充已导入普通文件 | 源码导入门禁与对抗测试 |
 
 ## 3. 旧图片能力分支的五个提交
 
@@ -114,14 +116,14 @@
 
 ### 6.3 根目录与桌面
 
-- 根目录最终完整 unittest：240 tests，OK，113.784 秒。
+- 根目录最终完整 unittest：241 tests，OK，115.208 秒。
 - Desktop Node：13 passed。
 - Installed Electron acceptance Node：26 passed。
 - Target evidence Python：8 tests，OK。
 - Electron provenance Node：8 passed。
 - 最终 Electron/harness 联合 Node：44 passed。
 - Git 来源门禁在六个污染定位变量同时注入时仍识别正式 primary `main`；对应 11 项测试通过。
-- `4ad82d1a` 的 `git archive` 在隔离目录重建索引后，源码导入门禁与完整库存 15 tests 全部通过；两个补回 JavaScript 入口通过 `node --check`，`userStories.json` 通过 JSON 解析。
+- `62fc8a06` 的 `git archive` 在隔离目录重建索引后，源码导入门禁与完整库存 16 tests 全部通过；两个补回 JavaScript 入口通过 `node --check`，`userStories.json` 通过 JSON 解析。
 
 ## 7. Electron 验收的对抗性修复
 
@@ -222,8 +224,8 @@
 - 逐文件核对嵌套 HEAD、物理文件和父仓库内容后，将 193 个有效且非重复文件纳入 `main`；
 - 以完整路径、可执行位和逐文件 SHA-256 固定库存，总摘要为 `83c5f87f0a00125766ec2e641a6564ebfa19d591d369a6fc89ff4feff58d802f`；
 - 新增 `scripts/check-imported-source-tree.py`，核对源树与父仓库索引、物理树、模式和内容；
-- 测试覆盖 ignored 漏导入、物理/暂存漂移、符号链接、gitlink、SHA-1/SHA-256 跨对象格式、FIFO、路径穿越和污染 Git 环境变量；
-- 从 `4ad82d1a` 导出的无 `.git` 归档重建索引后，15/15 项门禁与库存测试通过，证明结果不依赖已清理的 ignored 残留或 `.local-git-metadata`。
+- 测试覆盖 ignored 漏导入、物理/暂存漂移、符号链接、源树 gitlink、父索引 gitlink 冒充普通文件、SHA-1/SHA-256 跨对象格式、FIFO、路径穿越和污染 Git 环境变量；
+- 从 `62fc8a06` 导出的无 `.git` 归档重建索引后，16/16 项门禁与库存测试通过，证明结果不依赖已清理的 ignored 残留或 `.local-git-metadata`。
 
 ## 10. 项目与长期规则
 
@@ -319,4 +321,4 @@
 2. 真实 Provider、OAuth、后端持久化加密、Kylin/UOS 真机仍是独立发布门禁。
 3. backup refs 和残留 tree/blob 是有意保留的恢复面，保留期内不得 prune。
 4. 用户真实日常 runtime/config 未做无隔离覆盖；本轮真实 Electron 使用隔离临时 user data 和安全 fixture。
-5. 真实 Electron 验收绑定的是实现提交 `e7e54064`；`4ad82d1a` 只增加上游静态源码/资产、门禁和规则，没有修改该 UI 流程，但未为这些静态内容重复启动 Electron。
+5. 真实 Electron 验收绑定的是实现提交 `e7e54064`；`4ad82d1a` 只增加上游静态源码/资产、门禁和规则，`62fc8a06` 只增强导入门禁与测试，均未修改该 UI 流程，但未为这些静态内容重复启动 Electron。
