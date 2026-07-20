@@ -5600,10 +5600,18 @@ def _image_capability_provider_metadata(
         custom = bool(row.get("custom")) or provider_id.startswith("custom:")
         key = f"{capability}:{provider_id}" if custom else family
         default_named_credentials = bool(
-            (capability == "vision" and provider_id == "alibaba")
-            or (
-                capability == "image_generation"
-                and _internal_image_gen_provider_id(provider_id) == "dashscope"
+            auth_type == "api_key"
+            and auth_editable
+            and (
+                (
+                    capability == "vision"
+                    and provider_id in {"alibaba", "zai"}
+                )
+                or (
+                    capability == "image_generation"
+                    and _internal_image_gen_provider_id(provider_id)
+                    in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS
+                )
             )
         )
         entry = merged.setdefault(
@@ -6035,7 +6043,8 @@ def _stage_vision_capability(
     if meta.get("requires_base_url") and not base_url:
         raise ValueError("base_url is required for custom vision provider")
     credential_ref = str(body.get("credential_ref") or "").strip()
-    if provider_id == "alibaba" and not credential_ref:
+    supports_named_credentials = provider_id in {"alibaba", "zai"}
+    if supports_named_credentials and not credential_ref:
         credential_ref = default_credential_ref(
             provider_id,
             config_data=config_data,
@@ -6049,8 +6058,10 @@ def _stage_vision_capability(
             provider_id
         ):
             raise ValueError("所选凭据不属于当前 Provider。")
-    if credential_ref and provider_id != "alibaba":
-        raise ValueError("credential_ref is only supported for Alibaba vision")
+    if credential_ref and not supports_named_credentials:
+        raise ValueError(
+            "credential_ref is not supported for this vision Provider"
+        )
     previous_provider = str(
         vision_cfg.get("provider") or ""
     ).strip().lower()
@@ -6073,7 +6084,7 @@ def _stage_vision_capability(
     vision_cfg["model"] = model_id
     vision_cfg.pop("api_key", None)
     vision_cfg.pop("api_mode", None)
-    if provider_id == "alibaba":
+    if supports_named_credentials:
         vision_cfg["credential_ref"] = credential_ref
     else:
         vision_cfg.pop("credential_ref", None)
@@ -6178,11 +6189,14 @@ def _stage_image_generation_capability(
             "生成图片主配置只支持中国可用的稳定 Provider，请切换到国产生图服务。"
         )
     credential_ref = str(body.get("credential_ref") or "").strip()
-    if credential_ref and provider_id != "dashscope":
+    supports_named_credentials = (
+        provider_id in _DOMESTIC_STABLE_IMAGE_GEN_PROVIDER_IDS
+    )
+    if credential_ref and not supports_named_credentials:
         raise ValueError(
-            "credential_ref is only supported for DashScope image generation"
+            "credential_ref is not supported for this image generation Provider"
         )
-    if provider_id == "dashscope" and not credential_ref:
+    if supports_named_credentials and not credential_ref:
         credential_ref = default_credential_ref(
             provider_id,
             config_data=config_data,
@@ -6261,7 +6275,7 @@ def _stage_image_generation_capability(
     image_cfg["model"] = model_id
     image_cfg["use_gateway"] = False
     image_cfg.pop("api_key", None)
-    if provider_id == "dashscope":
+    if supports_named_credentials:
         image_cfg["credential_ref"] = credential_ref
     else:
         image_cfg.pop("credential_ref", None)

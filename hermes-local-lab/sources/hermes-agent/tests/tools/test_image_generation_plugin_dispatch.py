@@ -56,6 +56,70 @@ class _FakeCodexProvider(ImageGenProvider):
         }
 
 
+@pytest.mark.parametrize(
+    ("provider", "model", "family", "legacy_env"),
+    [
+        (
+            "doubao",
+            "doubao-seedream-5-0-260128",
+            "doubao",
+            "ARK_API_KEY",
+        ),
+        ("zhipu-image", "glm-image", "zhipu", "GLM_API_KEY"),
+    ],
+)
+def test_builtin_request_binding_captures_named_secret_without_process_fallback(
+    monkeypatch,
+    tmp_path,
+    provider,
+    model,
+    family,
+    legacy_env,
+):
+    from agent.provider_credentials import credential_secret_env
+    from tools import image_generation_tool
+
+    credential_ref = f"{provider}-named"
+    secret_env = credential_secret_env(credential_ref)
+    config_data = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": family,
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+            }
+        ],
+        "image_gen": {
+            "enabled": True,
+            "provider": provider,
+            "model": model,
+            "credential_ref": credential_ref,
+        },
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=named-request-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv(legacy_env, "legacy-process-secret-must-not-win")
+
+    binding = image_generation_tool._capture_image_gen_request_binding(
+        authorization_generation=f"{provider}-named-generation",
+    )
+
+    assert binding is not None
+    assert binding.provider == provider
+    assert binding.api_key == "named-request-secret"
+    assert "legacy-process-secret-must-not-win" not in repr(binding)
+
+
 class TestPluginDispatch:
     def test_dispatch_routes_to_codex_provider(self, monkeypatch, tmp_path):
         from tools import image_generation_tool

@@ -73,6 +73,41 @@ CAPABILITY_RESPONSE = {
                 {"name": "api_key", "label": "API Key", "secret": True}
             ],
             "endpoint_fields": [],
+        },
+        {
+            "provider_family": "zhipu",
+            "label": "智谱 AI",
+            "capabilities": ["vision", "image_generation"],
+            "provider_ids": {
+                "vision": "zai",
+                "image_generation": "zhipu-image",
+            },
+            "auth_type": "api_key",
+            "support_level": "native",
+            "supports_named_credentials": True,
+            "selectable": True,
+            "models": {
+                "vision": [{"id": "glm-5v-turbo", "label": "GLM-5V Turbo"}],
+                "image_generation": [
+                    {"id": "glm-image", "label": "GLM-Image"}
+                ],
+            },
+            "default_models": {
+                "vision": "glm-5v-turbo",
+                "image_generation": "glm-image",
+            },
+            "credential_fields": {
+                "vision": [
+                    {"name": "api_key", "label": "API Key", "secret": True}
+                ],
+                "image_generation": [
+                    {"name": "api_key", "label": "API Key", "secret": True}
+                ],
+            },
+            "endpoint_fields": {
+                "vision": [],
+                "image_generation": [],
+            },
         }
     ],
     "provider_credentials": [
@@ -292,10 +327,42 @@ def main() -> int:
                 ).evaluate_all(
                     "options => options.map(option => ({value: option.value, text: option.textContent}))"
                 )
-                assert len(vision_provider_options) == 1, vision_provider_options
+                assert len(vision_provider_options) == 2, vision_provider_options
                 assert "阿里云百炼" in page.locator(
                     "#imageCapabilityVisionProvider"
                 ).text_content()
+                page.locator("#imageCapabilityVisionProvider").select_option(
+                    "zai"
+                )
+                assert page.locator(
+                    "#imageCapabilityVisionCredentialField0"
+                ).is_visible()
+                assert page.locator(
+                    "#imageCapabilityVisionCredentialField0"
+                ).get_attribute("type") == "password"
+                page.locator(
+                    "#imageCapabilityGenerationProvider"
+                ).select_option("zhipu-image")
+                assert page.locator(
+                    "#imageCapabilityGenerationCredentialField0"
+                ).is_visible()
+                assert page.locator(
+                    "#imageCapabilityGenerationCredentialField0"
+                ).get_attribute("type") == "password"
+                if evidence_dir:
+                    page.screenshot(
+                        path=str(
+                            evidence_dir
+                            / "image-capability-center-non-ali-credentials.png"
+                        ),
+                        full_page=True,
+                    )
+                page.locator("#imageCapabilityVisionProvider").select_option(
+                    "alibaba"
+                )
+                page.locator(
+                    "#imageCapabilityGenerationProvider"
+                ).select_option("dashscope")
                 assert "辅助识图模型" in page.locator(
                     "#imageCapabilityVisionRoute"
                 ).text_content()

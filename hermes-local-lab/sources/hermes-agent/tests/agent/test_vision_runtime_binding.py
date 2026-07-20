@@ -1,11 +1,68 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+
+
+def test_zai_vision_runtime_binding_uses_named_secret_without_process_fallback(
+    monkeypatch,
+    tmp_path,
+):
+    from agent import auxiliary_client
+    from agent.provider_credentials import credential_secret_env
+    from hermes_cli import config as hermes_config
+    import hermes_constants
+
+    config_path = tmp_path / "config.yaml"
+    credential_ref = "zai-vision-named"
+    secret_env = credential_secret_env(credential_ref)
+    config_data = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": "zhipu",
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+            }
+        ],
+        "auxiliary": {
+            "vision": {
+                "enabled": True,
+                "provider": "zai",
+                "model": "glm-5v-turbo",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "credential_ref": credential_ref,
+            }
+        },
+    }
+    config_path.write_text(json.dumps(config_data), encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=zai-named-runtime-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GLM_API_KEY", "legacy-process-secret-must-not-win")
+    monkeypatch.setenv("ZAI_API_KEY", "legacy-process-secret-must-not-win")
+    monkeypatch.setattr(hermes_config, "load_config", lambda: config_data)
+    monkeypatch.setattr(
+        hermes_constants,
+        "get_config_path",
+        lambda: Path(config_path),
+    )
+
+    binding = auxiliary_client.capture_vision_request_binding(
+        authorization_generation="zai-named-generation",
+    )
+
+    assert binding is not None
+    assert binding.provider == "zai"
+    assert binding.api_key == "zai-named-runtime-secret"
+    assert "legacy-process-secret-must-not-win" not in repr(binding)
 
 
 class _FakeSyncOpenAI:

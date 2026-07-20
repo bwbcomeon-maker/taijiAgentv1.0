@@ -122,6 +122,32 @@ def test_runtime_renders_server_driven_provider_auth_credentials_and_endpoints()
         assert contract_field in runtime
 
 
+def test_visible_credential_fields_follow_non_ali_provider_selection_contract():
+    runtime = _marked_slice(
+        "/* image-capability-center-runtime:start */",
+        "/* image-capability-center-runtime:end */",
+    )
+    provider_change = runtime[
+        runtime.index("function imageCapabilityMarkDraftChanged")
+        : runtime.index("async function imageCapabilityConfirmReload")
+    ]
+    credential_fields = runtime[
+        runtime.index("function imageCapabilityRenderCredentialFields")
+        : runtime.index("function imageCapabilityFieldValue")
+    ]
+
+    assert "imageCapabilityProviderRow(imageCapabilityData,capability,target.value)" in provider_change
+    assert "imageCapabilityRenderCredentialFields(capability,row,'')" in provider_change
+    assert "row.supports_named_credentials" in credential_fields
+    assert "imageCapabilityNormalizeFields(row,'credential_fields',capability)" in credential_fields
+    for ali_only_guard in (
+        "provider==='alibaba'",
+        "provider==='dashscope'",
+        "row.provider_family==='alibaba_dashscope'",
+    ):
+        assert ali_only_guard not in credential_fields
+
+
 def test_runtime_treats_canonical_and_legacy_no_auth_as_credential_free():
     runtime = _marked_slice(
         "/* image-capability-center-runtime:start */",

@@ -8204,6 +8204,439 @@ def test_image_capability_provider_metadata_projects_canonical_auth_contract():
     ]
 
 
+def test_image_capability_catalog_exposes_named_credentials_for_supported_builtins():
+    providers = model_config._image_capability_provider_metadata(
+        [
+            {
+                "id": provider_id,
+                "name": provider_id,
+                "provider_family": family,
+                "auth_type": "api_key",
+                "credential_fields": [{"name": "api_key", "secret": True}],
+            }
+            for provider_id, family in (
+                ("alibaba", "alibaba_dashscope"),
+                ("zai", "zhipu"),
+            )
+        ],
+        [
+            {
+                "id": provider_id,
+                "name": provider_id,
+                "provider_family": family,
+                "auth_type": "api_key",
+                "credential_fields": [{"name": "api_key", "secret": True}],
+                "domestic": True,
+                "integration_status": "stable",
+            }
+            for provider_id, family in (
+                ("dashscope", "alibaba_dashscope"),
+                ("doubao", "doubao"),
+                ("qianfan", "qianfan"),
+                ("zhipu-image", "zhipu"),
+                ("minimax-image", "minimax"),
+            )
+        ],
+    )
+
+    by_family = {row["provider_family"]: row for row in providers}
+    assert set(by_family) == {
+        "alibaba_dashscope",
+        "doubao",
+        "qianfan",
+        "zhipu",
+        "minimax",
+    }
+    assert all(row["supports_named_credentials"] for row in by_family.values())
+    assert by_family["zhipu"]["provider_ids"] == {
+        "vision": "zai",
+        "image_generation": "zhipu-image",
+    }
+
+
+def test_image_capability_catalog_never_infers_api_key_fields_for_non_api_key_auth():
+    providers = model_config._image_capability_provider_metadata(
+        [
+            {
+                "id": "zai",
+                "name": "OAuth-only ZAI",
+                "provider_family": "zhipu",
+                "auth_type": "oauth",
+                "credential_fields": [],
+            },
+            {
+                "id": "custom:router",
+                "name": "Custom Router",
+                "provider_family": "custom_router",
+                "auth_type": "api_key",
+                "credential_fields": [{"name": "api_key", "secret": True}],
+                "custom": True,
+            },
+        ],
+        [
+            {
+                "id": "doubao",
+                "name": "No-auth Doubao",
+                "provider_family": "doubao",
+                "auth_type": "no_auth",
+                "credential_fields": [],
+                "domestic": True,
+                "integration_status": "stable",
+            }
+        ],
+    )
+
+    by_family = {row["provider_family"]: row for row in providers}
+    assert by_family["zhipu"]["supports_named_credentials"] is False
+    assert by_family["doubao"]["supports_named_credentials"] is False
+    assert by_family["custom_router"]["supports_named_credentials"] is False
+
+
+@pytest.mark.parametrize(
+    ("capability", "provider_id", "model_id", "family"),
+    [
+        ("vision", "zai", "glm-5v-turbo", "zhipu"),
+        (
+            "image_generation",
+            "doubao",
+            "doubao-seedream-5-0-260128",
+            "doubao",
+        ),
+        ("image_generation", "qianfan", "qwen-image", "qianfan"),
+        ("image_generation", "zhipu-image", "glm-image", "zhipu"),
+        ("image_generation", "minimax-image", "image-01", "minimax"),
+    ],
+)
+def test_image_capability_stage_saves_named_credential_for_non_ali_builtins(
+    monkeypatch,
+    tmp_path,
+    capability,
+    provider_id,
+    model_id,
+    family,
+):
+    credential_ref = f"{provider_id}-named"
+    config_data = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": family,
+                "auth_type": "api_key",
+                "secret_env": model_config.credential_secret_env(
+                    credential_ref
+                ),
+            }
+        ]
+    }
+    body = {
+        "enabled": True,
+        "provider": provider_id,
+        "model": model_id,
+        "credential_ref": credential_ref,
+        "endpoint_values": {},
+    }
+
+    if capability == "vision":
+        model_config._stage_vision_capability(
+            config_data,
+            body,
+            config_path=tmp_path / "config.yaml",
+        )
+        saved = config_data["auxiliary"]["vision"]
+    else:
+        provider_row = {
+            "id": provider_id,
+            "provider_family": family,
+            "models": [{"id": model_id, "label": model_id}],
+            "default_model": model_id,
+            "auth_type": "api_key",
+            "credential_fields": [{"name": "api_key", "secret": True}],
+            "endpoint_fields": [],
+            "domestic": True,
+            "integration_status": "stable",
+            "policy_blocked": False,
+        }
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_model_contract",
+            lambda *_args, **_kwargs: provider_row,
+        )
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_rows",
+            lambda *_args, **_kwargs: [provider_row],
+        )
+        model_config._stage_image_generation_capability(
+            config_data,
+            body,
+            config_path=tmp_path / "config.yaml",
+        )
+        saved = config_data["image_gen"]
+
+    assert saved["credential_ref"] == credential_ref
+
+
+@pytest.mark.parametrize(
+    ("capability", "provider_id", "model_id", "family"),
+    [
+        ("vision", "zai", "glm-5v-turbo", "zhipu"),
+        (
+            "image_generation",
+            "dashscope",
+            "qwen-image-2.0-pro",
+            "alibaba_dashscope",
+        ),
+        (
+            "image_generation",
+            "doubao",
+            "doubao-seedream-5-0-260128",
+            "doubao",
+        ),
+        ("image_generation", "qianfan", "qwen-image", "qianfan"),
+        ("image_generation", "zhipu-image", "glm-image", "zhipu"),
+        ("image_generation", "minimax-image", "image-01", "minimax"),
+    ],
+)
+def test_image_capability_stage_uses_configured_default_for_supported_builtins(
+    monkeypatch,
+    tmp_path,
+    capability,
+    provider_id,
+    model_id,
+    family,
+):
+    credential_ref = f"{provider_id}-default"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    config_data = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": family,
+                "auth_type": "api_key",
+                "secret_env": secret_env,
+                "default": True,
+            }
+        ]
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_data, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=configured-default-secret\n",
+        encoding="utf-8",
+    )
+    body = {
+        "enabled": True,
+        "provider": provider_id,
+        "model": model_id,
+        "endpoint_values": {},
+    }
+
+    if capability == "vision":
+        model_config._stage_vision_capability(
+            config_data,
+            body,
+            config_path=config_path,
+        )
+        saved = config_data["auxiliary"]["vision"]
+    else:
+        provider_row = {
+            "id": provider_id,
+            "provider_family": family,
+            "models": [{"id": model_id, "label": model_id}],
+            "default_model": model_id,
+            "auth_type": "api_key",
+            "credential_fields": [{"name": "api_key", "secret": True}],
+            "endpoint_fields": [],
+            "domestic": True,
+            "integration_status": "stable",
+            "policy_blocked": False,
+        }
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_model_contract",
+            lambda *_args, **_kwargs: provider_row,
+        )
+        monkeypatch.setattr(
+            model_config,
+            "_image_gen_provider_rows",
+            lambda *_args, **_kwargs: [provider_row],
+        )
+        model_config._stage_image_generation_capability(
+            config_data,
+            body,
+            config_path=config_path,
+        )
+        saved = config_data["image_gen"]
+
+    assert saved["credential_ref"] == credential_ref
+
+
+def test_image_capability_stage_rejects_non_ali_credential_family_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    credential_ref = "doubao-named"
+    config_data = {
+        "provider_credentials": [
+            {
+                "id": credential_ref,
+                "provider_family": "doubao",
+                "auth_type": "api_key",
+                "secret_env": model_config.credential_secret_env(
+                    credential_ref
+                ),
+            }
+        ]
+    }
+    provider_row = {
+        "id": "zhipu-image",
+        "provider_family": "zhipu",
+        "models": [{"id": "glm-image", "label": "GLM-Image"}],
+        "default_model": "glm-image",
+        "auth_type": "api_key",
+        "credential_fields": [{"name": "api_key", "secret": True}],
+        "endpoint_fields": [],
+        "domestic": True,
+        "integration_status": "stable",
+        "policy_blocked": False,
+    }
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_model_contract",
+        lambda *_args, **_kwargs: provider_row,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: [provider_row],
+    )
+
+    with pytest.raises(ValueError, match="所选凭据不属于当前 Provider"):
+        model_config._stage_image_generation_capability(
+            config_data,
+            {
+                "enabled": True,
+                "provider": "zhipu-image",
+                "model": "glm-image",
+                "credential_ref": credential_ref,
+                "endpoint_values": {},
+            },
+            config_path=tmp_path / "config.yaml",
+        )
+
+
+def test_configure_image_capabilities_reuses_one_zhipu_credential_for_both_cards(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path, stub_image_gen=False)
+    credential_ref = "zhipu-shared"
+    secret_env = model_config.credential_secret_env(credential_ref)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "provider_credentials": [
+                    {
+                        "id": credential_ref,
+                        "provider_family": "zhipu",
+                        "auth_type": "api_key",
+                        "secret_env": secret_env,
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"{secret_env}=shared-zhipu-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_vision_provider_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "zai",
+                "name": "智谱 AI",
+                "provider_family": "zhipu",
+                "models": [{"id": "glm-5v-turbo", "label": "GLM-5V Turbo"}],
+                "default_model": "glm-5v-turbo",
+                "auth_type": "api_key",
+                "credential_fields": [
+                    {"name": "api_key", "secret": True}
+                ],
+                "endpoint_fields": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_image_gen_provider_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "zhipu-image",
+                "name": "智谱 GLM-Image",
+                "provider_family": "zhipu",
+                "models": [{"id": "glm-image", "label": "GLM-Image"}],
+                "default_model": "glm-image",
+                "auth_type": "api_key",
+                "credential_fields": [
+                    {"name": "api_key", "secret": True}
+                ],
+                "endpoint_fields": [],
+                "domestic": True,
+                "integration_status": "stable",
+                "policy_blocked": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        model_config,
+        "_invoke_durable_mutation_post_commit",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = model_config.configure_image_capabilities(
+        _image_capability_configure_body(
+            tmp_path,
+            {
+                "credential_updates": [],
+                "capabilities": {
+                    "vision": {
+                        "enabled": True,
+                        "provider": "zai",
+                        "model": "glm-5v-turbo",
+                        "credential_ref": credential_ref,
+                        "endpoint_values": {},
+                    },
+                    "image_generation": {
+                        "enabled": True,
+                        "provider": "zhipu-image",
+                        "model": "glm-image",
+                        "credential_ref": credential_ref,
+                        "endpoint_values": {},
+                    },
+                },
+                "verify": [],
+            },
+            request_id="reuse-shared-zhipu",
+        )
+    )
+
+    saved = _read_config(tmp_path)
+    assert saved["auxiliary"]["vision"]["credential_ref"] == credential_ref
+    assert saved["image_gen"]["credential_ref"] == credential_ref
+    assert (
+        (tmp_path / ".env").read_text(encoding="utf-8")
+        == f"{secret_env}=shared-zhipu-secret\n"
+    )
+    assert "shared-zhipu-secret" not in json.dumps(result, ensure_ascii=False)
+
+
 @pytest.mark.parametrize(
     ("config_data", "vision", "expected"),
     (
