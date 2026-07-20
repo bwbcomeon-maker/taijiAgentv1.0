@@ -189,7 +189,13 @@ def parent_index(
             raise GateError(
                 f"parent index contains an unresolved stage: {os.fsdecode(raw_path)}"
             )
-        entries[os.fsdecode(raw_path)] = (
+        parent_path = os.fsdecode(raw_path)
+        if raw_mode == b"160000":
+            raise GateError(
+                "parent index contains a gitlink/submodule instead of directly "
+                f"imported source: {parent_path}"
+            )
+        entries[parent_path] = (
             raw_mode.decode("ascii"),
             raw_oid.decode("ascii"),
         )

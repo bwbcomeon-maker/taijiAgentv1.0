@@ -184,6 +184,36 @@ class ImportedSourceTreeGateTests(unittest.TestCase):
         self.assertIn("gitlink/submodule", result.stderr)
         self.assertIn("vendor/child", result.stderr)
 
+    def test_default_mode_rejects_parent_gitlink_that_masks_source_blob(self):
+        child = self.root / "parent-gitlink-child"
+        child.mkdir()
+        self._init_repo(child)
+        (child / "child.txt").write_text("child source\n", encoding="utf-8")
+        run(["git", "add", "child.txt"], cwd=child)
+        run(["git", "commit", "-m", "child source"], cwd=child)
+
+        masked_path = self.source_prefix / "kept.txt"
+        run(["git", "rm", str(masked_path)], cwd=self.repo)
+        run(
+            [
+                "git",
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                str(child),
+                str(masked_path),
+            ],
+            cwd=self.repo,
+        )
+        self.force_add_ignored_source()
+
+        result = self.gate()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("parent index contains a gitlink/submodule", result.stderr)
+        self.assertIn(masked_path.as_posix(), result.stderr)
+
     def test_exact_import_supports_different_parent_and_source_object_formats(self):
         sha256_parent = self.root / "sha256-parent"
         sha256_parent.mkdir()
