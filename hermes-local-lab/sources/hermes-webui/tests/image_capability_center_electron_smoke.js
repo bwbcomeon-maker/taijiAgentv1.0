@@ -21,6 +21,15 @@ const {
   installDailyEquivalentRuntimeConfig,
 } = require("./electron_acceptance_provenance");
 
+const AMBIENT_GIT_ENV = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
 function parseArgs(argv) {
   const result = { outDir: "", repoRoot: "", requireCleanSource: false };
   for (let index = 0; index < argv.length; index += 1) {
@@ -30,6 +39,32 @@ function parseArgs(argv) {
   }
   if (!result.outDir) throw new Error("--out-dir is required");
   return result;
+}
+
+function prepareResultDestination(outDirValue) {
+  const outDir = path.resolve(outDirValue);
+  fs.mkdirSync(outDir, { recursive: true });
+  const resultFile = path.join(
+    outDir,
+    "electron-image-capability-center-result.json",
+  );
+  fs.rmSync(resultFile, { force: true });
+  for (const entry of fs.readdirSync(outDir, { withFileTypes: true })) {
+    if (
+      entry.isFile()
+      && (
+        entry.name.startsWith(
+          "electron-image-capability-center-result.json.tmp-",
+        )
+        || entry.name.startsWith(
+          ".electron-image-capability-center-result.candidate-",
+        )
+      )
+    ) {
+      fs.rmSync(path.join(outDir, entry.name), { force: true });
+    }
+  }
+  return { outDir, resultFile };
 }
 
 function loadPlaywright() {
@@ -82,6 +117,18 @@ function runText(command, args, options = {}) {
   return String(result.stdout || "").trim();
 }
 
+function cleanGitEnv() {
+  const env = { ...process.env };
+  for (const name of AMBIENT_GIT_ENV) delete env[name];
+  return env;
+}
+
+function gitText(repoRoot, args) {
+  return runText("git", ["-C", repoRoot, ...args], {
+    env: cleanGitEnv(),
+  });
+}
+
 function realpathExisting(candidate, label) {
   assertState(fs.existsSync(candidate), `${label} missing`, { path: candidate });
   return fs.realpathSync(candidate);
@@ -90,16 +137,94 @@ function realpathExisting(candidate, label) {
 function gitSnapshot(repoRoot) {
   return {
     repo_root: fs.realpathSync(repoRoot),
-    branch: runText("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]),
-    commit: runText("git", ["-C", repoRoot, "rev-parse", "HEAD"]),
-    status_short: runText("git", ["-C", repoRoot, "status", "--short"]),
+    branch: gitText(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    commit: gitText(repoRoot, ["rev-parse", "HEAD"]),
+    status_short: gitText(repoRoot, ["status", "--short"]),
     common_dir: fs.realpathSync(
       path.resolve(
         repoRoot,
-        runText("git", ["-C", repoRoot, "rev-parse", "--git-common-dir"]),
+        gitText(repoRoot, ["rev-parse", "--git-common-dir"]),
       ),
     ),
   };
+}
+
+function assertFormalMainSource(sourceSnapshot, sourceFingerprint) {
+  assertState(
+    sourceSnapshot.branch === "main"
+      && !sourceSnapshot.status_short
+      && sourceFingerprint.branch === "main"
+      && sourceFingerprint.checkout_type === "formal_main_primary_worktree"
+      && sourceFingerprint.dirty === false
+      && sourceFingerprint.commit === sourceSnapshot.commit,
+    "Electron acceptance requires a clean formal main source and matching fingerprint",
+    {
+      source_snapshot: sourceSnapshot,
+      source_fingerprint: sourceFingerprint,
+    },
+  );
+}
+
+function collectExecutionSourceFingerprint({
+  repoRoot,
+  webuiDir,
+  productMain,
+  productPreload,
+}) {
+  return {
+    ...collectSourceFingerprint({ repoRoot, webuiDir }),
+    acceptance_script_realpath: fs.realpathSync(__filename),
+    acceptance_script_sha256: sha256File(__filename),
+    api_model_config_sha256: sha256File(
+      path.join(webuiDir, "api", "model_config.py"),
+    ),
+    desktop_main_realpath: productMain,
+    desktop_main_sha256: sha256File(productMain),
+    desktop_preload_realpath: productPreload,
+    desktop_preload_sha256: sha256File(productPreload),
+  };
+}
+
+function sourceStabilityProjection(snapshot, fingerprint) {
+  return {
+    snapshot: {
+      repo_root: snapshot.repo_root,
+      branch: snapshot.branch,
+      commit: snapshot.commit,
+      status_short: snapshot.status_short,
+      common_dir: snapshot.common_dir,
+    },
+    fingerprint: {
+      branch: fingerprint.branch,
+      commit: fingerprint.commit,
+      dirty: fingerprint.dirty,
+      checkout_type: fingerprint.checkout_type,
+      static_files_sha256: fingerprint.static_files_sha256,
+      acceptance_script_realpath: fingerprint.acceptance_script_realpath,
+      acceptance_script_sha256: fingerprint.acceptance_script_sha256,
+      api_model_config_sha256: fingerprint.api_model_config_sha256,
+      desktop_main_realpath: fingerprint.desktop_main_realpath,
+      desktop_main_sha256: fingerprint.desktop_main_sha256,
+      desktop_preload_realpath: fingerprint.desktop_preload_realpath,
+      desktop_preload_sha256: fingerprint.desktop_preload_sha256,
+    },
+  };
+}
+
+function assertStableSource(
+  initialSnapshot,
+  initialFingerprint,
+  finalSnapshot,
+  finalFingerprint,
+) {
+  const initial = sourceStabilityProjection(initialSnapshot, initialFingerprint);
+  const final = sourceStabilityProjection(finalSnapshot, finalFingerprint);
+  assertState(
+    JSON.stringify(final) === JSON.stringify(initial),
+    "source changed during Electron acceptance",
+    { initial, final },
+  );
+  assertFormalMainSource(finalSnapshot, finalFingerprint);
 }
 
 function resolveDefaultElectron(repoRoot) {
@@ -118,7 +243,7 @@ function resolveDefaultElectron(repoRoot) {
   try {
     const commonDir = path.resolve(
       repoRoot,
-      runText("git", ["-C", repoRoot, "rev-parse", "--git-common-dir"]),
+      gitText(repoRoot, ["rev-parse", "--git-common-dir"]),
     );
     candidates.push(path.join(path.dirname(commonDir), suffix));
   } catch (_) {}
@@ -132,21 +257,33 @@ function resolveDefaultElectron(repoRoot) {
 }
 
 function processTable() {
-  const result = spawnSync("ps", ["-axo", "pid=,ppid=,command="], {
+  const result = spawnSync("ps", ["-axo", "pid=,ppid=,lstart=,command="], {
     encoding: "utf8",
   });
   if (result.status !== 0) return new Map();
   const table = new Map();
   for (const line of String(result.stdout || "").split(/\r?\n/)) {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.{24})\s+(.*)$/);
     if (!match) continue;
     table.set(Number(match[1]), {
       pid: Number(match[1]),
       ppid: Number(match[2]),
-      command: match[3],
+      started: match[3],
+      command: match[4],
+      command_sha256: sha256Text(match[4]),
     });
   }
   return table;
+}
+
+function isBaselineProcess(baseline, current) {
+  return Boolean(
+    baseline
+      && current
+      && baseline.pid === current.pid
+      && baseline.started === current.started
+      && baseline.command_sha256 === current.command_sha256,
+  );
 }
 
 function psField(pid, field) {
@@ -191,6 +328,52 @@ function processIdentity(pid) {
     command_sha256: sha256Text(command),
     cwd,
     identity_sha256: sha256Text([pid, started, command, cwd].join("\0")),
+  };
+}
+
+function tcpListenerPids(port) {
+  assertState(
+    Number.isInteger(Number(port)) && Number(port) > 0 && Number(port) <= 65535,
+    "invalid TCP listener port",
+    { port },
+  );
+  const result = spawnSync(
+    "lsof",
+    [
+      "-nP",
+      "-a",
+      `-iTCP:${Number(port)}`,
+      "-sTCP:LISTEN",
+      "-Fp",
+    ],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) return [];
+  return [
+    ...new Set(
+      String(result.stdout || "")
+        .split(/\r?\n/)
+        .filter(line => /^p\d+$/.test(line))
+        .map(line => Number(line.slice(1)))
+        .filter(pid => Number.isInteger(pid) && pid > 0),
+    ),
+  ].sort((left, right) => left - right);
+}
+
+function assertTcpListenerOwner(port, expectedPid, listenerPids = tcpListenerPids(port)) {
+  const expected = Number(expectedPid);
+  const actual = [...new Set(listenerPids.map(Number))]
+    .filter(pid => Number.isInteger(pid) && pid > 0)
+    .sort((left, right) => left - right);
+  assertState(
+    actual.length === 1 && actual[0] === expected,
+    "desktop page TCP listener is not owned by the verified WebUI PID",
+    { port: Number(port), expected_pid: expected, listener_pids: actual },
+  );
+  return {
+    port: Number(port),
+    pid: expected,
+    listener_pids: actual,
   };
 }
 
@@ -367,16 +550,19 @@ const originalCreateConnection = net.createConnection;
 function connectionTarget(args) {
   const first = args[0];
   let host = "";
+  let port = "";
   let isUnix = false;
   if (typeof first === "string") {
     isUnix = true;
   } else if (first && typeof first === "object") {
     if (first.path && !first.host && !first.hostname) isUnix = true;
     host = first.host || first.hostname || "";
+    port = first.port || "";
   } else if (typeof first === "number") {
+    port = first;
     host = typeof args[1] === "string" ? args[1] : "localhost";
   }
-  return { host, isUnix };
+  return { host, port, isUnix };
 }
 function blockedError() {
   return Object.assign(
@@ -395,7 +581,11 @@ function mustBlock(args) {
 }
 net.Socket.prototype.connect = function guardedConnect(...args) {
   if (mustBlock(args)) {
-    record("main_network_blocked", { destination_class: "public" });
+    const target = connectionTarget(args);
+    record("main_network_blocked", {
+      destination_class: "public",
+      target_sha256: urlDigest(\`\${target.host}:\${target.port}\`),
+    });
     process.nextTick(() => this.destroy(blockedError()));
     return this;
   }
@@ -403,7 +593,11 @@ net.Socket.prototype.connect = function guardedConnect(...args) {
 };
 function guardedCreateConnection(...args) {
   if (mustBlock(args)) {
-    record("main_network_blocked", { destination_class: "public" });
+    const target = connectionTarget(args);
+    record("main_network_blocked", {
+      destination_class: "public",
+      target_sha256: urlDigest(\`\${target.host}:\${target.port}\`),
+    });
     return blockedSocket();
   }
   return originalCreateConnection.apply(net, args);
@@ -483,29 +677,64 @@ import hashlib
 import json
 import os
 import socket
+import sys
 
 _GUARD_LOG = os.environ["TAIJI_PYTHON_GUARD_LOG"]
 _ROLE = os.environ.get("TAIJI_PYTHON_GUARD_ROLE", "unknown")
 _MARKER_SHA256 = hashlib.sha256(
     os.environ.get("TAIJI_NETWORK_GUARD_MARKER", "").encode("utf-8")
 ).hexdigest()
+_CWD_SHA256 = hashlib.sha256(
+    os.path.realpath(os.getcwd()).encode("utf-8")
+).hexdigest()
+_EXECUTABLE_SHA256 = hashlib.sha256(
+    os.path.realpath(sys.executable).encode("utf-8")
+).hexdigest()
 
-def _record(kind):
+def _target_digest(target):
+    return hashlib.sha256(str(target or "").encode("utf-8")).hexdigest()
+
+def _address_target(address):
+    if isinstance(address, tuple) and address:
+        host = address[0]
+        port = address[1] if len(address) > 1 else ""
+        return f"{host}:{port}"
+    return str(address or "")
+
+def _record(kind, target=""):
     row = {
         "pid": os.getpid(),
         "type": kind,
         "role": _ROLE,
         "marker_sha256": _MARKER_SHA256,
+        "cwd_sha256": _CWD_SHA256,
+        "executable_sha256": _EXECUTABLE_SHA256,
     }
+    if target:
+        row["target_sha256"] = _target_digest(target)
     with open(_GUARD_LOG, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True) + "\\n")
+
+def _claim_role_probe():
+    claim = f"{_GUARD_LOG}.{_ROLE}.probe"
+    try:
+        descriptor = os.open(
+            claim,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError:
+        return False
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+    return True
 
 def _loopback(host):
     value = str(host or "").strip("[]").lower()
     return value in {"127.0.0.1", "::1", "localhost"}
 
-def _blocked():
-    _record("python_network_blocked")
+def _blocked(target):
+    _record("python_network_blocked", target)
     raise OSError(errno.ENETUNREACH, "TAIJI_PYTHON_TEST_NETWORK_BLOCKED")
 
 _original_socket_connect = socket.socket.connect
@@ -516,41 +745,43 @@ def _guarded_socket_connect(instance, address):
     if instance.family in (socket.AF_INET, socket.AF_INET6):
         host = address[0] if isinstance(address, tuple) and address else ""
         if not _loopback(host):
-            return _blocked()
+            return _blocked(_address_target(address))
     return _original_socket_connect(instance, address)
 
 def _guarded_socket_connect_ex(instance, address):
     if instance.family in (socket.AF_INET, socket.AF_INET6):
         host = address[0] if isinstance(address, tuple) and address else ""
         if not _loopback(host):
-            _record("python_network_blocked")
+            _record("python_network_blocked", _address_target(address))
             return errno.ENETUNREACH
     return _original_socket_connect_ex(instance, address)
 
 def _guarded_create_connection(address, *args, **kwargs):
     host = address[0] if isinstance(address, tuple) and address else ""
     if not _loopback(host):
-        return _blocked()
+        return _blocked(_address_target(address))
     return _original_create_connection(address, *args, **kwargs)
 
 socket.socket.connect = _guarded_socket_connect
 socket.socket.connect_ex = _guarded_socket_connect_ex
 socket.create_connection = _guarded_create_connection
-_record("python_guard_loaded")
-try:
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    probe.settimeout(0.01)
-    probe.connect(("203.0.113.1", 9))
-except OSError as error:
-    if getattr(error, "errno", None) == errno.ENETUNREACH:
-        _record("python_guard_self_test_blocked")
-    else:
-        _record("python_guard_self_test_failed")
-finally:
+if _ROLE in {"agent", "web"}:
+    _record("python_guard_loaded")
+if _ROLE in {"agent", "web"} and _claim_role_probe():
     try:
-        probe.close()
-    except Exception:
-        pass
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(0.01)
+        probe.connect(("203.0.113.1", 9))
+    except OSError as error:
+        if getattr(error, "errno", None) == errno.ENETUNREACH:
+            _record("python_guard_self_test_blocked", "203.0.113.1:9")
+        else:
+            _record("python_guard_self_test_failed")
+    finally:
+        try:
+            probe.close()
+        except Exception:
+            pass
 `;
   fs.writeFileSync(
     path.join(pythonGuard, "sitecustomize.py"),
@@ -565,10 +796,13 @@ finally:
       "set -eu",
       `export PYTHONPATH=${shellQuote(pythonGuard)}`,
       'role="bootstrap"',
-      'case " $* " in',
-      '  *" taiji_runtime.main "*) role="agent" ;;',
-      '  *"server.py"*) role="web" ;;',
-      "esac",
+      'if [ "${1:-}" = "-m" ] && [ "${2:-}" = "taiji_runtime.main" ] && [ "${3:-}" = "gateway" ] && [ "${4:-}" = "run" ]; then',
+      '  role="agent"',
+      "else",
+      '  case "${1:-}" in',
+      '    */server.py|*/server.pyc) role="web" ;;',
+      "  esac",
+      "fi",
       'export TAIJI_PYTHON_GUARD_ROLE="$role"',
       `exec ${shellQuote(pythonBin)} "$@"`,
       "",
@@ -598,6 +832,268 @@ function readGuardEvents(file) {
         });
       }
     });
+}
+
+function normalizedGuardEvent(event) {
+  return {
+    pid: Number(event.pid),
+    role: String(event.role || "electron"),
+    type: String(event.type || ""),
+    marker_sha256: String(event.marker_sha256 || ""),
+    target_sha256: String(event.target_sha256 || ""),
+    method: String(event.method || ""),
+  };
+}
+
+function sortGuardEvents(events) {
+  return events
+    .map(normalizedGuardEvent)
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
+function assertExactGuardEvents(events, {
+  appPid,
+  agentPid,
+  webPid,
+  markerSha256,
+  publicTargetSha256,
+  canaryTargetSha256,
+  agentCwdSha256,
+  webCwdSha256,
+  pythonExecutableSha256,
+}) {
+  const electron = { pid: appPid, marker_sha256: markerSha256 };
+  const pythonProbeEvents = (role, pid) => [
+    {
+      pid,
+      role,
+      type: "python_network_blocked",
+      marker_sha256: markerSha256,
+      target_sha256: publicTargetSha256,
+    },
+    {
+      pid,
+      role,
+      type: "python_guard_self_test_blocked",
+      marker_sha256: markerSha256,
+      target_sha256: publicTargetSha256,
+    },
+  ];
+  const expectedCore = [
+    { ...electron, type: "electron_guard_loaded" },
+    {
+      ...electron,
+      type: "main_network_blocked",
+      target_sha256: publicTargetSha256,
+    },
+    {
+      ...electron,
+      type: "shell_external_blocked",
+      target_sha256: canaryTargetSha256,
+      method: "openExternal",
+    },
+    {
+      ...electron,
+      type: "window_open_blocked",
+      target_sha256: canaryTargetSha256,
+    },
+    ...pythonProbeEvents("agent", agentPid),
+    ...pythonProbeEvents("web", webPid),
+  ];
+  const loaded = events.filter(event => event.type === "python_guard_loaded");
+  const expectedIdentity = {
+    agent: agentCwdSha256,
+    web: webCwdSha256,
+  };
+  const loadedKeys = new Set();
+  for (const event of loaded) {
+    const role = String(event.role || "");
+    const key = `${role}:${Number(event.pid)}`;
+    assertState(
+      ["agent", "web"].includes(role)
+        && Number.isInteger(Number(event.pid))
+        && Number(event.pid) > 0
+        && Number(event.pid) !== appPid
+        && event.marker_sha256 === markerSha256
+        && event.cwd_sha256 === expectedIdentity[role]
+        && event.executable_sha256 === pythonExecutableSha256
+        && !event.target_sha256
+        && !loadedKeys.has(key),
+      "guard event loaded identity mismatch",
+      { event, expectedIdentity, pythonExecutableSha256 },
+    );
+    loadedKeys.add(key);
+  }
+  assertState(
+    loaded.filter(event => (
+      event.role === "agent" && Number(event.pid) === agentPid
+    )).length === 1
+      && loaded.filter(event => (
+        event.role === "web" && Number(event.pid) === webPid
+      )).length === 1,
+    "guard event loaded evidence is missing for a service PID",
+    { loaded, agentPid, webPid },
+  );
+  const actualSorted = sortGuardEvents(
+    events.filter(event => event.type !== "python_guard_loaded"),
+  );
+  const expectedSorted = sortGuardEvents(expectedCore);
+  assertState(
+    JSON.stringify(actualSorted) === JSON.stringify(expectedSorted),
+    "guard event whitelist mismatch",
+    { expected: expectedSorted, actual: actualSorted, loaded },
+  );
+}
+
+function collectLiveGuardProcessIdentities(events, {
+  baselineTable,
+  markerSha256,
+  agentDir,
+  webuiDir,
+  pythonEntryPath,
+  pythonExecutableSha256,
+}) {
+  const result = [];
+  const seen = new Set();
+  for (const event of events) {
+    if (event.type !== "python_guard_loaded") continue;
+    const pid = Number(event.pid);
+    if (!Number.isInteger(pid) || pid <= 0 || seen.has(pid) || !pidAlive(pid)) {
+      continue;
+    }
+    seen.add(pid);
+    const role = String(event.role || "");
+    const expectedCwd = role === "agent"
+      ? agentDir
+      : role === "web"
+        ? webuiDir
+        : "";
+    const identity = processIdentity(pid);
+    const commandMatchesRole = role === "agent"
+      ? identity
+        && identity.command.includes("taiji_runtime.main")
+        && identity.command.includes("gateway run")
+      : role === "web"
+        ? identity && identity.command.includes(path.join(webuiDir, "server.py"))
+        : false;
+    assertState(
+      Boolean(identity)
+        && Boolean(expectedCwd)
+        && event.marker_sha256 === markerSha256
+        && event.cwd_sha256 === sha256Text(expectedCwd)
+        && event.executable_sha256 === pythonExecutableSha256
+        && identity.cwd === expectedCwd
+        && identity.command.includes(pythonEntryPath)
+        && commandMatchesRole
+        && !isBaselineProcess(baselineTable.get(pid), identity),
+      "live guard-loaded process identity is not safe to own",
+      {
+        event,
+        identity,
+        expected_cwd: expectedCwd,
+        python_entry_path: pythonEntryPath,
+      },
+    );
+    result.push(identity);
+  }
+  return result;
+}
+
+function mergeCleanupEvidence(target, update) {
+  for (const key of ["term", "kill", "skipped"]) {
+    target[key].push(...(update[key] || []));
+  }
+}
+
+async function stabilizeProcessCleanup({
+  baselineTable,
+  harnessRoot,
+  initialIdentities,
+  rootPids,
+  guardLog,
+  guardProcessExpected,
+  timeoutMs = 8000,
+}) {
+  const identities = new Map(
+    initialIdentities.filter(Boolean).map(identity => [identity.pid, identity]),
+  );
+  const cleanup = { term: [], kill: [], skipped: [] };
+  const snapshots = [];
+  const deadline = Date.now() + timeoutMs;
+  let consecutiveClean = 0;
+
+  while (Date.now() < deadline) {
+    const events = readGuardEvents(guardLog);
+    const guarded = collectLiveGuardProcessIdentities(
+      events,
+      guardProcessExpected,
+    );
+    for (const identity of guarded) identities.set(identity.pid, identity);
+
+    const table = processTable();
+    const descendantPids = descendantsOf(
+      [...new Set([...rootPids, ...identities.keys()])],
+      table,
+    );
+    for (const pid of descendantPids) {
+      const row = table.get(pid);
+      if (isBaselineProcess(baselineTable.get(pid), row)) continue;
+      const identity = processIdentity(pid);
+      if (identity) identities.set(pid, identity);
+    }
+
+    const liveIdentities = [...identities.values()].filter(identity => (
+      pidAlive(identity.pid)
+    ));
+    if (liveIdentities.length > 0) {
+      mergeCleanupEvidence(
+        cleanup,
+        await terminateOwnedProcesses(liveIdentities),
+      );
+    }
+
+    const afterTable = processTable();
+    const liveOwned = [...identities.keys()].filter(pidAlive);
+    const liveGuardLoaded = readGuardEvents(guardLog)
+      .filter(event => event.type === "python_guard_loaded")
+      .map(event => Number(event.pid))
+      .filter(pid => Number.isInteger(pid) && pid > 0 && pidAlive(pid));
+    const markedDelta = [...afterTable.values()]
+      .filter(row => !isBaselineProcess(baselineTable.get(row.pid), row))
+      .filter(row => (
+        row.command.includes(harnessRoot)
+        || identities.has(row.pid)
+        || liveGuardLoaded.includes(row.pid)
+      ))
+      .map(row => row.pid);
+    const clean = (
+      liveOwned.length === 0
+      && liveGuardLoaded.length === 0
+      && markedDelta.length === 0
+    );
+    snapshots.push({
+      clean,
+      live_owned: liveOwned,
+      live_guard_loaded: [...new Set(liveGuardLoaded)],
+      marked_delta: markedDelta,
+    });
+    consecutiveClean = clean ? consecutiveClean + 1 : 0;
+    if (consecutiveClean >= 2) {
+      return {
+        cleanup,
+        identities: [...identities.values()],
+        final_snapshot: snapshots.at(-1),
+        stable_clean_snapshots: 2,
+        attempts: snapshots.length,
+      };
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw new Error(`process cleanup did not stabilize\n${JSON.stringify(
+    snapshots.slice(-4),
+    null,
+    2,
+  )}`);
 }
 
 function waitForCondition(check, timeoutMs = 15000) {
@@ -702,6 +1198,27 @@ function providerFamilyFor(state, capability, providerId) {
   return "";
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(item => canonicalJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function imageCapabilityRequestDigest(payload) {
+  const canonicalPayload = {};
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (key !== "request_id") canonicalPayload[key] = value;
+  }
+  return sha256Text(canonicalJson(canonicalPayload));
+}
+
 function configuredResponse(state, payload, requestLog) {
   const next = clone(state);
   const updates = Array.isArray(payload.credential_updates)
@@ -802,7 +1319,6 @@ function configuredResponse(state, payload, requestLog) {
     };
   }
 
-  next.revision = "b".repeat(64);
   next.effective_route = {
     vision: {
       route: next.capabilities.vision.enabled ? "auxiliary_vision" : "disabled",
@@ -823,6 +1339,14 @@ function configuredResponse(state, payload, requestLog) {
       status: next.capabilities.image_generation.verification.status,
     },
   };
+  next.revision = sha256Text(canonicalJson({
+    previous_revision: state.revision,
+    request_id: String(payload.request_id || ""),
+    capabilities: next.capabilities,
+    provider_credentials: next.provider_credentials,
+    effective_route: next.effective_route,
+    verification_results: next.verification_results,
+  }));
   return { status: 200, body: next };
 }
 
@@ -974,6 +1498,53 @@ function initialFixtureState() {
   };
 }
 
+function createFixtureController(initialState, { requestLog = [] } = {}) {
+  let state = clone(initialState);
+  const requests = new Map();
+  return {
+    read() {
+      return clone(state);
+    },
+    replaceState(nextState) {
+      state = clone(nextState);
+    },
+    configure(payload) {
+      const requestId = String(payload && payload.request_id || "");
+      const digest = imageCapabilityRequestDigest(payload);
+      const cached = requests.get(requestId);
+      if (cached) {
+        if (cached.digest !== digest) {
+          return {
+            status: 400,
+            body: {
+              error: "request_id was already used for a different payload",
+              error_code: "request_id_conflict",
+            },
+          };
+        }
+        return clone(cached.response);
+      }
+
+      let response;
+      if (String(payload && payload.expected_revision || "").toLowerCase()
+          !== String(state.revision || "").toLowerCase()) {
+        response = {
+          status: 409,
+          body: {
+            error: "配置已被其他请求更新，请刷新后重试。",
+            error_code: "configuration_conflict",
+          },
+        };
+      } else {
+        response = configuredResponse(state, payload, requestLog);
+        if (response.status === 200) state = clone(response.body);
+      }
+      requests.set(requestId, { digest, response: clone(response) });
+      return clone(response);
+    },
+  };
+}
+
 function sanitizedLaunchEnv(base, dirs, {
   agentDir,
   guard,
@@ -1094,28 +1665,76 @@ const EXPECTED_FAMILY_MISMATCH_CONSOLE =
   "Failed to load resource: the server responded with a status of 400 (Bad Request)";
 const FAILURE_REDACTION_VALUES = [];
 
+function assertExpectedConsoleErrors(consoleErrors) {
+  assertState(
+    Array.isArray(consoleErrors)
+      && consoleErrors.length === 1
+      && consoleErrors[0] === EXPECTED_FAMILY_MISMATCH_CONSOLE,
+    "console error whitelist mismatch",
+    {
+      expected: [EXPECTED_FAMILY_MISMATCH_CONSOLE],
+      actual: consoleErrors,
+    },
+  );
+}
+
+function assertTerminalGates({
+  consoleErrors,
+  guardEvents,
+  guardExpected,
+  initialSourceSnapshot,
+  initialSourceFingerprint,
+  finalSourceSnapshot,
+  finalSourceFingerprint,
+  lateSignals = {},
+}) {
+  assertExpectedConsoleErrors(consoleErrors);
+  assertExactGuardEvents(guardEvents, guardExpected);
+  for (const [name, values] of Object.entries(lateSignals)) {
+    assertState(
+      Array.isArray(values) && values.length === 0,
+      `late ${name} evidence appeared before final pass`,
+      values,
+    );
+  }
+  assertStableSource(
+    initialSourceSnapshot,
+    initialSourceFingerprint,
+    finalSourceSnapshot,
+    finalSourceFingerprint,
+  );
+}
+
 async function main() {
   let harnessRoot = "";
   let outDir = "";
+  let resultFile = "";
   let app = null;
   let result = null;
   let runError = null;
   let cleanupError = null;
   let guard = null;
+  let guardProcessExpected = null;
   let pidFiles = null;
   let baselineTable = new Map();
   let sourceSnapshot = null;
+  let sourceFingerprint = null;
+  let sourceInputs = null;
+  let terminalGate = null;
+  let finalGuardEvents = [];
   let expectedAgentDir = "";
   let expectedWebuiDir = "";
   let appIdentity = null;
   let agentIdentity = null;
   let webIdentity = null;
+  let pageListenerOwnership = null;
   let ownedDescendantIdentities = [];
   const sensitiveValues = [];
   const screenshotSanity = {};
 
   try {
     const cli = parseArgs(process.argv.slice(2));
+    ({ outDir, resultFile } = prepareResultDestination(cli.outDir));
     const { _electron } = loadPlaywright();
     const defaultRepoRoot = path.resolve(__dirname, "..", "..", "..", "..");
     const repoRoot = realpathExisting(
@@ -1127,11 +1746,6 @@ async function main() {
       "source repository",
     );
     sourceSnapshot = gitSnapshot(repoRoot);
-    assertState(
-      !cli.requireCleanSource || !sourceSnapshot.status_short,
-      "source repository must be clean for this acceptance",
-      sourceSnapshot,
-    );
     const webuiDir = realpathExisting(
       path.join(repoRoot, "hermes-local-lab", "sources", "hermes-webui"),
       "WebUI source",
@@ -1158,6 +1772,14 @@ async function main() {
       path.join(appDir, "src", "preload.js"),
       "desktop preload entry",
     );
+    sourceInputs = {
+      repoRoot,
+      webuiDir,
+      productMain,
+      productPreload,
+    };
+    sourceFingerprint = collectExecutionSourceFingerprint(sourceInputs);
+    assertFormalMainSource(sourceSnapshot, sourceFingerprint);
     const electronResolution = process.env.TAIJI_ELECTRON_BIN
       ? {
         candidates: [process.env.TAIJI_ELECTRON_BIN],
@@ -1182,8 +1804,6 @@ async function main() {
     const pythonBin = pythonCandidate;
     const pythonBinaryRealpath = fs.realpathSync(pythonCandidate);
 
-    outDir = path.resolve(cli.outDir);
-    fs.mkdirSync(outDir, { recursive: true });
     harnessRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "taiji-image-capability-electron-"),
     );
@@ -1213,18 +1833,6 @@ async function main() {
     FAILURE_REDACTION_VALUES.push(...sensitiveValues);
 
     const runtimeConfig = installDailyEquivalentRuntimeConfig(dirs.runtimeHome);
-    const sourceFingerprint = collectSourceFingerprint({ repoRoot, webuiDir });
-    Object.assign(sourceFingerprint, {
-      acceptance_script_realpath: fs.realpathSync(__filename),
-      acceptance_script_sha256: sha256File(__filename),
-      api_model_config_sha256: sha256File(
-        path.join(webuiDir, "api", "model_config.py"),
-      ),
-      desktop_main_realpath: productMain,
-      desktop_main_sha256: sha256File(productMain),
-      desktop_preload_realpath: productPreload,
-      desktop_preload_sha256: sha256File(productPreload),
-    });
     guard = writeHarnessGuards({
       harnessRoot,
       productMain,
@@ -1232,14 +1840,23 @@ async function main() {
       guardMarker,
     });
     baselineTable = processTable();
-    const baselinePids = new Set(baselineTable.keys());
+    guardProcessExpected = {
+      baselineTable,
+      markerSha256: guard.markerSha256,
+      agentDir,
+      webuiDir,
+      pythonEntryPath: pythonBin,
+      pythonExecutableSha256: sha256Text(pythonBinaryRealpath),
+    };
     pidFiles = {
       agent: path.join(dirs.state, "taiji-agent", "logs", "agent.pid"),
       web: path.join(dirs.state, "taiji-agent", "logs", "web.pid"),
     };
 
-    let fixtureState = initialFixtureState();
     const configureRequests = [];
+    const fixtureController = createFixtureController(initialFixtureState(), {
+      requestLog: configureRequests,
+    });
     const apiRequests = [];
     const fixtureResponses = [];
     const routeViolations = [];
@@ -1264,11 +1881,13 @@ async function main() {
       timeout: 120000,
     });
     const appPid = app.process().pid;
-    assertState(!baselinePids.has(appPid), "Electron PID existed before launch", {
-      appPid,
-    });
     appIdentity = processIdentity(appPid);
     assertState(Boolean(appIdentity), "could not capture Electron process identity");
+    assertState(
+      !isBaselineProcess(baselineTable.get(appPid), appIdentity),
+      "Electron process identity existed before launch",
+      { appIdentity, baseline: baselineTable.get(appPid) || null },
+    );
     assertState(
       appIdentity.command.includes(electronBin)
         && appIdentity.command.includes(guard.electronWrapper),
@@ -1376,7 +1995,7 @@ async function main() {
           await route.fulfill({
             status: 200,
             contentType: "application/json",
-            body: JSON.stringify(fixtureState),
+            body: JSON.stringify(fixtureController.read()),
           });
           return;
         }
@@ -1409,12 +2028,7 @@ async function main() {
           await failRoute("request_id is not the canonical UUID emitted by the UI");
           return;
         }
-        const response = configuredResponse(
-          fixtureState,
-          payload,
-          configureRequests,
-        );
-        if (response.status === 200) fixtureState = clone(response.body);
+        const response = fixtureController.configure(payload);
         fixtureResponses.push({
           operation: "configure",
           status: response.status,
@@ -1452,13 +2066,22 @@ async function main() {
     await waitForDesktopReady(page);
     const agentPid = await waitForCondition(() => readPid(pidFiles.agent), 30000);
     const webPid = await waitForCondition(() => readPid(pidFiles.web), 30000);
-    for (const [kind, pid] of [["agent", agentPid], ["web", webPid]]) {
-      assertState(!baselinePids.has(pid), `${kind} PID existed before launch`, {
-        pid,
-      });
-    }
     agentIdentity = processIdentity(agentPid);
     webIdentity = processIdentity(webPid);
+    for (const [kind, identity] of [
+      ["agent", agentIdentity],
+      ["web", webIdentity],
+    ]) {
+      assertState(
+        identity
+          && !isBaselineProcess(baselineTable.get(identity.pid), identity),
+        `${kind} process identity existed before launch`,
+        {
+          identity,
+          baseline: identity ? baselineTable.get(identity.pid) || null : null,
+        },
+      );
+    }
     assertState(
       Boolean(agentIdentity)
         && agentIdentity.cwd === agentDir
@@ -1474,6 +2097,32 @@ async function main() {
       "WebUI process provenance does not match the selected source",
       webIdentity,
     );
+    pageListenerOwnership = {
+      ...assertTcpListenerOwner(Number(pageUrl.port), webPid),
+      cwd: webIdentity.cwd,
+      command_sha256: webIdentity.command_sha256,
+      identity_sha256: webIdentity.identity_sha256,
+    };
+    terminalGate = {
+      consoleErrors,
+      lateSignals: {
+        external_requests: externalRequests,
+        page_errors: pageErrors,
+        popup_urls: popupUrls,
+        route_violations: routeViolations,
+      },
+      guardExpected: {
+        appPid,
+        agentPid,
+        webPid,
+        markerSha256: guard.markerSha256,
+        publicTargetSha256: sha256Text("203.0.113.1:9"),
+        canaryTargetSha256: sha256Text(canaryUrl),
+        agentCwdSha256: sha256Text(agentDir),
+        webCwdSha256: sha256Text(webuiDir),
+        pythonExecutableSha256: sha256Text(pythonBinaryRealpath),
+      },
+    };
 
     const guardEventsReady = await waitForCondition(() => {
       const events = readGuardEvents(guard.guardLog);
@@ -1707,12 +2356,13 @@ async function main() {
       happyRequest,
     );
     const createdCredentialId = happyRequest.credential_updates[0].id;
+    const happyFixtureState = fixtureController.read();
     assertState(
       Boolean(createdCredentialId)
-        && fixtureState.capabilities.image_generation.credential_ref
+        && happyFixtureState.capabilities.image_generation.credential_ref
           === createdCredentialId,
       "created credential was not persisted in the fixture response",
-      { createdCredentialId, fixtureState },
+      { createdCredentialId, fixtureState: happyFixtureState },
     );
 
     await page.reload({ waitUntil: "domcontentloaded", timeout: 120000 });
@@ -1734,8 +2384,11 @@ async function main() {
       "saved secret field was unexpectedly redisplayed after reload",
     );
 
-    fixtureState.revision = "c".repeat(64);
-    fixtureState.capabilities.image_generation.credential_ref = "doubao-shared";
+    const mismatchFixtureState = fixtureController.read();
+    mismatchFixtureState.revision = "c".repeat(64);
+    mismatchFixtureState.capabilities.image_generation.credential_ref =
+      "doubao-shared";
+    fixtureController.replaceState(mismatchFixtureState);
     await page.locator("#btnReloadImageCapabilityCenter").click();
     await page.waitForFunction(
       () => (
@@ -1772,15 +2425,11 @@ async function main() {
       && response.error_code === "credential_family_mismatch"
     ));
     assertState(
-      mismatchResponses.length === 1
-        && consoleErrors.length === 1
-        && consoleErrors[0] === EXPECTED_FAMILY_MISMATCH_CONSOLE,
-      "family mismatch 400 is not the only whitelisted console error",
-      {
-        mismatchResponses,
-        consoleErrors,
-      },
+      mismatchResponses.length === 1,
+      "family mismatch did not produce exactly one 400 response",
+      { mismatchResponses },
     );
+    assertExpectedConsoleErrors(consoleErrors);
     await page.locator("#imageCapabilityCenterError").scrollIntoViewIfNeeded();
     screenshotSanity["02-family-mismatch.png"] =
       await captureAuditedScreenshot(
@@ -1884,7 +2533,7 @@ async function main() {
     }
 
     result = {
-      status: "passed",
+      status: "pending_terminal_gates",
       scope: "real Electron desktop/WebUI/DOM with renderer-only image capability API fixture",
       release_gate_boundary: {
         this_script_proves: [
@@ -1924,6 +2573,7 @@ async function main() {
         guarded_wrapper_realpath: guard.electronWrapper,
         python_entry_path: pythonBin,
         python_binary_realpath: pythonBinaryRealpath,
+        page_listener: pageListenerOwnership,
       },
       acceptance_provenance: buildAcceptanceProvenance({
         sourceFingerprint,
@@ -1983,7 +2633,7 @@ async function main() {
         const candidate = processIdentity(readPid(pidFiles.agent));
         if (
           candidate
-          && !baselineTable.has(candidate.pid)
+          && !isBaselineProcess(baselineTable.get(candidate.pid), candidate)
           && candidate.cwd === expectedAgentDir
           && candidate.command.includes("taiji_runtime.main")
           && candidate.command.includes("gateway run")
@@ -1995,7 +2645,7 @@ async function main() {
         const candidate = processIdentity(readPid(pidFiles.web));
         if (
           candidate
-          && !baselineTable.has(candidate.pid)
+          && !isBaselineProcess(baselineTable.get(candidate.pid), candidate)
           && candidate.cwd === expectedWebuiDir
           && candidate.command.includes(path.join(expectedWebuiDir, "server.py"))
         ) {
@@ -2010,7 +2660,12 @@ async function main() {
       const rootPids = rootIdentities.map(identity => identity.pid);
       const currentTable = processTable();
       ownedDescendantIdentities = descendantsOf(rootPids, currentTable)
-        .filter(pid => !baselineTable.has(pid))
+        .filter(pid => (
+          !isBaselineProcess(
+            baselineTable.get(pid),
+            currentTable.get(pid),
+          )
+        ))
         .map(processIdentity)
         .filter(Boolean);
       let electronCloseTimedOut = false;
@@ -2023,30 +2678,54 @@ async function main() {
           }, 5000)),
         ]);
       }
-      const cleanup = await terminateOwnedProcesses([
-        ...ownedDescendantIdentities,
-        ...rootIdentities,
-      ]);
-      const ownedPids = [
-        ...new Set(
-          [...ownedDescendantIdentities, ...rootIdentities]
-            .map(identity => identity.pid),
-        ),
-      ];
-      const survivors = ownedPids.filter(pidAlive);
-      const afterTable = processTable();
-      const markedDelta = [...afterTable.values()]
-        .filter(row => !baselineTable.has(row.pid))
-        .filter(row => (
-          (harnessRoot && row.command.includes(harnessRoot))
-          || ownedPids.includes(row.pid)
+      const afterCloseTable = processTable();
+      const afterCloseDescendants = descendantsOf(rootPids, afterCloseTable)
+        .filter(pid => (
+          !isBaselineProcess(
+            baselineTable.get(pid),
+            afterCloseTable.get(pid),
+          )
         ))
-        .map(row => row.pid);
-      assertState(
-        survivors.length === 0 && markedDelta.length === 0,
-        "guarded launch left owned or marked processes behind",
-        { survivors, markedDelta },
-      );
+        .map(processIdentity)
+        .filter(Boolean);
+      const initialCleanupIdentities = [
+        ...ownedDescendantIdentities,
+        ...afterCloseDescendants,
+        ...rootIdentities,
+      ];
+      const stabilized = guard && guardProcessExpected
+        ? await stabilizeProcessCleanup({
+          baselineTable,
+          harnessRoot,
+          initialIdentities: initialCleanupIdentities,
+          rootPids,
+          guardLog: guard.guardLog,
+          guardProcessExpected,
+        })
+        : {
+          cleanup: await terminateOwnedProcesses(initialCleanupIdentities),
+          identities: initialCleanupIdentities,
+          final_snapshot: {
+            live_owned: [],
+            live_guard_loaded: [],
+            marked_delta: [],
+          },
+          stable_clean_snapshots: 0,
+          attempts: 1,
+        };
+      const cleanup = stabilized.cleanup;
+      const allOwnedIdentities = stabilized.identities;
+      ownedDescendantIdentities = allOwnedIdentities.filter(identity => (
+        !rootPids.includes(identity.pid)
+      ));
+      const ownedPids = [...new Set(
+        allOwnedIdentities.map(identity => identity.pid),
+      )];
+      const survivors = stabilized.final_snapshot.live_owned;
+      const markedDelta = stabilized.final_snapshot.marked_delta;
+      if (guard) {
+        finalGuardEvents = readGuardEvents(guard.guardLog);
+      }
       if (result) {
         result.process_ownership.descendants_captured_before_close =
           ownedDescendantIdentities;
@@ -2056,15 +2735,15 @@ async function main() {
         result.cleanup = {
           ...cleanup,
           electron_close_timed_out: electronCloseTimedOut,
-          strategy: "capture identity and descendants, close Electron, then signal only unchanged non-baseline identities",
+          stable_clean_snapshots: stabilized.stable_clean_snapshots,
+          stabilization_attempts: stabilized.attempts,
+          final_stability_snapshot: stabilized.final_snapshot,
+          strategy: "capture before and after close, own strict guard-loaded PIDs, then require two clean bounded snapshots",
           pid_reuse_guard: "pid + start time + command + cwd SHA-256 must match before every signal",
         };
       }
     } catch (error) {
       cleanupError = error;
-    }
-    if (harnessRoot) {
-      fs.rmSync(harnessRoot, { recursive: true, force: true });
     }
   }
 
@@ -2072,33 +2751,123 @@ async function main() {
     if (cleanupError) {
       runError.message += `\nCleanup also failed: ${cleanupError.message}`;
     }
+    if (harnessRoot && fs.existsSync(harnessRoot)) {
+      runError.message += `\nHarness preserved at: ${harnessRoot}`;
+    }
     throw runError;
   }
-  if (cleanupError) throw cleanupError;
+  if (cleanupError) {
+    if (harnessRoot && fs.existsSync(harnessRoot)) {
+      cleanupError.message += `\nHarness preserved at: ${harnessRoot}`;
+    }
+    throw cleanupError;
+  }
   assertState(result, "Electron acceptance did not produce a result");
+  assertState(
+    terminalGate && sourceInputs && sourceSnapshot && sourceFingerprint,
+    "terminal acceptance gate inputs are incomplete",
+  );
+  let terminalSourceSnapshot = null;
+  let terminalSourceFingerprint = null;
+  try {
+    terminalSourceSnapshot = gitSnapshot(sourceInputs.repoRoot);
+    terminalSourceFingerprint =
+      collectExecutionSourceFingerprint(sourceInputs);
+    assertTerminalGates({
+      consoleErrors: terminalGate.consoleErrors,
+      guardEvents: finalGuardEvents,
+      guardExpected: terminalGate.guardExpected,
+      initialSourceSnapshot: sourceSnapshot,
+      initialSourceFingerprint: sourceFingerprint,
+      finalSourceSnapshot: terminalSourceSnapshot,
+      finalSourceFingerprint: terminalSourceFingerprint,
+      lateSignals: terminalGate.lateSignals,
+    });
+  } catch (error) {
+    if (harnessRoot && fs.existsSync(harnessRoot)) {
+      error.message += `\nHarness preserved at: ${harnessRoot}`;
+    }
+    throw error;
+  }
+  const terminalGuardEventCounts = {};
+  for (const event of finalGuardEvents) {
+    const key = `${event.role || "electron"}:${event.type}`;
+    terminalGuardEventCounts[key] = (terminalGuardEventCounts[key] || 0) + 1;
+  }
+  result.source_execution.terminal_git = terminalSourceSnapshot;
+  result.source_stability = {
+    checked_after_process_cleanup: true,
+    unchanged: true,
+    terminal_fingerprint: terminalSourceFingerprint,
+  };
+  result.network_isolation.guard_event_counts = terminalGuardEventCounts;
+  result.network_isolation.exact_guard_event_whitelist = true;
+  result.network_isolation.final_guard_events = finalGuardEvents;
+  if (harnessRoot) {
+    try {
+      fs.rmSync(harnessRoot, { recursive: true, force: true });
+    } catch (error) {
+      error.message += `\nHarness cleanup failed; preserved at: ${harnessRoot}`;
+      throw error;
+    }
+  }
+  assertTerminalGates({
+    consoleErrors: terminalGate.consoleErrors,
+    guardEvents: finalGuardEvents,
+    guardExpected: terminalGate.guardExpected,
+    initialSourceSnapshot: sourceSnapshot,
+    initialSourceFingerprint: sourceFingerprint,
+    finalSourceSnapshot: gitSnapshot(sourceInputs.repoRoot),
+    finalSourceFingerprint: collectExecutionSourceFingerprint(sourceInputs),
+    lateSignals: terminalGate.lateSignals,
+  });
+  result.status = "passed";
   result.canary_scan.result_and_stdout_checked = true;
   let serialized = JSON.stringify(result, null, 2);
   assertNoSensitiveValues(serialized, sensitiveValues, "result/stdout");
-  const resultFile = path.join(
-    outDir,
-    "electron-image-capability-center-result.json",
-  );
-  fs.writeFileSync(resultFile, `${serialized}\n`, "utf8");
   result.canary_scan.evidence_text_files_checked = scanTextArtifacts(
     outDir,
     sensitiveValues,
   );
   serialized = JSON.stringify(result, null, 2);
   assertNoSensitiveValues(serialized, sensitiveValues, "final result/stdout");
-  fs.writeFileSync(resultFile, `${serialized}\n`, "utf8");
+  const temporaryResultFile = `${resultFile}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(temporaryResultFile, `${serialized}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    fs.renameSync(temporaryResultFile, resultFile);
+  } catch (error) {
+    fs.rmSync(temporaryResultFile, { force: true });
+    throw error;
+  }
   process.stdout.write(`${serialized}\n`);
 }
 
-main().catch(error => {
-  const detail = redactText(
-    error && error.stack ? error.stack : error,
-    FAILURE_REDACTION_VALUES,
-  );
-  console.error(detail);
-  process.exitCode = 1;
-});
+module.exports = {
+  EXPECTED_FAMILY_MISMATCH_CONSOLE,
+  assertExactGuardEvents,
+  assertExpectedConsoleErrors,
+  assertFormalMainSource,
+  assertStableSource,
+  assertTcpListenerOwner,
+  collectLiveGuardProcessIdentities,
+  createFixtureController,
+  gitSnapshot,
+  initialFixtureState,
+  isBaselineProcess,
+  prepareResultDestination,
+  writeHarnessGuards,
+};
+
+if (require.main === module) {
+  main().catch(error => {
+    const detail = redactText(
+      error && error.stack ? error.stack : error,
+      FAILURE_REDACTION_VALUES,
+    );
+    console.error(detail);
+    process.exitCode = 1;
+  });
+}
