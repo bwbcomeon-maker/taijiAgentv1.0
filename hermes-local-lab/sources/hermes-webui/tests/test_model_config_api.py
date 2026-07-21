@@ -7994,6 +7994,39 @@ def test_probe_cleanup_candidate_identity_change_does_not_delete_replacement(
     assert result_path.read_bytes() == b"replacement"
 
 
+def test_probe_cleanup_candidate_rejects_reused_inode_with_changed_generation():
+    class ReusedInodePath:
+        def __init__(self):
+            self.unlinked = False
+
+        def lstat(self):
+            return SimpleNamespace(
+                st_dev=7,
+                st_ino=11,
+                st_mode=model_config.stat.S_IFREG,
+                st_size=19,
+                st_mtime_ns=200,
+                st_ctime_ns=300,
+            )
+
+        def unlink(self):
+            self.unlinked = True
+
+    path = ReusedInodePath()
+    candidate = model_config._ProbeCleanupCandidate(
+        path=path,
+        device=7,
+        inode=11,
+        file_type=model_config.stat.S_IFREG,
+        size=18,
+        mtime_ns=100,
+        ctime_ns=150,
+    )
+
+    assert model_config._remove_probe_cleanup_candidate(candidate) is False
+    assert path.unlinked is False
+
+
 def test_probe_cache_accepts_runtime_home_parent_symlink(monkeypatch, tmp_path):
     real_home = tmp_path / "real-home"
     real_home.mkdir()

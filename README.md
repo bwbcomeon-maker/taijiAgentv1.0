@@ -34,20 +34,23 @@ To configure real model providers, copy `hermes-local-lab/.env.example` to `herm
 
 ## GitHub Workflow
 
-For day-to-day work:
+`main` is the only formal runtime, packaging and release source. Day-to-day
+changes use a short-lived `codex/*` branch in an isolated worktree:
 
-```bash
-git status
-git add <changed-files>
-git commit -m "describe the change"
-git push
-```
+1. Create a worktree/branch from current `main`.
+2. Implement and test locally, then create one clear local commit.
+3. Push the branch and open a pull request; do not push development commits
+   directly to `main`.
+4. GitHub CI selects the smallest safe test scope from changed paths. Add the
+   `full-ci` label to force every automated suite.
+5. Merge only after the required `CI Gate` check passes, then fast-forward the
+   formal local `main` and verify it is clean.
 
-To roll back after pushing:
+Documentation-only changes use the fast lane. Normal code changes run root
+contracts plus affected modules. Workflow, dependency, security, provider,
+license, migration, packaging and release changes run every automated suite.
+Real Electron, OAuth/provider, WPS and Kylin/UOS target-machine checks remain
+release gates because shared GitHub runners cannot reproduce those environments.
 
-```bash
-git log --oneline
-git checkout <commit>
-```
-
-Use `git revert <commit>` when you want to create a new commit that safely undoes a previous change on GitHub.
+See [the solo-development runbook](docs/runbooks/github-pr-ci-workflow.md) for
+the exact commands and recovery procedure.

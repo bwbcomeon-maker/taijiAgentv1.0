@@ -3526,6 +3526,22 @@ class _ProbeCleanupCandidate:
     device: int
     inode: int
     file_type: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+def _probe_cleanup_candidate_matches(
+    candidate: _ProbeCleanupCandidate,
+    info: os.stat_result,
+) -> bool:
+    return bool(
+        (info.st_dev, info.st_ino) == (candidate.device, candidate.inode)
+        and stat.S_IFMT(info.st_mode) == candidate.file_type
+        and info.st_size == candidate.size
+        and info.st_mtime_ns == candidate.mtime_ns
+        and info.st_ctime_ns == candidate.ctime_ns
+    )
 
 
 def _snapshot_image_cache() -> _ImageCacheSnapshot:
@@ -3591,6 +3607,9 @@ def _probe_cleanup_candidate(
         device=info.st_dev,
         inode=info.st_ino,
         file_type=stat.S_IFMT(info.st_mode),
+        size=info.st_size,
+        mtime_ns=info.st_mtime_ns,
+        ctime_ns=info.st_ctime_ns,
     )
 
 
@@ -3606,10 +3625,9 @@ def _owned_probe_image(
         resolved.relative_to(before.root)
     except (OSError, RuntimeError, ValueError):
         return None
-    identity = (info.st_dev, info.st_ino)
     if (
-        identity != (candidate.device, candidate.inode)
-        or identity in before.inodes
+        not _probe_cleanup_candidate_matches(candidate, info)
+        or (info.st_dev, info.st_ino) in before.inodes
         or not stat.S_ISREG(info.st_mode)
         or info.st_nlink != 1
     ):
@@ -3648,10 +3666,7 @@ def _has_safe_image_header(image: _OwnedProbeImage) -> bool:
 def _remove_probe_cleanup_candidate(candidate: _ProbeCleanupCandidate) -> bool:
     try:
         info = candidate.path.lstat()
-        if (
-            (info.st_dev, info.st_ino) != (candidate.device, candidate.inode)
-            or stat.S_IFMT(info.st_mode) != candidate.file_type
-        ):
+        if not _probe_cleanup_candidate_matches(candidate, info):
             return False
         candidate.path.unlink()
         return True
