@@ -162,22 +162,26 @@ class CanonicalMainGateWiringTests(unittest.TestCase):
         self.assertIn('--repo-root "$REPO_DIR"', source)
         self.assertIn('--source-root "$REPO_DIR"', source)
 
-    def test_desktop_launchers_default_to_formal_but_support_explicit_development_mode(self):
-        for relative_path in (
-            "hermes-local-lab/启动太极Agent桌面端.command",
+    def test_desktop_command_uses_the_shared_source_gate(self):
+        source = self.read("hermes-local-lab/启动太极Agent桌面端.command")
+
+        self.assertIn('TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"', source)
+        self.assertIn("check-clean-worktree.sh", source)
+        self.assertIn('--mode "$TAIJI_SOURCE_MODE"', source)
+        self.assertIn('--repo-root "$REPO_DIR"', source)
+        self.assertIn('--source-root "$REPO_DIR"', source)
+
+    def test_finder_desktop_launcher_keeps_the_source_gate_in_process(self):
+        source = self.read(
             "hermes-local-lab/启动太极Agent桌面端.app/Contents/MacOS/"
-            "taiji-agent-desktop-launcher",
-        ):
-            with self.subTest(path=relative_path):
-                source = self.read(relative_path)
-                self.assertIn(
-                    'TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"',
-                    source,
-                )
-                self.assertIn("check-clean-worktree.sh", source)
-                self.assertIn('--mode "$TAIJI_SOURCE_MODE"', source)
-                self.assertIn('--repo-root "$REPO_DIR"', source)
-                self.assertIn('--source-root "$REPO_DIR"', source)
+            "taiji-agent-desktop-launcher"
+        )
+
+        self.assertIn('TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"', source)
+        self.assertIn("check_source_gate()", source)
+        self.assertIn('check_source_gate "$TAIJI_SOURCE_MODE"', source)
+        self.assertNotIn("SOURCE_GATE=", source)
+        self.assertNotIn("check-clean-worktree.sh", source)
 
     def test_persistent_credential_lock_is_excluded_from_source_status(self):
         ignore_lines = {
