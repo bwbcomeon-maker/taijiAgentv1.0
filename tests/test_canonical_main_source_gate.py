@@ -171,7 +171,7 @@ class CanonicalMainGateWiringTests(unittest.TestCase):
         self.assertIn('--repo-root "$REPO_DIR"', source)
         self.assertIn('--source-root "$REPO_DIR"', source)
 
-    def test_finder_desktop_launcher_runs_the_shared_gate_in_an_osascript_shell(self):
+    def test_finder_desktop_runner_invokes_the_shared_source_gate(self):
         source = self.read(
             "hermes-local-lab/启动太极Agent桌面端.app/Contents/MacOS/"
             "taiji-agent-desktop-launcher"
@@ -180,9 +180,10 @@ class CanonicalMainGateWiringTests(unittest.TestCase):
         self.assertIn('TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"', source)
         self.assertIn("SOURCE_GATE=", source)
         self.assertIn("check-clean-worktree.sh", source)
-        self.assertIn("check_source_gate()", source)
-        self.assertIn('check_source_gate "$SOURCE_GATE" "$TAIJI_SOURCE_MODE"', source)
-        self.assertIn("do shell script", source)
+        self.assertIn('if ! "$SOURCE_GATE"', source)
+        self.assertIn('--mode "$TAIJI_SOURCE_MODE"', source)
+        self.assertIn('--repo-root "$REPO_DIR"', source)
+        self.assertIn('--source-root "$REPO_DIR"', source)
 
     def test_persistent_credential_lock_is_excluded_from_source_status(self):
         ignore_lines = {

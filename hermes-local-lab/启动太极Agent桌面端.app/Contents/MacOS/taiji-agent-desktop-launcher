@@ -23,33 +23,6 @@ show_error() {
   /usr/bin/osascript -e "display dialog \"$escaped\" with title \"太极 Agent 启动失败\" buttons {\"好\"} default button \"好\"" >/dev/null 2>&1 || true
 }
 
-check_source_gate() {
-  local gate_path="$1"
-  local mode="$2"
-  local gate_output
-
-  # LaunchServices may deny this unsigned shell bundle access to Documents,
-  # while the existing osascript runner has the required user-shell context.
-  if ! gate_output="$(/usr/bin/osascript - "$gate_path" "$mode" "$REPO_DIR" <<'OSA'
-on run argv
-  set gatePath to item 1 of argv
-  set sourceMode to item 2 of argv
-  set repoPath to item 3 of argv
-  return do shell script quoted form of gatePath & " --mode " & quoted form of sourceMode & " --repo-root " & quoted form of repoPath & " --source-root " & quoted form of repoPath
-end run
-OSA
-)"; then
-    printf '%s\n' "$gate_output" >&2
-    return 1
-  fi
-  printf '%s\n' "$gate_output"
-}
-
-if ! check_source_gate "$SOURCE_GATE" "$TAIJI_SOURCE_MODE"; then
-  show_error "源码状态校验未通过。正式启动仅允许干净的 main；开发调试请显式设置 TAIJI_SOURCE_MODE=development。"
-  exit 1
-fi
-
 echo "========================================"
 echo "太极 Agent 桌面端启动器"
 echo "========================================"
@@ -128,6 +101,13 @@ export TAIJI_SOURCE_ROOT="$TAIJI_SOURCE_ROOT"
 export TAIJI_SOURCE_COMMIT="$TAIJI_SOURCE_COMMIT"
 export TAIJI_SOURCE_DIRTY="$TAIJI_SOURCE_DIRTY"
 export TAIJI_DESKTOP_USER_DATA_DIR="$TAIJI_DESKTOP_USER_DATA_DIR"
+if ! "$SOURCE_GATE" \
+  --mode "$TAIJI_SOURCE_MODE" \
+  --repo-root "$REPO_DIR" \
+  --source-root "$REPO_DIR"; then
+  /usr/bin/osascript -e 'display dialog "源码状态校验未通过。正式启动仅允许干净的 main；开发调试请显式设置 TAIJI_SOURCE_MODE=development。" with title "太极 Agent 启动失败" buttons {"好"} default button "好"' >/dev/null 2>&1 || true
+  exit 1
+fi
 cd "$APP_DIR"
 exec "$ELECTRON_BIN" "$APP_DIR" >>"$LOG_FILE" 2>&1
 EOF
