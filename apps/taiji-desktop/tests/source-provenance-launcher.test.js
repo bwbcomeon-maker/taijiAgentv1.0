@@ -78,6 +78,15 @@ test("Electron boot and runtime logs preserve the exact source provenance", () =
   assert.match(mainSource, /sourceDirty=/);
 });
 
+test("Electron verifies formal source provenance before creating a window", () => {
+  const gateIndex = mainSource.indexOf("verifyFormalSourceBeforeWindow();");
+  const windowIndex = mainSource.indexOf("createWindow();", gateIndex);
+  assert.notEqual(gateIndex, -1);
+  assert.notEqual(windowIndex, -1);
+  assert.ok(gateIndex < windowIndex);
+  assert.match(mainSource, /spawnSync\("\/usr\/bin\/git"/);
+});
+
 test("Electron authenticates the desktop session without putting the bearer token in the URL", () => {
   const cookieIndex = mainSource.indexOf("webContents.session.cookies.set");
   const loadIndex = mainSource.indexOf(

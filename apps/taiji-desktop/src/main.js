@@ -113,6 +113,33 @@ function desktopBootLog(message) {
   }
 }
 
+function verifyFormalSourceBeforeWindow() {
+  const mode = String(process.env.TAIJI_SOURCE_MODE || "formal").trim();
+  if (mode === "development") return;
+  if (mode !== "formal") throw new Error(`Unsupported source mode: ${mode}`);
+
+  const sourceRoot = path.resolve(process.env.TAIJI_SOURCE_ROOT || path.join(app.getAppPath(), "..", ".."));
+  const gitEnv = { ...process.env };
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) {
+    delete gitEnv[name];
+  }
+  const git = (...args) => {
+    const result = spawnSync("/usr/bin/git", ["-C", sourceRoot, ...args], { encoding: "utf8", env: gitEnv });
+    if (result.status !== 0) throw new Error((result.stderr || result.stdout || "git source check failed").trim());
+    return String(result.stdout || "").trim();
+  };
+
+  const top = fs.realpathSync.native(git("rev-parse", "--show-toplevel"));
+  if (top !== fs.realpathSync.native(sourceRoot)) throw new Error("Source root does not match Git top-level.");
+  const commonRaw = git("rev-parse", "--git-common-dir");
+  const commonDir = path.isAbsolute(commonRaw) ? commonRaw : path.join(top, commonRaw);
+  if (fs.realpathSync.native(path.join(commonDir, "..")) !== top) throw new Error("Formal launch requires the primary worktree.");
+  if (git("symbolic-ref", "--quiet", "--short", "HEAD") !== "main") throw new Error("Formal launch requires branch main.");
+  if (git("rev-parse", "HEAD") !== git("rev-parse", "refs/heads/main")) throw new Error("Formal launch HEAD does not match main.");
+  if (git("status", "--porcelain=v1", "--untracked-files=all")) throw new Error("Formal source worktree is dirty.");
+  desktopBootLog(`source gate passed root=${JSON.stringify(sourceRoot)}`);
+}
+
 desktopBootLog(
   `boot argv=${JSON.stringify(process.argv)} defaultApp=${process.defaultApp ? "1" : "0"} ` +
   `appPath=${app.getAppPath()} lock=${gotSingleInstanceLock ? "1" : "0"} ` +
@@ -710,6 +737,15 @@ if (!gotSingleInstanceLock) {
     desktopBootLog("app.whenReady");
     installMenu();
     installDesktopIpcHandlers();
+    try {
+      verifyFormalSourceBeforeWindow();
+    } catch (error) {
+      const message = `源码状态校验未通过：${error.message}`;
+      desktopBootLog(message);
+      dialog.showErrorBox("太极 Agent 启动失败", message);
+      app.quit();
+      return;
+    }
     createWindow();
   });
 

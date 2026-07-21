@@ -10,7 +10,6 @@ APP_DIR="$REPO_DIR/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 LOG_DIR="$HOME/.local/state/taiji-agent/logs"
 LOG_FILE="$LOG_DIR/taiji-desktop-launcher.log"
-SOURCE_GATE="$REPO_DIR/scripts/check-clean-worktree.sh"
 TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"
 
 mkdir -p "$LOG_DIR"
@@ -101,13 +100,7 @@ export TAIJI_SOURCE_ROOT="$TAIJI_SOURCE_ROOT"
 export TAIJI_SOURCE_COMMIT="$TAIJI_SOURCE_COMMIT"
 export TAIJI_SOURCE_DIRTY="$TAIJI_SOURCE_DIRTY"
 export TAIJI_DESKTOP_USER_DATA_DIR="$TAIJI_DESKTOP_USER_DATA_DIR"
-if ! "$SOURCE_GATE" \
-  --mode "$TAIJI_SOURCE_MODE" \
-  --repo-root "$REPO_DIR" \
-  --source-root "$REPO_DIR"; then
-  /usr/bin/osascript -e 'display dialog "源码状态校验未通过。正式启动仅允许干净的 main；开发调试请显式设置 TAIJI_SOURCE_MODE=development。" with title "太极 Agent 启动失败" buttons {"好"} default button "好"' >/dev/null 2>&1 || true
-  exit 1
-fi
+export TAIJI_SOURCE_MODE="$TAIJI_SOURCE_MODE"
 cd "$APP_DIR"
 exec "$ELECTRON_BIN" "$APP_DIR" >>"$LOG_FILE" 2>&1
 EOF
