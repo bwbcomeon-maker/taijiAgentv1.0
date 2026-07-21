@@ -1573,6 +1573,7 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
+  if(e.key==='Tab'&&typeof trapApprovalFocus==='function'&&trapApprovalFocus(e)) return;
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
@@ -1585,14 +1586,15 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
-  if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
+  // Escape is the only card-wide approval shortcut, and always takes the safe path.
+  // Enter is handled only by the explicitly focused button's native behavior.
+  if(e.key==='Escape'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
     const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
+    if(card&&card.classList.contains('visible')){
       e.preventDefault();
-      if(typeof respondApproval==='function') respondApproval('once');
+      if(typeof cancelApprovalAdvancedAction==='function'&&!$('approvalConfirmation').hidden){
+        cancelApprovalAdvancedAction();
+      }else if(typeof respondApproval==='function') respondApproval('deny');
       return;
     }
   }

@@ -1890,6 +1890,60 @@ def public_approval_projection(payload: Any) -> dict:
     cleaned["summary"] = _mask_public_sensitive_text(
         _public_visible_text(summary), hide_local_paths=True
     )
+    pattern_keys = source.get("pattern_keys")
+    if not isinstance(pattern_keys, list):
+        pattern_keys = [source.get("pattern_key")] if source.get("pattern_key") else []
+    known_tirith_rules = {
+        "pipe_to_interpreter",
+        "shortened_url",
+        "homograph_url",
+    }
+    rule_ids = []
+    for key in pattern_keys:
+        if not isinstance(key, str) or not key.startswith("tirith:") or ":" not in key:
+            continue
+        raw_rule_id = key.split(":", 1)[1]
+        rule_ids.append(raw_rule_id if raw_rule_id in known_tirith_rules else "restricted_operation")
+    rule_ids = list(dict.fromkeys(rule_ids))
+    is_capability = source.get("approval_type") == "capability_enable" or source.get("kind") == "capability_enable"
+    reason_code = rule_ids[0] if rule_ids else ("capability_enable" if is_capability else "restricted_operation")
+    descriptions = " ".join(
+        str(item or "") for item in (
+            source.get("description"),
+            source.get("pattern_key"),
+            *(pattern_keys or []),
+        )
+    ).lower()
+    if reason_code == "pipe_to_interpreter":
+        detail_summary = "检测到高风险的本机命令执行方式。"
+    elif reason_code == "shortened_url":
+        detail_summary = "检测到会隐藏真实访问地址的短链接。"
+    elif reason_code == "homograph_url":
+        detail_summary = "检测到外观疑似仿冒正规网站的网址。"
+    elif is_capability:
+        detail_summary = "此功能需要额外的本机权限。"
+    else:
+        detail_summary = "此操作触发了本机安全规则。"
+        if "recursive delete" in descriptions or "rm -rf" in descriptions:
+            reason_code = "delete_files"
+        elif "git reset --hard" in descriptions:
+            reason_code = "reset_changes"
+        elif "overwrite" in descriptions or "config" in descriptions:
+            reason_code = "overwrite_config"
+        elif "sudo" in descriptions or "privilege" in descriptions:
+            reason_code = "elevated_permission"
+    choices = source.get("choices") if isinstance(source.get("choices"), list) else []
+    allow_permanent = source.get("allow_permanent")
+    if not isinstance(allow_permanent, bool):
+        allow_permanent = not bool(rule_ids) and (not choices or "always" in choices)
+    cleaned["presentation"] = {
+        "category": "capability" if is_capability else "local_command",
+        "risk_level": "high" if rule_ids else "warning",
+        "reason_code": reason_code,
+        "allow_permanent": allow_permanent,
+        "detail_summary": detail_summary,
+        "rule_ids": rule_ids,
+    }
     return cleaned
 
 

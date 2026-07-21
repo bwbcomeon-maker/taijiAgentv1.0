@@ -12693,15 +12693,6 @@ def handle_post(handler, parsed) -> bool:
         enabled = bool(body.get("enabled", True))
         if enabled:
             enable_session_yolo(sid)
-            # Also resolve any pending approvals for this session so the
-            # agent doesn't stay stuck waiting on an already-dismissed card.
-            try:
-                from tools.approval import _pending as _p, _lock as _l
-                with _l:
-                    _p.pop(sid, None)
-            except Exception:
-                pass
-            resolve_gateway_approval(sid, "once", resolve_all=True)
         else:
             disable_session_yolo(sid)
         return j(handler, {"ok": True, "yolo_enabled": enabled})
@@ -20337,6 +20328,12 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
     approval_payload = pending or gateway_data or {}
+    effective_choice = choice
+    has_tirith = any(str(key).startswith("tirith:") for key in all_keys)
+    if choice == "always" and (approval_payload.get("allow_permanent") is False or has_tirith):
+        # Tirith/security-scanner findings are intentionally session-only.
+        # A stale client cannot turn them into a permanent allowlist entry.
+        effective_choice = "session"
     remote_gateway_run_id = str(approval_payload.get("_gateway_run_id") or "").strip()
     remote_gateway_resolved = False
     remote_gateway_inactive = False
@@ -20344,7 +20341,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
         try:
             from api.gateway_chat import resolve_gateway_run_approval_result
 
-            remote_gateway_result = resolve_gateway_run_approval_result(approval_payload, choice)
+            remote_gateway_result = resolve_gateway_run_approval_result(approval_payload, effective_choice)
             remote_gateway_resolved = bool(remote_gateway_result.get("resolved"))
             remote_gateway_inactive = bool(remote_gateway_result.get("inactive"))
         except Exception:
@@ -20366,10 +20363,10 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
             return False
     is_capability_approval = approval_payload.get("approval_type") == "capability_enable" or approval_payload.get("kind") == "capability_enable"
     if not is_capability_approval:
-        if choice in ("once", "session"):
+        if effective_choice == "session":
             for k in all_keys:
                 approve_session(sid, k)
-        elif choice == "always":
+        elif effective_choice == "always":
             for k in all_keys:
                 approve_session(sid, k)
                 approve_permanent(k)
@@ -20379,7 +20376,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # thread is parked in entry.event.wait() and needs to be woken up.
     gateway_resolved = 0
     if found_target or not approval_id:
-        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+        gateway_resolved = resolve_gateway_approval(sid, effective_choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
     if remote_gateway_run_id:

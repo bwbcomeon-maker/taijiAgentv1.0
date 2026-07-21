@@ -149,6 +149,31 @@ class TestTirithAllowDangerous:
 # ---------------------------------------------------------------------------
 
 class TestTirithWarnSafe:
+    @patch("tools.approval._get_approval_mode", return_value="ask")
+    @patch(_TIRITH_PATCH,
+           return_value=_tirith_result("warn",
+                                       [{"rule_id": "pipe_to_interpreter"}],
+                                       "pipe to interpreter"))
+    def test_gateway_payload_disables_permanent_scope(self, mock_tirith, mock_mode):
+        os.environ["HERMES_GATEWAY_SESSION"] = "1"
+        received = []
+
+        from tools.approval import register_gateway_notify, resolve_gateway_approval
+
+        def notify(payload):
+            received.append(payload)
+            resolve_gateway_approval("approval-office-copy", "deny")
+
+        register_gateway_notify("approval-office-copy", notify)
+        token = set_current_session_key("approval-office-copy")
+        try:
+            result = check_all_command_guards("cat file | python3", "local")
+        finally:
+            reset_current_session_key(token)
+
+        assert result["approved"] is False
+        assert received[0]["allow_permanent"] is False
+
     @patch(_TIRITH_PATCH,
            return_value=_tirith_result("warn",
                                        [{"rule_id": "shortened_url"}],

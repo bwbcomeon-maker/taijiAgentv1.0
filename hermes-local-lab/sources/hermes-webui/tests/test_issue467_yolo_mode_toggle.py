@@ -126,6 +126,36 @@ class TestYoloEndpointPost:
         data = _post("/api/session/yolo", {"session_id": sid})
         assert data.get("yolo_enabled") is True
 
+    def test_yolo_preserves_current_and_already_queued_approvals(self):
+        from api import routes
+        from tools.approval import _ApprovalEntry
+
+        sid = "test-yolo-existing-queue-001"
+        first = _ApprovalEntry({"allow_permanent": True})
+        second = _ApprovalEntry({"allow_permanent": True})
+        with routes._lock:
+            routes._pending[sid] = [
+                {"approval_id": "first", "description": "first"},
+                {"approval_id": "second", "description": "second"},
+            ]
+            routes._gateway_queues[sid] = [first, second]
+
+        try:
+            data = _post("/api/session/yolo", {"session_id": sid, "enabled": True})
+
+            assert data.get("ok") is True
+            assert first.result is None
+            assert not first.event.is_set()
+            assert second.result is None
+            assert not second.event.is_set()
+            with routes._lock:
+                assert [item["approval_id"] for item in routes._pending[sid]] == ["first", "second"]
+                assert routes._gateway_queues[sid] == [first, second]
+        finally:
+            with routes._lock:
+                routes._pending.pop(sid, None)
+                routes._gateway_queues.pop(sid, None)
+
 
 # ── Frontend JS tests (static file analysis — no server needed) ──
 

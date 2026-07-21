@@ -52,7 +52,7 @@ def test_taiji_desktop_approval_flyout_is_readable_above_composer():
     assert idx >= 0
     desktop_flyout = STYLE_CSS[idx : idx + 900]
 
-    assert "bottom:12px!important" in desktop_flyout
+    assert "bottom:48px!important" in desktop_flyout
     assert "z-index:60!important" in desktop_flyout
     assert "overflow:visible!important" in desktop_flyout
     assert "background:rgba(255,255,255,.98)!important" in desktop_flyout

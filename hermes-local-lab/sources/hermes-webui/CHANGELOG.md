@@ -20,6 +20,7 @@
 
 ### Changed
 
+- Redesigned approval prompts for office users with plain-language Chinese summaries, explicit permission and impact fields, collapsed technical details, three primary decisions, and confirmed advanced authorization options. High-risk scanner findings no longer offer permanent authorization, and Enter no longer approves a visible card globally.
 - User-facing app identity now uses `taiji Agent` across title, manifest, shell UI, offline/service-worker copy, settings, onboarding, dialogs, toasts, and main English/Chinese UI strings while retaining internal Hermes protocol/env/cache identifiers.
 - The default WebUI appearance is now `light + taiji-light-glass`; existing theme and skin choices remain available.
 - The 1024px+ desktop UI now uses the Taiji brand sidebar, live recent-conversation panel, electric-grid main workspace, and real glass composer Dock while hiding the old desktop rail/header/sidebar in that shell.

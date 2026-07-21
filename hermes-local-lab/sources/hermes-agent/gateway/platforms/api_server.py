@@ -5850,11 +5850,15 @@ class APIServerAdapter(BasePlatformAdapter):
 
                 def _approval_notify(approval_data: Dict[str, Any]) -> None:
                     event = dict(approval_data or {})
+                    choices = ["once", "session"]
+                    if event.get("allow_permanent", True):
+                        choices.append("always")
+                    choices.append("deny")
                     event.update({
                         "event": "approval.request",
                         "run_id": run_id,
                         "timestamp": time.time(),
-                        "choices": ["once", "session", "always", "deny"],
+                        "choices": choices,
                     })
                     self._set_run_status(
                         run_id,

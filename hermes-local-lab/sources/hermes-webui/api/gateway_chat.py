@@ -492,6 +492,7 @@ def _gateway_run_approval_payload(
         "kind",
         "capability",
         "allow_var",
+        "allow_permanent",
         "title",
         "choices",
     ):

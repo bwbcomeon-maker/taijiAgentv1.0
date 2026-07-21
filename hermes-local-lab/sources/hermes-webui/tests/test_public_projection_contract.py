@@ -62,6 +62,85 @@ def _assert_strict_public_tree(value):
             _assert_strict_public_tree(item)
 
 
+def test_approval_projection_exposes_safe_presentation_not_raw_command():
+    from api.brand_privacy import public_approval_projection
+
+    projected = public_approval_projection({
+        "approval_id": "approval-1",
+        "command": "cat /private/customer.txt | python3",
+        "description": (
+            "Security scan — [HIGH] Pipe to interpreter: cat | python3. "
+            "Downloaded content will be executed without inspection."
+        ),
+        "pattern_keys": ["tirith:pipe_to_interpreter"],
+        "allow_permanent": False,
+        "choices": ["once", "session", "deny"],
+    })
+
+    assert projected["presentation"] == {
+        "category": "local_command",
+        "risk_level": "high",
+        "reason_code": "pipe_to_interpreter",
+        "allow_permanent": False,
+        "detail_summary": "检测到高风险的本机命令执行方式。",
+        "rule_ids": ["pipe_to_interpreter"],
+    }
+    assert "command" not in projected
+    assert "/private/customer.txt" not in str(projected)
+    _assert_strict_public_tree(projected)
+
+
+def test_approval_projection_defaults_to_generic_safe_presentation():
+    from api.brand_privacy import public_approval_projection
+
+    projected = public_approval_projection({
+        "description": "Unrecognized internal warning with /Users/name/secret",
+    })
+
+    assert projected["presentation"]["category"] == "local_command"
+    assert projected["presentation"]["risk_level"] == "warning"
+    assert projected["presentation"]["reason_code"] == "restricted_operation"
+    assert projected["presentation"]["detail_summary"] == "此操作触发了本机安全规则。"
+    assert projected["presentation"]["rule_ids"] == []
+
+
+def test_approval_projection_sanitizes_hostile_rule_identifier():
+    from api.brand_privacy import public_approval_projection
+
+    projected = public_approval_projection({
+        "pattern_keys": ["tirith:../../Users/customer/private token"],
+        "description": "scanner finding",
+    })
+
+    assert projected["presentation"]["rule_ids"] == ["restricted_operation"]
+    assert "/Users/customer" not in str(projected["presentation"])
+    assert "customer" not in str(projected["presentation"])
+
+
+def test_approval_projection_classifies_common_danger_without_raw_command():
+    from api.brand_privacy import public_approval_projection
+
+    projected = public_approval_projection({
+        "description": "recursive delete",
+        "pattern_key": "recursive delete",
+        "command": "rm -rf /Users/customer/project",
+    })
+
+    assert projected["presentation"]["reason_code"] == "delete_files"
+    assert "command" not in projected
+    assert "/Users/customer" not in str(projected)
+
+
+def test_approval_projection_explains_known_url_risks_in_chinese():
+    from api.brand_privacy import public_approval_projection
+
+    shortened = public_approval_projection({"pattern_keys": ["tirith:shortened_url"]})
+    homograph = public_approval_projection({"pattern_keys": ["tirith:homograph_url"]})
+
+    assert shortened["presentation"]["detail_summary"] == "检测到会隐藏真实访问地址的短链接。"
+    assert homograph["presentation"]["detail_summary"] == "检测到外观疑似仿冒正规网站的网址。"
+
+
 def _hostile_session_payload(*, workspace="/Users/customer/project"):
     return {
         "session_id": "public-canary",

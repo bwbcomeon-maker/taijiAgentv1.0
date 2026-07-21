@@ -1444,6 +1444,19 @@ class TestApprovalTimeoutIsNotConsent:
         assert "NOT consented" in r["message"]
         assert "rephrase" in r["message"].lower()
 
+    def test_forged_always_is_downgraded_for_non_permanent_gateway_entry(self):
+        from tools import approval as mod
+
+        restricted = mod._ApprovalEntry({"pattern_keys": ["tirith:pipe_to_interpreter"]})
+        ordinary = mod._ApprovalEntry({"allow_permanent": True})
+        mod._gateway_queues[self.SESSION_KEY] = [restricted, ordinary]
+
+        assert mod.resolve_gateway_approval(self.SESSION_KEY, "always", resolve_all=True) == 2
+        assert restricted.result == "session"
+        assert ordinary.result == "always"
+        assert restricted.event.is_set()
+        assert ordinary.event.is_set()
+
     def test_timeout_emits_post_hook_with_timeout_outcome(self, monkeypatch):
         """Plugins must be able to distinguish timeout from explicit deny.
 

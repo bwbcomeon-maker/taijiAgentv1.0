@@ -612,7 +612,12 @@ def resolve_gateway_approval(session_key: str, choice: str,
         if not queue:
             _gateway_queues.pop(session_key, None)
         for entry in targets:
-            entry.result = choice
+            effective_choice = choice
+            entry_keys = entry.data.get("pattern_keys") or [entry.data.get("pattern_key", "")]
+            has_tirith = any(str(key).startswith("tirith:") for key in entry_keys)
+            if choice == "always" and (entry.data.get("allow_permanent") is False or has_tirith):
+                effective_choice = "session"
+            entry.result = effective_choice
             entry.event.set()
     return len(targets)
 
@@ -821,6 +826,7 @@ def request_capability_approval(
         "pattern_keys": [_capability_approval_key(capability)],
         "description": description,
         "title": "能力授权",
+        "allow_permanent": True,
     }
     entry, notify_cb = _begin_gateway_approval(session_key, approval_data)
     if notify_cb is None:
@@ -1438,6 +1444,7 @@ def check_all_command_guards(command: str, env_type: str,
             "pattern_key": primary_key,
             "pattern_keys": all_keys,
             "description": combined_desc,
+            "allow_permanent": not has_tirith,
         }
         entry, notify_cb = _begin_gateway_approval(
             session_key,
@@ -1588,6 +1595,7 @@ def check_all_command_guards(command: str, env_type: str,
             "pattern_key": primary_key,
             "pattern_keys": all_keys,
             "description": combined_desc,
+            "allow_permanent": not has_tirith,
         })
         return {
             "approved": False,

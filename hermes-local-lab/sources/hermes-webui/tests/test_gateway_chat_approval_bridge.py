@@ -25,6 +25,7 @@ def test_gateway_run_approval_event_becomes_webui_pending_payload():
             "description": "recursive delete",
             "pattern_key": "recursive delete",
             "pattern_keys": ["recursive delete"],
+            "allow_permanent": False,
         },
         profile_name="alice",
     )
@@ -35,6 +36,7 @@ def test_gateway_run_approval_event_becomes_webui_pending_payload():
     assert payload["_gateway_run_id"] == "run_123"
     assert payload["_profile_name"] == "alice"
     assert payload["approval_id"]
+    assert payload["allow_permanent"] is False
 
 
 def test_gateway_run_approval_payload_falls_back_to_stream_run_id():

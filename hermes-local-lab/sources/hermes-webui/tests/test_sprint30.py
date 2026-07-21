@@ -50,11 +50,12 @@ REPO = pathlib.Path(__file__).parent.parent
 
 class TestApprovalCardHTML:
 
-    def test_approval_card_has_four_buttons(self):
+    def test_approval_card_has_three_primary_buttons_and_advanced_permanent_choice(self):
         html = read(REPO / "static/index.html")
-        for choice in ("once", "session", "always", "deny"):
+        for choice in ("once", "session", "deny"):
             assert f"respondApproval('{choice}')" in html, \
                 f"approval button for '{choice}' missing from index.html"
+        assert "requestApprovalAdvancedAction('always')" in html
 
     def test_approval_buttons_have_ids(self):
         html = read(REPO / "static/index.html")
@@ -75,10 +76,9 @@ class TestApprovalCardHTML:
             assert f'data-i18n="{key}"' in html, \
                 f"button label data-i18n='{key}' missing"
 
-    def test_approval_once_button_has_kbd_badge(self):
+    def test_approval_once_button_has_no_unsafe_enter_shortcut_badge(self):
         html = read(REPO / "static/index.html")
-        assert '<kbd class="approval-kbd">' in html, \
-            "kbd badge missing from Allow once button"
+        assert '<kbd class="approval-kbd">' not in html
 
     def test_approval_card_has_aria_roles(self):
         html = read(REPO / "static/index.html")
@@ -220,17 +220,17 @@ class TestApprovalI18nKeys:
 
     def test_approval_heading_english_value(self):
         src = read(REPO / "static/i18n.js")
-        assert "approval_heading: 'Approval required'" in src, \
+        assert "approval_heading: 'Confirm an operation'" in src, \
             "English approval_heading value incorrect"
 
     def test_approval_btn_once_english_value(self):
         src = read(REPO / "static/i18n.js")
-        assert "approval_btn_once: 'Allow once'" in src, \
+        assert "approval_btn_once: 'Allow this step only'" in src, \
             "English approval_btn_once value incorrect"
 
     def test_approval_btn_deny_english_value(self):
         src = read(REPO / "static/i18n.js")
-        assert "approval_btn_deny: 'Deny'" in src, \
+        assert "approval_btn_deny: 'Not now'" in src, \
             "English approval_btn_deny value incorrect"
 
 
@@ -283,18 +283,18 @@ class TestApprovalMessagesJS:
     def test_respond_uses_i18n_for_error(self):
         src = read(REPO / "static/messages.js")
         # Should use t('approval_responding') not a hardcoded string
-        assert "t(\"approval_responding\")" in src or "t('approval_responding')" in src, \
-            "respondApproval error message should use t('approval_responding')"
+        assert "t(\"approval_submit_failed\")" in src or "t('approval_submit_failed')" in src, \
+            "respondApproval error message should use t('approval_submit_failed')"
 
     def test_show_card_applies_locale_to_dom(self):
         src = read(REPO / "static/messages.js")
         assert "applyLocaleToDOM" in src, \
             "showApprovalCard should call applyLocaleToDOM to translate data-i18n labels"
 
-    def test_show_card_focuses_once_button(self):
+    def test_show_card_focuses_neutral_dialog_container(self):
         src = read(REPO / "static/messages.js")
-        assert "approvalBtnOnce" in src and "focus()" in src, \
-            "showApprovalCard should focus the Allow once button"
+        assert 'card.focus({preventScroll: true})' in src, \
+            "showApprovalCard should focus the neutral dialog container"
 
 
 class TestClarifyMessagesJS:
@@ -332,20 +332,18 @@ class TestClarifyMessagesJS:
 
 class TestApprovalKeyboardShortcut:
 
-    def test_enter_shortcut_present_in_boot_js(self):
+    def test_enter_does_not_auto_approve_in_boot_js(self):
         src = read(REPO / "static/boot.js")
-        assert "respondApproval('once')" in src or 'respondApproval("once")' in src, \
-            "Enter shortcut calling respondApproval('once') missing from boot.js"
+        assert "respondApproval('once')" not in src and 'respondApproval("once")' not in src
 
-    def test_enter_shortcut_checks_card_visible(self):
+    def test_escape_shortcut_checks_card_visible(self):
         src = read(REPO / "static/boot.js")
         assert "approvalCard" in src and "visible" in src, \
-            "Enter shortcut should check if approval card is visible"
+            "Escape shortcut should check if approval card is visible"
 
-    def test_enter_shortcut_guards_input_elements(self):
+    def test_modal_traps_tab_focus(self):
         src = read(REPO / "static/boot.js")
-        assert "TEXTAREA" in src and "INPUT" in src, \
-            "Enter shortcut should not fire when focus is on TEXTAREA or INPUT"
+        assert "trapApprovalFocus" in src
 
 
 # ── streaming.py scoping fix ─────────────────────────────────────────────────

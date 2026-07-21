@@ -80,10 +80,8 @@ def test_show_approval_card_accepts_count():
 
 
 def test_show_approval_card_renders_counter():
-    """showApprovalCard must display a '1 of N pending' counter when N > 1."""
-    assert '"1 of " + pendingCount + " pending"' in MESSAGES_JS or \
-           "'1 of ' + pendingCount + ' pending'" in MESSAGES_JS, \
-        "showApprovalCard() must render '1 of N pending' counter for multiple queued approvals"
+    """showApprovalCard must display a localized count when N > 1."""
+    assert 't("approval_pending_count", pendingCount)' in MESSAGES_JS
 
 
 def test_approval_current_id_tracked():
@@ -125,7 +123,7 @@ def test_capability_approval_card_branch_exists():
     assert "capability_enable" in MESSAGES_JS
     assert "_isCapabilityApproval" in MESSAGES_JS
     assert "approvalSkipAll" in MESSAGES_JS and "isCapability ? \"none\"" in MESSAGES_JS
-    assert "能力授权" in MESSAGES_JS
+    assert "approval_summary_capability" in MESSAGES_JS
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +208,20 @@ def test_stale_explicit_approval_id_does_not_pop_oldest_entry():
     with r._lock:
         r._pending.pop(sid, None)
 
+    r.submit_pending(sid, {"command": "cmd1", "pattern_key": "p1", "pattern_keys": ["p1"], "description": "d1"})
+    r.submit_pending(sid, {"command": "cmd2", "pattern_key": "p2", "pattern_keys": ["p2"], "description": "d2"})
+
+    accepted = r._resolve_approval_legacy(sid, "missing-approval-id", "deny")
+
+    assert accepted is False
+    with r._lock:
+        queue = r._pending.get(sid, [])
+        commands = [entry["command"] for entry in queue]
+    assert commands == ["cmd1", "cmd2"]
+
+    with r._lock:
+        r._pending.pop(sid, None)
+
 
 def test_capability_approval_does_not_persist_command_allowlist():
     """Always-allow for a capability must not write a command pattern allowlist entry."""
@@ -240,16 +252,59 @@ def test_capability_approval_does_not_persist_command_allowlist():
         r._pending.pop(sid, None)
         r._gateway_queues.pop(sid, None)
 
-    r.submit_pending(sid, {"command": "cmd1", "pattern_key": "p1", "pattern_keys": ["p1"], "description": "d1"})
-    r.submit_pending(sid, {"command": "cmd2", "pattern_key": "p2", "pattern_keys": ["p2"], "description": "d2"})
 
-    accepted = r._resolve_approval_legacy(sid, "missing-approval-id", "deny")
+def test_tirith_approval_cannot_be_persisted_permanently():
+    """A stale or crafted WebUI `always` choice must degrade to session scope."""
+    from api import routes as r
+    from tools.approval import _ApprovalEntry, is_approved
 
-    assert accepted is False
+    sid = "test-tirith-no-permanent-sid"
+    key = "tirith:pipe_to_interpreter"
+    entry = _ApprovalEntry({
+        "command": "cat file | python3",
+        "pattern_key": key,
+        "pattern_keys": [key],
+        "description": "Security scan — [HIGH] Pipe to interpreter",
+        "allow_permanent": False,
+    })
     with r._lock:
-        queue = r._pending.get(sid, [])
-        commands = [entry["command"] for entry in queue]
-    assert commands == ["cmd1", "cmd2"]
+        r._pending[sid] = [dict(entry.data, approval_id="tirith-approval")]
+        r._gateway_queues[sid] = [entry]
+        r._permanent_approved.discard(key)
 
+    accepted = r._resolve_approval_legacy(sid, "tirith-approval", "always")
+
+    assert accepted is True
+    assert entry.result == "session"
+    assert is_approved(sid, key) is True
+    assert key not in r._permanent_approved
     with r._lock:
         r._pending.pop(sid, None)
+        r._gateway_queues.pop(sid, None)
+
+
+def test_allow_once_does_not_create_session_approval():
+    from api import routes as r
+    from tools.approval import _ApprovalEntry, is_approved
+
+    sid = "test-approval-once-scope-sid"
+    key = "test:single-step-only"
+    entry = _ApprovalEntry({
+        "command": "test command",
+        "pattern_key": key,
+        "pattern_keys": [key],
+        "description": "test restricted operation",
+        "allow_permanent": True,
+    })
+    with r._lock:
+        r._pending[sid] = [dict(entry.data, approval_id="once-approval")]
+        r._gateway_queues[sid] = [entry]
+
+    accepted = r._resolve_approval_legacy(sid, "once-approval", "once")
+
+    assert accepted is True
+    assert entry.result == "once"
+    assert is_approved(sid, key) is False
+    with r._lock:
+        r._pending.pop(sid, None)
+        r._gateway_queues.pop(sid, None)

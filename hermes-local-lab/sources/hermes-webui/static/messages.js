@@ -2197,8 +2197,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      const isCapability=_isCapabilityApproval(d);
-      sendBrowserNotification(isCapability?'能力授权':'Approval required',d.description||'Tool approval needed');
+      const approvalCopy=_approvalPlainCopy(d);
+      sendBrowserNotification(t('approval_notification_title'),approvalCopy.summary);
     });
 
     source.addEventListener('clarify',e=>{
@@ -3090,9 +3090,12 @@ async function toggleYoloFromApproval() {
     });
     _yoloEnabled = true;
     _updateYoloPill();
-    hideApprovalCard(true);
     showToast(t('yolo_enabled'));
-  } catch (e) { showToast('YOLO: ' + e.message); }
+    return true;
+  } catch (e) {
+    showToast(t('approval_submit_failed'), 3200, 'warning');
+    return false;
+  }
 }
 
 // ── Approval polling ──
@@ -3101,6 +3104,8 @@ let _approvalFallbackPollInFlight = false;
 let _approvalHideTimer = null;
 let _approvalVisibleSince = 0;
 let _approvalSignature = '';
+let _approvalAdvancedAction = null;
+let _approvalOriginFocus = null;
 const APPROVAL_MIN_VISIBLE_MS = 30000;
 
 // showApprovalCard moved above respondApproval
@@ -3137,10 +3142,25 @@ function hideApprovalCard(force=false) {
   _approvalSessionId = null;
   _approvalCurrentType = null;
   _approvalCurrentCapability = null;
+  _approvalAdvancedAction = null;
   _resetApprovalCardState();
   card.classList.remove("visible");
-  $("approvalCmd").textContent = "";
-  $("approvalDesc").textContent = "";
+  card.classList.remove("details-open");
+  $("approvalDetailsText").textContent = "";
+  $("approvalSummary").textContent = "";
+  $("approvalPermission").textContent = "";
+  $("approvalImpact").textContent = "";
+  $("approvalRisk").textContent = "";
+  if ($("approvalDetails")) $("approvalDetails").hidden = true;
+  if ($("approvalAdvanced")) $("approvalAdvanced").hidden = true;
+  if ($("approvalConfirmation")) $("approvalConfirmation").hidden = true;
+  if ($("approvalDetailsToggle")) $("approvalDetailsToggle").setAttribute("aria-expanded", "false");
+  if ($("approvalAdvancedToggle")) $("approvalAdvancedToggle").setAttribute("aria-expanded", "false");
+  const restore = _approvalOriginFocus;
+  _approvalOriginFocus = null;
+  if (restore && restore.isConnected && typeof restore.focus === "function") {
+    setTimeout(() => restore.focus({preventScroll: true}), 0);
+  }
 }
 
 // Track session_id of the active approval so respond goes to the right session
@@ -3226,13 +3246,141 @@ function _capabilityApprovalLabel(capability) {
   return labels[capability] || capability || "受限能力";
 }
 
+function _approvalPlainCopy(pending) {
+  const presentation = pending && pending.presentation && typeof pending.presentation === "object" ? pending.presentation : {};
+  const isCapability = _isCapabilityApproval(pending);
+  const reason = presentation.reason_code || "restricted_operation";
+  if (isCapability) {
+    return {
+      summary: t("approval_summary_capability"),
+      permission: _capabilityApprovalLabel(pending.capability),
+      impact: t("approval_impact_capability"),
+      risk: t("approval_risk_capability")
+    };
+  }
+  if (reason === "pipe_to_interpreter") {
+    return {
+      summary: t("approval_summary_pipe_interpreter"),
+      permission: t("approval_permission_local_command"),
+      impact: t("approval_impact_continue_task"),
+      risk: t("approval_risk_pipe_interpreter")
+    };
+  }
+  const reasonCopy = {
+    shortened_url: ["approval_summary_shortened_url", "approval_impact_shortened_url", "approval_risk_shortened_url"],
+    homograph_url: ["approval_summary_homograph_url", "approval_impact_homograph_url", "approval_risk_homograph_url"],
+    delete_files: ["approval_summary_delete_files", "approval_impact_delete_files", "approval_risk_delete_files"],
+    reset_changes: ["approval_summary_reset_changes", "approval_impact_reset_changes", "approval_risk_reset_changes"],
+    overwrite_config: ["approval_summary_overwrite_config", "approval_impact_overwrite_config", "approval_risk_overwrite_config"],
+    elevated_permission: ["approval_summary_elevated_permission", "approval_impact_elevated_permission", "approval_risk_elevated_permission"]
+  };
+  if (reasonCopy[reason]) {
+    const keys = reasonCopy[reason];
+    return {
+      summary: t(keys[0]),
+      permission: t("approval_permission_local_command"),
+      impact: t(keys[1]),
+      risk: t(keys[2])
+    };
+  }
+  return {
+    summary: t("approval_summary_generic"),
+    permission: t("approval_permission_local_command"),
+    impact: t("approval_impact_continue_task"),
+    risk: t("approval_risk_generic")
+  };
+}
+
+function _setApprovalDisclosure(id, expanded) {
+  const button = $(id + "Toggle");
+  const panel = $(id);
+  if (!button || !panel) return;
+  button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  panel.hidden = !expanded;
+}
+
+function toggleApprovalDetails() {
+  const expanded = $("approvalDetailsToggle").getAttribute("aria-expanded") === "true";
+  _setApprovalDisclosure("approvalDetails", !expanded);
+  $("approvalCard").classList.toggle("details-open", !expanded);
+  if (expanded && $("approvalDetails").contains(document.activeElement)) {
+    $("approvalDetailsToggle").focus({preventScroll: true});
+  }
+}
+
+function toggleApprovalAdvanced() {
+  const expanded = $("approvalAdvancedToggle").getAttribute("aria-expanded") === "true";
+  _setApprovalDisclosure("approvalAdvanced", !expanded);
+  if (expanded) cancelApprovalAdvancedAction();
+}
+
+function requestApprovalAdvancedAction(action) {
+  if (action !== "always" && action !== "skip_all") return;
+  _approvalAdvancedAction = action;
+  const text = action === "always" ? t("approval_confirm_always") : t("approval_confirm_skip_all");
+  $("approvalConfirmationText").textContent = text;
+  $("approvalConfirmation").hidden = false;
+  const confirmButton = $("approvalConfirmButton");
+  confirmButton.onclick = confirmApprovalAdvancedAction;
+  confirmButton.focus({preventScroll: true});
+}
+
+function cancelApprovalAdvancedAction() {
+  _approvalAdvancedAction = null;
+  const panel = $("approvalConfirmation");
+  if (panel) panel.hidden = true;
+  const toggle = $("approvalAdvancedToggle");
+  if (toggle && !$("approvalAdvanced").hidden) toggle.focus({preventScroll: true});
+}
+
+async function confirmApprovalAdvancedAction() {
+  const action = _approvalAdvancedAction;
+  let ok = false;
+  if (action === "always") ok = await respondApproval("always");
+  if (action === "skip_all") ok = await toggleYoloFromApproval();
+  if (ok) {
+    _approvalAdvancedAction = null;
+    if (action === "skip_all") {
+      $("approvalConfirmation").hidden = true;
+      $("approvalAdvancedToggle").focus({preventScroll: true});
+    }
+  }
+  return ok;
+}
+
+function trapApprovalFocus(event) {
+  const card = $("approvalCard");
+  if (!card || !card.classList.contains("visible") || event.key !== "Tab") return false;
+  const candidates = [...card.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+    .filter(el => !el.disabled && !el.hidden && el.getClientRects().length && getComputedStyle(el).visibility !== "hidden");
+  if (!candidates.length) {
+    event.preventDefault();
+    card.focus({preventScroll: true});
+    return true;
+  }
+  const first = candidates[0];
+  const last = candidates[candidates.length - 1];
+  const focusIsOutsideCycle = !candidates.includes(document.activeElement);
+  if (event.shiftKey && (document.activeElement === first || focusIsOutsideCycle)) {
+    event.preventDefault();
+    last.focus({preventScroll: true});
+    return true;
+  }
+  if (!event.shiftKey && (document.activeElement === last || focusIsOutsideCycle)) {
+    event.preventDefault();
+    first.focus({preventScroll: true});
+    return true;
+  }
+  return false;
+}
+
 function _setApprovalButtonCopy(isCapability, capability) {
   const capLabel = _capabilityApprovalLabel(capability);
   const copy = isCapability ? {
-    approvalBtnOnce: ["允许一次", `仅本次工具调用允许${capLabel}`],
-    approvalBtnSession: ["本次允许", `本次会话期间允许${capLabel}`],
-    approvalBtnAlways: ["始终允许", `始终允许${capLabel}，只写入该单项能力变量`],
-    approvalBtnDeny: ["拒绝", `拒绝开启${capLabel}`]
+    approvalBtnOnce: [t("approval_btn_once"), `仅在当前这一步允许${capLabel}`],
+    approvalBtnSession: [t("approval_btn_session"), `在本次对话内允许${capLabel}`],
+    approvalBtnAlways: [t("approval_btn_always"), `长期允许${capLabel}`],
+    approvalBtnDeny: [t("approval_btn_deny"), `暂不开启${capLabel}`]
   } : {
     approvalBtnOnce: [t("approval_btn_once"), t("approval_btn_once_title")],
     approvalBtnSession: [t("approval_btn_session"), t("approval_btn_session_title")],
@@ -3256,17 +3404,24 @@ function showApprovalCard(pending, pendingCount) {
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
   const isCapability = _isCapabilityApproval(pending);
   const capability = pending.capability || "";
+  const presentation = pending.presentation && typeof pending.presentation === "object" ? pending.presentation : {};
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
-  const desc = isCapability ? (pending.description || "当前能力未开启，授权后继续当前任务。") : ((pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : ""));
-  const cmd = isCapability
-    ? `能力：${_capabilityApprovalLabel(capability)}\n范围：仅开启该能力；危险命令仍需审批`
-    : (pending.summary || pending.description || "受限操作需要你的授权");
-  const sig = JSON.stringify({type: isCapability ? "capability" : "command", desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
+  const copy = _approvalPlainCopy(pending);
+  const detailLines = [
+    presentation.detail_summary,
+    pending.description,
+    keys.length ? `${t("approval_rule_label")}：${keys.join(", ")}` : ""
+  ].filter(Boolean);
+  const technicalDetails = [...new Set(detailLines)].join("\n\n");
+  const sig = JSON.stringify({type: isCapability ? "capability" : "command", reason: presentation.reason_code || "restricted_operation", details: technicalDetails, sid: pending._session_id || (S.session && S.session.session_id) || null});
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   card.classList.toggle("capability-approval", isCapability);
-  $("approvalDesc").textContent = desc;
-  $("approvalCmd").textContent = cmd;
+  $("approvalSummary").textContent = copy.summary;
+  $("approvalPermission").textContent = copy.permission;
+  $("approvalImpact").textContent = copy.impact;
+  $("approvalRisk").textContent = copy.risk;
+  $("approvalDetailsText").textContent = technicalDetails || t("approval_details_empty");
   _approvalSessionId = sid;
   _approvalCurrentId = pending.approval_id || null;
   _approvalCurrentType = isCapability ? "capability_enable" : "command";
@@ -3276,37 +3431,45 @@ function showApprovalCard(pending, pendingCount) {
   const counter = $("approvalCounter");
   if (counter) {
     if (pendingCount && pendingCount > 1) {
-      counter.textContent = "1 of " + pendingCount + " pending";
-      counter.style.display = "";
+      counter.textContent = t("approval_pending_count", pendingCount);
+      counter.hidden = false;
     } else {
-      counter.style.display = "none";
+      counter.hidden = true;
     }
   }
   if (!sameApproval) {
+    _approvalOriginFocus = document.activeElement && document.activeElement !== document.body ? document.activeElement : $("msg");
     _approvalVisibleSince = Date.now();
     _clearApprovalHideTimer();
+    _setApprovalDisclosure("approvalDetails", false);
+    card.classList.remove("details-open");
+    _setApprovalDisclosure("approvalAdvanced", false);
+    cancelApprovalAdvancedAction();
   }
   // Re-enable buttons in case a previous approval disabled them
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny","approvalSkipAll","approvalConfirmButton"].forEach(id => {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
   card.classList.add("visible");
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
-  $("approvalHeading").textContent = isCapability ? (pending.title || "能力授权") : t("approval_heading");
+  $("approvalHeading").textContent = t("approval_heading");
   _setApprovalButtonCopy(isCapability, capability);
-  const onceBtn = $("approvalBtnOnce");
-  if (onceBtn && document.activeElement !== $('msg')) {
-    setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
-  }
+  const choices = Array.isArray(pending.choices) ? pending.choices : [];
+  const hasTirith = keys.some(key => String(key).startsWith("tirith:"));
+  const allowPermanent = pending.allow_permanent !== false && presentation.allow_permanent !== false && !hasTirith && (!choices.length || choices.includes("always"));
+  $("approvalBtnAlways").hidden = !allowPermanent;
+  $("approvalSkipAll").hidden = isCapability;
+  $("approvalAdvancedToggle").hidden = !allowPermanent && isCapability;
+  if (!sameApproval) setTimeout(() => card.focus({preventScroll: true}), 50);
 }
 
 async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
-  if (!sid) return;
+  if (!sid) return false;
   const approvalId = _approvalCurrentId;
   const approvalType = _approvalCurrentType;
   // Disable all buttons immediately to prevent double-submit
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny","approvalSkipAll","approvalConfirmButton"].forEach(id => {
     const b = $(id);
     if (b) { b.disabled = true; if (b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) b.classList.add("loading"); }
   });
@@ -3323,7 +3486,7 @@ async function respondApproval(choice) {
         _renderPendingApprovalForActiveSession();
         showToast("审批暂未生效，请再试一次。", 3200, "warning");
       }
-      return;
+      return false;
     }
     _approvalSessionId = null;
     _approvalCurrentId = null;
@@ -3334,13 +3497,15 @@ async function respondApproval(choice) {
     if (approvalType === "capability_enable" && typeof refreshSecurityStatus === "function") {
       setTimeout(()=>{ void refreshSecurityStatus(true); }, 500);
     }
+    return true;
   } catch(e) {
     await refreshApprovalPendingForSession(sid);
     if(!_hasApprovalPendingForSession(sid)) _settleStaleApprovalUiForSession(sid);
-    ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+    ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny","approvalSkipAll","approvalConfirmButton"].forEach(id => {
       const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
     });
-    setStatus(t("approval_responding") + " " + e.message);
+    showToast(t("approval_submit_failed"), 3200, "warning");
+    return false;
   }
 }
 
