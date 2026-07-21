@@ -112,6 +112,18 @@ class CiScopeClassifierTest(unittest.TestCase):
         self.assertTrue(action_refs)
         self.assertTrue(all(len(ref) == 40 for ref in action_refs))
 
+    def test_root_contracts_use_uv_managed_python_fixture(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        root_job = workflow[workflow.index("  root:") : workflow.index("  desktop:")]
+        self.assertIn("UV_PYTHON_PREFERENCE: only-managed", root_job)
+        self.assertIn("uv python install 3.11", root_job)
+        self.assertIn(
+            "hermes-local-lab/sources/hermes-agent/venv/bin/python -m unittest",
+            root_job,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
