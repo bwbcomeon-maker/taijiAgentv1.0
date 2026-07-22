@@ -9661,6 +9661,10 @@ def handle_get(handler, parsed) -> bool:
             "Set-Cookie",
             f"{IDENTITY_COOKIE_NAME}={result['session_id']}; Path=/api/expert-teams; HttpOnly; Secure; SameSite=Lax",
         )
+        handler.send_header(
+            "Set-Cookie",
+            f"{IDENTITY_COOKIE_NAME}={result['session_id']}; Path=/api/docx-engine-v2/quality/wps-visual; HttpOnly; Secure; SameSite=Lax",
+        )
         _security_headers(handler)
         handler.end_headers()
         handler.wfile.write(response)
@@ -12775,6 +12779,10 @@ def handle_post(handler, parsed) -> bool:
             "Set-Cookie",
             f"{IDENTITY_COOKIE_NAME}=; Path=/api/expert-teams; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
         )
+        handler.send_header(
+            "Set-Cookie",
+            f"{IDENTITY_COOKIE_NAME}=; Path=/api/docx-engine-v2/quality/wps-visual; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+        )
         _security_headers(handler)
         handler.end_headers()
         handler.wfile.write(response)
@@ -12839,17 +12847,23 @@ def handle_post(handler, parsed) -> bool:
         except Exception as exc:
             return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
 
-    if parsed.path in {"/api/expert-teams/brief/update", "/api/expert-teams/brief/confirm"}:
+    if parsed.path in {
+        "/api/expert-teams/brief/update",
+        "/api/expert-teams/brief/confirm",
+        "/api/expert-teams/brief/sources/add",
+        "/api/expert-teams/brief/sources/remove",
+    }:
         from api import expert_teams
 
         try:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
-            operation = (
-                expert_teams.update_expert_team_document_brief
-                if parsed.path.endswith("/update")
-                else expert_teams.confirm_expert_team_document_brief
-            )
+            operation = {
+                "/api/expert-teams/brief/update": expert_teams.update_expert_team_document_brief,
+                "/api/expert-teams/brief/confirm": expert_teams.confirm_expert_team_document_brief,
+                "/api/expert-teams/brief/sources/add": expert_teams.add_expert_team_brief_source,
+                "/api/expert-teams/brief/sources/remove": expert_teams.remove_expert_team_brief_source,
+            }[parsed.path]
             run = operation(workspace, body)
             return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
         except FileNotFoundError:

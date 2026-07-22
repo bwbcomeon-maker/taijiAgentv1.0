@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 _MAX_SOURCE_BYTES = 10 * 1024 * 1024
+_ALLOWED_TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json"}
 
 
 class SourceRegistryError(ValueError):
@@ -61,7 +62,7 @@ def _write_provided_text(root: Path, run_id: str, source_id: str, text: object) 
         raise SourceRegistryError("source_unresolved", source_id, "用户提供文本不能为空")
     data = content.encode("utf-8")
     if len(data) > _MAX_SOURCE_BYTES:
-        raise SourceRegistryError("source_unresolved", source_id, "用户提供文本超出大小限制")
+        raise SourceRegistryError("source_too_large", source_id, "单份资料不能超过 10MB")
     target = root / ".taiji" / "expert-teams" / "sources" / run_id / f"{source_id}.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -84,6 +85,32 @@ def _write_provided_text(root: Path, run_id: str, source_id: str, text: object) 
     return target
 
 
+def _materialized_provided_text(root: Path, run_id: str, source_id: str, locator: object) -> Path:
+    target = _workspace_file(root, str(locator or ""), source_id)
+    expected = root / ".taiji" / "expert-teams" / "sources" / str(run_id) / f"{source_id}.txt"
+    if target != expected.resolve(strict=False):
+        raise SourceRegistryError("source_unresolved", source_id, "用户提供文本未绑定到当前任务的固化资料")
+    return target
+
+
+def _validated_text_bytes(target: Path, source_id: str) -> bytes:
+    if target.suffix.lower() not in _ALLOWED_TEXT_SUFFIXES:
+        raise SourceRegistryError("source_type_not_allowed", source_id, "首版仅支持 TXT、Markdown、CSV 和 JSON 文本资料")
+    size = target.stat().st_size
+    if size <= 0:
+        raise SourceRegistryError("source_unresolved", source_id, "资料不能为空")
+    if size > _MAX_SOURCE_BYTES:
+        raise SourceRegistryError("source_too_large", source_id, "单份资料不能超过 10MB")
+    data = target.read_bytes()
+    if b"\x00" in data:
+        raise SourceRegistryError("source_binary_not_allowed", source_id, "资料包含二进制内容")
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SourceRegistryError("source_invalid_utf8", source_id, "资料必须使用 UTF-8 编码") from exc
+    return data
+
+
 def resolve_source_registry(workspace: Path, run_id: str, source_refs: list[dict]) -> tuple[list[dict], dict]:
     root = Path(workspace).expanduser().resolve()
     resolved_refs = []
@@ -98,14 +125,15 @@ def resolve_source_registry(workspace: Path, run_id: str, source_refs: list[dict
         seen.add(source_id)
         kind = str(raw_ref.get("kind") or "").strip()
         if kind == "provided_text":
-            target = _write_provided_text(root, str(run_id), source_id, raw_ref.get("text"))
+            if "text" in raw_ref:
+                target = _write_provided_text(root, str(run_id), source_id, raw_ref.get("text"))
+            else:
+                target = _materialized_provided_text(root, str(run_id), source_id, raw_ref.get("locator"))
         elif kind in {"local_file", "attachment"}:
             target = _workspace_file(root, str(raw_ref.get("locator") or ""), source_id)
         else:
             raise SourceRegistryError("source_unresolved", source_id, "当前资料类型尚未接入受信解析链")
-        data = target.read_bytes()
-        if not data or len(data) > _MAX_SOURCE_BYTES:
-            raise SourceRegistryError("source_unresolved", source_id, "资料为空或超出大小限制")
+        data = _validated_text_bytes(target, source_id)
         relative = target.relative_to(root).as_posix()
         digest = hashlib.sha256(data).hexdigest()
         sanitized = {

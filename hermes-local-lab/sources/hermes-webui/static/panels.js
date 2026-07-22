@@ -228,6 +228,9 @@ async function switchPanel(name, opts = {}) {
     }
   }
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
+  if (nextPanel !== 'chat' && window.ExpertTeamV3 && typeof window.ExpertTeamV3.clearStatusSurface === 'function') {
+    window.ExpertTeamV3.clearStatusSurface();
+  }
   if (window.closeAllTaijiFloatingPanels) window.closeAllTaijiFloatingPanels();
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel

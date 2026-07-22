@@ -3707,6 +3707,9 @@ function renderWriteflowStatusDock(card){
 }
 
 function clearWriteflowStatusDock(){
+  if(typeof window!=='undefined'&&window.ExpertTeamV3&&typeof window.ExpertTeamV3.clearStatusSurface==='function'){
+    window.ExpertTeamV3.clearStatusSurface();
+  }
   const dock=(typeof $==='function'&&$('writeflowStatusDock'))||document.getElementById('writeflowStatusDock');
   if(!dock){
     clearExpertTeamWorkspacePanel();
