@@ -117,7 +117,10 @@ def test_v3_dialog_and_workbench_have_keyboard_and_live_feedback_contracts():
     assert 'aria-modal="true"' in script
     assert 'aria-live="polite"' in script
     assert "event.key === 'Escape'" in script or 'event.key === "Escape"' in script
+    assert "state.keyboardBound = true" in script
     assert "focus()" in script
+    assert "state.dialogReturnFocus?.isConnected" in script
+    assert 'data-team-id="${CSS.escape(state.selectedTeam.id)}"' in script
     assert "trapDialogFocus" in script
     assert 'data-et3-action="choose-source-file"' in script
     assert 'data-et3-action="choose-office-evidence"' in script

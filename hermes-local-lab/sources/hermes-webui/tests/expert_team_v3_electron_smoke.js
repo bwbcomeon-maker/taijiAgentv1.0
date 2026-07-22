@@ -114,7 +114,18 @@ async function main() {
       }
     });
     await page.waitForLoadState('domcontentloaded', { timeout: 90000 });
-    await page.waitForFunction(() => window.ExpertTeamV3 && typeof S !== 'undefined' && typeof switchPanel === 'function', null, { timeout: 90000 });
+    await page.waitForFunction(() => window.ExpertTeamV3 && typeof S !== 'undefined' && S._bootReady && typeof switchPanel === 'function', null, { timeout: 90000 });
+    const runtimeExpertScript = await page.evaluate(async () => {
+      const source = document.querySelector('script[src*="expert-team-v3.js"]')?.src;
+      return source ? fetch(source).then(response => response.text()) : '';
+    });
+    assert(runtimeExpertScript.includes('state.keyboardBound = true'), 'Electron did not load the current Expert Team V3 source');
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window?.show();
+      window?.focus();
+    });
+    await page.bringToFront();
     await page.evaluate(async ({ workspace }) => {
       document.getElementById('onboardingOverlay')?.remove();
       const response = await fetch('/api/session/new', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace }) });
@@ -138,8 +149,21 @@ async function main() {
     await page.screenshot({ path: path.join(outDir, '02-team-detail.png'), fullPage: false });
     for (let index = 0; index < 12; index += 1) await page.keyboard.press('Tab');
     assert(await page.locator('[data-et3-dialog]').evaluate(dialog => dialog.contains(document.activeElement)), 'Dialog focus escaped into the page background');
+    await page.evaluate(() => {
+      window.__et3EscapeEvents = 0;
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') window.__et3EscapeEvents += 1; }, { once: true, capture: true });
+    });
     await page.keyboard.press('Escape');
-    assert(await firstCard.evaluate(node => document.activeElement === node), 'Dialog did not return focus to trigger');
+    const returnedFocus = await firstCard.evaluate(node => ({
+      matched: document.activeElement === node,
+      connected: node.isConnected,
+      activeTag: document.activeElement?.tagName || '',
+      activeId: document.activeElement?.id || '',
+      activeClass: String(document.activeElement?.className || ''),
+      dialogHidden: document.querySelector('[data-et3-dialog-backdrop]')?.hidden,
+      escapeEvents: window.__et3EscapeEvents,
+    }));
+    assert(returnedFocus.matched, 'Dialog did not return focus to trigger', returnedFocus);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.screenshot({ path: path.join(outDir, '01-portal.png'), fullPage: false });
 
