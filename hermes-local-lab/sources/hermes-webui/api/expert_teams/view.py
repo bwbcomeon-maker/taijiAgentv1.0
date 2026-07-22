@@ -709,6 +709,26 @@ def expert_team_run_view(run: dict) -> dict:
             "citation_style": str(source_policy.get("citation_style") or ""),
             "source_count": len(source_policy.get("source_refs") or []),
         }
+        registry = run.get("source_registry") if isinstance(run.get("source_registry"), dict) else {}
+        sources = []
+        for item in source_policy.get("source_refs") or []:
+            if not isinstance(item, dict):
+                continue
+            source_id = str(item.get("source_id") or "")
+            authoritative = registry.get(source_id) if isinstance(registry.get(source_id), dict) else {}
+            safe = {
+                "source_id": source_id,
+                "kind": str(item.get("kind") or ""),
+                "label": str(item.get("label") or source_id),
+                "status": str(authoritative.get("status") or ("ready" if item.get("sha256") else "pending")),
+            }
+            if authoritative.get("size_bytes") is not None:
+                safe["size_bytes"] = int(authoritative.get("size_bytes") or 0)
+            digest = str(authoritative.get("sha256") or item.get("sha256") or "")
+            if digest:
+                safe["sha256"] = digest
+            sources.append(safe)
+        brief["sources"] = sources
         brief["editable"] = _brief_is_editable(run)
         brief["edit_policy"] = "editable" if brief["editable"] else "new_run_required"
         brief["validation"] = deepcopy(

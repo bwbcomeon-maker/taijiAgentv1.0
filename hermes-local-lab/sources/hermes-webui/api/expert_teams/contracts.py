@@ -147,7 +147,10 @@ def normalize_document_brief(brief) -> dict:
         if not source_id or source_id in seen:
             continue
         seen.add(source_id)
-        normalized_refs.append({k: deepcopy(v) for k, v in raw.items() if k in {"source_id", "kind", "label", "locator", "sha256"}})
+        allowed_fields = {"source_id", "kind", "label", "locator", "sha256"}
+        if _text(raw.get("kind")) == "provided_text" and "text" in raw:
+            allowed_fields.add("text")
+        normalized_refs.append({k: deepcopy(v) for k, v in raw.items() if k in allowed_fields})
         normalized_refs[-1]["source_id"] = source_id
         normalized_refs[-1]["kind"] = _text(raw.get("kind"))
         normalized_refs[-1]["label"] = _text(raw.get("label"))
