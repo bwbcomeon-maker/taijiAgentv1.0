@@ -8,6 +8,7 @@
     card: null,
     portalController: null,
     workbenchController: null,
+    keyboardBound: false,
     identityController: null,
     identityStatus: null,
     identityRole: '',
@@ -160,10 +161,6 @@
     const signal = state.portalController.signal;
     root.addEventListener('click', event => handlePortalClick(event), { signal });
     root.addEventListener('input', event => handlePortalInput(event), { signal });
-    root.addEventListener('keydown', event => {
-      if (event.key === 'Escape') closeDialog();
-      if (event.key === 'Tab') trapDialogFocus(event);
-    }, { signal });
   }
 
   function handlePortalInput(event) {
@@ -260,7 +257,13 @@
     backdrop.hidden = true;
     const portal = portalRoot()?.querySelector('.et3-portal');
     if (portal) portal.inert = false;
-    if (state.dialogReturnFocus && state.dialogReturnFocus.isConnected) state.dialogReturnFocus.focus();
+    const fallbackSelector = state.selectedTeam?.id
+      ? `[data-et3-action="open-team"][data-team-id="${CSS.escape(state.selectedTeam.id)}"]`
+      : '';
+    const returnFocus = state.dialogReturnFocus?.isConnected
+      ? state.dialogReturnFocus
+      : (fallbackSelector ? portalRoot()?.querySelector(fallbackSelector) : null);
+    returnFocus?.focus();
     return true;
   }
 
@@ -934,6 +937,13 @@
   }
 
   function init() {
+    if (!state.keyboardBound) {
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') closeDialog();
+        if (event.key === 'Tab') trapDialogFocus(event);
+      }, { capture: true });
+      state.keyboardBound = true;
+    }
     renderPortal();
     window.loadWriteflow = loadCatalog;
     window.renderWriteflowTeams = renderPortal;
