@@ -2,6 +2,7 @@
 
 from .catalog import expert_team_catalog
 from .contracts import ContractError, EXPERT_TEAM_CONTRACT_V1, classify_contract_version
+from .launch_profiles import get_launch_profile, list_launch_profiles
 from .runtime import (
     _business_context_for_view,
     ExpertTeamStateConflict,
@@ -41,6 +42,8 @@ from .runtime import (
     resume_expert_team,
     restore_expert_team_after_cancel_completion,
     start_expert_team,
+    start_standalone_expert_team,
+    validate_standalone_start_request,
     submit_expert_team_stage_input,
     update_expert_team_document_brief,
     add_expert_team_brief_source,
@@ -65,6 +68,8 @@ __all__ = [
     "complete_expert_team_orphan_cleanup",
     "expert_team_catalog",
     "expert_team_run_view",
+    "get_launch_profile",
+    "list_launch_profiles",
     "resolve_contract_rollout",
     "fail_expert_team_execution",
     "fail_expert_team_cancellation",
@@ -96,6 +101,8 @@ __all__ = [
     "resume_expert_team",
     "restore_expert_team_after_cancel_completion",
     "start_expert_team",
+    "start_standalone_expert_team",
+    "validate_standalone_start_request",
     "submit_expert_team_stage_input",
     "update_expert_team_document_brief",
     "add_expert_team_brief_source",

@@ -15,6 +15,7 @@ from functools import wraps
 from pathlib import Path
 
 from .catalog import CONTENT_CREATOR_TEAM_ID, get_template
+from .launch_profiles import get_launch_profile
 from .rollout import enforce_new_contract_rollout
 from .contracts import (
     EXPERT_TEAM_CONTRACT_V1,
@@ -87,6 +88,16 @@ _START_LOCKS: dict[str, threading.RLock] = {}
 _START_LOCKS_GUARD = threading.Lock()
 _RUN_FILE_LOCK_DEPTH = threading.local()
 _EXPECTED_CURSOR_UNSET = object()
+_STANDALONE_START_FIELDS = frozenset(
+    {"launch_profile_id", "prompt", "session_id", "idempotency_key"}
+)
+_STANDALONE_START_MAX_LENGTHS = {
+    "launch_profile_id": 128,
+    "session_id": 240,
+    "prompt": 20_000,
+    "idempotency_key": 240,
+}
+_STANDALONE_IDEMPOTENCY_PATTERN = re.compile(r"[A-Za-z0-9:._-]+")
 
 
 class ExpertTeamStateConflict(ValueError):
@@ -1508,28 +1519,106 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
     return write_run(workspace, _sync_derived(next_run))
 
 
-def start_expert_team(workspace: Path, body: dict) -> dict:
-    contract_version = classify_contract_version(body)
-    if contract_version == EXPERT_TEAM_CONTRACT_V1:
-        enforce_new_contract_rollout(
-            team_id=str(body.get("team_id") or CONTENT_CREATOR_TEAM_ID),
-            document_type=str(body.get("document_type") or ""),
-            intake_example_id=str(body.get("intake_example_id") or body.get("template_id") or ""),
+def _standalone_required_text(body: dict, field: str) -> str:
+    required_code = "launch_profile_required" if field == "launch_profile_id" else f"{field}_required"
+    if field not in body:
+        raise ContractError(required_code, field, f"{field} 为必填项")
+    value = body[field]
+    if type(value) is not str:
+        raise ContractError(f"{field}_invalid_type", field, f"{field} 必须是字符串")
+    if not value.strip():
+        raise ContractError(required_code, field, f"{field} 不能为空")
+    if len(value) > _STANDALONE_START_MAX_LENGTHS[field]:
+        raise ContractError(f"{field}_too_long", field, f"{field} 超出长度限制")
+    return value.strip() if field in {"launch_profile_id", "prompt"} else value
+
+
+def validate_standalone_start_request(body: dict) -> dict:
+    """Validate and normalize the public standalone start request without side effects."""
+    if type(body) is not dict:
+        raise ContractError("start_request_invalid_type", "request", "启动请求必须是对象")
+
+    validated = {
+        field: _standalone_required_text(body, field)
+        for field in ("launch_profile_id", "session_id", "prompt", "idempotency_key")
+    }
+    unknown_fields = sorted(set(body) - _STANDALONE_START_FIELDS)
+    if unknown_fields:
+        field = unknown_fields[0]
+        raise ContractError(
+            "server_owned_launch_field",
+            field,
+            "任务类型和流程由服务端启动配置决定",
         )
-    template = get_template(str(body.get("team_id") or CONTENT_CREATOR_TEAM_ID))
+
+    from api.models import is_safe_session_id
+
+    if not is_safe_session_id(validated["session_id"]):
+        raise ContractError("session_id_invalid_format", "session_id", "session_id 不是安全的会话标识")
+    idempotency_key = validated["idempotency_key"]
+    if len(idempotency_key) < 8:
+        raise ContractError("idempotency_key_too_short", "idempotency_key", "幂等键至少需要 8 个字符")
+    if _STANDALONE_IDEMPOTENCY_PATTERN.fullmatch(idempotency_key) is None:
+        raise ContractError(
+            "idempotency_key_invalid_format",
+            "idempotency_key",
+            "幂等键只能包含英文字母、数字、冒号、点、下划线和连字符",
+        )
+    return validated
+
+
+def _standalone_start_context(body: dict) -> tuple[dict, dict]:
+    validated = validate_standalone_start_request(body)
+    profile = get_launch_profile(validated["launch_profile_id"])
+    resolved = {
+        "session_id": validated["session_id"],
+        "prompt": validated["prompt"],
+        "idempotency_key": validated["idempotency_key"],
+        "team_id": profile["team_id"],
+        "contract_version": EXPERT_TEAM_CONTRACT_V1,
+        "intake_example_id": profile["intake_example_id"],
+        "document_type": profile["document_type"],
+        "document_brief_seed": {
+            "task_mode": profile["task_mode"],
+            "document_control": {"render_template_id": profile["render_template_id"]},
+        },
+    }
+    return profile, resolved
+
+
+def start_expert_team(workspace: Path, body: dict) -> dict:
+    standalone = "launch_profile_id" in body
+    launch_profile = None
+    resolved_body = body
+    if standalone:
+        launch_profile, resolved_body = _standalone_start_context(body)
+
+    contract_version = classify_contract_version(resolved_body)
+    if contract_version == EXPERT_TEAM_CONTRACT_V1 and not standalone:
+        enforce_new_contract_rollout(
+            team_id=str(resolved_body.get("team_id") or CONTENT_CREATOR_TEAM_ID),
+            document_type=str(resolved_body.get("document_type") or ""),
+            intake_example_id=str(
+                resolved_body.get("intake_example_id") or resolved_body.get("template_id") or ""
+            ),
+        )
+    template = get_template(str(resolved_body.get("team_id") or CONTENT_CREATOR_TEAM_ID))
     if contract_version == EXPERT_TEAM_CONTRACT_V1:
-        prompt = str(body.get("prompt") or "")
-        document_brief = build_document_brief(template["id"], body, now=_now())
+        prompt = str(resolved_body.get("prompt") or "")
+        document_brief = build_document_brief(template["id"], resolved_body, now=_now())
     else:
-        prompt = str(body.get("prompt") or body.get("message") or "").strip()
+        prompt = str(resolved_body.get("prompt") or resolved_body.get("message") or "").strip()
         document_brief = None
     if not prompt and contract_version == "legacy":
         prompt = "请起草一份办公材料。"
-    session_id = str(body.get("session_id") or "").strip()
+    session_id = str(resolved_body.get("session_id") or "").strip()
     if not session_id:
         raise ValueError("session_id is required to start an expert team")
+    task_template = deepcopy(
+        launch_profile["stages"] if standalone and launch_profile is not None else template.get("tasks") or []
+    )
     run = {
-        "schema_version": 2,
+        "schema_version": 3 if standalone else 2,
         "version": 1,
         "run_id": "et-" + uuid.uuid4().hex[:16],
         "session_id": session_id,
@@ -1545,8 +1634,8 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
         "questions": _questions(template, prompt),
         "answers": [],
         "members": _members(template),
-        "_tasks_template": deepcopy(template.get("tasks") or []),
-        "tasks": deepcopy(template.get("tasks") or []),
+        "_tasks_template": task_template,
+        "tasks": deepcopy(task_template),
         "artifacts": [],
         "stage_outputs": [],
         "review_items": [],
@@ -1563,7 +1652,21 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
                 "canonical_document_ref": None,
             }
         )
+    if standalone and launch_profile is not None:
+        run.update(
+            {
+                "product_mode": "standalone",
+                "launch_profile_id": launch_profile["id"],
+                "launch_profile_snapshot": deepcopy(launch_profile),
+                "review_policy": deepcopy(launch_profile["review_policy"]),
+            }
+        )
     return write_run(workspace, _sync_derived(run))
+
+
+def start_standalone_expert_team(workspace: Path, body: dict) -> dict:
+    """Public standalone start boundary; legacy constructors remain internal-only."""
+    return start_expert_team(workspace, validate_standalone_start_request(body))
 
 
 def read_expert_team_run(workspace: Path, run_id: str) -> dict:

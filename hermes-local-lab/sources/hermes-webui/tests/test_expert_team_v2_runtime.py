@@ -241,7 +241,7 @@ def test_contract_answer_route_never_auto_starts_before_brief_confirmation(monke
     assert handler.json_body()["run"]["view"]["brief"]["gate"] == "needs_confirmation"
 
 
-def test_start_route_returns_stable_contract_error_code(monkeypatch, tmp_path):
+def test_start_route_rejects_legacy_contract_selector_with_profile_error(monkeypatch, tmp_path):
     from api import routes
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -258,7 +258,8 @@ def test_start_route_returns_stable_contract_error_code(monkeypatch, tmp_path):
         },
     )
     assert handler.status == 400
-    assert handler.json_body()["code"] == "unsupported_contract_version"
+    assert handler.json_body()["code"] == "launch_profile_required"
+    assert handler.json_body()["field"] == "launch_profile_id"
 
 
 def test_approve_route_starts_next_stage_in_the_same_request(monkeypatch, tmp_path):
@@ -1969,7 +1970,11 @@ def test_start_route_rejects_missing_session_id(monkeypatch, tmp_path):
     handler = _post(
         routes,
         "/api/expert-teams/start",
-        {"team_id": "content-creator-team", "prompt": "起草工作汇报"},
+        {
+            "launch_profile_id": "content-work-report",
+            "prompt": "起草工作汇报",
+            "idempotency_key": "start-missing-session",
+        },
     )
     assert handler.status == 400
     assert "session_id" in handler.json_body()["error"]

@@ -269,20 +269,27 @@ def test_contract_run_persists_draft_brief_without_starting_generation(tmp_path)
     assert run["view"]["phase_progress"]["is_intake"] is True
 
 
-def test_catalog_examples_expose_explicit_intake_and_document_semantics():
+def test_catalog_hides_internal_document_semantics_while_launch_profiles_keep_them():
     from api import expert_teams
+    from api.expert_teams.launch_profiles import list_launch_profiles
 
     catalog = expert_teams.expert_team_catalog()
-    examples = {
-        example["intake_example_id"]: example
+    examples = [
+        example
         for team in catalog["teams"]
         for example in team["examples"]
-    }
-    assert examples["work_report"]["document_type"] == "work_report"
-    assert examples["work_report"]["task_mode"] == "create"
-    assert examples["work_report"]["document_brief_seed"]["document_control"]["render_template_id"] == "enterprise-work-report"
-    assert examples["research_report"]["document_type"] == "research_report"
-    assert examples["polish"]["task_mode"] == "polish"
+    ]
+    for example in examples:
+        assert "intake_example_id" not in example
+        assert "document_type" not in example
+        assert "task_mode" not in example
+        assert "document_brief_seed" not in example
+
+    profiles = {profile["intake_example_id"]: profile for profile in list_launch_profiles()}
+    assert profiles["work_report"]["document_type"] == "work_report"
+    assert profiles["work_report"]["task_mode"] == "create"
+    assert profiles["work_report"]["render_template_id"] == "enterprise-work-report"
+    assert profiles["research_report"]["document_type"] == "research_report"
 
 
 def test_unknown_persisted_contract_version_fails_closed_without_rewrite(tmp_path):

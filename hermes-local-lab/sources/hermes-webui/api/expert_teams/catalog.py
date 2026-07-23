@@ -4,8 +4,23 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-CONTENT_CREATOR_TEAM_ID = "content-creator-team"
-DEEP_RESEARCH_TEAM_ID = "deep-research-team"
+if __package__:
+    from .launch_profiles import (
+        CONTENT_CREATOR_TEAM_ID,
+        CONTENT_PHASES,
+        DEEP_RESEARCH_PHASES,
+        DEEP_RESEARCH_TEAM_ID,
+        list_launch_profiles,
+    )
+else:  # Compatibility for source-contract tests that load this file directly.
+    from api.expert_teams.launch_profiles import (
+        CONTENT_CREATOR_TEAM_ID,
+        CONTENT_PHASES,
+        DEEP_RESEARCH_PHASES,
+        DEEP_RESEARCH_TEAM_ID,
+        list_launch_profiles,
+    )
+
 PUBLIC_EXPERT_TEAM_IDS = (CONTENT_CREATOR_TEAM_ID, DEEP_RESEARCH_TEAM_ID)
 
 CONTENT_MATERIAL_TEMPLATES = [
@@ -64,23 +79,6 @@ CONTENT_MATERIAL_TEMPLATES = [
         "summary": "在保持原意基础上提升逻辑层次、正式表达和可读性。",
         "prompt": "帮我润色一份办公材料，要求保持原意，提升逻辑层次、正式表达和可读性。",
     },
-]
-
-CONTENT_PHASES = [
-    {"id": "plan", "title": "专家团计划", "phase": "流程安排", "worker_id": "director", "worker_name": "写作总导演", "executor": "model", "artifact_type": "writing_plan", "depends_on": []},
-    {"id": "materials", "title": "素材整理", "phase": "素材整理", "worker_id": "material", "worker_name": "资料整理专家", "executor": "model", "artifact_type": "material_ledger", "depends_on": ["plan"]},
-    {"id": "draft", "title": "起草富内容初稿", "phase": "富内容初稿", "worker_id": "writer", "worker_name": "文案创作专家", "executor": "model", "artifact_type": "document_draft", "depends_on": ["plan", "materials"]},
-    {"id": "polish", "title": "审稿打磨", "phase": "审稿打磨", "worker_id": "reviewer", "worker_name": "审稿专家", "executor": "model", "artifact_type": "reviewed_document", "depends_on": ["materials", "draft"]},
-    {"id": "delivery", "title": "交付确认", "phase": "交付确认", "worker_id": "delivery", "worker_name": "交付复核专家", "executor": "system", "artifact_type": "delivery_manifest", "depends_on": ["polish"]},
-]
-
-DEEP_RESEARCH_PHASES = [
-    {"id": "direction", "title": "确定研究方向", "phase": "研究方向", "worker_id": "director", "worker_name": "研究总导演", "executor": "model", "artifact_type": "research_charter", "depends_on": []},
-    {"id": "research", "title": "补充案例素材", "phase": "资料调研", "worker_id": "researcher", "worker_name": "资料研究员", "executor": "model", "artifact_type": "source_register", "depends_on": ["direction"]},
-    {"id": "evidence", "title": "事实核验", "phase": "事实核验", "worker_id": "evidence", "worker_name": "事实核验专家", "executor": "model", "artifact_type": "evidence_matrix", "depends_on": ["research"]},
-    {"id": "outline", "title": "结构提纲", "phase": "结构提纲", "worker_id": "architect", "worker_name": "结构架构师", "executor": "model", "artifact_type": "research_outline", "depends_on": ["evidence"]},
-    {"id": "draft", "title": "研究富内容初稿", "phase": "富内容初稿", "worker_id": "writer", "worker_name": "材料起草专家", "executor": "model", "artifact_type": "research_document_draft", "depends_on": ["outline", "evidence"]},
-    {"id": "review", "title": "复核交付", "phase": "复核交付", "worker_id": "reviewer", "worker_name": "复核专家", "executor": "model", "artifact_type": "reviewed_research_document", "depends_on": ["evidence", "outline", "draft"]},
 ]
 
 _CATALOG = {
@@ -241,29 +239,29 @@ def get_template(team_id: str | None) -> dict:
 
 
 def expert_team_catalog() -> dict:
-    from .rollout import resolve_contract_rollout
-
-    rollout = resolve_contract_rollout()
-    allowed = {
-        (item["team_id"], item["document_type"], item["intake_example_id"]): item
-        for item in rollout["allowed_combinations"]
+    profiles = {
+        (profile["team_id"], profile["intake_example_id"]): profile
+        for profile in list_launch_profiles()
     }
     teams = [get_template(team_id) for team_id in PUBLIC_EXPERT_TEAM_IDS]
     for team in teams:
+        public_examples = []
         for example in team.get("examples") or []:
-            capability = allowed.get(
-                (
-                    str(team.get("id") or ""),
-                    str(example.get("document_type") or ""),
-                    str(example.get("intake_example_id") or ""),
-                )
+            profile = profiles.get(
+                (str(team.get("id") or ""), str(example.get("intake_example_id") or ""))
             )
-            example["capability"] = {
-                "kind": capability["capability"] if capability else "draft",
-                "label": capability["label"] if capability else "AI 草稿能力",
-                "contract_version": rollout["contract_version"] if capability else "",
+            public_example = {
+                key: deepcopy(example.get(key))
+                for key in ("id", "label", "summary", "prompt")
             }
-    return {
-        "teams": teams,
-        "contract_rollout": rollout,
-    }
+            if profile is None:
+                public_example["available"] = False
+                public_example["capability"] = {"kind": "unavailable", "label": "暂未开放"}
+                public_example["disabled_reason"] = "该任务尚未完成完整交付验证"
+            else:
+                public_example["available"] = True
+                public_example["launch_profile_id"] = profile["id"]
+                public_example["capability"] = {"kind": "standalone", "label": "本机协作"}
+            public_examples.append(public_example)
+        team["examples"] = public_examples
+    return {"product_mode": "standalone", "teams": teams}

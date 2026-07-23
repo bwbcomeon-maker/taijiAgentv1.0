@@ -12792,9 +12792,10 @@ def handle_post(handler, parsed) -> bool:
         from api import expert_teams
 
         try:
-            session_id = str(body.get("session_id") or "").strip() or None
+            validated_body = expert_teams.validate_standalone_start_request(body)
+            session_id = validated_body["session_id"]
             workspace = _expert_team_workspace(session_id)
-            run = expert_teams.start_expert_team(workspace, body)
+            run = expert_teams.start_standalone_expert_team(workspace, validated_body)
             session_messages = _append_expert_team_session_entry(run)
             return j(
                 handler,

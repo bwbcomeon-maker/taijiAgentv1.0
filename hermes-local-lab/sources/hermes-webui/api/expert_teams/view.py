@@ -23,6 +23,7 @@ STATE_LABELS = {
     "awaiting_stage_input": "需要确认后继续",
     "generated_invalid": "草稿未通过校验",
     "awaiting_review": "阶段成果待复核",
+    "awaiting_local_confirmation": "等待本机确认",
     "delivery_validation_required": "正文已确认，等待文档交付",
     "revising": "正在按修改意见调整",
     "completed": "专家团任务已完成",
@@ -51,6 +52,8 @@ def _effective_state(run: dict) -> str:
         return "completion_reconciling"
     if state == "completed" and str(integrity.get("status") or "") in {"drifted", "unverified"}:
         return "completed_invalid"
+    if state == "completed" and str(run.get("product_mode") or "") == "standalone":
+        return "awaiting_local_confirmation"
     return state
 
 
@@ -199,6 +202,7 @@ def _stage_review(run: dict, state: str) -> dict:
 
 def _presentation(run: dict, business_context: dict) -> dict:
     state = _effective_state(run)
+    standalone = str(run.get("product_mode") or "") == "standalone"
     output = _stage_output(run)
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     detail = ""
@@ -227,16 +231,24 @@ def _presentation(run: dict, business_context: dict) -> dict:
         detail = str(run.get("last_validation_error") or "草稿未通过办公材料口径校验。")
     elif state == "awaiting_review":
         validation = run.get("validation") if isinstance(run.get("validation"), dict) else {}
-        if str(validation.get("status") or "") == "office_acceptance_required":
+        if standalone:
+            detail = "阶段成果已生成，请在本机确认后继续。"
+        elif str(validation.get("status") or "") == "office_acceptance_required":
             detail = str(run.get("last_validation_error") or "请完成 WPS/Word 验收后再确认交付。")
         else:
             detail = "阶段结果已生成，请查看后确认是否进入下一阶段。"
+    elif state == "awaiting_local_confirmation":
+        detail = "文档已生成，请在本机确认后完成任务。"
     elif state == "delivery_validation_required":
         detail = "正文语义已由受信人员确认，正在等待系统生成并校验唯一 DOCX 交付物。"
     elif state == "completed":
         detail = "所有阶段已完成，结果已写入当前对话。"
     elif state == "completion_reconciling":
-        detail = "Office 验收证据正在对账恢复，摘要闭合前不会显示企业完成。"
+        detail = (
+            "正在恢复本机交付状态，核验完成前不会显示任务完成。"
+            if standalone
+            else "Office 验收证据正在对账恢复，摘要闭合前不会显示企业完成。"
+        )
     elif state == "completed_invalid":
         integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
         detail = str(integrity.get("message") or "已完成交付文件缺失或摘要已变化，请勿继续按已验收结果使用。")
@@ -261,9 +273,15 @@ def _presentation(run: dict, business_context: dict) -> dict:
             if str(run.get("cancel_outcome") or "").strip().lower() in {"unknown", "retry_required"}
             else {"id": "refresh", "label": "刷新停止状态", "kind": "primary"}
         )
+    title = STATE_LABELS.get(state, "专家团状态")
+    if standalone:
+        title = {
+            "awaiting_review": "成果待本机确认",
+            "completion_reconciling": "正在恢复交付状态",
+        }.get(state, title)
     return {
         "state": state,
-        "title": STATE_LABELS.get(state, "专家团状态"),
+        "title": title,
         "visible_title": str(business_context.get("visible_title") or run.get("title") or "专家团任务"),
         "detail": detail,
         "primary_action": primary_action,
@@ -308,7 +326,7 @@ def _progress_text(run: dict, state: str | None = None) -> str:
         return "0/0"
     if progress.get("is_intake"):
         return f"0/{total}"
-    if (state or str(run.get("workflow_state") or "")) == "completed":
+    if (state or str(run.get("workflow_state") or "")) in {"completed", "awaiting_local_confirmation"}:
         return f"{total}/{total}"
     done = int(progress.get("done") or 0)
     return f"{min(total, max(0, done))}/{total}"
@@ -369,6 +387,8 @@ def _workflow(run: dict) -> dict:
     return {
         "stages": tasks,
         "current_stage": deepcopy(run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}),
+        "current_index": int(progress.get("current_index") or 0),
+        "total": len(tasks),
         "progress": progress,
     }
 
@@ -400,6 +420,7 @@ def _dock(run: dict, presentation: dict) -> dict:
 
 
 def _timeline_events(run: dict) -> list[dict]:
+    standalone = str(run.get("product_mode") or "") == "standalone"
     members = {
         str(member.get("id") or ""): member
         for member in run.get("members") or []
@@ -411,11 +432,18 @@ def _timeline_events(run: dict) -> list[dict]:
             continue
         member_id = str(event.get("member_id") or "")
         member = members.get(member_id) or {}
+        event_type = str(event.get("type") or "event")
+        title = str(event.get("title") or event_type or "专家团动态")
+        detail = str(event.get("detail") or "")
+        if standalone and event_type == "office_acceptance_required":
+            event_type = "local_confirmation_required"
+            title = "等待本机确认"
+            detail = "当前成果已生成，请在本机确认后继续。"
         rows.append(
             {
-                "type": str(event.get("type") or "event"),
-                "title": str(event.get("title") or event.get("type") or "专家团动态"),
-                "detail": str(event.get("detail") or ""),
+                "type": event_type,
+                "title": title,
+                "detail": detail,
                 "member_id": member_id,
                 "member_name": str(member.get("name") or ""),
                 "member_image": str(member.get("image") or ""),
@@ -605,6 +633,33 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
     return gates, "office_review_required", {"type": "open_office_review", "label": "开始 Office 验收"}
 
 
+def _standalone_completion_model(run: dict) -> tuple[dict, str, dict]:
+    document_gates, _status, _next_action = _completion_model(run, enterprise=True)
+    gates = {
+        "content": document_gates["content"],
+        "document": document_gates["document"],
+        "local_confirmation": {
+            "status": "pending",
+            "label": "等待本机确认",
+            "reason_code": "local_confirmation_required",
+            "blocking_issue_count": 0,
+            "next_action": {"type": "wait_local_confirmation", "label": "等待本机确认"},
+        },
+    }
+    content_status = str(gates["content"].get("status") or "pending")
+    document_status = str(gates["document"].get("status") or "pending")
+    if content_status != "passed":
+        return gates, "content_required", {"type": "review_content", "label": "复核内容"}
+    if document_status == "failed":
+        return gates, "document_failed", {"type": "repair_document", "label": "处理 DOCX 自动检查问题"}
+    if document_status != "passed":
+        return gates, "document_pending", {"type": "wait_document", "label": "等待生成文档"}
+    return gates, "local_confirmation_required", {
+        "type": "wait_local_confirmation",
+        "label": "等待本机确认",
+    }
+
+
 def _brief_is_editable(run: dict) -> bool:
     state = str(run.get("workflow_state") or "collecting_required")
     if state not in {"collecting_required", "collecting_optional", "ready_to_generate"}:
@@ -617,6 +672,8 @@ def _brief_is_editable(run: dict) -> bool:
 
 
 def _capability_model(run: dict, contract_version: str) -> dict:
+    if str(run.get("product_mode") or "") == "standalone":
+        return {"kind": "standalone", "label": "本机协作"}
     if contract_version != EXPERT_TEAM_CONTRACT_V1:
         return {"kind": "legacy", "label": "历史任务，未按企业合同验证"}
     document_type = str((run.get("document_brief") or {}).get("document_type") or run.get("document_type") or "")
@@ -659,8 +716,15 @@ def expert_team_run_view(run: dict) -> dict:
         pending_input = _pending_input(run)
     if state != "awaiting_stage_input":
         pending_input = _pending_input(run)
-    enterprise = contract_version == EXPERT_TEAM_CONTRACT_V1
-    completion_gates, delivery_status, next_action = _completion_model(run, enterprise=enterprise)
+    standalone = str(run.get("product_mode") or "") == "standalone"
+    document_contract = contract_version == EXPERT_TEAM_CONTRACT_V1
+    if standalone:
+        completion_gates, delivery_status, next_action = _standalone_completion_model(run)
+    else:
+        completion_gates, delivery_status, next_action = _completion_model(
+            run,
+            enterprise=document_contract,
+        )
     result = {
         "business_context": business_context,
         "presentation": presentation,
@@ -688,11 +752,19 @@ def expert_team_run_view(run: dict) -> dict:
         "completion_gates": completion_gates,
         "delivery_status": delivery_status,
         "next_action": next_action,
-        "office_review": deepcopy(run.get("office_review_view")) if isinstance(run.get("office_review_view"), dict) else None,
+        "office_review": (
+            None
+            if standalone
+            else deepcopy(run.get("office_review_view"))
+            if isinstance(run.get("office_review_view"), dict)
+            else None
+        ),
         "capability": _capability_model(run, contract_version),
         "artifact_validation": {"status": "unavailable", "blocking_count": 0},
     }
-    if enterprise:
+    if standalone:
+        result["product_mode"] = "standalone"
+    if document_contract:
         brief = brief_summary(run.get("document_brief") or {})
         full_brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
         original_request = str(brief.get("original_request") or "")
@@ -741,7 +813,8 @@ def expert_team_run_view(run: dict) -> dict:
             "type": "edit_brief" if brief["editable"] else "view_brief",
             "label": "查看/编辑文档规格" if brief["editable"] else "查看文档规格",
         }
-        result["contract_version"] = contract_version
+        if not standalone:
+            result["contract_version"] = contract_version
         result["brief"] = brief
         enterprise_result = _enterprise_stage_result(run)
         result["artifact_validation"] = deepcopy(
