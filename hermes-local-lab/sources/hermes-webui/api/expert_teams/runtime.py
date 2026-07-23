@@ -2138,10 +2138,13 @@ def update_expert_team_document_brief(workspace: Path, body: dict) -> dict:
         stage_started=stage_started,
     )
     _record_action(run, body, "brief_update")
+    next_state = str(run.get("workflow_state") or "collecting_required")
+    if next_state not in {"collecting_required", "collecting_optional"}:
+        next_state = "collecting_optional"
     return _transition(
         workspace,
         run,
-        "collecting_required",
+        next_state,
         "brief_updated",
         {"document_brief": updated, "brief_validation": {"valid_for_confirmation": False, "field_errors": []}},
     )
@@ -2200,6 +2203,109 @@ def confirm_expert_team_document_brief(workspace: Path, body: dict) -> dict:
             "brief_validation": validation,
             "source_registry": source_registry,
             "source_context_snapshot_ref": snapshot_ref,
+        },
+    )
+
+
+def _require_editable_document_brief(run: dict, expected_revision: object) -> dict:
+    if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+        raise ContractError("brief_not_available", "contract_version", "历史任务不支持企业文档规格编辑")
+    brief = deepcopy(run.get("document_brief") or {})
+    if expected_revision is None:
+        raise ValueError("expected_brief_revision is required for document brief mutations")
+    if int(expected_revision) != int(brief.get("revision") or 0):
+        raise ContractError("brief_revision_conflict", "expected_brief_revision", "规格已被更新，请保留草稿并刷新后重试")
+    stage_started = bool(run.get("stage_outputs") or run.get("execution_start_id")) or str(
+        run.get("workflow_state") or ""
+    ) in {"starting", "generating", "revising", "awaiting_review", "awaiting_stage_input", "completed"}
+    if stage_started:
+        raise ContractError("brief_frozen_new_run_required", "document_brief", "已开始生成；修改规格需基于当前规格新建任务")
+    return brief
+
+
+@_serialized_body_mutation
+def add_expert_team_brief_source(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(workspace, body, "brief_source_add", require_stage=False)
+    if duplicate is not None:
+        return duplicate
+    brief = _require_editable_document_brief(run, body.get("expected_brief_revision"))
+    raw_source = body.get("source")
+    if not isinstance(raw_source, dict):
+        raise ContractError("invalid_source", "source", "资料必须是字段对象")
+    raw_source = deepcopy(raw_source)
+    if not str(raw_source.get("source_id") or "").strip():
+        raw_source["source_id"] = "SRC-" + uuid.uuid4().hex[:12].upper()
+    source_id = str(raw_source.get("source_id") or "").strip()
+    existing = list((brief.get("source_policy") or {}).get("source_refs") or [])
+    if any(str(item.get("source_id") or "") == source_id for item in existing if isinstance(item, dict)):
+        raise ContractError("source_duplicate", f"source_policy.source_refs.{source_id}", "资料 ID 不能重复")
+    try:
+        resolved, registry = resolve_source_registry(workspace, str(run.get("run_id") or ""), [raw_source])
+    except SourceRegistryError as exc:
+        raise ContractError(exc.code, f"source_policy.source_refs.{exc.source_id}", str(exc)) from exc
+    source_policy = deepcopy(brief.get("source_policy") or {})
+    source_policy["source_refs"] = [*existing, resolved[0]]
+    updated = patch_document_brief(
+        brief,
+        {"source_policy": source_policy},
+        expected_revision=body.get("expected_brief_revision"),
+        stage_started=False,
+    )
+    source_registry = deepcopy(run.get("source_registry") or {})
+    source_registry.update(registry)
+    _record_action(run, body, "brief_source_add")
+    next_state = str(run.get("workflow_state") or "collecting_required")
+    if next_state not in {"collecting_required", "collecting_optional"}:
+        next_state = "collecting_optional"
+    return _transition(
+        workspace,
+        run,
+        next_state,
+        "brief_source_added",
+        {
+            "document_brief": updated,
+            "source_registry": source_registry,
+            "brief_validation": {"valid_for_confirmation": False, "field_errors": []},
+        },
+    )
+
+
+@_serialized_body_mutation
+def remove_expert_team_brief_source(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(workspace, body, "brief_source_remove", require_stage=False)
+    if duplicate is not None:
+        return duplicate
+    brief = _require_editable_document_brief(run, body.get("expected_brief_revision"))
+    source_id = str(body.get("source_id") or "").strip()
+    if not source_id:
+        raise ContractError("source_id_required", "source_id", "请选择要移除的资料")
+    existing = [item for item in (brief.get("source_policy") or {}).get("source_refs") or [] if isinstance(item, dict)]
+    remaining = [item for item in existing if str(item.get("source_id") or "") != source_id]
+    if len(remaining) == len(existing):
+        raise ContractError("source_not_found", f"source_policy.source_refs.{source_id}", "资料不存在或已被移除")
+    source_policy = deepcopy(brief.get("source_policy") or {})
+    source_policy["source_refs"] = remaining
+    updated = patch_document_brief(
+        brief,
+        {"source_policy": source_policy},
+        expected_revision=body.get("expected_brief_revision"),
+        stage_started=False,
+    )
+    source_registry = deepcopy(run.get("source_registry") or {})
+    source_registry.pop(source_id, None)
+    _record_action(run, body, "brief_source_remove")
+    next_state = str(run.get("workflow_state") or "collecting_required")
+    if next_state not in {"collecting_required", "collecting_optional"}:
+        next_state = "collecting_optional"
+    return _transition(
+        workspace,
+        run,
+        next_state,
+        "brief_source_removed",
+        {
+            "document_brief": updated,
+            "source_registry": source_registry,
+            "brief_validation": {"valid_for_confirmation": False, "field_errors": []},
         },
     )
 

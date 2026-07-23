@@ -73,6 +73,7 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/expert-team-v3.css?v=__WEBUI_VERSION__">
 <style>
 /* image-capability-center-styles:start */
 .image-capability-center{display:grid;gap:14px;min-width:0}
@@ -997,31 +998,7 @@
       </div>
     </div>
     <div id="mainWriting" class="main-view">
-      <div class="main-view-header">
-        <div class="main-view-title-row">
-          <div class="main-view-title">写作专家中心</div>
-          <span class="main-view-badge">本地技能</span>
-        </div>
-        <div class="main-view-actions">
-          <button class="panel-icon-btn has-tooltip has-tooltip--bottom" type="button" onclick="loadWriteflow(true)" data-tooltip="刷新专家团" aria-label="刷新专家团"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
-        </div>
-      </div>
-      <div class="main-view-body writeflow-center-body">
-        <div class="writeflow-center">
-          <div class="writeflow-center-head">
-            <div>
-              <strong>选择一个写作专家团</strong>
-              <span>先选团队，再把任务交给新的聊天任务处理。</span>
-            </div>
-            <div class="writeflow-center-search">
-              <svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-              <input id="writeflowTeamSearch" type="search" placeholder="搜索专家团、能力或场景" oninput="renderWriteflowTeams()" autocomplete="off">
-            </div>
-          </div>
-          <div id="writeflowCatalogStatus" class="writeflow-catalog-status"></div>
-          <div id="writeflowTeamGrid" class="writeflow-team-grid writeflow-team-grid-main"></div>
-        </div>
-      </div>
+      <div id="expertTeamV3PortalRoot" data-expert-team-v3 data-expert-team-v3-surface="portal"></div>
     </div>
     <div id="mainWorkspaces" class="main-view">
       <div class="main-view-header">
@@ -2438,6 +2415,7 @@
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/expert-team-v3.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/taiji-home.js?v=__WEBUI_VERSION__" defer></script>

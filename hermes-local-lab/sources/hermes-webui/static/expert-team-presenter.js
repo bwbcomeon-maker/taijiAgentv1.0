@@ -70,6 +70,10 @@
       additionalContext:str(brief.additional_context),
       documentControl:brief.document_control&&typeof brief.document_control==='object'?brief.document_control:{},
       sourcePolicySummary:brief.source_policy_summary&&typeof brief.source_policy_summary==='object'?brief.source_policy_summary:{},
+      sources:arr(brief.sources).map(source=>({
+        source_id:str(source&&source.source_id),kind:str(source&&source.kind),label:str(source&&source.label),
+        status:str(source&&source.status),size_bytes:Number(source&&source.size_bytes||0),sha256:str(source&&source.sha256)
+      })),
       editable:brief.editable===true,
       editPolicy:str(brief.edit_policy),
       validation:brief.validation||{},
@@ -91,6 +95,7 @@
       reviewSessionStatus:str(value.review_session_status||value.reviewSessionStatus,'begin_required'),
       checklist:value.checklist&&typeof value.checklist==='object'?value.checklist:{},issues,
       issueCount:Number(value.issue_count==null?issues.length:value.issue_count),reviewerLabel:str(value.reviewer_label||value.reviewerLabel),
+      evidenceCount:Number(value.evidence_count||value.evidenceCount||arr(value.evidence).length||arr(value.visual_evidence||value.visualEvidence).length||0),
       waivedIssueIds:arr(value.waived_issue_ids||value.waivedIssueIds).map(String)
     };
   }

@@ -43,6 +43,8 @@ from .runtime import (
     start_expert_team,
     submit_expert_team_stage_input,
     update_expert_team_document_brief,
+    add_expert_team_brief_source,
+    remove_expert_team_brief_source,
     verified_source_context_for_execution,
     confirm_expert_team_document_brief,
 )
@@ -96,6 +98,8 @@ __all__ = [
     "start_expert_team",
     "submit_expert_team_stage_input",
     "update_expert_team_document_brief",
+    "add_expert_team_brief_source",
+    "remove_expert_team_brief_source",
     "verified_source_context_for_execution",
     "confirm_expert_team_document_brief",
 ]
