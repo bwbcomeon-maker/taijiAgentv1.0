@@ -31,14 +31,24 @@ from api.agent_sessions import (
 logger = logging.getLogger(__name__)
 
 
+class SessionWriteConflict(RuntimeError):
+    """A stale Session object attempted to replace newer durable truth."""
+
+
 def _migration_guarded_session_write(func):
     """Keep every sidecar/index commit outside an exclusive migration window."""
     @wraps(func)
     def guarded(*args, **kwargs):
         from api.legacy_session_migration import legacy_migration_state_guard
+        from api.truth_rewrite import truth_rewrite_lock
 
         with legacy_migration_state_guard():
-            return func(*args, **kwargs)
+            session = args[0] if args else None
+            session_id = getattr(session, "session_id", None)
+            if not session_id:
+                return func(*args, **kwargs)
+            with truth_rewrite_lock(session_id):
+                return func(*args, **kwargs)
     return guarded
 CLI_VISIBLE_SESSION_LIMIT = 20
 # How many messageful cron sessions to surface in the project-chip layer.
@@ -670,6 +680,7 @@ class Session:
                  enabled_toolsets=None,
                  composer_draft=None,
                 privacy_context=None,
+                expert_team_start_transaction_ids=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -729,6 +740,13 @@ class Session:
         # had no source turn or expiry, so carrying them forward would recreate
         # the indefinite cross-turn pollution this field replaces.
         self.privacy_context = normalize_session_privacy_context(privacy_context)
+        self.expert_team_start_transaction_ids = list(
+            dict.fromkeys(
+                str(value)
+                for value in (expert_team_start_transaction_ids or [])
+                if re.fullmatch(r"[0-9a-f]{64}", str(value or ""))
+            )
+        )
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -772,6 +790,25 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # Compare the durable sidecar before mutating any in-memory field.  A
+        # stale writer must fail without changing either disk truth or the
+        # caller's timestamp, so the caller can safely reload and retry.
+        existing_text = None
+        expected_digest = getattr(self, '_loaded_sidecar_sha256', None)
+        if self.path.exists():
+            existing_text = self.path.read_text(encoding='utf-8')
+            current_digest = hashlib.sha256(existing_text.encode('utf-8')).hexdigest()
+            if expected_digest is None or current_digest != expected_digest:
+                raise SessionWriteConflict(
+                    f"Session {self.session_id!r} changed on disk; reload before saving"
+                )
+        elif expected_digest is not None:
+            # This object previously observed a durable sidecar.  Its absence
+            # is itself a newer state (normally DELETE), never permission for a
+            # delayed worker in this or another process to recreate the sid.
+            raise SessionWriteConflict(
+                f"Session {self.session_id!r} was deleted; refusing stale resurrection"
+            )
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -796,6 +833,7 @@ class Session:
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'privacy_context',
+            'expert_team_start_transaction_ids',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -821,8 +859,7 @@ class Session:
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
         try:
-            if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
+            if existing_text is not None:
                 try:
                     existing = json.loads(existing_text)
                     existing_msg_count = len(existing.get('messages') or [])
@@ -864,6 +901,14 @@ class Session:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
+            self._loaded_sidecar_sha256 = hashlib.sha256(
+                payload.encode('utf-8')
+            ).hexdigest()
+            # A full Session instance is now the source of the committed
+            # transcript. Keep its compact/index hint in sync with the payload
+            # just written; otherwise a cold-loaded zero-message Session that
+            # appends rows can publish a stale sidebar count.
+            self._metadata_message_count = len(self.messages or [])
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -880,27 +925,39 @@ class Session:
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
         if not is_safe_session_id(sid):
             return None
-        p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
-            return None
-        data = json.loads(p.read_text(encoding='utf-8'))
-        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
-        session = cls(**data)
-        # A coordinated sidecar/state.db transcript rewrite may be interrupted
-        # by process death after only one store commits.  This is transaction
-        # crash recovery (not legacy-history migration): the durable marker
-        # contains only before/target hashes, and recovery proceeds solely when
-        # the two stores prove an unambiguous roll-forward/complete/abort state.
-        _recover_truth_rewrite_on_full_read(session)
-        if _collapsed_partials:
-            try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
-                session.save(touch_updated_at=False, skip_index=True)
-            except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
-        return session
+        from api.legacy_session_migration import legacy_migration_state_guard
+        from api.truth_rewrite import truth_rewrite_lock
+
+        # Bind the returned object and its CAS digest to one coherent sidecar
+        # snapshot.  Recovery and duplicate-partial self-healing can re-enter
+        # these guards, but no concurrent writer may publish B between reading
+        # A and returning an object that still represents A.
+        with legacy_migration_state_guard(), truth_rewrite_lock(sid):
+            p = SESSION_DIR / f'{sid}.json'
+            if not p.exists():
+                return None
+            source_text = p.read_text(encoding='utf-8')
+            data = json.loads(source_text)
+            data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+            session = cls(**data)
+            session._loaded_sidecar_sha256 = hashlib.sha256(
+                source_text.encode('utf-8')
+            ).hexdigest()
+            # A coordinated sidecar/state.db transcript rewrite may be interrupted
+            # by process death after only one store commits.  This is transaction
+            # crash recovery (not legacy-history migration): the durable marker
+            # contains only before/target hashes, and recovery proceeds solely when
+            # the two stores prove an unambiguous roll-forward/complete/abort state.
+            _recover_truth_rewrite_on_full_read(session)
+            if _collapsed_partials:
+                try:
+                    # Self-heal bloated sessions on first full load without touching
+                    # recency/index ordering; save() creates a .bak because this
+                    # intentionally shrinks the transcript (#2592).
+                    session.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+            return session
 
     @classmethod
     def load_metadata_only(cls, sid):
@@ -951,6 +1008,10 @@ class Session:
             # session must reload it with metadata_only=False first.
             # See #1558 — v0.50.279 _clear_stale_stream_state() data-loss bug.
             session._loaded_metadata_only = True
+            try:
+                session._loaded_sidecar_sha256 = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                pass
             return session
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
@@ -983,6 +1044,9 @@ class Session:
             'archived': self.archived,
             'project_id': self.project_id,
             'profile': self.profile,
+            'expert_team_start_transaction_ids': copy.deepcopy(
+                self.expert_team_start_transaction_ids
+            ),
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,

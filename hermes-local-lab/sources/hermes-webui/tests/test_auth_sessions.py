@@ -5,12 +5,13 @@ and lazy pruning of expired entries.
 import time
 import unittest
 from pathlib import Path
-import tempfile
 import os
 
-# Isolate state dir so we don't touch real sessions
-_TEST_STATE = Path(tempfile.mkdtemp())
-os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
+# conftest publishes one isolated state root before test modules are collected.
+# Reuse it instead of mutating HERMES_WEBUI_STATE_DIR at import time: the latter
+# can make the pytest process and its test-server subprocess read different
+# session trees depending on collection order.
+_TEST_STATE = Path(os.environ["HERMES_WEBUI_TEST_STATE_DIR"])
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))

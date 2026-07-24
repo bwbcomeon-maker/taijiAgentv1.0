@@ -1665,7 +1665,14 @@ def _build_expert_team_run(body: dict, *, run_id: str | None = None) -> dict:
 
 
 def start_expert_team(workspace: Path, body: dict) -> dict:
-    """Build and immediately publish a run for legacy/internal callers."""
+    """Build and write a Run for legacy/internal compatibility callers.
+
+    This is not the standalone product launch boundary. If an internal test
+    passes a standalone profile, the resulting raw file remains intentionally
+    invisible to ``read_run`` because it has no atomic receipt. Production
+    standalone callers must use ``POST /api/expert-teams/start`` (and later
+    ``/launch``), which commits Session, Run, and reverse bindings together.
+    """
     return write_run(workspace, _build_expert_team_run(body))
 
 
@@ -1678,8 +1685,13 @@ def build_standalone_expert_team_run(body: dict, *, run_id: str) -> dict:
 
 
 def start_standalone_expert_team(workspace: Path, body: dict) -> dict:
-    """Public standalone start boundary; legacy constructors remain internal-only."""
-    return start_expert_team(workspace, validate_standalone_start_request(body))
+    """Reject the removed non-atomic standalone constructor."""
+    del workspace, body
+    raise ContractError(
+        "atomic_launch_required",
+        "launch_profile_id",
+        "standalone tasks must be launched through the atomic start API",
+    )
 
 
 def read_expert_team_run(workspace: Path, run_id: str) -> dict:

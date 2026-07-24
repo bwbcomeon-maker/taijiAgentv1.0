@@ -388,6 +388,7 @@ def test_public_start_route_creates_only_standalone_schema_v3(monkeypatch, tmp_p
         if hasattr(module, "SESSIONS"):
             monkeypatch.setattr(module, "SESSIONS", sessions)
     session = models.Session(session_id="standalone-session", workspace=str(tmp_path))
+    session.save(touch_updated_at=False, skip_index=True)
     sessions[session.session_id] = session
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(
@@ -410,7 +411,11 @@ def test_public_start_route_creates_only_standalone_schema_v3(monkeypatch, tmp_p
 def test_profile_start_creates_standalone_schema_v3_with_immutable_server_snapshot(tmp_path):
     from api import expert_teams
     from api.expert_teams.launch_profiles import get_launch_profile
+    from api.expert_teams.storage import read_run_raw
 
+    # ``start_expert_team`` is the legacy/internal constructor used by runtime
+    # unit tests. A standalone v3 file created here is deliberately not public:
+    # production visibility requires the atomic /start receipt and bindings.
     run = expert_teams.start_expert_team(tmp_path, _profile_start())
 
     assert run["schema_version"] == 3
@@ -425,7 +430,7 @@ def test_profile_start_creates_standalone_schema_v3_with_immutable_server_snapsh
     assert len(run["tasks"]) == 5
 
     run["launch_profile_snapshot"]["team_id"] = "forged-after-write"
-    reopened = expert_teams.read_expert_team_run(tmp_path, run["run_id"])
+    reopened = read_run_raw(tmp_path, run["run_id"])
     assert reopened["launch_profile_snapshot"]["team_id"] == "content-creator-team"
 
 

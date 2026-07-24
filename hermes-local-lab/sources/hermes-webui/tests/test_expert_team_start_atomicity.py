@@ -4,7 +4,13 @@ import copy
 import hashlib
 import io
 import json
+import multiprocessing
+import os
+import subprocess
+import sys
+import textwrap
 import threading
+import time
 import unicodedata
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -78,6 +84,8 @@ def atomic_env(monkeypatch, tmp_path):
     import api.config as config
     import api.models as models
     import api.routes as routes
+    import api.state_sync as state_sync
+    from hermes_state import SessionDB
 
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -92,7 +100,12 @@ def atomic_env(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: Path(value).resolve())
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(routes, "_replace_state_db_truth", lambda *_args, **_kwargs: True)
+    state_db_path = tmp_path / "state.db"
+    monkeypatch.setattr(
+        state_sync,
+        "_get_state_db",
+        lambda *_args, **_kwargs: SessionDB(state_db_path),
+    )
     return routes, models, sessions, tmp_path
 
 
@@ -102,6 +115,7 @@ def _new_memory_session(models, tmp_path, *, session_id: str):
         workspace=str(tmp_path),
         profile="default",
     )
+    session.save(touch_updated_at=False, skip_index=True)
     models.SESSIONS[session.session_id] = session
     return session
 
@@ -160,6 +174,87 @@ def _run_messages(session, run_id: str):
         for message in session.messages
         if message.get("expert_team_run_id") == run_id
     ]
+
+
+def _hold_cross_process_lock(kind, workspace, identifier, ready, release, result):
+    """Fork worker used to prove the OS locks, not only thread locks."""
+    try:
+        if kind == "session":
+            from api.truth_rewrite import truth_rewrite_lock
+
+            manager = truth_rewrite_lock(identifier, timeout_seconds=2)
+        else:
+            from api.expert_teams.storage import run_file_lock
+
+            manager = run_file_lock(Path(workspace), identifier, timeout_seconds=2)
+        with manager:
+            ready.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("test release signal timed out")
+        result.put(("ok", ""))
+    except BaseException as exc:  # pragma: no cover - child diagnostic path
+        result.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _save_stale_session_after_signal(session_id, ready, proceed, result):
+    try:
+        from api.models import Session
+
+        stale = Session.load(session_id)
+        if stale is None:
+            raise RuntimeError("session not found")
+        ready.set()
+        if not proceed.wait(timeout=5):
+            raise TimeoutError("test proceed signal timed out")
+        stale.messages.extend(
+            [
+                {"role": "user", "content": "过期进程的问题"},
+                {"role": "assistant", "content": "过期进程的回答"},
+            ]
+        )
+        stale.context_messages = copy.deepcopy(stale.messages)
+        stale.title = "过期进程标题"
+        stale.input_tokens = 999
+        stale.save(touch_updated_at=False, skip_index=True)
+        result.put(("saved", ""))
+    except BaseException as exc:  # pragma: no cover - child diagnostic path
+        result.put(("error", type(exc).__name__))
+
+
+def _commit_ordinary_session_before_start(session_id, ready, result):
+    try:
+        import api.routes as routes
+        from api.models import Session
+
+        ordinary = Session.load(session_id)
+        if ordinary is None:
+            raise RuntimeError("session not found")
+
+        def mutate():
+            ready.set()
+            # Keep the durable writer lock long enough for the parent request
+            # to contend on the OS lock, then atomically commit ordinary truth.
+            time.sleep(0.25)
+            ordinary.messages.extend(
+                [
+                    {"role": "user", "content": "普通写入的问题"},
+                    {"role": "assistant", "content": "普通写入的回答"},
+                ]
+            )
+            ordinary.context_messages = copy.deepcopy(ordinary.messages)
+            ordinary.title = "普通写入后的标题"
+            ordinary.input_tokens = 123
+            ordinary.output_tokens = 456
+
+        routes._rewrite_existing_session_truth(
+            ordinary,
+            mutate,
+            privacy_reason=None,
+            touch_updated_at=False,
+        )
+        result.put(("ok", ""))
+    except BaseException as exc:  # pragma: no cover - child diagnostic path
+        result.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def test_unknown_session_is_404_and_never_falls_back_to_last_workspace(atomic_env):
@@ -248,26 +343,25 @@ def test_different_keys_create_distinct_runs_for_same_session(atomic_env):
     assert len(session.messages) == 4
 
 
-def test_new_session_persistence_failure_restores_memory_and_removes_run(
-    atomic_env,
-    monkeypatch,
-):
+def test_unpersisted_session_is_rejected_before_receipt_or_run_creation(atomic_env):
     routes, models, _sessions, workspace = atomic_env
-    session = _new_memory_session(models, workspace, session_id="atomic-new-rollback")
-    before = copy.deepcopy(session.__dict__)
-    monkeypatch.setattr(
-        routes,
-        "_replace_state_db_truth",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("state db locked")),
+    session = models.Session(
+        session_id="atomic-unpersisted",
+        workspace=str(workspace),
+        profile="default",
     )
+    models.SESSIONS[session.session_id] = session
+    before = copy.deepcopy(session.__dict__)
 
     handler = _post(routes, _start_body(session.session_id))
 
-    assert handler.status == 500
-    assert handler.json_body()["code"] == "start_persistence_failed"
+    assert handler.status == 409
+    assert handler.json_body()["code"] == "session_not_persisted"
     assert session.__dict__ == before
     assert session.path.exists() is False
     assert _public_run_files(workspace) == []
+    assert _pending_run_files(workspace) == []
+    assert not (workspace / ".taiji" / "expert-teams" / "start-transactions").exists()
 
 
 def test_existing_session_failure_preserves_exact_sidecar_and_semantics(
@@ -1209,7 +1303,7 @@ def test_run_id_only_get_fails_closed_when_prepared_session_is_busy(
     )["state"] == "prepared"
 
 
-def test_advanced_canonical_is_preserved_and_receipt_marks_recovery_required(
+def test_uncommitted_canonical_cannot_advance_during_commit_compensation(
     atomic_env,
     monkeypatch,
 ):
@@ -1243,10 +1337,9 @@ def test_advanced_canonical_is_preserved_and_receipt_marks_recovery_required(
         session_id=session.session_id,
         idempotency_key=body["idempotency_key"],
     )
-    assert receipt["state"] == "recovery_required"
-    raw_reader = getattr(storage, "read_run_raw", storage.read_run)
-    assert raw_reader(workspace, receipt["run_id"])["version"] == 7
-    assert len(_run_messages(session, receipt["run_id"])) == 2
+    assert receipt["state"] == "rolled_back"
+    assert storage.run_path(workspace, receipt["run_id"]).exists() is False
+    assert len(_run_messages(session, receipt["run_id"])) == 0
 
 
 def test_failed_run_cleanup_keeps_session_recovery_marker_discoverable(
@@ -1300,8 +1393,17 @@ def test_metadata_only_session_get_hides_prepared_title_and_message_count(
     )
     with pytest.raises(SystemExit):
         _post(routes, body)
+    import api.state_sync as state_sync
+
+    assert len(state_sync._get_state_db().get_messages(session.session_id)) == 2
     if cold_cache:
+        from api import brand_privacy, truth_rewrite
+
         sessions.clear()
+        with brand_privacy._COMMITTED_START_RECEIPT_CACHE_LOCK:
+            brand_privacy._COMMITTED_START_RECEIPT_CACHE.clear()
+        with truth_rewrite._LOCKS_GUARD:
+            truth_rewrite._LOCKS.clear()
 
     response = _get(
         routes,
@@ -1312,6 +1414,7 @@ def test_metadata_only_session_get_hides_prepared_title_and_message_count(
     public = response.json_body()["session"]
     assert public["title"] == "Untitled"
     assert public["message_count"] == 0
+    assert len(state_sync._get_state_db().get_messages(session.session_id)) == 2
 
 
 def test_sidebar_session_row_hides_prepared_title_and_message_count(
@@ -1356,6 +1459,11 @@ def test_public_projection_reads_each_start_receipt_once_and_fails_safe(
         {
             "role": role,
             "content": content,
+            "type": (
+                "expert_team_start"
+                if role == "user"
+                else "expert_team_lifecycle"
+            ),
             "expert_team_run_id": "et-0123456789abcdef",
             "expert_team_start_transaction_id": transaction_id,
         }
@@ -1380,6 +1488,7 @@ def test_public_projection_reads_each_start_receipt_once_and_fails_safe(
         "workspace": str(tmp_path),
         "message_count": 2,
         "messages": messages,
+        "expert_team_start_transaction_ids": [transaction_id],
     }
 
     projected = brand_privacy.public_session_projection(payload)
@@ -1393,8 +1502,8 @@ def test_public_projection_reads_each_start_receipt_once_and_fails_safe(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("temporary read error")),
     )
     projected_on_error = brand_privacy.public_session_projection(payload)
-    assert len(projected_on_error["messages"]) == 2
-    assert projected_on_error["message_count"] == 2
+    assert projected_on_error["messages"] == []
+    assert projected_on_error["message_count"] == 0
 
     never_verified_payload = copy.deepcopy(payload)
     never_verified_payload["messages"] = [
@@ -1410,7 +1519,7 @@ def test_public_projection_reads_each_start_receipt_once_and_fails_safe(
     assert never_verified["message_count"] == 0
 
 
-def test_initial_receipt_write_crash_never_publishes_dangling_session_binding(
+def test_initial_receipt_write_crash_without_session_binding_fails_closed(
     atomic_env,
     monkeypatch,
 ):
@@ -1442,13 +1551,16 @@ def test_initial_receipt_write_crash_never_publishes_dangling_session_binding(
     monkeypatch.setattr(storage, "_write_json_atomic", real_write_json)
     retry = _post(routes, body)
 
-    assert retry.status == 200
-    receipts = storage.list_start_transactions_for_session(workspace, session.session_id)
-    assert [item["transaction_id"] for item in receipts] == [transaction_id]
+    assert retry.status == 503
+    assert retry.json_body()["code"] == "start_receipt_invalid"
+    with pytest.raises(storage.StartTransactionIntegrityError):
+        storage.read_start_transaction_by_id(workspace, transaction_id)
+    assert session.messages == []
+    assert _public_run_files(workspace) == []
 
 
 @pytest.mark.parametrize("wrapped_storage_error", [False, True])
-def test_transient_session_receipt_batch_failure_uses_complete_committed_cache(
+def test_transient_session_receipt_failure_never_uses_cache_as_authority(
     atomic_env,
     monkeypatch,
     wrapped_storage_error,
@@ -1464,7 +1576,6 @@ def test_transient_session_receipt_batch_failure_uses_complete_committed_cache(
 
     warmed = brand_privacy.public_session_projection(payload)
     assert len(warmed["messages"]) == 2
-    expected_title = warmed["title"]
 
     def transient_read_failure(*_args, **_kwargs):
         error = OSError("temporary receipt read failure")
@@ -1485,11 +1596,11 @@ def test_transient_session_receipt_batch_failure_uses_complete_committed_cache(
         transient_read_failure,
     )
 
-    recovered = brand_privacy.public_session_projection(payload)
+    rejected = brand_privacy.public_session_projection(payload)
 
-    assert recovered["messages"] == warmed["messages"]
-    assert recovered["message_count"] == 2
-    assert recovered["title"] == expected_title
+    assert rejected["messages"] == []
+    assert rejected["message_count"] == 0
+    assert rejected["title"] == "Untitled"
 
 
 @pytest.mark.parametrize("failure_kind", ["tampered", "missing"])
@@ -1810,3 +1921,895 @@ def test_late_compensation_preserves_newer_user_rename_timestamp(
     reloaded = models.Session.load(session.session_id)
     assert reloaded.title == session.title
     assert reloaded.updated_at == renamed_updated_at
+
+
+def test_committed_same_key_replay_precedes_busy_session_rejection(atomic_env):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-replay-busy")
+    body = _start_body(session.session_id, idempotency_key="replay-before-busy")
+    first = _post(routes, body)
+    assert first.status == 200
+    first_run_id = first.json_body()["run"]["run_id"]
+    before_messages = copy.deepcopy(session.messages)
+
+    session.active_stream_id = "ordinary-chat-is-running"
+    session.pending_user_message = "另一条普通消息正在处理"
+    replay = _post(routes, body)
+
+    assert replay.status == 200
+    assert replay.json_body()["replayed"] is True
+    assert replay.json_body()["run"]["run_id"] == first_run_id
+    assert session.messages == before_messages
+    assert len(_public_run_files(workspace)) == 1
+
+
+def test_missing_committed_receipt_cannot_create_a_second_run_for_same_key(atomic_env):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-receipt-missing-replay")
+    body = _start_body(session.session_id, idempotency_key="missing-receipt-same-key")
+    first = _post(routes, body)
+    assert first.status == 200
+    first_run_id = first.json_body()["run"]["run_id"]
+    receipt_path = _receipt_path(workspace, session.session_id, body["idempotency_key"])
+    receipt_path.unlink()
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    assert [path.stem for path in _public_run_files(workspace)] == [first_run_id]
+    assert len(_run_messages(session, first_run_id)) == 2
+
+
+@pytest.mark.parametrize("binding_kind", ["by_run", "by_session"])
+def test_committed_replay_requires_both_reverse_bindings(atomic_env, binding_kind):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=f"atomic-missing-{binding_kind}",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key=f"missing-{binding_kind}-binding",
+    )
+    first = _post(routes, body)
+    assert first.status == 200
+    run_id = first.json_body()["run"]["run_id"]
+    target = (
+        storage.start_run_binding_path(workspace, run_id)
+        if binding_kind == "by_run"
+        else storage.start_session_binding_path(workspace, session.session_id)
+    )
+    target.unlink()
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    assert len(_public_run_files(workspace)) == 1
+
+
+def test_legal_receipt_state_tamper_is_rejected_instead_of_self_healed(atomic_env):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-state-tamper")
+    body = _start_body(session.session_id, idempotency_key="state-tamper")
+    first = _post(routes, body)
+    assert first.status == 200
+    path = _receipt_path(workspace, session.session_id, body["idempotency_key"])
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["state"] = "prepared"
+    path.write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    assert len(_public_run_files(workspace)) == 1
+
+
+def test_bound_standalone_v3_run_without_binding_is_not_treated_as_legacy(atomic_env):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-v3-binding-required")
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    run_id = first.json_body()["run"]["run_id"]
+    storage.start_run_binding_path(workspace, run_id).unlink()
+
+    with pytest.raises(FileNotFoundError):
+        storage.read_run(workspace, run_id)
+    assert storage.list_runs(workspace) == []
+    with pytest.raises(FileNotFoundError):
+        storage.latest_run_for_session(workspace, session.session_id)
+
+
+@pytest.mark.parametrize("mutation", ["prompt", "session_id", "launch_profile_snapshot"])
+def test_committed_run_read_rejects_immutable_projection_tamper(atomic_env, mutation):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=f"atomic-run-projection-{mutation}",
+    )
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    run_id = first.json_body()["run"]["run_id"]
+    path = storage.run_path(workspace, run_id)
+    run = json.loads(path.read_text(encoding="utf-8"))
+    if mutation == "prompt":
+        run["prompt"] = "被篡改的任务"
+    elif mutation == "session_id":
+        run["session_id"] = "another-session"
+    else:
+        run["launch_profile_snapshot"]["title"] = "被篡改的配置快照"
+    path.write_text(json.dumps(run, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError):
+        storage.read_run(workspace, run_id)
+    assert storage.list_runs(workspace) == []
+
+
+def test_write_run_rejects_immutable_projection_change_for_committed_run(atomic_env):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-run-write-guard")
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    run = copy.deepcopy(first.json_body()["run"])
+    run["prompt"] = "mutation API 不得改写启动投影"
+
+    with pytest.raises(storage.StartTransactionIntegrityError):
+        storage.write_run(workspace, run)
+
+    assert storage.read_run(workspace, run["run_id"])["prompt"] != run["prompt"]
+
+
+def test_committed_message_pair_is_hidden_as_a_group_when_one_row_is_missing(atomic_env):
+    from api import brand_privacy
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-incomplete-pair")
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    run_id = first.json_body()["run"]["run_id"]
+    session.messages = [
+        message
+        for message in session.messages
+        if not (
+            message.get("expert_team_run_id") == run_id
+            and message.get("type") == "expert_team_lifecycle"
+        )
+    ]
+    payload = session.compact() | {"messages": copy.deepcopy(session.messages)}
+
+    projected = brand_privacy.public_session_projection(payload)
+
+    assert projected["messages"] == []
+    assert projected["message_count"] == 0
+
+
+def test_metadata_projection_does_not_rollback_activity_after_prepared_start(
+    atomic_env,
+    monkeypatch,
+):
+    from api import brand_privacy
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-prepared-later-activity")
+    body = _start_body(session.session_id, idempotency_key="prepared-before-chat")
+    monkeypatch.setattr(
+        routes,
+        "_publish_expert_team_start_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("leave prepared")),
+    )
+    with pytest.raises(SystemExit, match="leave prepared"):
+        _post(routes, body)
+
+    later_timestamp = time.time() + 100
+
+    def append_later_activity():
+        session.messages.extend(
+            [
+                {
+                    "role": "user",
+                    "content": "专家团启动后新增的普通问题",
+                    "timestamp": later_timestamp,
+                },
+                {
+                    "role": "assistant",
+                    "content": "专家团启动后新增的普通回答",
+                    "timestamp": later_timestamp + 1,
+                },
+            ]
+        )
+        session.context_messages = copy.deepcopy(session.messages)
+        session.title = "用户后续重命名"
+        session.input_tokens = 321
+        session.output_tokens = 654
+        session.updated_at = later_timestamp + 1
+
+    routes._rewrite_existing_session_truth(
+        session,
+        append_later_activity,
+        privacy_reason=None,
+        touch_updated_at=False,
+    )
+    metadata = models.Session.load_metadata_only(session.session_id)
+    projected = brand_privacy.public_session_projection(metadata.compact())
+
+    assert projected["title"] == "用户后续重命名"
+    assert projected["message_count"] == 2
+    assert projected["updated_at"] == later_timestamp + 1
+    assert projected["last_message_at"] == later_timestamp + 1
+    assert projected["input_tokens"] == 321
+    assert projected["output_tokens"] == 654
+
+
+def test_missing_by_session_binding_fails_closed_for_metadata_projection(atomic_env):
+    from api import brand_privacy
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-sidebar-binding-missing")
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    persisted = models.Session.load_metadata_only(session.session_id)
+    assert persisted.expert_team_start_transaction_ids
+    storage.start_session_binding_path(workspace, session.session_id).unlink()
+
+    projected = brand_privacy.public_session_projection(persisted.compact())
+
+    assert projected["title"] == "Untitled"
+    assert projected["message_count"] == 0
+
+
+def test_discovered_committed_receipt_requires_durable_marker_and_pair(atomic_env):
+    from api import brand_privacy
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-committed-marker-and-pair-missing",
+    )
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+
+    # Preserve the by-session receipt discovery index while simulating a
+    # corrupted Session that lost both its owned message pair and durable marker.
+    session.messages = []
+    session.context_messages = []
+    session.expert_team_start_transaction_ids = []
+    payload = session.compact() | {"messages": []}
+
+    projected = brand_privacy.public_session_projection(payload)
+
+    assert projected["messages"] == []
+    assert projected["title"] == "Untitled"
+    assert projected["message_count"] == 0
+
+
+def test_same_transaction_row_for_another_run_invalidates_replay(atomic_env):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-cross-run-transaction-row",
+    )
+    body = _start_body(session.session_id)
+    first = _post(routes, body)
+    assert first.status == 200
+    transaction_id = session.expert_team_start_transaction_ids[0]
+
+    def append_rogue_row():
+        session.messages.append(
+            {
+                "role": "assistant",
+                "type": "expert_team_lifecycle",
+                "content": "rogue",
+                "expert_team_run_id": "et-another-run",
+                "expert_team_start_transaction_id": transaction_id,
+            }
+        )
+        session.context_messages = copy.deepcopy(session.messages)
+
+    routes._rewrite_existing_session_truth(
+        session,
+        append_rogue_row,
+        privacy_reason=None,
+        touch_updated_at=False,
+    )
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+
+
+def test_missing_all_receipt_bindings_cannot_create_second_run(atomic_env):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-all-start-bindings-missing",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="all-bindings-missing-same-key",
+    )
+    first = _post(routes, body)
+    assert first.status == 200
+    run_id = first.json_body()["run"]["run_id"]
+    transaction_id = session.expert_team_start_transaction_ids[0]
+
+    storage.start_transaction_path(workspace, transaction_id).unlink()
+    storage.start_run_binding_path(workspace, run_id).unlink()
+    storage.start_session_binding_path(workspace, session.session_id).unlink()
+
+    def remove_session_evidence():
+        session.messages = [
+            message
+            for message in session.messages
+            if message.get("expert_team_start_transaction_id") != transaction_id
+        ]
+        session.context_messages = copy.deepcopy(session.messages)
+        session.expert_team_start_transaction_ids = []
+
+    routes._rewrite_existing_session_truth(
+        session,
+        remove_session_evidence,
+        privacy_reason=None,
+        touch_updated_at=False,
+    )
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    assert [path.stem for path in storage.runs_dir(workspace).glob("*.json")] == [run_id]
+
+
+def test_storage_rejects_symlinked_parent_directory(tmp_path):
+    import api.expert_teams.storage as storage
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / ".taiji").symlink_to(outside, target_is_directory=True)
+    run = {"run_id": "et-symlink-parent"}
+
+    with pytest.raises(storage.StartTransactionIntegrityError):
+        storage.write_pending_run(workspace, run)
+
+    assert not (outside / "expert-teams" / "start-transactions" / "pending").exists()
+
+
+def test_storage_atomic_write_stays_anchored_during_parent_symlink_swap(
+    tmp_path,
+    monkeypatch,
+):
+    """A parent exchange after validation must never redirect a Run write."""
+    import api.expert_teams.storage as storage
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    pending = storage.pending_run_path(workspace, "et-parent-swap").parent
+    pending.mkdir(parents=True)
+    detached = pending.with_name("pending-detached")
+    real_open = storage.os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        is_temp_create = bool(flags & os.O_CREAT and flags & os.O_EXCL)
+        if not swapped and is_temp_create and str(path).endswith(".tmp"):
+            pending.rename(detached)
+            pending.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "open", racing_open)
+    with pytest.raises(storage.StartTransactionIntegrityError):
+        storage.write_pending_run(workspace, {"run_id": "et-parent-swap"})
+
+    assert swapped is True
+    assert not (outside / "et-parent-swap.json").exists()
+    assert (detached / "et-parent-swap.json").is_file()
+
+
+def test_storage_read_fails_when_parent_is_exchanged_after_open(
+    tmp_path,
+    monkeypatch,
+):
+    """A read from a detached inode must not be reported as canonical truth."""
+    import api.expert_teams.storage as storage
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    run_id = "et-read-parent-swap"
+    storage.write_pending_run(workspace, {"run_id": run_id, "source": "trusted"})
+    pending = storage.pending_run_path(workspace, run_id).parent
+    detached = pending.with_name("pending-read-detached")
+    (outside / f"{run_id}.json").write_text(
+        json.dumps({"run_id": run_id, "source": "outside"}),
+        encoding="utf-8",
+    )
+    real_open = storage.os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if (
+            not swapped
+            and kwargs.get("dir_fd") is not None
+            and str(path) == f"{run_id}.json"
+        ):
+            pending.rename(detached)
+            pending.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "open", racing_open)
+    with pytest.raises(storage.StartTransactionIntegrityError):
+        storage.read_pending_run(workspace, run_id)
+
+    assert swapped is True
+    assert json.loads((outside / f"{run_id}.json").read_text(encoding="utf-8"))[
+        "source"
+    ] == "outside"
+
+
+def test_publish_pending_run_never_promotes_a_replaced_source_leaf(
+    tmp_path,
+    monkeypatch,
+):
+    """Publishing must use the payload that was validated, not reopen its name."""
+    import api.expert_teams.storage as storage
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.json"
+    workspace.mkdir()
+    run_id = "et-leaf-publish-race"
+    trusted = {"run_id": run_id, "source": "trusted"}
+    malicious = {"run_id": run_id, "source": "outside"}
+    storage.write_pending_run(workspace, trusted)
+    outside.write_text(json.dumps(malicious), encoding="utf-8")
+    pending = storage.pending_run_path(workspace, run_id)
+    detached = pending.with_name(f"{pending.stem}-trusted-backup.json")
+    real_read_pending = storage.read_pending_run
+    swapped = False
+
+    def read_then_swap(workspace_arg, run_id_arg):
+        nonlocal swapped
+        result = real_read_pending(workspace_arg, run_id_arg)
+        pending.rename(detached)
+        pending.symlink_to(outside)
+        swapped = True
+        return result
+
+    monkeypatch.setattr(storage, "read_pending_run", read_then_swap)
+
+    published = storage.publish_pending_run(workspace, run_id)
+    canonical = storage.run_path(workspace, run_id)
+
+    assert swapped is True
+    assert published == trusted
+    assert canonical.is_file()
+    assert not canonical.is_symlink()
+    assert storage.read_run_raw(workspace, run_id) == trusted
+    assert json.loads(outside.read_text(encoding="utf-8")) == malicious
+    assert not pending.exists()
+
+
+def test_publish_pending_run_reuses_identical_canonical_and_removes_pending(tmp_path):
+    import api.expert_teams.storage as storage
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run = {"run_id": "et-identical-canonical", "source": "trusted"}
+    storage.write_pending_run(workspace, run)
+    storage.write_run(workspace, run)
+
+    assert storage.publish_pending_run(workspace, run["run_id"]) == run
+    assert storage.read_run_raw(workspace, run["run_id"]) == run
+    assert not storage.pending_run_path(workspace, run["run_id"]).exists()
+
+
+def test_publish_pending_run_preserves_conflicting_canonical_and_pending(tmp_path):
+    import api.expert_teams.storage as storage
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_id = "et-conflicting-canonical"
+    pending = {"run_id": run_id, "source": "pending"}
+    canonical = {"run_id": run_id, "source": "canonical"}
+    storage.write_pending_run(workspace, pending)
+    storage.write_run(workspace, canonical)
+
+    with pytest.raises(
+        storage.StartTransactionIntegrityError,
+        match="canonical run conflicts with pending run",
+    ):
+        storage.publish_pending_run(workspace, run_id)
+
+    assert storage.read_run_raw(workspace, run_id) == canonical
+    assert storage.read_pending_run(workspace, run_id) == pending
+
+
+def test_storage_lock_stays_anchored_during_parent_symlink_swap(
+    tmp_path,
+    monkeypatch,
+):
+    """A parent exchange must not redirect the inter-process lock file."""
+    import api.expert_teams.storage as storage
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    transaction_id = "d" * 64
+    locks = storage.start_transaction_lock_path(workspace, transaction_id).parent
+    locks.mkdir(parents=True)
+    detached = locks.with_name("locks-detached")
+    real_open = storage.os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if (
+            not swapped
+            and flags & os.O_CREAT
+            and str(path).endswith(f"{transaction_id}.lock")
+        ):
+            locks.rename(detached)
+            locks.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "open", racing_open)
+    with pytest.raises(storage.StartTransactionIntegrityError):
+        with storage.start_transaction_lock(workspace, transaction_id):
+            pass
+
+    assert swapped is True
+    assert not (outside / f"{transaction_id}.lock").exists()
+    assert (detached / f"{transaction_id}.lock").is_file()
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "expected_exit"),
+    [
+        ("after_receipt", 71),
+        ("after_session", 72),
+        ("after_canonical", 73),
+    ],
+)
+def test_fresh_interpreter_recovers_three_durable_start_crash_points(
+    tmp_path,
+    crash_point,
+    expected_exit,
+):
+    """Prove cold recovery against real sidecar, state.db, index, Run and receipt.
+
+    Each first process exits abruptly at a different durable boundary. A wholly
+    new interpreter then retries the same idempotency key and must converge all
+    stores to one committed Run and one exact message pair.
+    """
+    webui_root = Path(__file__).resolve().parents[1]
+    case_root = tmp_path / crash_point
+    state_root = case_root / "state"
+    workspace = case_root / "workspace"
+    state_root.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    session_id = f"spawn-{crash_point}"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHONPATH": str(webui_root),
+            "PYTHONUNBUFFERED": "1",
+            "HERMES_WEBUI_STATE_DIR": str(state_root),
+            "HERMES_WEBUI_TEST_STATE_DIR": str(state_root),
+            "HERMES_WEBUI_DEFAULT_WORKSPACE": str(workspace),
+            "HERMES_HOME": str(state_root),
+            "HERMES_BASE_HOME": str(state_root),
+            "HERMES_CONFIG_PATH": str(state_root / "config.yaml"),
+            "AWS_EC2_METADATA_DISABLED": "true",
+            "EXPERT_TEAM_CRASH_POINT": crash_point,
+            "EXPERT_TEAM_WORKSPACE": str(workspace),
+            "EXPERT_TEAM_SESSION_ID": session_id,
+        }
+    )
+    crashing_script = textwrap.dedent(
+        """
+        import os
+        from pathlib import Path
+
+        from api import config
+        from api.models import Session
+        import api.routes as routes
+        import api.expert_teams.storage as storage
+
+        workspace = Path(os.environ["EXPERT_TEAM_WORKSPACE"])
+        session_id = os.environ["EXPERT_TEAM_SESSION_ID"]
+        Path(config.SESSION_DIR).mkdir(parents=True, exist_ok=True)
+        session = Session(
+            session_id=session_id,
+            workspace=str(workspace),
+            profile="default",
+        )
+        session.save(touch_updated_at=False)
+        body = {
+            "launch_profile_id": "content-work-report",
+            "session_id": session_id,
+            "prompt": "fresh process atomic recovery",
+            "idempotency_key": "fresh-process-idempotency",
+        }
+        point = os.environ["EXPERT_TEAM_CRASH_POINT"]
+        if point == "after_receipt":
+            def crash_pending(*_args, **_kwargs):
+                os._exit(71)
+            storage.write_pending_run = crash_pending
+        elif point == "after_session":
+            def crash_publish(*_args, **_kwargs):
+                os._exit(72)
+            routes._publish_expert_team_start_run = crash_publish
+        elif point == "after_canonical":
+            original_write_receipt = storage.write_start_transaction
+            def crash_committed_receipt(target_workspace, receipt):
+                if receipt.get("state") == "committed":
+                    os._exit(73)
+                return original_write_receipt(target_workspace, receipt)
+            storage.write_start_transaction = crash_committed_receipt
+        routes._coordinate_expert_team_start(body)
+        raise SystemExit(90)
+        """
+    )
+    crashed = subprocess.run(
+        [sys.executable, "-c", crashing_script],
+        cwd=webui_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert crashed.returncode == expected_exit, crashed.stderr
+
+    recovery_script = textwrap.dedent(
+        """
+        import json
+        import os
+        from pathlib import Path
+
+        from api import config
+        from api.models import Session
+        import api.routes as routes
+        import api.state_sync as state_sync
+        import api.expert_teams.storage as storage
+
+        workspace = Path(os.environ["EXPERT_TEAM_WORKSPACE"])
+        session_id = os.environ["EXPERT_TEAM_SESSION_ID"]
+        body = {
+            "launch_profile_id": "content-work-report",
+            "session_id": session_id,
+            "prompt": "fresh process atomic recovery",
+            "idempotency_key": "fresh-process-idempotency",
+        }
+        result = routes._coordinate_expert_team_start(body)
+        session = Session.load(session_id)
+        receipt = storage.read_start_transaction(
+            workspace,
+            session_id=session_id,
+            idempotency_key=body["idempotency_key"],
+        )
+        run = storage.read_run(workspace, receipt["run_id"])
+        db = state_sync._get_state_db(
+            profile="default",
+            strict=True,
+            create_if_missing=True,
+        )
+        try:
+            state_messages = list(db.get_messages(session_id) or [])
+        finally:
+            db.close()
+        index = json.loads(Path(config.SESSION_INDEX_FILE).read_text(encoding="utf-8"))
+        index_row = next(row for row in index if row.get("session_id") == session_id)
+        transaction_id = receipt["transaction_id"]
+        owned_messages = [
+            row for row in session.messages
+            if row.get("expert_team_start_transaction_id") == transaction_id
+        ]
+        owned_semantic_messages = [
+            {"role": row.get("role"), "content": row.get("content")}
+            for row in owned_messages
+        ]
+        state_semantic_messages = [
+            {"role": row.get("role"), "content": row.get("content")}
+            for row in state_messages
+        ]
+        print(json.dumps({
+            "receipt_state": receipt["state"],
+            "run_id": run["run_id"],
+            "run_transaction_id": run.get("start_transaction_id"),
+            "canonical_run_ids": sorted(
+                path.stem for path in storage.runs_dir(workspace).glob("*.json")
+            ),
+            "pending_exists": storage.pending_run_path(workspace, run["run_id"]).exists(),
+            "marker_ids": session.expert_team_start_transaction_ids,
+            "owned_message_types": sorted(row.get("type") for row in owned_messages),
+            "owned_semantic_messages": owned_semantic_messages,
+            "state_semantic_messages": state_semantic_messages,
+            "index_message_count": index_row.get("message_count"),
+            "result_run_id": result["run"]["run_id"],
+        }, ensure_ascii=False))
+        """
+    )
+    recovered = subprocess.run(
+        [sys.executable, "-c", recovery_script],
+        cwd=webui_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert recovered.returncode == 0, recovered.stderr
+    evidence = json.loads(recovered.stdout.strip().splitlines()[-1])
+    expected_types = ["expert_team_lifecycle", "expert_team_start"]
+    assert evidence["receipt_state"] == "committed"
+    assert evidence["run_id"] == evidence["result_run_id"]
+    assert evidence["run_transaction_id"] in evidence["marker_ids"]
+    assert evidence["canonical_run_ids"] == [evidence["run_id"]]
+    assert evidence["pending_exists"] is False
+    assert evidence["owned_message_types"] == expected_types
+    assert evidence["state_semantic_messages"] == evidence["owned_semantic_messages"]
+    assert evidence["index_message_count"] == 2
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="requires POSIX fork to inherit the isolated test stores",
+)
+def test_start_session_and_run_file_locks_have_bounded_cross_process_waits(atomic_env):
+    from api import truth_rewrite
+    import api.expert_teams.storage as storage
+
+    _routes, _models, _sessions, workspace = atomic_env
+    context = multiprocessing.get_context("fork")
+    cases = (
+        (
+            "session",
+            "bounded-session-writer",
+            lambda: truth_rewrite.truth_rewrite_lock(
+                "bounded-session-writer",
+                timeout_seconds=0.1,
+            ),
+        ),
+        (
+            "run",
+            "bounded-run-writer",
+            lambda: storage.run_file_lock(
+                workspace,
+                "bounded-run-writer",
+                timeout_seconds=0.1,
+            ),
+        ),
+    )
+    for kind, identifier, contender in cases:
+        ready = context.Event()
+        release = context.Event()
+        result = context.Queue()
+        process = context.Process(
+            target=_hold_cross_process_lock,
+            args=(kind, str(workspace), identifier, ready, release, result),
+        )
+        process.start()
+        try:
+            assert ready.wait(timeout=2)
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                with contender():
+                    pass
+            assert time.monotonic() - started < 1
+        finally:
+            release.set()
+            process.join(timeout=3)
+            if process.is_alive():  # pragma: no cover - diagnostic cleanup
+                process.terminate()
+                process.join(timeout=1)
+        assert process.exitcode == 0
+        assert result.get(timeout=1) == ("ok", "")
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="requires POSIX fork to inherit the isolated test stores",
+)
+def test_stale_process_loaded_before_start_cannot_overwrite_committed_start(atomic_env):
+    import api.state_sync as state_sync
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-stale-process")
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+    proceed = context.Event()
+    result = context.Queue()
+    process = context.Process(
+        target=_save_stale_session_after_signal,
+        args=(session.session_id, ready, proceed, result),
+    )
+    process.start()
+    try:
+        assert ready.wait(timeout=2)
+        started = _post(routes, _start_body(session.session_id))
+        assert started.status == 200
+        proceed.set()
+        process.join(timeout=3)
+    finally:
+        proceed.set()
+        if process.is_alive():  # pragma: no cover - diagnostic cleanup
+            process.terminate()
+            process.join(timeout=1)
+    assert process.exitcode == 0
+    assert result.get(timeout=1) == ("error", "SessionWriteConflict")
+    durable = models.Session.load(session.session_id)
+    assert durable.title != "过期进程标题"
+    assert all("过期进程" not in str(message.get("content") or "") for message in durable.messages)
+    assert len(durable.messages) == 2
+    assert len(state_sync._get_state_db().get_messages(session.session_id)) == 2
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="requires POSIX fork to inherit the isolated test stores",
+)
+def test_cross_process_ordinary_commit_wins_then_start_reloads_and_retries(atomic_env):
+    import api.state_sync as state_sync
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-ordinary-first")
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+    result = context.Queue()
+    process = context.Process(
+        target=_commit_ordinary_session_before_start,
+        args=(session.session_id, ready, result),
+    )
+    process.start()
+    try:
+        assert ready.wait(timeout=2)
+        conflicted = _post(routes, _start_body(session.session_id))
+        process.join(timeout=3)
+    finally:
+        if process.is_alive():  # pragma: no cover - diagnostic cleanup
+            process.terminate()
+            process.join(timeout=1)
+    assert process.exitcode == 0
+    assert result.get(timeout=1) == ("ok", "")
+    assert conflicted.status == 409
+    assert conflicted.json_body()["code"] == "session_state_conflict"
+    assert session.title == "普通写入后的标题"
+    assert session.input_tokens == 123
+    assert session.output_tokens == 456
+    assert len(session.messages) == 2
+
+    retry = _post(routes, _start_body(session.session_id))
+    assert retry.status == 200
+    durable = models.Session.load(session.session_id)
+    assert durable.title == "普通写入后的标题"
+    assert durable.input_tokens == 123
+    assert durable.output_tokens == 456
+    assert len(durable.messages) == 4
+    assert len(state_sync._get_state_db().get_messages(session.session_id)) == 4

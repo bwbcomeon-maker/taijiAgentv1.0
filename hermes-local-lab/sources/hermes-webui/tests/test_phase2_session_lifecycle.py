@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 from collections import OrderedDict
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -267,15 +268,39 @@ def test_delete_tombstones_stale_worker_and_cancels_live_stream(
     session.pending_user_message = "running"
     session.save(skip_index=True)
     stale_worker_session = session
+    external_stale_session = models.Session.load(session.session_id)
+    assert external_stale_session is not None
     cancel_flag = threading.Event()
     monkeypatch.setattr(routes, "STREAMS", {"delete-live-stream": object()})
     monkeypatch.setattr(routes, "CANCEL_FLAGS", {"delete-live-stream": cancel_flag})
     monkeypatch.setattr(config, "AGENT_INSTANCES", {})
     deleted_state_rows = []
+    writer_lock_depth = 0
+    import api.truth_rewrite as truth_rewrite
+
+    original_writer_lock = truth_rewrite.truth_rewrite_lock
+
+    @contextmanager
+    def observed_writer_lock(session_id, **kwargs):
+        nonlocal writer_lock_depth
+        with original_writer_lock(session_id, **kwargs):
+            writer_lock_depth += 1
+            try:
+                yield
+            finally:
+                writer_lock_depth -= 1
+
+    monkeypatch.setattr(truth_rewrite, "truth_rewrite_lock", observed_writer_lock)
+
+    def delete_cli_session(sid):
+        assert writer_lock_depth > 0
+        deleted_state_rows.append(sid)
+        return True
+
     monkeypatch.setattr(
         models,
         "delete_cli_session",
-        lambda sid: deleted_state_rows.append(sid) or True,
+        delete_cli_session,
     )
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
     monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
@@ -305,6 +330,11 @@ def test_delete_tombstones_stale_worker_and_cancels_live_stream(
     )
     with pytest.raises(RuntimeError, match="deleted session"):
         stale_worker_session.save(skip_index=True)
+    external_stale_session.messages.append(
+        {"role": "assistant", "content": "late cross-process completion"}
+    )
+    with pytest.raises(models.SessionWriteConflict, match="deleted"):
+        external_stale_session.save(skip_index=True)
     assert session.path.exists() is False
 
 
