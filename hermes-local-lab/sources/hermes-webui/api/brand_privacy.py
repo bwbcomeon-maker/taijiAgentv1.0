@@ -12,12 +12,18 @@ import copy
 import json
 import os
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
 BRAND_NAME = "taiji Agent"
+
+_COMMITTED_START_RECEIPT_CACHE_MAX = 512
+_COMMITTED_START_RECEIPT_CACHE: OrderedDict[tuple[str, str], dict] = OrderedDict()
+_COMMITTED_START_RECEIPT_CACHE_LOCK = threading.Lock()
 
 FORBIDDEN_PUBLIC_MARKERS = (
     "Hermes",
@@ -1685,6 +1691,116 @@ def public_profile_projection(value: Any) -> dict:
     return projected
 
 
+def _expert_team_start_message_is_public(
+    message: dict,
+    *,
+    receipts: dict[str, dict | None],
+    session_id: str,
+) -> bool:
+    transaction_id = str(message.get("expert_team_start_transaction_id") or "")
+    if not transaction_id:
+        return True
+    run_id = str(message.get("expert_team_run_id") or "")
+    if not run_id:
+        return False
+    receipt = receipts.get(transaction_id)
+    return bool(
+        receipt
+        and receipt.get("state") == "committed"
+        and str(receipt.get("session_id") or "") == session_id
+        and str(receipt.get("run_id") or "") == run_id
+    )
+
+
+def _committed_start_receipt_cache_key(
+    workspace: str,
+    transaction_id: str,
+) -> tuple[str, str]:
+    return str(Path(workspace).expanduser().resolve()), transaction_id
+
+
+def _remember_committed_start_receipt(workspace: str, receipt: dict) -> None:
+    transaction_id = str(receipt.get("transaction_id") or "")
+    if receipt.get("state") != "committed" or not transaction_id:
+        return
+    key = _committed_start_receipt_cache_key(workspace, transaction_id)
+    with _COMMITTED_START_RECEIPT_CACHE_LOCK:
+        _COMMITTED_START_RECEIPT_CACHE[key] = copy.deepcopy(receipt)
+        _COMMITTED_START_RECEIPT_CACHE.move_to_end(key)
+        while len(_COMMITTED_START_RECEIPT_CACHE) > _COMMITTED_START_RECEIPT_CACHE_MAX:
+            _COMMITTED_START_RECEIPT_CACHE.popitem(last=False)
+
+
+def _cached_committed_start_receipt(
+    workspace: str,
+    transaction_id: str,
+) -> dict | None:
+    key = _committed_start_receipt_cache_key(workspace, transaction_id)
+    with _COMMITTED_START_RECEIPT_CACHE_LOCK:
+        receipt = _COMMITTED_START_RECEIPT_CACHE.get(key)
+        if receipt is None:
+            return None
+        _COMMITTED_START_RECEIPT_CACHE.move_to_end(key)
+        return copy.deepcopy(receipt)
+
+
+def _forget_committed_start_receipt(workspace: str, transaction_id: str) -> None:
+    key = _committed_start_receipt_cache_key(workspace, transaction_id)
+    with _COMMITTED_START_RECEIPT_CACHE_LOCK:
+        _COMMITTED_START_RECEIPT_CACHE.pop(key, None)
+
+
+def _message_transactions_have_complete_committed_receipts(
+    messages: list,
+    receipts: dict[str, dict | None],
+    session_id: str,
+) -> bool:
+    bindings: dict[str, set[str]] = {}
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        transaction_id = str(item.get("expert_team_start_transaction_id") or "")
+        if not transaction_id:
+            continue
+        run_id = str(item.get("expert_team_run_id") or "")
+        if not run_id:
+            return False
+        bindings.setdefault(transaction_id, set()).add(run_id)
+    if not bindings:
+        return False
+    for transaction_id, run_ids in bindings.items():
+        receipt = receipts.get(transaction_id)
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("state") != "committed"
+            or str(receipt.get("session_id") or "") != session_id
+            or run_ids != {str(receipt.get("run_id") or "")}
+        ):
+            return False
+    return True
+
+
+def _session_title_from_messages(messages: list, fallback: str) -> str:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        text = re.sub(
+            r"\n\n\[Attached files: [^\]]+\]$",
+            "",
+            str(content or ""),
+        ).strip()
+        if text:
+            return text[:64]
+    return fallback
+
+
 def public_session_projection(payload: Any) -> dict:
     """Return the explicit browser session contract used by GET, sync, and done."""
     if not isinstance(payload, dict):
@@ -1721,12 +1837,230 @@ def public_session_projection(payload: Any) -> dict:
         cleaned["worktree_label"] = label
     session_id = str(payload.get("session_id") or "")
     workspace = str(payload.get("workspace") or "") or None
+    start_receipts: dict[str, dict | None] = {}
+    start_receipt_read_failed = False
+    if workspace and session_id:
+        try:
+            from api.expert_teams import storage
+
+            for receipt in storage.list_start_transactions_for_session(
+                Path(workspace),
+                session_id,
+            ):
+                start_receipts[str(receipt.get("transaction_id") or "")] = receipt
+                _remember_committed_start_receipt(workspace, receipt)
+        except Exception:
+            start_receipt_read_failed = True
+    message_transaction_ids = {
+        str(item.get("expert_team_start_transaction_id") or "")
+        for item in (payload.get("messages") or [])
+        if isinstance(item, dict) and item.get("expert_team_start_transaction_id")
+    }
+    if workspace:
+        try:
+            from api.expert_teams import storage
+
+            for transaction_id in message_transaction_ids:
+                if transaction_id not in start_receipts:
+                    try:
+                        receipt = (
+                            storage.read_start_transaction_by_id(
+                                Path(workspace),
+                                transaction_id,
+                            )
+                        )
+                        start_receipts[transaction_id] = receipt
+                        if isinstance(receipt, dict):
+                            _remember_committed_start_receipt(workspace, receipt)
+                        else:
+                            _forget_committed_start_receipt(
+                                workspace,
+                                transaction_id,
+                            )
+                            start_receipt_read_failed = True
+                    except storage.StartTransactionIntegrityError as exc:
+                        if isinstance(exc.__cause__, OSError):
+                            cached_receipt = _cached_committed_start_receipt(
+                                workspace,
+                                transaction_id,
+                            )
+                            start_receipts[transaction_id] = cached_receipt
+                            if cached_receipt is None:
+                                start_receipt_read_failed = True
+                        else:
+                            _forget_committed_start_receipt(
+                                workspace,
+                                transaction_id,
+                            )
+                            start_receipts[transaction_id] = None
+                            start_receipt_read_failed = True
+                    except (UnicodeError, json.JSONDecodeError):
+                        _forget_committed_start_receipt(
+                            workspace,
+                            transaction_id,
+                        )
+                        start_receipts[transaction_id] = None
+                        start_receipt_read_failed = True
+                    except OSError:
+                        cached_receipt = _cached_committed_start_receipt(
+                            workspace,
+                            transaction_id,
+                        )
+                        start_receipts[transaction_id] = cached_receipt
+                        if cached_receipt is None:
+                            start_receipt_read_failed = True
+        except Exception:
+            start_receipt_read_failed = True
+    elif message_transaction_ids:
+        start_receipt_read_failed = True
+
+    if start_receipt_read_failed and _message_transactions_have_complete_committed_receipts(
+        payload.get("messages") if isinstance(payload.get("messages"), list) else [],
+        start_receipts,
+        session_id,
+    ):
+        # The Session index is only an accelerator.  A temporary batch-read
+        # failure must not hide a transcript when every transaction-tagged
+        # message is closed by a previously validated committed receipt.
+        start_receipt_read_failed = False
+
+    uncommitted_receipts = [
+        receipt
+        for receipt in start_receipts.values()
+        if isinstance(receipt, dict)
+        and receipt.get("state") in {"prepared", "recovery_required"}
+        and str(receipt.get("session_id") or "") == session_id
+    ]
+    metadata_restored_from_prepared_snapshot = False
+    prepared_metadata_snapshot = None
+    if uncommitted_receipts:
+        earliest = min(
+            uncommitted_receipts,
+            key=lambda receipt: float(receipt.get("created_at") or 0),
+        )
+        snapshot = earliest.get("session_metadata_before_start")
+        try:
+            from api.expert_teams import storage
+
+            snapshot_is_valid = (
+                isinstance(snapshot, dict)
+                and storage.start_session_metadata_digest(snapshot)
+                == str(earliest.get("session_metadata_before_start_sha256") or "")
+                and isinstance(snapshot.get("title"), str)
+                and isinstance(snapshot.get("message_count"), int)
+                and snapshot["message_count"] >= 0
+            )
+        except Exception:
+            snapshot_is_valid = False
+        if snapshot_is_valid:
+            metadata_restored_from_prepared_snapshot = True
+            prepared_metadata_snapshot = snapshot
+            for key in (
+                "title",
+                "message_count",
+                "user_message_count",
+                "updated_at",
+                "last_message_at",
+            ):
+                if key in snapshot:
+                    if key == "title":
+                        cleaned[key] = _mask_public_sensitive_text(
+                            _public_visible_text(snapshot[key])
+                        )
+                    else:
+                        cleaned[key] = copy.deepcopy(snapshot[key])
+        else:
+            start_receipt_read_failed = True
+            cleaned["title"] = "Untitled"
+            cleaned["message_count"] = 0
+            if "user_message_count" in cleaned:
+                cleaned["user_message_count"] = 0
+    if start_receipt_read_failed and not uncommitted_receipts:
+        # An unreadable transaction binding is evidence that visibility cannot
+        # be proven. Keep message and derived metadata projection fail-closed.
+        cleaned["title"] = "Untitled"
+        cleaned["message_count"] = 0
+        if "user_message_count" in cleaned:
+            cleaned["user_message_count"] = 0
     if isinstance(payload.get("messages"), list):
-        cleaned["messages"] = [
-            public_message_projection(item, workspace=workspace, session_id=session_id)
+        visible_messages = [
+            item
             for item in payload["messages"]
             if isinstance(item, dict)
+            and _expert_team_start_message_is_public(
+                item,
+                receipts=start_receipts,
+                session_id=session_id,
+            )
         ]
+        cleaned["messages"] = [
+            public_message_projection(item, workspace=workspace, session_id=session_id)
+            for item in visible_messages
+        ]
+        hidden_count = len(payload["messages"]) - len(visible_messages)
+        full_transcript_is_available = (
+            metadata_restored_from_prepared_snapshot
+            and isinstance(prepared_metadata_snapshot, dict)
+            and not bool(payload.get("_messages_truncated"))
+            and type(payload.get("message_count")) is int
+            and payload["message_count"] == len(payload["messages"])
+        )
+        if full_transcript_is_available:
+            cleaned["message_count"] = len(visible_messages)
+            if type(payload.get("user_message_count")) is int:
+                cleaned["user_message_count"] = sum(
+                    1
+                    for message in visible_messages
+                    if str(message.get("role") or "").lower() == "user"
+                )
+
+            snapshot_title = str(prepared_metadata_snapshot["title"])
+            current_title = str(payload.get("title") or "")
+            generated_title = _session_title_from_messages(
+                payload["messages"],
+                snapshot_title,
+            )
+            projected_title = (
+                _session_title_from_messages(visible_messages, snapshot_title)
+                if current_title == generated_title
+                else current_title
+            )
+            cleaned["title"] = _mask_public_sensitive_text(
+                _public_visible_text(projected_title)
+            )
+
+            projected_updated_at = payload.get("updated_at")
+            for receipt in sorted(
+                uncommitted_receipts,
+                key=lambda item: float(item.get("created_at") or 0),
+                reverse=True,
+            ):
+                owned_updated_at = receipt.get("session_updated_at_after_start")
+                receipt_snapshot = receipt.get("session_metadata_before_start")
+                if (
+                    projected_updated_at == owned_updated_at
+                    and isinstance(receipt_snapshot, dict)
+                ):
+                    projected_updated_at = receipt_snapshot.get("updated_at")
+            cleaned["updated_at"] = copy.deepcopy(projected_updated_at)
+
+            visible_last_message_at = max(
+                (
+                    float(message.get("timestamp") or message.get("_ts") or 0)
+                    for message in visible_messages
+                ),
+                default=0,
+            )
+            cleaned["last_message_at"] = max(
+                float(prepared_metadata_snapshot.get("last_message_at") or 0),
+                visible_last_message_at,
+            )
+        elif (
+            hidden_count
+            and not metadata_restored_from_prepared_snapshot
+            and isinstance(cleaned.get("message_count"), int)
+        ):
+            cleaned["message_count"] = max(0, cleaned["message_count"] - hidden_count)
     if isinstance(payload.get("pending_attachments"), list):
         cleaned["pending_attachments"] = [
             item for item in (

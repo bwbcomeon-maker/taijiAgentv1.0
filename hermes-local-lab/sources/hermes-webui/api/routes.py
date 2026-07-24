@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import datetime
 from functools import wraps
@@ -1380,6 +1381,1012 @@ def _append_expert_team_session_entry(run: dict) -> list[dict]:
         logger.debug("Failed to persist expert team session entry", exc_info=True)
         return []
     return new_messages
+
+
+class _ExpertTeamStartPersistenceError(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartIntegrityError(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartIdempotencyConflict(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartSessionNotFound(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartSessionBusy(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartSessionStateConflict(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartFinalizeError(RuntimeError):
+    pass
+
+
+def _expert_team_start_session_messages(
+    session,
+    run_id: str,
+    transaction_id: str,
+) -> list[dict]:
+    rows = [
+        message
+        for message in (getattr(session, "messages", None) or [])
+        if isinstance(message, dict)
+        and str(message.get("expert_team_run_id") or "") == run_id
+    ]
+    if not rows:
+        return []
+    types = [str(message.get("type") or "") for message in rows]
+    if len(rows) != 2 or sorted(types) != ["expert_team_lifecycle", "expert_team_start"]:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start session message pair is incomplete or duplicated"
+        )
+    if any(
+        str(message.get("expert_team_start_transaction_id") or "") != transaction_id
+        for message in rows
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start session message transaction binding does not match"
+        )
+    return copy.deepcopy(rows)
+
+
+def _new_expert_team_start_session_messages(
+    run: dict,
+    transaction_id: str,
+) -> list[dict]:
+    run_id = str(run.get("run_id") or "")
+    title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
+    team_title = str(run.get("team_title") or "专家团").strip()
+    visible_title = str(
+        ((run.get("view") or {}).get("business_context") or {}).get("visible_title")
+        or title
+    ).strip()
+    now = time.time()
+    return [
+        {
+            "role": "user",
+            "content": f"召唤{team_title}：{title[:120]}",
+            "timestamp": now,
+            "_ts": now,
+            "type": "expert_team_start",
+            "expert_team_run_id": run_id,
+            "expert_team_start_transaction_id": transaction_id,
+        },
+        {
+            "role": "assistant",
+            "content": (
+                f"{team_title}已创建，等待需求确认。\n\n"
+                f"本次任务：{visible_title}。请在右侧专家团工作台补充必填信息。"
+            ),
+            "timestamp": now + 0.001,
+            "_ts": now + 0.001,
+            "type": "expert_team_lifecycle",
+            "expert_team_run_id": run_id,
+            "expert_team_start_transaction_id": transaction_id,
+        },
+    ]
+
+
+def _persist_expert_team_session_entry_locked(
+    session,
+    run: dict,
+    transaction_id: str,
+    *,
+    session_updated_at_after_start: float,
+) -> list[dict]:
+    """Persist the canonical message pair; caller holds the session writer lock."""
+    run_id = str(run.get("run_id") or "")
+    existing = _expert_team_start_session_messages(session, run_id, transaction_id)
+    if existing:
+        return existing
+
+    before = copy.deepcopy(session.__dict__)
+    sidecar_existed = session.path.exists()
+    new_messages = _new_expert_team_start_session_messages(run, transaction_id)
+    messages = list(getattr(session, "messages", None) or [])
+
+    def _append_entry():
+        session.messages = messages + copy.deepcopy(new_messages)
+        session.context_messages = _completed_semantic_messages(session.messages)
+        if _is_default_or_empty_session_title(getattr(session, "title", None)):
+            session.title = title_from(
+                session.messages,
+                getattr(session, "title", None) or "Untitled",
+            )
+        # Use the timestamp durably reserved by the start receipt.  Compensation
+        # can then restore the previous timestamp only while this transaction
+        # still owns it; a later rename or metadata-only save changes the value
+        # and must be preserved.
+        session.updated_at = session_updated_at_after_start
+
+    try:
+        if sidecar_existed:
+            _rewrite_existing_session_truth(
+                session,
+                _append_entry,
+                privacy_reason=None,
+                touch_updated_at=False,
+            )
+        else:
+            _append_entry()
+            _persist_new_session_truth(session, touch_updated_at=False)
+    except Exception as exc:
+        session.__dict__.clear()
+        session.__dict__.update(copy.deepcopy(before))
+        raise _ExpertTeamStartPersistenceError(str(exc)) from exc
+    return copy.deepcopy(new_messages)
+
+
+def _rollback_expert_team_start_session_entry_locked(
+    session,
+    run_id: str,
+    transaction_id: str,
+    metadata_before_start: dict | None = None,
+    session_updated_at_after_start: float | None = None,
+) -> None:
+    existing = _expert_team_start_session_messages(session, run_id, transaction_id)
+    if not existing:
+        return
+    before = copy.deepcopy(session.__dict__)
+
+    def _remove_entry():
+        expected_generated_title = None
+        snapshot_message_count = None
+        snapshot_title = None
+        snapshot_updated_at = None
+        if isinstance(metadata_before_start, dict):
+            snapshot_title = metadata_before_start.get("title")
+            snapshot_message_count = metadata_before_start.get("message_count")
+            snapshot_updated_at = metadata_before_start.get("updated_at")
+            if isinstance(snapshot_title, str):
+                expected_generated_title = title_from(
+                    session.messages,
+                    snapshot_title,
+                )
+        session.messages = [
+            message
+            for message in (session.messages or [])
+            if not (
+                isinstance(message, dict)
+                and str(message.get("expert_team_run_id") or "") == run_id
+                and str(message.get("expert_team_start_transaction_id") or "")
+                == transaction_id
+            )
+        ]
+        session.context_messages = _completed_semantic_messages(session.messages)
+        if (
+            isinstance(snapshot_title, str)
+            and session.title == expected_generated_title
+        ):
+            session.title = title_from(session.messages, snapshot_title)
+        transaction_still_owns_updated_at = (
+            isinstance(session_updated_at_after_start, (int, float))
+            and not isinstance(session_updated_at_after_start, bool)
+            and getattr(session, "updated_at", None) == session_updated_at_after_start
+        )
+        if (
+            transaction_still_owns_updated_at
+            and type(snapshot_message_count) is int
+            and len(session.messages) == snapshot_message_count
+            and isinstance(snapshot_updated_at, (int, float))
+            and not isinstance(snapshot_updated_at, bool)
+        ):
+            session.updated_at = snapshot_updated_at
+        elif type(snapshot_message_count) is int and len(session.messages) > snapshot_message_count:
+            remaining_last_message_at = max(
+                (
+                    float(message.get("timestamp") or message.get("_ts") or 0)
+                    for message in session.messages
+                    if isinstance(message, dict)
+                ),
+                default=0,
+            )
+            session.updated_at = max(
+                float(getattr(session, "updated_at", 0) or 0),
+                float(snapshot_updated_at or 0),
+                remaining_last_message_at,
+            )
+
+    try:
+        _rewrite_existing_session_truth(
+            session,
+            _remove_entry,
+            privacy_reason=None,
+            touch_updated_at=False,
+        )
+    except Exception as exc:
+        session.__dict__.clear()
+        session.__dict__.update(copy.deepcopy(before))
+        raise _ExpertTeamStartIntegrityError(
+            "failed to compensate expert team Session messages"
+        ) from exc
+
+
+def _expert_team_start_fingerprint(validated_body: dict) -> str:
+    def _nfc(value: str) -> str:
+        return unicodedata.normalize("NFC", str(value))
+
+    canonical = {
+        "contract": "expert-team-standalone-start/v1",
+        "launch_profile_id": _nfc(validated_body["launch_profile_id"]),
+        "session_id": _nfc(validated_body["session_id"]),
+        "prompt": _nfc(validated_body["prompt"]),
+    }
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_expert_team_start_run_ownership(
+    run: dict,
+    validated_body: dict,
+    receipt: dict,
+    *,
+    require_initial_exact: bool,
+) -> dict:
+    from api import expert_teams
+
+    if not isinstance(run, dict):
+        raise _ExpertTeamStartIntegrityError("expert team start Run is not an object")
+    expected = {
+        "run_id": str(receipt["run_id"]),
+        "session_id": str(validated_body["session_id"]),
+        "launch_profile_id": str(validated_body["launch_profile_id"]),
+    }
+    if any(str(run.get(key) or "") != value for key, value in expected.items()):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run ownership does not match its receipt"
+        )
+    if (
+        int(run.get("schema_version") or 0) != 3
+        or str(run.get("product_mode") or "") != "standalone"
+        or str(run.get("contract_version") or "") != expert_teams.EXPERT_TEAM_CONTRACT_V1
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run is not the standalone v3 contract"
+        )
+    if unicodedata.normalize("NFC", str(run.get("prompt") or "")) != unicodedata.normalize(
+        "NFC", str(validated_body["prompt"])
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run prompt does not match its receipt"
+        )
+    snapshot = run.get("launch_profile_snapshot")
+    if not isinstance(snapshot, dict) or str(snapshot.get("id") or "") != expected["launch_profile_id"]:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run launch snapshot does not match its receipt"
+        )
+    initial_snapshot = receipt.get("initial_run_snapshot")
+    initial_digest = str(receipt.get("initial_run_sha256") or "")
+    projection_digest = str(receipt.get("initial_start_projection_sha256") or "")
+    if not isinstance(initial_snapshot, dict) or not initial_digest or not projection_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt is missing its immutable initial Run snapshot"
+        )
+    if _expert_team_start_run_digest(initial_snapshot) != initial_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt initial Run snapshot was modified"
+        )
+    if _expert_team_start_projection_digest(initial_snapshot) != projection_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt launch projection was modified"
+        )
+    if _expert_team_start_projection_digest(run) != projection_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team Run immutable launch projection changed"
+        )
+    if require_initial_exact and _expert_team_start_run_digest(run) != initial_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "pending expert team Run differs from its prepared snapshot"
+        )
+    return run
+
+
+def _expert_team_start_run_digest(run: dict) -> str:
+    payload = json.dumps(
+        run,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _expert_team_start_projection_digest(run: dict) -> str:
+    projection = {
+        key: copy.deepcopy(run.get(key))
+        for key in (
+            "schema_version",
+            "contract_version",
+            "product_mode",
+            "run_id",
+            "session_id",
+            "team_id",
+            "team_title",
+            "team_image",
+            "title",
+            "prompt",
+            "created_at",
+            "launch_profile_id",
+            "launch_profile_snapshot",
+            "review_policy",
+            "_tasks_template",
+        )
+    }
+    return _expert_team_start_run_digest(projection)
+
+
+def _publish_expert_team_start_run(workspace: Path, run_id: str) -> dict:
+    from api.expert_teams import storage
+
+    return storage.publish_pending_run(workspace, run_id)
+
+
+def _expert_team_start_public_session(session) -> dict:
+    payload = session.compact()
+    payload["messages"] = copy.deepcopy(getattr(session, "messages", None) or [])
+    return public_session_projection(redact_session_data(payload))
+
+
+def _expert_team_start_session_is_busy(session) -> bool:
+    return any(
+        (
+            getattr(session, "active_stream_id", None),
+            getattr(session, "pending_user_message", None),
+            getattr(session, "pending_started_at", None),
+            getattr(session, "pending_attachments", None),
+        )
+    )
+
+
+_EXPERT_TEAM_START_SEQUENCE_FIELDS = ("messages", "context_messages", "tool_calls")
+_EXPERT_TEAM_START_VOLATILE_FIELDS = {
+    "updated_at",
+    "active_stream_id",
+    "pending_user_message",
+    "pending_attachments",
+    "pending_started_at",
+}
+
+
+def _replace_cached_expert_team_start_session(session_id: str, cached, fresh) -> None:
+    cached.__dict__.clear()
+    cached.__dict__.update(copy.deepcopy(fresh.__dict__))
+    with LOCK:
+        SESSIONS[session_id] = cached
+        SESSIONS.move_to_end(session_id)
+        while len(SESSIONS) > SESSIONS_MAX:
+            SESSIONS.popitem(last=False)
+
+
+def _expert_team_start_durable_scalar_state(session) -> dict:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in session.__dict__.items()
+        if key not in _EXPERT_TEAM_START_SEQUENCE_FIELDS
+        and key not in _EXPERT_TEAM_START_VOLATILE_FIELDS
+        and not key.startswith("_")
+    }
+
+
+def _reload_expert_team_start_session(session_id: str):
+    """Reconcile every durable Session field without losing an unsaved tail."""
+    cached = get_session(session_id)
+    if _expert_team_start_session_is_busy(cached):
+        raise _ExpertTeamStartSessionBusy(session_id)
+    if not cached.path.exists():
+        return cached
+    fresh = Session.load(session_id)
+    if fresh is None:
+        raise _ExpertTeamStartSessionNotFound(session_id)
+    if _expert_team_start_session_is_busy(fresh):
+        raise _ExpertTeamStartSessionBusy(session_id)
+    if (
+        str(getattr(cached, "session_id", "") or "") != session_id
+        or str(getattr(fresh, "session_id", "") or "") != session_id
+    ):
+        # Never retain a sidecar whose payload identity disagrees with its
+        # filename/cache key; a retry must reload and fail closed again rather
+        # than mutate the mismatched Session under the requested lock.
+        with LOCK:
+            SESSIONS.pop(session_id, None)
+        raise _ExpertTeamStartSessionStateConflict(
+            "Session identity does not match its durable key"
+        )
+
+    cached_identity = tuple(
+        str(getattr(cached, field, None) or "")
+        for field in ("session_id", "workspace", "profile")
+    )
+    fresh_identity = tuple(
+        str(getattr(fresh, field, None) or "")
+        for field in ("session_id", "workspace", "profile")
+    )
+    if cached_identity != fresh_identity:
+        # Workspace/profile drift changes the authority boundary.  Refresh the
+        # cache so a retry cannot write the old workspace, but reject this
+        # request because it acquired locks for the old identity.
+        _replace_cached_expert_team_start_session(session_id, cached, fresh)
+        raise _ExpertTeamStartSessionStateConflict(
+            "cached and durable Session identity changed"
+        )
+
+    if _expert_team_start_durable_scalar_state(cached) != _expert_team_start_durable_scalar_state(fresh):
+        _replace_cached_expert_team_start_session(session_id, cached, fresh)
+        raise _ExpertTeamStartSessionStateConflict(
+            "cached and durable Session metadata diverged"
+        )
+
+    exact = True
+    fresh_extends_cache = True
+    for field in _EXPERT_TEAM_START_SEQUENCE_FIELDS:
+        cached_rows = copy.deepcopy(getattr(cached, field, None) or [])
+        fresh_rows = copy.deepcopy(getattr(fresh, field, None) or [])
+        exact = exact and cached_rows == fresh_rows
+        fresh_extends_cache = (
+            fresh_extends_cache
+            and len(fresh_rows) >= len(cached_rows)
+            and fresh_rows[: len(cached_rows)] == cached_rows
+        )
+    if exact:
+        # Recency alone is not a semantic conflict, but it is still durable
+        # ownership state.  Carry the locked sidecar value into the receipt so
+        # a later compensation cannot restore an older process-cache timestamp.
+        cached.updated_at = copy.deepcopy(fresh.updated_at)
+        return cached
+    if not fresh_extends_cache:
+        raise _ExpertTeamStartSessionStateConflict(
+            "cached and durable Session sequences diverged or contain an unsaved tail"
+        )
+    # A different process committed a strict append while this request waited
+    # for the cross-process lock. Refresh all durable fields as one snapshot.
+    _replace_cached_expert_team_start_session(session_id, cached, fresh)
+    return cached
+
+
+def _compensate_expert_team_start_finalize_locked(
+    workspace: Path,
+    session,
+    receipt: dict,
+) -> None:
+    from api.expert_teams import storage
+
+    run_id = str(receipt["run_id"])
+    transaction_id = str(receipt["transaction_id"])
+
+    def _mark_recovery_required() -> None:
+        recovery = dict(receipt)
+        recovery["state"] = "recovery_required"
+        recovery["updated_at"] = time.time()
+        try:
+            storage.write_start_transaction(workspace, recovery)
+        except Exception:
+            # The original prepared receipt and its reverse indexes remain the
+            # durable recovery marker if even this best-effort state write fails.
+            logger.critical(
+                "failed to mark expert team start %s for recovery",
+                transaction_id,
+                exc_info=True,
+            )
+
+    try:
+        with storage.run_file_lock(workspace, run_id):
+            if storage.pending_run_path(workspace, run_id).exists():
+                _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    _expert_team_start_request_from_receipt(receipt),
+                    receipt,
+                    require_initial_exact=True,
+                )
+            if storage.run_path(workspace, run_id).exists():
+                _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    _expert_team_start_request_from_receipt(receipt),
+                    receipt,
+                    require_initial_exact=True,
+                )
+            # Run truth must be safely removed before its Session marker.  A
+            # failure leaves the message pair discoverable for lazy recovery.
+            storage.delete_pending_run(workspace, run_id)
+            storage.delete_canonical_run(workspace, run_id)
+    except Exception:
+        _mark_recovery_required()
+        raise
+
+    try:
+        session = _reload_expert_team_start_session(str(receipt["session_id"]))
+        _rollback_expert_team_start_session_entry_locked(
+            session,
+            run_id,
+            transaction_id,
+            metadata_before_start=receipt.get("session_metadata_before_start"),
+            session_updated_at_after_start=receipt.get(
+                "session_updated_at_after_start"
+            ),
+        )
+    except Exception:
+        _mark_recovery_required()
+        raise
+    rolled_back = dict(receipt)
+    rolled_back["state"] = "rolled_back"
+    rolled_back["updated_at"] = time.time()
+    try:
+        storage.write_start_transaction(workspace, rolled_back)
+    except Exception:
+        _mark_recovery_required()
+        raise
+
+
+def _finalize_prepared_expert_team_start_locked(
+    workspace: Path,
+    session,
+    receipt: dict,
+    validated_body: dict,
+) -> tuple[dict, dict]:
+    """Publish one prepared start or precisely remove its bound public state."""
+    from api.expert_teams import storage
+
+    run_id = str(receipt["run_id"])
+    transaction_id = str(receipt["transaction_id"])
+    session_messages = _expert_team_start_session_messages(
+        session,
+        run_id,
+        transaction_id,
+    )
+    if not session_messages:
+        raise _ExpertTeamStartIntegrityError(
+            "prepared start has no bound Session message pair"
+        )
+    try:
+        with storage.run_file_lock(workspace, run_id):
+            if storage.pending_run_path(workspace, run_id).exists():
+                pending_run = _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+                run = _publish_expert_team_start_run(workspace, run_id)
+                if run != pending_run:
+                    raise _ExpertTeamStartIntegrityError(
+                        "published expert team Run does not match its pending snapshot"
+                    )
+            elif storage.run_path(workspace, run_id).exists():
+                run = _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+            else:
+                raise _ExpertTeamStartIntegrityError(
+                    "prepared start has Session messages but no recoverable Run"
+                )
+            committed = dict(receipt)
+            committed["state"] = "committed"
+            committed["updated_at"] = time.time()
+            storage.write_start_transaction(workspace, committed)
+    except Exception as finalize_error:
+        try:
+            _compensate_expert_team_start_finalize_locked(
+                workspace,
+                session,
+                receipt,
+            )
+        except Exception as compensation_error:
+            raise _ExpertTeamStartIntegrityError(
+                "expert team start could not be finalized or compensated"
+            ) from compensation_error
+        raise _ExpertTeamStartFinalizeError(
+            "expert team start finalization failed and was rolled back"
+        ) from finalize_error
+    return run, committed
+
+
+def _expert_team_start_request_from_receipt(receipt: dict) -> dict:
+    snapshot = receipt.get("initial_run_snapshot")
+    if not isinstance(snapshot, dict):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt has no immutable Run snapshot"
+        )
+    validated_body = {
+        "session_id": str(receipt.get("session_id") or ""),
+        "launch_profile_id": str(snapshot.get("launch_profile_id") or ""),
+        "prompt": str(snapshot.get("prompt") or ""),
+    }
+    if (
+        not all(validated_body.values())
+        or _expert_team_start_fingerprint(validated_body)
+        != str(receipt.get("request_fingerprint") or "")
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt request binding does not match"
+        )
+    return validated_body
+
+
+def _reconcile_prepared_expert_team_starts_for_session(session):
+    """Narrow read-time recovery for starts that died after Session commit."""
+    from api.expert_teams import storage
+
+    session_id = str(getattr(session, "session_id", "") or "")
+    raw_workspace = str(getattr(session, "workspace", "") or "").strip()
+    if not session_id or not raw_workspace:
+        return session
+    workspace = resolve_trusted_workspace(raw_workspace)
+    transaction_ids = {
+        str(message.get("expert_team_start_transaction_id") or "")
+        for message in (getattr(session, "messages", None) or [])
+        if isinstance(message, dict)
+        and message.get("expert_team_start_transaction_id")
+    }
+    transaction_ids.update(
+        str(receipt.get("transaction_id") or "")
+        for receipt in storage.list_start_transactions_for_session(
+            workspace,
+            session_id,
+        )
+    )
+    transaction_ids.discard("")
+    if not transaction_ids:
+        return session
+    current = session
+    for transaction_id in sorted(transaction_ids):
+        with storage.start_transaction_lock(workspace, transaction_id):
+            with storage.start_session_lock(
+                workspace,
+                session_id,
+            ), _get_session_agent_lock(session_id):
+                current = _reload_expert_team_start_session(session_id)
+                locked_workspace = str(
+                    getattr(current, "workspace", "") or ""
+                ).strip()
+                if (
+                    not locked_workspace
+                    or resolve_trusted_workspace(locked_workspace) != workspace
+                ):
+                    raise _ExpertTeamStartIntegrityError(
+                        "expert team session workspace changed during recovery"
+                    )
+                receipt = storage.read_start_transaction_by_id(
+                    workspace,
+                    transaction_id,
+                )
+                if receipt is None or receipt.get("state") not in {
+                    "prepared",
+                    "recovery_required",
+                }:
+                    continue
+                if str(receipt.get("session_id") or "") != session_id:
+                    raise _ExpertTeamStartIntegrityError(
+                        "expert team start receipt Session binding does not match"
+                    )
+                validated_body = _expert_team_start_request_from_receipt(receipt)
+                _validate_expert_team_start_run_ownership(
+                    copy.deepcopy(receipt.get("initial_run_snapshot")),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+                if not _expert_team_start_session_messages(
+                    current,
+                    str(receipt["run_id"]),
+                    transaction_id,
+                ):
+                    continue
+                _finalize_prepared_expert_team_start_locked(
+                    workspace,
+                    current,
+                    receipt,
+                    validated_body,
+                )
+    return current
+
+
+def _public_expert_team_start_messages(messages: list[dict]) -> list[dict]:
+    public_messages = copy.deepcopy(messages)
+    for message in public_messages:
+        if isinstance(message, dict):
+            message.pop("expert_team_start_transaction_id", None)
+    return public_messages
+
+
+def _coordinate_expert_team_start(validated_body: dict) -> dict:
+    """Commit one standalone start across receipt, Run, and Session truth."""
+    from api import expert_teams
+    from api.expert_teams import storage
+
+    session_id = validated_body["session_id"]
+    idempotency_key = validated_body["idempotency_key"]
+    # Validate all server-owned selectors before resolving mutable Session state.
+    expert_teams.get_launch_profile(validated_body["launch_profile_id"])
+    try:
+        session = get_session(session_id)
+    except (KeyError, FileNotFoundError) as exc:
+        raise _ExpertTeamStartSessionNotFound(session_id) from exc
+    raw_workspace = str(getattr(session, "workspace", "") or "").strip()
+    if not raw_workspace:
+        raise _ExpertTeamStartIntegrityError("expert team session has no workspace")
+    workspace = resolve_trusted_workspace(raw_workspace)
+    transaction_id = storage.start_transaction_id(session_id, idempotency_key)
+    request_fingerprint = _expert_team_start_fingerprint(validated_body)
+
+    with storage.start_transaction_lock(workspace, transaction_id):
+        with storage.start_session_lock(workspace, session_id), _get_session_agent_lock(session_id):
+            try:
+                session = _reload_expert_team_start_session(session_id)
+            except (KeyError, FileNotFoundError) as exc:
+                raise _ExpertTeamStartSessionNotFound(session_id) from exc
+            locked_workspace = str(getattr(session, "workspace", "") or "").strip()
+            if not locked_workspace or resolve_trusted_workspace(locked_workspace) != workspace:
+                raise _ExpertTeamStartIntegrityError(
+                    "expert team session workspace changed during start"
+                )
+            try:
+                receipt = storage.read_start_transaction(
+                    workspace,
+                    session_id=session_id,
+                    idempotency_key=idempotency_key,
+                )
+            except storage.StartTransactionIntegrityError as exc:
+                raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+            if receipt is not None and receipt["request_fingerprint"] != request_fingerprint:
+                raise _ExpertTeamStartIdempotencyConflict(
+                    "idempotency key was already used for a different start request"
+                )
+
+            if receipt is None:
+                now = time.time()
+                run_id = "et-" + uuid.uuid4().hex[:16]
+                initial_run = expert_teams.build_standalone_expert_team_run(
+                    validated_body,
+                    run_id=run_id,
+                )
+                compact_before_start = session.compact()
+                metadata_before_start = {
+                    key: copy.deepcopy(compact_before_start.get(key))
+                    for key in (
+                        "title",
+                        "message_count",
+                        "user_message_count",
+                        "updated_at",
+                        "last_message_at",
+                    )
+                }
+                session_updated_at_after_start = max(
+                    now,
+                    float(metadata_before_start.get("updated_at") or 0) + 0.000001,
+                )
+                receipt = {
+                    "schema_version": storage.START_TRANSACTION_SCHEMA_VERSION,
+                    "transaction_id": transaction_id,
+                    "session_id": session_id,
+                    "idempotency_key_hash": storage.start_idempotency_key_hash(
+                        idempotency_key
+                    ),
+                    "request_fingerprint": request_fingerprint,
+                    "run_id": run_id,
+                    "initial_run_snapshot": copy.deepcopy(initial_run),
+                    "initial_run_sha256": _expert_team_start_run_digest(initial_run),
+                    "initial_start_projection_sha256": (
+                        _expert_team_start_projection_digest(initial_run)
+                    ),
+                    "session_metadata_before_start": metadata_before_start,
+                    "session_metadata_before_start_sha256": (
+                        storage.start_session_metadata_digest(metadata_before_start)
+                    ),
+                    "session_updated_at_after_start": session_updated_at_after_start,
+                    "state": "prepared",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                storage.write_start_transaction(workspace, receipt)
+
+            run_id = str(receipt["run_id"])
+            initial_run = _validate_expert_team_start_run_ownership(
+                copy.deepcopy(receipt.get("initial_run_snapshot")),
+                validated_body,
+                receipt,
+                require_initial_exact=True,
+            )
+            session_messages = _expert_team_start_session_messages(
+                session,
+                run_id,
+                transaction_id,
+            )
+            session_updated_at_after_start = receipt.get(
+                "session_updated_at_after_start"
+            )
+            if session_updated_at_after_start is None and not session_messages:
+                # Pre-marker prepared receipts are safe to upgrade only before
+                # any Session entry exists.  Once messages exist, preserving the
+                # current timestamp is safer than guessing whether later user
+                # metadata activity occurred.
+                receipt = dict(receipt)
+                session_updated_at_after_start = max(
+                    time.time(),
+                    float(
+                        (receipt.get("session_metadata_before_start") or {}).get(
+                            "updated_at"
+                        )
+                        or 0
+                    )
+                    + 0.000001,
+                )
+                receipt["session_updated_at_after_start"] = (
+                    session_updated_at_after_start
+                )
+                receipt["updated_at"] = time.time()
+                storage.write_start_transaction(workspace, receipt)
+            pending_exists = storage.pending_run_path(workspace, run_id).exists()
+            canonical_exists = storage.run_path(workspace, run_id).exists()
+
+            if receipt["state"] == "committed":
+                if not canonical_exists or not session_messages:
+                    raise _ExpertTeamStartIntegrityError(
+                        "committed start receipt is missing canonical Run or Session messages"
+                    )
+                run = _validate_expert_team_start_run_ownership(
+                    storage.read_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=False,
+                )
+                if pending_exists:
+                    _validate_expert_team_start_run_ownership(
+                        storage.read_pending_run(workspace, run_id),
+                        validated_body,
+                        receipt,
+                        require_initial_exact=True,
+                    )
+                    if _expert_team_start_run_digest(run) == str(
+                        receipt["initial_run_sha256"]
+                    ):
+                        storage.publish_pending_run(workspace, run_id)
+                    else:
+                        # A stale initial pending snapshot must never overwrite
+                        # a canonical Run that legitimately advanced.
+                        storage.delete_pending_run(workspace, run_id)
+                return {
+                    "run": run,
+                    "session": _expert_team_start_public_session(session),
+                    "session_messages": session_messages,
+                    "replayed": True,
+                    "workspace": workspace,
+                }
+
+            if receipt["state"] == "rolled_back" and session_messages:
+                raise _ExpertTeamStartIntegrityError(
+                    "rolled-back start receipt still has Session messages"
+                )
+
+            if receipt["state"] in {"prepared", "recovery_required"} and session_messages:
+                run, receipt = _finalize_prepared_expert_team_start_locked(
+                    workspace,
+                    session,
+                    receipt,
+                    validated_body,
+                )
+                return {
+                    "run": run,
+                    "session": _expert_team_start_public_session(session),
+                    "session_messages": session_messages,
+                    "replayed": True,
+                    "workspace": workspace,
+                }
+
+            # A prepared Run without a Session pair was never publicly committed.
+            # Reuse its validated immutable snapshot so a profile update between
+            # process death and retry cannot silently change this transaction.
+            run = None
+            if pending_exists:
+                run = _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+            if canonical_exists:
+                canonical_run = _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+                if run is not None and canonical_run != run:
+                    raise _ExpertTeamStartIntegrityError(
+                        "pending and canonical expert team Runs disagree"
+                    )
+                run = canonical_run
+                storage.delete_canonical_run(workspace, run_id)
+                storage.write_pending_run(workspace, run)
+            receipt = dict(receipt)
+            receipt["state"] = "prepared"
+            receipt["updated_at"] = time.time()
+
+            if run is None:
+                run = copy.deepcopy(initial_run)
+                storage.write_pending_run(workspace, run)
+            receipt["pending_run_sha256"] = str(receipt["initial_run_sha256"])
+            storage.write_start_transaction(workspace, receipt)
+            try:
+                session_messages = _persist_expert_team_session_entry_locked(
+                    session,
+                    run,
+                    transaction_id,
+                    session_updated_at_after_start=float(
+                        session_updated_at_after_start
+                    ),
+                )
+            except _ExpertTeamStartPersistenceError as persistence_error:
+                try:
+                    session = _reload_expert_team_start_session(session_id)
+                    durable_messages = _expert_team_start_session_messages(
+                        session,
+                        run_id,
+                        transaction_id,
+                    )
+                except Exception as recovery_error:
+                    raise _ExpertTeamStartIntegrityError(
+                        "could not determine whether the expert team Session commit completed"
+                    ) from recovery_error
+                if durable_messages:
+                    # The two authoritative Session stores already contain the
+                    # bound pair.  Treat the cleanup exception as post-commit
+                    # and finish publishing the still-prepared transaction.
+                    session_messages = durable_messages
+                else:
+                    storage.delete_pending_run(workspace, run_id)
+                    storage.delete_canonical_run(workspace, run_id)
+                    receipt["state"] = "rolled_back"
+                    receipt["updated_at"] = time.time()
+                    try:
+                        storage.write_start_transaction(workspace, receipt)
+                    except Exception:
+                        logger.critical(
+                            "failed to record rolled-back expert team start %s",
+                            transaction_id,
+                            exc_info=True,
+                        )
+                    raise persistence_error
+
+            run, receipt = _finalize_prepared_expert_team_start_locked(
+                workspace,
+                session,
+                receipt,
+                validated_body,
+            )
+            result = {
+                "run": run,
+                "session": _expert_team_start_public_session(session),
+                "session_messages": session_messages,
+                "replayed": False,
+                "workspace": workspace,
+            }
+
+    try:
+        publish_session_list_changed("session_update")
+    except Exception:
+        logger.warning(
+            "failed to publish session update after expert team start for %s",
+            session_id,
+            exc_info=True,
+        )
+    return result
 
 
 def _latest_expert_team_assistant_content_after_execution(session, run: dict) -> str:
@@ -9967,6 +10974,23 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            if load_messages:
+                try:
+                    s = _reconcile_prepared_expert_team_starts_for_session(s)
+                except (
+                    _ExpertTeamStartSessionBusy,
+                    _ExpertTeamStartSessionStateConflict,
+                ):
+                    logger.debug(
+                        "deferred expert team start recovery for busy Session %s",
+                        sid,
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to reconcile prepared expert team start for Session %s",
+                        sid,
+                        exc_info=True,
+                    )
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -10824,6 +11848,7 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/expert-teams/run":
         from api import expert_teams
+        from api.expert_teams import storage
 
         qs = parse_qs(parsed.query)
         session_id = qs.get("session_id", [""])[0].strip() or None
@@ -10832,6 +11857,41 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "run_id or session_id required", 400)
         try:
             workspace = _expert_team_workspace(session_id)
+            recovery_session_id = session_id
+            if run_id:
+                try:
+                    bound_receipt = storage.read_start_transaction_for_run(
+                        workspace,
+                        run_id,
+                    )
+                except Exception:
+                    bound_receipt = None
+                if bound_receipt and bound_receipt.get("state") in {
+                    "prepared",
+                    "recovery_required",
+                }:
+                    recovery_session_id = str(
+                        bound_receipt.get("session_id") or ""
+                    ) or recovery_session_id
+            if recovery_session_id:
+                try:
+                    _reconcile_prepared_expert_team_starts_for_session(
+                        get_session(recovery_session_id)
+                    )
+                except (
+                    _ExpertTeamStartSessionBusy,
+                    _ExpertTeamStartSessionStateConflict,
+                ):
+                    logger.debug(
+                        "deferred expert team start recovery for busy Session %s",
+                        recovery_session_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to reconcile prepared expert team start for Session %s",
+                        recovery_session_id,
+                        exc_info=True,
+                    )
             if run_id:
                 run = expert_teams.read_expert_team_run(workspace, run_id)
             else:
@@ -11254,6 +12314,7 @@ def _completed_semantic_messages(messages) -> list[dict]:
 
 def _snapshot_session_truth(session) -> dict:
     fields = {
+        "updated_at",
         "messages",
         "context_messages",
         "tool_calls",
@@ -11314,6 +12375,7 @@ def _rewrite_existing_session_truth(
     privacy_reason: str | None,
     rollback_snapshot: dict | None = None,
     preserve_context_messages: bool = False,
+    touch_updated_at: bool = True,
 ) -> list[dict]:
     """Coordinate one sidecar rewrite with the transactional state.db rewrite.
 
@@ -11370,11 +12432,11 @@ def _rewrite_existing_session_truth(
                 # it runs while this marker is live, crash recovery recursively
                 # replays the same state.db replacement before this transaction
                 # has finished.  Publish the index only after the marker clears.
-                session.save(skip_index=True)
+                session.save(touch_updated_at=touch_updated_at, skip_index=True)
             except Exception:
                 _restore_session_truth(session, snapshot)
                 try:
-                    session.save(skip_index=True)
+                    session.save(touch_updated_at=False, skip_index=True)
                     truth_rewrite.clear_truth_rewrite_intent(session)
                 except Exception:
                     logger.critical(
@@ -11389,7 +12451,7 @@ def _rewrite_existing_session_truth(
             except Exception:
                 _restore_session_truth(session, snapshot)
                 try:
-                    session.save(skip_index=True)
+                    session.save(touch_updated_at=False, skip_index=True)
                     truth_rewrite.clear_truth_rewrite_intent(session)
                 except Exception:
                     logger.critical(
@@ -11398,8 +12460,23 @@ def _rewrite_existing_session_truth(
                         exc_info=True,
                     )
                 raise
-            truth_rewrite.discard_committed_shrink_backup(session)
-            truth_rewrite.clear_truth_rewrite_intent(session)
+            try:
+                truth_rewrite.discard_committed_shrink_backup(session)
+            except Exception:
+                logger.warning(
+                    "failed to discard committed truth backup for %s",
+                    session.session_id,
+                    exc_info=True,
+                )
+            else:
+                try:
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                except Exception:
+                    logger.warning(
+                        "failed to clear committed truth intent for %s",
+                        session.session_id,
+                        exc_info=True,
+                    )
             try:
                 _write_session_index(updates=[session])
             except Exception:
@@ -11414,7 +12491,11 @@ def _rewrite_existing_session_truth(
             return semantic_messages
 
 
-def _persist_new_session_truth(session) -> list[dict]:
+def _persist_new_session_truth(
+    session,
+    *,
+    touch_updated_at: bool = True,
+) -> list[dict]:
     """Persist a new sidecar, then atomically create/replace its DB truth.
 
     The DB bridge creates the new session row and messages in one transaction.
@@ -11446,7 +12527,7 @@ def _persist_new_session_truth(session) -> list[dict]:
         try:
             # See _rewrite_existing_session_truth: indexing while the intent is
             # live can recursively invoke Session.load() and replay the DB write.
-            session.save(skip_index=True)
+            session.save(touch_updated_at=touch_updated_at, skip_index=True)
         except Exception:
             try:
                 session.path.unlink(missing_ok=True)
@@ -11475,8 +12556,23 @@ def _persist_new_session_truth(session) -> list[dict]:
                     exc_info=True,
                 )
             raise
-        truth_rewrite.discard_committed_shrink_backup(session)
-        truth_rewrite.clear_truth_rewrite_intent(session)
+        try:
+            truth_rewrite.discard_committed_shrink_backup(session)
+        except Exception:
+            logger.warning(
+                "failed to discard committed new-session truth backup for %s",
+                session.session_id,
+                exc_info=True,
+            )
+        else:
+            try:
+                truth_rewrite.clear_truth_rewrite_intent(session)
+            except Exception:
+                logger.warning(
+                    "failed to clear committed new-session truth intent for %s",
+                    session.session_id,
+                    exc_info=True,
+                )
         try:
             _write_session_index(updates=[session])
         except Exception:
@@ -12793,23 +13889,71 @@ def handle_post(handler, parsed) -> bool:
 
         try:
             validated_body = expert_teams.validate_standalone_start_request(body)
-            session_id = validated_body["session_id"]
-            workspace = _expert_team_workspace(session_id)
-            run = expert_teams.start_standalone_expert_team(workspace, validated_body)
-            session_messages = _append_expert_team_session_entry(run)
+            result = _coordinate_expert_team_start(validated_body)
             return j(
                 handler,
                 {
                     "ok": True,
-                    "run": run,
+                    "replayed": result["replayed"],
+                    "run": result["run"],
+                    "session": result["session"],
                     "teams": expert_teams.expert_team_catalog()["teams"],
-                    "session_messages": session_messages,
+                    "session_messages": _public_expert_team_start_messages(
+                        result["session_messages"]
+                    ),
                 },
             )
         except expert_teams.ContractError as exc:
             return j(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
+        except _ExpertTeamStartSessionNotFound:
+            return j(
+                handler,
+                {"ok": False, "code": "session_not_found", "error": "expert team session not found"},
+                status=404,
+            )
+        except _ExpertTeamStartSessionBusy:
+            return j(
+                handler,
+                {"ok": False, "code": "session_busy", "error": "session is currently active"},
+                status=409,
+            )
+        except _ExpertTeamStartSessionStateConflict as exc:
+            return j(
+                handler,
+                {"ok": False, "code": "session_state_conflict", "error": str(exc)},
+                status=409,
+            )
+        except _ExpertTeamStartIdempotencyConflict as exc:
+            return j(
+                handler,
+                {"ok": False, "code": "start_idempotency_conflict", "error": str(exc)},
+                status=409,
+            )
+        except _ExpertTeamStartPersistenceError as exc:
+            return j(
+                handler,
+                {"ok": False, "code": "start_persistence_failed", "error": _sanitize_error(exc)},
+                status=500,
+            )
+        except _ExpertTeamStartFinalizeError as exc:
+            return j(
+                handler,
+                {"ok": False, "code": "start_finalize_failed", "error": _sanitize_error(exc)},
+                status=503,
+            )
+        except _ExpertTeamStartIntegrityError as exc:
+            return j(
+                handler,
+                {"ok": False, "code": "start_receipt_invalid", "error": _sanitize_error(exc)},
+                status=503,
+            )
         except Exception as exc:
-            return bad(handler, f"Failed to start expert team: {_sanitize_error(exc)}", 400)
+            logger.exception("Failed to commit standalone expert team start")
+            return j(
+                handler,
+                {"ok": False, "code": "start_unavailable", "error": _sanitize_error(exc)},
+                status=503,
+            )
 
     if parsed.path == "/api/expert-teams/answer":
         from api import expert_teams

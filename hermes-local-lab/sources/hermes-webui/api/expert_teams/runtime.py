@@ -1586,7 +1586,7 @@ def _standalone_start_context(body: dict) -> tuple[dict, dict]:
     return profile, resolved
 
 
-def start_expert_team(workspace: Path, body: dict) -> dict:
+def _build_expert_team_run(body: dict, *, run_id: str | None = None) -> dict:
     standalone = "launch_profile_id" in body
     launch_profile = None
     resolved_body = body
@@ -1620,7 +1620,7 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
     run = {
         "schema_version": 3 if standalone else 2,
         "version": 1,
-        "run_id": "et-" + uuid.uuid4().hex[:16],
+        "run_id": run_id or "et-" + uuid.uuid4().hex[:16],
         "session_id": session_id,
         "team_id": template["id"],
         "team_title": template["title"],
@@ -1661,7 +1661,20 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
                 "review_policy": deepcopy(launch_profile["review_policy"]),
             }
         )
-    return write_run(workspace, _sync_derived(run))
+    return _sync_derived(run)
+
+
+def start_expert_team(workspace: Path, body: dict) -> dict:
+    """Build and immediately publish a run for legacy/internal callers."""
+    return write_run(workspace, _build_expert_team_run(body))
+
+
+def build_standalone_expert_team_run(body: dict, *, run_id: str) -> dict:
+    """Build a standalone run without making it visible to public readers."""
+    return _build_expert_team_run(
+        validate_standalone_start_request(body),
+        run_id=run_id,
+    )
 
 
 def start_standalone_expert_team(workspace: Path, body: dict) -> dict:

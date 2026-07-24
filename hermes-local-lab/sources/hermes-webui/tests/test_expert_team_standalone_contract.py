@@ -1,5 +1,7 @@
 import io
 import json
+from collections import OrderedDict
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -373,11 +375,28 @@ def test_public_start_route_requires_every_public_field_before_write(
 
 
 def test_public_start_route_creates_only_standalone_schema_v3(monkeypatch, tmp_path):
-    from api import routes
+    from api import config, models, routes
 
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sessions = OrderedDict()
+    for module in (config, models, routes):
+        if hasattr(module, "SESSION_DIR"):
+            monkeypatch.setattr(module, "SESSION_DIR", session_dir)
+        if hasattr(module, "SESSION_INDEX_FILE"):
+            monkeypatch.setattr(module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+        if hasattr(module, "SESSIONS"):
+            monkeypatch.setattr(module, "SESSIONS", sessions)
+    session = models.Session(session_id="standalone-session", workspace=str(tmp_path))
+    sessions[session.session_id] = session
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
-    monkeypatch.setattr(routes, "_expert_team_workspace", lambda _sid=None: tmp_path)
-    monkeypatch.setattr(routes, "_append_expert_team_session_entry", lambda _run: [])
+    monkeypatch.setattr(
+        routes,
+        "resolve_trusted_workspace",
+        lambda value: Path(value).resolve(),
+    )
+    monkeypatch.setattr(routes, "_replace_state_db_truth", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
 
     handler = _post(routes, "/api/expert-teams/start", _profile_start())
 
