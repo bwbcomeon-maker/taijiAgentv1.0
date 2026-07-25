@@ -246,6 +246,55 @@ def _downgrade_start_transaction_to_v1(
     return receipt
 
 
+def _load_early_v1_fixture() -> dict:
+    path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "expert_team_start"
+        / "early_v1_prepared.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _install_early_v1_fixture(storage, workspace: Path) -> tuple[dict, dict[str, Path]]:
+    fixture = _load_early_v1_fixture()
+    receipt = copy.deepcopy(fixture["receipt"])
+    run_binding = copy.deepcopy(fixture["run_binding"])
+    session_binding = copy.deepcopy(fixture["session_binding"])
+    pending_run = copy.deepcopy(fixture["pending_run"])
+    paths = {
+        "receipt": storage.start_transaction_path(
+            workspace,
+            receipt["transaction_id"],
+        ),
+        "run_binding": storage.start_run_binding_path(
+            workspace,
+            receipt["run_id"],
+        ),
+        "session_binding": storage.start_session_binding_path(
+            workspace,
+            receipt["session_id"],
+        ),
+        "pending_run": storage.pending_run_path(
+            workspace,
+            receipt["run_id"],
+        ),
+    }
+    payloads = {
+        "receipt": receipt,
+        "run_binding": run_binding,
+        "session_binding": session_binding,
+        "pending_run": pending_run,
+    }
+    for key, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payloads[key], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return fixture, paths
+
+
 def _hold_cross_process_lock(kind, workspace, identifier, ready, release, result):
     """Fork worker used to prove the OS locks, not only thread locks."""
     try:
@@ -802,6 +851,286 @@ def test_v1_committed_receipt_is_not_retroactively_signed_from_current_messages(
 
     assert replay.status == 503
     assert replay.json_body()["code"] == "start_receipt_invalid"
+
+
+def test_real_early_v1_receipt_is_readable_without_rewriting(tmp_path):
+    import api.expert_teams.storage as storage
+
+    fixture, paths = _install_early_v1_fixture(storage, tmp_path)
+    before = {key: path.read_bytes() for key, path in paths.items()}
+
+    receipt = storage.read_start_transaction_by_id(
+        tmp_path,
+        fixture["receipt"]["transaction_id"],
+    )
+
+    assert receipt == fixture["receipt"]
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
+
+
+def test_late_v1_shape_cannot_drop_its_receipt_digest_binding(tmp_path):
+    import api.expert_teams.storage as storage
+
+    fixture, paths = _install_early_v1_fixture(storage, tmp_path)
+    receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
+    initial = receipt["initial_run_snapshot"]
+    initial["start_transaction_id"] = receipt["transaction_id"]
+    receipt["session_title_after_start"] = "专家团任务"
+    receipt["initial_run_sha256"] = storage.start_run_digest(initial)
+    receipt["initial_start_projection_sha256"] = (
+        storage.start_run_projection_digest(initial)
+    )
+    paths["receipt"].write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        storage.StartTransactionIntegrityError,
+        match="does not match its Run binding",
+    ):
+        storage.read_start_transaction_by_id(
+            tmp_path,
+            fixture["receipt"]["transaction_id"],
+        )
+
+
+def test_real_early_v1_prepared_without_evidence_is_rebuilt_as_v2(atomic_env):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    fixture = _load_early_v1_fixture()
+    receipt_v1 = fixture["receipt"]
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=receipt_v1["session_id"],
+    )
+    fixture, paths = _install_early_v1_fixture(storage, workspace)
+    body = _start_body(
+        session.session_id,
+        idempotency_key=fixture["idempotency_key"],
+    )
+    sessions.clear()
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 200
+    receipt_v2 = storage.read_start_transaction(
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    assert receipt_v2["schema_version"] == 2
+    assert receipt_v2["state"] == "committed"
+    assert receipt_v2["run_id"] == "et-" + receipt_v1["transaction_id"]
+    assert receipt_v2["run_id"] != receipt_v1["run_id"]
+    assert not paths["pending_run"].exists()
+    assert not storage.start_run_binding_path(
+        workspace,
+        receipt_v1["run_id"],
+    ).exists()
+
+
+def test_real_early_v1_tampered_private_run_fails_closed_without_cleanup(
+    atomic_env,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    fixture = _load_early_v1_fixture()
+    receipt = fixture["receipt"]
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=receipt["session_id"],
+    )
+    fixture, paths = _install_early_v1_fixture(storage, workspace)
+    tampered = json.loads(paths["pending_run"].read_text(encoding="utf-8"))
+    tampered["prompt"] = "被篡改的历史任务"
+    paths["pending_run"].write_text(
+        json.dumps(tampered, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key=fixture["idempotency_key"],
+    )
+    sessions.clear()
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 503
+    assert recovered.json_body()["code"] == "start_receipt_invalid"
+    assert paths["receipt"].exists()
+    assert paths["run_binding"].exists()
+    assert paths["session_binding"].exists()
+    assert paths["pending_run"].exists()
+    assert models.Session.load(session.session_id).messages == []
+
+
+def test_start_evidence_in_context_messages_is_never_treated_as_private():
+    import api.routes as routes
+
+    transaction_id = "a" * 64
+    run_id = "et-context-evidence"
+
+    class _SessionEvidence:
+        expert_team_start_transaction_ids = []
+        messages = []
+        context_messages = [
+            {
+                "role": "assistant",
+                "type": "expert_team_lifecycle",
+                "content": "专家团已启动",
+                "expert_team_run_id": run_id,
+                "expert_team_start_transaction_id": transaction_id,
+            }
+        ]
+
+    assert routes._expert_team_start_has_session_evidence(
+        _SessionEvidence(),
+        run_id=run_id,
+        transaction_id=transaction_id,
+    ) is True
+
+
+@pytest.mark.parametrize("sequence_field", ["messages", "context_messages"])
+def test_start_marker_cannot_mask_malformed_session_sequence(sequence_field):
+    import api.routes as routes
+
+    transaction_id = "a" * 64
+
+    class _MalformedSessionEvidence:
+        expert_team_start_transaction_ids = [transaction_id]
+        messages = []
+        context_messages = []
+
+    setattr(_MalformedSessionEvidence, sequence_field, {"corrupt": True})
+
+    with pytest.raises(
+        routes._ExpertTeamStartIntegrityError,
+        match=f"Session {sequence_field} is not a list",
+    ):
+        routes._expert_team_start_has_session_evidence(
+            _MalformedSessionEvidence(),
+            run_id="et-corrupt-sequence",
+            transaction_id=transaction_id,
+        )
+
+
+def test_real_early_v1_context_evidence_fails_closed_without_rewriting(
+    atomic_env,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    fixture = _load_early_v1_fixture()
+    receipt = fixture["receipt"]
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=receipt["session_id"],
+    )
+    session.context_messages = [
+        {
+            "role": "assistant",
+            "type": "expert_team_lifecycle",
+            "content": "历史专家团启动证据",
+            "expert_team_run_id": receipt["run_id"],
+            "expert_team_start_transaction_id": receipt["transaction_id"],
+        }
+    ]
+    session.save(touch_updated_at=False, skip_index=True)
+    fixture, paths = _install_early_v1_fixture(storage, workspace)
+    before = {key: path.read_bytes() for key, path in paths.items()}
+    body = _start_body(
+        session.session_id,
+        idempotency_key=fixture["idempotency_key"],
+    )
+    sessions.clear()
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 503
+    assert recovered.json_body()["code"] == "start_receipt_invalid"
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
+
+
+@pytest.mark.parametrize("sequence_field", ["messages", "context_messages"])
+def test_real_early_v1_malformed_raw_session_sequence_fails_closed_without_rewriting(
+    atomic_env,
+    sequence_field,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    fixture = _load_early_v1_fixture()
+    receipt = fixture["receipt"]
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=receipt["session_id"],
+    )
+    raw_session = json.loads(session.path.read_text(encoding="utf-8"))
+    raw_session[sequence_field] = {
+        "corrupt_row": {
+            "role": "assistant",
+            "type": "expert_team_lifecycle",
+            "expert_team_run_id": receipt["run_id"],
+            "expert_team_start_transaction_id": receipt["transaction_id"],
+        }
+    }
+    session.path.write_text(
+        json.dumps(raw_session, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    fixture, paths = _install_early_v1_fixture(storage, workspace)
+    paths["session"] = session.path
+    before = {key: path.read_bytes() for key, path in paths.items()}
+    body = _start_body(
+        session.session_id,
+        idempotency_key=fixture["idempotency_key"],
+    )
+    sessions.clear()
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 503
+    assert recovered.json_body()["code"] == "start_receipt_invalid"
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
+
+
+def test_real_early_v1_committed_remains_read_only_and_fail_closed(atomic_env):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    fixture = _load_early_v1_fixture()
+    receipt = fixture["receipt"]
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=receipt["session_id"],
+    )
+    fixture, paths = _install_early_v1_fixture(storage, workspace)
+    committed = json.loads(paths["receipt"].read_text(encoding="utf-8"))
+    committed["state"] = "committed"
+    paths["receipt"].write_text(
+        json.dumps(committed, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    before = {key: path.read_bytes() for key, path in paths.items()}
+    body = _start_body(
+        session.session_id,
+        idempotency_key=fixture["idempotency_key"],
+    )
+    sessions.clear()
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 503
+    assert recovered.json_body()["code"] == "start_receipt_invalid"
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
 
 
 def test_v1_prepared_without_session_evidence_is_rebuilt_as_v2(

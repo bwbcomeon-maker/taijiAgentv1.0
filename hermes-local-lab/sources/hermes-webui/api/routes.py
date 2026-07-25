@@ -2395,15 +2395,17 @@ def _validate_expert_team_start_run_ownership(
     require_initial_exact: bool,
 ) -> dict:
     from api import expert_teams
+    from api.expert_teams import storage
 
     if not isinstance(run, dict):
         raise _ExpertTeamStartIntegrityError("expert team start Run is not an object")
     expected = {
         "run_id": str(receipt["run_id"]),
         "session_id": str(validated_body["session_id"]),
-        "start_transaction_id": str(receipt["transaction_id"]),
         "launch_profile_id": str(validated_body["launch_profile_id"]),
     }
+    if not storage.uses_early_v1_start_projection(receipt):
+        expected["start_transaction_id"] = str(receipt["transaction_id"])
     if any(str(run.get(key) or "") != value for key, value in expected.items()):
         raise _ExpertTeamStartIntegrityError(
             "expert team start Run ownership does not match its receipt"
@@ -2438,11 +2440,14 @@ def _validate_expert_team_start_run_ownership(
         raise _ExpertTeamStartIntegrityError(
             "expert team start receipt initial Run snapshot was modified"
         )
-    if _expert_team_start_projection_digest(initial_snapshot) != projection_digest:
+    if (
+        storage.start_receipt_run_projection_digest(receipt, initial_snapshot)
+        != projection_digest
+    ):
         raise _ExpertTeamStartIntegrityError(
             "expert team start receipt launch projection was modified"
         )
-    if _expert_team_start_projection_digest(run) != projection_digest:
+    if storage.start_receipt_run_projection_digest(receipt, run) != projection_digest:
         raise _ExpertTeamStartIntegrityError(
             "expert team Run immutable launch projection changed"
         )
@@ -2976,6 +2981,14 @@ def _expert_team_start_has_session_evidence(
         )
     except storage.StartTransactionIntegrityError as exc:
         raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+    durable_rows = []
+    for field in ("messages", "context_messages"):
+        value = getattr(session, field, None)
+        if not isinstance(value, list):
+            raise _ExpertTeamStartIntegrityError(
+                f"expert team Session {field} is not a list"
+            )
+        durable_rows.extend(value)
     if transaction_id in markers:
         return True
     return any(
@@ -2985,8 +2998,27 @@ def _expert_team_start_has_session_evidence(
             == transaction_id
             or str(message.get("expert_team_run_id") or "") == run_id
         )
-        for message in (getattr(session, "messages", None) or [])
+        for message in durable_rows
     )
+
+
+def _validate_expert_team_start_raw_session_sequences(session) -> None:
+    """Require proven list-shaped bytes before destructive v1 recovery."""
+    shapes = getattr(session, "_loaded_raw_sequence_shapes", None)
+    if not isinstance(shapes, dict):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team Session raw sequence shapes are unavailable"
+        )
+    invalid = [
+        field
+        for field in ("messages", "context_messages")
+        if shapes.get(field) is not True
+    ]
+    if invalid:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team Session raw sequence shape is invalid: "
+            + ", ".join(invalid)
+        )
 
 
 def _reconcile_initial_expert_team_start_metadata_locked(
@@ -3018,12 +3050,20 @@ def _reconcile_initial_expert_team_start_metadata_locked(
         raise _ExpertTeamStartIntegrityError(str(exc)) from exc
 
     receipt = metadata["receipt"]
+    if receipt is not None and receipt.get("schema_version") == 1:
+        run_id = str(receipt.get("run_id") or "")
     run_binding = metadata["run_binding"]
     session_binding = metadata["session_binding"]
     session_indexed = bool(
         session_binding
         and transaction_id in session_binding.get("transaction_ids", [])
     )
+    if receipt is not None and receipt.get("schema_version") == 1:
+        # Session.__init__ deliberately normalizes some corrupt/legacy fields
+        # for ordinary reads.  A v1 receipt has no signed Session message
+        # bytes, so deletion is allowed only when the original locked sidecar
+        # itself proves both evidence stores are list-shaped.
+        _validate_expert_team_start_raw_session_sequences(session)
     session_evidence = _expert_team_start_has_session_evidence(
         session,
         run_id=run_id,
@@ -3073,11 +3113,7 @@ def _reconcile_initial_expert_team_start_metadata_locked(
         or str(run_binding.get("transaction_id") or "") != transaction_id
         or str(run_binding.get("session_id") or "") != session_id
         or str(run_binding.get("run_id") or "") != run_id
-        or storage.start_receipt_digest(receipt)
-        not in {
-            str(run_binding.get("receipt_sha256") or ""),
-            str(run_binding.get("previous_receipt_sha256") or ""),
-        }
+        or not storage.start_receipt_matches_run_binding(receipt, run_binding)
     ):
         raise _ExpertTeamStartIntegrityError(
             "start transaction receipt and Run binding disagree"

@@ -947,8 +947,17 @@ class Session:
                 return None
             source_text = p.read_text(encoding='utf-8')
             data = json.loads(source_text)
+            # Preserve the raw durable sequence shapes before Session.__init__
+            # normalizes legacy/corrupt values.  Destructive recovery paths
+            # need to distinguish a proven empty list from an object that the
+            # in-memory model would otherwise turn into ``[]``.
+            raw_sequence_shapes = {
+                field: isinstance(data.get(field), list)
+                for field in ('messages', 'context_messages')
+            }
             data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
             session = cls(**data)
+            session._loaded_raw_sequence_shapes = raw_sequence_shapes
             session._loaded_sidecar_sha256 = hashlib.sha256(
                 source_text.encode('utf-8')
             ).hexdigest()

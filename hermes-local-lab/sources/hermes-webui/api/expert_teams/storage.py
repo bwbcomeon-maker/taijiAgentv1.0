@@ -53,6 +53,9 @@ _START_PROJECTION_FIELDS = (
     "review_policy",
     "_tasks_template",
 )
+_EARLY_V1_START_PROJECTION_FIELDS = tuple(
+    field for field in _START_PROJECTION_FIELDS if field != "start_transaction_id"
+)
 
 
 class StartTransactionIntegrityError(ValueError):
@@ -330,6 +333,29 @@ def start_run_projection_digest(run: dict) -> str:
     return start_run_digest(projection)
 
 
+def uses_early_v1_start_projection(receipt: dict) -> bool:
+    """Identify the historical v1 shape without mutating or upgrading it."""
+    initial = receipt.get("initial_run_snapshot")
+    return (
+        receipt.get("schema_version") == 1
+        and isinstance(initial, dict)
+        and "start_transaction_id" not in initial
+    )
+
+
+def start_receipt_run_projection_digest(receipt: dict, run: dict) -> str:
+    fields = (
+        _EARLY_V1_START_PROJECTION_FIELDS
+        if uses_early_v1_start_projection(receipt)
+        else _START_PROJECTION_FIELDS
+    )
+    projection = {
+        key: json.loads(json.dumps(run.get(key), ensure_ascii=False))
+        for key in fields
+    }
+    return start_run_digest(projection)
+
+
 def start_receipt_digest(receipt: dict) -> str:
     return start_run_digest(receipt)
 
@@ -504,6 +530,7 @@ def validate_start_transaction_bundle(
 
 
 def _validate_start_session_metadata_snapshot(receipt: dict) -> None:
+    early_v1 = uses_early_v1_start_projection(receipt)
     snapshot_present = "session_metadata_before_start" in receipt
     digest_present = "session_metadata_before_start_sha256" in receipt
     if not snapshot_present or not digest_present:
@@ -558,7 +585,10 @@ def _validate_start_session_metadata_snapshot(receipt: dict) -> None:
         )
 
     title_after_start = receipt.get("session_title_after_start")
-    if not isinstance(title_after_start, str):
+    if (
+        (not early_v1 or "session_title_after_start" in receipt)
+        and not isinstance(title_after_start, str)
+    ):
         raise StartTransactionIntegrityError(
             "start transaction owned Session title is invalid"
         )
@@ -643,7 +673,7 @@ def _validate_start_transaction_payload(receipt: dict, transaction_id: str) -> d
         or _SHA256_PATTERN.fullmatch(initial_sha) is None
         or _SHA256_PATTERN.fullmatch(projection_sha) is None
         or start_run_digest(initial) != initial_sha
-        or start_run_projection_digest(initial) != projection_sha
+        or start_receipt_run_projection_digest(receipt, initial) != projection_sha
     ):
         raise StartTransactionIntegrityError(
             "start transaction immutable Run snapshot is invalid"
@@ -651,10 +681,16 @@ def _validate_start_transaction_payload(receipt: dict, transaction_id: str) -> d
     if (
         str(initial.get("run_id") or "") != str(receipt.get("run_id") or "")
         or str(initial.get("session_id") or "") != str(receipt.get("session_id") or "")
-        or str(initial.get("start_transaction_id") or "")
-        != str(receipt.get("transaction_id") or "")
         or int(initial.get("schema_version") or 0) != 3
         or str(initial.get("product_mode") or "") != "standalone"
+    ):
+        raise StartTransactionIntegrityError(
+            "start transaction immutable Run ownership is invalid"
+        )
+    if (
+        not uses_early_v1_start_projection(receipt)
+        and str(initial.get("start_transaction_id") or "")
+        != str(receipt.get("transaction_id") or "")
     ):
         raise StartTransactionIntegrityError(
             "start transaction immutable Run ownership is invalid"
@@ -1118,6 +1154,9 @@ def _read_start_run_binding(workspace: Path, run_id: str) -> dict:
         raise StartTransactionIntegrityError("start Run binding is missing")
     binding = _read_json_object(path, max_bytes=_MAX_TRANSACTION_JSON_BYTES)
     transaction_id = str(binding.get("transaction_id") or "")
+    schema_version = binding.get("schema_version")
+    receipt_sha256 = binding.get("receipt_sha256")
+    previous_receipt_sha256 = binding.get("previous_receipt_sha256")
     allowed = {
         "schema_version",
         "run_id",
@@ -1128,16 +1167,23 @@ def _read_start_run_binding(workspace: Path, run_id: str) -> dict:
     }
     if (
         not set(binding).issubset(allowed)
-        or binding.get("schema_version")
-        not in _SUPPORTED_START_TRANSACTION_SCHEMA_VERSIONS
+        or schema_version not in _SUPPORTED_START_TRANSACTION_SCHEMA_VERSIONS
         or binding.get("run_id") != requested_run_id
         or not str(binding.get("session_id") or "")
         or _SHA256_PATTERN.fullmatch(transaction_id) is None
-        or _SHA256_PATTERN.fullmatch(str(binding.get("receipt_sha256") or "")) is None
         or (
-            binding.get("previous_receipt_sha256") is not None
+            schema_version == START_TRANSACTION_SCHEMA_VERSION
+            and _SHA256_PATTERN.fullmatch(str(receipt_sha256 or "")) is None
+        )
+        or (
+            schema_version == 1
+            and receipt_sha256 is not None
+            and _SHA256_PATTERN.fullmatch(str(receipt_sha256 or "")) is None
+        )
+        or (
+            previous_receipt_sha256 is not None
             and _SHA256_PATTERN.fullmatch(
-                str(binding.get("previous_receipt_sha256") or "")
+                str(previous_receipt_sha256 or "")
             )
             is None
         )
@@ -1173,11 +1219,22 @@ def _read_start_session_binding(workspace: Path, session_id: str) -> dict:
 
 
 def _receipt_digest_matches_run_binding(receipt: dict, binding: dict) -> bool:
+    if (
+        uses_early_v1_start_projection(receipt)
+        and binding.get("schema_version") == 1
+        and "receipt_sha256" not in binding
+    ):
+        return "previous_receipt_sha256" not in binding
     digest = start_receipt_digest(receipt)
     return digest in {
         str(binding.get("receipt_sha256") or ""),
         str(binding.get("previous_receipt_sha256") or ""),
     }
+
+
+def start_receipt_matches_run_binding(receipt: dict, binding: dict) -> bool:
+    """Authenticate a receipt against the strongest evidence its schema owns."""
+    return _receipt_digest_matches_run_binding(receipt, binding)
 
 
 def _validate_start_state_transition(before: str, after: str) -> None:
@@ -1229,9 +1286,12 @@ def inspect_start_transaction_metadata(
         raise ValueError("Invalid expert team start session_id")
 
     receipt = _raw_start_transaction_payload(workspace, requested_transaction_id)
+    binding_run_id = requested_run_id
+    if receipt is not None and receipt.get("schema_version") == 1:
+        binding_run_id = safe_run_id(str(receipt.get("run_id") or ""))
     run_binding = None
-    if start_run_binding_path(workspace, requested_run_id).exists():
-        run_binding = _read_start_run_binding(workspace, requested_run_id)
+    if start_run_binding_path(workspace, binding_run_id).exists():
+        run_binding = _read_start_run_binding(workspace, binding_run_id)
     session_binding = None
     if start_session_binding_path(workspace, requested_session_id).exists():
         session_binding = _read_start_session_binding(
@@ -1321,7 +1381,7 @@ def delete_start_transaction_metadata(
                 _write_json_atomic(
                     session_path,
                     {
-                        "schema_version": START_TRANSACTION_SCHEMA_VERSION,
+                        "schema_version": binding["schema_version"],
                         "session_id": session_id,
                         "transaction_ids": remaining,
                     },
