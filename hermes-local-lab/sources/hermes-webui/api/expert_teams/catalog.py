@@ -11,6 +11,7 @@ if __package__:
         DEEP_RESEARCH_PHASES,
         DEEP_RESEARCH_TEAM_ID,
         list_launch_profiles,
+        validate_launch_profiles,
     )
 else:  # Compatibility for source-contract tests that load this file directly.
     from api.expert_teams.launch_profiles import (
@@ -19,6 +20,7 @@ else:  # Compatibility for source-contract tests that load this file directly.
         DEEP_RESEARCH_PHASES,
         DEEP_RESEARCH_TEAM_ID,
         list_launch_profiles,
+        validate_launch_profiles,
     )
 
 PUBLIC_EXPERT_TEAM_IDS = (CONTENT_CREATOR_TEAM_ID, DEEP_RESEARCH_TEAM_ID)
@@ -252,9 +254,16 @@ def get_template(team_id: str | None) -> dict:
 
 
 def expert_team_catalog() -> dict:
+    try:
+        validated_profiles = validate_launch_profiles(
+            list_launch_profiles(),
+            product_mode="standalone",
+        )
+    except (TypeError, ValueError):
+        validated_profiles = []
     profiles = {
         (profile["team_id"], profile["intake_example_id"]): profile
-        for profile in list_launch_profiles()
+        for profile in validated_profiles
     }
     teams = [get_template(team_id) for team_id in PUBLIC_EXPERT_TEAM_IDS]
     for team in teams:
@@ -263,6 +272,11 @@ def expert_team_catalog() -> dict:
             profile = profiles.get(
                 (str(team.get("id") or ""), str(example.get("intake_example_id") or ""))
             )
+            if profile is not None and (
+                str(example.get("document_type") or "") != str(profile.get("document_type") or "")
+                or str(example.get("task_mode") or "") != str(profile.get("task_mode") or "")
+            ):
+                profile = None
             public_example = {
                 key: deepcopy(example.get(key))
                 for key in ("id", "label", "summary", "prompt")

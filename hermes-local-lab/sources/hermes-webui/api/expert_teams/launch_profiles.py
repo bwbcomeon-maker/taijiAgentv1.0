@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from .contracts import ContractError
-from .document_capabilities import brief_schema, source_requirement
+from .document_capabilities import resolve_document_capability
 
 
 CONTENT_CREATOR_TEAM_ID = "content-creator-team"
@@ -32,25 +32,23 @@ DEEP_RESEARCH_PHASES = [
 _LAUNCH_PROFILES = {
     "content-work-report": {
         "id": "content-work-report",
+        "capability_id": "content-work-report",
         "team_id": CONTENT_CREATOR_TEAM_ID,
         "document_type": "work_report",
         "intake_example_id": "work_report",
         "task_mode": "create",
         "render_template_id": "standalone-work-report",
-        "brief_schema": brief_schema("work_report"),
-        "source_requirement": source_requirement("work_report"),
         "stages": CONTENT_PHASES,
         "review_policy": {"kind": "local_confirmation"},
     },
     "research-report": {
         "id": "research-report",
+        "capability_id": "research-report",
         "team_id": DEEP_RESEARCH_TEAM_ID,
         "document_type": "research_report",
         "intake_example_id": "research_report",
         "task_mode": "create",
         "render_template_id": "standalone-research-report",
-        "brief_schema": brief_schema("research_report"),
-        "source_requirement": source_requirement("research_report"),
         "stages": DEEP_RESEARCH_PHASES,
         "post_approval_system_steps": [
             {
@@ -66,6 +64,86 @@ _LAUNCH_PROFILES = {
     },
 }
 
+
+def _capability_fields(profile: dict, *, product_mode: str) -> dict:
+    capability = resolve_document_capability(
+        profile.get("document_type"),
+        profile.get("task_mode"),
+        product_mode=product_mode,
+    )
+    if capability is None:
+        raise ContractError(
+            "launch_profile_capability_mismatch",
+            "launch_profile_id",
+            "专家团启动配置未绑定已放行的文档能力",
+        )
+    return {
+        "capability_id": capability["capability_id"],
+        "document_type": capability["document_type"],
+        "task_mode": capability["task_mode"],
+        "render_template_id": capability["render_template_id"],
+        "brief_schema": deepcopy(capability.get("brief_schema") or ()),
+        "source_requirement": deepcopy(capability.get("source_requirement") or {}),
+    }
+
+
+def validate_launch_profiles(
+    profiles: list[dict] | None = None,
+    *,
+    product_mode: str = "standalone",
+) -> list[dict]:
+    """Return only launch profiles exactly bound to one released capability."""
+    candidates = (
+        [deepcopy(item) for item in profiles]
+        if profiles is not None
+        else [
+            deepcopy(_LAUNCH_PROFILES[profile_id])
+            for profile_id in _LAUNCH_PROFILE_ORDER
+            if profile_id in _LAUNCH_PROFILES
+        ]
+    )
+    seen_ids: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    validated = []
+    for profile in candidates:
+        if not isinstance(profile, dict):
+            raise ContractError(
+                "launch_profile_capability_mismatch",
+                "launch_profile_id",
+                "专家团启动配置无效",
+            )
+        profile_id = str(profile.get("id") or "").strip()
+        team_id = str(profile.get("team_id") or "").strip()
+        example_id = str(profile.get("intake_example_id") or "").strip()
+        pair = (team_id, example_id)
+        if (
+            not profile_id
+            or not team_id
+            or not example_id
+            or profile_id in seen_ids
+            or pair in seen_pairs
+        ):
+            raise ContractError(
+                "launch_profile_capability_mismatch",
+                "launch_profile_id",
+                "专家团启动配置存在空值或重复绑定",
+            )
+        expected = _capability_fields(profile, product_mode=product_mode)
+        for field, value in expected.items():
+            current = profile.get(field)
+            if field in {"brief_schema", "source_requirement"} and current is None:
+                profile[field] = deepcopy(value)
+            elif current != value:
+                raise ContractError(
+                    "launch_profile_capability_mismatch",
+                    field,
+                    "专家团启动配置与文档能力合同不一致",
+                )
+        seen_ids.add(profile_id)
+        seen_pairs.add(pair)
+        validated.append(profile)
+    return validated
+
 _LAUNCH_PROFILE_ORDER = (
     "content-work-report",
     "research-report",
@@ -74,17 +152,16 @@ _LAUNCH_PROFILE_ORDER = (
 
 def list_launch_profiles() -> list[dict]:
     """Return detached snapshots in stable catalog order."""
-    return [
-        deepcopy(_LAUNCH_PROFILES[profile_id])
-        for profile_id in _LAUNCH_PROFILE_ORDER
-        if profile_id in _LAUNCH_PROFILES
-    ]
+    return validate_launch_profiles(product_mode="standalone")
 
 
 def get_launch_profile(profile_id: str | None) -> dict:
     """Resolve a launch profile without exposing the mutable source object."""
     normalized = str(profile_id or "").strip()
-    profile = _LAUNCH_PROFILES.get(normalized)
+    profile = next(
+        (item for item in list_launch_profiles() if item.get("id") == normalized),
+        None,
+    )
     if profile is None:
         raise ContractError(
             "unknown_launch_profile",

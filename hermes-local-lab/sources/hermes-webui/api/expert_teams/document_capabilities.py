@@ -42,7 +42,20 @@ _COMMON_FIELDS = (
 
 
 _CAPABILITIES = {
-    "work_report": {
+    "content-work-report": {
+        "capability_id": "content-work-report",
+        "document_type": "work_report",
+        "task_mode": "create",
+        "releases": {
+            "standalone": {
+                "released": True,
+                "render_template_id": "standalone-work-report",
+            },
+            "enterprise": {
+                "released": True,
+                "render_template_id": "enterprise-work-report",
+            },
+        },
         "brief_schema": (
             *_COMMON_FIELDS,
             {
@@ -85,7 +98,20 @@ _CAPABILITIES = {
             "empty_help": "可以不添加资料；缺失事实和数据将明确标注为“待补充”或“需人工确认”。",
         },
     },
-    "research_report": {
+    "research-report": {
+        "capability_id": "research-report",
+        "document_type": "research_report",
+        "task_mode": "create",
+        "releases": {
+            "standalone": {
+                "released": True,
+                "render_template_id": "standalone-research-report",
+            },
+            "enterprise": {
+                "released": True,
+                "render_template_id": "enterprise-research-report",
+            },
+        },
         "brief_schema": (
             *_COMMON_FIELDS,
             {
@@ -160,28 +186,145 @@ _STANDALONE_SOURCE_PATCH_PATHS = frozenset(
 )
 
 
-def get_document_capability(document_type: str | None) -> dict:
-    """Return a detached capability definition for one released document type."""
-    capability = _CAPABILITIES.get(str(document_type or "").strip())
-    return deepcopy(capability) if capability is not None else {}
+def _matching_capabilities(document_type: str | None, task_mode: str | None) -> list[dict]:
+    document = str(document_type or "").strip()
+    mode = str(task_mode or "create").strip() or "create"
+    return [
+        capability
+        for capability in _CAPABILITIES.values()
+        if isinstance(capability, dict)
+        and str(capability.get("document_type") or "") == document
+        and str(capability.get("task_mode") or "") == mode
+    ]
 
 
-def standalone_brief_defaults(document_type: str | None) -> dict:
-    return get_document_capability(document_type).get("standalone_defaults", {})
+def _has_valid_capability_shape(capability: dict, *, product_mode: str) -> bool:
+    """Fail closed when the mutable registry contains an incomplete entry."""
+    if not str(capability.get("capability_id") or "").strip():
+        return False
+    if not str(capability.get("document_type") or "").strip():
+        return False
+    if not str(capability.get("task_mode") or "").strip():
+        return False
+    schema = capability.get("brief_schema")
+    if not isinstance(schema, (list, tuple)):
+        return False
+    schema_paths = [
+        str(field.get("path") or "").strip()
+        for field in schema
+        if isinstance(field, dict)
+    ]
+    if len(schema_paths) != len(schema) or any(not path for path in schema_paths):
+        return False
+    if len(schema_paths) != len(set(schema_paths)):
+        return False
+    requirement = capability.get("source_requirement")
+    if not isinstance(requirement, dict):
+        return False
+    minimum_ready = requirement.get("minimum_ready")
+    if (
+        not isinstance(minimum_ready, int)
+        or isinstance(minimum_ready, bool)
+        or minimum_ready < 0
+    ):
+        return False
+    if product_mode == "standalone" and not isinstance(
+        capability.get("standalone_defaults"), dict
+    ):
+        return False
+    return True
 
 
-def brief_schema(document_type: str | None) -> list[dict]:
-    return list(get_document_capability(document_type).get("brief_schema", ()))
+def get_document_capability(
+    document_type: str | None,
+    task_mode: str | None = "create",
+) -> dict:
+    """Return one detached business capability, independent of product mode."""
+    matches = _matching_capabilities(document_type, task_mode)
+    return deepcopy(matches[0]) if len(matches) == 1 else {}
 
 
-def source_requirement(document_type: str | None) -> dict:
-    return get_document_capability(document_type).get("source_requirement", {})
+def get_document_capability_by_id(capability_id: str | None) -> dict:
+    capability = _CAPABILITIES.get(str(capability_id or "").strip())
+    return deepcopy(capability) if isinstance(capability, dict) else {}
 
 
-def standalone_editable_brief_paths(document_type: str | None) -> frozenset[str]:
+def has_document_capability(document_type: str | None) -> bool:
+    document = str(document_type or "").strip()
+    return any(
+        isinstance(capability, dict)
+        and str(capability.get("document_type") or "") == document
+        for capability in _CAPABILITIES.values()
+    )
+
+
+def resolve_document_capability(
+    document_type: str | None,
+    task_mode: str | None,
+    *,
+    product_mode: str | None,
+) -> dict | None:
+    """Resolve one released mode-specific capability without leaking KeyError."""
+    normalized_mode = str(product_mode or "").strip()
+    if normalized_mode not in {"standalone", "enterprise"}:
+        return None
+    matches = _matching_capabilities(document_type, task_mode)
+    if len(matches) != 1:
+        return None
+    capability = deepcopy(matches[0])
+    if not _has_valid_capability_shape(capability, product_mode=normalized_mode):
+        return None
+    releases = capability.get("releases")
+    release = releases.get(normalized_mode) if isinstance(releases, dict) else None
+    if (
+        not isinstance(release, dict)
+        or release.get("released") is not True
+        or not str(release.get("render_template_id") or "").strip()
+    ):
+        return None
+    capability["product_mode"] = normalized_mode
+    capability["render_template_id"] = str(release["render_template_id"])
+    capability["brief_schema"] = list(deepcopy(capability.get("brief_schema") or ()))
+    capability["source_requirement"] = deepcopy(
+        capability.get("source_requirement") or {}
+    )
+    return capability
+
+
+def standalone_brief_defaults(
+    document_type: str | None,
+    task_mode: str | None = "create",
+) -> dict:
+    return get_document_capability(document_type, task_mode).get(
+        "standalone_defaults", {}
+    )
+
+
+def brief_schema(
+    document_type: str | None,
+    task_mode: str | None = "create",
+) -> list[dict]:
+    return list(
+        get_document_capability(document_type, task_mode).get("brief_schema", ())
+    )
+
+
+def source_requirement(
+    document_type: str | None,
+    task_mode: str | None = "create",
+) -> dict:
+    return get_document_capability(document_type, task_mode).get(
+        "source_requirement", {}
+    )
+
+
+def standalone_editable_brief_paths(
+    document_type: str | None,
+    task_mode: str | None = "create",
+) -> frozenset[str]:
     schema_paths = {
         str(field.get("path") or "")
-        for field in brief_schema(document_type)
+        for field in brief_schema(document_type, task_mode)
         if isinstance(field, dict) and str(field.get("path") or "")
     }
     return frozenset(schema_paths) | _STANDALONE_SOURCE_PATCH_PATHS

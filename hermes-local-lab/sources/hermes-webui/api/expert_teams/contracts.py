@@ -9,7 +9,8 @@ from copy import deepcopy
 
 from .data_egress import validate_model_policy_reference
 from .document_capabilities import (
-    standalone_brief_defaults,
+    has_document_capability,
+    resolve_document_capability,
     standalone_editable_brief_paths,
 )
 
@@ -18,15 +19,6 @@ EXPERT_TEAM_CONTRACT_V1 = "expert-team-contract/v1"
 DOCUMENT_BRIEF_V1 = "document-brief/v1"
 _MISSING = object()
 _LIFECYCLE_FIELDS = {"revision", "status", "confirmed_revision", "confirmed_at", "confirmed_sha256"}
-_RENDER_TEMPLATES = {
-    "work_report": "enterprise-work-report",
-    "research_report": "enterprise-research-report",
-}
-_STANDALONE_RENDER_TEMPLATES = {
-    "work_report": "standalone-work-report",
-    "research_report": "standalone-research-report",
-}
-_RELEASED_DOCUMENT_TYPES = frozenset(_RENDER_TEMPLATES)
 _TASK_MODES = {"create", "polish"}
 _SOURCE_MODES = {"provided_only", "approved_internal", "approved_public"}
 _SOURCE_KINDS = {"attachment", "local_file", "provided_text", "approved_internal", "approved_public"}
@@ -111,8 +103,6 @@ def build_document_brief(team_id, payload, *, now) -> dict:
     document_type = _text(payload.get("document_type"))
     if not document_type:
         raise ContractError("document_type_required", "document_type", "请明确选择业务文种")
-    if document_type not in _RELEASED_DOCUMENT_TYPES:
-        raise ContractError("document_type_not_released", "document_type", "当前文种尚未进入企业合同试点")
     original_request = _text(payload.get("prompt"))
     if not original_request:
         raise ContractError("original_request_required", "prompt", "请填写原始诉求")
@@ -129,19 +119,32 @@ def build_document_brief(team_id, payload, *, now) -> dict:
     if product_mode not in {"", "standalone"}:
         raise ContractError("product_mode_invalid", "product_mode", "专家团产品模式无效")
     standalone = product_mode == "standalone"
-    defaults = standalone_brief_defaults(document_type) if standalone else {}
-    control = _deep_merge(defaults.get("document_control"), seed.get("document_control"))
-    expected_template = (
-        _STANDALONE_RENDER_TEMPLATES[document_type]
-        if product_mode == "standalone"
-        else _RENDER_TEMPLATES[document_type]
+    task_mode = _text(seed.get("task_mode")) or "create"
+    capability = resolve_document_capability(
+        document_type,
+        task_mode,
+        product_mode="standalone" if standalone else "enterprise",
     )
+    if capability is None:
+        if not has_document_capability(document_type):
+            raise ContractError(
+                "document_type_not_released",
+                "document_type",
+                "当前产品模式尚未放行该文种",
+            )
+        raise ContractError(
+            "capability_not_released",
+            "task_mode",
+            "当前文种与处理方式的组合尚未放行",
+        )
+    defaults = deepcopy(capability.get("standalone_defaults") or {}) if standalone else {}
+    control = _deep_merge(defaults.get("document_control"), seed.get("document_control"))
+    expected_template = capability["render_template_id"]
     render_template_id = _text(control.get("render_template_id")) or expected_template
     if render_template_id != expected_template:
         raise ContractError("render_template_mismatch", "document_control.render_template_id", "文种与交付模板不兼容")
     control["render_template_id"] = render_template_id
 
-    task_mode = _text(seed.get("task_mode")) or "create"
     source_policy = _deep_merge(defaults.get("source_policy"), seed.get("source_policy"))
     source_policy["source_refs"] = _list(source_policy.get("source_refs"))
     constraints = _deep_merge(defaults.get("content_constraints"), seed.get("content_constraints"))
@@ -254,7 +257,10 @@ def patch_document_brief(brief, patch, *, expected_revision, stage_started) -> d
     updated = deepcopy(brief)
     standalone = str(updated.get("product_mode") or "") == "standalone"
     if standalone:
-        allowed_paths = standalone_editable_brief_paths(updated.get("document_type"))
+        allowed_paths = standalone_editable_brief_paths(
+            updated.get("document_type"),
+            updated.get("task_mode"),
+        )
         invalid_paths = [
             path
             for path in _patch_leaf_paths(patch)
@@ -291,11 +297,32 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
     normalized = normalize_document_brief(brief)
     errors = []
     document_type = normalized.get("document_type")
-    standalone = normalized.get("product_mode") == "standalone"
-    if normalized.get("task_mode") not in _TASK_MODES:
+    raw_product_mode = normalized.get("product_mode")
+    product_mode_valid = raw_product_mode in {None, "", "standalone"}
+    standalone = raw_product_mode == "standalone"
+    if not product_mode_valid:
+        errors.append(_error("product_mode", "product_mode_invalid", "专家团产品模式无效"))
+    task_mode = normalized.get("task_mode")
+    if task_mode not in _TASK_MODES:
         errors.append(_error("task_mode", "invalid_enum", "任务模式无效"))
-    if document_type not in _RELEASED_DOCUMENT_TYPES:
+    if not has_document_capability(document_type):
         errors.append(_error("document_type", "document_type_not_released", "当前文种尚未放行"))
+    capability = (
+        resolve_document_capability(
+            document_type,
+            task_mode,
+            product_mode="standalone" if standalone else "enterprise",
+        )
+        if product_mode_valid
+        else None
+    )
+    if (
+        has_document_capability(document_type)
+        and task_mode in _TASK_MODES
+        and capability is None
+        and product_mode_valid
+    ):
+        errors.append(_error("task_mode", "capability_not_released", "当前文种与处理方式的组合尚未放行"))
     source_policy = normalized.get("source_policy") or {}
     if source_policy.get("mode") not in _SOURCE_MODES:
         errors.append(_error("source_policy.mode", "invalid_enum", "资料模式无效"))
@@ -309,11 +336,7 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
             errors.append(_error("document_control.classification", "invalid_enum", "密级无效"))
         if control.get("classification") == "custom" and not _text(control.get("classification_label")):
             errors.append(_error("document_control.classification_label", "required", "请填写自定义密级标签"))
-    expected_template = (
-        _STANDALONE_RENDER_TEMPLATES.get(document_type)
-        if normalized.get("product_mode") == "standalone"
-        else _RENDER_TEMPLATES.get(document_type)
-    )
+    expected_template = capability.get("render_template_id") if isinstance(capability, dict) else None
     if control.get("render_template_id") != expected_template:
         errors.append(_error("document_control.render_template_id", "render_template_mismatch", "文种与模板不兼容"))
 
@@ -380,7 +403,7 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
     return {
         "valid_for_confirmation": not errors,
         "field_errors": errors,
-        "release_candidate": document_type in _RELEASED_DOCUMENT_TYPES,
+        "release_candidate": capability is not None,
         "enterprise_released": False,
         "model_policy": {
             "policy_id": policy_result["policy_id"],

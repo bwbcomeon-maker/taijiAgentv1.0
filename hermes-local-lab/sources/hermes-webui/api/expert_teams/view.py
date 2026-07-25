@@ -1437,7 +1437,10 @@ def expert_team_run_view(run: dict) -> dict:
             )
             schema = profile.get("brief_schema")
             if not isinstance(schema, list):
-                schema = brief_schema(str(full_brief.get("document_type") or ""))
+                schema = brief_schema(
+                    str(full_brief.get("document_type") or ""),
+                    str(full_brief.get("task_mode") or "create"),
+                )
             brief["field_schema"] = [
                 {
                     **deepcopy(field),
@@ -1450,7 +1453,10 @@ def expert_team_run_view(run: dict) -> dict:
             brief["source_requirement"] = deepcopy(
                 requirement
                 if isinstance(requirement, dict)
-                else source_requirement(str(full_brief.get("document_type") or ""))
+                else source_requirement(
+                    str(full_brief.get("document_type") or ""),
+                    str(full_brief.get("task_mode") or "create"),
+                )
             )
             brief["field_errors"] = [
                 {
