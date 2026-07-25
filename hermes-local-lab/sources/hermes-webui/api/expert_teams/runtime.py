@@ -28,7 +28,12 @@ from .contracts import (
     validate_document_brief,
 )
 from .data_egress import load_model_policy_registry
-from .source_context import build_source_context_snapshot, verify_source_context_snapshot
+from .source_context import (
+    SourceContextError,
+    allows_empty_source_context,
+    build_source_context_snapshot,
+    verify_source_context_snapshot,
+)
 from .source_registry import SourceRegistryError, resolve_source_registry
 from .documents import (
     FinalDocumentDeliveryError,
@@ -2462,14 +2467,22 @@ def confirm_expert_team_document_brief(workspace: Path, body: dict) -> dict:
         first = validation["field_errors"][0]
         raise ContractError(first["code"], first["field"], first["message"])
     confirmed = confirm_document_brief(brief, now=checked_at)
-    snapshot_ref = build_source_context_snapshot(
-        workspace,
-        str(run.get("run_id") or ""),
-        confirmed,
-        source_registry,
-        brief_sha256=brief_digest(confirmed),
-        brief_revision=int(confirmed.get("confirmed_revision") or 0),
-    )
+    try:
+        snapshot_ref = build_source_context_snapshot(
+            workspace,
+            str(run.get("run_id") or ""),
+            confirmed,
+            source_registry,
+            brief_sha256=brief_digest(confirmed),
+            brief_revision=int(confirmed.get("confirmed_revision") or 0),
+            allow_empty=allows_empty_source_context(run, brief=confirmed),
+        )
+    except SourceContextError as exc:
+        raise ContractError(
+            "source_context_invalid",
+            "source_policy.source_refs",
+            "资料快照无法固化，请检查资料后重试",
+        ) from exc
     _record_action(run, body, "brief_confirm")
     return _transition(
         workspace,
