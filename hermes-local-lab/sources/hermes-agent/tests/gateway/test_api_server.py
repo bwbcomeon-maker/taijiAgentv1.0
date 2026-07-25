@@ -29,13 +29,23 @@ from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.api_server import (
     APIServerAdapter,
     ResponseStore,
+    STRICT_EXPERT_EXECUTION_FIELD,
     _IdempotencyCache,
     _CORS_HEADERS,
     _derive_chat_session_id,
+    build_strict_expert_execution_binding,
     check_api_server_requirements,
     cors_middleware,
     security_headers_middleware,
 )
+
+
+def _with_strict_expert_execution(body):
+    payload = dict(body)
+    payload[STRICT_EXPERT_EXECUTION_FIELD] = build_strict_expert_execution_binding(
+        payload
+    )
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +476,68 @@ class TestAgentExecution:
             conversation_history=[],
             task_id="session-123",
         )
+
+    @pytest.mark.asyncio
+    async def test_run_agent_can_disable_all_tools_for_one_request(self, adapter):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "ok"}
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent) as create_agent:
+            await adapter._run_agent(
+                user_message="strict user",
+                conversation_history=[],
+                ephemeral_system_prompt="strict system",
+                session_id="strict-session",
+                requested_model="gpt-test",
+                requested_provider="openai",
+                tools_disabled=True,
+                strict_execution=True,
+            )
+
+        assert create_agent.call_args.kwargs["tools_disabled"] is True
+        assert create_agent.call_args.kwargs["requested_model"] == "gpt-test"
+        assert create_agent.call_args.kwargs["requested_provider"] == "openai"
+
+    def test_create_agent_zero_tools_is_exact_stateless_and_has_no_fallback(
+        self, adapter
+    ):
+        with patch.object(
+            adapter,
+            "_resolve_agent_route",
+            return_value={
+                "model": "gpt-test",
+                "provider": "openai",
+                "runtime_kwargs": {"provider": "openai", "api_key": "secret"},
+                "fallback_model": {"provider": "fallback", "model": "other"},
+            },
+        ), patch(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            return_value=None,
+        ), patch(
+            "gateway.run._load_gateway_config",
+            return_value={},
+        ), patch(
+            "hermes_cli.tools_config._get_platform_tools",
+            return_value={"terminal"},
+        ), patch("run_agent.AIAgent") as agent_class:
+            adapter._create_agent(
+                ephemeral_system_prompt="strict system",
+                session_id="strict-session",
+                requested_model="gpt-test",
+                requested_provider="openai",
+                tools_disabled=True,
+                strict_execution=True,
+            )
+
+        kwargs = agent_class.call_args.kwargs
+        assert kwargs["enabled_toolsets"] == []
+        assert kwargs["exact_system_prompt"] is True
+        assert kwargs["tools_disabled"] is True
+        assert kwargs["skip_context_files"] is True
+        assert kwargs["skip_memory"] is True
+        assert kwargs["session_db"] is None
+        assert kwargs["fallback_model"] is None
+        assert kwargs["gateway_session_key"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +993,225 @@ class TestToolsetsEndpoint:
 
 
 class TestChatCompletionsEndpoint:
+    @pytest.mark.asyncio
+    async def test_ordinary_zero_tools_multiturn_is_not_upgraded_to_strict_execution(
+        self, adapter
+    ):
+        """Standard OpenAI zero-tool fields must not erase ordinary history."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as run_agent:
+                run_agent.return_value = (
+                    {"final_response": "done", "completed": True},
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "gpt-test",
+                        "messages": [
+                            {"role": "system", "content": "ordinary system"},
+                            {"role": "user", "content": "first turn"},
+                            {"role": "assistant", "content": "first answer"},
+                            {"role": "user", "content": "second turn"},
+                        ],
+                        "tools": [],
+                        "tool_choice": "none",
+                    },
+                )
+                response_text = await resp.text()
+
+        assert resp.status == 200, response_text
+        kwargs = run_agent.call_args.kwargs
+        assert kwargs["conversation_history"] == [
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "first answer"},
+        ]
+        assert kwargs["tools_disabled"] is True
+        assert kwargs["strict_execution"] is False
+
+    @pytest.mark.asyncio
+    async def test_exact_zero_tools_contract_is_forwarded_request_scoped(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as run_agent:
+                run_agent.return_value = (
+                    {
+                        "final_response": "done",
+                        "completed": True,
+                        "failed": False,
+                        "partial": False,
+                        "interrupted": False,
+                        "api_calls": 1,
+                        "messages": [],
+                    },
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json=_with_strict_expert_execution({
+                        "model": "gpt-test",
+                        "provider": "openai",
+                        "messages": [
+                            {"role": "system", "content": "strict system"},
+                            {"role": "user", "content": "strict user"},
+                        ],
+                        "tools": [],
+                        "tool_choice": "none",
+                    }),
+                )
+
+        assert resp.status == 200, await resp.text()
+        assert run_agent.call_args.kwargs["tools_disabled"] is True
+        assert run_agent.call_args.kwargs["strict_execution"] is True
+        assert run_agent.call_args.kwargs["requested_model"] == "gpt-test"
+        assert run_agent.call_args.kwargs["requested_provider"] == "openai"
+        assert run_agent.call_args.kwargs["conversation_history"] == []
+        assert run_agent.call_args.kwargs["ephemeral_system_prompt"] == "strict system"
+
+    @pytest.mark.asyncio
+    async def test_strict_execution_binding_rejects_payload_drift_before_provider(
+        self, adapter
+    ):
+        payload = _with_strict_expert_execution(
+            {
+                "model": "gpt-test",
+                "messages": [
+                    {"role": "system", "content": "strict system"},
+                    {"role": "user", "content": "bound user"},
+                ],
+                "tools": [],
+                "tool_choice": "none",
+            }
+        )
+        payload["messages"][1]["content"] = "drifted user"
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as run_agent:
+                resp = await cli.post("/v1/chat/completions", json=payload)
+                data = await resp.json()
+
+        assert resp.status == 400
+        assert data["error"]["code"] == "expert_execution_binding_mismatch"
+        run_agent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_zero_tools_ignores_supplied_session_continuation_and_memory_key(
+        self, auth_adapter
+    ):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_ensure_session_db",
+                side_effect=AssertionError("strict request must not read persisted history"),
+            ), patch.object(
+                auth_adapter, "_run_agent", new_callable=AsyncMock
+            ) as run_agent:
+                run_agent.return_value = (
+                    {
+                        "final_response": "done",
+                        "completed": True,
+                        "failed": False,
+                        "partial": False,
+                        "interrupted": False,
+                        "api_calls": 1,
+                        "messages": [],
+                    },
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "Authorization": "Bearer sk-secret",
+                        "X-Hermes-Session-Id": "ordinary-session",
+                        "X-Hermes-Session-Key": "ordinary-memory-key",
+                    },
+                    json=_with_strict_expert_execution({
+                        "model": "gpt-test",
+                        "messages": [
+                            {"role": "system", "content": "strict system"},
+                            {"role": "user", "content": "strict user"},
+                        ],
+                        "tools": [],
+                        "tool_choice": "none",
+                        "platform_message_id": "webui-turn:strict-001",
+                    }),
+                )
+
+        assert resp.status == 200, await resp.text()
+        kwargs = run_agent.call_args.kwargs
+        assert kwargs["conversation_history"] == []
+        assert kwargs["session_id"].startswith("api-strict-")
+        assert kwargs["session_id"] != "ordinary-session"
+        assert kwargs["gateway_session_key"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "messages",
+        [
+            [{"role": "user", "content": "missing system"}],
+            [
+                {"role": "system", "content": "strict"},
+                {"role": "assistant", "content": "history"},
+                {"role": "user", "content": "current"},
+            ],
+            [
+                {"role": "system", "content": ""},
+                {"role": "user", "content": "current"},
+            ],
+            [
+                {"role": "system", "content": "strict", "name": "extra"},
+                {"role": "user", "content": "current"},
+            ],
+        ],
+    )
+    async def test_zero_tools_rejects_non_exact_role_contract_before_provider(
+        self, adapter, messages
+    ):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as run_agent:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json=_with_strict_expert_execution({
+                        "model": "gpt-test",
+                        "messages": messages,
+                        "tools": [],
+                        "tool_choice": "none",
+                    }),
+                )
+
+        assert resp.status == 400
+        run_agent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tools_patch",
+        [
+            {"tools": []},
+            {"tool_choice": "none"},
+            {"tools": [], "tool_choice": "auto"},
+        ],
+    )
+    async def test_partial_zero_tools_contract_fails_before_provider_call(
+        self, adapter, tools_patch
+    ):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as run_agent:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json=_with_strict_expert_execution({
+                        "model": "gpt-test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        **tools_patch,
+                    }),
+                )
+
+        assert resp.status == 400
+        run_agent.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_preserves_tool_history_and_webui_turn_identity(self, adapter):
         app = _create_app(adapter)
@@ -3071,6 +3362,100 @@ class TestChatCompletionsAgentIncomplete:
     must NOT pretend it succeeded. Either signal truncation via
     finish_reason='length' (with the partial text), or 502 with an OpenAI
     error envelope (no usable text). Issue #22496."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "result_patch",
+        [
+            {"completed": False, "partial": True, "error": "truncated"},
+            {"interrupted": True},
+            {"api_calls": 0},
+            {"api_calls": 2},
+        ],
+    )
+    async def test_strict_zero_tools_never_returns_incomplete_text_as_success(
+        self,
+        adapter,
+        result_patch,
+    ):
+        mock_result = {
+            "final_response": "untrusted partial expert output",
+            "completed": True,
+            "partial": False,
+            "failed": False,
+            "interrupted": False,
+            "error": None,
+            "messages": [],
+            "api_calls": 1,
+        }
+        mock_result.update(result_patch)
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json=_with_strict_expert_execution({
+                        "model": "hermes-agent",
+                        "messages": [
+                            {"role": "system", "content": "strict system"},
+                            {"role": "user", "content": "strict user"},
+                        ],
+                        "tools": [],
+                        "tool_choice": "none",
+                    }),
+                )
+                assert resp.status == 502
+                data = await resp.json()
+                assert data["error"]["code"] == "strict_execution_incomplete"
+                assert data["error"]["hermes"]["authoritative"] is False
+                assert "untrusted partial expert output" not in repr(data)
+
+    @pytest.mark.asyncio
+    async def test_strict_zero_tools_stream_finishes_with_error_for_incomplete_result(
+        self,
+        adapter,
+    ):
+        mock_result = {
+            "final_response": "untrusted partial expert output",
+            "completed": False,
+            "partial": True,
+            "failed": True,
+            "interrupted": False,
+            "error": "strict output truncated",
+            "messages": [],
+            "api_calls": 1,
+        }
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json=_with_strict_expert_execution({
+                        "model": "hermes-agent",
+                        "stream": True,
+                        "messages": [
+                            {"role": "system", "content": "strict system"},
+                            {"role": "user", "content": "strict user"},
+                        ],
+                        "tools": [],
+                        "tool_choice": "none",
+                    }),
+                )
+                body = await resp.text()
+
+        assert resp.status == 200
+        assert '"finish_reason": "error"' in body
+        assert "strict_execution_incomplete" in body
+        assert "untrusted partial expert output" not in body
+        assert "data: [DONE]" in body
 
     @pytest.mark.asyncio
     async def test_truncation_with_partial_text_uses_length_finish_reason(self, adapter):

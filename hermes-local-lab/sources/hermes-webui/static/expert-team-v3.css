@@ -79,6 +79,11 @@
 .et3-form-field > span, .et3-form-field > label { font-weight: 720; }
 .et3-form-field textarea, .et3-form-field input, .et3-form-field select { width: 100%; border: 1px solid var(--et3-line); border-radius: 11px; padding: 11px 12px; background: #fff; color: var(--et3-ink); }
 .et3-form-field textarea { min-height: 112px; resize: vertical; line-height: 1.6; }
+.et3-brief-field textarea { min-height: 84px; }
+.et3-form-field > span b { color: var(--et3-danger); }
+.et3-field-error { margin: 0; color: var(--et3-danger); font-size: 12px; line-height: 1.5; }
+.et3-field-error[hidden] { display: none; }
+[data-expert-team-v3] [aria-invalid="true"] { border-color: #d97b7b; box-shadow: 0 0 0 2px rgba(183,71,71,.08); }
 .et3-dialog .et3-form-field textarea { min-height: 96px; }
 .et3-help { color: var(--et3-muted); font-size: 12px; line-height: 1.55; }
 .et3-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 0 24px 14px; }

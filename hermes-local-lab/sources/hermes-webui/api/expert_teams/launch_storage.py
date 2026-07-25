@@ -895,6 +895,22 @@ def hidden_session_ids() -> set[str]:
     return hidden
 
 
+def is_session_deletion_public(session_id: str) -> bool:
+    """Decide DELETE visibility without reading the Session sidecar.
+
+    A corrupt/symlinked ordinary sidecar must still be reachable by the
+    anchored deletion transaction.  Conversely, a launch receipt remains
+    authoritative when its by-session reverse binding is missing.  Enumerate
+    both registry directions and fail closed on any unreadable or changing
+    launch evidence.
+    """
+    try:
+        normalized = _validate_session_id(session_id)
+        return normalized not in hidden_session_ids()
+    except Exception:
+        return False
+
+
 def new_reserved_receipt(
     *,
     transaction_id: str,

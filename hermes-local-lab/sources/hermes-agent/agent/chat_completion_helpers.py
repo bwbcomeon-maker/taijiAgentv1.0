@@ -574,6 +574,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             base_url=getattr(agent, "_anthropic_base_url", None),
             fast_mode=(agent.request_overrides or {}).get("speed") == "fast",
             drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)),
+            exact_system_prompt=bool(
+                getattr(agent, "exact_system_prompt", False)
+            ),
         )
 
     # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.
@@ -643,6 +646,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             github_reasoning_extra=agent._github_models_reasoning_extra_body() if is_github_responses else None,
             replay_encrypted_reasoning=bool(
                 getattr(agent, "_codex_reasoning_replay_enabled", True)
+            ),
+            exact_system_prompt=bool(
+                getattr(agent, "exact_system_prompt", False)
             ),
         )
 
@@ -748,6 +754,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             anthropic_max_output=_ant_max,
             supports_reasoning=agent._supports_reasoning_extra_body(),
             qwen_session_metadata=_qwen_meta,
+            exact_system_prompt=bool(
+                getattr(agent, "exact_system_prompt", False)
+            ),
         )
 
     # ── Legacy flag path ────────────────────────────────────────────
@@ -795,6 +804,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         lmstudio_reasoning_options=agent._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
         anthropic_max_output=_ant_max,
         provider_name=agent.provider,
+        exact_system_prompt=bool(
+            getattr(agent, "exact_system_prompt", False)
+        ),
     )
 
 
@@ -1279,6 +1291,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
+    if getattr(agent, "exact_system_prompt", False):
+        raise RuntimeError(
+            "exact system prompt turn exhausted its iteration budget without "
+            "a final response"
+        )
     print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")
 
     summary_request = (

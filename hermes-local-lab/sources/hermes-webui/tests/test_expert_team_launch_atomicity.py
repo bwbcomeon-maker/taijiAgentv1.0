@@ -1006,6 +1006,15 @@ def test_uncommitted_launch_rejects_public_session_and_run_mutations(
         "/api/expert-teams/answer",
         {"session_id": sid, "run_id": run_id, "answers": {}},
     )
+    # Losing the reverse binding must not turn a receipt-owned hidden Session
+    # into an ordinary deletable Session.  Receipt enumeration is the
+    # recovery-side authority for this crash/tamper window.
+    launch_storage._session_binding_path(sid).unlink()
+    deleted = _post(
+        routes,
+        "/api/session/delete",
+        {"session_id": sid},
+    )
     hidden_reads = [
         _get(routes, f"/api/session/export?session_id={sid}"),
         _get(routes, f"/api/session/export-bundle?session_id={sid}"),
@@ -1016,10 +1025,44 @@ def test_uncommitted_launch_rejects_public_session_and_run_mutations(
     after = models.Session.load(sid)
     assert renamed.status == 404
     assert answered.status == 404
+    assert deleted.status == 404
     assert [response.status for response in hidden_reads] == [404, 404, 404, 404]
     assert after is not None
     assert after.title == before.title
     assert after.messages == before.messages
+
+
+def test_session_delete_fails_closed_when_launch_registry_is_unreadable(
+    launch_env,
+    monkeypatch,
+):
+    routes, models, sessions, workspace = launch_env
+    from api.expert_teams import launch_storage
+
+    session = models.Session(
+        session_id="ordinary-delete-registry-error",
+        title="普通会话",
+        workspace=str(workspace),
+        messages=[{"role": "user", "content": "保留我"}],
+    )
+    session.save(skip_index=True)
+    sessions[session.session_id] = session
+    durable_before = session.path.read_bytes()
+    monkeypatch.setattr(
+        launch_storage,
+        "hidden_session_ids",
+        lambda: (_ for _ in ()).throw(OSError("launch registry unavailable")),
+    )
+
+    response = _post(
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert response.status == 404
+    assert session.path.read_bytes() == durable_before
+    assert sessions[session.session_id] is session
 
 
 def test_outer_commit_refuses_session_polluted_during_hidden_window(

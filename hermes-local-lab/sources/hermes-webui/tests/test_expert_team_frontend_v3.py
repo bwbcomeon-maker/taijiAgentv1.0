@@ -44,6 +44,7 @@ def _run_v3_hooks(body: str) -> dict:
                 deliveryBindingFingerprint, conflictDeliveryDraftMatches, restoreConflictDeliveryDraft,
                 draftFingerprint, restoreWorkbenchDraft, stateCopyFor, statePanel, workbenchHtml,
                 handleWorkbenchClick, deliveryActionControl,
+                briefPanel, buildBriefPatch, clientBriefFieldErrors,
                 setConflictDraft(value) {{ state.conflictRevisionDraft = value; }},
                 setConflictDeliveryDraft(value) {{ state.conflictDeliveryDraft = value; }},
                 setCard(value) {{ state.card = value; state.busy = false; }},
@@ -178,6 +179,169 @@ def test_v3_preserves_drafts_and_saves_brief_fields_before_answering():
     assert "question__" in script
 
 
+def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const run={
+              run_id:'run-brief',session_id:'session-brief',schema_version:3,version:1,
+              view:{product_mode:'standalone',public_state:'intake',allowed_actions:['answer'],
+                brief:{status:'draft',revision:1,document_type:'research_report',document_type_label:'研究报告',
+                  field_schema:[
+                    {path:'exact_title',label:'文档标题',control:'text',required:true,placeholder:'填写标题',help:'使用准确标题',value:'专题研究报告'},
+                    {path:'details.core_question',label:'核心研究问题',control:'textarea',required:true,placeholder:'填写研究问题',help:'限定研究主线',value:'如何落地'},
+                  ],
+                  field_errors:[{field:'details.core_question',code:'required',message:'请填写核心研究问题'}],
+                  source_requirement:{minimum_ready:1,empty_help:'必须添加一份可核对资料'},sources:[],
+                },
+                workflow:{stages:[],current_stage:{},progress:{done:0,total:6,is_intake:true}},
+                workspace:{},presentation:{},intake:{questions:[]}},
+            };
+            const card=context.window.buildExpertTeamCardFromRun(run,{});
+            console.log(JSON.stringify({
+              fields:card.brief.fieldSchema,
+              errors:card.brief.fieldErrors,
+              requirement:card.brief.sourceRequirement,
+            }));
+            """
+        )
+    )
+
+    assert result["fields"][1] == {
+        "path": "details.core_question",
+        "label": "核心研究问题",
+        "control": "textarea",
+        "required": True,
+        "placeholder": "填写研究问题",
+        "help": "限定研究主线",
+        "value": "如何落地",
+    }
+    assert result["errors"] == [
+        {
+            "field": "details.core_question",
+            "code": "required",
+            "message": "请填写核心研究问题",
+        }
+    ]
+    assert result["requirement"] == {
+        "minimumReady": 1,
+        "emptyHelp": "必须添加一份可核对资料",
+    }
+
+
+def test_v3_profile_fields_render_chinese_help_and_associated_inline_errors():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',allowedActions:['answer'],questions:[],brief:{
+          originalRequest:'形成专题研究报告',documentTypeLabel:'研究报告',sources:[],
+          fieldSchema:[
+            {path:'exact_title',label:'文档标题',control:'text',required:true,placeholder:'填写标题',help:'使用准确标题',value:''},
+            {path:'details.core_question',label:'核心研究问题',control:'textarea',required:true,placeholder:'填写研究问题',help:'限定研究主线',value:''},
+          ],
+          fieldErrors:[{field:'details.core_question',code:'required',message:'请填写核心研究问题'}],
+          sourceRequirement:{minimumReady:1,emptyHelp:'研究报告必须至少添加一份可核对资料，并在正文中保留引用。'},
+        }};
+        console.log(JSON.stringify({html:hooks.briefPanel(card)}));
+        """
+    )
+    html = result["html"]
+
+    assert "核心研究问题" in html
+    assert "限定研究主线" in html
+    assert 'name="details.core_question"' in html
+    assert 'aria-invalid="true"' in html
+    assert "请填写核心研究问题" in html
+    assert "研究报告必须至少添加一份可核对资料" in html
+    assert "data-et3-source-error" in html
+
+
+def test_v3_brief_patch_uses_schema_whitelist_and_writes_nested_fields():
+    result = _run_v3_hooks(
+        """
+        const schema=[
+          {path:'exact_title',required:true},
+          {path:'details.core_question',required:true},
+          {path:'details.time_range.start',required:true},
+          {path:'details.time_range.end',required:true},
+          {path:'source_policy.as_of_date',required:true},
+        ];
+        const values={
+          exact_title:'专题研究报告',
+          'details.core_question':'人工智能辅助办公如何落地',
+          'details.time_range.start':'2025-01-01',
+          'details.time_range.end':'2026-07-25',
+          'source_policy.as_of_date':'2026-07-25',
+          'question__q1':'保留为问答而非 Brief 字段',
+          'data_handling.model_policy_id':'client-forged-policy',
+        };
+        console.log(JSON.stringify({patch:hooks.buildBriefPatch(values,schema)}));
+        """
+    )
+
+    assert result["patch"] == {
+        "exact_title": "专题研究报告",
+        "details": {
+            "core_question": "人工智能辅助办公如何落地",
+            "time_range": {"start": "2025-01-01", "end": "2026-07-25"},
+        },
+        "source_policy": {"as_of_date": "2026-07-25"},
+    }
+
+
+def test_v3_custom_confirmation_validates_before_request_and_links_server_field_errors():
+    script = _read(SCRIPT)
+    save_start = script.index("async function saveBrief(button, confirmAfter)")
+    save_end = script.index("async function addTextSource", save_start)
+    save_source = script[save_start:save_end]
+    submit_start = script.index("async function submitAnswers(button)")
+    submit_end = script.index("function saveBriefFields", submit_start)
+    submit_source = script[submit_start:submit_end]
+
+    assert "form.reportValidity()" in save_source
+    assert save_source.index("form.reportValidity()") < save_source.index("saveBriefFields")
+    assert "const nativeValid = !confirmAfter || form.reportValidity();" in save_source
+    assert "if (!nativeValid || errors.length)" in save_source
+    assert "form.reportValidity()" in submit_source
+    assert submit_source.index("form.reportValidity()") < submit_source.index("saveBriefFields")
+    assert "const nativeValid = form.reportValidity();" in submit_source
+    assert "if (!nativeValid || errors.length)" in submit_source
+    assert "clientBriefFieldErrors" in save_source
+    assert "showBriefFieldErrors" in script
+    assert "error.payload.field" in script
+    assert "aria-describedby" in script
+
+
+def test_v3_client_required_validation_returns_one_error_per_profile_field():
+    result = _run_v3_hooks(
+        """
+        const schema=[
+          {path:'exact_title',label:'文档标题',required:true},
+          {path:'details.reporting_period',label:'汇报周期',required:true},
+          {path:'details.reporting_unit',label:'汇报单位',required:true},
+        ];
+        const errors=hooks.clientBriefFieldErrors(
+          {exact_title:'月度汇报','details.reporting_period':'','details.reporting_unit':'  '},
+          schema
+        );
+        console.log(JSON.stringify({errors}));
+        """
+    )
+    assert result["errors"] == [
+        {
+            "field": "details.reporting_period",
+            "code": "required",
+            "message": "请填写汇报周期",
+        },
+        {
+            "field": "details.reporting_unit",
+            "code": "required",
+            "message": "请填写汇报单位",
+        },
+    ]
+
+
 def test_v3_can_collapse_restore_and_recover_without_legacy_result_globals():
     script = _read(SCRIPT)
 
@@ -236,7 +400,7 @@ def test_v3_revision_draft_and_stage_mutations_are_bound_to_authoritative_object
     assert "conflictRevisionDraft" in script
 
 
-def test_v3_has_a_real_electron_flow_and_non_expert_isolation_gate():
+def test_v3_electron_smoke_script_covers_flow_and_non_expert_isolation_gate():
     smoke = _read(ELECTRON_SMOKE)
 
     assert "_electron.launch" in smoke
@@ -309,7 +473,7 @@ def test_presenter_uses_standalone_run_view_as_the_only_public_state_and_action_
             vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
             const binding={session_id:'session-1',run_id:'run-1',expected_version:7,stage_id:'draft',stage_attempt:2,artifact_id:'draft:2',artifact_sha256:'a'.repeat(64)};
             const run={
-              run_id:'run-1',session_id:'session-1',schema_version:3,version:999,product_mode:'standalone',
+              run_id:'run-1',session_id:'session-1',schema_version:3,version:7,product_mode:'standalone',
               workflow_state:'completed',questions:[{id:'raw-question',title:'不得使用'}],
               view:{
                 product_mode:'standalone',public_state:'awaiting_stage_confirmation',
@@ -350,6 +514,58 @@ def test_presenter_uses_standalone_run_view_as_the_only_public_state_and_action_
         "artifact_id",
         "artifact_sha256",
         "idempotency_key",
+    }
+
+
+def test_presenter_rejects_stage_binding_for_another_session_run_or_version():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            function project(binding, version=7){
+              const run={run_id:'run-1',session_id:'session-1',schema_version:3,version,
+                view:{product_mode:'standalone',public_state:'awaiting_stage_confirmation',
+                  allowed_actions:['stage_confirm','stage_revise'],stage_action_binding:binding,
+                  presentation:{},workflow:{stages:[],current_stage:{id:'draft'},progress:{}}}};
+              const card=context.window.buildExpertTeamCardFromRun(run,{});
+              return {binding:card.stageActionBinding,payload:context.window.buildExpertTeamStageActionPayload(card,'idem')};
+            }
+            const base={session_id:'session-1',run_id:'run-1',expected_version:7,stage_id:'draft',stage_attempt:2,artifact_id:'draft:2',artifact_sha256:'a'.repeat(64)};
+            console.log(JSON.stringify({
+              valid:project(base),
+              wrongSession:project({...base,session_id:'session-2'}),
+              wrongRun:project({...base,run_id:'run-2'}),
+              wrongVersion:project({...base,expected_version:6}),
+            }));
+            """
+        )
+    )
+
+    assert result["valid"]["binding"] is not None
+    assert result["valid"]["payload"]["idempotency_key"] == "idem"
+    for key in ("wrongSession", "wrongRun", "wrongVersion"):
+        assert result[key] == {"binding": None, "payload": None}
+
+
+def test_stage_review_buttons_are_disabled_when_server_binding_is_missing():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',allowedActions:['stage_confirm','stage_revise'],stageActionBinding:null,
+          stageReview:{output:{content:'阶段成果'}},stageResult:{},presentation:{},reviewItems:[]};
+        const html=hooks.statePanel(card,'awaiting_stage_confirmation');
+        console.log(JSON.stringify({
+          reviseDisabled:html.includes('data-et3-action="submit-revision" disabled'),
+          confirmDisabled:html.includes('data-et3-action="confirm-stage" disabled'),
+          explains:html.includes('服务端尚未允许当前操作'),
+        }));
+        """
+    )
+
+    assert result == {
+        "reviseDisabled": True,
+        "confirmDisabled": True,
+        "explains": True,
     }
 
 

@@ -3027,6 +3027,45 @@ def test_write_run_rejects_immutable_projection_change_for_committed_run(atomic_
     assert storage.read_run(workspace, run["run_id"])["prompt"] != run["prompt"]
 
 
+@pytest.mark.parametrize(
+    "marker_mutation",
+    [
+        pytest.param("schema_version", id="schema-v2"),
+        pytest.param("product_mode", id="missing-product-mode"),
+    ],
+)
+def test_write_run_rejects_committed_standalone_contract_downgrade(
+    atomic_env,
+    marker_mutation,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=f"atomic-run-downgrade-{marker_mutation}",
+    )
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    run_id = first.json_body()["run"]["run_id"]
+    before = storage.read_run_raw(workspace, run_id)
+    downgraded = copy.deepcopy(before)
+    if marker_mutation == "schema_version":
+        downgraded["schema_version"] = 2
+    else:
+        downgraded.pop("product_mode")
+
+    with pytest.raises(
+        storage.StartTransactionIntegrityError,
+        match="contract markers are incomplete",
+    ):
+        storage.write_run(workspace, downgraded)
+
+    assert storage.read_run_raw(workspace, run_id) == before
+    assert storage.read_run(workspace, run_id) == before
+
+
 def test_committed_message_pair_is_hidden_as_a_group_when_one_row_is_missing(atomic_env):
     from api import brand_privacy
 

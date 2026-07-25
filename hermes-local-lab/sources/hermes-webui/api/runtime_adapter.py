@@ -12,6 +12,8 @@ approval callbacks, clarify callbacks, or new long-lived queues.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
@@ -25,6 +27,116 @@ _VALID_RUNTIME_ADAPTER_MODES = {
     _RUNTIME_ADAPTER_JOURNAL,
     _RUNTIME_ADAPTER_RUNNER_LOCAL,
 }
+
+STRICT_PROVIDER_BINDING_CONTRACT_VERSION = "taiji.strict-provider-binding/v1"
+STRICT_PROVIDER_BINDING_METADATA_KEY = "strict_provider_binding"
+STRICT_PROVIDER_TRANSPORTS = {
+    "chat_completions": "openai_chat_completions",
+    "codex_responses": "openai_responses",
+    "anthropic_messages": "anthropic_messages",
+}
+_STRICT_PROVIDER_CAPABILITY_FIELDS = (
+    "exact_system_prompt",
+    "exact_user_payload",
+    "preserves_message_roles",
+    "supports_tools_disabled",
+    "stateless",
+    "fallback_disabled",
+)
+_STRICT_PROVIDER_BINDING_FIELDS = {
+    "contract_version",
+    "provider",
+    "model",
+    "api_mode",
+    "transport",
+    *_STRICT_PROVIDER_CAPABILITY_FIELDS,
+    "binding_sha256",
+}
+
+
+def _strict_provider_binding_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_strict_provider_context(
+    *,
+    provider: str | None,
+    model: str | None,
+    api_mode: str | None,
+    transport: str | None = None,
+) -> dict[str, Any]:
+    """Build the only Provider binding accepted by standalone expert turns.
+
+    The public binding deliberately excludes credentials and endpoints.  It
+    binds the actual protocol selection plus the execution guarantees owned by
+    the strict in-process turn path; unsupported transports fail closed.
+    """
+    normalized_provider = str(provider or "").strip()
+    normalized_model = str(model or "").strip()
+    normalized_api_mode = str(api_mode or "").strip().lower()
+    if not normalized_provider:
+        raise ValueError("standalone runtime provider is required")
+    if not normalized_model:
+        raise ValueError("standalone runtime model is required")
+    expected_transport = STRICT_PROVIDER_TRANSPORTS.get(normalized_api_mode)
+    if expected_transport is None:
+        raise ValueError(
+            f"standalone runtime api_mode is not released: {normalized_api_mode or 'missing'}"
+        )
+    normalized_transport = str(transport or expected_transport).strip()
+    if normalized_transport != expected_transport:
+        raise ValueError("standalone runtime transport does not match api_mode")
+
+    payload: dict[str, Any] = {
+        "contract_version": STRICT_PROVIDER_BINDING_CONTRACT_VERSION,
+        "provider": normalized_provider,
+        "model": normalized_model,
+        "api_mode": normalized_api_mode,
+        "transport": normalized_transport,
+    }
+    payload.update({field: True for field in _STRICT_PROVIDER_CAPABILITY_FIELDS})
+    return {
+        **payload,
+        "binding_sha256": _strict_provider_binding_sha256(payload),
+    }
+
+
+def validate_strict_provider_context(
+    context: dict[str, Any],
+    *,
+    expected_provider: str | None = None,
+    expected_model: str | None = None,
+) -> dict[str, Any]:
+    """Validate shape, capabilities, protocol pairing, and binding digest."""
+    if not isinstance(context, dict) or set(context) != _STRICT_PROVIDER_BINDING_FIELDS:
+        raise ValueError("standalone runtime provider binding has invalid fields")
+    if any(context.get(field) is not True for field in _STRICT_PROVIDER_CAPABILITY_FIELDS):
+        raise ValueError("standalone runtime provider binding lacks strict capabilities")
+    if (
+        expected_provider is not None
+        and str(context.get("provider") or "") != str(expected_provider or "")
+    ):
+        raise ValueError("standalone runtime provider binding drifted")
+    if (
+        expected_model is not None
+        and str(context.get("model") or "") != str(expected_model or "")
+    ):
+        raise ValueError("standalone runtime model binding drifted")
+    rebuilt = build_strict_provider_context(
+        provider=context.get("provider"),
+        model=context.get("model"),
+        api_mode=context.get("api_mode"),
+        transport=context.get("transport"),
+    )
+    if rebuilt != context:
+        raise ValueError("standalone runtime provider binding digest is invalid")
+    return rebuilt
 
 
 @dataclass(frozen=True)
@@ -371,6 +483,7 @@ class LegacyJournalRuntimeAdapter:
         clarify_delegate: Callable[[str, str, str], Any] | None = None,
         queue_delegate: Callable[[str, str, str], Any] | None = None,
         goal_delegate: Callable[[str, str, str], Any] | None = None,
+        provider_context_resolver: Callable[[StartRunRequest], dict[str, Any]] | None = None,
         live_stream_lookup: Callable[[str], bool] | None = None,
         session_dir: Path | None = None,
     ):
@@ -380,17 +493,49 @@ class LegacyJournalRuntimeAdapter:
         self._clarify_delegate = clarify_delegate
         self._queue_delegate = queue_delegate
         self._goal_delegate = goal_delegate
+        self._provider_context_resolver = provider_context_resolver
         self._live_stream_lookup = live_stream_lookup or (lambda _run_id: False)
         self._session_dir = Path(session_dir) if session_dir is not None else None
 
     def resolve_provider_context(self, request: StartRunRequest) -> dict[str, Any]:
+        if _is_standalone_strict_request(request):
+            if self._provider_context_resolver is None:
+                raise ValueError(
+                    "standalone strict runtime has no actual Provider resolver"
+                )
+            resolved = self._provider_context_resolver(request)
+            if not isinstance(resolved, dict):
+                raise ValueError(
+                    "standalone strict runtime Provider resolver returned invalid data"
+                )
+            return build_strict_provider_context(
+                provider=resolved.get("provider"),
+                model=resolved.get("model"),
+                api_mode=resolved.get("api_mode"),
+                transport=resolved.get("transport"),
+            )
         raise NotImplementedError(
             "Legacy runtime cannot preserve role-separated enterprise prompts or preflight provider fallback"
         )
 
     def start_run(self, request: StartRunRequest) -> RunStartResult:
-        if request.messages:
+        strict_request = _is_standalone_strict_request(request)
+        if request.messages and not strict_request:
             raise NotImplementedError("Legacy runtime cannot flatten role-separated enterprise prompts")
+        if strict_request:
+            expected_binding = (request.metadata or {}).get(
+                STRICT_PROVIDER_BINDING_METADATA_KEY
+            )
+            expected_binding = validate_strict_provider_context(
+                expected_binding,
+                expected_provider=None,
+                expected_model=None,
+            )
+            actual_binding = self.resolve_provider_context(request)
+            if actual_binding != expected_binding:
+                raise ValueError(
+                    "standalone strict Provider binding drifted before dispatch"
+                )
         if self._start_run_delegate is None:
             raise NotImplementedError("LegacyJournalRuntimeAdapter.start_run requires a legacy delegate")
         payload = dict(self._start_run_delegate(request) or {})
@@ -524,3 +669,23 @@ class LegacyJournalRuntimeAdapter:
         if self._goal_delegate is None:
             return ControlResult(False, status="unsupported", safe_message="Goal is delegated to the legacy path.")
         return _active_control_result(self._goal_delegate(session_id, action, text))
+
+
+def _is_standalone_strict_request(request: StartRunRequest) -> bool:
+    """Recognize the one role-separated contract the in-process path preserves."""
+    messages = list(request.messages or [])
+    return bool(
+        request.source == "expert-team"
+        and request.tools_disabled is True
+        and (request.metadata or {}).get("expert_team_product_mode") == "standalone"
+        and len(messages) == 2
+        and [item.get("role") if isinstance(item, dict) else None for item in messages]
+        == ["system", "user"]
+        and all(
+            isinstance(item, dict)
+            and set(item) == {"role", "content"}
+            and isinstance(item.get("content"), str)
+            and bool(item["content"].strip())
+            for item in messages
+        )
+    )

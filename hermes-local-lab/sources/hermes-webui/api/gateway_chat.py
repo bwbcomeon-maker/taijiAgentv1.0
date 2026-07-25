@@ -70,6 +70,17 @@ _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_CHAT_TRANSPORT_ENV = "HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 _GATEWAY_RUN_FALLBACK_STATUSES = {404, 405, 501}
+_STRICT_EXPERT_EXECUTION_FIELD = "taiji_expert_execution"
+_STRICT_EXPERT_EXECUTION_CONTRACT_VERSION = "taiji.expert-team-execution/v1"
+_STRICT_EXPERT_EXECUTION_BOUND_FIELDS = (
+    "model",
+    "provider",
+    "messages",
+    "platform_message_id",
+    "tools",
+    "tool_choice",
+    "stream",
+)
 
 
 class _GatewayRunHandle:
@@ -197,11 +208,13 @@ def _gateway_request_headers(
     *,
     profile_name: str | None = None,
     event_stream: bool = False,
+    session_continuation: bool = True,
 ) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
-        "X-Hermes-Session-Id": session_id,
     }
+    if session_continuation:
+        headers["X-Hermes-Session-Id"] = session_id
     headers["Accept"] = "text/event-stream" if event_stream else "application/json"
     normalized_profile = str(profile_name or "").strip()
     if normalized_profile:
@@ -212,8 +225,47 @@ def _gateway_request_headers(
         headers["Authorization"] = f"Bearer {api_key}"
         # Scope Gateway long-term continuity to this WebUI conversation
         # without exposing the browser's auth cookie or CSRF material.
-        headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+        if session_continuation:
+            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
     return headers
+
+
+def _gateway_request_body(
+    *,
+    model: str | None,
+    provider: str | None,
+    turn_envelope: TurnEnvelope,
+    ordinary_messages,
+) -> dict:
+    """Build one Gateway call while preserving strict expert-team input."""
+    body = {
+        "model": model or "default",
+        "stream": True,
+        "messages": turn_envelope.model_messages_for_runtime(ordinary_messages),
+        "platform_message_id": turn_envelope.platform_message_id,
+    }
+    if provider:
+        body["provider"] = provider
+    if turn_envelope.strict_model_messages:
+        body["tools"] = []
+        body["tool_choice"] = "none"
+        bound = {
+            key: body[key]
+            for key in _STRICT_EXPERT_EXECUTION_BOUND_FIELDS
+            if key in body
+        }
+        encoded = json.dumps(
+            bound,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        body[_STRICT_EXPERT_EXECUTION_FIELD] = {
+            "contract_version": _STRICT_EXPERT_EXECUTION_CONTRACT_VERSION,
+            "request_sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+    return body
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -1292,26 +1344,30 @@ def _run_gateway_chat_streaming(
         capability_generation = (
             capture_capability_runtime_generation()
         )
-        try:
-            from api.streaming import (
-                _WEBUI_PROGRESS_PROMPT,
-                _load_webui_prefill_context,
-                _prefill_messages_with_webui_context,
-                _public_prefill_context_status,
-            )
+        strict_turn = bool(
+            turn_envelope is not None and turn_envelope.strict_model_messages
+        )
+        prefill_messages = []
+        if not strict_turn:
+            try:
+                from api.streaming import (
+                    _WEBUI_PROGRESS_PROMPT,
+                    _load_webui_prefill_context,
+                    _prefill_messages_with_webui_context,
+                    _public_prefill_context_status,
+                )
 
-            prefill_context = _load_webui_prefill_context(cfg)
-            prefill_messages = [
-                {"role": "system", "content": f"{BRAND_PRIVACY_SYSTEM_PROMPT}\n\n{_WEBUI_PROGRESS_PROMPT}"},
-                *_prefill_messages_with_webui_context(prefill_context, cfg),
-            ]
-            put_gateway_event("context_status", {
-                "session_id": session_id,
-                "prefill": _public_prefill_context_status(prefill_context),
-            })
-        except Exception:
-            logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
-            prefill_messages = []
+                prefill_context = _load_webui_prefill_context(cfg)
+                prefill_messages = [
+                    {"role": "system", "content": f"{BRAND_PRIVACY_SYSTEM_PROMPT}\n\n{_WEBUI_PROGRESS_PROMPT}"},
+                    *_prefill_messages_with_webui_context(prefill_context, cfg),
+                ]
+                put_gateway_event("context_status", {
+                    "session_id": session_id,
+                    "prefill": _public_prefill_context_status(prefill_context),
+                })
+            except Exception:
+                logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
@@ -1320,6 +1376,7 @@ def _run_gateway_chat_streaming(
             api_key,
             profile_name=gateway_profile,
             event_stream=True,
+            session_continuation=not strict_turn,
         )
         run_handle.bind_transport(base_url, headers)
         if cancel_event.is_set():
@@ -1328,40 +1385,44 @@ def _run_gateway_chat_streaming(
             cancel_stream(stream_id)
             return
         message_text = str(msg_text or "")
-        try:
-            message_content: Any = prepare_webui_chat_input(
-                message_text,
-                attachments,
-                workspace=str(workspace),
-                session_id=session_id,
-                cfg=cfg,
-                provider=model_provider,
-                model=model,
-                cancel_check=cancel_event.is_set,
-                capability_generation=capability_generation,
-            )
-        except WebUIChatInputCancelled:
-            record_turn_interrupted("cancelled")
-            put_gateway_event("cancel", {"message": "Cancelled by user"})
-            return
-        except WebUIChatInputError as exc:
-            with _get_session_agent_lock(session_id):
-                _persist_webui_chat_input_error(s, stream_id, exc.payload)
-            record_turn_interrupted(str(exc.payload.get("type") or "chat_input_error"))
-            put_gateway_event("apperror", exc.payload)
-            return
+        message_content: Any = message_text
+        if not strict_turn:
+            try:
+                message_content = prepare_webui_chat_input(
+                    message_text,
+                    attachments,
+                    workspace=str(workspace),
+                    session_id=session_id,
+                    cfg=cfg,
+                    provider=model_provider,
+                    model=model,
+                    cancel_check=cancel_event.is_set,
+                    capability_generation=capability_generation,
+                )
+            except WebUIChatInputCancelled:
+                record_turn_interrupted("cancelled")
+                put_gateway_event("cancel", {"message": "Cancelled by user"})
+                return
+            except WebUIChatInputError as exc:
+                with _get_session_agent_lock(session_id):
+                    _persist_webui_chat_input_error(s, stream_id, exc.payload)
+                record_turn_interrupted(str(exc.payload.get("type") or "chat_input_error"))
+                put_gateway_event("apperror", exc.payload)
+                return
         if cancel_event.is_set():
             record_turn_interrupted("cancelled")
             put_gateway_event("cancel", {"message": "Cancelled by user"})
             return
-        model_messages = _gateway_messages_for_new_turn(
-            s,
-            str(persist_msg_text or ""),
-            prefill_messages,
-            message_content,
-            cfg=cfg,
-            capability_generation=capability_generation,
-        )
+        model_messages = []
+        if not strict_turn:
+            model_messages = _gateway_messages_for_new_turn(
+                s,
+                str(persist_msg_text or ""),
+                prefill_messages,
+                message_content,
+                cfg=cfg,
+                capability_generation=capability_generation,
+            )
         if turn_envelope is None:
             turn_envelope = TurnEnvelope.create(
                 turn_id=str(turn_id or uuid.uuid4().hex),
@@ -1371,23 +1432,20 @@ def _run_gateway_chat_streaming(
                 model_messages=model_messages,
                 attachments=attachments,
             )
-        else:
+        elif not strict_turn:
             turn_envelope = turn_envelope.with_model_messages(model_messages)
-        model_messages = [copy.deepcopy(message) for message in turn_envelope.model_messages]
-        body = {
-            "model": model or "default",
-            "stream": True,
-            "messages": model_messages,
-            "platform_message_id": turn_envelope.platform_message_id,
-        }
-        if model_provider:
-            body["provider"] = model_provider
+        body = _gateway_request_body(
+            model=model,
+            provider=model_provider,
+            turn_envelope=turn_envelope,
+            ordinary_messages=model_messages,
+        )
         update_active_run(stream_id, phase="gateway-request")
         last_payload = {}
         gateway_error_event = None
         sse_event = "message"
         run_result = None
-        if _gateway_chat_transport(cfg) == "runs":
+        if not strict_turn and _gateway_chat_transport(cfg) == "runs":
             try:
                 _ensure_gateway_managed_session(
                     base_url=base_url,

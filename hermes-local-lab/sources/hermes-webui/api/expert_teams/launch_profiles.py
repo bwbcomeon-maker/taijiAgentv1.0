@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from .contracts import ContractError
+from .document_capabilities import brief_schema, source_requirement
 
 
 CONTENT_CREATOR_TEAM_ID = "content-creator-team"
@@ -36,6 +37,8 @@ _LAUNCH_PROFILES = {
         "intake_example_id": "work_report",
         "task_mode": "create",
         "render_template_id": "standalone-work-report",
+        "brief_schema": brief_schema("work_report"),
+        "source_requirement": source_requirement("work_report"),
         "stages": CONTENT_PHASES,
         "review_policy": {"kind": "local_confirmation"},
     },
@@ -46,6 +49,8 @@ _LAUNCH_PROFILES = {
         "intake_example_id": "research_report",
         "task_mode": "create",
         "render_template_id": "standalone-research-report",
+        "brief_schema": brief_schema("research_report"),
+        "source_requirement": source_requirement("research_report"),
         "stages": DEEP_RESEARCH_PHASES,
         "post_approval_system_steps": [
             {

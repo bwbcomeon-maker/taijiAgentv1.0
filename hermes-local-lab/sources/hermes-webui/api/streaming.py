@@ -69,6 +69,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.turn_duration import compute_turn_duration_seconds, stamp_turn_duration_on_latest_assistant
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    SessionWriteConflict,
     _is_empty_partial_activity_message,
     get_state_db_session_messages,
     reconciled_state_db_messages_for_session,
@@ -2534,6 +2535,21 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     cached_session = SESSIONS.get(session_id)
                     if cached_session is not None and getattr(cached_session, 'session_id', None) == session_id:
                         s = cached_session
+                    # WebUI DELETE marks the canonical Session before evicting
+                    # it.  This is an expected stale-worker outcome, but
+                    # Session.save() rejects it before the disk-CAS branch and
+                    # therefore raises RuntimeError rather than
+                    # SessionWriteConflict.  Detect the tombstone before this
+                    # worker mutates title fields; do not broaden the save
+                    # handler to swallow unrelated RuntimeError failures.
+                    if getattr(s, '_deleted', False) is True:
+                        _put_title_status(
+                            put_event,
+                            session_id,
+                            'skipped',
+                            'session_changed',
+                        )
+                        return
                     effective_title = str(s.title or '').strip()
                     invalid_existing_now = _looks_invalid_generated_title(s.title)
                     still_auto = (
@@ -2546,10 +2562,27 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)
                     return
                 if next_title != effective_title:
+                    previous_title = s.title
+                    previous_llm_title_generated = s.llm_title_generated
                     s.title = next_title
                     s.llm_title_generated = True
                     # Keep chronological ordering stable in the sidebar.
-                    s.save(touch_updated_at=False)
+                    try:
+                        s.save(touch_updated_at=False)
+                    except SessionWriteConflict:
+                        # A delete or a newer cross-process write won the CAS
+                        # race while title generation was in flight.  Preserve
+                        # that durable truth and undo only this worker's stale
+                        # in-memory mutation; other failures must still surface.
+                        s.title = previous_title
+                        s.llm_title_generated = previous_llm_title_generated
+                        _put_title_status(
+                            put_event,
+                            session_id,
+                            'skipped',
+                            'session_changed',
+                        )
+                        return
                     effective_title = s.title
                     wrote_title = True
 
@@ -4548,6 +4581,52 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _strict_turn_agent_overrides(turn_envelope) -> dict:
+    """Return fail-closed AIAgent overrides for an isolated expert turn."""
+    if not getattr(turn_envelope, "strict_model_messages", False):
+        return {}
+    if not getattr(turn_envelope, "tools_disabled", False):
+        raise ValueError("strict model messages require tools to be disabled")
+    turn_id = str(getattr(turn_envelope, "turn_id", "") or "").strip()
+    if not turn_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", turn_id):
+        raise ValueError("strict model messages require a safe turn id")
+    return {
+        "session_id": f"expert-exec-{turn_id}",
+        "session_db": None,
+        "gateway_session_key": None,
+        "exact_system_prompt": True,
+        "tools_disabled": True,
+        "skip_context_files": True,
+        "skip_memory": True,
+        "fallback_model": None,
+        "enabled_toolsets": [],
+        "max_iterations": 1,
+        "cacheable": False,
+    }
+
+
+def _strict_turn_result_is_authoritative(result) -> bool:
+    """Accept only one complete, non-partial Provider result.
+
+    Streamed tokens are presentation-only until this gate passes.  This keeps
+    a truncated or otherwise failed strict turn from being persisted as an
+    expert-stage artifact merely because an assistant token was observed.
+    """
+    if not isinstance(result, dict):
+        return False
+    final_response = result.get("final_response")
+    return bool(
+        result.get("completed") is True
+        and result.get("failed") is not True
+        and result.get("partial") is not True
+        and result.get("interrupted") is not True
+        and not result.get("error")
+        and result.get("api_calls") == 1
+        and isinstance(final_response, str)
+        and final_response.strip()
+    )
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -4567,6 +4646,10 @@ def _run_agent_streaming(
     When ephemeral=True, session mutations are skipped — used by /btw to get
     a streaming answer without persisting to the parent session.
     """
+    strict_turn = bool(
+        turn_envelope is not None
+        and getattr(turn_envelope, "strict_model_messages", False)
+    )
     # Claim the stream and publish its cancellation identity atomically. If
     # cancel wins this lock first, the worker observes no channel and exits
     # before it can create or cache an AIAgent. If the worker wins, cancel can
@@ -4644,7 +4727,7 @@ def _run_agent_streaming(
         if _agent is not None:
             try:
                 _cc = getattr(_agent, 'context_compressor', None)
-                if _cc:
+                if _cc and not strict_turn:
                     _base = getattr(_cc, 'last_prompt_tokens', 0) or 0
             except Exception:
                 _base = 0
@@ -4709,7 +4792,7 @@ def _run_agent_streaming(
                 pass
             try:
                 _cc = getattr(_agent, 'context_compressor', None)
-                if _cc:
+                if _cc and not strict_turn:
                     _cc_cl_u = getattr(_cc, 'context_length', 0) or 0
                     # Default-only guard (#3256): the agent-side compressor is
                     # built in agent_init with the global model.context_length
@@ -4805,9 +4888,6 @@ def _run_agent_streaming(
 
         return _usage
 
-    # Register this stream with the global streaming meter
-    meter().begin_session(stream_id)
-
     # Metering ticker — emits a metering event at 1 Hz while sessions are active.
     # When get_interval() returns >= 10.0 (no active sessions), the ticker exits
     # so no idle readings are emitted and the SSE consumer sees nothing.
@@ -4835,7 +4915,8 @@ def _run_agent_streaming(
     # short-lived ticker intentionally does not hold the session-state lease.
     # The owning agent worker already guards all Session/DB/artifact writes.
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
-    _metering_thread.start()
+    _metering_registered = False
+    _metering_thread_started = False
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
@@ -4889,6 +4970,8 @@ def _run_agent_streaming(
             )
         )
         if _is_compression_start:
+            if strict_turn:
+                return
             put('compressing', {
                 'session_id': session_id,
                 'message': 'Auto-compressing context to continue...',
@@ -4907,6 +4990,12 @@ def _run_agent_streaming(
     _ckpt_thread = None
     _agent_lock = None
     try:
+        # Register/start inside the outer try so every later failure or early
+        # return is paired with end_session() and thread shutdown in finally.
+        meter().begin_session(stream_id)
+        _metering_registered = True
+        _metering_thread.start()
+        _metering_thread_started = True
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -5543,12 +5632,20 @@ def _run_agent_streaming(
                 _cfg = _get_config(config_path=_get_config_path())
             else:
                 _cfg = _get_config()
-            _prefill_context = _load_webui_prefill_context(_cfg)
-            _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
-            put('context_status', {
-                'session_id': session_id,
-                'prefill': _public_prefill_context_status(_prefill_context),
-            })
+            if strict_turn:
+                _prefill_context = {
+                    'status': 'disabled',
+                    'source': 'strict-expert-team-turn',
+                    'message_count': 0,
+                }
+                _prefill_messages = []
+            else:
+                _prefill_context = _load_webui_prefill_context(_cfg)
+                _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
+                put('context_status', {
+                    'session_id': session_id,
+                    'prefill': _public_prefill_context_status(_prefill_context),
+                })
 
             # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
             # server toolsets are included, matching native CLI behaviour.
@@ -5574,6 +5671,8 @@ def _run_agent_streaming(
             except Exception as _ts_err:
                 print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
             _toolsets = safe_toolsets_for_workspace(_toolsets, workspace)
+            if strict_turn:
+                _toolsets = []
 
             # Fallback model chain from profile config (e.g. for rate-limit or
             # provider recovery). Match Hermes CLI/gateway semantics:
@@ -5619,6 +5718,8 @@ def _run_agent_streaming(
                     _fallback_seen.add(_identity)
                     _fallback_chain.append(_fb_entry)
             _fallback_resolved = _fallback_chain or None
+            if strict_turn:
+                _fallback_resolved = None
 
             # Build kwargs defensively — guard newer params so the WebUI
             # degrades gracefully when run against an older hermes-agent build.
@@ -5731,11 +5832,20 @@ def _run_agent_streaming(
                 _agent_kwargs['acp_args'] = _rt.get('args')
             if 'credential_pool' in _agent_params:
                 _agent_kwargs['credential_pool'] = _rt.get('credential_pool')
+            _strict_agent_overrides = (
+                _strict_turn_agent_overrides(turn_envelope)
+                if strict_turn
+                else {}
+            )
+            _strict_agent_cacheable = bool(
+                _strict_agent_overrides.pop('cacheable', not ephemeral)
+            )
+            _agent_kwargs.update(_strict_agent_overrides)
             # Pin Honcho memory sessions to the stable WebUI session ID.
             # Without this, 'per-session' Honcho strategy creates a new Honcho
             # session on every streaming request because HonchoSessionManager is
             # re-instantiated fresh each turn (#855).
-            if 'gateway_session_key' in _agent_params:
+            if 'gateway_session_key' in _agent_params and not strict_turn:
                 _agent_kwargs['gateway_session_key'] = session_id
 
             from agent.image_runtime import (
@@ -5749,12 +5859,15 @@ def _run_agent_streaming(
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
-            if ephemeral:
+            if ephemeral or not _strict_agent_cacheable:
                 agent = _require_agent_capability_generation(
                     _AIAgent(**_agent_kwargs),
                     _capability_generation,
                 )
-                logger.debug('[webui] Created ephemeral agent for session %s', session_id)
+                logger.debug(
+                    '[webui] Created uncached agent for session %s',
+                    _agent_kwargs.get('session_id', session_id),
+                )
             else:
                 import hashlib as _hashlib
                 import json as _json
@@ -5778,6 +5891,7 @@ def _run_agent_streaming(
                     image_capability_runtime_fingerprint(
                         _capability_generation
                     ),
+                    strict_turn,
                     # #1897: profile_home is part of the agent's identity because
                     # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
                     # at construction time, sourced from HERMES_HOME. Same-session
@@ -6000,14 +6114,18 @@ def _run_agent_streaming(
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
             # through interim_assistant_callback instead of frontend guesses.
-            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
-                _personality_prompt,
-                surface_context={
-                    'source': 'webui',
-                    'session_id': session_id,
-                    'profile': getattr(s, 'profile', None),
-                    'workspace': s.workspace,
-                },
+            agent.ephemeral_system_prompt = (
+                None
+                if strict_turn
+                else _webui_ephemeral_system_prompt(
+                    _personality_prompt,
+                    surface_context={
+                        'source': 'webui',
+                        'session_id': session_id,
+                        'profile': getattr(s, 'profile', None),
+                        'workspace': s.workspace,
+                    },
+                )
             )
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
@@ -6081,22 +6199,28 @@ def _run_agent_streaming(
                 name=f"ckpt-{session_id[:8]}",
             )
 
-            _process_notifications = _drain_webui_process_notifications(session_id)
+            _process_notifications = (
+                [] if strict_turn else _drain_webui_process_notifications(session_id)
+            )
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             try:
-                user_message = prepare_webui_chat_input(
-                    _agent_msg_text,
-                    attachments,
-                    workspace=workspace,
-                    session_id=session_id,
-                    cfg=_cfg,
-                    provider=model_provider,
-                    model=model,
-                    workspace_ctx=workspace_ctx,
-                    cancel_check=cancel_event.is_set,
-                    capability_generation=_capability_generation,
+                user_message = (
+                    str(turn_envelope.model_messages[1]["content"])
+                    if strict_turn
+                    else prepare_webui_chat_input(
+                        _agent_msg_text,
+                        attachments,
+                        workspace=workspace,
+                        session_id=session_id,
+                        cfg=_cfg,
+                        provider=model_provider,
+                        model=model,
+                        workspace_ctx=workspace_ctx,
+                        cancel_check=cancel_event.is_set,
+                        capability_generation=_capability_generation,
+                    )
                 )
             except WebUIChatInputCancelled:
                 if _checkpoint_stop is not None:
@@ -6132,10 +6256,14 @@ def _run_agent_streaming(
                         _finalize_cancelled_turn(s, ephemeral=False)
                 put('cancel', {'message': 'Cancelled by user'})
                 return
-            canonical_history = _sanitize_messages_for_api(
-                _previous_context_messages,
-                cfg=_cfg,
-                capability_generation=_capability_generation,
+            canonical_history = (
+                []
+                if strict_turn
+                else _sanitize_messages_for_api(
+                    _previous_context_messages,
+                    cfg=_cfg,
+                    capability_generation=_capability_generation,
+                )
             )
             from api.turn_envelope import TurnEnvelope
 
@@ -6148,18 +6276,32 @@ def _run_agent_streaming(
                     model_messages=[],
                     attachments=attachments,
                 )
-            turn_envelope = turn_envelope.with_model_messages([
+            ordinary_model_messages = [
                 *canonical_history,
                 {"role": "user", "content": user_message},
-            ])
-            effective_model_messages = [
-                copy.deepcopy(message) for message in turn_envelope.model_messages
             ]
+            effective_model_messages = turn_envelope.model_messages_for_runtime(
+                ordinary_model_messages
+            )
+            if not strict_turn:
+                turn_envelope = turn_envelope.with_model_messages(
+                    ordinary_model_messages
+                )
             result = agent.run_conversation(
                 user_message=effective_model_messages[-1]["content"],
-                system_message=workspace_system_msg,
-                conversation_history=effective_model_messages[:-1],
-                task_id=session_id,
+                system_message=(
+                    effective_model_messages[0]["content"]
+                    if strict_turn
+                    else workspace_system_msg
+                ),
+                conversation_history=(
+                    [] if strict_turn else effective_model_messages[:-1]
+                ),
+                task_id=(
+                    _agent_kwargs.get('session_id', session_id)
+                    if strict_turn
+                    else session_id
+                ),
                 image_turn_id=turn_envelope.turn_id,
                 image_gate_owner=stream_id,
                 persist_user_message=persist_msg_text,
@@ -6190,6 +6332,79 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                 put('cancel', {'message': 'Cancelled by user'})
+                return
+            if strict_turn and not _strict_turn_result_is_authoritative(result):
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                if _ckpt_thread is not None:
+                    _ckpt_thread.join(timeout=15)
+                _strict_error = str(
+                    result.get('error')
+                    or '严格阶段执行未返回完整、可确认的单次模型结果。'
+                )
+                _strict_error_payload = _provider_error_payload(
+                    _strict_error,
+                    'strict_execution_failed',
+                    '本次输出不会作为阶段成果保存，请检查模型配置后重试当前阶段。',
+                )
+                _flush_brand_token_tail(include_reasoning=False)
+                put('apperror', _strict_error_payload)
+                _strict_lock_ctx = (
+                    _agent_lock
+                    if _agent_lock is not None
+                    else contextlib.nullcontext()
+                )
+                with _strict_lock_ctx:
+                    # Discard any streamed/partial assistant projection before
+                    # materialising a durable error turn.  The submitted user
+                    # message remains visible, but no failed output can become
+                    # authoritative expert-team context.
+                    s.messages = copy.deepcopy(_previous_messages)
+                    s.context_messages = copy.deepcopy(
+                        _previous_context_messages
+                    )
+                    _error_turn_started_at = getattr(
+                        s,
+                        'pending_started_at',
+                        None,
+                    )
+                    _materialize_pending_user_turn_before_error(s)
+                    s.active_stream_id = None
+                    s.pending_user_message = None
+                    s.pending_attachments = []
+                    s.pending_started_at = None
+                    s.messages.append({
+                        'role': 'assistant',
+                        'content': (
+                            '**专家团阶段执行未完成：** '
+                            f'{_strict_error}\n\n'
+                            '*本次输出未保存为阶段成果，可重试当前阶段。*'
+                        ),
+                        'timestamp': int(time.time()),
+                        '_error': True,
+                        'provider_details_label': '严格执行详情',
+                    })
+                    stamp_turn_duration_on_latest_assistant(
+                        s,
+                        _error_turn_started_at,
+                        time.time(),
+                    )
+                    s.save()
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                'event': 'interrupted',
+                                'created_at': time.time(),
+                                'reason': 'strict_execution_failed',
+                            },
+                        )
+                    except Exception:
+                        logger.debug(
+                            'Failed to append strict failure turn journal event',
+                            exc_info=True,
+                        )
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -6348,7 +6563,7 @@ def _run_agent_streaming(
                         _err_label = _classification['label']
                         _err_type = _classification['type']
                         _err_hint = _classification['hint']
-                    elif _is_auth and not _self_healed:
+                    elif _is_auth and not _self_healed and not strict_turn:
                         # ── Credential self-heal on 401 (#1401) ──
                         # Before emitting the error, try re-reading credentials
                         # and retrying once with a fresh agent.
@@ -6566,7 +6781,7 @@ def _run_agent_streaming(
                 _compression_continuation_session_id = None
                 _agent_sid = getattr(agent, 'session_id', None)
                 _compressed = False
-                if _agent_sid and _agent_sid != session_id:
+                if not strict_turn and _agent_sid and _agent_sid != session_id:
                     old_sid = session_id
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
@@ -6668,7 +6883,7 @@ def _run_agent_streaming(
                             logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
                 # Also detect compression via the result dict or compressor state
-                if not _compressed:
+                if not strict_turn and not _compressed:
                     _compressor = getattr(agent, 'context_compressor', None)
                     if _compressor and getattr(_compressor, 'compression_count', 0) > _pre_compression_count:
                         _compressed = True
@@ -6881,7 +7096,10 @@ def _run_agent_streaming(
                 # The fields are captured into the SSE usage payload below; this
                 # block writes them to the session itself so GET /api/session
                 # returns them on reload instead of falling back to 0.
-                _cc_for_save = getattr(agent, 'context_compressor', None)
+                _cc_for_save = (
+                    None if strict_turn
+                    else getattr(agent, 'context_compressor', None)
+                )
                 # Initialized before the compressor block so the #3256/#3263
                 # threshold-rescale below is safe even when there is no
                 # compressor (fresh agent / interrupted stream): _skip_cc_cl
@@ -6945,7 +7163,9 @@ def _run_agent_streaming(
                 # context_length persisted keeps it forever — skipping the
                 # compressor write removes the re-clobber but never recomputes
                 # the real per-model window. Recompute and overwrite in that case.
-                if (not getattr(s, 'context_length', 0)) or _skip_cc_cl:
+                if not strict_turn and (
+                    (not getattr(s, 'context_length', 0)) or _skip_cc_cl
+                ):
                     try:
                         from agent.model_metadata import get_model_context_length
                         _cfg_ctx_len = None
@@ -7018,7 +7238,7 @@ def _run_agent_streaming(
                 # Only rescale when both the original cap and threshold are
                 # positive; otherwise clear the threshold to 0 (consistent with
                 # the live-snapshot path) rather than leave a stale value.
-                if _skip_cc_cl:
+                if not strict_turn and _skip_cc_cl:
                     _orig_cap = _cc_cl  # the stale global cap the compressor reported
                     _orig_thresh = getattr(s, 'threshold_tokens', 0) or 0
                     _real_cap = getattr(s, 'context_length', 0) or 0
@@ -7185,7 +7405,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append completed turn journal event", exc_info=True)
-                if not ephemeral:
+                if not ephemeral and not strict_turn:
                     # ── Memory-provider lifecycle: mark turn completed (CLI parity) ──
                     # Completed, non-ephemeral turns are marked dirty/uncommitted so
                     # boundary drains know there is work.  Per CLI semantics, the
@@ -7238,10 +7458,16 @@ def _run_agent_streaming(
                 usage['tps'] = _turn_tps
             if _gateway_routing:
                 usage['gateway_routing'] = _gateway_routing
+            if strict_turn:
+                usage.update({
+                    'context_length': getattr(s, 'context_length', 0) or 0,
+                    'threshold_tokens': getattr(s, 'threshold_tokens', 0) or 0,
+                    'last_prompt_tokens': getattr(s, 'last_prompt_tokens', 0) or 0,
+                })
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
-            _cc = getattr(agent, 'context_compressor', None)
+            _cc = None if strict_turn else getattr(agent, 'context_compressor', None)
             if _cc:
                 _cc_cl_sse = getattr(_cc, 'context_length', 0) or 0
                 # #3256/#3263: remember the original compressor cap + threshold
@@ -7294,7 +7520,7 @@ def _run_agent_streaming(
             # SSE payload's `context_length` is what feeds the live token-usage
             # indicator, so a stale 256K here surfaces as the same wrong-window
             # display that motivates this fix.
-            if not usage.get('context_length'):
+            if not strict_turn and not usage.get('context_length'):
                 try:
                     from agent.model_metadata import get_model_context_length as _get_cl
                     _cfg_ctx_len = None
@@ -7459,7 +7685,9 @@ def _run_agent_streaming(
             meter_stats.setdefault('tps_available', False)
             meter_stats.setdefault('estimated', False)
             put('metering', meter_stats)
-            if _should_bg_title and _u0 and _a0:
+            if strict_turn:
+                put('stream_end', {'session_id': session_id})
+            elif _should_bg_title and _u0 and _a0:
                 from api.legacy_session_migration import start_legacy_migration_guarded_worker
                 start_legacy_migration_guarded_worker(
                     _run_background_title_update,
@@ -7557,7 +7785,7 @@ def _run_agent_streaming(
                 _classification['label'], _classification['type'], _classification['hint'],
             )
         elif _exc_is_auth:
-            if not _self_healed:
+            if not _self_healed and not strict_turn:
                 # ── Credential self-heal on 401 (#1401) ──
                 _heal_rt = _attempt_credential_self_heal(
                     resolved_provider or '', session_id, _agent_lock,
@@ -7768,6 +7996,20 @@ def _run_agent_streaming(
             _flush_brand_token_tail(include_reasoning=False)
         put('apperror', _error_payload)
     finally:
+        # Every registered stream must retire its meter identity, including
+        # cancellation and all early-return/error paths through this outer try.
+        _metering_stop.set()
+        if _metering_registered:
+            try:
+                meter().end_session(
+                    stream_id,
+                    getattr(agent, 'session_completion_tokens', 0) or 0,
+                    getattr(agent, 'session_prompt_tokens', 0) or 0,
+                )
+            except Exception:
+                logger.debug("Failed to end metering session %s", stream_id, exc_info=True)
+        if _metering_thread_started:
+            _metering_thread.join(timeout=15)
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.

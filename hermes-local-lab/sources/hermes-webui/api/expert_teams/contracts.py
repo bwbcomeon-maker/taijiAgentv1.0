@@ -8,6 +8,10 @@ import unicodedata
 from copy import deepcopy
 
 from .data_egress import validate_model_policy_reference
+from .document_capabilities import (
+    standalone_brief_defaults,
+    standalone_editable_brief_paths,
+)
 
 
 EXPERT_TEAM_CONTRACT_V1 = "expert-team-contract/v1"
@@ -35,6 +39,14 @@ _SEED_FIELDS = {
     "approval", "additional_context",
 }
 _PATCH_FIELDS = _SEED_FIELDS - {"task_mode"}
+_MAPPING_PATCH_FIELDS = {
+    "source_policy",
+    "data_handling",
+    "document_control",
+    "content_constraints",
+    "details",
+    "approval",
+}
 
 
 class ContractError(ValueError):
@@ -74,6 +86,26 @@ def _list(value) -> list:
     return deepcopy(value) if isinstance(value, list) else []
 
 
+def _deep_merge(base, override) -> dict:
+    merged = _mapping(base)
+    for key, value in _mapping(override).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _patch_leaf_paths(value, *, prefix: str = "") -> list[str]:
+    if not isinstance(value, dict) or not value:
+        return [prefix] if prefix else []
+    paths = []
+    for key, item in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        paths.extend(_patch_leaf_paths(item, prefix=path))
+    return paths
+
+
 def build_document_brief(team_id, payload, *, now) -> dict:
     del now  # reserved for future deterministic defaults; no hidden time-derived business fields
     document_type = _text(payload.get("document_type"))
@@ -96,7 +128,9 @@ def build_document_brief(team_id, payload, *, now) -> dict:
     product_mode = _text(payload.get("product_mode"))
     if product_mode not in {"", "standalone"}:
         raise ContractError("product_mode_invalid", "product_mode", "专家团产品模式无效")
-    control = _mapping(seed.get("document_control"))
+    standalone = product_mode == "standalone"
+    defaults = standalone_brief_defaults(document_type) if standalone else {}
+    control = _deep_merge(defaults.get("document_control"), seed.get("document_control"))
     expected_template = (
         _STANDALONE_RENDER_TEMPLATES[document_type]
         if product_mode == "standalone"
@@ -108,13 +142,20 @@ def build_document_brief(team_id, payload, *, now) -> dict:
     control["render_template_id"] = render_template_id
 
     task_mode = _text(seed.get("task_mode")) or "create"
-    source_policy = _mapping(seed.get("source_policy"))
+    source_policy = _deep_merge(defaults.get("source_policy"), seed.get("source_policy"))
     source_policy["source_refs"] = _list(source_policy.get("source_refs"))
-    constraints = _mapping(seed.get("content_constraints"))
+    constraints = _deep_merge(defaults.get("content_constraints"), seed.get("content_constraints"))
     for key in ("required_sections", "must_include", "must_avoid"):
         constraints[key] = _list(constraints.get(key))
-    approval = _mapping(seed.get("approval"))
+    approval = _deep_merge(defaults.get("approval"), seed.get("approval"))
     approval["approver_roles"] = _list(approval.get("approver_roles"))
+
+    data_handling = _deep_merge(defaults.get("data_handling"), seed.get("data_handling"))
+    details = _deep_merge(defaults.get("details"), seed.get("details"))
+    if standalone:
+        data_handling = {}
+        approval = {}
+        control = {"render_template_id": render_template_id}
 
     brief = {
             "schema_version": DOCUMENT_BRIEF_V1,
@@ -130,10 +171,10 @@ def build_document_brief(team_id, payload, *, now) -> dict:
             "audience": _text(seed.get("audience")),
             "usage_scenario": _text(seed.get("usage_scenario")),
             "source_policy": source_policy,
-            "data_handling": _mapping(seed.get("data_handling")),
+            "data_handling": data_handling,
             "document_control": control,
             "content_constraints": constraints,
-            "details": _mapping(seed.get("details")),
+            "details": details,
             "approval": approval,
             "additional_context": _text(seed.get("additional_context")),
             "confirmed_revision": None,
@@ -171,6 +212,13 @@ def normalize_document_brief(brief) -> dict:
     result["schema_version"] = DOCUMENT_BRIEF_V1
     if "product_mode" in result:
         result["product_mode"] = _text(result.get("product_mode"))
+    if result.get("product_mode") == "standalone":
+        control = _mapping(result.get("document_control"))
+        result["document_control"] = {
+            "render_template_id": _text(control.get("render_template_id"))
+        }
+        result["data_handling"] = {}
+        result["approval"] = {}
     return result
 
 
@@ -204,8 +252,25 @@ def patch_document_brief(brief, patch, *, expected_revision, stage_started) -> d
     if unknown:
         raise ContractError("unknown_brief_field", unknown[0], "规格更新包含不支持的字段")
     updated = deepcopy(brief)
+    standalone = str(updated.get("product_mode") or "") == "standalone"
+    if standalone:
+        allowed_paths = standalone_editable_brief_paths(updated.get("document_type"))
+        invalid_paths = [
+            path
+            for path in _patch_leaf_paths(patch)
+            if path not in allowed_paths
+        ]
+        if invalid_paths:
+            raise ContractError(
+                "unknown_brief_field",
+                invalid_paths[0],
+                "当前任务规格不允许修改该字段",
+            )
     for key, value in patch.items():
-        updated[key] = deepcopy(value)
+        if standalone and key in _MAPPING_PATCH_FIELDS and isinstance(value, dict):
+            updated[key] = _deep_merge(updated.get(key), value)
+        else:
+            updated[key] = deepcopy(value)
     updated["revision"] = current_revision + 1
     updated["status"] = "draft"
     updated["confirmed_revision"] = None
@@ -226,6 +291,7 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
     normalized = normalize_document_brief(brief)
     errors = []
     document_type = normalized.get("document_type")
+    standalone = normalized.get("product_mode") == "standalone"
     if normalized.get("task_mode") not in _TASK_MODES:
         errors.append(_error("task_mode", "invalid_enum", "任务模式无效"))
     if document_type not in _RELEASED_DOCUMENT_TYPES:
@@ -238,10 +304,11 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
     if source_policy.get("unknown_fact_action") not in _UNKNOWN_FACT_ACTIONS:
         errors.append(_error("source_policy.unknown_fact_action", "invalid_enum", "未知事实处理方式无效"))
     control = normalized.get("document_control") or {}
-    if control.get("classification") not in _CLASSIFICATIONS:
-        errors.append(_error("document_control.classification", "invalid_enum", "密级无效"))
-    if control.get("classification") == "custom" and not _text(control.get("classification_label")):
-        errors.append(_error("document_control.classification_label", "required", "请填写自定义密级标签"))
+    if not standalone:
+        if control.get("classification") not in _CLASSIFICATIONS:
+            errors.append(_error("document_control.classification", "invalid_enum", "密级无效"))
+        if control.get("classification") == "custom" and not _text(control.get("classification_label")):
+            errors.append(_error("document_control.classification_label", "required", "请填写自定义密级标签"))
     expected_template = (
         _STANDALONE_RENDER_TEMPLATES.get(document_type)
         if normalized.get("product_mode") == "standalone"
@@ -283,17 +350,48 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
             errors.append(_error(f"source_policy.source_refs.{index}.sha256", "source_hash_conflict", "资料摘要与服务端原始字节不一致"))
             continue
         ready_count += 1
-    if ready_count == 0 and not any(item["code"] == "source_unresolved" for item in errors):
-        errors.append(_error("source_policy.source_refs", "source_unresolved", "正式文稿至少需要一项可核对资料"))
+    source_required = (
+        not standalone
+        or document_type == "research_report"
+        or source_policy.get("unknown_fact_action") != "allow_labeled_placeholder"
+    )
+    if ready_count == 0 and source_required and not any(item["code"] == "source_unresolved" for item in errors):
+        if standalone and document_type == "research_report":
+            errors.append(_error("source_policy.source_refs", "source_required", "研究报告至少需要一项可核对资料"))
+        else:
+            errors.append(_error("source_policy.source_refs", "source_unresolved", "正式文稿至少需要一项可核对资料"))
 
-    policy_result = validate_model_policy_reference(normalized, model_policy_registry=model_policy_registry, now=now)
+    policy_result = (
+        {
+            "authorized": True,
+            "policy_id": "",
+            "label": "单机版由服务端模型配置决定",
+            "authorization_basis": "server_runtime",
+            "field_errors": [],
+        }
+        if standalone
+        else validate_model_policy_reference(
+            normalized,
+            model_policy_registry=model_policy_registry,
+            now=now,
+        )
+    )
     errors.extend(policy_result["field_errors"])
     return {
         "valid_for_confirmation": not errors,
         "field_errors": errors,
         "release_candidate": document_type in _RELEASED_DOCUMENT_TYPES,
         "enterprise_released": False,
-        "model_policy": {"policy_id": policy_result["policy_id"], "label": policy_result["label"], "authorized": policy_result["authorized"]},
+        "model_policy": {
+            "policy_id": policy_result["policy_id"],
+            "label": policy_result["label"],
+            "authorized": policy_result["authorized"],
+            **(
+                {"authorization_basis": policy_result["authorization_basis"]}
+                if policy_result.get("authorization_basis")
+                else {}
+            ),
+        },
     }
 
 

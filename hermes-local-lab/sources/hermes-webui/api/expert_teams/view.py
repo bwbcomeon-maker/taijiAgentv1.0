@@ -7,6 +7,7 @@ import json
 from copy import deepcopy
 
 from .contracts import EXPERT_TEAM_CONTRACT_V1, brief_summary, classify_contract_version
+from .document_capabilities import brief_schema, source_requirement
 
 from .materials import business_context_for_run, content_summary
 
@@ -40,6 +41,15 @@ DOCUMENT_TYPE_LABELS = {
     "research_report": "研究报告",
 }
 _GATE_STATUSES = {"pending", "running", "failed", "invalidated", "passed"}
+
+
+def _nested_brief_value(brief: dict, path: str):
+    current = brief
+    for segment in path.split("."):
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(segment)
+    return current if isinstance(current, (str, int, float, bool)) else ""
 
 
 def _has_current_local_delivery_confirmation(run: dict) -> bool:
@@ -1419,6 +1429,38 @@ def expert_team_run_view(run: dict) -> dict:
             if isinstance(run.get("brief_validation"), dict)
             else {"valid_for_confirmation": False, "field_errors": []}
         )
+        if standalone:
+            profile = (
+                run.get("launch_profile_snapshot")
+                if isinstance(run.get("launch_profile_snapshot"), dict)
+                else {}
+            )
+            schema = profile.get("brief_schema")
+            if not isinstance(schema, list):
+                schema = brief_schema(str(full_brief.get("document_type") or ""))
+            brief["field_schema"] = [
+                {
+                    **deepcopy(field),
+                    "value": _nested_brief_value(full_brief, str(field.get("path") or "")),
+                }
+                for field in schema
+                if isinstance(field, dict) and str(field.get("path") or "")
+            ]
+            requirement = profile.get("source_requirement")
+            brief["source_requirement"] = deepcopy(
+                requirement
+                if isinstance(requirement, dict)
+                else source_requirement(str(full_brief.get("document_type") or ""))
+            )
+            brief["field_errors"] = [
+                {
+                    "field": str(error.get("field") or ""),
+                    "code": str(error.get("code") or ""),
+                    "message": str(error.get("message") or ""),
+                }
+                for error in brief["validation"].get("field_errors") or []
+                if isinstance(error, dict) and str(error.get("field") or "")
+            ]
         brief["gate"] = "confirmed" if brief.get("status") == "confirmed" else "needs_confirmation"
         brief["view_action"] = {
             "type": "edit_brief" if brief["editable"] else "view_brief",

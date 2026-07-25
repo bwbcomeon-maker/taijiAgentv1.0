@@ -62,7 +62,7 @@
     revising: ['正在按意见修改', '修改完成后会回到当前阶段复核。'],
     generating_document: ['正在生成正式文档', '内容已确认，正在完成 DOCX 自动检查。'],
     awaiting_delivery_confirmation: ['最终文档待确认', '请在本机打开文档检查，确认后再完成交付。'],
-    completed: ['文档已交付', '正式 DOCX 已生成，可打开或下载。'],
+    completed: ['文档已交付', '正式 DOCX 已生成，可在本机打开。'],
     contract_error: ['状态暂不可用', '服务端没有返回完整的单机任务状态，请刷新后重试。'],
     failed: ['任务未完成', '查看原因后返回专家团门户重新发起。'],
     cancelled: ['任务已取消', '当前任务已停止，不会继续生成。'],
@@ -667,9 +667,47 @@
     return failurePanel(card, current);
   }
 
+  function briefFieldSchema(brief) {
+    const configured = list(brief?.fieldSchema).filter(field => field && field.path);
+    if (configured.length) return configured;
+    return [
+      { path: 'exact_title', label: '文档标题', control: 'text', required: true, placeholder: '', help: '', value: brief?.exactTitle || '' },
+      { path: 'purpose', label: '文档用途', control: 'textarea', required: true, placeholder: '', help: '', value: brief?.purpose || '' },
+      { path: 'audience', label: '阅读对象', control: 'text', required: true, placeholder: '', help: '', value: brief?.audience || '' },
+      { path: 'usage_scenario', label: '使用场景', control: 'text', required: true, placeholder: '', help: '', value: brief?.usageScenario || '' },
+    ];
+  }
+
+  function briefFieldDomId(path) {
+    return `et3-brief-${String(path || '').replace(/[^a-z0-9_-]+/gi, '-')}`;
+  }
+
+  function fieldErrorsFor(brief, path) {
+    return list(brief?.fieldErrors).filter(error => String(error?.field || '') === path);
+  }
+
+  function briefFieldHtml(field, brief) {
+    const path = String(field.path || '');
+    const id = briefFieldDomId(path);
+    const helpId = `${id}-help`;
+    const errorId = `${id}-error`;
+    const errors = fieldErrorsFor(brief, path);
+    const errorMessage = errors.map(error => error.message).filter(Boolean).join('；');
+    const describedBy = [field.help ? helpId : '', errorId].filter(Boolean).join(' ');
+    const attributes = `id="${esc(id)}" name="${esc(path)}" data-et3-brief-path="${esc(path)}" value="${esc(field.value || '')}" placeholder="${esc(field.placeholder || '')}" ${field.required ? 'required aria-required="true"' : ''} aria-describedby="${esc(describedBy)}" ${errorMessage ? 'aria-invalid="true"' : ''}`;
+    const control = field.control === 'textarea'
+      ? `<textarea ${attributes.replace(` value="${esc(field.value || '')}"`, '')}>${esc(field.value || '')}</textarea>`
+      : `<input type="${field.control === 'date' ? 'date' : 'text'}" ${attributes}>`;
+    return `<label class="et3-form-field et3-brief-field" for="${esc(id)}"><span>${esc(field.label || path)}${field.required ? '<b aria-hidden="true"> *</b>' : ''}</span>${control}${field.help ? `<small id="${esc(helpId)}" class="et3-help">${esc(field.help)}</small>` : ''}<small id="${esc(errorId)}" class="et3-field-error" data-et3-field-error-for="${esc(path)}"${errorMessage ? '' : ' hidden'}>${esc(errorMessage)}</small></label>`;
+  }
+
   function briefPanel(card) {
     const brief = card.brief || {};
     const sources = list(brief.sources);
+    const fields = briefFieldSchema(brief);
+    const sourceRequirement = brief.sourceRequirement || {};
+    const sourceErrors = list(brief.fieldErrors).filter(error => String(error?.field || '').startsWith('source_policy.source_refs'));
+    const sourceErrorMessage = sourceErrors.map(error => error.message).filter(Boolean).join('；');
     const questions = list(card.questions).filter(question => !['answered', 'skipped'].includes(question.status));
     const canAnswer = actionAllowed(card, 'answer');
     const disabled = canAnswer ? '' : 'disabled aria-disabled="true" aria-describedby="expertTeamV3IntakeActionHelp"';
@@ -677,13 +715,12 @@
       <dl class="et3-kv"><dt>原始诉求</dt><dd>${esc(brief.originalRequest || brief.originalRequestSummary || '')}</dd><dt>文档类型</dt><dd>${esc(brief.documentTypeLabel || brief.documentType || '')}</dd></dl>
       <form data-et3-brief-form>
         ${questions.map(question => `<div class="et3-question"><label for="et3-question-${esc(question.id)}">${esc(question.title)}</label><textarea id="et3-question-${esc(question.id)}" name="question__${esc(question.id)}" ${question.required ? 'required' : ''} placeholder="${esc(question.placeholder || '')}">${esc(question.answer || '')}</textarea></div>`).join('')}
-        <label class="et3-form-field"><span>文档标题</span><input name="exact_title" value="${esc(brief.exactTitle || '')}"></label>
-        <label class="et3-form-field"><span>用途</span><textarea name="purpose">${esc(brief.purpose || '')}</textarea></label>
-        <label class="et3-form-field"><span>阅读对象</span><input name="audience" value="${esc(brief.audience || '')}"></label>
+        ${fields.map(field => briefFieldHtml(field, brief)).join('')}
       </form>
     </section>
     <section class="et3-panel"><h3>资料与依据</h3><p>支持 UTF-8 纯文本、TXT、Markdown、CSV、JSON，单份不超过 10MB。</p>
-      <ul class="et3-source-list">${sources.map(source => `<li class="et3-source"><span><strong>${esc(source.label || '资料')}</strong><small>${esc(source.kind || '')} · ${esc(source.status || '已绑定')}</small></span><button type="button" class="et3-button" data-et3-action="remove-source" data-source-id="${esc(source.source_id || source.sourceId)}" aria-label="移除资料：${esc(source.label || '未命名资料')}" ${disabled}>移除</button></li>`).join('') || '<li class="et3-help">尚未添加资料。没有资料也可以继续，但缺失数据会在文档中标注待补充。</li>'}</ul>
+      <ul class="et3-source-list">${sources.map(source => `<li class="et3-source"><span><strong>${esc(source.label || '资料')}</strong><small>${esc(source.kind || '')} · ${esc(source.status || '已绑定')}</small></span><button type="button" class="et3-button" data-et3-action="remove-source" data-source-id="${esc(source.source_id || source.sourceId)}" aria-label="移除资料：${esc(source.label || '未命名资料')}" ${disabled}>移除</button></li>`).join('') || `<li class="et3-help">${esc(sourceRequirement.emptyHelp || '尚未添加资料。')}</li>`}</ul>
+      <p class="et3-field-error" data-et3-source-error${sourceErrorMessage ? '' : ' hidden'}>${esc(sourceErrorMessage)}</p>
       <label class="et3-form-field"><span>添加文字资料</span><textarea data-et3-source-text placeholder="粘贴需要引用的事实、数据或背景"></textarea></label>
       <label class="et3-form-field"><span>资料名称</span><input data-et3-source-label placeholder="例如：6月工作台账"></label>
       <div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="add-text-source" ${disabled}>添加文字资料</button><button type="button" class="et3-button" data-et3-action="choose-source-file" aria-describedby="expertTeamV3SourceHelp${canAnswer ? '' : ' expertTeamV3IntakeActionHelp'}" ${canAnswer ? '' : 'disabled aria-disabled="true"'}>添加本地文件</button><input id="expertTeamV3SourceFile" class="et3-visually-hidden" type="file" data-et3-source-file accept=".txt,.md,.markdown,.csv,.json,text/plain,text/markdown,text/csv,application/json" ${canAnswer ? '' : 'disabled'}><span id="expertTeamV3SourceHelp" class="et3-visually-hidden">支持 UTF-8 文本，单份不超过 10MB</span></div>
@@ -732,8 +769,9 @@
     const result = card.stageReview?.output || card.stageResult?.output || card.stageResult || {};
     const content = result.content || card.presentation?.result?.content || '';
     const items = list(card.reviewItems);
-    const canRevise = actionAllowed(card, 'stage_revise');
-    const canConfirm = actionAllowed(card, 'stage_confirm');
+    const bindingReady = Boolean(stageBindingFingerprint(card));
+    const canRevise = bindingReady && actionAllowed(card, 'stage_revise');
+    const canConfirm = bindingReady && actionAllowed(card, 'stage_confirm');
     const blocked = !canRevise || !canConfirm;
     return `<section class="et3-panel"><h3>阶段成果</h3><div class="et3-document" tabindex="-1" data-et3-result-document>${esc(content || '阶段成果已生成，请稍后刷新状态。')}</div><div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="view-result">定位到完整成果</button></div></section>
       <section class="et3-panel"><h3>复核建议</h3><ul class="et3-review-list">${items.map(item => `<li class="et3-review-item"><span><strong>${esc(item.title || '待确认事项')}</strong><small>${esc(item.phase || '待人工确认')}</small></span><button type="button" class="et3-button" data-et3-action="append-revision" data-revision-text="${esc(item.title || '')}">加入修改意见</button></li>`).join('') || '<li class="et3-help">未发现阻断问题。仍建议阅读完整成果后确认。</li>'}</ul><label class="et3-form-field"><span>修改意见</span><textarea data-et3-revision aria-describedby="expertTeamV3Live" placeholder="逐条写清需要修改的位置和目标；无修改可直接进入下一阶段"></textarea></label></section>
@@ -923,6 +961,13 @@
       return true;
     } catch (error) {
       if (error && error.payload && error.payload.run) applyResponse(error.payload);
+      if (String(endpoint || '').includes('/brief/') && error?.payload?.field) {
+        showBriefFieldErrors([{
+          field: error.payload.field,
+          code: error.payload.code || 'invalid',
+          message: error.payload.error || error.message || '请检查此项',
+        }]);
+      }
       setLive(error.message || '操作失败，请刷新状态后重试。', true);
       return false;
     } finally { setBusy(button, false); }
@@ -1036,22 +1081,88 @@
     return Object.fromEntries(Array.from(new FormData(form).entries()).map(([key, value]) => [key, String(value).trim()]));
   }
 
+  function setNestedBriefValue(target, path, value) {
+    const segments = String(path || '').split('.');
+    if (!segments.length || segments.some(segment => !/^[a-z][a-z0-9_]*$/i.test(segment) || ['__proto__', 'prototype', 'constructor'].includes(segment))) return;
+    let current = target;
+    segments.forEach((segment, index) => {
+      if (index === segments.length - 1) current[segment] = value;
+      else {
+        if (!current[segment] || typeof current[segment] !== 'object' || Array.isArray(current[segment])) current[segment] = {};
+        current = current[segment];
+      }
+    });
+  }
+
+  function buildBriefPatch(values, schema) {
+    const patch = {};
+    list(schema).forEach(field => {
+      const path = String(field?.path || '');
+      if (!path || !Object.prototype.hasOwnProperty.call(values || {}, path)) return;
+      setNestedBriefValue(patch, path, String(values[path] ?? '').trim());
+    });
+    return patch;
+  }
+
+  function clientBriefFieldErrors(values, schema) {
+    return list(schema).filter(field => field?.required === true && !String(values?.[field.path] || '').trim()).map(field => ({
+      field: String(field.path || ''), code: 'required', message: `请填写${String(field.label || field.path || '必填项')}`,
+    }));
+  }
+
+  function showBriefFieldErrors(errors) {
+    const form = workbenchRoot()?.querySelector('[data-et3-brief-form]');
+    if (!form) return false;
+    const normalized = list(errors).filter(error => error && error.field && error.message);
+    const byField = new Map();
+    normalized.forEach(error => {
+      const field = String(error.field);
+      if (!byField.has(field)) byField.set(field, []);
+      byField.get(field).push(String(error.message));
+    });
+    Array.from(form.querySelectorAll('[data-et3-field-error-for]')).forEach(slot => {
+      const messages = byField.get(String(slot.dataset.et3FieldErrorFor || '')) || [];
+      slot.textContent = messages.join('；');
+      slot.hidden = messages.length === 0;
+    });
+    Array.from(form.querySelectorAll('[data-et3-brief-path]')).forEach(control => {
+      const invalid = byField.has(String(control.dataset.et3BriefPath || ''));
+      if (invalid) control.setAttribute('aria-invalid', 'true');
+      else control.removeAttribute('aria-invalid');
+    });
+    const sourceMessages = normalized.filter(error => String(error.field).startsWith('source_policy.source_refs')).map(error => error.message);
+    const sourceSlot = workbenchRoot()?.querySelector('[data-et3-source-error]');
+    if (sourceSlot) {
+      sourceSlot.textContent = sourceMessages.join('；');
+      sourceSlot.hidden = sourceMessages.length === 0;
+    }
+    const first = Array.from(form.querySelectorAll('[data-et3-brief-path]')).find(control => byField.has(String(control.dataset.et3BriefPath || '')));
+    first?.focus();
+    return normalized.length === 0;
+  }
+
   async function submitAnswers(button) {
     const form = workbenchRoot().querySelector('[data-et3-brief-form]');
+    const nativeValid = form.reportValidity();
     const values = formValues(form);
+    const errors = clientBriefFieldErrors(values, briefFieldSchema(state.card.brief));
+    if (!nativeValid || errors.length) { showBriefFieldErrors(errors); return setLive('请先补全页面标出的必填项。', true); }
     const answers = Object.fromEntries(Object.entries(values).filter(([key]) => key.startsWith('question__')).map(([key, value]) => [key.slice('question__'.length), value]));
     if (!await saveBriefFields(button, values)) return false;
     return mutate('/api/expert-teams/answer', { answers, skip_optional: false }, button, 'answer');
   }
 
   function saveBriefFields(button, values) {
-    const patch = Object.fromEntries(Object.entries(values).filter(([key]) => !key.startsWith('question__')));
+    const patch = buildBriefPatch(values, briefFieldSchema(state.card.brief));
     return mutate('/api/expert-teams/brief/update', { expected_brief_revision: Number(state.card.brief?.revision || 0), patch }, button, 'brief-update');
   }
 
   async function saveBrief(button, confirmAfter) {
     const form = workbenchRoot().querySelector('[data-et3-brief-form]');
+    const nativeValid = !confirmAfter || form.reportValidity();
     const values = formValues(form);
+    const errors = confirmAfter ? clientBriefFieldErrors(values, briefFieldSchema(state.card.brief)) : [];
+    if (!nativeValid || errors.length) { showBriefFieldErrors(errors); return setLive('请先补全页面标出的必填项。', true); }
     const saved = await saveBriefFields(button, values);
     if (!saved || !confirmAfter) return saved;
     return mutate('/api/expert-teams/brief/confirm', { expected_brief_revision: Number(state.card.brief?.revision || 0) }, button, 'brief-confirm');

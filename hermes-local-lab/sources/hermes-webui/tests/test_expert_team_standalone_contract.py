@@ -49,6 +49,14 @@ def _profile_start(**overrides):
     return payload
 
 
+def _build_profile_run(expert_teams, **overrides):
+    payload = _profile_start(**overrides)
+    return expert_teams.build_standalone_expert_team_run(
+        payload,
+        run_id=f"et-{payload['session_id']}",
+    )
+
+
 def _legacy_office_timeline():
     return [
         {
@@ -408,15 +416,11 @@ def test_public_start_route_creates_only_standalone_schema_v3(monkeypatch, tmp_p
     assert run["launch_profile_id"] == "content-work-report"
 
 
-def test_profile_start_creates_standalone_schema_v3_with_immutable_server_snapshot(tmp_path):
+def test_profile_builder_creates_standalone_schema_v3_with_immutable_server_snapshot():
     from api import expert_teams
     from api.expert_teams.launch_profiles import get_launch_profile
-    from api.expert_teams.storage import read_run_raw
 
-    # ``start_expert_team`` is the legacy/internal constructor used by runtime
-    # unit tests. A standalone v3 file created here is deliberately not public:
-    # production visibility requires the atomic /start receipt and bindings.
-    run = expert_teams.start_expert_team(tmp_path, _profile_start())
+    run = _build_profile_run(expert_teams)
 
     assert run["schema_version"] == 3
     assert run["product_mode"] == "standalone"
@@ -429,9 +433,9 @@ def test_profile_start_creates_standalone_schema_v3_with_immutable_server_snapsh
     assert run["document_brief"]["document_control"]["render_template_id"] == "standalone-work-report"
     assert len(run["tasks"]) == 5
 
-    run["launch_profile_snapshot"]["team_id"] = "forged-after-write"
-    reopened = read_run_raw(tmp_path, run["run_id"])
-    assert reopened["launch_profile_snapshot"]["team_id"] == "content-creator-team"
+    run["launch_profile_snapshot"]["team_id"] = "forged-after-build"
+    rebuilt = _build_profile_run(expert_teams)
+    assert rebuilt["launch_profile_snapshot"]["team_id"] == "content-creator-team"
 
 
 @pytest.mark.parametrize(
@@ -469,18 +473,16 @@ def test_profile_start_rejects_unknown_or_client_owned_profile_fields_without_wr
     assert sorted(tmp_path.rglob("*.json")) == before
 
 
-def test_standalone_view_projects_real_workflow_without_enterprise_identity_capability(tmp_path):
+def test_standalone_view_projects_real_workflow_without_enterprise_identity_capability():
     from api import expert_teams
     from api.expert_teams.view import expert_team_run_view
 
-    run = expert_teams.start_expert_team(
-        tmp_path,
-        _profile_start(
-            launch_profile_id="research-report",
-            session_id="research-session",
-            idempotency_key="start-research-session",
-            prompt="研究本地优先 AI 助理在企业办公场景的落地趋势",
-        ),
+    run = _build_profile_run(
+        expert_teams,
+        launch_profile_id="research-report",
+        session_id="research-session",
+        idempotency_key="start-research-session",
+        prompt="研究本地优先 AI 助理在企业办公场景的落地趋势",
     )
     view = run["view"]
 
@@ -618,11 +620,11 @@ def test_standalone_completed_without_local_confirmation_projects_as_pending_not
     assert "Office 验收" not in serialized
 
 
-def test_standalone_awaiting_review_rewrites_stale_office_validation_as_local_confirmation(tmp_path):
+def test_standalone_awaiting_review_rewrites_stale_office_validation_as_local_confirmation():
     from api import expert_teams
     from api.expert_teams.view import expert_team_run_view
 
-    run = expert_teams.start_expert_team(tmp_path, _profile_start())
+    run = _build_profile_run(expert_teams)
     run["workflow_state"] = "awaiting_review"
     run["validation"] = {"status": "office_acceptance_required"}
     run["last_validation_error"] = "请完成 WPS/Word Office 企业验收后再确认交付。"
@@ -637,11 +639,11 @@ def test_standalone_awaiting_review_rewrites_stale_office_validation_as_local_co
         assert forbidden not in serialized
 
 
-def test_standalone_completion_reconciling_uses_neutral_local_delivery_recovery_copy(tmp_path):
+def test_standalone_completion_reconciling_uses_neutral_local_delivery_recovery_copy():
     from api import expert_teams
     from api.expert_teams.view import expert_team_run_view
 
-    run = expert_teams.start_expert_team(tmp_path, _profile_start(session_id="completion-recovery"))
+    run = _build_profile_run(expert_teams, session_id="completion-recovery")
     run["workflow_state"] = "completed"
     run["completion_transaction_ref"] = {
         "transaction_id": "stale-enterprise-transaction",
@@ -732,7 +734,6 @@ def test_enterprise_late_state_presentation_keeps_office_acceptance_copy():
     ],
 )
 def test_standalone_full_view_neutralizes_legacy_office_timeline_without_losing_history(
-    tmp_path,
     run_patch,
     expected_state,
     expected_event,
@@ -740,7 +741,10 @@ def test_standalone_full_view_neutralizes_legacy_office_timeline_without_losing_
     from api import expert_teams
     from api.expert_teams.view import expert_team_run_view
 
-    run = expert_teams.start_expert_team(tmp_path, _profile_start(session_id=f"timeline-{expected_state}"))
+    run = _build_profile_run(
+        expert_teams,
+        session_id=f"timeline-{expected_state}",
+    )
     run.update(run_patch)
     run["timeline_events"] = _legacy_office_timeline()
 
@@ -767,11 +771,11 @@ def test_standalone_full_view_neutralizes_legacy_office_timeline_without_losing_
         assert forbidden not in serialized
 
 
-def test_standalone_legacy_office_timeline_projection_is_stable_across_run_state(tmp_path):
+def test_standalone_legacy_office_timeline_projection_is_stable_across_run_state():
     from api import expert_teams
     from api.expert_teams.view import expert_team_run_view
 
-    run = expert_teams.start_expert_team(tmp_path, _profile_start(session_id="timeline-stability"))
+    run = _build_profile_run(expert_teams, session_id="timeline-stability")
     run["timeline_events"] = _legacy_office_timeline()
     run["workflow_state"] = "awaiting_review"
     awaiting = expert_team_run_view(run)
@@ -842,11 +846,11 @@ def test_catalog_import_strategy_is_deterministic_and_direct_load_uses_current_w
         },
     ],
 )
-def test_enterprise_full_view_keeps_legacy_office_timeline(run_patch, tmp_path):
+def test_enterprise_full_view_keeps_legacy_office_timeline(run_patch):
     from api import expert_teams
     from api.expert_teams.view import expert_team_run_view
 
-    run = expert_teams.start_expert_team(tmp_path, _profile_start(session_id="enterprise-timeline-control"))
+    run = _build_profile_run(expert_teams, session_id="enterprise-timeline-control")
     run.pop("product_mode")
     run["schema_version"] = 2
     run.update(run_patch)

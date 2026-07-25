@@ -242,6 +242,7 @@ class ChatCompletionsTransport(ProviderTransport):
         """
         # Codex sanitization: drop reasoning_items / call_id / response_item_id
         sanitized = self.convert_messages(messages)
+        exact_system_prompt = bool(params.get("exact_system_prompt", False))
 
         # ── Provider profile: single-path when present ──────────────────
         _profile = params.get("provider_profile")
@@ -257,6 +258,8 @@ class ChatCompletionsTransport(ProviderTransport):
         # Developer role swap for GPT-5/Codex models
         model_lower = params.get("model_lower", (model or "").lower())
         if (
+            not exact_system_prompt
+            and
             sanitized
             and isinstance(sanitized[0], dict)
             and sanitized[0].get("role") == "system"
@@ -417,6 +420,17 @@ class ChatCompletionsTransport(ProviderTransport):
 
         # Request overrides last (service_tier etc.)
         overrides = params.get("request_overrides")
+        if exact_system_prompt and isinstance(overrides, dict):
+            reserved = {
+                "model",
+                "messages",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+            }
+            overrides = {
+                key: value for key, value in overrides.items() if key not in reserved
+            }
         if overrides:
             api_kwargs.update(overrides)
 
@@ -431,11 +445,15 @@ class ChatCompletionsTransport(ProviderTransport):
         from providers.base import OMIT_TEMPERATURE
 
         # Message preprocessing
-        sanitized = profile.prepare_messages(sanitized)
+        exact_system_prompt = bool(params.get("exact_system_prompt", False))
+        if not exact_system_prompt:
+            sanitized = profile.prepare_messages(sanitized)
 
         # Developer role swap — model-name-based, applies to all providers
         _model_lower = (model or "").lower()
         if (
+            not exact_system_prompt
+            and
             sanitized
             and isinstance(sanitized[0], dict)
             and sanitized[0].get("role") == "system"
@@ -526,6 +544,17 @@ class ChatCompletionsTransport(ProviderTransport):
 
         # Request overrides (user config)
         overrides = params.get("request_overrides")
+        if exact_system_prompt and isinstance(overrides, dict):
+            reserved = {
+                "model",
+                "messages",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+            }
+            overrides = {
+                key: value for key, value in overrides.items() if key not in reserved
+            }
         if overrides:
             for k, v in overrides.items():
                 if k == "extra_body" and isinstance(v, dict):

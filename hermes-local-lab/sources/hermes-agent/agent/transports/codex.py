@@ -90,13 +90,23 @@ class ResponsesApiTransport(ProviderTransport):
 
         from run_agent import DEFAULT_AGENT_IDENTITY
 
+        exact_system_prompt = bool(params.get("exact_system_prompt", False))
         instructions = params.get("instructions", "")
         payload_messages = messages
         if not instructions:
             if messages and messages[0].get("role") == "system":
-                instructions = str(messages[0].get("content") or "").strip()
+                raw_instructions = str(messages[0].get("content") or "")
+                instructions = (
+                    raw_instructions
+                    if exact_system_prompt
+                    else raw_instructions.strip()
+                )
                 payload_messages = messages[1:]
         if not instructions:
+            if exact_system_prompt:
+                raise ValueError(
+                    "exact system prompt mode requires a non-empty system message"
+                )
             instructions = DEFAULT_AGENT_IDENTITY
 
         is_github_responses = params.get("is_github_responses", False)
@@ -189,6 +199,20 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs["include"] = []
 
         request_overrides = params.get("request_overrides")
+        if exact_system_prompt and isinstance(request_overrides, dict):
+            reserved = {
+                "model",
+                "instructions",
+                "input",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+            }
+            request_overrides = {
+                key: value
+                for key, value in request_overrides.items()
+                if key not in reserved
+            }
         if request_overrides:
             kwargs.update(request_overrides)
 

@@ -5342,6 +5342,234 @@ def _open_expert_team_delivery_target(path: Path, target: str) -> None:
         subprocess.Popen(["xdg-open", str(resolved)])
 
 
+def _expert_team_standalone_execution_binding(
+    workspace: Path,
+    run: dict,
+    session,
+) -> dict:
+    """Resolve immutable runtime fields from server-owned launch truth."""
+    from api.expert_teams import launch_storage
+
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ValueError("standalone runtime binding requires a standalone Run")
+    run_id = str(run.get("run_id") or "").strip()
+    session_id = str(run.get("session_id") or "").strip()
+    if not run_id or not session_id or session_id != str(getattr(session, "session_id", "") or ""):
+        raise ValueError("standalone runtime binding identity is invalid")
+
+    receipt = launch_storage.read_launch_transaction_for_run(run_id)
+    marker = str(
+        getattr(session, "expert_team_launch_transaction_id", "") or ""
+    ).strip()
+    if receipt is None:
+        # Existing-session /start is retained for internal compatibility.  It
+        # has no portal receipt, so the persisted Session (never request JSON)
+        # is the only runtime binding.  A Session carrying a portal marker may
+        # never fall back to this weaker path.
+        if marker:
+            raise ValueError("standalone launch receipt is missing")
+        resolved_workspace = Path(str(getattr(session, "workspace", "") or "")).resolve()
+        if resolved_workspace != Path(workspace).resolve():
+            raise ValueError("standalone Session workspace does not match the Run")
+        return {
+            "workspace": str(resolved_workspace),
+            "profile": str(getattr(session, "profile", None) or "default"),
+            "model": str(getattr(session, "model", None) or "") or None,
+            "model_provider": str(getattr(session, "model_provider", None) or "") or None,
+            "source": "committed_session",
+        }
+
+    if str(receipt.get("state") or "") != "committed":
+        raise ValueError("standalone launch receipt is not committed")
+    if (
+        str(receipt.get("run_id") or "") != run_id
+        or str(receipt.get("session_id") or "") != session_id
+        or (marker and marker != str(receipt.get("transaction_id") or ""))
+    ):
+        raise ValueError("standalone launch receipt identity does not match the Run")
+    if (
+        str(receipt.get("launch_profile_id") or "")
+        != str(run.get("launch_profile_id") or "")
+        or receipt.get("launch_profile_snapshot") != run.get("launch_profile_snapshot")
+    ):
+        raise ValueError("standalone launch Profile snapshot does not match the Run")
+
+    options = receipt.get("session_options")
+    initial = receipt.get("initial_session_snapshot")
+    if not isinstance(options, dict) or not isinstance(initial, dict):
+        raise ValueError("standalone launch receipt Session binding is invalid")
+    resolved_workspace = Path(str(receipt.get("workspace") or "")).resolve()
+    expected = {
+        "workspace": str(resolved_workspace),
+        "profile": str(options.get("profile") or "default"),
+        "model": str(options.get("model") or "") or None,
+        "model_provider": str(options.get("model_provider") or "") or None,
+    }
+    actual = {
+        "workspace": str(Path(str(getattr(session, "workspace", "") or "")).resolve()),
+        "profile": str(getattr(session, "profile", None) or "default"),
+        "model": str(getattr(session, "model", None) or "") or None,
+        "model_provider": str(getattr(session, "model_provider", None) or "") or None,
+    }
+    initial_binding = {
+        "workspace": str(Path(str(initial.get("workspace") or "")).resolve()),
+        "profile": str(initial.get("profile") or "default"),
+        "model": str(initial.get("model") or "") or None,
+        "model_provider": str(initial.get("model_provider") or "") or None,
+    }
+    if resolved_workspace != Path(workspace).resolve() or expected != actual or expected != initial_binding:
+        raise ValueError("standalone Session runtime binding drifted after launch")
+    return {**expected, "source": "committed_launch_receipt"}
+
+
+def _validate_standalone_runtime_provider_context(
+    context: dict,
+    *,
+    expected_provider: str | None,
+    expected_model: str | None,
+) -> None:
+    from api.runtime_adapter import validate_strict_provider_context
+
+    try:
+        validate_strict_provider_context(
+            context,
+            expected_provider=expected_provider,
+            expected_model=expected_model,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"standalone runtime cannot prove the immutable Provider contract: {exc}"
+        ) from exc
+
+
+def _resolve_standalone_legacy_provider_context(request) -> dict:
+    """Resolve the protocol that the in-process worker would actually use.
+
+    Resolution runs inside the Session profile's HERMES_HOME context and
+    returns no credential or endpoint material.  External-process and
+    unreleased protocol transports remain fail-closed in the binding builder.
+    """
+    from api.config import model_with_provider_context, resolve_model_provider
+    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+    from api.profiles import get_hermes_home_for_profile
+    from api.runtime_adapter import STRICT_PROVIDER_TRANSPORTS
+    from api.streaming import _resolve_custom_provider_runtime_overrides
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    profile_home = get_hermes_home_for_profile(request.profile)
+    override_token = set_hermes_home_override(profile_home)
+    try:
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+            model_with_provider_context(request.model, request.provider)
+        )
+        runtime = resolve_runtime_provider_with_anthropic_env_lock(
+            resolve_runtime_provider,
+            requested=resolved_provider,
+        )
+        if not isinstance(runtime, dict):
+            raise ValueError(
+                "standalone runtime Provider resolution returned invalid data"
+            )
+        if str(runtime.get("command") or "").strip() or runtime.get("args"):
+            raise ValueError(
+                "standalone runtime external-process transport is not released"
+            )
+        resolved_api_key = runtime.get("api_key")
+        if not resolved_provider:
+            resolved_provider = runtime.get("provider")
+        if not resolved_base_url:
+            resolved_base_url = runtime.get("base_url")
+        resolved_provider, _resolved_api_key, _resolved_base_url = (
+            _resolve_custom_provider_runtime_overrides(
+                resolved_provider,
+                resolved_api_key,
+                resolved_base_url,
+            )
+        )
+        api_mode = str(runtime.get("api_mode") or "").strip().lower()
+        return {
+            "provider": str(resolved_provider or "").strip(),
+            "model": str(resolved_model or "").strip(),
+            "api_mode": api_mode,
+            "transport": STRICT_PROVIDER_TRANSPORTS.get(api_mode, ""),
+        }
+    finally:
+        reset_hermes_home_override(override_token)
+
+
+def _require_standalone_strict_execution_contract(
+    run: dict,
+    gateway_request: dict,
+) -> None:
+    """Reject standalone Runs that could degrade into an ordinary chat turn."""
+    if type(run.get("schema_version")) is not int or run.get("schema_version") != 3:
+        raise ValueError("standalone expert team execution requires schema_version 3")
+    if str(run.get("contract_version") or "") != "expert-team-contract/v1":
+        raise ValueError("standalone expert team execution requires contract v1")
+    if not isinstance(gateway_request, dict):
+        raise ValueError("standalone strict execution request is missing")
+    messages = gateway_request.get("messages")
+    valid_messages = bool(
+        isinstance(messages, list)
+        and len(messages) == 2
+        and [
+            item.get("role") if isinstance(item, dict) else None
+            for item in messages
+        ]
+        == ["system", "user"]
+        and all(
+            isinstance(item, dict)
+            and set(item) == {"role", "content"}
+            and isinstance(item.get("content"), str)
+            and bool(item["content"].strip())
+            for item in messages
+        )
+    )
+    if not valid_messages or gateway_request.get("tools_disabled") is not True:
+        raise ValueError(
+            "standalone expert team execution requires strict system/user messages "
+            "and tools_disabled=true"
+        )
+
+
+def _expert_team_standalone_compatibility_error(run: dict) -> str:
+    """Reject incomplete standalone Run markers without classifying enterprise v2."""
+    from api.expert_teams import EXPERT_TEAM_CONTRACT_V1, storage
+
+    document_brief = (
+        run.get("document_brief")
+        if isinstance(run.get("document_brief"), dict)
+        else {}
+    )
+    review_policy = (
+        run.get("review_policy")
+        if isinstance(run.get("review_policy"), dict)
+        else {}
+    )
+    standalone_v3_shape = (
+        storage.requires_standalone_run_integrity(run)
+        or "launch_profile_id" in run
+        or "launch_profile_snapshot" in run
+        or str(document_brief.get("product_mode") or "") == "standalone"
+        or str(review_policy.get("kind") or "") == "local_confirmation"
+    )
+    if not standalone_v3_shape:
+        return ""
+    if str(run.get("product_mode") or "") != "standalone":
+        return "standalone expert team execution requires product_mode=standalone"
+    if (
+        type(run.get("schema_version")) is not int
+        or run.get("schema_version") != 3
+        or str(run.get("contract_version") or "") != EXPERT_TEAM_CONTRACT_V1
+    ):
+        return "standalone expert team execution requires schema 3 and contract v1"
+    return ""
+
+
 def _start_expert_team_execution(
     workspace: Path,
     run: dict,
@@ -5352,6 +5580,7 @@ def _start_expert_team_execution(
     from api import expert_teams
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
+        STRICT_PROVIDER_BINDING_METADATA_KEY,
         StartRunRequest,
         build_runtime_adapter,
     )
@@ -5391,6 +5620,14 @@ def _start_expert_team_execution(
     if not sid:
         error = "expert team session_id is required"
         return {"ok": False, "error": error, "run": _fail_known_pre_dispatch(error)}, 400
+    standalone_product_mode = str(run.get("product_mode") or "") == "standalone"
+    if error := _expert_team_standalone_compatibility_error(run):
+        return _backend_failure({
+            "ok": False,
+            "code": "runtime_incompatible",
+            "error": error,
+            "run": _fail_known_pre_dispatch(error),
+        }), 503
     if (
         str(run.get("contract_version") or "") == "expert-team-contract/v1"
         and isinstance(run.get("pending_system_stage"), dict)
@@ -5403,21 +5640,57 @@ def _start_expert_team_execution(
         error = "Session not found"
         return {"ok": False, "error": error, "run": _fail_known_pre_dispatch(error)}, 404
     try:
-        requested_model = body.get("model") or getattr(session, "model", None)
+        standalone = standalone_product_mode
+        standalone_binding = (
+            _expert_team_standalone_execution_binding(workspace, run, session)
+            if standalone
+            else None
+        )
+        requested_model = (
+            standalone_binding.get("model")
+            if standalone_binding is not None
+            else body.get("model") or getattr(session, "model", None)
+        )
         requested_provider = (
-            body.get("model_provider")
-            if "model_provider" in body
-            else getattr(session, "model_provider", None)
+            standalone_binding.get("model_provider")
+            if standalone_binding is not None
+            else (
+                body.get("model_provider")
+                if "model_provider" in body
+                else getattr(session, "model_provider", None)
+            )
         )
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
             requested_provider,
         )
+        if standalone and (
+            normalized_model
+            or str(model or "") != str(requested_model or "")
+            or str(model_provider or "") != str(requested_provider or "")
+        ):
+            raise ValueError(
+                "standalone runtime Provider binding is no longer available exactly as launched"
+            )
         display_msg = _expert_team_execution_display_message(run)
         execution_message_start_index = len(list(getattr(session, "messages", None) or []))
         enterprise_gateway_request = None
-        if expert_teams.classify_contract_version(run) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
+        classified_contract = expert_teams.classify_contract_version(run)
+        if standalone and (
+            type(run.get("schema_version")) is not int
+            or run.get("schema_version") != 3
+            or classified_contract != expert_teams.EXPERT_TEAM_CONTRACT_V1
+        ):
+            raise ValueError(
+                "standalone expert team execution requires schema 3 and contract v1"
+            )
+        if classified_contract == expert_teams.EXPERT_TEAM_CONTRACT_V1:
             enterprise_gateway_request = _expert_team_enterprise_gateway_request(workspace, run)
+            if standalone:
+                _require_standalone_strict_execution_contract(
+                    run,
+                    enterprise_gateway_request,
+                )
             execution_prompt = ""
         else:
             execution_prompt = _expert_team_execution_prompt(run)
@@ -5440,6 +5713,8 @@ def _start_expert_team_execution(
             session,
             msg=request.message,
             display_msg=display_msg,
+            model_messages=request.messages,
+            tools_disabled=request.tools_disabled,
             attachments=request.attachments,
             workspace=request.workspace or str(workspace),
             model=request.model or model,
@@ -5458,6 +5733,7 @@ def _start_expert_team_execution(
         return LegacyJournalRuntimeAdapter(
             start_run_delegate=_legacy_start,
             cancel_delegate=cancel_stream,
+            provider_context_resolver=_resolve_standalone_legacy_provider_context,
             live_stream_lookup=lambda run_id: str(run_id) in _active_stream_id_set(),
         )
 
@@ -5474,6 +5750,17 @@ def _start_expert_team_execution(
         return _backend_failure({"ok": False, "code": "runtime_incompatible", "error": error, "run": failed_run}), 503
 
     planned_runtime_adapter = type(adapter).__name__
+    if standalone and planned_runtime_adapter == "RunnerRuntimeAdapter":
+        error = (
+            "当前 Runner 协议不支持单机专家团的严格 Provider 绑定，"
+            "未向 Runner 发送任何请求。"
+        )
+        return _backend_failure({
+            "ok": False,
+            "code": "runtime_incompatible",
+            "error": error,
+            "run": _fail_known_pre_dispatch(error),
+        }), 503
     if already_reserved:
         persisted_adapter = str(run.get("execution_runtime_adapter") or "").strip()
         if persisted_adapter != planned_runtime_adapter:
@@ -5588,13 +5875,25 @@ def _start_expert_team_execution(
         tools_disabled=bool((enterprise_gateway_request or {}).get("tools_disabled")),
         idempotency_key=reservation_id,
         attachments=[],
-        workspace=str(workspace),
-        profile=getattr(session, "profile", None),
+        workspace=str(
+            (standalone_binding or {}).get("workspace") or workspace
+        ),
+        profile=(
+            (standalone_binding or {}).get("profile")
+            if standalone
+            else getattr(session, "profile", None)
+        ),
         provider=model_provider,
         model=model,
         source="expert-team",
         metadata={
             "route": "expert-team",
+            "expert_team_product_mode": (
+                "standalone" if standalone else "enterprise"
+            ),
+            "runtime_binding_source": str(
+                (standalone_binding or {}).get("source") or "enterprise_request"
+            ),
             "expert_team_run_id": str(run.get("run_id") or ""),
             "expert_team_stage_id": str(current_stage.get("task_id") or current_stage.get("id") or ""),
             "expert_team_version": int(run.get("version") or 0),
@@ -5608,7 +5907,35 @@ def _start_expert_team_execution(
         },
     )
 
-    if enterprise_gateway_request is not None:
+    if enterprise_gateway_request is not None and standalone:
+        try:
+            provider_context = adapter.resolve_provider_context(start_request)
+            _validate_standalone_runtime_provider_context(
+                provider_context,
+                expected_provider=None,
+                expected_model=None,
+            )
+            from dataclasses import replace
+
+            start_request = replace(
+                start_request,
+                metadata={
+                    **start_request.metadata,
+                    STRICT_PROVIDER_BINDING_METADATA_KEY: copy.deepcopy(
+                        provider_context
+                    ),
+                },
+            )
+        except Exception as exc:
+            error = str(exc) or "当前运行时无法证明单机专家团的严格模型合同。"
+            failed_run = _fail_reserved_start(error)
+            return {
+                "ok": False,
+                "code": "runtime_incompatible",
+                "error": error,
+                "run": failed_run,
+            }, 503
+    elif enterprise_gateway_request is not None:
         try:
             from api.expert_teams.data_egress import load_model_policy_registry
             from api.expert_teams.prompts import authorize_stage_model_call
@@ -14655,11 +14982,34 @@ def handle_post(handler, parsed) -> bool:
 
     if isinstance(body, dict):
         body_session_id = str(body.get("session_id") or "").strip()
+        body_session_is_public = True
         if (
             body_session_id
             and len(body_session_id) <= 240
             and is_safe_session_id(body_session_id)
-            and not _expert_team_launch_session_is_public(body_session_id)
+        ):
+            if parsed.path == "/api/session/delete":
+                # DELETE is the recovery path for a corrupt or symlinked
+                # ordinary sidecar.  Its anchored authority implementation
+                # must run before any sidecar deserialization, so visibility
+                # here is decided only from the independent launch receipt
+                # registry.  Uncommitted portal Sessions remain hidden;
+                # ordinary and committed Sessions can reach the fail-closed
+                # deletion transaction.
+                from api.expert_teams import launch_storage
+
+                body_session_is_public = launch_storage.is_session_deletion_public(
+                    body_session_id
+                )
+            else:
+                body_session_is_public = (
+                    _expert_team_launch_session_is_public(body_session_id)
+                )
+        if (
+            body_session_id
+            and len(body_session_id) <= 240
+            and is_safe_session_id(body_session_id)
+            and not body_session_is_public
         ):
             if diag:
                 diag.finish()
@@ -16215,6 +16565,17 @@ def handle_post(handler, parsed) -> bool:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
             existing = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if error := _expert_team_standalone_compatibility_error(existing):
+                return _expert_team_json_response(
+                    handler,
+                    {
+                        "ok": False,
+                        "code": "runtime_incompatible",
+                        "error": error,
+                        "run": existing,
+                    },
+                    status=503,
+                )
             if expert_teams.classify_contract_version(existing) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
                 run = expert_teams.answer_expert_team(workspace, body)
                 reservation_created = False
@@ -21422,6 +21783,8 @@ def _start_chat_stream_for_session(
     *,
     msg: str,
     display_msg: str | None = None,
+    model_messages=None,
+    tools_disabled: bool = False,
     attachments=None,
     workspace: str,
     model: str,
@@ -21439,6 +21802,23 @@ def _start_chat_stream_for_session(
     from api.turn_journal import new_turn_id
     reserved_turn_id = new_turn_id()
     persisted_msg = display_msg if display_msg is not None else msg
+    from api.turn_envelope import TurnEnvelope
+
+    strict_model_messages = bool(model_messages)
+    turn_envelope = TurnEnvelope.create(
+        turn_id=reserved_turn_id,
+        session_id=s.session_id,
+        submitted_at=time.time(),
+        display_user_message=persisted_msg,
+        model_messages=(
+            copy.deepcopy(model_messages)
+            if strict_model_messages
+            else [{"role": "user", "content": msg}]
+        ),
+        attachments=attachments,
+        strict_model_messages=strict_model_messages,
+        tools_disabled=bool(tools_disabled),
+    )
     session_lock = _get_session_agent_lock(s.session_id)
     privacy_decision = None
     diag.stage("session_lock_wait") if diag else None
@@ -21531,7 +21911,6 @@ def _start_chat_stream_for_session(
                 logger.exception("Failed to roll back unstarted stream claim %s", stream_id)
 
     journal_event = {}
-    from api.turn_envelope import TurnEnvelope
     try:
         if was_hidden_empty_session:
             publish_session_list_changed("session_new")
@@ -21599,14 +21978,6 @@ def _start_chat_stream_for_session(
         diag.stage("worker_thread_start") if diag else None
         backend_is_gateway = webui_gateway_chat_enabled(get_config())
         worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-        turn_envelope = TurnEnvelope.create(
-            turn_id=reserved_turn_id,
-            session_id=s.session_id,
-            submitted_at=s.pending_started_at or time.time(),
-            display_user_message=persisted_msg,
-            model_messages=[{"role": "user", "content": msg}],
-            attachments=attachments,
-        )
         worker_kwargs = {
             "model_provider": model_provider,
             "display_msg": persisted_msg,

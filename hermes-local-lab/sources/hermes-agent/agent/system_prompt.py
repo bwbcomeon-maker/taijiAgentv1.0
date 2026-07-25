@@ -75,6 +75,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     session — that's the only way to keep upstream prompt caches
     warm across turns.
     """
+    if getattr(agent, "exact_system_prompt", False):
+        if not isinstance(system_message, str) or not system_message.strip():
+            raise ValueError(
+                "exact system prompt mode requires a non-empty caller contract"
+            )
+        return {
+            "stable": "",
+            "context": system_message,
+            "volatile": "",
+        }
+
     # Local import to avoid pulling model_tools at module load.  Tests
     # patch ``run_agent.get_toolset_for_tool`` and similar helpers, so
     # we resolve through ``_ra()`` to honor those patches.

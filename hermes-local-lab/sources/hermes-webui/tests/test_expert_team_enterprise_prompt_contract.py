@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -243,6 +244,79 @@ def test_legacy_runtime_cannot_flatten_enterprise_messages_and_makes_zero_calls(
                 tools_disabled=True,
             )
         )
+    assert calls == []
+
+
+def test_legacy_runtime_accepts_only_standalone_strict_contract_without_flattening():
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, StartRunRequest
+
+    calls = []
+    messages = [
+        {"role": "system", "content": "contract"},
+        {"role": "user", "content": "{}"},
+    ]
+    adapter = LegacyJournalRuntimeAdapter(
+        start_run_delegate=lambda request: calls.append(request) or {"stream_id": "stream-1"},
+        provider_context_resolver=lambda request: {
+            "provider": request.provider,
+            "model": request.model,
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+        },
+    )
+    request = StartRunRequest(
+        session_id="sid",
+        message="",
+        messages=messages,
+        tools_disabled=True,
+        provider="openai",
+        model="gpt-test",
+        source="expert-team",
+        metadata={"expert_team_product_mode": "standalone"},
+    )
+    binding = adapter.resolve_provider_context(request)
+    request = replace(
+        request,
+        metadata={**request.metadata, "strict_provider_binding": binding},
+    )
+    result = adapter.start_run(request)
+
+    assert result.stream_id == "stream-1"
+    assert calls[0].messages == messages
+    assert calls[0].tools_disabled is True
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"tools_disabled": False},
+        {"messages": [{"role": "user", "content": "{}"}]},
+        {"messages": [{"role": "system", "content": "x"}, {"role": "assistant", "content": "y"}]},
+        {"metadata": {"expert_team_product_mode": "enterprise"}},
+    ],
+)
+def test_legacy_runtime_rejects_malformed_or_enterprise_strict_contract_before_dispatch(patch):
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, StartRunRequest
+
+    calls = []
+    values = {
+        "session_id": "sid",
+        "message": "",
+        "messages": [
+            {"role": "system", "content": "contract"},
+            {"role": "user", "content": "{}"},
+        ],
+        "tools_disabled": True,
+        "source": "expert-team",
+        "metadata": {"expert_team_product_mode": "standalone"},
+    }
+    values.update(patch)
+    adapter = LegacyJournalRuntimeAdapter(
+        start_run_delegate=lambda request: calls.append(request) or {}
+    )
+
+    with pytest.raises(NotImplementedError):
+        adapter.start_run(StartRunRequest(**values))
     assert calls == []
 
 

@@ -1764,13 +1764,10 @@ def _build_expert_team_run(
 
 
 def start_expert_team(workspace: Path, body: dict) -> dict:
-    """Build and write a Run for legacy/internal compatibility callers.
+    """Build and persist a legacy/internal non-standalone Run.
 
-    This is not the standalone product launch boundary. If an internal test
-    passes a standalone profile, the resulting raw file remains intentionally
-    invisible to ``read_run`` because it has no atomic receipt. Production
-    standalone callers must use ``POST /api/expert-teams/start`` (and later
-    ``/launch``), which commits Session, Run, and reverse bindings together.
+    Public canonical standalone Runs require an atomic committed receipt and
+    must use the pending/publish launch path behind ``POST /api/expert-teams/start``.
     """
     return write_run(workspace, _build_expert_team_run(body))
 

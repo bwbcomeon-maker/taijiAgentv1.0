@@ -1035,21 +1035,24 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
 def write_run(workspace: Path, run: dict) -> dict:
     run_id = safe_run_id(str(run.get("run_id") or ""))
     path = run_path(workspace, run_id)
+    requires_integrity = requires_standalone_run_integrity(run)
     if path.exists():
         existing = read_run_raw(workspace, run_id)
-        if _requires_standalone_start_binding(existing):
+        if requires_standalone_run_integrity(existing):
             _validate_public_standalone_run(
                 workspace,
                 existing,
                 require_committed=True,
             )
-            _validate_public_standalone_run(workspace, run, require_committed=True)
+            requires_integrity = True
+    if requires_integrity:
+        _validate_public_standalone_run(workspace, run, require_committed=True)
     _write_json_atomic(path, run)
     return run
 
 
-def _requires_standalone_start_binding(run: dict) -> bool:
-    """Return whether *run* belongs to the transaction-bound v3 contract."""
+def requires_standalone_run_integrity(run: dict) -> bool:
+    """Return whether schema/product markers require standalone integrity."""
     try:
         schema_version = int(run.get("schema_version") or 0)
     except (TypeError, ValueError):
@@ -1627,7 +1630,7 @@ def read_run(workspace: Path, run_id: str) -> dict:
     requested_run_id = safe_run_id(run_id)
     run = read_run_raw(workspace, requested_run_id)
     try:
-        if _requires_standalone_start_binding(run):
+        if requires_standalone_run_integrity(run):
             _validate_public_standalone_run(
                 workspace,
                 run,
