@@ -16,6 +16,14 @@
     {
       "templateId": "enterprise-research-report",
       "path": "templates/enterprise-research-report"
+    },
+    {
+      "templateId": "standalone-work-report",
+      "path": "templates/standalone-work-report"
+    },
+    {
+      "templateId": "standalone-research-report",
+      "path": "templates/standalone-research-report"
     }
   ],
   "installed": []

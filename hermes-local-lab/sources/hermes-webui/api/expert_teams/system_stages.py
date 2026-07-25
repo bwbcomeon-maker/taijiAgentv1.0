@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
+import uuid
 
 
 SYSTEM_STAGE_REQUEST_SCHEMA = "system-stage-request/v1"
@@ -110,7 +111,7 @@ def _template_identity(template_id: str) -> dict:
     package = docx_engine_v2.engine_root() / "templates" / str(template_id)
     manifest_path = package / "manifest.json"
     if not manifest_path.is_file():
-        raise SystemStageError("template_identity_unavailable", "企业模板身份不可用")
+        raise SystemStageError("template_identity_unavailable", "文档模板身份不可用")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     digest = hashlib.sha256()
     for file_path in sorted(item for item in package.rglob("*") if item.is_file()):
@@ -125,10 +126,11 @@ def _template_identity(template_id: str) -> dict:
     }
 
 
-def _renderer_identities() -> tuple[dict, dict]:
+def _renderer_identities(*, product_mode: str = "enterprise") -> tuple[dict, dict]:
     from api import docx_engine_v2
 
-    camel = docx_engine_v2.describe_renderer_identity("enterprise-default")
+    profile_id = "standalone-default" if product_mode == "standalone" else "enterprise-default"
+    camel = docx_engine_v2.describe_renderer_identity(profile_id)
     snake = {
         "name": str(camel.get("name") or ""),
         "version": str(camel.get("version") or ""),
@@ -139,18 +141,27 @@ def _renderer_identities() -> tuple[dict, dict]:
     return snake, camel
 
 
-def _document_metadata(brief: dict) -> dict:
+def _document_metadata(brief: dict, *, product_mode: str = "enterprise") -> dict:
     control = brief.get("document_control") if isinstance(brief.get("document_control"), dict) else {}
-    return {
+    common = {
         "title": str(brief.get("exact_title") or ""),
         "documentType": str(brief.get("document_type") or ""),
+        "versionLabel": str(control.get("version_label") or ""),
+        "documentDate": str(control.get("document_date") or ""),
+    }
+    if product_mode == "standalone":
+        return {
+            key: value
+            for key, value in common.items()
+            if key in {"title", "documentType"} or value
+        }
+    return {
+        **common,
         "client": str(control.get("client") or ""),
         "issuer": str(control.get("issuer") or ""),
         "compiler": str(control.get("compiler") or ""),
-        "versionLabel": str(control.get("version_label") or ""),
         "classification": str(control.get("classification") or ""),
         "classificationLabel": str(control.get("classification_label") or ""),
-        "documentDate": str(control.get("document_date") or ""),
     }
 
 
@@ -164,6 +175,13 @@ def _validate_delivery_binding_files(
     renderer: dict,
 ) -> None:
     from .delivery_integrity import sha256_file
+
+    standalone = binding.get("schema_version") == "expert-delivery-binding/v3"
+    if standalone:
+        if binding.get("product_mode") != "standalone":
+            raise SystemStageError("delivery_binding_changed", "单机交付绑定模式已变化")
+    elif binding.get("schema_version") != "expert-delivery-binding/v2":
+        raise SystemStageError("delivery_binding_changed", "交付绑定版本不受支持")
 
     expected_identity = {
         "session_id": str(request["session_id"]),
@@ -185,9 +203,10 @@ def _validate_delivery_binding_files(
         "sha256": canonical.get("sha256"),
     }:
         raise SystemStageError("delivery_binding_changed", "交付绑定正文身份已变化")
+    quality_field = "standalone_quality_report" if standalone else "layered_quality_report"
     for field in (
         "canonical_markdown", "asset_manifest", "semantic_gates", "document",
-        "automatic_quality_report", "layered_quality_report",
+        "automatic_quality_report", quality_field,
     ):
         ref = binding.get(field)
         if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}:
@@ -200,16 +219,55 @@ def _validate_delivery_binding_files(
             raise SystemStageError("delivery_binding_changed", f"交付绑定镜像摘要不一致: {field}")
 
 
+def _quarantine_uncommitted_delivery_output(attempt_root: Path, *, standalone: bool) -> Path:
+    """Move an incomplete, unbound renderer result aside before a safe retry."""
+
+    root = Path(attempt_root).resolve()
+    delivery_dir = root / "delivery"
+    sidecar_name = (
+        "standalone-quality-report.json" if standalone else "enterprise-quality-report.json"
+    )
+    sidecar = root / "reviews" / sidecar_name
+    candidates = [candidate for candidate in (delivery_dir, sidecar) if candidate.exists()]
+    if not candidates:
+        raise SystemStageError(
+            "delivery_orphan_missing",
+            "未找到可隔离的未绑定交付输出",
+        )
+    for candidate in candidates:
+        if candidate.is_symlink():
+            raise SystemStageError(
+                "delivery_orphan_path_unsafe",
+                "未绑定交付输出包含符号链接，已拒绝恢复",
+            )
+    quarantine = root / "recovery" / f"orphan-{uuid.uuid4().hex}"
+    quarantine.mkdir(parents=True, exist_ok=False)
+    if delivery_dir.exists():
+        delivery_dir.replace(quarantine / "delivery")
+    if sidecar.exists():
+        review_target = quarantine / "reviews"
+        review_target.mkdir(parents=True, exist_ok=True)
+        sidecar.replace(review_target / sidecar.name)
+    return quarantine
+
+
 def _execute_delivery_stage(workspace: Path, request: dict) -> dict:
     from api import docx_engine_v2
     from .documents import (
         FinalDocumentDeliveryError,
+        assert_standalone_delivery_write_tree,
         build_delivery_binding_v2,
+        build_delivery_binding_v3,
         build_delivery_manifest_from_binding,
         build_render_input_binding,
         prepare_canonical_delivery_inputs,
     )
-    from .delivery_integrity import canonical_attempt_root, sha256_file, workspace_relative_path
+    from .delivery_integrity import (
+        canonical_attempt_root,
+        delivery_attempt_lock,
+        sha256_file,
+        workspace_relative_path,
+    )
     from .runtime import reserve_document_revision_and_delivery_attempt
     from .stage_artifacts import build_stage_artifact
     from .storage import read_run
@@ -222,9 +280,20 @@ def _execute_delivery_stage(workspace: Path, request: dict) -> dict:
     ):
         raise SystemStageError("system_stage_request_stale", "系统交付请求已失效")
     brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
-    template_id = str((brief.get("document_control") or {}).get("render_template_id") or "")
+    standalone = str(run.get("product_mode") or "") == "standalone"
+    if standalone:
+        profile = run.get("launch_profile_snapshot")
+        if not isinstance(profile, dict) or profile.get("id") != run.get("launch_profile_id"):
+            raise SystemStageError("launch_profile_snapshot_invalid", "单机任务启动配置已失效")
+        template_id = str(profile.get("render_template_id") or "")
+        if not template_id.startswith("standalone-"):
+            raise SystemStageError("standalone_template_required", "单机任务未绑定独立版文档模板")
+    else:
+        template_id = str((brief.get("document_control") or {}).get("render_template_id") or "")
     template = _template_identity(template_id)
-    renderer, renderer_camel = _renderer_identities()
+    renderer, renderer_camel = _renderer_identities(
+        product_mode="standalone" if standalone else "enterprise"
+    )
 
     with tempfile.TemporaryDirectory(prefix="taiji-delivery-preview-") as preview:
         preview_inputs = prepare_canonical_delivery_inputs(
@@ -252,120 +321,176 @@ def _execute_delivery_stage(workspace: Path, request: dict) -> dict:
     attempt_root = canonical_attempt_root(root, str(request["run_id"]), str(request["stage_id"]), delivery_attempt)
     binding_path = attempt_root / "expert-team-delivery.json"
     quality_path = attempt_root / "delivery" / "quality-report.json"
-    if binding_path.is_file():
-        binding = json.loads(binding_path.read_text(encoding="utf-8"))
-    else:
-        prepared = prepare_canonical_delivery_inputs(
-            root,
-            reserved_run,
-            stage_id=str(request["stage_id"]),
-            delivery_attempt=delivery_attempt,
-        )
-        render_input = build_render_input_binding(
-            brief=brief,
-            artifact=prepared["artifact"],
-            canonical_document_path=prepared["paths"]["document"],
-            asset_manifest_path=prepared["paths"]["asset_manifest"],
-            semantic_gates_path=prepared["paths"]["semantic_gates"],
+    with delivery_attempt_lock(
+        root,
+        str(request["run_id"]),
+        str(request["stage_id"]),
+        delivery_attempt,
+    ):
+        if standalone:
+            try:
+                assert_standalone_delivery_write_tree(attempt_root)
+            except FinalDocumentDeliveryError as exc:
+                raise SystemStageError("delivery_path_unsafe", str(exc)) from exc
+        binding_builder = build_delivery_binding_v3 if standalone else build_delivery_binding_v2
+        if binding_path.is_file():
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        else:
+            prepared = prepare_canonical_delivery_inputs(
+                root,
+                reserved_run,
+                stage_id=str(request["stage_id"]),
+                delivery_attempt=delivery_attempt,
+            )
+            render_input = build_render_input_binding(
+                brief=brief,
+                artifact=prepared["artifact"],
+                canonical_document_path=prepared["paths"]["document"],
+                asset_manifest_path=prepared["paths"]["asset_manifest"],
+                semantic_gates_path=prepared["paths"]["semantic_gates"],
+                template=template,
+                renderer=renderer,
+            )
+            if render_input["render_input_fingerprint"] != fingerprint:
+                raise SystemStageError(
+                    "render_input_fingerprint_changed",
+                    "交付输入在预约后发生变化",
+                )
+            binding_kwargs = {
+                "session_id": str(request["session_id"]),
+                "run_id": str(request["run_id"]),
+                "stage_id": str(request["stage_id"]),
+                "stage_attempt": int(request["stage_attempt"]),
+                "delivery_attempt": delivery_attempt,
+                "document_revision": int(delivery_reservation["document_revision"]),
+                "brief": brief,
+                "artifact": prepared["artifact"],
+                "assets": prepared["paths"]["asset_manifest"],
+                "semantic_gates": prepared["semantic_gates"],
+                "template": template,
+                "renderer": renderer,
+                "render_input_fingerprint": fingerprint,
+                "document": attempt_root / "delivery" / "document.docx",
+                "quality": quality_path,
+            }
+            binding = None
+            delivery_dir = attempt_root / "delivery"
+            if delivery_dir.is_dir() and any(delivery_dir.iterdir()):
+                try:
+                    # The renderer publishes a verified directory atomically. If the
+                    # process died immediately afterwards, close the missing binding
+                    # over that exact output instead of invoking the renderer again.
+                    binding = binding_builder(attempt_root, **binding_kwargs)
+                except FinalDocumentDeliveryError:
+                    _quarantine_uncommitted_delivery_output(
+                        attempt_root,
+                        standalone=standalone,
+                    )
+
+            if binding is None:
+                engine_binding = {
+                    key: value
+                    for key, value in render_input.items()
+                    if key != "render_input_fingerprint"
+                }
+                canonical_ref = request["canonical_document_ref"]
+                result, status = docx_engine_v2._create_expert_delivery_job(
+                    {
+                        "template_id": template_id,
+                        "source_path": str(prepared["paths"]["document"]),
+                        "source_type": "markdown",
+                        "asset_dir": str(prepared["paths"]["asset_manifest"].parent),
+                        "asset_manifest_path": str(prepared["paths"]["asset_manifest"]),
+                        "out_dir": str(attempt_root / "delivery"),
+                        "document_metadata": _document_metadata(
+                            brief,
+                            product_mode="standalone" if standalone else "enterprise",
+                        ),
+                        "canonical_binding": {
+                            "artifactId": canonical_ref["artifact_id"],
+                            "artifactSha256": canonical_ref["sha256"],
+                            "briefRevision": int(canonical_ref["brief_revision"]),
+                            "briefSha256": canonical_ref["brief_sha256"],
+                        },
+                        "renderer_identity": renderer_camel,
+                        "render_input_binding": engine_binding,
+                        "render_input_fingerprint": fingerprint,
+                    },
+                    root,
+                    run_id=str(request["run_id"]),
+                    stage_id=str(request["stage_id"]),
+                    attempt=delivery_attempt,
+                )
+                if status != 200 or not result.get("ok"):
+                    raise SystemStageError(
+                        str(result.get("code") or "delivery_render_failed"),
+                        str(result.get("message") or "DOCX 交付生成失败"),
+                    )
+                binding = binding_builder(attempt_root, **binding_kwargs)
+
+        _validate_delivery_binding_files(
+            attempt_root,
+            binding,
+            request=request,
+            delivery_reservation=delivery_reservation,
             template=template,
             renderer=renderer,
         )
-        if render_input["render_input_fingerprint"] != fingerprint:
-            raise SystemStageError("render_input_fingerprint_changed", "交付输入在预约后发生变化")
-        engine_binding = {key: value for key, value in render_input.items() if key != "render_input_fingerprint"}
-        canonical_ref = request["canonical_document_ref"]
-        result, status = docx_engine_v2._create_expert_delivery_job(
+
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        projected_binding = {
+            **binding,
+            "_binding_path": workspace_relative_path(root, binding_path),
+            "_binding_sha256": sha256_file(binding_path),
+            "_quality_report_sha256": sha256_file(quality_path),
+        }
+        manifest = build_delivery_manifest_from_binding(projected_binding, quality)
+        enterprise_tokens = ("office", "wps", "approval", "approver")
+        failed = []
+        for item in quality.get("checks") or []:
+            if not isinstance(item, dict) or item.get("status") != "failed":
+                continue
+            identity = " ".join(
+                str(item.get(field) or "") for field in ("id", "code", "domain")
+            ).lower()
+            if (standalone and any(token in identity for token in enterprise_tokens)) or (
+                not standalone and item.get("id") == "wps_visual"
+            ):
+                continue
+            failed.append(item)
+        issues = [
             {
-                "template_id": template_id,
-                "source_path": str(prepared["paths"]["document"]),
-                "source_type": "markdown",
-                "asset_dir": str(prepared["paths"]["asset_manifest"].parent),
-                "asset_manifest_path": str(prepared["paths"]["asset_manifest"]),
-                "out_dir": str(attempt_root / "delivery"),
-                "document_metadata": _document_metadata(brief),
-                "canonical_binding": {
-                    "artifactId": canonical_ref["artifact_id"],
-                    "artifactSha256": canonical_ref["sha256"],
-                    "briefRevision": int(canonical_ref["brief_revision"]),
-                    "briefSha256": canonical_ref["brief_sha256"],
-                },
-                "renderer_identity": renderer_camel,
-                "render_input_binding": engine_binding,
-                "render_input_fingerprint": fingerprint,
+                "issue_id": f"delivery:{item.get('id')}:{index}",
+                "severity": "blocking",
+                "category": "render",
+                "field_path": f"quality.checks.{item.get('id')}",
+                "message": str(item.get("message") or item.get("id") or "automatic check failed"),
+                "suggested_action": "修复对应自动检查后重新生成交付包",
+            }
+            for index, item in enumerate(failed, 1)
+        ]
+        artifact = build_stage_artifact(
+            {
+                "artifact_type": "delivery_manifest",
+                "summary": (
+                    "DOCX 已按确认正文生成并通过自动检查，等待本机确认。"
+                    if standalone
+                    else "企业 DOCX 已按批准正文生成，等待 Office 视觉验收。"
+                ),
+                "payload": manifest,
+                "blocking_issues": issues,
+                "deliverable_markdown": None,
             },
-            root,
-            run_id=str(request["run_id"]),
-            stage_id=str(request["stage_id"]),
-            attempt=delivery_attempt,
-        )
-        if status != 200 or not result.get("ok"):
-            raise SystemStageError(str(result.get("code") or "delivery_render_failed"), str(result.get("message") or "DOCX 交付生成失败"))
-        binding = build_delivery_binding_v2(
-            attempt_root,
-            session_id=str(request["session_id"]),
-            run_id=str(request["run_id"]),
             stage_id=str(request["stage_id"]),
             stage_attempt=int(request["stage_attempt"]),
-            delivery_attempt=delivery_attempt,
-            document_revision=int(delivery_reservation["document_revision"]),
             brief=brief,
-            artifact=prepared["artifact"],
-            assets=prepared["paths"]["asset_manifest"],
-            semantic_gates=prepared["semantic_gates"],
-            template=template,
-            renderer=renderer,
-            render_input_fingerprint=fingerprint,
-            document=attempt_root / "delivery" / "document.docx",
-            quality=quality_path,
+            input_refs=deepcopy(request.get("approved_input_refs") or []),
+            now=str(
+                delivery_reservation.get("created_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
         )
-
-    _validate_delivery_binding_files(
-        attempt_root,
-        binding,
-        request=request,
-        delivery_reservation=delivery_reservation,
-        template=template,
-        renderer=renderer,
-    )
-
-    quality = json.loads(quality_path.read_text(encoding="utf-8"))
-    projected_binding = {
-        **binding,
-        "_binding_path": workspace_relative_path(root, binding_path),
-        "_binding_sha256": sha256_file(binding_path),
-        "_quality_report_sha256": sha256_file(quality_path),
-    }
-    manifest = build_delivery_manifest_from_binding(projected_binding, quality)
-    failed = [
-        item for item in quality.get("checks") or []
-        if isinstance(item, dict) and item.get("id") != "wps_visual" and item.get("status") == "failed"
-    ]
-    issues = [
-        {
-            "issue_id": f"delivery:{item.get('id')}:{index}",
-            "severity": "blocking",
-            "category": "render",
-            "field_path": f"quality.checks.{item.get('id')}",
-            "message": str(item.get("message") or item.get("id") or "automatic check failed"),
-            "suggested_action": "修复对应自动检查后重新生成交付包",
-        }
-        for index, item in enumerate(failed, 1)
-    ]
-    artifact = build_stage_artifact(
-        {
-            "artifact_type": "delivery_manifest",
-            "summary": "企业 DOCX 已按批准正文生成，等待 Office 视觉验收。",
-            "payload": manifest,
-            "blocking_issues": issues,
-            "deliverable_markdown": None,
-        },
-        stage_id=str(request["stage_id"]),
-        stage_attempt=int(request["stage_attempt"]),
-        brief=brief,
-        input_refs=deepcopy(request.get("approved_input_refs") or []),
-        now=str(delivery_reservation.get("created_at") or datetime.now(timezone.utc).isoformat()),
-    )
-    return {"artifact": artifact}
+        return {"artifact": artifact}
 
 
 def get_system_stage_registry(workspace: Path | None = None) -> SystemStageRegistry:
@@ -381,6 +506,6 @@ def get_system_stage_registry(workspace: Path | None = None) -> SystemStageRegis
         except (SystemStageError, ExpertTeamStateConflict):
             raise
         except (OSError, RuntimeError, ValueError) as exc:
-            raise SystemStageError("delivery_generation_failed", str(exc) or "企业交付生成失败") from exc
+            raise SystemStageError("delivery_generation_failed", str(exc) or "文档交付生成失败") from exc
 
     return SystemStageRegistry({"delivery": execute})

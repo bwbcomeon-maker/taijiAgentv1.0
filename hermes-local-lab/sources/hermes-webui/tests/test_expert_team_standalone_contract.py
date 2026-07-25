@@ -98,14 +98,14 @@ def test_launch_profiles_are_the_only_server_owned_startable_combinations():
             "content-creator-team",
             "work_report",
             "work_report",
-            "enterprise-work-report",
+            "standalone-work-report",
             5,
         ),
         (
             "deep-research-team",
             "research_report",
             "research_report",
-            "enterprise-research-report",
+            "standalone-research-report",
             6,
         ),
     ]
@@ -426,7 +426,7 @@ def test_profile_start_creates_standalone_schema_v3_with_immutable_server_snapsh
     assert run["team_id"] == "content-creator-team"
     assert run["document_brief"]["document_type"] == "work_report"
     assert run["document_brief"]["intake_example_id"] == "work_report"
-    assert run["document_brief"]["document_control"]["render_template_id"] == "enterprise-work-report"
+    assert run["document_brief"]["document_control"]["render_template_id"] == "standalone-work-report"
     assert len(run["tasks"]) == 5
 
     run["launch_profile_snapshot"]["team_id"] = "forged-after-write"
@@ -491,7 +491,7 @@ def test_standalone_view_projects_real_workflow_without_enterprise_identity_capa
     assert len(view["workflow"]["stages"]) == 6
     assert "contract_version" not in view
     assert view["brief"]["document_type"] == "research_report"
-    assert view["brief"]["document_control"]["render_template_id"] == "enterprise-research-report"
+    assert view["brief"]["document_control"]["render_template_id"] == "standalone-research-report"
 
     stage_artifact = {
         "artifact_id": "artifact-direction-1",
@@ -599,7 +599,9 @@ def test_standalone_completed_without_local_confirmation_projects_as_pending_not
     assert view["workspace"]["state"] == "awaiting_local_confirmation"
     assert list(view["completion_gates"]) == ["content", "document", "local_confirmation"]
     assert view["completion_gates"]["content"]["status"] == "passed"
-    assert view["completion_gates"]["document"]["status"] == "passed"
+    # Phase 3 no longer treats a residual enterprise transaction or a partial
+    # delivery ref as proof that the standalone DOCX passed its own binding.
+    assert view["completion_gates"]["document"]["status"] == "pending"
     assert view["completion_gates"]["local_confirmation"] == {
         "status": "pending",
         "label": "等待本机确认",
@@ -607,8 +609,8 @@ def test_standalone_completed_without_local_confirmation_projects_as_pending_not
         "blocking_issue_count": 0,
         "next_action": {"type": "wait_local_confirmation", "label": "等待本机确认"},
     }
-    assert view["delivery_status"] == "local_confirmation_required"
-    assert view["next_action"] == {"type": "wait_local_confirmation", "label": "等待本机确认"}
+    assert view["delivery_status"] == "document_pending"
+    assert view["next_action"] == {"type": "wait_document", "label": "等待生成文档"}
     assert view["office_review"] is None
     serialized = json.dumps(view, ensure_ascii=False)
     assert '"office"' not in serialized

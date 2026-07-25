@@ -18,6 +18,10 @@ _RENDER_TEMPLATES = {
     "work_report": "enterprise-work-report",
     "research_report": "enterprise-research-report",
 }
+_STANDALONE_RENDER_TEMPLATES = {
+    "work_report": "standalone-work-report",
+    "research_report": "standalone-research-report",
+}
 _RELEASED_DOCUMENT_TYPES = frozenset(_RENDER_TEMPLATES)
 _TASK_MODES = {"create", "polish"}
 _SOURCE_MODES = {"provided_only", "approved_internal", "approved_public"}
@@ -89,8 +93,15 @@ def build_document_brief(team_id, payload, *, now) -> dict:
     if seeded_original is not _MISSING and _text(seeded_original) != original_request:
         raise ContractError("original_request_conflict", "document_brief_seed.original_request", "原始诉求与顶层 prompt 不一致")
 
+    product_mode = _text(payload.get("product_mode"))
+    if product_mode not in {"", "standalone"}:
+        raise ContractError("product_mode_invalid", "product_mode", "专家团产品模式无效")
     control = _mapping(seed.get("document_control"))
-    expected_template = _RENDER_TEMPLATES[document_type]
+    expected_template = (
+        _STANDALONE_RENDER_TEMPLATES[document_type]
+        if product_mode == "standalone"
+        else _RENDER_TEMPLATES[document_type]
+    )
     render_template_id = _text(control.get("render_template_id")) or expected_template
     if render_template_id != expected_template:
         raise ContractError("render_template_mismatch", "document_control.render_template_id", "文种与交付模板不兼容")
@@ -105,8 +116,7 @@ def build_document_brief(team_id, payload, *, now) -> dict:
     approval = _mapping(seed.get("approval"))
     approval["approver_roles"] = _list(approval.get("approver_roles"))
 
-    return normalize_document_brief(
-        {
+    brief = {
             "schema_version": DOCUMENT_BRIEF_V1,
             "revision": 1,
             "status": "draft",
@@ -130,7 +140,9 @@ def build_document_brief(team_id, payload, *, now) -> dict:
             "confirmed_at": None,
             "confirmed_sha256": None,
         }
-    )
+    if product_mode == "standalone":
+        brief["product_mode"] = "standalone"
+    return normalize_document_brief(brief)
 
 
 def normalize_document_brief(brief) -> dict:
@@ -157,6 +169,8 @@ def normalize_document_brief(brief) -> dict:
     source_policy["source_refs"] = normalized_refs
     result["source_policy"] = source_policy
     result["schema_version"] = DOCUMENT_BRIEF_V1
+    if "product_mode" in result:
+        result["product_mode"] = _text(result.get("product_mode"))
     return result
 
 
@@ -228,7 +242,12 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
         errors.append(_error("document_control.classification", "invalid_enum", "密级无效"))
     if control.get("classification") == "custom" and not _text(control.get("classification_label")):
         errors.append(_error("document_control.classification_label", "required", "请填写自定义密级标签"))
-    if control.get("render_template_id") != _RENDER_TEMPLATES.get(document_type):
+    expected_template = (
+        _STANDALONE_RENDER_TEMPLATES.get(document_type)
+        if normalized.get("product_mode") == "standalone"
+        else _RENDER_TEMPLATES.get(document_type)
+    )
+    if control.get("render_template_id") != expected_template:
         errors.append(_error("document_control.render_template_id", "render_template_mismatch", "文种与模板不兼容"))
 
     details = normalized.get("details") or {}

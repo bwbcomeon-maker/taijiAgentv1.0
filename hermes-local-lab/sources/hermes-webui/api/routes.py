@@ -5289,6 +5289,7 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
                 "run_id": run.get("run_id"),
                 "stage_id": pending.get("id"),
                 "canonical_sha256": canonical.get("sha256"),
+                "delivery_recovery_generation": int(run.get("delivery_recovery_generation") or 0),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -5318,6 +5319,27 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
         return {"ok": False, "code": exc.code, "error": str(exc), "run": current}, 503
     except expert_teams.ExpertTeamStateConflict as exc:
         return {"ok": False, "code": exc.code, "error": str(exc), "run": exc.run or run}, 409
+
+
+def _open_expert_team_delivery_target(path: Path, target: str) -> None:
+    """Open only a server-resolved standalone delivery document or directory."""
+
+    resolved = Path(path).expanduser().resolve()
+    if target == "document":
+        if not resolved.is_file():
+            raise FileNotFoundError(resolved)
+    elif target == "folder":
+        if not resolved.is_dir():
+            raise FileNotFoundError(resolved)
+    else:
+        raise ValueError("unsupported standalone delivery open target")
+    system = platform.system()
+    if system == "Darwin":
+        subprocess.Popen(["open", str(resolved)])
+    elif system == "Windows":  # pragma: no cover - packaged Windows runtime
+        os.startfile(str(resolved))  # type: ignore[attr-defined]
+    else:  # pragma: no cover - packaged Linux runtime
+        subprocess.Popen(["xdg-open", str(resolved)])
 
 
 def _start_expert_team_execution(
@@ -16356,6 +16378,93 @@ def handle_post(handler, parsed) -> bool:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
             return bad(handler, f"Failed to revise expert team stage: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/delivery/open":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            resolved = expert_teams.resolve_standalone_expert_team_delivery_open(
+                workspace,
+                body,
+            )
+            _open_expert_team_delivery_target(
+                Path(resolved["path"]),
+                str(resolved["target"]),
+            )
+            return _expert_team_json_response(
+                handler,
+                {"ok": True, "target": str(resolved["target"])},
+            )
+        except FileNotFoundError:
+            return bad(handler, "standalone delivery file not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return bad(handler, f"Failed to open expert team delivery: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/delivery/revise":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.request_standalone_expert_team_delivery_revision(
+                workspace,
+                {**body, "feedback": str(body.get("feedback") or "")},
+            )
+            stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return _expert_team_json_response(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return bad(handler, f"Failed to revise expert team delivery: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/delivery/recover":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.recover_standalone_expert_team_delivery(workspace, body)
+            if str(run.get("workflow_state") or "") == "delivery_validation_required":
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            else:
+                stream_payload, status = {"ok": True, "run": run}, 200
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return _expert_team_json_response(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return bad(handler, f"Failed to recover expert team delivery: {_sanitize_error(exc)}", 400)
+
+    if parsed.path == "/api/expert-teams/delivery/confirm":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.confirm_standalone_expert_team_delivery(workspace, body)
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": True,
+                    "run": run,
+                    "teams": expert_teams.expert_team_catalog()["teams"],
+                },
+            )
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return bad(handler, f"Failed to confirm expert team delivery: {_sanitize_error(exc)}", 400)
 
     if parsed.path == "/api/expert-teams/stage/input":
         from api import expert_teams

@@ -510,8 +510,22 @@ def _validate_research_outline(payload):
 
 
 def _validate_delivery_manifest(payload):
-    _exact(payload, ("schema_version", "delivery_binding_path", "delivery_binding_sha256", "render_input_fingerprint", "delivery_attempt", "document_revision", "automatic_check_summary", "office_review_required"), path="payload")
-    if payload["schema_version"] != "delivery-manifest/v1":
+    schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+    if schema_version == "delivery-manifest/v1":
+        _exact(payload, ("schema_version", "delivery_binding_path", "delivery_binding_sha256", "render_input_fingerprint", "delivery_attempt", "document_revision", "automatic_check_summary", "office_review_required"), path="payload")
+    elif schema_version == "delivery-manifest/v2":
+        _exact(
+            payload,
+            (
+                "schema_version", "product_mode", "delivery_binding_path",
+                "delivery_binding_sha256", "render_input_fingerprint",
+                "delivery_attempt", "document_revision", "document_sha256",
+                "standalone_quality_report_sha256", "automatic_check_summary",
+                "local_confirmation_required",
+            ),
+            path="payload",
+        )
+    else:
         raise StageArtifactError("schema_version_mismatch", "payload.schema_version")
     path = payload["delivery_binding_path"]
     _string(path, "payload.delivery_binding_path")
@@ -520,17 +534,26 @@ def _validate_delivery_manifest(payload):
     for field in ("delivery_binding_sha256", "render_input_fingerprint"):
         if not _HEX64.fullmatch(str(payload[field])):
             raise StageArtifactError("invalid_sha256", f"payload.{field}")
+    if schema_version == "delivery-manifest/v2":
+        if payload["product_mode"] != "standalone":
+            raise StageArtifactError("invalid_enum", "payload.product_mode")
+        for field in ("document_sha256", "standalone_quality_report_sha256"):
+            if not _HEX64.fullmatch(str(payload[field])):
+                raise StageArtifactError("invalid_sha256", f"payload.{field}")
     for field in ("delivery_attempt", "document_revision"):
-        if not isinstance(payload[field], int) or payload[field] <= 0:
+        if not isinstance(payload[field], int) or isinstance(payload[field], bool) or payload[field] <= 0:
             raise StageArtifactError("invalid_type", f"payload.{field}")
     summary = payload["automatic_check_summary"]
     _exact(summary, ("status", "passed_count", "failed_count", "warning_count", "blocking_count"), path="payload.automatic_check_summary")
     _enum(summary["status"], {"passed", "failed"}, "payload.automatic_check_summary.status")
     for field in ("passed_count", "failed_count", "warning_count", "blocking_count"):
-        if not isinstance(summary[field], int) or summary[field] < 0:
+        if not isinstance(summary[field], int) or isinstance(summary[field], bool) or summary[field] < 0:
             raise StageArtifactError("invalid_type", f"payload.automatic_check_summary.{field}")
-    if payload["office_review_required"] is not True:
-        raise StageArtifactError("office_review_required", "payload.office_review_required")
+    if schema_version == "delivery-manifest/v1":
+        if payload["office_review_required"] is not True:
+            raise StageArtifactError("office_review_required", "payload.office_review_required")
+    elif payload["local_confirmation_required"] is not True:
+        raise StageArtifactError("local_confirmation_required", "payload.local_confirmation_required")
 
 
 def _validate_payload(artifact_type, payload, brief, source_snapshot):

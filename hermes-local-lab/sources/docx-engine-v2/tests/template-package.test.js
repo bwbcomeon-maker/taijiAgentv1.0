@@ -17,6 +17,8 @@ const expectedTemplateIds = [
   'meeting-minutes',
   'enterprise-work-report',
   'enterprise-research-report',
+  'standalone-work-report',
+  'standalone-research-report',
 ];
 
 function readJson(filePath) {
@@ -38,8 +40,13 @@ test('template registry lists migrated packages in stable order', () => {
   );
 });
 
-test('enterprise template packages bind every rendering file outside the manifest', () => {
-  for (const templateId of ['enterprise-work-report', 'enterprise-research-report']) {
+test('contract templates bind every rendering file outside the manifest', () => {
+  for (const templateId of [
+    'enterprise-work-report',
+    'enterprise-research-report',
+    'standalone-work-report',
+    'standalone-research-report',
+  ]) {
     const template = getTemplatePackage(templateId, { rootDir });
     const binding = readJson(path.join(template.packageDir, 'template-package.binding.json'));
     assert.equal(binding.schemaVersion, 'docx-template-package-binding/v1');

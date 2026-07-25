@@ -75,6 +75,23 @@ const documentMetadataV1Schema = {
   },
 };
 
+const standaloneDocumentMetadataV1Schema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['title', 'documentType'],
+  properties: {
+    title: { type: 'string', minLength: 1 },
+    documentType: { enum: ['work_report', 'research_report'] },
+    client: { type: 'string' },
+    versionLabel: { type: 'string' },
+    documentDate: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+  },
+};
+
+const documentMetadataSchema = {
+  oneOf: [documentMetadataV1Schema, standaloneDocumentMetadataV1Schema],
+};
+
 const canonicalBindingV1Schema = {
   type: 'object',
   additionalProperties: false,
@@ -413,6 +430,7 @@ const templateManifestSchema = {
 
 const schemas = {
   DocumentMetadataV1: documentMetadataV1Schema,
+  StandaloneDocumentMetadataV1: standaloneDocumentMetadataV1Schema,
   CanonicalBindingV1: canonicalBindingV1Schema,
   RendererIdentityV1: rendererIdentityV1Schema,
   RenderInputBindingV1: {
@@ -478,7 +496,7 @@ const schemas = {
       },
       warnings: stringArraySchema,
       failures: stringArraySchema,
-      documentMetadata: documentMetadataV1Schema,
+      documentMetadata: documentMetadataSchema,
       canonicalBinding: canonicalBindingV1Schema,
       rendererIdentity: rendererIdentityV1Schema,
       renderInputBinding: { type: 'object', additionalProperties: true },
@@ -594,7 +612,7 @@ const schemas = {
       schemaVersion: { const: 'docx-engine-v2/render-plan' },
       jobId: { type: 'string', minLength: 1 },
       templateId: { type: 'string', minLength: 1 },
-      documentMetadata: documentMetadataV1Schema,
+      documentMetadata: documentMetadataSchema,
       canonicalBinding: canonicalBindingV1Schema,
       rendererIdentity: rendererIdentityV1Schema,
       renderInputBinding: { type: 'object', additionalProperties: true },
@@ -695,7 +713,7 @@ const schemas = {
           },
         },
       },
-      documentMetadata: documentMetadataV1Schema,
+      documentMetadata: documentMetadataSchema,
       canonicalBinding: canonicalBindingV1Schema,
       rendererIdentity: rendererIdentityV1Schema,
       renderInputFingerprint: sha256Schema,

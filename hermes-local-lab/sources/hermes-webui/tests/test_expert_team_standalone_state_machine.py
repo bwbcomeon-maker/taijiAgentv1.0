@@ -3,8 +3,11 @@ from __future__ import annotations
 import io
 import json
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
+import threading
 from urllib.parse import urlparse
 
 import pytest
@@ -504,9 +507,17 @@ def test_unbound_standalone_completed_state_never_claims_delivery_completed(stan
     reopened = expert_teams.read_expert_team_run(workspace, run_id)
 
     assert reopened["workflow_state"] == "completed"
-    assert reopened["view"]["public_state"] == "awaiting_delivery_confirmation"
+    assert reopened["view"]["public_state"] == "failed"
     assert reopened["view"]["presentation"]["state"] != "completed"
     assert reopened["view"]["allowed_actions"] == []
+    assert "delivery_confirm" not in reopened["view"]["allowed_actions"]
+    assert reopened["view"]["delivery_action_binding"] is None
+    assert reopened["view"]["delivery_recovery_binding"] is None
+    assert reopened["view"]["delivery_status"] == "delivery_unverified"
+    assert reopened["view"]["next_action"] == {
+        "type": "none",
+        "label": "当前交付无法自动恢复，请新建专家团任务",
+    }
 
 
 def test_routes_keep_standalone_out_of_enterprise_approval_and_return_authoritative_409(
@@ -593,6 +604,571 @@ def test_confirm_route_dispatches_document_generation_after_last_semantic_stage(
     assert response.json_body()["run"]["view"]["public_state"] == "generating_document"
 
 
+def test_delivery_render_holds_attempt_lock_and_releases_before_run_completion(
+    standalone_env,
+    monkeypatch,
+):
+    from api import docx_engine_v2, expert_teams
+    from api.expert_teams import delivery_integrity
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-delivery-lock-launch",
+    )
+    reviewed = _install_review_artifact(workspace, run_id, stage_index=3)
+    confirmed_stage = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reviewed, key="standalone-delivery-lock-stage-confirm"),
+    )
+    lock_depth = 0
+    events = []
+    original_lock = delivery_integrity.delivery_attempt_lock
+    original_engine = docx_engine_v2._create_expert_delivery_job
+    original_complete = expert_teams.complete_system_stage_attempt
+
+    @contextmanager
+    def observed_lock(*args, **kwargs):
+        nonlocal lock_depth
+        with original_lock(*args, **kwargs):
+            lock_depth += 1
+            events.append("delivery-lock-enter")
+            try:
+                yield
+            finally:
+                events.append("delivery-lock-exit")
+                lock_depth -= 1
+
+    def observed_engine(*args, **kwargs):
+        assert lock_depth == 1
+        events.append("engine")
+        return original_engine(*args, **kwargs)
+
+    def observed_complete(*args, **kwargs):
+        assert lock_depth == 0
+        events.append("complete")
+        return original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(delivery_integrity, "delivery_attempt_lock", observed_lock)
+    monkeypatch.setattr(docx_engine_v2, "_create_expert_delivery_job", observed_engine)
+    monkeypatch.setattr(expert_teams, "complete_system_stage_attempt", observed_complete)
+
+    payload, status = routes._start_expert_team_execution(workspace, confirmed_stage, {})
+
+    assert status == 200, payload
+    assert events == ["delivery-lock-enter", "engine", "delivery-lock-exit", "complete"]
+
+
+def test_delivery_generation_rejects_symlinked_attempt_root_before_any_write(
+    standalone_env,
+):
+    from api import expert_teams
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-delivery-symlink-launch",
+    )
+    reviewed = _install_review_artifact(workspace, run_id, stage_index=3)
+    confirmed_stage = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reviewed, key="standalone-delivery-symlink-stage-confirm"),
+    )
+    attempt_root = canonical_attempt_root(workspace, run_id, "delivery", 1)
+    external = workspace.parent / f"{workspace.name}-external-delivery-attempt"
+    external.mkdir(parents=True)
+    attempt_root.parent.mkdir(parents=True, exist_ok=True)
+    attempt_root.symlink_to(external, target_is_directory=True)
+
+    payload, status = routes._start_expert_team_execution(workspace, confirmed_stage, {})
+
+    assert status == 503, payload
+    assert payload["code"] == "delivery_path_unsafe"
+    assert list(external.iterdir()) == []
+
+
+def test_retry_reuses_complete_orphan_delivery_output_after_binding_crash(
+    standalone_env,
+    monkeypatch,
+):
+    from api import expert_teams
+    from api.expert_teams import documents
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-complete-orphan-launch",
+    )
+    reviewed = _install_review_artifact(workspace, run_id, stage_index=3)
+    confirmed_stage = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reviewed, key="standalone-complete-orphan-stage-confirm"),
+    )
+    original_builder = documents.build_delivery_binding_v3
+
+    def crash_before_binding(*_args, **_kwargs):
+        raise RuntimeError("simulated crash after renderer output")
+
+    monkeypatch.setattr(documents, "build_delivery_binding_v3", crash_before_binding)
+    first_payload, first_status = routes._start_expert_team_execution(
+        workspace,
+        confirmed_stage,
+        {},
+    )
+    assert first_status == 503, first_payload
+    attempt_root = canonical_attempt_root(workspace, run_id, "delivery", 1)
+    assert (attempt_root / "delivery" / "document.docx").is_file()
+    assert not (attempt_root / "expert-team-delivery.json").exists()
+
+    engine_calls = []
+
+    def renderer_must_not_run(*_args, **_kwargs):
+        engine_calls.append("called")
+        return {"ok": False, "code": "renderer_replayed", "message": "renderer must not replay"}, 409
+
+    monkeypatch.setattr(documents, "build_delivery_binding_v3", original_builder)
+    monkeypatch.setattr(routes.docx_engine_v2, "_create_expert_delivery_job", renderer_must_not_run)
+    current = expert_teams.read_expert_team_run(workspace, run_id)
+    retry_payload, retry_status = routes._start_expert_team_execution(workspace, current, {})
+
+    assert retry_status == 200, retry_payload
+    assert engine_calls == []
+    assert retry_payload["run"]["current_delivery_attempt_reservation"]["delivery_attempt"] == 1
+    assert retry_payload["run"]["delivery_attempt_counter"] == 1
+
+
+def test_retry_quarantines_incomplete_orphan_output_then_renders_safely(
+    standalone_env,
+    monkeypatch,
+):
+    from api import docx_engine_v2, expert_teams
+    from api.expert_teams import documents
+    from api.expert_teams.delivery_integrity import canonical_attempt_root
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-incomplete-orphan-launch",
+    )
+    reviewed = _install_review_artifact(workspace, run_id, stage_index=3)
+    confirmed_stage = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reviewed, key="standalone-incomplete-orphan-stage-confirm"),
+    )
+    original_builder = documents.build_delivery_binding_v3
+    original_engine = docx_engine_v2._create_expert_delivery_job
+    monkeypatch.setattr(
+        documents,
+        "build_delivery_binding_v3",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated crash after renderer output")
+        ),
+    )
+    first_payload, first_status = routes._start_expert_team_execution(
+        workspace,
+        confirmed_stage,
+        {},
+    )
+    assert first_status == 503, first_payload
+
+    attempt_root = canonical_attempt_root(workspace, run_id, "delivery", 1)
+    delivery_dir = attempt_root / "delivery"
+    (delivery_dir / "document.docx").unlink()
+    (delivery_dir / "orphan-marker.txt").write_text("partial", encoding="utf-8")
+    engine_calls = []
+
+    def observed_engine(*args, **kwargs):
+        engine_calls.append("called")
+        return original_engine(*args, **kwargs)
+
+    monkeypatch.setattr(documents, "build_delivery_binding_v3", original_builder)
+    monkeypatch.setattr(docx_engine_v2, "_create_expert_delivery_job", observed_engine)
+    current = expert_teams.read_expert_team_run(workspace, run_id)
+    retry_payload, retry_status = routes._start_expert_team_execution(workspace, current, {})
+
+    assert retry_status == 200, retry_payload
+    assert engine_calls == ["called"]
+    assert (delivery_dir / "document.docx").is_file()
+    quarantined_markers = list((attempt_root / "recovery").glob("*/delivery/orphan-marker.txt"))
+    assert len(quarantined_markers) == 1
+    assert quarantined_markers[0].read_text(encoding="utf-8") == "partial"
+
+
+def test_real_standalone_delivery_generation_confirmation_and_drift_detection(
+    standalone_env,
+    monkeypatch,
+):
+    from api import expert_teams
+    from api.expert_teams.standalone_delivery import validate_standalone_delivery_context
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-real-delivery-launch",
+    )
+    reviewed = _install_review_artifact(workspace, run_id, stage_index=3)
+    confirmed_stage = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reviewed, key="standalone-real-delivery-stage-confirm"),
+    )
+
+    generated_payload, generated_status = routes._start_expert_team_execution(
+        workspace,
+        confirmed_stage,
+        {},
+    )
+
+    assert generated_status == 200, generated_payload
+    generated = generated_payload["run"]
+    assert generated["workflow_state"] == "awaiting_review"
+    assert generated["view"]["public_state"] == "awaiting_delivery_confirmation"
+    assert generated["view"]["allowed_actions"] == [
+        "delivery_open_document",
+        "delivery_open_folder",
+        "delivery_revise",
+        "delivery_confirm",
+    ]
+    action_binding = generated["view"]["delivery_action_binding"]
+    assert action_binding["document_sha256"]
+    delivery = validate_standalone_delivery_context(workspace, generated)
+    assert delivery["document_path"].is_file()
+    assert delivery["document_path"].suffix == ".docx"
+
+    response = _post(
+        routes,
+        "/api/expert-teams/delivery/confirm",
+        {**action_binding, "idempotency_key": "standalone-real-delivery-confirm"},
+    )
+
+    assert response.status == 200, response.json_body()
+    completed = response.json_body()["run"]
+    assert completed["workflow_state"] == "completed"
+    assert completed["completion_integrity"]["status"] == "valid"
+    assert completed["view"]["public_state"] == "completed"
+    assert completed["view"]["allowed_actions"] == [
+        "delivery_open_document",
+        "delivery_open_folder",
+    ]
+
+    opened = []
+    monkeypatch.setattr(
+        routes,
+        "_open_expert_team_delivery_target",
+        lambda path, target: opened.append((Path(path), target)),
+    )
+    open_response = _post(
+        routes,
+        "/api/expert-teams/delivery/open",
+        {
+            **action_binding,
+            "expected_version": completed["version"],
+            "idempotency_key": "standalone-real-delivery-open-after-confirm",
+            "target": "document",
+        },
+    )
+    assert open_response.status == 200, open_response.json_body()
+    assert opened == [(delivery["document_path"], "document")]
+
+    replay = _post(
+        routes,
+        "/api/expert-teams/delivery/confirm",
+        {**action_binding, "idempotency_key": "standalone-real-delivery-confirm"},
+    )
+    assert replay.status == 200, replay.json_body()
+    replayed = replay.json_body()["run"]
+    assert replayed["version"] == completed["version"]
+    assert replayed["local_delivery_confirmation"] == completed["local_delivery_confirmation"]
+    assert sum(
+        item.get("action") == "confirm_delivery"
+        for item in replayed.get("action_journal") or []
+        if isinstance(item, dict)
+    ) == 1
+
+    original_document = delivery["document_path"].read_bytes()
+    delivery["document_path"].write_bytes(original_document + b"tampered")
+    drifted = expert_teams.read_expert_team_run(workspace, run_id)
+    assert drifted["completion_integrity"]["status"] == "drifted"
+    assert drifted["view"]["public_state"] == "awaiting_delivery_confirmation"
+    assert "delivery_confirm" not in drifted["view"]["allowed_actions"]
+    assert drifted["view"]["allowed_actions"] == ["delivery_recover"]
+    assert drifted["view"]["presentation"]["primary_action"] == {
+        "id": "delivery_recover",
+        "label": "重新生成 DOCX",
+        "kind": "primary",
+    }
+    assert drifted["view"]["delivery_status"] == "delivery_drifted"
+    assert drifted["view"]["next_action"] == {
+        "type": "recover_delivery",
+        "label": "重新生成 DOCX",
+    }
+    recovery_binding = drifted["view"]["delivery_recovery_binding"]
+    assert recovery_binding == {
+        **{
+            field: completed["local_delivery_confirmation"][field]
+            for field in (
+                "session_id",
+                "run_id",
+                "stage_id",
+                "stage_attempt",
+                "artifact_id",
+                "artifact_sha256",
+                "delivery_attempt",
+                "delivery_binding_sha256",
+                "document_sha256",
+            )
+        },
+        "expected_version": completed["version"],
+    }
+
+    rejected_path = _post(
+        routes,
+        "/api/expert-teams/delivery/recover",
+        {
+            **recovery_binding,
+            "idempotency_key": "standalone-real-delivery-recover-path",
+            "path": str(delivery["document_path"]),
+        },
+    )
+    assert rejected_path.status == 400, rejected_path.json_body()
+    unchanged = expert_teams.read_expert_team_run(workspace, run_id)
+    assert unchanged["version"] == completed["version"]
+    assert unchanged["delivery_attempt_counter"] == 1
+
+    for label, mutation, expected_status, expected_code in (
+        (
+            "unknown-field",
+            {"client_note": "must be rejected"},
+            400,
+            None,
+        ),
+        (
+            "boolean-version",
+            {"expected_version": True},
+            400,
+            None,
+        ),
+        (
+            "stale-version",
+            {"expected_version": completed["version"] - 1},
+            409,
+            "version_conflict",
+        ),
+        (
+            "stale-stage",
+            {"stage_id": "other-stage"},
+            409,
+            "stale_stage",
+        ),
+        (
+            "stale-stage-attempt",
+            {"stage_attempt": recovery_binding["stage_attempt"] + 1},
+            409,
+            "stale_stage_attempt",
+        ),
+        (
+            "stale-artifact",
+            {"artifact_id": "delivery:999"},
+            409,
+            "stale_artifact",
+        ),
+        (
+            "stale-artifact-hash",
+            {"artifact_sha256": "e" * 64},
+            409,
+            "stale_artifact_hash",
+        ),
+        (
+            "stale-delivery-attempt",
+            {"delivery_attempt": recovery_binding["delivery_attempt"] + 1},
+            409,
+            "stale_delivery_attempt",
+        ),
+        (
+            "stale-binding-hash",
+            {"delivery_binding_sha256": "c" * 64},
+            409,
+            "stale_delivery_binding",
+        ),
+        (
+            "stale-document-hash",
+            {"document_sha256": "f" * 64},
+            409,
+            "stale_document_hash",
+        ),
+    ):
+        rejected = _post(
+            routes,
+            "/api/expert-teams/delivery/recover",
+            {
+                **recovery_binding,
+                "idempotency_key": f"standalone-real-delivery-recover-{label}",
+                **mutation,
+            },
+        )
+        assert rejected.status == expected_status, rejected.json_body()
+        if expected_code is not None:
+            assert rejected.json_body()["code"] == expected_code
+        unchanged = expert_teams.read_expert_team_run(workspace, run_id)
+        assert unchanged["version"] == completed["version"]
+        assert unchanged["delivery_attempt_counter"] == 1
+
+    delivery["document_path"].write_bytes(original_document)
+    no_longer_drifted = _post(
+        routes,
+        "/api/expert-teams/delivery/recover",
+        {
+            **recovery_binding,
+            "idempotency_key": "standalone-real-delivery-recover-no-drift",
+        },
+    )
+    assert no_longer_drifted.status == 409, no_longer_drifted.json_body()
+    assert no_longer_drifted.json_body()["code"] == "delivery_recovery_not_required"
+    delivery["document_path"].write_bytes(original_document + b"tampered-again")
+
+    recovered_response = _post(
+        routes,
+        "/api/expert-teams/delivery/recover",
+        {
+            **recovery_binding,
+            "idempotency_key": "standalone-real-delivery-recover",
+        },
+    )
+    assert recovered_response.status == 200, recovered_response.json_body()
+    regenerated = recovered_response.json_body()["run"]
+    assert regenerated["workflow_state"] == "awaiting_review"
+    assert regenerated["view"]["public_state"] == "awaiting_delivery_confirmation"
+    assert regenerated["current_delivery_attempt_reservation"]["delivery_attempt"] == 2
+    assert regenerated["delivery_attempt_counter"] == 2
+    assert regenerated["current_stage_attempt_reservation"]["stage_attempt"] == 2
+    assert regenerated["local_delivery_confirmation"] is None
+    assert regenerated["delivery_gate"]["status"] == "pending_confirmation"
+    assert [
+        item["status"]
+        for item in regenerated["delivery_attempt_reservations"]
+        if item["delivery_attempt"] == 1
+    ] == ["invalidated"]
+    assert [
+        item["status"]
+        for item in regenerated["stage_attempt_reservations"]
+        if item["stage_id"] == "delivery" and item["stage_attempt"] == 1
+    ] == ["invalidated"]
+
+    recovery_replay = _post(
+        routes,
+        "/api/expert-teams/delivery/recover",
+        {
+            **recovery_binding,
+            "idempotency_key": "standalone-real-delivery-recover",
+        },
+    )
+    assert recovery_replay.status == 200, recovery_replay.json_body()
+    replayed_recovery = recovery_replay.json_body()["run"]
+    assert replayed_recovery["version"] == regenerated["version"]
+    assert replayed_recovery["delivery_attempt_counter"] == 2
+    assert replayed_recovery["stage_attempt_counters"]["delivery"] == 2
+
+    reconfirmed_response = _post(
+        routes,
+        "/api/expert-teams/delivery/confirm",
+        {
+            **regenerated["view"]["delivery_action_binding"],
+            "idempotency_key": "standalone-real-delivery-reconfirm",
+        },
+    )
+    assert reconfirmed_response.status == 200, reconfirmed_response.json_body()
+    reconfirmed = reconfirmed_response.json_body()["run"]
+    assert reconfirmed["workflow_state"] == "completed"
+    assert reconfirmed["completion_integrity"]["status"] == "valid"
+    assert reconfirmed["local_delivery_confirmation"]["delivery_attempt"] == 2
+    assert reconfirmed["view"]["public_state"] == "completed"
+
+
+def test_concurrent_same_key_delivery_recovery_generates_and_completes_once(
+    standalone_env,
+    monkeypatch,
+):
+    from api import docx_engine_v2, expert_teams
+    from api.expert_teams.standalone_delivery import validate_standalone_delivery_context
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-concurrent-recovery-launch",
+    )
+    reviewed = _install_review_artifact(workspace, run_id, stage_index=3)
+    confirmed_stage = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reviewed, key="standalone-concurrent-recovery-stage-confirm"),
+    )
+    generated_payload, generated_status = routes._start_expert_team_execution(
+        workspace,
+        confirmed_stage,
+        {},
+    )
+    assert generated_status == 200, generated_payload
+    generated = generated_payload["run"]
+    confirmed_response = _post(
+        routes,
+        "/api/expert-teams/delivery/confirm",
+        {
+            **generated["view"]["delivery_action_binding"],
+            "idempotency_key": "standalone-concurrent-recovery-confirm",
+        },
+    )
+    assert confirmed_response.status == 200, confirmed_response.json_body()
+    completed = confirmed_response.json_body()["run"]
+    delivery = validate_standalone_delivery_context(workspace, completed)
+    delivery["document_path"].write_bytes(delivery["document_path"].read_bytes() + b"drift")
+    drifted = expert_teams.read_expert_team_run(workspace, run_id)
+    action = {
+        **drifted["view"]["delivery_recovery_binding"],
+        "idempotency_key": "standalone-concurrent-recovery",
+    }
+
+    original_engine = docx_engine_v2._create_expert_delivery_job
+    original_reserve = expert_teams.reserve_system_stage_attempt
+    engine_entered = threading.Event()
+    release_engine = threading.Event()
+    second_reserved = threading.Event()
+    counter_lock = threading.Lock()
+    engine_calls = 0
+    reserve_calls = 0
+
+    def slow_engine(*args, **kwargs):
+        nonlocal engine_calls
+        with counter_lock:
+            engine_calls += 1
+        engine_entered.set()
+        assert release_engine.wait(timeout=10)
+        return original_engine(*args, **kwargs)
+
+    def observed_reserve(*args, **kwargs):
+        nonlocal reserve_calls
+        result = original_reserve(*args, **kwargs)
+        with counter_lock:
+            reserve_calls += 1
+            if reserve_calls >= 2:
+                second_reserved.set()
+        return result
+
+    monkeypatch.setattr(docx_engine_v2, "_create_expert_delivery_job", slow_engine)
+    monkeypatch.setattr(expert_teams, "reserve_system_stage_attempt", observed_reserve)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_post, routes, "/api/expert-teams/delivery/recover", action)
+        assert engine_entered.wait(timeout=10)
+        second = pool.submit(_post, routes, "/api/expert-teams/delivery/recover", action)
+        assert second_reserved.wait(timeout=10)
+        release_engine.set()
+        responses = [first.result(timeout=20), second.result(timeout=20)]
+
+    assert [response.status for response in responses] == [200, 200]
+    assert engine_calls == 1
+    observed = expert_teams.read_expert_team_run(workspace, run_id)
+    assert observed["delivery_attempt_counter"] == 2
+    assert observed["stage_attempt_counters"]["delivery"] == 2
+    assert sum(
+        item.get("action") == "recover_delivery"
+        for item in observed.get("action_journal") or []
+        if isinstance(item, dict)
+    ) == 1
+
+
 def test_standalone_read_ignores_residual_enterprise_office_evidence(
     standalone_env,
     monkeypatch,
@@ -666,6 +1242,19 @@ def test_standalone_completed_read_still_runs_local_digest_integrity_after_offic
     assert observed["workflow_state"] == "completed"
     assert observed["completion_integrity"]["status"] == "unverified"
     assert "office_review_view" not in observed
+
+    view = runtime.expert_team_run_view(observed)
+    assert view["public_state"] == "failed"
+    assert view["allowed_actions"] == []
+    assert view["delivery_action_binding"] is None
+    assert view["delivery_recovery_binding"] is None
+    assert view["delivery_status"] == "delivery_unverified"
+    assert view["next_action"] == {
+        "type": "none",
+        "label": "当前交付无法自动恢复，请新建专家团任务",
+    }
+    assert view["presentation"]["title"] == "交付确认缺失"
+    assert view["presentation"]["primary_action"] is None
 
 
 @pytest.mark.parametrize("ledger_case", ["missing", "duplicate", "mismatched", "corrupt"])

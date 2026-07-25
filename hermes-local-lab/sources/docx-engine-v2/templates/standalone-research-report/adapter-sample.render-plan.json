@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "docx-engine-v2/render-plan",
+  "jobId": "job-standalone-research-sample",
+  "templateId": "standalone-research-report",
+  "documentMetadata": {
+    "title": "本地优先 AI 助理落地研究",
+    "documentType": "research_report"
+  },
+  "sections": [],
+  "tables": [],
+  "figures": [],
+  "templateData": {
+    "title": "本地优先 AI 助理落地研究",
+    "sections": [
+      {
+        "sectionId": "sec-1",
+        "title": "研究范围",
+        "level": 2,
+        "metadata": {},
+        "blocks": [
+          {"type": "paragraph", "blockId": "block-1", "text": "已确认正文：本报告仅覆盖已提供材料中可验证的事实。"}
+        ]
+      }
+    ],
+    "tables": [],
+    "images": [],
+    "metadata": {}
+  },
+  "warnings": []
+}

@@ -288,7 +288,7 @@ def test_catalog_hides_internal_document_semantics_while_launch_profiles_keep_th
     profiles = {profile["intake_example_id"]: profile for profile in list_launch_profiles()}
     assert profiles["work_report"]["document_type"] == "work_report"
     assert profiles["work_report"]["task_mode"] == "create"
-    assert profiles["work_report"]["render_template_id"] == "enterprise-work-report"
+    assert profiles["work_report"]["render_template_id"] == "standalone-work-report"
     assert profiles["research_report"]["document_type"] == "research_report"
 
 

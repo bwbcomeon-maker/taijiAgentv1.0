@@ -41,10 +41,13 @@ def _run_v3_hooks(body: str) -> dict:
               'window.ExpertTeamV3 = Object.freeze({{',
               `window.__expertTeamV3TestHooks = {{
                 stageBindingFingerprint, conflictDraftMatches, restoreConflictRevisionDraft,
+                deliveryBindingFingerprint, conflictDeliveryDraftMatches, restoreConflictDeliveryDraft,
                 draftFingerprint, restoreWorkbenchDraft, stateCopyFor, statePanel, workbenchHtml,
-                handleWorkbenchClick,
+                handleWorkbenchClick, deliveryActionControl,
                 setConflictDraft(value) {{ state.conflictRevisionDraft = value; }},
+                setConflictDeliveryDraft(value) {{ state.conflictDeliveryDraft = value; }},
                 setCard(value) {{ state.card = value; state.busy = false; }},
+                getCard() {{ return state.card; }},
               }};\n  window.ExpertTeamV3 = Object.freeze({{`
             );
             vm.runInContext(source,context);
@@ -143,7 +146,7 @@ def test_v3_exposes_every_public_state_as_a_user_actionable_screen():
         "加入修改意见",
         "提交修改意见",
         "无修改，进入下一阶段",
-        "打开最终 DOCX",
+        "打开文档",
     ):
         assert label in script
 
@@ -549,3 +552,234 @@ def test_panel_switch_owns_v3_cleanup_without_changing_non_expert_markup():
     assert "window.ExpertTeamV3.clearStatusSurface()" in panels
     assert 'await switchPanel("tasks")' in smoke
     assert "ExpertTeamV3.clearStatusSurface(); await switchPanel" not in smoke
+
+
+def test_presenter_projects_only_a_complete_hash_bound_delivery_action_binding():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const binding={
+              session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',
+              stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,
+              delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64),
+            };
+            const summary={document_name:'部门月度工作汇报.docx',delivery_attempt:1,document_sha256:'c'.repeat(64),automatic_check_summary:{status:'passed',passed_count:5,failed_count:0,warning_count:0,blocking_count:0},quality_report_sha256:'d'.repeat(64)};
+            function card(candidate=binding,delivery=summary,version=12){
+              return context.window.buildExpertTeamCardFromRun({
+                run_id:'run-1',session_id:'session-1',schema_version:3,version,
+                view:{product_mode:'standalone',public_state:'awaiting_delivery_confirmation',allowed_actions:['delivery_open_document','delivery_open_folder','delivery_revise','delivery_confirm'],delivery_action_binding:candidate,standalone_delivery:delivery,presentation:{},workflow:{stages:[],current_stage:{id:'delivery'},progress:{done:5,total:5,current:'正式文档交付',current_index:4}}},
+              },{});
+            }
+            const valid=card();
+            const payload=context.window.buildExpertTeamDeliveryActionPayload(valid,'delivery-idem-1');
+            const invalid={};
+            for (const [key,value] of Object.entries({session_id:'',run_id:'',expected_version:-1,stage_id:'',stage_attempt:0,artifact_id:'',artifact_sha256:'x',delivery_attempt:0,delivery_binding_sha256:'x',document_sha256:'x'})) invalid[key]=card({...binding,[key]:value}).deliveryActionBinding;
+            console.log(JSON.stringify({
+              binding:valid.deliveryActionBinding,delivery:valid.standaloneDelivery,payload,invalid,
+              wrongSession:card({...binding,session_id:'session-2'}).deliveryActionBinding,
+              wrongRun:card({...binding,run_id:'run-2'}).deliveryActionBinding,
+              wrongVersion:card({...binding,expected_version:13}).deliveryActionBinding,
+            }));
+            """
+        )
+    )
+
+    assert result["binding"] is not None
+    assert result["delivery"]["documentName"] == "部门月度工作汇报.docx"
+    assert result["delivery"]["automaticCheckSummary"] == {
+        "status": "passed",
+        "passedCount": 5,
+        "failedCount": 0,
+        "warningCount": 0,
+        "blockingCount": 0,
+    }
+    assert result["payload"] == {**result["binding"], "idempotency_key": "delivery-idem-1"}
+    assert set(result["payload"]) == {
+        "session_id", "run_id", "expected_version", "stage_id", "stage_attempt",
+        "artifact_id", "artifact_sha256", "delivery_attempt", "delivery_binding_sha256",
+        "document_sha256", "idempotency_key",
+    }
+    assert all(value is None for value in result["invalid"].values())
+    assert result["wrongSession"] is None
+    assert result["wrongRun"] is None
+    assert result["wrongVersion"] is None
+
+
+def test_presenter_projects_a_separate_strict_delivery_recovery_binding_and_payload():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const binding={
+              session_id:'session-1',run_id:'run-1',expected_version:17,stage_id:'delivery',
+              stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,
+              delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64),
+            };
+            function card(candidate=binding,version=17){
+              return context.window.buildExpertTeamCardFromRun({
+                run_id:'run-1',session_id:'session-1',schema_version:3,version,
+                view:{product_mode:'standalone',public_state:'awaiting_delivery_confirmation',allowed_actions:['delivery_recover'],delivery_recovery_binding:candidate,delivery_status:'delivery_drifted',presentation:{state:'completed_invalid',title:'交付文档已变化'},workflow:{stages:[],current_stage:{id:'delivery'},progress:{done:5,total:5,current:'正式文档交付',current_index:4}}},
+              },{});
+            }
+            const valid=card();
+            const payload=context.window.buildExpertTeamDeliveryRecoveryPayload(valid,'recover-idem-1');
+            const invalid={};
+            for(const [key,value] of Object.entries({session_id:'',run_id:'',expected_version:-1,stage_id:'',stage_attempt:0,artifact_id:'',artifact_sha256:'x',delivery_attempt:0,delivery_binding_sha256:'x',document_sha256:'x'})) invalid[key]=card({...binding,[key]:value}).deliveryRecoveryBinding;
+            console.log(JSON.stringify({binding:valid.deliveryRecoveryBinding,payload,deliveryActionBinding:valid.deliveryActionBinding,invalid,wrongVersion:card(binding,18).deliveryRecoveryBinding}));
+            """
+        )
+    )
+
+    assert result["binding"] is not None
+    assert result["deliveryActionBinding"] is None
+    assert result["payload"] == {**result["binding"], "idempotency_key": "recover-idem-1"}
+    assert set(result["payload"]) == {
+        "session_id", "run_id", "expected_version", "stage_id", "stage_attempt",
+        "artifact_id", "artifact_sha256", "delivery_attempt", "delivery_binding_sha256",
+        "document_sha256", "idempotency_key",
+    }
+    assert all(value is None for value in result["invalid"].values())
+    assert result["wrongVersion"] is None
+
+
+def test_v3_delivery_surface_is_driven_only_by_allowed_actions_and_shows_text_progress():
+    result = _run_v3_hooks(
+        """
+        const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+        const base={
+          kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,
+          publicState:'awaiting_delivery_confirmation',subtitle:'部门月度工作汇报',phase:'正式文档交付',progress:{done:5,total:5,current:'正式文档交付',currentIndex:4},
+          workflow:{currentStage:{id:'delivery',title:'正式文档交付'},progress:{done:5,total:5,current:'正式文档交付',current_index:4}},brief:{sources:[]},presentation:{},team:{title:'内容创作专家团'},
+          deliveryActionBinding:binding,standaloneDelivery:{documentName:'部门月度工作汇报.docx',automaticCheckSummary:{status:'passed',passedCount:5,failedCount:0,warningCount:0,blockingCount:0}},
+        };
+        const all=hooks.workbenchHtml({...base,allowedActions:['delivery_open_document','delivery_open_folder','delivery_revise','delivery_confirm']});
+        const openOnly=hooks.statePanel({...base,allowedActions:['delivery_open_document']},'awaiting_delivery_confirmation');
+        const confirmOnly=hooks.statePanel({...base,allowedActions:['delivery_confirm']},'awaiting_delivery_confirmation');
+        const invalid=hooks.statePanel({...base,allowedActions:['delivery_open_document','delivery_confirm'],deliveryActionBinding:null},'awaiting_delivery_confirmation');
+        console.log(JSON.stringify({all,openOnly,confirmOnly,invalid}));
+        """
+    )
+
+    assert "第 5/5 步 · 正式文档交付" in result["all"]
+    assert "部门月度工作汇报.docx" in result["all"]
+    assert "自动检查通过 5 项" in result["all"]
+    for label in ("打开文档", "打开所在文件夹", "退回修改并重新生成", "确认文档可交付"):
+        assert label in result["all"]
+    assert "打开文档" in result["openOnly"]
+    assert "打开所在文件夹" not in result["openOnly"]
+    assert "退回修改并重新生成" not in result["openOnly"]
+    assert "确认文档可交付" not in result["openOnly"]
+    assert "确认文档可交付" in result["confirmOnly"]
+    assert "打开文档" not in result["confirmOnly"]
+    assert 'data-et3-action="delivery-open-document"' not in result["invalid"]
+    assert 'data-et3-action="delivery-confirm"' not in result["invalid"]
+    assert "交付操作信息不完整" in result["invalid"]
+
+
+def test_v3_delivery_drift_has_one_explicit_recovery_surface_and_no_stale_file_actions():
+    result = _run_v3_hooks(
+        """
+        const recovery={session_id:'session-1',run_id:'run-1',expected_version:17,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+        const card={
+          kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:17,
+          publicState:'awaiting_delivery_confirmation',allowedActions:['delivery_recover'],deliveryStatus:'delivery_drifted',deliveryRecoveryBinding:recovery,deliveryActionBinding:null,
+          subtitle:'部门月度工作汇报',phase:'正式文档交付',progress:{done:5,total:5,current:'正式文档交付',currentIndex:4},
+          workflow:{currentStage:{id:'delivery'},progress:{done:5,total:5,current:'正式文档交付',current_index:4}},brief:{exactTitle:'部门月度工作汇报',sources:[]},presentation:{title:'交付文档已变化'},team:{title:'内容创作专家团'},
+        };
+        const html=hooks.workbenchHtml(card);
+        console.log(JSON.stringify({html}));
+        """
+    )
+
+    html = result["html"]
+    assert "交付文档已变化" in html
+    assert "原本机确认已失效" in html
+    assert "重新生成 DOCX" in html
+    assert 'data-et3-action="delivery-recover"' in html
+    assert 'data-et3-action="delivery-open-document"' not in html
+    assert 'data-et3-action="delivery-open-folder"' not in html
+    assert 'data-et3-action="delivery-confirm"' not in html
+    assert 'data-et3-action="submit-delivery-revision"' not in html
+
+
+def test_v3_delivery_recovery_posts_only_the_server_bound_identity_and_never_a_path():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const recovery={session_id:'session-1',run_id:'run-1',expected_version:17,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+          const card={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:17,currentStageId:'delivery',publicState:'awaiting_delivery_confirmation',allowedActions:['delivery_recover'],deliveryStatus:'delivery_drifted',deliveryRecoveryBinding:recovery,presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5}};
+          const live={textContent:'',classList:{toggle(){}},setAttribute(){}};
+          const root={querySelector(selector){if(selector==='[data-et3-live]')return live;return null;}};
+          context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+          context.window.buildExpertTeamDeliveryRecoveryPayload=(target,key)=>({...target.deliveryRecoveryBinding,idempotency_key:key});
+          const requests=[];
+          context.window.api=async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {ok:true};};
+          const button={dataset:{et3Action:'delivery-recover'},textContent:'重新生成 DOCX',disabled:false,setAttribute(){}};
+          hooks.setCard(card);
+          await hooks.handleWorkbenchClick({target:{closest(){return button;}}});
+          console.log(JSON.stringify({requests,live:live.textContent,publicState:hooks.getCard().publicState}));
+        })();
+        """
+    )
+
+    assert len(result["requests"]) == 1
+    assert result["requests"][0]["url"] == "/api/expert-teams/delivery/recover"
+    body = result["requests"][0]["body"]
+    assert set(body) == {
+        "session_id", "run_id", "expected_version", "stage_id", "stage_attempt",
+        "artifact_id", "artifact_sha256", "delivery_attempt", "delivery_binding_sha256",
+        "document_sha256", "idempotency_key",
+    }
+    assert not any("path" in key for key in body)
+    assert result["publicState"] == "awaiting_delivery_confirmation"
+
+
+def test_v3_delivery_requests_are_hash_bound_never_send_paths_and_do_not_fake_completion():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+          const card={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,currentStageId:'delivery',publicState:'awaiting_delivery_confirmation',allowedActions:['delivery_open_document','delivery_open_folder','delivery_revise','delivery_confirm'],deliveryActionBinding:binding,presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5}};
+          let feedback='';const live={textContent:'',classList:{toggle(){}},setAttribute(){}};
+          const feedbackField={get value(){return feedback;},set value(value){feedback=value;},setAttribute(){},removeAttribute(){},focus(){}};
+          const root={querySelector(selector){if(selector==='[data-et3-delivery-revision]')return feedbackField;if(selector==='[data-et3-live]')return live;return null;}};
+          context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+          context.window.buildExpertTeamDeliveryActionPayload=(target,key)=>({...target.deliveryActionBinding,idempotency_key:key});
+          const requests=[];
+          context.window.api=async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {ok:true};};
+          function button(action){return {dataset:{et3Action:action},textContent:action,disabled:false,setAttribute(){}};}
+          hooks.setCard(card);
+          await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-open-document');}}});
+          await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-open-folder');}}});
+          await hooks.handleWorkbenchClick({target:{closest(){return button('submit-delivery-revision');}}});
+          const emptyMessage=live.textContent;
+          feedback='补充第三部分负责人和时间节点';
+          await hooks.handleWorkbenchClick({target:{closest(){return button('submit-delivery-revision');}}});
+          await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-confirm');}}});
+          console.log(JSON.stringify({requests,emptyMessage,publicState:hooks.getCard().publicState}));
+        })();
+        """
+    )
+
+    assert result["emptyMessage"] == "请先填写需要修改的内容；如果文档无需修改，请确认可交付。"
+    assert [item["url"] for item in result["requests"]] == [
+        "/api/expert-teams/delivery/open",
+        "/api/expert-teams/delivery/open",
+        "/api/expert-teams/delivery/revise",
+        "/api/expert-teams/delivery/confirm",
+    ]
+    assert result["requests"][0]["body"]["target"] == "document"
+    assert result["requests"][1]["body"]["target"] == "folder"
+    assert result["requests"][2]["body"]["feedback"] == "补充第三部分负责人和时间节点"
+    assert all("path" not in item["body"] for item in result["requests"])
+    for item in result["requests"]:
+        for field in (
+            "session_id", "run_id", "expected_version", "stage_id", "stage_attempt",
+            "artifact_id", "artifact_sha256", "delivery_attempt", "delivery_binding_sha256",
+            "document_sha256", "idempotency_key",
+        ):
+            assert field in item["body"]
+    assert result["publicState"] == "awaiting_delivery_confirmation"

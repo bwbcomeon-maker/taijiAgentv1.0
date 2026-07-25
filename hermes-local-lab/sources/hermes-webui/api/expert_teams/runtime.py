@@ -848,6 +848,63 @@ def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
         run.pop("office_review_view", None)
     else:
         run = _attach_office_review_view(workspace, run)
+    if standalone and str(run.get("workflow_state") or "") == "completed":
+        checked_at = _now()
+        confirmation = (
+            run.get("local_delivery_confirmation")
+            if isinstance(run.get("local_delivery_confirmation"), dict)
+            else {}
+        )
+        gate = run.get("delivery_gate") if isinstance(run.get("delivery_gate"), dict) else {}
+        if confirmation.get("schema_version") != "local-delivery-confirmation/v1":
+            run["completion_integrity"] = {
+                "status": "unverified",
+                "checked_at": checked_at,
+                "message": "已完成交付缺少当前本机确认，不能证明文件仍可交付。",
+            }
+            return run
+        try:
+            from .standalone_delivery import validate_standalone_delivery_context
+
+            attempt = int(confirmation.get("delivery_attempt") or 0)
+            stage_id = str(confirmation.get("stage_id") or "")
+            with delivery_attempt_lock(
+                workspace,
+                str(run.get("run_id") or ""),
+                stage_id,
+                attempt,
+            ):
+                context = validate_standalone_delivery_context(workspace, run)
+                snapshot = _standalone_delivery_snapshot(context)
+            expected = gate.get("digest_set") if isinstance(gate.get("digest_set"), dict) else {}
+            if not expected or snapshot != expected:
+                raise DeliveryIntegrityError("standalone delivery digest snapshot changed")
+            confirmation_identity = {
+                "session_id": str(confirmation.get("session_id") or ""),
+                "run_id": str(confirmation.get("run_id") or ""),
+                "stage_id": stage_id,
+                "stage_attempt": int(confirmation.get("stage_attempt") or 0),
+                "artifact_id": str(confirmation.get("artifact_id") or ""),
+                "artifact_sha256": str(confirmation.get("artifact_sha256") or ""),
+                "delivery_attempt": attempt,
+                "delivery_binding_sha256": str(confirmation.get("delivery_binding_sha256") or ""),
+                "document_sha256": str(confirmation.get("document_sha256") or ""),
+            }
+            if confirmation_identity != _standalone_delivery_identity(context):
+                raise DeliveryIntegrityError("standalone local confirmation is stale")
+        except (DeliveryIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as exc:
+            run["completion_integrity"] = {
+                "status": "drifted",
+                "checked_at": checked_at,
+                "message": f"已完成交付文件缺失或摘要变化：{exc}",
+            }
+            return run
+        run["completion_integrity"] = {
+            "status": "valid",
+            "checked_at": checked_at,
+            "message": "本机确认的 DOCX、质量报告与交付绑定摘要仍然一致。",
+        }
+        return run
     if not standalone and classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and isinstance(
         run.get("current_delivery_manifest_ref"), dict
     ):
@@ -1255,7 +1312,16 @@ def _idempotency_result(
             )
         replay = _refresh_artifact_existence(workspace, deepcopy(run))
         replay = _completion_integrity_for_read(workspace, replay)
-        return _sync_derived(replay)
+        # An idempotent replay must not change merely because the wall clock
+        # crossed a one-second boundary between the original response and the
+        # retry.  ``duration_seconds`` is a volatile view field that is already
+        # persisted with the committed mutation, so retain that committed value
+        # after refreshing the durable artifact/completion truth.
+        committed_duration = run.get("duration_seconds")
+        replay = _sync_derived(replay)
+        if isinstance(committed_duration, int) and not isinstance(committed_duration, bool):
+            replay["duration_seconds"] = committed_duration
+        return replay
     return None
 
 
@@ -1600,6 +1666,7 @@ def _standalone_start_context(
         "idempotency_key": validated["idempotency_key"],
         "team_id": profile["team_id"],
         "contract_version": EXPERT_TEAM_CONTRACT_V1,
+        "product_mode": "standalone",
         "intake_example_id": profile["intake_example_id"],
         "document_type": profile["document_type"],
         "document_brief_seed": {
@@ -1862,7 +1929,10 @@ def _reserve_stage_attempt_in_run(
         "created_at": _now(),
     }
     for item in reservations:
-        if item.get("stage_id") == stage_id and item.get("status") != "superseded":
+        if (
+            item.get("stage_id") == stage_id
+            and item.get("status") not in {"superseded", "invalidated"}
+        ):
             item["status"] = "superseded"
             item["superseded_at"] = _now()
     reservations.append(reservation)
@@ -1955,7 +2025,7 @@ def _reserve_document_revision_and_delivery_attempt_in_run(
     next_run["document_revision_counter"] = document_revision_counter
     next_run["delivery_attempt_counter"] = delivery_attempt
     for item in reservations:
-        if item.get("status") != "superseded":
+        if item.get("status") not in {"superseded", "invalidated"}:
             item["status"] = "superseded"
             item["superseded_at"] = _now()
     next_run["delivery_attempt_reservations"] = reservations + [deepcopy(reservation)]
@@ -2156,8 +2226,34 @@ def complete_system_stage_attempt(
             if isinstance(issue, dict)
         ):
             raise ExpertTeamStateConflict("system_artifact_blocked", "system artifact has unresolved issues", run)
-        if any(item.get("artifact_id") == artifact.get("artifact_id") for item in run.get("stage_artifacts") or []):
-            raise ExpertTeamStateConflict("stage_artifact_immutable_conflict", "system artifact already exists", run)
+        existing_artifacts = [
+            item
+            for item in run.get("stage_artifacts") or []
+            if isinstance(item, dict) and item.get("artifact_id") == artifact.get("artifact_id")
+        ]
+        if existing_artifacts:
+            current_ref = run.get("current_stage_artifact_ref")
+            if (
+                len(existing_artifacts) == 1
+                and existing_artifacts[0] == artifact
+                and str(run.get("workflow_state") or "") == "awaiting_review"
+                and str(reservation.get("status") or "") == "generated_valid"
+                and isinstance(current_ref, dict)
+                and current_ref
+                == {
+                    "artifact_id": artifact["artifact_id"],
+                    "sha256": artifact["sha256"],
+                    "stage_attempt": artifact["stage_attempt"],
+                }
+            ):
+                # Concurrent idempotent dispatchers may both finish the same
+                # immutable attempt. The second completion is a read-only replay.
+                return _sync_derived(run)
+            raise ExpertTeamStateConflict(
+                "stage_artifact_immutable_conflict",
+                "system artifact already exists",
+                run,
+            )
         run.setdefault("stage_artifacts", []).append(deepcopy(artifact))
         run["current_stage_artifact_ref"] = {
             "artifact_id": artifact["artifact_id"],
@@ -2193,6 +2289,14 @@ def complete_system_stage_attempt(
                 "delivery_binding_path": payload.get("delivery_binding_path"),
                 "delivery_binding_sha256": payload.get("delivery_binding_sha256"),
             }
+            if str(run.get("product_mode") or "") == "standalone":
+                run["delivery_gate"] = {
+                    "schema_version": "standalone-delivery-gate/v1",
+                    "status": "pending_confirmation",
+                    "delivery_attempt": delivery_attempt,
+                    "delivery_binding_sha256": payload.get("delivery_binding_sha256"),
+                    "document_sha256": payload.get("document_sha256"),
+                }
         run["pending_system_stage_result"] = "generated_valid"
         return _transition(
             workspace,
@@ -4298,6 +4402,781 @@ def request_expert_team_stage_revision(workspace: Path, body: dict) -> dict:
         "stage_revision_requested",
         {**_clear_execution_patch(), **standalone_patch},
     )
+
+
+_STANDALONE_DELIVERY_IDENTITY_FIELDS = (
+    "session_id",
+    "run_id",
+    "stage_id",
+    "stage_attempt",
+    "artifact_id",
+    "artifact_sha256",
+    "delivery_attempt",
+    "delivery_binding_sha256",
+    "document_sha256",
+)
+
+
+def _require_standalone_delivery_action_fields(body: dict) -> None:
+    for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS:
+        value = body.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"{field} is required for standalone delivery actions")
+    for field in ("stage_attempt", "delivery_attempt"):
+        if type(body.get(field)) is not int or int(body[field]) <= 0:
+            raise ValueError(f"{field} must be a positive integer")
+    for field in ("artifact_sha256", "delivery_binding_sha256", "document_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(body.get(field) or "")) is None:
+            raise ValueError(f"{field} must be a lowercase sha256 digest")
+
+
+def _standalone_delivery_identity(context: dict) -> dict:
+    identity = {
+        field: context.get(field)
+        for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS
+    }
+    identity["stage_attempt"] = int(identity.get("stage_attempt") or 0)
+    identity["delivery_attempt"] = int(identity.get("delivery_attempt") or 0)
+    for field in set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) - {
+        "stage_attempt",
+        "delivery_attempt",
+    }:
+        identity[field] = str(identity.get(field) or "")
+    return identity
+
+
+def _standalone_delivery_snapshot(context: dict) -> dict:
+    """Return a hash-closed snapshot used both at confirmation and later reads."""
+
+    binding_path = Path(context.get("binding_path") or "")
+    document_path = Path(context.get("document_path") or "")
+    quality_path = Path(context.get("quality_path") or "")
+    return {
+        **_standalone_delivery_identity(context),
+        "binding_file_sha256": sha256_file(binding_path),
+        "document_file_sha256": sha256_file(document_path),
+        "quality_file_sha256": sha256_file(quality_path),
+    }
+
+
+def _require_current_delivery_reservation(
+    run: dict,
+    context: dict,
+    *,
+    expected_status: str,
+) -> dict:
+    current = run.get("current_delivery_attempt_reservation")
+    if not isinstance(current, dict):
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "current delivery reservation is missing",
+            run,
+        )
+    reservation_id = str(current.get("reservation_id") or "")
+    attempt = int(context.get("delivery_attempt") or 0)
+    if (
+        not reservation_id
+        or int(current.get("delivery_attempt") or 0) != attempt
+        or str(current.get("status") or "") != expected_status
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "current delivery reservation is no longer confirmable",
+            run,
+        )
+    matches = [
+        item
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+        and str(item.get("reservation_id") or "") == reservation_id
+        and int(item.get("delivery_attempt") or 0) == attempt
+        and str(item.get("status") or "") == expected_status
+    ]
+    if len(matches) != 1 or matches[0] != current:
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "delivery reservation ledger is missing or ambiguous",
+            run,
+        )
+    return deepcopy(current)
+
+
+def _require_bound_standalone_delivery(
+    workspace: Path,
+    run: dict,
+    body: dict,
+    *,
+    allowed_states: set[str],
+) -> dict:
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_delivery_not_available",
+            "standalone delivery actions are only available for standalone runs",
+            run,
+        )
+    if str(run.get("workflow_state") or "") not in allowed_states:
+        raise ExpertTeamStateConflict(
+            "stale_state",
+            "standalone delivery is not awaiting this action",
+            run,
+        )
+    _require_standalone_delivery_action_fields(body)
+    from .standalone_delivery import validate_standalone_delivery_context
+
+    try:
+        context = validate_standalone_delivery_context(workspace, run)
+    except (DeliveryIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        raise ExpertTeamStateConflict(
+            "delivery_integrity_failed",
+            f"standalone delivery failed integrity validation: {exc}",
+            run,
+        ) from exc
+    requested = {
+        field: body.get(field)
+        for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS
+    }
+    requested["stage_attempt"] = int(requested["stage_attempt"])
+    requested["delivery_attempt"] = int(requested["delivery_attempt"])
+    authoritative = _standalone_delivery_identity(context)
+    conflict_codes = {
+        "session_id": "wrong_session",
+        "run_id": "wrong_run",
+        "stage_id": "stale_stage",
+        "stage_attempt": "stale_stage_attempt",
+        "artifact_id": "stale_artifact",
+        "artifact_sha256": "stale_artifact_hash",
+        "delivery_attempt": "stale_delivery_attempt",
+        "delivery_binding_sha256": "stale_delivery_binding",
+        "document_sha256": "stale_document_hash",
+    }
+    for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS:
+        if requested[field] != authoritative[field]:
+            raise ExpertTeamStateConflict(
+                conflict_codes[field],
+                f"standalone delivery {field} changed",
+                run,
+            )
+    quality = context.get("quality_report") if isinstance(context.get("quality_report"), dict) else {}
+    if str(quality.get("status") or "") != "passed":
+        raise ExpertTeamStateConflict(
+            "delivery_quality_failed",
+            "standalone delivery automatic quality checks did not pass",
+            run,
+        )
+    expected_reservation_status = (
+        "confirmed" if str(run.get("workflow_state") or "") == "completed" else "generated_valid"
+    )
+    _require_current_delivery_reservation(
+        run,
+        context,
+        expected_status=expected_reservation_status,
+    )
+    return context
+
+
+def _standalone_delivery_revision_stage(run: dict) -> tuple[int, str]:
+    descriptor = run.get("pending_system_stage")
+    if not isinstance(descriptor, dict) or descriptor.get("executor") != "system":
+        raise ExpertTeamStateConflict(
+            "system_step_contract_missing",
+            "standalone delivery has no immutable system descriptor",
+            run,
+        )
+    dependencies = [str(item or "") for item in descriptor.get("depends_on") or [] if str(item or "")]
+    if len(dependencies) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_revision_target_ambiguous",
+            "standalone delivery does not declare one semantic revision target",
+            run,
+        )
+    target = dependencies[0]
+    matches = [
+        index
+        for index, item in enumerate(run.get("_tasks_template") or [])
+        if isinstance(item, dict)
+        and str(item.get("id") or item.get("task_id") or "") == target
+        and item.get("executor") == "model"
+    ]
+    if len(matches) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_revision_target_ambiguous",
+            "standalone delivery semantic revision target is missing or ambiguous",
+            run,
+        )
+    return matches[0], target
+
+
+def _invalidate_delivery_reservation(run: dict, context: dict, *, at: str) -> list[dict]:
+    current = _require_current_delivery_reservation(
+        run,
+        context,
+        expected_status="generated_valid",
+    )
+    reservation_id = str(current.get("reservation_id") or "")
+    rows = [
+        deepcopy(item)
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    changed = 0
+    for index, item in enumerate(rows):
+        if str(item.get("reservation_id") or "") == reservation_id:
+            rows[index] = {**item, "status": "invalidated", "invalidated_at": at}
+            changed += 1
+    if changed != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "delivery reservation could not be invalidated exactly once",
+            run,
+        )
+    return rows
+
+
+@_serialized_body_mutation
+def request_standalone_expert_team_delivery_revision(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "revise_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+    feedback = str(body.get("feedback") or "").strip()
+    if not feedback:
+        raise ValueError("standalone delivery revision feedback is required")
+    attempt = body.get("delivery_attempt")
+    stage_id = str(body.get("stage_id") or "")
+    with delivery_attempt_lock(
+        workspace,
+        str(run.get("run_id") or ""),
+        stage_id,
+        int(attempt or 0),
+    ):
+        context = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review"},
+        )
+        invalidated_reservations = _invalidate_delivery_reservation(
+            run,
+            context,
+            at=_now(),
+        )
+    target_index, target_stage_id = _standalone_delivery_revision_stage(run)
+    at = _now()
+    entry = {
+        "stage_id": target_stage_id,
+        "feedback": feedback,
+        "at": at,
+        **{
+            field: _standalone_delivery_identity(context)[field]
+            for field in (
+                "stage_attempt",
+                "artifact_id",
+                "artifact_sha256",
+                "delivery_attempt",
+                "delivery_binding_sha256",
+                "document_sha256",
+            )
+        },
+    }
+    delivery_feedback = [
+        deepcopy(item)
+        for item in run.get("delivery_revision_feedback") or []
+        if isinstance(item, dict)
+    ]
+    delivery_feedback.append(deepcopy(entry))
+    revision_feedback = [
+        deepcopy(item)
+        for item in run.get("revision_feedback") or []
+        if isinstance(item, dict)
+    ]
+    revision_feedback.append(deepcopy(entry))
+    outputs = [deepcopy(item) for item in run.get("stage_outputs") or [] if isinstance(item, dict)]
+    for output in reversed(outputs):
+        if str(output.get("stage_id") or output.get("task_id") or "") == target_stage_id:
+            output["status"] = "revision_requested"
+            output["revision_requested_at"] = at
+            output.setdefault("feedback_history", []).append(deepcopy(entry))
+            break
+    approved = (
+        deepcopy(run.get("approved_stage_artifact_refs"))
+        if isinstance(run.get("approved_stage_artifact_refs"), dict)
+        else {}
+    )
+    approved.pop(target_stage_id, None)
+    _record_action(run, body, "revise_delivery")
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "delivery_revision_requested",
+        {
+            **_clear_execution_patch(),
+            "current_stage_index": target_index,
+            "stage_outputs": outputs,
+            "revision_feedback": revision_feedback,
+            "delivery_revision_feedback": delivery_feedback,
+            "approved_stage_artifact_refs": approved,
+            "canonical_document_ref": None,
+            "current_stage_artifact_ref": None,
+            "current_stage_attempt_reservation": None,
+            "current_delivery_manifest_ref": None,
+            "current_delivery_attempt_reservation": None,
+            "delivery_attempt_reservations": invalidated_reservations,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "invalidated",
+                "invalidated_at": at,
+                "delivery_attempt": int(context.get("delivery_attempt") or 0),
+                "delivery_binding_sha256": str(context.get("delivery_binding_sha256") or ""),
+                "document_sha256": str(context.get("document_sha256") or ""),
+            },
+            "local_delivery_confirmation": None,
+            "pending_system_stage": None,
+            "pending_system_stage_result": "invalidated",
+        },
+    )
+
+
+@_serialized_body_mutation
+def confirm_standalone_expert_team_delivery(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "confirm_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+    _require_standalone_delivery_action_fields(body)
+    stage_id = str(body.get("stage_id") or "")
+    delivery_attempt = int(body.get("delivery_attempt") or 0)
+    with delivery_attempt_lock(
+        workspace,
+        str(run.get("run_id") or ""),
+        stage_id,
+        delivery_attempt,
+    ):
+        first = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review"},
+        )
+        first_snapshot = _standalone_delivery_snapshot(first)
+        from .standalone_delivery import validate_standalone_delivery_context
+
+        try:
+            second = validate_standalone_delivery_context(workspace, run)
+        except (DeliveryIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as exc:
+            raise ExpertTeamStateConflict(
+                "delivery_changed_during_confirmation",
+                f"standalone delivery changed during final confirmation: {exc}",
+                run,
+            ) from exc
+        second_snapshot = _standalone_delivery_snapshot(second)
+        if first_snapshot != second_snapshot:
+            raise ExpertTeamStateConflict(
+                "delivery_changed_during_confirmation",
+                "standalone delivery changed while final confirmation was being committed",
+                run,
+            )
+    confirmed_at = _now()
+    identity = _standalone_delivery_identity(second)
+    confirmation = {
+        "schema_version": "local-delivery-confirmation/v1",
+        **identity,
+        "confirmed_at": confirmed_at,
+    }
+    delivery_rows = [
+        deepcopy(item)
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    current_delivery = _require_current_delivery_reservation(
+        run,
+        second,
+        expected_status="generated_valid",
+    )
+    current_delivery_id = str(current_delivery.get("reservation_id") or "")
+    for index, item in enumerate(delivery_rows):
+        if str(item.get("reservation_id") or "") == current_delivery_id:
+            delivery_rows[index] = {**item, "status": "confirmed", "confirmed_at": confirmed_at}
+            current_delivery = deepcopy(delivery_rows[index])
+            break
+    _record_action(run, body, "confirm_delivery")
+    return _transition(
+        workspace,
+        run,
+        "completed",
+        "delivery_confirmed",
+        {
+            **_stage_reservation_status_patch(run, "confirmed"),
+            "delivery_attempt_reservations": delivery_rows,
+            "current_delivery_attempt_reservation": current_delivery,
+            "local_delivery_confirmation": confirmation,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "passed",
+                "validated_at": confirmed_at,
+                "digest_set": second_snapshot,
+            },
+            "completion_integrity": {
+                # Use the same integrity vocabulary as the completed-read path
+                # so the UI does not change state labels after an app restart.
+                "status": "valid",
+                "checked_at": confirmed_at,
+                "message": "DOCX、质量报告和交付绑定已在锁内复核并由本机用户确认。",
+            },
+            "pending_system_stage_result": "confirmed",
+        },
+    )
+
+
+def _require_recoverable_confirmed_delivery(run: dict, body: dict) -> dict:
+    """Validate drift recovery against durable confirmation facts, never the changed file."""
+
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_delivery_not_available",
+            "standalone delivery recovery is only available for standalone runs",
+            run,
+        )
+    integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
+    if (
+        str(run.get("workflow_state") or "") != "completed"
+        or str(integrity.get("status") or "") != "drifted"
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_not_required",
+            "standalone delivery recovery requires a completed delivery with digest drift",
+            run,
+        )
+    _require_standalone_delivery_action_fields(body)
+    confirmation = (
+        run.get("local_delivery_confirmation")
+        if isinstance(run.get("local_delivery_confirmation"), dict)
+        else {}
+    )
+    if confirmation.get("schema_version") != "local-delivery-confirmation/v1":
+        raise ExpertTeamStateConflict(
+            "delivery_confirmation_missing",
+            "standalone delivery recovery has no durable local confirmation",
+            run,
+        )
+    requested = _standalone_delivery_identity(body)
+    confirmed = _standalone_delivery_identity(confirmation)
+    conflict_codes = {
+        "session_id": "wrong_session",
+        "run_id": "wrong_run",
+        "stage_id": "stale_stage",
+        "stage_attempt": "stale_stage_attempt",
+        "artifact_id": "stale_artifact",
+        "artifact_sha256": "stale_artifact_hash",
+        "delivery_attempt": "stale_delivery_attempt",
+        "delivery_binding_sha256": "stale_delivery_binding",
+        "document_sha256": "stale_document_hash",
+    }
+    for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS:
+        if requested[field] != confirmed[field]:
+            raise ExpertTeamStateConflict(
+                conflict_codes[field],
+                f"confirmed standalone delivery {field} changed",
+                run,
+            )
+
+    ref = run.get("current_delivery_manifest_ref")
+    stage_ref = run.get("current_stage_artifact_ref")
+    if not isinstance(ref, dict) or not isinstance(stage_ref, dict):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery references are missing",
+            run,
+        )
+    ref_identity = {
+        "artifact_id": str(ref.get("artifact_id") or ""),
+        "artifact_sha256": str(ref.get("sha256") or ""),
+        "stage_attempt": int(ref.get("stage_attempt") or 0),
+        "delivery_attempt": int(ref.get("delivery_attempt") or 0),
+        "delivery_binding_sha256": str(ref.get("delivery_binding_sha256") or ""),
+    }
+    if any(ref_identity[field] != confirmed[field] for field in ref_identity):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery manifest reference changed",
+            run,
+        )
+    if (
+        str(stage_ref.get("artifact_id") or "") != confirmed["artifact_id"]
+        or str(stage_ref.get("sha256") or "") != confirmed["artifact_sha256"]
+        or int(stage_ref.get("stage_attempt") or 0) != confirmed["stage_attempt"]
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery artifact reference changed",
+            run,
+        )
+    artifacts = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and str(item.get("artifact_id") or "") == confirmed["artifact_id"]
+        and str(item.get("sha256") or "") == confirmed["artifact_sha256"]
+        and int(item.get("stage_attempt") or 0) == confirmed["stage_attempt"]
+        and str(item.get("stage_id") or "") == confirmed["stage_id"]
+        and str(item.get("artifact_type") or "") == "delivery_manifest"
+    ]
+    if len(artifacts) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery artifact is missing or ambiguous",
+            run,
+        )
+
+    current_delivery = _require_current_delivery_reservation(
+        run,
+        confirmed,
+        expected_status="confirmed",
+    )
+    current_stage = run.get("current_stage_attempt_reservation")
+    if (
+        not isinstance(current_stage, dict)
+        or str(current_stage.get("stage_id") or "") != confirmed["stage_id"]
+        or int(current_stage.get("stage_attempt") or 0) != confirmed["stage_attempt"]
+        or str(current_stage.get("artifact_type") or "") != "delivery_manifest"
+        or str(current_stage.get("status") or "") != "confirmed"
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "confirmed delivery stage reservation changed",
+            run,
+        )
+    stage_reservation_id = str(current_stage.get("reservation_id") or "")
+    stage_matches = [
+        item
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+        and str(item.get("reservation_id") or "") == stage_reservation_id
+        and item == current_stage
+    ]
+    if not stage_reservation_id or len(stage_matches) != 1:
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "confirmed delivery stage reservation ledger is ambiguous",
+            run,
+        )
+    gate = run.get("delivery_gate") if isinstance(run.get("delivery_gate"), dict) else {}
+    digest_set = gate.get("digest_set") if isinstance(gate.get("digest_set"), dict) else {}
+    if (
+        gate.get("schema_version") != "standalone-delivery-gate/v1"
+        or str(gate.get("status") or "") != "passed"
+        or _standalone_delivery_identity(digest_set) != confirmed
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery digest gate changed",
+            run,
+        )
+    _pending_system_descriptor(run)
+    return {
+        "identity": confirmed,
+        "stage_reservation": deepcopy(current_stage),
+        "delivery_reservation": deepcopy(current_delivery),
+        "confirmation": deepcopy(confirmation),
+        "digest_set": deepcopy(digest_set),
+    }
+
+
+@_serialized_body_mutation
+def recover_standalone_expert_team_delivery(workspace: Path, body: dict) -> dict:
+    """Invalidate a drifted completed delivery and reserve a new system-delivery lineage."""
+
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    forbidden_paths = {
+        "path",
+        "document_path",
+        "delivery_dir",
+        "binding_path",
+        "quality_path",
+        "out_dir",
+    }
+    if forbidden_paths.intersection(unknown_fields):
+        raise ValueError("standalone delivery recovery paths are server-owned")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery recovery has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    if type((body or {}).get("expected_version")) is not int or int(body["expected_version"]) <= 0:
+        raise ValueError("expected_version must be a positive integer")
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "recover_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+    recovery = _require_recoverable_confirmed_delivery(run, body)
+    at = _now()
+    old_stage = recovery["stage_reservation"]
+    old_delivery = recovery["delivery_reservation"]
+    stage_rows = [
+        deepcopy(item)
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    delivery_rows = [
+        deepcopy(item)
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    stage_changed = 0
+    delivery_changed = 0
+    for index, item in enumerate(stage_rows):
+        if str(item.get("reservation_id") or "") == str(old_stage.get("reservation_id") or ""):
+            stage_rows[index] = {**item, "status": "invalidated", "invalidated_at": at}
+            stage_changed += 1
+    for index, item in enumerate(delivery_rows):
+        if str(item.get("reservation_id") or "") == str(old_delivery.get("reservation_id") or ""):
+            delivery_rows[index] = {**item, "status": "invalidated", "invalidated_at": at}
+            delivery_changed += 1
+    if stage_changed != 1 or delivery_changed != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery reservations could not be invalidated exactly once",
+            run,
+        )
+
+    _record_action(run, body, "recover_delivery")
+    generation = int(run.get("delivery_recovery_generation") or 0) + 1
+    history = [
+        deepcopy(item)
+        for item in run.get("delivery_recovery_history") or []
+        if isinstance(item, dict)
+    ]
+    history.append(
+        {
+            "schema_version": "standalone-delivery-recovery/v1",
+            "generation": generation,
+            "requested_at": at,
+            "detected_at": str((run.get("completion_integrity") or {}).get("checked_at") or ""),
+            "reason": "completed_delivery_digest_drift",
+            "previous_confirmation": recovery["confirmation"],
+            "previous_digest_set": recovery["digest_set"],
+        }
+    )
+    next_run = deepcopy(run)
+    next_run.update(
+        {
+            **_clear_execution_patch(),
+            "workflow_state": "delivery_validation_required",
+            "version": int(run.get("version") or 0) + 1,
+            "updated_at": at,
+            "delivery_recovery_generation": generation,
+            "delivery_recovery_history": history,
+            "stage_attempt_reservations": stage_rows,
+            "delivery_attempt_reservations": delivery_rows,
+            "current_stage_attempt_reservation": None,
+            "current_delivery_attempt_reservation": None,
+            "current_stage_artifact_ref": None,
+            "current_delivery_manifest_ref": None,
+            "local_delivery_confirmation": None,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "invalidated",
+                "invalidated_at": at,
+                "reason": "completed_delivery_digest_drift",
+                "previous_delivery_attempt": recovery["identity"]["delivery_attempt"],
+                "previous_delivery_binding_sha256": recovery["identity"]["delivery_binding_sha256"],
+                "previous_document_sha256": recovery["identity"]["document_sha256"],
+            },
+            "completion_integrity": {
+                "status": "recovery_requested",
+                "checked_at": at,
+                "message": "已使旧交付失效，正在从已确认正文重新生成 DOCX。",
+            },
+            "pending_system_stage_result": "recovery_requested",
+        }
+    )
+    events = [deepcopy(item) for item in run.get("events") or [] if isinstance(item, dict)]
+    events.append(
+        {
+            "type": "delivery_recovery_requested",
+            "from": "completed",
+            "to": "delivery_validation_required",
+            "at": at,
+        }
+    )
+    next_run["events"] = events
+    timeline = [
+        deepcopy(item)
+        for item in run.get("timeline_events") or []
+        if isinstance(item, dict)
+    ]
+    timeline.append(
+        {
+            "type": "delivery_recovery_requested",
+            "title": "已发现交付文件变化，正在重新生成",
+            "detail": "旧文档确认和交付绑定已失效",
+            "member_id": "director",
+            "at": at,
+        }
+    )
+    next_run["timeline_events"] = timeline
+    return write_run(workspace, _sync_derived(next_run))
+
+
+def resolve_standalone_expert_team_delivery_open(workspace: Path, body: dict) -> dict:
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+        "target",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    if "path" in unknown_fields:
+        raise ValueError("path is server-owned for standalone delivery open")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery open has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    target = str((body or {}).get("target") or "").strip()
+    if target not in {"document", "folder"}:
+        raise ValueError("target must be document or folder")
+    run_id = str((body or {}).get("run_id") or "")
+    with _run_mutation_lock(workspace, run_id):
+        run, _duplicate = _prepare_mutation(
+            workspace,
+            body,
+            "open_delivery",
+            skip_idempotency_result=True,
+            require_stage=False,
+        )
+        context = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review", "completed"},
+        )
+        from .standalone_delivery import resolve_standalone_open_target
+
+        resolved = resolve_standalone_open_target(workspace, run, target)
+        expected = context["document_path"] if target == "document" else context["delivery_dir"]
+        if Path(resolved).resolve() != Path(expected).resolve():
+            raise ExpertTeamStateConflict(
+                "delivery_open_target_changed",
+                "standalone delivery open target changed after validation",
+                run,
+            )
+        return {"target": target, "path": Path(resolved)}
 
 
 @_serialized_body_mutation

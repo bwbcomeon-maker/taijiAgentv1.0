@@ -23,18 +23,23 @@ function sha256(file) {
 }
 
 function fixture(sessionId, publicState = 'awaiting_stage_confirmation', version = 7) {
+  const awaitingStage = publicState === 'awaiting_stage_confirmation';
+  const awaitingDelivery = publicState === 'awaiting_delivery_confirmation';
+  const deliveryCompleted = publicState === 'completed';
   const output = {
     id: 'draft-1', kind: 'chat', title: '工作汇报阶段稿',
     content: '# 工作汇报\n\n## 一、工作开展情况\n已完成重点任务。\n\n## 二、存在问题\n部分数据待核实。\n\n## 三、下一步安排\n继续推进闭环。',
   };
   const stages = [
     { id: 'plan', task_id: 'plan', title: '任务规划', phase: '任务规划', status: 'done', worker_name: '写作总导演' },
-    { id: 'draft', task_id: 'draft', title: '初稿撰写', phase: '初稿撰写', status: publicState === 'executing' ? 'running' : 'awaiting_review', worker_name: '文案创作专家' },
-    { id: 'delivery', task_id: 'delivery', title: '交付确认', phase: '交付确认', status: 'pending', worker_name: '交付复核专家' },
+    { id: 'materials', task_id: 'materials', title: '素材整理', phase: '素材整理', status: 'done', worker_name: '资料整理专家' },
+    { id: 'draft', task_id: 'draft', title: '初稿撰写', phase: '初稿撰写', status: awaitingStage ? 'awaiting_review' : (publicState === 'executing' || publicState === 'revising' ? 'running' : 'done'), worker_name: '文案创作专家' },
+    { id: 'polish', task_id: 'polish', title: '审稿打磨', phase: '审稿打磨', status: awaitingDelivery || deliveryCompleted ? 'done' : 'pending', worker_name: '审稿专家' },
+    { id: 'delivery', task_id: 'delivery', title: '正式文档交付', phase: '正式文档交付', status: awaitingDelivery ? 'awaiting_review' : (deliveryCompleted ? 'done' : 'pending'), worker_name: '交付复核专家' },
   ];
   const presentation = {
     state: publicState, visible_title: '起草部门月度工作汇报',
-    title: publicState === 'awaiting_stage_confirmation' ? '阶段成果待确认' : '专家团正在执行',
+    title: awaitingStage ? '阶段成果待确认' : (awaitingDelivery ? '最终文档待确认' : (deliveryCompleted ? '文档已交付' : '专家团正在执行')),
     detail: '请阅读阶段成果后决定是否修改。', result: output,
     primary_action: { id: 'review_stage', label: '去复核', kind: 'primary' },
     secondary_actions: [
@@ -44,8 +49,10 @@ function fixture(sessionId, publicState = 'awaiting_stage_confirmation', version
   };
   return {
     run_id: 'et3-electron-run', session_id: sessionId, schema_version: 3,
-    contract_version: 'expert-team-contract/v1', product_mode: 'standalone', version, workflow_state: 'awaiting_review',
-    team_id: 'content-creator-team', team_title: '内容创作专家团', current_stage: stages[1],
+    contract_version: 'expert-team-contract/v1', product_mode: 'standalone', version,
+    workflow_state: deliveryCompleted ? 'completed' : (awaitingDelivery || awaitingStage ? 'awaiting_review' : publicState),
+    phase: awaitingDelivery || deliveryCompleted ? '正式文档交付' : '初稿撰写',
+    team_id: 'content-creator-team', team_title: '内容创作专家团', current_stage: awaitingDelivery || deliveryCompleted ? stages[4] : stages[2],
     document_brief: {
       status: 'confirmed', revision: 3, original_request: '起草部门月度工作汇报', exact_title: '部门月度工作汇报',
       document_type: 'work_report', purpose: '内部汇报', audience: '公司分管领导', source_refs: [],
@@ -53,16 +60,28 @@ function fixture(sessionId, publicState = 'awaiting_stage_confirmation', version
     questions: [], members: [], tasks: stages, artifacts: [], stage_outputs: [output],
     view: {
       product_mode: 'standalone', public_state: publicState,
-      allowed_actions: publicState === 'awaiting_stage_confirmation' ? ['stage_confirm', 'stage_revise'] : [],
-      stage_action_binding: publicState === 'awaiting_stage_confirmation' ? {
+      allowed_actions: awaitingStage ? ['stage_confirm', 'stage_revise'] : (awaitingDelivery
+        ? ['delivery_open_document', 'delivery_open_folder', 'delivery_revise', 'delivery_confirm']
+        : (deliveryCompleted ? ['delivery_open_document', 'delivery_open_folder'] : [])),
+      stage_action_binding: awaitingStage ? {
         session_id: sessionId, run_id: 'et3-electron-run', expected_version: version,
         stage_id: 'draft', stage_attempt: 1, artifact_id: 'draft:1', artifact_sha256: 'a'.repeat(64),
+      } : null,
+      delivery_action_binding: awaitingDelivery || deliveryCompleted ? {
+        session_id: sessionId, run_id: 'et3-electron-run', expected_version: version,
+        stage_id: 'delivery', stage_attempt: 1, artifact_id: 'delivery:1', artifact_sha256: 'b'.repeat(64),
+        delivery_attempt: 1, delivery_binding_sha256: 'c'.repeat(64), document_sha256: 'd'.repeat(64),
+      } : null,
+      standalone_delivery: awaitingDelivery || deliveryCompleted ? {
+        document_name: '部门月度工作汇报.docx', delivery_attempt: 1, document_sha256: 'd'.repeat(64),
+        quality_report_sha256: 'e'.repeat(64),
+        automatic_check_summary: { status: 'passed', passed_count: 5, failed_count: 0, warning_count: 0, blocking_count: 0 },
       } : null,
       presentation,
       business_context: { visible_title: '起草部门月度工作汇报', material_type: 'work_report' },
       team: { id: 'content-creator-team', title: '内容创作专家团', members: [] },
-      workflow: { stages, current_stage: stages[1], progress: { done: 1, total: 3, current: '初稿撰写' } },
-      workspace: { visible: true, title: '专家团工作台', state: publicState, current_stage: stages[1], stages },
+      workflow: { stages, current_stage: awaitingDelivery || deliveryCompleted ? stages[4] : stages[2], progress: { done: deliveryCompleted ? 5 : (awaitingDelivery ? 4 : 2), total: 5, current: awaitingDelivery || deliveryCompleted ? '正式文档交付' : '初稿撰写', current_index: awaitingDelivery || deliveryCompleted ? 4 : 2 } },
+      workspace: { visible: true, title: '专家团工作台', state: publicState, current_stage: awaitingDelivery || deliveryCompleted ? stages[4] : stages[2], stages },
       brief: {
         status: 'confirmed', revision: 3, original_request: '起草部门月度工作汇报', exact_title: '部门月度工作汇报',
         document_type: 'work_report', document_type_label: '工作汇报', purpose: '内部汇报', audience: '公司分管领导',
@@ -153,6 +172,17 @@ async function main() {
     await page.keyboard.press('Enter');
     await page.waitForSelector('[data-et3-dialog-backdrop]:not([hidden])');
     assert(await page.locator('[data-et3-dialog]').getAttribute('role') === 'dialog', 'Team detail is not an accessible dialog');
+    const dialogLayout = await page.locator('[data-et3-dialog]').evaluate(dialog => {
+      const templateList = dialog.querySelector('.et3-template-list');
+      return {
+        clientHeight: dialog.clientHeight,
+        scrollHeight: dialog.scrollHeight,
+        overflowY: getComputedStyle(dialog).overflowY,
+        templateColumns: templateList ? getComputedStyle(templateList).gridTemplateColumns.split(' ').filter(Boolean).length : 0,
+      };
+    });
+    assert(dialogLayout.scrollHeight <= dialogLayout.clientHeight + 1, '1440×900 team detail requires nested scrolling', dialogLayout);
+    assert(dialogLayout.templateColumns >= 2, 'Document tasks are not arranged compactly', dialogLayout);
     await page.screenshot({ path: path.join(outDir, '02-team-detail.png'), fullPage: false });
     for (let index = 0; index < 12; index += 1) await page.keyboard.press('Tab');
     assert(await page.locator('[data-et3-dialog]').evaluate(dialog => dialog.contains(document.activeElement)), 'Dialog focus escaped into the page background');
@@ -206,11 +236,18 @@ async function main() {
       window.__et3ConflictOnce = false;
       window.__et3ConflictCaptured = [];
       window.__et3StageInputCaptured = [];
+      window.__et3DeliveryCaptured = [];
+      window.__et3DeliveryConflictCaptured = [];
+      window.__et3DeliveryConflictOnce = false;
+      window.__et3RecoveryCaptured = [];
+      window.__et3RecoveryConflictCaptured = [];
+      window.__et3RecoveryConflictOnce = false;
       const originalApi = window.api;
       window.__et3OriginalApi = originalApi;
       window.api = async (url, options) => {
         const target = String(url);
-        if (target.includes('/identity/') || target.endsWith('/stage/approve') || target.includes('/quality/wps-visual') || target.includes('/office-revisions/')) {
+        const lowerTarget = target.toLowerCase();
+        if (target.includes('/identity/') || target.endsWith('/stage/approve') || lowerTarget.includes('office') || lowerTarget.includes('wps')) {
           window.__et3Forbidden.push(target);
           throw new Error(`standalone forbidden request: ${target}`);
         }
@@ -232,6 +269,54 @@ async function main() {
           const body = JSON.parse(options.body);
           window.__et3StageInputCaptured.push({ url, body });
           return { ok: true, run: makeRun(window.__et3SessionId, 'executing', Number(body.expected_version || 10) + 1) };
+        }
+        if (target === '/api/expert-teams/delivery/recover') {
+          const body = JSON.parse(options.body);
+          if (Object.keys(body).some(key => key.includes('path')) || Object.prototype.hasOwnProperty.call(body, 'delivery_dir') || Object.prototype.hasOwnProperty.call(body, 'out_dir')) {
+            throw new Error('standalone recovery request must contain only the server-bound identity');
+          }
+          if (window.__et3RecoveryConflictOnce) {
+            window.__et3RecoveryConflictOnce = false;
+            window.__et3RecoveryConflictCaptured.push({ url, body });
+            const error = new Error('delivery recovery binding is stale');
+            error.status = 409;
+            const latest = makeRun(window.__et3SessionId, 'completed', Number(body.expected_version || 17) + 1);
+            latest.view.public_state = 'awaiting_delivery_confirmation';
+            latest.view.allowed_actions = ['delivery_recover'];
+            latest.view.delivery_action_binding = null;
+            latest.view.standalone_delivery = null;
+            latest.view.delivery_recovery_binding = { ...body, expected_version: Number(body.expected_version || 17) + 1 };
+            delete latest.view.delivery_recovery_binding.idempotency_key;
+            latest.view.delivery_status = 'delivery_drifted';
+            latest.view.presentation = { ...latest.view.presentation, state: 'completed_invalid', title: '交付文档已变化', primary_action: { id: 'delivery_recover', label: '重新生成 DOCX', kind: 'primary' } };
+            error.payload = { ok: false, code: 'stale_delivery_recovery_binding', error: error.message, run: latest };
+            throw error;
+          }
+          window.__et3RecoveryCaptured.push({ url, body });
+          const regenerating = makeRun(window.__et3SessionId, 'generating_document', Number(body.expected_version || 17) + 1);
+          regenerating.phase = '正式文档交付';
+          regenerating.current_stage = regenerating.tasks[4];
+          regenerating.view.workflow.current_stage = regenerating.view.workflow.stages[4];
+          regenerating.view.workflow.progress = { done: 4, total: 5, current: '正式文档交付', current_index: 4 };
+          regenerating.view.workspace.current_stage = regenerating.view.workflow.stages[4];
+          regenerating.view.presentation = { ...regenerating.view.presentation, state: 'generating_document', title: '正在生成正式文档' };
+          return { ok: true, run: regenerating };
+        }
+        if (target === '/api/expert-teams/delivery/open' || target === '/api/expert-teams/delivery/revise' || target === '/api/expert-teams/delivery/confirm') {
+          const body = JSON.parse(options.body);
+          if (Object.prototype.hasOwnProperty.call(body, 'path')) throw new Error('standalone delivery request must not contain path');
+          if (target.endsWith('/revise') && window.__et3DeliveryConflictOnce) {
+            window.__et3DeliveryConflictOnce = false;
+            window.__et3DeliveryConflictCaptured.push({ url, body });
+            const error = new Error('delivery action binding is stale');
+            error.status = 409;
+            error.payload = { ok: false, code: 'stale_delivery_binding', error: error.message, run: makeRun(window.__et3SessionId, 'awaiting_delivery_confirmation', Number(body.expected_version || 12) + 1) };
+            throw error;
+          }
+          window.__et3DeliveryCaptured.push({ url, body });
+          if (target.endsWith('/open')) return { ok: true, target: body.target };
+          if (target.endsWith('/revise')) return { ok: true, run: makeRun(window.__et3SessionId, 'revising', Number(body.expected_version || 12) + 1) };
+          return { ok: true, run: makeRun(window.__et3SessionId, 'completed', Number(body.expected_version || 12) + 1) };
         }
         return originalApi(url, options);
       };
@@ -281,6 +366,7 @@ async function main() {
       const makeRun = eval(`(${source})`);
       window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(makeRun(window.__et3SessionId, 'awaiting_stage_confirmation', 9)));
     }, { source: fixture.toString() });
+    assert(await page.locator('[data-et3-stale-revision]').count() === 0, 'Successfully submitted stage feedback was mislabeled as an unsubmitted draft');
     const approve = page.getByRole('button', { name: '无修改，进入下一阶段' });
     await approve.waitFor({ state: 'visible' });
     await page.waitForFunction(() => !document.querySelector('[data-et3-action="approve-stage"]')?.disabled);
@@ -324,16 +410,99 @@ async function main() {
     await page.evaluate(({ source }) => {
       const makeRun = eval(`(${source})`);
       const deliveryRun = makeRun(window.__et3SessionId, 'awaiting_delivery_confirmation', 12);
-      deliveryRun.artifacts = [{ kind: 'docx', title: '最终 DOCX', path: '.taiji/expert-teams/run/delivery/1/document.docx', exists: true }];
       deliveryRun.view.completion_gates = { content: { status: 'passed' }, document: { status: 'passed' }, local_confirmation: { status: 'pending' } };
-      window.__et3Opened = [];
-      window.openExpertTeamFileArtifact = async button => { window.__et3Opened.push(button.dataset.expertTeamArtifactPath); return true; };
       window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(deliveryRun));
     }, { source: fixture.toString() });
-    await page.getByRole('button', { name: '打开最终 DOCX' }).click();
-    assert((await page.evaluate(() => window.__et3Opened)).length === 1, 'Local delivery document was not opened through the desktop bridge');
+    assert((await page.locator('#expertTeamV3Workbench').innerText()).includes('第 5/5 步 · 正式文档交付'), 'Delivery progress does not match the five-stage content-team contract');
+    assert(await page.locator('#expertTeamV3Workbench .et3-progress > span').count() === 5, 'Delivery progress has the wrong number of content-team stages');
+    const progressTops = await page.locator('#expertTeamV3Workbench .et3-progress > span').evaluateAll(nodes => nodes.map(node => Math.round(node.getBoundingClientRect().top)));
+    assert(new Set(progressTops).size === 1, 'Five-stage delivery progress wrapped onto multiple rows', { progressTops });
+    await page.screenshot({ path: path.join(outDir, '13-local-delivery-awaiting.png'), fullPage: false });
+    await page.getByRole('button', { name: '打开文档' }).click();
+    await page.getByRole('button', { name: '打开所在文件夹' }).click();
+    const deliveryRevision = page.locator('[data-et3-delivery-revision]');
+    const reviseRequestCountBeforeEmpty = await page.evaluate(() => window.__et3DeliveryCaptured.filter(item => item.url.endsWith('/revise')).length);
+    await page.getByRole('button', { name: '退回修改并重新生成' }).click();
+    await page.waitForFunction(() => document.querySelector('[data-et3-delivery-revision]')?.getAttribute('aria-invalid') === 'true');
+    assert(await page.locator('[data-et3-live]').innerText() === '请先填写需要修改的内容；如果文档无需修改，请确认可交付。', 'Empty delivery feedback has no associated error');
+    assert(await page.evaluate(() => window.__et3DeliveryCaptured.filter(item => item.url.endsWith('/revise')).length) === reviseRequestCountBeforeEmpty, 'Empty delivery feedback emitted a request');
+    await deliveryRevision.fill('请补充第三部分负责人和时间节点');
+    await page.evaluate(() => { window.__et3DeliveryConflictOnce = true; });
+    await page.getByRole('button', { name: '退回修改并重新生成' }).click();
+    await page.waitForFunction(() => document.body.innerText.includes('交付状态已更新，修改意见已保留'));
+    assert((await deliveryRevision.inputValue()) === '', '409 stale delivery draft entered the authoritative feedback field');
+    assert((await page.locator('[data-et3-stale-delivery-revision]').inputValue()).includes('负责人'), '409 did not retain delivery feedback as read-only');
+    await deliveryRevision.fill('重新核对：补充第三部分负责人和时间节点');
+    await page.getByRole('button', { name: '退回修改并重新生成' }).click();
+    await page.waitForFunction(() => window.__et3DeliveryCaptured.filter(item => item.url.endsWith('/revise')).length === 1);
+    await page.evaluate(({ source }) => {
+      const makeRun = eval(`(${source})`);
+      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(makeRun(window.__et3SessionId, 'awaiting_delivery_confirmation', 15)));
+    }, { source: fixture.toString() });
+    assert(await page.locator('[data-et3-stale-delivery-revision]').count() === 0, 'Successfully submitted delivery feedback was mislabeled as an unsubmitted draft');
+    await page.getByRole('button', { name: '确认文档可交付' }).click();
+    await page.waitForFunction(() => document.body.innerText.includes('文档已交付'));
+    const deliveryCaptured = await page.evaluate(() => window.__et3DeliveryCaptured);
+    assert(deliveryCaptured[0].body.target === 'document' && deliveryCaptured[1].body.target === 'folder', 'Delivery open targets are wrong', deliveryCaptured);
+    assert(deliveryCaptured.every(item => !Object.prototype.hasOwnProperty.call(item.body, 'path')), 'Delivery request leaked a client path', deliveryCaptured);
+    for (const request of deliveryCaptured) {
+      for (const field of ['session_id','run_id','expected_version','stage_id','stage_attempt','artifact_id','artifact_sha256','delivery_attempt','delivery_binding_sha256','document_sha256','idempotency_key']) {
+        assert(Object.prototype.hasOwnProperty.call(request.body, field), `Delivery request is missing ${field}`, request);
+      }
+    }
+    assert((await page.evaluate(() => window.__et3DeliveryConflictCaptured)).length === 1, 'Delivery 409 adversarial branch did not execute');
     assert((await page.evaluate(() => window.__et3Forbidden)).length === 0, 'Delivery confirmation emitted an enterprise-only request', await page.evaluate(() => window.__et3Forbidden));
     await page.screenshot({ path: path.join(outDir, '14-local-delivery.png'), fullPage: false });
+
+    for (const viewport of [{ width: 1280, height: 800, file: '15-local-delivery-1280.png' }, { width: 760, height: 800, file: '16-local-delivery-narrow.png' }]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      const responsiveLayout = await page.locator('#expertTeamV3Workbench').evaluate(root => {
+        const parentRect = root.parentElement.getBoundingClientRect();
+        const rect = root.getBoundingClientRect();
+        return {
+          rootWidth: Math.round(rect.width), parentWidth: Math.round(parentRect.width),
+          scrollWidth: root.scrollWidth, clientWidth: root.clientWidth,
+        };
+      });
+      const expectedWidth = viewport.width <= 920 ? viewport.width : responsiveLayout.parentWidth;
+      assert(Math.abs(responsiveLayout.rootWidth - expectedWidth) < 2, `${viewport.width}px workbench is not a single full workspace`, { ...responsiveLayout, expectedWidth });
+      assert(responsiveLayout.scrollWidth <= responsiveLayout.clientWidth + 1, `${viewport.width}px workbench has horizontal overflow`, responsiveLayout);
+      await page.screenshot({ path: path.join(outDir, viewport.file), fullPage: false });
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(({ source }) => {
+      const makeRun = eval(`(${source})`);
+      const drifted = makeRun(window.__et3SessionId, 'completed', 17);
+      const recovery = { ...drifted.view.delivery_action_binding };
+      drifted.view.public_state = 'awaiting_delivery_confirmation';
+      drifted.view.allowed_actions = ['delivery_recover'];
+      drifted.view.delivery_action_binding = null;
+      drifted.view.delivery_recovery_binding = recovery;
+      drifted.view.standalone_delivery = null;
+      drifted.view.delivery_status = 'delivery_drifted';
+      drifted.view.presentation = { ...drifted.view.presentation, state: 'completed_invalid', title: '交付文档已变化', primary_action: { id: 'delivery_recover', label: '重新生成 DOCX', kind: 'primary' } };
+      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(drifted));
+    }, { source: fixture.toString() });
+    const driftedText = await page.locator('#expertTeamV3Workbench').innerText();
+    assert(driftedText.includes('交付文档已变化') && driftedText.includes('原本机确认已失效'), 'Drifted delivery did not expose the recovery explanation', { driftedText });
+    assert(await page.getByRole('button', { name: '打开文档' }).count() === 0, 'Drifted delivery still exposed the stale document');
+    assert(await page.getByRole('button', { name: '确认文档可交付' }).count() === 0, 'Drifted delivery still exposed stale confirmation');
+    await page.screenshot({ path: path.join(outDir, '17-delivery-drifted.png'), fullPage: false });
+    await page.evaluate(() => { window.__et3RecoveryConflictOnce = true; });
+    await page.getByRole('button', { name: '重新生成 DOCX' }).click();
+    await page.waitForFunction(() => document.body.innerText.includes('交付状态已更新，请核对最新状态后重试'));
+    assert((await page.evaluate(() => window.__et3RecoveryConflictCaptured)).length === 1, 'Recovery 409 adversarial branch did not execute');
+    await page.getByRole('button', { name: '重新生成 DOCX' }).click();
+    await page.waitForFunction(() => window.__et3RecoveryCaptured.length === 1);
+    await page.waitForFunction(() => document.body.innerText.includes('正在生成正式文档'));
+    assert((await page.locator('#expertTeamV3Workbench').innerText()).includes('第 5/5 步 · 正式文档交付'), 'Recovery regeneration lost the delivery-stage progress identity');
+    const recoveryRequestSnapshot = await page.evaluate(() => window.__et3RecoveryCaptured);
+    const recoveryKeys = ['session_id','run_id','expected_version','stage_id','stage_attempt','artifact_id','artifact_sha256','delivery_attempt','delivery_binding_sha256','document_sha256','idempotency_key'];
+    assert(Object.keys(recoveryRequestSnapshot[0].body).sort().join(',') === recoveryKeys.sort().join(','), 'Recovery request did not use the exact server-bound whitelist', recoveryRequestSnapshot[0]);
+    assert(Object.keys(recoveryRequestSnapshot[0].body).every(key => !key.includes('path')), 'Recovery request leaked a client path', recoveryRequestSnapshot[0]);
+    assert((await page.evaluate(() => window.__et3Forbidden)).length === 0, 'Recovery emitted an enterprise-only request', await page.evaluate(() => window.__et3Forbidden));
+    await page.screenshot({ path: path.join(outDir, '18-delivery-regenerating.png'), fullPage: false });
 
     await page.evaluate(async () => { await switchPanel("tasks"); });
     const isolated = await page.evaluate(() => ({ active: document.body.classList.contains('expert-team-v3-active'), workbench: Boolean(document.querySelector('#expertTeamV3Workbench')), tasksVisible: document.querySelector('main.main')?.classList.contains('showing-tasks') }));
@@ -356,10 +525,12 @@ async function main() {
       runtimeRoot: runtime,
       sourceSha256: Object.fromEntries(sourceFiles.map(file => [file, sha256(path.join(webuiDir, file))])),
       realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/run'],
-      mocked: ['/api/expert-teams/stage/revise', '/api/expert-teams/stage/confirm', '/api/expert-teams/stage/input'],
+      mocked: ['/api/expert-teams/stage/revise', '/api/expert-teams/stage/confirm', '/api/expert-teams/stage/input', '/api/expert-teams/delivery/open', '/api/expert-teams/delivery/revise', '/api/expert-teams/delivery/confirm', '/api/expert-teams/delivery/recover'],
     };
     const forbiddenRequests = await page.evaluate(() => window.__et3Forbidden || []);
-    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, captured, stageInputCaptured, forbiddenRequests, isolated }, null, 2));
+    const recoveryCaptured = await page.evaluate(() => window.__et3RecoveryCaptured || []);
+    const recoveryConflictCaptured = await page.evaluate(() => window.__et3RecoveryConflictCaptured || []);
+    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, captured, stageInputCaptured, deliveryCaptured, recoveryCaptured, recoveryConflictCaptured, forbiddenRequests, isolated }, null, 2));
   } finally {
     await app.close();
   }

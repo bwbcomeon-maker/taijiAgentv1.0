@@ -16,6 +16,7 @@ from api import docx_engine_v2
 from .delivery_integrity import (
     DeliveryIntegrityError,
     canonical_attempt_root,
+    path_contains_symlink,
     write_binding_manifest,
 )
 from .storage import safe_run_id
@@ -34,6 +35,35 @@ class FinalDocumentDeliveryError(RuntimeError):
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _WORKFLOW_TEXT = re.compile(r"负责专家|\bStage\s*\d+|复核交付|本阶段|可直接生成\s*DOCX", re.I)
 _PLACEHOLDER_TEXT = re.compile(r"待补充|待完善|暂无|TBD|TODO|XXX", re.I)
+_STANDALONE_UNSAFE_PLACEHOLDER_TEXT = re.compile(r"待完善|暂无|\b(?:TBD|TODO|XXX)\b", re.I)
+
+
+def assert_standalone_delivery_write_tree(attempt_root: Path) -> Path:
+    """Reject every symlink in the standalone attempt tree before a write."""
+
+    root = Path(attempt_root).expanduser().absolute()
+    candidates = (
+        root,
+        root / "brief.json",
+        root / "canonical",
+        root / "canonical" / "artifact.json",
+        root / "canonical" / "document.md",
+        root / "assets",
+        root / "assets" / "asset-manifest.json",
+        root / "reviews",
+        root / "reviews" / "semantic-gates.json",
+        root / "reviews" / "standalone-quality-report.json",
+        root / "delivery",
+        root / "delivery" / "document.docx",
+        root / "delivery" / "quality-report.json",
+        root / "expert-team-delivery.json",
+        root / "recovery",
+    )
+    if any(path_contains_symlink(root, candidate) for candidate in candidates):
+        raise FinalDocumentDeliveryError(
+            "standalone delivery write path contains a symlink"
+        )
+    return root
 
 
 def _canonical_json(payload: object) -> bytes:
@@ -130,6 +160,7 @@ def write_semantic_gates_snapshot(
     brief: dict,
     artifact: dict,
     approved_inputs: list[dict],
+    product_mode: str = "enterprise",
 ) -> dict:
     """Evaluate enterprise semantics once and persist an immutable upstream report."""
 
@@ -148,7 +179,12 @@ def write_semantic_gates_snapshot(
         issues.append(_semantic_issue("document_type_mismatch", "payload:document_type", "正文文种与确认 Brief 不一致"))
     if _WORKFLOW_TEXT.search(markdown):
         issues.append(_semantic_issue("workflow_text_leaked", "document:body", "正文包含内部阶段或专家协作话术"))
-    if _PLACEHOLDER_TEXT.search(markdown):
+    placeholder_pattern = (
+        _STANDALONE_UNSAFE_PLACEHOLDER_TEXT
+        if str(product_mode or "") == "standalone"
+        else _PLACEHOLDER_TEXT
+    )
+    if placeholder_pattern.search(markdown):
         issues.append(_semantic_issue("placeholder_detected", "document:body", "正文包含未处置占位符"))
     review_report = payload.get("review_report") if isinstance(payload.get("review_report"), dict) else {}
     unsupported_claim_ids = [
@@ -238,6 +274,94 @@ def write_layered_quality_report(
     return report, path
 
 
+def _standalone_automatic_items(automatic_quality: dict) -> tuple[list[dict], list[dict]]:
+    """Remove checks that belong exclusively to the enterprise Office workflow."""
+
+    raw_checks = automatic_quality.get("checks") if isinstance(automatic_quality, dict) else []
+    raw_layers = automatic_quality.get("automaticQuality") if isinstance(automatic_quality, dict) else {}
+    enterprise_tokens = ("office", "wps", "approval", "approver")
+
+    def applicable(item: dict) -> bool:
+        identity = " ".join(
+            str(item.get(field) or "")
+            for field in ("id", "issueId", "issue_id", "code", "domain")
+        ).lower()
+        return not any(token in identity for token in enterprise_tokens)
+
+    checks = [deepcopy(item) for item in raw_checks or [] if isinstance(item, dict) and applicable(item)]
+    issues = [
+        deepcopy(item)
+        for item in (raw_layers.get("issues") or [] if isinstance(raw_layers, dict) else [])
+        if isinstance(item, dict) and applicable(item)
+    ]
+    return checks, issues
+
+
+def write_standalone_quality_report(
+    delivery_dir: Path,
+    *,
+    semantic_gates: dict,
+    automatic_quality: dict,
+    document_sha256: str,
+) -> tuple[dict, Path]:
+    """Persist standalone quality facts without Office, approval, or identity semantics."""
+
+    automatic = automatic_quality if isinstance(automatic_quality, dict) else {}
+    automatic_layers = automatic.get("automaticQuality")
+    if not isinstance(automatic_layers, dict):
+        raise FinalDocumentDeliveryError("automatic quality layers are missing")
+    if not _HEX64.fullmatch(str(document_sha256 or "")):
+        raise FinalDocumentDeliveryError("standalone document digest is invalid")
+    checks, automatic_issues = _standalone_automatic_items(automatic)
+    issues = deepcopy(semantic_gates.get("issues") or [])
+    for item in automatic_issues:
+        issues.append(
+            {
+                "issue_id": str(item.get("issueId") or item.get("issue_id") or item.get("code") or "automatic"),
+                "code": str(item.get("code") or "automatic_quality_issue"),
+                "severity": str(item.get("severity") or "warning"),
+                "target_id": str(item.get("issueId") or item.get("issue_id") or item.get("code") or "automatic"),
+                "owner": "document-renderer" if item.get("domain") == "render" else "document-author",
+                "message": str(item.get("message") or item.get("code") or "automatic quality issue"),
+                "disposition": "unresolved",
+                "completion_blocking": bool(item.get("completionBlocking", True)),
+            }
+        )
+    statuses = {
+        "brief": str(semantic_gates.get("brief_status") or "failed"),
+        "semantic": str(semantic_gates.get("semantic_status") or "failed"),
+        "evidence": str(semantic_gates.get("evidence_status") or "failed"),
+        "asset": str(automatic_layers.get("assetStatus") or "failed"),
+        "render": str(automatic_layers.get("renderStatus") or "failed"),
+        "document": "passed",
+    }
+    blocking = [item for item in issues if item.get("completion_blocking", True)]
+    check_ids: set[str] = set()
+    checks_passed = bool(checks)
+    for item in checks:
+        check_id = str(item.get("id") or "").strip()
+        check_status = str(item.get("status") or "").strip()
+        if not check_id or check_id in check_ids or check_status != "passed":
+            checks_passed = False
+        check_ids.add(check_id)
+    report = {
+        "schema_version": "expert-standalone-quality/v1",
+        "status": (
+            "passed"
+            if all(value == "passed" for value in statuses.values()) and checks_passed and not blocking
+            else "blocked"
+        ),
+        "statuses": statuses,
+        "document_sha256": str(document_sha256),
+        "checks": checks,
+        "issues": issues,
+    }
+    report["report_sha256"] = _sha256_payload(report)
+    path = Path(delivery_dir).expanduser().resolve() / "reviews" / "standalone-quality-report.json"
+    _immutable_json(path, report, label="standalone quality report")
+    return report, path
+
+
 def prepare_canonical_delivery_inputs(
     workspace: Path,
     run: dict,
@@ -271,6 +395,8 @@ def prepare_canonical_delivery_inputs(
         raise FinalDocumentDeliveryError("canonical document artifact was not approved")
     run_id = safe_run_id(str(run.get("run_id") or ""))
     root = canonical_attempt_root(workspace, run_id, stage_id, delivery_attempt)
+    if str(run.get("product_mode") or "") == "standalone":
+        assert_standalone_delivery_write_tree(root)
     brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
     paths = write_canonical_snapshot(root, brief=brief, artifact=artifact)
     semantic = write_semantic_gates_snapshot(
@@ -278,6 +404,7 @@ def prepare_canonical_delivery_inputs(
         brief=brief,
         artifact=artifact,
         approved_inputs=artifact.get("input_refs") or [],
+        product_mode=str(run.get("product_mode") or "enterprise"),
     )
     assets = deepcopy(asset_manifest) if isinstance(asset_manifest, dict) else {
         "schema_version": "expert-asset-manifest/v1",
@@ -470,11 +597,127 @@ def build_delivery_binding_v2(
     return binding
 
 
+def build_delivery_binding_v3(
+    delivery_dir: Path,
+    *,
+    session_id: str,
+    run_id: str,
+    stage_id: str,
+    stage_attempt: int,
+    delivery_attempt: int,
+    document_revision: int,
+    brief: dict,
+    artifact: dict,
+    assets: Path,
+    semantic_gates: dict,
+    template: dict,
+    renderer: dict,
+    render_input_fingerprint: str,
+    document: Path,
+    quality: Path,
+) -> dict:
+    """Build the standalone binding without inheriting enterprise review semantics."""
+
+    from .delivery_integrity import sha256_file
+
+    root = assert_standalone_delivery_write_tree(delivery_dir).resolve()
+    canonical_path = root / "canonical" / "document.md"
+    gates_path = root / "reviews" / "semantic-gates.json"
+    render_input = build_render_input_binding(
+        brief=brief,
+        artifact=artifact,
+        canonical_document_path=canonical_path,
+        asset_manifest_path=Path(assets),
+        semantic_gates_path=gates_path,
+        template=template,
+        renderer=renderer,
+    )
+    if render_input["render_input_fingerprint"] != render_input_fingerprint:
+        raise FinalDocumentDeliveryError("render input fingerprint does not close over renderer and inputs")
+    if semantic_gates.get("status") != "passed":
+        raise FinalDocumentDeliveryError("semantic gates have not passed")
+    if not str(session_id or "").strip() or not str(run_id or "").strip():
+        raise FinalDocumentDeliveryError("delivery session or run identity is missing")
+    if int(stage_attempt) <= 0 or int(delivery_attempt) <= 0 or int(document_revision) <= 0:
+        raise FinalDocumentDeliveryError("stage attempt, delivery attempt, or document revision is invalid")
+    if not str(render_input["template"]["id"]).startswith("standalone-"):
+        raise FinalDocumentDeliveryError("standalone delivery requires a standalone template")
+    if render_input["rendererIdentity"]["profileId"] != "standalone-default":
+        raise FinalDocumentDeliveryError("standalone delivery requires the standalone renderer profile")
+    expected_document = root / "delivery" / "document.docx"
+    expected_quality = root / "delivery" / "quality-report.json"
+    if Path(document).resolve() != expected_document or Path(quality).resolve() != expected_quality:
+        raise FinalDocumentDeliveryError("delivery output path is not canonical")
+    for candidate in (root, expected_document, expected_quality):
+        if candidate.is_symlink():
+            raise FinalDocumentDeliveryError("standalone delivery path contains a symlink")
+    if not expected_document.is_file() or not expected_quality.is_file():
+        raise FinalDocumentDeliveryError("delivery output is missing")
+    try:
+        automatic_report = json.loads(expected_quality.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FinalDocumentDeliveryError("automatic quality report is invalid") from exc
+    document_sha256 = sha256_file(expected_document)
+    standalone_quality, standalone_quality_path = write_standalone_quality_report(
+        root,
+        semantic_gates=semantic_gates,
+        automatic_quality=automatic_report,
+        document_sha256=document_sha256,
+    )
+    if standalone_quality["status"] != "passed":
+        raise FinalDocumentDeliveryError("standalone quality gates have not passed")
+    binding = {
+        "schema_version": "expert-delivery-binding/v3",
+        "product_mode": "standalone",
+        "session_id": str(session_id).strip(),
+        "run_id": str(run_id).strip(),
+        "stage_id": str(stage_id).strip(),
+        "stage_attempt": int(stage_attempt),
+        "delivery_attempt": int(delivery_attempt),
+        "document_revision": int(document_revision),
+        "render_input_fingerprint": render_input_fingerprint,
+        "brief": render_input["brief"],
+        "canonical_artifact": {
+            "artifact_id": render_input["canonicalArtifact"]["artifactId"],
+            "sha256": render_input["canonicalArtifact"]["sha256"],
+        },
+        "canonical_markdown": {"path": "canonical/document.md", "sha256": render_input["canonicalMarkdownSha256"]},
+        "asset_manifest": {"path": "assets/asset-manifest.json", "sha256": render_input["assetManifestSha256"]},
+        "semantic_gates": {"path": "reviews/semantic-gates.json", "sha256": render_input["semanticGatesSha256"]},
+        "template": {
+            "id": render_input["template"]["id"],
+            "version": render_input["template"]["version"],
+            "package_sha256": render_input["template"]["packageSha256"],
+        },
+        "renderer": {
+            "name": render_input["rendererIdentity"]["name"],
+            "version": render_input["rendererIdentity"]["version"],
+            "build_sha256": render_input["rendererIdentity"]["buildSha256"],
+            "profile_id": render_input["rendererIdentity"]["profileId"],
+            "profile_sha256": render_input["rendererIdentity"]["profileSha256"],
+        },
+        "document": {"path": "delivery/document.docx", "sha256": document_sha256},
+        "automatic_quality_report": {"path": "delivery/quality-report.json", "sha256": sha256_file(expected_quality)},
+        "standalone_quality_report": {
+            "path": "reviews/standalone-quality-report.json",
+            "sha256": sha256_file(standalone_quality_path),
+        },
+    }
+    _immutable_json(root / "expert-team-delivery.json", binding, label="delivery binding")
+    return binding
+
+
 def build_delivery_manifest_from_binding(binding: dict, quality_report: dict) -> dict:
     """Project the public system-stage manifest from hash-bound delivery facts only."""
 
-    if not isinstance(binding, dict) or binding.get("schema_version") != "expert-delivery-binding/v2":
+    if not isinstance(binding, dict) or binding.get("schema_version") not in {
+        "expert-delivery-binding/v2",
+        "expert-delivery-binding/v3",
+    }:
         raise ValueError("delivery binding is invalid")
+    standalone = binding.get("schema_version") == "expert-delivery-binding/v3"
+    if standalone and binding.get("product_mode") != "standalone":
+        raise ValueError("standalone delivery binding mode is invalid")
     if not isinstance(quality_report, dict):
         raise ValueError("quality report is invalid")
     binding_path = str(binding.get("_binding_path") or "").strip()
@@ -499,10 +742,17 @@ def build_delivery_manifest_from_binding(binding: dict, quality_report: dict) ->
     if attempt <= 0 or int(binding.get("document_revision") or 0) <= 0:
         raise ValueError("delivery attempt or document revision is invalid")
 
-    checks = [
-        item for item in quality_report.get("checks") or []
-        if isinstance(item, dict) and item.get("id") != "wps_visual"
-    ]
+    if standalone:
+        checks, applicable_issues = _standalone_automatic_items(quality_report)
+    else:
+        checks = [
+            item for item in quality_report.get("checks") or []
+            if isinstance(item, dict) and item.get("id") != "wps_visual"
+        ]
+        applicable_issues = [
+            item for item in (quality_report.get("automaticQuality") or {}).get("issues") or []
+            if isinstance(item, dict)
+        ]
     counts = {
         "passed_count": sum(item.get("status") == "passed" for item in checks),
         "failed_count": sum(item.get("status") == "failed" for item in checks),
@@ -511,11 +761,7 @@ def build_delivery_manifest_from_binding(binding: dict, quality_report: dict) ->
     automatic = quality_report.get("automaticQuality")
     if not isinstance(automatic, dict):
         raise ValueError("automatic quality layers are missing")
-    blocking_count = sum(
-        bool(item.get("completionBlocking"))
-        for item in automatic.get("issues") or []
-        if isinstance(item, dict)
-    )
+    blocking_count = sum(bool(item.get("completionBlocking")) for item in applicable_issues)
     counts["blocking_count"] = blocking_count
     counts["status"] = (
         "passed"
@@ -526,8 +772,8 @@ def build_delivery_manifest_from_binding(binding: dict, quality_report: dict) ->
         and blocking_count == 0
         else "failed"
     )
-    return {
-        "schema_version": "delivery-manifest/v1",
+    result = {
+        "schema_version": "delivery-manifest/v2" if standalone else "delivery-manifest/v1",
         "delivery_binding_path": binding_path,
         "delivery_binding_sha256": binding_sha256,
         "render_input_fingerprint": binding["render_input_fingerprint"],
@@ -540,8 +786,30 @@ def build_delivery_manifest_from_binding(binding: dict, quality_report: dict) ->
             "warning_count": counts["warning_count"],
             "blocking_count": counts["blocking_count"],
         },
-        "office_review_required": True,
     }
+    if standalone:
+        document = binding.get("document")
+        standalone_quality = binding.get("standalone_quality_report")
+        if (
+            not isinstance(document, dict)
+            or document.get("path") != "delivery/document.docx"
+            or not _HEX64.fullmatch(str(document.get("sha256") or ""))
+            or not isinstance(standalone_quality, dict)
+            or standalone_quality.get("path") != "reviews/standalone-quality-report.json"
+            or not _HEX64.fullmatch(str(standalone_quality.get("sha256") or ""))
+        ):
+            raise ValueError("standalone delivery outputs are invalid")
+        result.update(
+            {
+                "product_mode": "standalone",
+                "document_sha256": document["sha256"],
+                "standalone_quality_report_sha256": standalone_quality["sha256"],
+                "local_confirmation_required": True,
+            }
+        )
+    else:
+        result["office_review_required"] = True
+    return result
 
 
 def is_final_delivery_stage(run: dict, stage_id: str) -> bool:

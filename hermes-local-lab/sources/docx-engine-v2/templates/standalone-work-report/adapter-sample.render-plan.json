@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "docx-engine-v2/render-plan",
+  "jobId": "job-standalone-work-sample",
+  "templateId": "standalone-work-report",
+  "documentMetadata": {
+    "title": "部门月度工作汇报",
+    "documentType": "work_report"
+  },
+  "sections": [],
+  "tables": [],
+  "figures": [],
+  "templateData": {
+    "title": "部门月度工作汇报",
+    "sections": [
+      {
+        "sectionId": "sec-1",
+        "title": "工作进展",
+        "level": 2,
+        "metadata": {},
+        "blocks": [
+          {"type": "paragraph", "blockId": "block-1", "text": "已确认正文：本月重点工作已按计划推进。"}
+        ]
+      }
+    ],
+    "tables": [],
+    "images": [],
+    "metadata": {}
+  },
+  "warnings": []
+}

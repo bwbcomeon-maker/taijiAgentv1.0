@@ -42,8 +42,68 @@
     )return null;
     return binding;
   }
+  function normalizedDeliveryActionBinding(value){
+    value=value&&typeof value==='object'?value:{};
+    const binding={
+      session_id:str(value.session_id),
+      run_id:str(value.run_id),
+      expected_version:Number(value.expected_version),
+      stage_id:str(value.stage_id),
+      stage_attempt:Number(value.stage_attempt),
+      artifact_id:str(value.artifact_id),
+      artifact_sha256:str(value.artifact_sha256).toLowerCase(),
+      delivery_attempt:Number(value.delivery_attempt),
+      delivery_binding_sha256:str(value.delivery_binding_sha256).toLowerCase(),
+      document_sha256:str(value.document_sha256).toLowerCase()
+    };
+    if(
+      !binding.session_id||!binding.run_id||!Number.isInteger(binding.expected_version)||binding.expected_version<0||
+      !binding.stage_id||!Number.isInteger(binding.stage_attempt)||binding.stage_attempt<1||!binding.artifact_id||
+      !/^[0-9a-f]{64}$/.test(binding.artifact_sha256)||
+      !Number.isInteger(binding.delivery_attempt)||binding.delivery_attempt<1||
+      !/^[0-9a-f]{64}$/.test(binding.delivery_binding_sha256)||
+      !/^[0-9a-f]{64}$/.test(binding.document_sha256)
+    )return null;
+    return binding;
+  }
+  function normalizedStandaloneDelivery(value){
+    if(!value||typeof value!=='object')return null;
+    const check=value.automatic_check_summary&&typeof value.automatic_check_summary==='object'
+      ? value.automatic_check_summary:{};
+    const delivery={
+      documentName:str(value.document_name,'最终交付文档.docx'),
+      deliveryAttempt:Number(value.delivery_attempt),
+      documentSha256:str(value.document_sha256).toLowerCase(),
+      qualityReportSha256:str(value.quality_report_sha256).toLowerCase(),
+      automaticCheckSummary:{
+        status:str(check.status,'pending'),
+        passedCount:Number(check.passed_count||0),
+        failedCount:Number(check.failed_count||0),
+        warningCount:Number(check.warning_count||0),
+        blockingCount:Number(check.blocking_count||0)
+      }
+    };
+    if(
+      !Number.isInteger(delivery.deliveryAttempt)||delivery.deliveryAttempt<1||
+      !/^[0-9a-f]{64}$/.test(delivery.documentSha256)||
+      (delivery.qualityReportSha256&&!/^[0-9a-f]{64}$/.test(delivery.qualityReportSha256))
+    )return null;
+    return delivery;
+  }
   function buildExpertTeamStageActionPayload(card,idempotencyKey){
     const binding=normalizedStageActionBinding(card&&card.stageActionBinding);
+    const key=str(idempotencyKey);
+    if(!binding||!key)return null;
+    return {...binding,idempotency_key:key};
+  }
+  function buildExpertTeamDeliveryActionPayload(card,idempotencyKey){
+    const binding=normalizedDeliveryActionBinding(card&&card.deliveryActionBinding);
+    const key=str(idempotencyKey);
+    if(!binding||!key)return null;
+    return {...binding,idempotency_key:key};
+  }
+  function buildExpertTeamDeliveryRecoveryPayload(card,idempotencyKey){
+    const binding=normalizedDeliveryActionBinding(card&&card.deliveryRecoveryBinding);
     const key=str(idempotencyKey);
     if(!binding||!key)return null;
     return {...binding,idempotency_key:key};
@@ -245,6 +305,26 @@
       normalizedCancelBinding.session_id===str(run.session_id)&&normalizedCancelBinding.run_id===str(run.run_id)
       ? normalizedCancelBinding
       : null;
+    const normalizedDeliveryBinding=standalone?normalizedDeliveryActionBinding(view.delivery_action_binding):null;
+    const deliveryActionBinding=normalizedDeliveryBinding&&
+      normalizedDeliveryBinding.session_id===str(run.session_id)&&
+      normalizedDeliveryBinding.run_id===str(run.run_id)&&
+      normalizedDeliveryBinding.expected_version===Number(run.version||0)
+      ? normalizedDeliveryBinding
+      : null;
+    const normalizedDeliveryRecoveryBinding=standalone?normalizedDeliveryActionBinding(view.delivery_recovery_binding):null;
+    const deliveryRecoveryBinding=normalizedDeliveryRecoveryBinding&&
+      normalizedDeliveryRecoveryBinding.session_id===str(run.session_id)&&
+      normalizedDeliveryRecoveryBinding.run_id===str(run.run_id)&&
+      normalizedDeliveryRecoveryBinding.expected_version===Number(run.version||0)
+      ? normalizedDeliveryRecoveryBinding
+      : null;
+    const normalizedDelivery=standalone?normalizedStandaloneDelivery(view.standalone_delivery):null;
+    const standaloneDelivery=deliveryActionBinding&&normalizedDelivery&&
+      normalizedDelivery.deliveryAttempt===deliveryActionBinding.delivery_attempt&&
+      normalizedDelivery.documentSha256===deliveryActionBinding.document_sha256
+      ? normalizedDelivery
+      : null;
     const teamView=view.team||{};
     const workflow=view.workflow||{};
     const pendingInput=view.pending_input||workspace.pendingInput||{};
@@ -319,6 +399,9 @@
       allowedActions,
       stageActionBinding,
       cancelActionBinding,
+      deliveryActionBinding,
+      deliveryRecoveryBinding,
+      standaloneDelivery,
       readOnly:run.read_only===true||schemaVersion<2,
       executionStreamId:str(run.execution_stream_id),
       currentStageId:str(currentStage.task_id||currentStage.id),
@@ -329,7 +412,13 @@
       team:{id:str(teamView.id||run.team_id),title:teamTitle,category:str((data.team||{}).category,'专家团'),image:str(teamView.image||run.team_image),members},
       status:standalone?publicState:presentation.state,
       phase:str(phaseProgress.current||run.phase,'需求确认'),
-      progress:{done:Number(phaseProgress.done||0),total:Number(phaseProgress.total||tasks.length||0)},
+      progress:{
+        done:Number(phaseProgress.done||0),
+        total:Number(phaseProgress.total||tasks.length||0),
+        current:str(phaseProgress.current),
+        currentIndex:Number.isInteger(phaseProgress.current_index)?Number(phaseProgress.current_index):null,
+        isIntake:phaseProgress.is_intake===true
+      },
       presentation,
       brief:presentation.brief,
       completionGates:presentation.completionGates,
@@ -367,5 +456,7 @@
     window.buildExpertTeamPresentation=buildExpertTeamPresentation;
     window.buildExpertTeamCardFromRun=buildExpertTeamCardFromRun;
     window.buildExpertTeamStageActionPayload=buildExpertTeamStageActionPayload;
+    window.buildExpertTeamDeliveryActionPayload=buildExpertTeamDeliveryActionPayload;
+    window.buildExpertTeamDeliveryRecoveryPayload=buildExpertTeamDeliveryRecoveryPayload;
   }
 })();

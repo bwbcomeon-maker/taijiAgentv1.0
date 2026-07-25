@@ -12,6 +12,7 @@
     dialogReturnFocus: null,
     draft: null,
     conflictRevisionDraft: null,
+    conflictDeliveryDraft: null,
     collapsed: false,
     busy: false,
     catalogStatus: 'idle',
@@ -24,7 +25,8 @@
       title: '内容创作专家团',
       category: '办公材料',
       description: '把零散诉求和资料整理为可复核、可交付的工作汇报。',
-      image: 'static/assets/writeflow/team-content-creator.png',
+      image: 'static/assets/taiji/expert-teams/team-content-cover.png',
+      image_alt: '内容创作专家团五位专家协作插画',
       tags: ['工作汇报', '规格确认', 'DOCX 交付'],
       members: [],
       examples: [{
@@ -39,7 +41,8 @@
       title: '深度材料研究团',
       category: '材料研究',
       description: '围绕指定资料建立研究边界、证据链和结构化研究报告。',
-      image: 'static/assets/writeflow/team-research.png',
+      image: 'static/assets/taiji/expert-teams/team-research-cover.png',
+      image_alt: '深度材料研究团六位专家协作插画',
       tags: ['研究报告', '证据梳理', '引用核验'],
       members: [],
       examples: [{
@@ -67,6 +70,8 @@
     legacy_read_only: ['历史任务（只读）', '该任务使用旧版数据结构，仅保留查看能力。'],
   };
 
+  const EXPERT_TEAM_ASSET_PATTERN = /^static\/assets\/taiji\/expert-teams\/[a-z0-9][a-z0-9._-]*\.png$/i;
+
   function esc(value) {
     return String(value == null ? '' : value)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -74,6 +79,14 @@
   }
 
   function list(value) { return Array.isArray(value) ? value : []; }
+  function localExpertTeamImage(value, fallback) {
+    return [value, fallback]
+      .map(candidate => String(candidate || '').trim())
+      .find(candidate => EXPERT_TEAM_ASSET_PATTERN.test(candidate)) || '';
+  }
+  function imageFallbackText(value) {
+    return Array.from(String(value || '').trim())[0] || '专';
+  }
   function uid(kind) {
     const id = globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
       ? globalThis.crypto.randomUUID()
@@ -88,12 +101,14 @@
       available: example.available === true && Boolean(String(example.launch_profile_id || '').trim()),
       disabled_reason: String(example.disabled_reason || '该任务尚未完成交付验证'),
     }));
+    const title = team.title || fallback.title || '专家团';
     return {
       ...fallback,
       ...team,
-      title: team.title || fallback.title || '专家团',
+      title,
       description: team.description || fallback.description || '',
-      image: team.image || fallback.image || '',
+      image: localExpertTeamImage(team.image, fallback.image),
+      image_alt: String(team.image_alt || fallback.image_alt || `${title}协作插画`).trim(),
       tags: list(team.tags).length ? team.tags : list(fallback.tags),
       members: list(team.members),
       examples,
@@ -144,8 +159,13 @@
   function teamCard(team) {
     const unavailable = team.available !== true;
     const reason = list(team.examples).map(example => example.disabled_reason).find(Boolean) || '暂无通过验证的文档任务';
+    const cover = localExpertTeamImage(team.image);
+    const coverAlt = String(team.image_alt || `${team.title || '专家团'}协作插画`).trim();
+    const image = cover
+      ? `<img src="${esc(cover)}" alt="${esc(coverAlt)}" loading="lazy" data-et3-image><span class="et3-image-fallback et3-team-image-fallback" data-et3-image-fallback hidden aria-hidden="true">${esc(imageFallbackText(team.title))}</span>`
+      : `<span class="et3-image-fallback et3-team-image-fallback" data-et3-image-fallback>${esc(imageFallbackText(team.title))}</span>`;
     return `<button type="button" class="et3-team-card${unavailable ? ' is-disabled' : ''}" data-et3-action="open-team" data-team-id="${esc(team.id)}" aria-label="${unavailable ? esc(`${team.title}暂不可用：${reason}`) : esc(`查看并发起${team.title}`)}" aria-disabled="${String(unavailable)}" ${unavailable ? 'disabled' : ''}>
-      <img src="${esc(team.image)}" alt="" loading="lazy">
+      ${image}
       <span>
         <small>${esc(team.category || '专业协作')}</small>
         <h2>${esc(team.title)}</h2>
@@ -162,6 +182,46 @@
     const signal = state.portalController.signal;
     root.addEventListener('click', event => handlePortalClick(event), { signal });
     root.addEventListener('input', event => handlePortalInput(event), { signal });
+    root.addEventListener('error', event => handlePortalImageError(event), { signal, capture: true });
+  }
+
+  function handlePortalImageError(event) {
+    const image = event && event.target;
+    if (!image || typeof image.matches !== 'function' || !image.matches('[data-et3-image]')) return false;
+    const fallback = image.nextElementSibling;
+    if (!fallback || typeof fallback.matches !== 'function' || !fallback.matches('[data-et3-image-fallback]')) return false;
+    image.hidden = true;
+    image.setAttribute('aria-hidden', 'true');
+    image.removeAttribute('src');
+    image.removeAttribute('srcset');
+    fallback.hidden = false;
+    fallback.removeAttribute('aria-hidden');
+    return true;
+  }
+
+  function memberRowsHtml(members) {
+    return list(members).map(member => {
+      const name = String(member.name || member.id || '专家').trim();
+      const role = String(member.role || '').trim();
+      const source = localExpertTeamImage(member.image);
+      const imageAlt = String(member.image_alt || `${name}头像`).trim();
+      const avatar = source
+        ? `<img class="et3-member-avatar" src="${esc(source)}" alt="${esc(imageAlt)}" loading="lazy" data-et3-image><span class="et3-member-avatar et3-image-fallback" data-et3-image-fallback hidden aria-hidden="true">${esc(imageFallbackText(name))}</span>`
+        : `<span class="et3-member-avatar et3-image-fallback" data-et3-image-fallback>${esc(imageFallbackText(name))}</span>`;
+      return `<div class="et3-member">${avatar}<span class="et3-member-copy"><strong>${esc(name)}</strong><span>${esc(role)}</span></span></div>`;
+    }).join('');
+  }
+
+  function exampleTaskRowsHtml(examples, selectedExample) {
+    return list(examples).map(example => {
+      const unavailable = example.available !== true;
+      const summary = example.summary || (example.capability && example.capability.label) || '本机协作';
+      const unavailableReason = String(example.disabled_reason || '该任务暂未开放').trim();
+      const selected = Boolean(selectedExample && selectedExample.id === example.id);
+      const label = example.label || '文档任务';
+      const accessibleLabel = unavailable ? `${label}。${summary} 暂未开放：${unavailableReason}` : `${label}。${summary}`;
+      return `<button type="button" class="et3-template${unavailable ? ' is-disabled' : ''}" data-et3-action="select-template" data-example-id="${esc(example.id)}" aria-label="${esc(accessibleLabel)}" aria-pressed="${selected}" aria-disabled="${String(unavailable)}" ${unavailable ? `disabled title="${esc(unavailableReason)}"` : ''}><strong>${esc(label)}</strong>${unavailable ? '<small class="et3-template-status">暂未开放</small>' : ''}<span>${esc(summary)}</span></button>`;
+    }).join('');
   }
 
   function handlePortalInput(event) {
@@ -214,18 +274,12 @@
       <div class="et3-dialog-body">
         <div>
           <section class="et3-section"><h3>团队能力</h3><p>${esc(team.description)}</p></section>
-          <section class="et3-section"><h3>团队成员</h3><div class="et3-member-list">${list(team.members).map(member => `<div class="et3-member"><strong>${esc(member.name || member.id)}</strong><span>${esc(member.role || '')}</span></div>`).join('') || '<p>专家角色会在任务启动后按阶段加入。</p>'}</div></section>
+          <section class="et3-section"><h3>团队成员</h3><div class="et3-member-list">${memberRowsHtml(team.members) || '<p>专家角色会在任务启动后按阶段加入。</p>'}</div></section>
         </div>
         <div>
           <section class="et3-section">
             <h3>选择文档任务</h3>
-            <div class="et3-template-list">${examples.map(example => {
-              const unavailable = example.available !== true;
-              const detail = unavailable
-                ? (example.disabled_reason || '暂未开放')
-                : (example.summary || (example.capability && example.capability.label) || '本机协作');
-              return `<button type="button" class="et3-template${unavailable ? ' is-disabled' : ''}" data-et3-action="select-template" data-example-id="${esc(example.id)}" aria-pressed="${state.selectedExample ? state.selectedExample.id === example.id : false}" aria-disabled="${String(unavailable)}" ${unavailable ? 'disabled' : ''}><strong>${esc(example.label || '文档任务')}</strong><span>${esc(detail)}</span></button>`;
-            }).join('')}</div>
+            <div class="et3-template-list">${exampleTaskRowsHtml(examples, state.selectedExample)}</div>
             <label class="et3-form-field" for="expertTeamV3Prompt"><span>原始诉求</span><textarea id="expertTeamV3Prompt" rows="6" aria-describedby="expertTeamV3PromptHelp">${esc(prompt)}</textarea></label>
             <p id="expertTeamV3PromptHelp" class="et3-help">发起后先确认完整任务规格，不会直接生成文档。</p>
             <p class="et3-live" data-et3-dialog-live aria-live="polite"></p>
@@ -325,10 +379,22 @@
   }
 
   function progressHtml(card) {
-    const total = Math.max(4, Number(card.progress && card.progress.total || 0));
-    const done = Number(card.progress && card.progress.done || 0);
-    const visibleTotal = Math.min(total, 6);
-    return `<div class="et3-progress" role="progressbar" aria-label="阶段进度：已完成 ${Math.min(done, visibleTotal)} / ${visibleTotal}" aria-valuemin="0" aria-valuemax="${visibleTotal}" aria-valuenow="${Math.min(done, visibleTotal)}">${Array.from({ length: visibleTotal }, (_, index) => `<span class="${index < done ? 'is-done' : index === done ? 'is-current' : ''}"${index === done ? ' aria-current="step"' : ''}><span class="et3-visually-hidden">第 ${index + 1} 阶段</span></span>`).join('')}</div>`;
+    const progress = card.progress || {};
+    const total = Math.max(0, Number(progress.total || 0));
+    const done = Math.max(0, Math.min(total, Number(progress.done || 0)));
+    const current = effectiveState(card);
+    const stageName = String(
+      progress.current || card.workflow?.progress?.current || card.workflow?.currentStage?.title || card.phase || '阶段信息同步中'
+    ).trim();
+    if (!total) return `<p class="et3-progress-label et3-help" role="status">阶段进度待同步 · ${esc(stageName)}</p>`;
+    const intake = progress.isIntake === true || current === 'intake' || (current === 'ready' && done === 0);
+    const currentIndex = Number(progress.currentIndex);
+    const terminal = ['generating_document', 'awaiting_delivery_confirmation', 'completed'].includes(current);
+    const step = intake ? 0 : (terminal
+      ? total
+      : Math.min(total, Math.max(1, Number.isInteger(currentIndex) ? currentIndex + 1 : done + 1)));
+    const text = intake ? `准备阶段 · ${stageName}` : `第 ${step}/${total} 步 · ${stageName}`;
+    return `<div class="et3-progress-group"><p class="et3-progress-label et3-help">${esc(text)}</p><div class="et3-progress" role="progressbar" aria-label="${esc(text)}" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${step}">${Array.from({ length: total }, (_, index) => `<span class="${index < step - 1 || terminal ? 'is-done' : index === step - 1 ? 'is-current' : ''}"${index === step - 1 ? ' aria-current="step"' : ''}><span class="et3-visually-hidden">第 ${index + 1} 步</span></span>`).join('')}</div></div>`;
   }
 
   function effectiveState(card) {
@@ -341,6 +407,9 @@
   }
 
   function stateCopyFor(card, current) {
+    if (actionAllowed(card, 'delivery_recover')) {
+      return ['交付文档已变化', '已交付的 DOCX 与确认时不一致，原本机确认已失效。'];
+    }
     if (current === 'ready' && actionAllowed(card, 'submit_stage_input')) {
       return ['需要你的补充', '专家团在继续当前阶段前，需要你确认一项信息。'];
     }
@@ -360,6 +429,10 @@
     const surface = effectiveState(card);
     if (surface === 'awaiting_stage_confirmation') {
       const bindingFingerprint = stageBindingFingerprint(card);
+      return bindingFingerprint ? JSON.stringify([card.runId, surface, bindingFingerprint]) : '';
+    }
+    if (surface === 'awaiting_delivery_confirmation') {
+      const bindingFingerprint = deliveryBindingFingerprint(card);
       return bindingFingerprint ? JSON.stringify([card.runId, surface, bindingFingerprint]) : '';
     }
     if (surface === 'intake') return [card.runId, surface, list(card.questions).map(item => item.id).join(',')].join(':');
@@ -420,6 +493,52 @@
     return JSON.stringify(values);
   }
 
+  function deliveryBindingFingerprint(card) {
+    const binding = card?.deliveryActionBinding || {};
+    const fields = [
+      'session_id', 'run_id', 'expected_version', 'stage_id', 'stage_attempt',
+      'artifact_id', 'artifact_sha256', 'delivery_attempt', 'delivery_binding_sha256', 'document_sha256',
+    ];
+    const values = fields.map(field => String(binding[field] ?? ''));
+    if (values.some(value => !value)) return '';
+    return JSON.stringify(values);
+  }
+
+  function deliveryRecoveryBindingFingerprint(card) {
+    const binding = card?.deliveryRecoveryBinding || {};
+    const fields = [
+      'session_id', 'run_id', 'expected_version', 'stage_id', 'stage_attempt',
+      'artifact_id', 'artifact_sha256', 'delivery_attempt', 'delivery_binding_sha256', 'document_sha256',
+    ];
+    const values = fields.map(field => String(binding[field] ?? ''));
+    if (values.some(value => !value)) return '';
+    return JSON.stringify(values);
+  }
+
+  function captureConflictDeliveryDraft(card) {
+    const value = String(workbenchRoot()?.querySelector('[data-et3-delivery-revision]')?.value || '');
+    const deliveryFingerprint = deliveryBindingFingerprint(card);
+    if (!value.trim() || !card?.runId || !deliveryFingerprint) return null;
+    return { runId: card.runId, deliveryFingerprint, value };
+  }
+
+  function conflictDeliveryDraftMatches(card, draft) {
+    return Boolean(
+      draft
+      && draft.runId === card?.runId
+      && draft.deliveryFingerprint
+      && draft.deliveryFingerprint === deliveryBindingFingerprint(card)
+    );
+  }
+
+  function restoreConflictDeliveryDraft(root, card) {
+    const draft = state.conflictDeliveryDraft;
+    const field = root?.querySelector('[data-et3-delivery-revision]');
+    if (!conflictDeliveryDraftMatches(card, draft) || !field) return false;
+    if (!String(field.value || '').trim()) field.value = draft.value;
+    return true;
+  }
+
   function conflictDraftMatches(card, draft) {
     return Boolean(
       draft
@@ -441,6 +560,12 @@
     const draft = state.conflictRevisionDraft;
     if (!draft || draft.runId !== card?.runId || conflictDraftMatches(card, draft)) return '';
     return `<section class="et3-panel et3-stale-draft" role="status"><h3>上一阶段有未提交的修改意见</h3><p>阶段或产物已变更，为避免误提交，以下内容未自动带入当前阶段。如仍适用，请手动复制并重新核对。</p><textarea readonly data-et3-stale-revision aria-label="上一阶段未提交的修改意见">${esc(draft.value)}</textarea></section>`;
+  }
+
+  function staleConflictDeliveryHtml(card) {
+    const draft = state.conflictDeliveryDraft;
+    if (!draft || draft.runId !== card?.runId || conflictDeliveryDraftMatches(card, draft)) return '';
+    return `<section class="et3-panel et3-stale-draft" role="status"><h3>上一份交付修改意见已保留</h3><p>交付文档或校验摘要已变更，为避免误提交，以下内容未自动带入新文档。如仍适用，请手动复制并重新核对。</p><textarea readonly data-et3-stale-delivery-revision aria-label="上一份交付修改意见">${esc(draft.value)}</textarea></section>`;
   }
 
   function renderStatusSurface(card) {
@@ -466,8 +591,12 @@
     }
     const draft = captureWorkbenchDraft(root, previousCard);
     const staleRevisionDraft = captureConflictRevisionDraft(previousCard);
+    const staleDeliveryDraft = captureConflictDeliveryDraft(previousCard);
     if (staleRevisionDraft && !conflictDraftMatches(card, staleRevisionDraft)) {
       state.conflictRevisionDraft = staleRevisionDraft;
+    }
+    if (staleDeliveryDraft && !conflictDeliveryDraftMatches(card, staleDeliveryDraft)) {
+      state.conflictDeliveryDraft = staleDeliveryDraft;
     }
     state.card = card;
     root.dataset.expertTeamRunId = card.runId || '';
@@ -488,6 +617,7 @@
     bindWorkbenchEvents(root);
     restoreWorkbenchDraft(root, draft || state.draft, card);
     restoreConflictRevisionDraft(root, card);
+    restoreConflictDeliveryDraft(root, card);
     state.draft = null;
     return true;
   }
@@ -498,6 +628,8 @@
     document.body.classList.remove('expert-team-v3-active', 'expert-team-v3-collapsed');
     state.card = null;
     state.draft = null;
+    state.conflictRevisionDraft = null;
+    state.conflictDeliveryDraft = null;
     state.collapsed = false;
     return true;
   }
@@ -512,8 +644,9 @@
       <div class="et3-workbench-scroll">
         <section class="et3-state-banner"><div><strong>${esc(copy[0])}</strong><p>${esc(copy[1])}</p></div><span class="et3-state-pill">${esc(statusLabel)}</span></section>
         ${staleConflictRevisionHtml(card)}
+        ${staleConflictDeliveryHtml(card)}
         ${statePanel(card, current)}
-        <p class="et3-live" data-et3-live aria-live="polite"></p>
+        <p id="expertTeamV3Live" class="et3-live" data-et3-live aria-live="polite"></p>
       </div>
     </div><button type="button" class="et3-workbench-restore" data-et3-action="restore-workbench" aria-label="展开专家团工作台">专家团</button>`;
   }
@@ -528,6 +661,7 @@
     if (current === 'cancelling') return cancellationPanel(card);
     if (current === 'awaiting_stage_confirmation') return reviewPanel(card);
     if (current === 'generating_document') return documentValidationPanel(card);
+    if (actionAllowed(card, 'delivery_recover')) return deliveryRecoveryPanel(card);
     if (current === 'awaiting_delivery_confirmation') return deliveryConfirmationPanel(card);
     if (current === 'completed') return completedPanel(card);
     return failurePanel(card, current);
@@ -602,7 +736,7 @@
     const canConfirm = actionAllowed(card, 'stage_confirm');
     const blocked = !canRevise || !canConfirm;
     return `<section class="et3-panel"><h3>阶段成果</h3><div class="et3-document" tabindex="-1" data-et3-result-document>${esc(content || '阶段成果已生成，请稍后刷新状态。')}</div><div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="view-result">定位到完整成果</button></div></section>
-      <section class="et3-panel"><h3>复核建议</h3><ul class="et3-review-list">${items.map(item => `<li class="et3-review-item"><span><strong>${esc(item.title || '待确认事项')}</strong><small>${esc(item.phase || '待人工确认')}</small></span><button type="button" class="et3-button" data-et3-action="append-revision" data-revision-text="${esc(item.title || '')}">加入修改意见</button></li>`).join('') || '<li class="et3-help">未发现阻断问题。仍建议阅读完整成果后确认。</li>'}</ul><label class="et3-form-field"><span>修改意见</span><textarea data-et3-revision placeholder="逐条写清需要修改的位置和目标；无修改可直接进入下一阶段"></textarea></label></section>
+      <section class="et3-panel"><h3>复核建议</h3><ul class="et3-review-list">${items.map(item => `<li class="et3-review-item"><span><strong>${esc(item.title || '待确认事项')}</strong><small>${esc(item.phase || '待人工确认')}</small></span><button type="button" class="et3-button" data-et3-action="append-revision" data-revision-text="${esc(item.title || '')}">加入修改意见</button></li>`).join('') || '<li class="et3-help">未发现阻断问题。仍建议阅读完整成果后确认。</li>'}</ul><label class="et3-form-field"><span>修改意见</span><textarea data-et3-revision aria-describedby="expertTeamV3Live" placeholder="逐条写清需要修改的位置和目标；无修改可直接进入下一阶段"></textarea></label></section>
       ${blocked ? '<p id="expertTeamV3StageActionHelp" class="et3-help">服务端尚未允许当前操作，请刷新任务状态后重试。</p>' : ''}
       <div class="et3-primary-actions"><button type="button" class="et3-button" data-et3-action="submit-revision" ${canRevise ? '' : 'disabled aria-disabled="true" aria-describedby="expertTeamV3StageActionHelp"'}>提交修改意见</button><button type="button" class="et3-button et3-button--primary" data-et3-action="confirm-stage" ${canConfirm ? '' : 'disabled aria-disabled="true" aria-describedby="expertTeamV3StageActionHelp"'}>无修改，进入下一阶段</button></div>`;
   }
@@ -611,14 +745,38 @@
     return `<section class="et3-panel"><h3>DOCX 自动检查</h3><p>正在核对文档结构、文件完整性和交付绑定。完成后可在本机打开正式文档检查。</p><div class="et3-skeleton"></div><div class="et3-skeleton" style="width:72%"></div></section>`;
   }
 
+  function deliveryRecoveryPanel(card) {
+    const bindingReady = Boolean(deliveryRecoveryBindingFingerprint(card));
+    const canRecover = bindingReady && actionAllowed(card, 'delivery_recover');
+    const documentName = `${String(card.brief?.exactTitle || card.subtitle || '最终交付文档').trim()}.docx`;
+    return `<section class="et3-panel et3-panel--warning" role="alert"><h3>交付文档已变化</h3><p>已交付的 DOCX 可能被修改、替换或删除，已不再符合确认时的文件摘要。</p><dl class="et3-kv"><dt>原文件</dt><dd>${esc(documentName)}</dd><dt>确认状态</dt><dd>原本机确认已失效</dd><dt>处理方式</dt><dd>保留已确认内容，重新生成并检查 DOCX</dd></dl><p class="et3-help">不会重做已经确认的内容阶段，也不会读取客户端传入的任意路径。</p></section>
+      ${canRecover ? '<div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="delivery-recover">重新生成 DOCX</button></div>' : '<p class="et3-help">恢复操作信息不完整，请刷新任务状态后重试。</p>'}`;
+  }
+
   function deliveryConfirmationPanel(card) {
-    const artifact = finalDocument(card);
-    return `<section class="et3-panel"><h3>最终文档</h3><p>正式 DOCX 已生成。请先在本机打开检查，再确认是否交付。</p><dl class="et3-kv"><dt>文件</dt><dd>${esc(artifact?.title || artifact?.label || '最终交付文档.docx')}</dd><dt>状态</dt><dd>等待本机确认</dd></dl></section><div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="open-docx">打开最终 DOCX</button><button type="button" class="et3-button" data-et3-action="refresh-run">刷新状态</button></div>`;
+    const delivery = card.standaloneDelivery || {};
+    const checks = delivery.automaticCheckSummary || {};
+    const bindingReady = Boolean(deliveryBindingFingerprint(card));
+    const canOpenDocument = bindingReady && actionAllowed(card, 'delivery_open_document');
+    const canOpenFolder = bindingReady && actionAllowed(card, 'delivery_open_folder');
+    const canRevise = bindingReady && actionAllowed(card, 'delivery_revise');
+    const canConfirm = bindingReady && actionAllowed(card, 'delivery_confirm');
+    const openActions = [
+      canOpenDocument ? '<button type="button" class="et3-button et3-button--primary" data-et3-action="delivery-open-document">打开文档</button>' : '',
+      canOpenFolder ? '<button type="button" class="et3-button" data-et3-action="delivery-open-folder">打开所在文件夹</button>' : '',
+    ].filter(Boolean).join('');
+    return `<section class="et3-panel"><h3>最终文档</h3><p>正式 DOCX 已生成。请先在本机打开检查，再确认是否可交付。</p><dl class="et3-kv"><dt>文件</dt><dd>${esc(delivery.documentName || '最终交付文档.docx')}</dd><dt>自动检查</dt><dd>${checks.status === 'passed' ? `自动检查通过 ${Number(checks.passedCount || 0)} 项` : '自动检查状态待同步'}</dd><dt>状态</dt><dd>等待本机确认</dd></dl>${openActions ? `<div class="et3-inline-actions">${openActions}</div>` : ''}</section>
+      ${canRevise ? `<section class="et3-panel"><h3>发现问题？</h3><label class="et3-form-field" for="expertTeamV3DeliveryRevision"><span>修改意见</span><textarea id="expertTeamV3DeliveryRevision" data-et3-delivery-revision aria-describedby="expertTeamV3DeliveryRevisionHelp expertTeamV3Live" placeholder="说明需要修改的位置、内容和目标"></textarea></label><p id="expertTeamV3DeliveryRevisionHelp" class="et3-help">退回后当前交付文档将失效，专家团会按意见重新生成。</p><div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="submit-delivery-revision">退回修改并重新生成</button></div></section>` : ''}
+      ${bindingReady ? '' : '<p id="expertTeamV3DeliveryActionHelp" class="et3-help">交付操作信息不完整，为避免打开或确认错误文档，当前操作已停用。请重新进入任务或刷新会话状态。</p>'}
+      ${canConfirm ? '<div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="delivery-confirm">确认文档可交付</button></div>' : ''}`;
   }
 
   function completedPanel(card) {
-    const artifacts = list(card.artifacts).filter(item => item && (item.exists !== false));
-    return `<section class="et3-panel"><h3>最终交付</h3><p>文档内容、DOCX 自动检查和本机确认已经形成完整交付链。</p><dl class="et3-kv"><dt>交付状态</dt><dd>已完成</dd><dt>确认链</dt><dd>内容确认 · DOCX 自检 · 本机确认</dd></dl><ul class="et3-artifact-list">${artifacts.map(item => `<li class="et3-artifact"><span><strong>${esc(item.title || item.label || (item.kind === 'docx' ? '最终交付文档.docx' : item.kind) || '交付文件')}</strong><small>${esc(item.kind === 'docx' ? 'DOCX · 已确认' : (item.kind || '交付文件'))}</small></span><button type="button" class="et3-button" data-et3-action="open-artifact" data-path="${esc(item.path || '')}" data-kind="${esc(item.kind || '')}" aria-label="打开${esc(item.title || item.label || item.kind || '交付文件')}">打开</button></li>`).join('') || '<li class="et3-help">交付文件入口正在同步，请刷新任务状态。</li>'}</ul></section><div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="open-docx">打开最终 DOCX</button></div>`;
+    const delivery = card.standaloneDelivery || {};
+    const bindingReady = Boolean(deliveryBindingFingerprint(card));
+    const canOpenDocument = bindingReady && actionAllowed(card, 'delivery_open_document');
+    const canOpenFolder = bindingReady && actionAllowed(card, 'delivery_open_folder');
+    return `<section class="et3-panel"><h3>最终交付</h3><p>文档内容、DOCX 自动检查和本机确认已经形成完整交付链。</p><dl class="et3-kv"><dt>文件</dt><dd>${esc(delivery.documentName || '最终交付文档.docx')}</dd><dt>交付状态</dt><dd>已完成</dd><dt>确认链</dt><dd>内容确认 · DOCX 自检 · 本机确认</dd></dl><div class="et3-inline-actions">${canOpenDocument ? '<button type="button" class="et3-button et3-button--primary" data-et3-action="delivery-open-document">打开文档</button>' : ''}${canOpenFolder ? '<button type="button" class="et3-button" data-et3-action="delivery-open-folder">打开所在文件夹</button>' : ''}</div></section>${bindingReady ? '' : '<p class="et3-help">交付文件入口已失效，请刷新会话状态后再试。</p>'}`;
   }
 
   function legacyPanel(card) {
@@ -665,6 +823,9 @@
       'save-brief': 'answer', 'confirm-brief': 'answer', 'submit-answers': 'answer',
       'start-generation': 'start_generation', 'submit-stage-input': 'submit_stage_input',
       'retry-run': 'resume', 'cancel-run': 'cancel', 'retry-cancel': 'retry_cancel',
+      'delivery-open-document': 'delivery_open_document', 'delivery-open-folder': 'delivery_open_folder',
+      'submit-delivery-revision': 'delivery_revise', 'delivery-confirm': 'delivery_confirm',
+      'delivery-recover': 'delivery_recover',
     }[action];
     if (requiredAction && !actionAllowed(state.card, requiredAction)) {
       return setLive('该操作已不适用于服务端最新状态，请刷新后重试。', true);
@@ -678,8 +839,11 @@
       return true;
     }
     if (action === 'view-result') { const result = workbenchRoot().querySelector('[data-et3-result-document]'); if (result) { result.focus(); result.scrollIntoView({ block: 'start' }); return true; } return setLive('完整成果尚未同步，请刷新状态。', true); }
-    if (action === 'open-artifact') return openArtifact(button.dataset.path, button.dataset.kind, button);
-    if (action === 'open-docx') return openFinalDocx(button);
+    if (action === 'delivery-open-document') return openDelivery('document', button);
+    if (action === 'delivery-open-folder') return openDelivery('folder', button);
+    if (action === 'submit-delivery-revision') return submitDeliveryRevision(button);
+    if (action === 'delivery-confirm') return confirmDelivery(button);
+    if (action === 'delivery-recover') return recoverDelivery(button);
     if (action === 'choose-source-file') { workbenchRoot().querySelector('[data-et3-source-file]')?.click(); return true; }
     if (action === 'add-text-source') return addTextSource(button);
     if (action === 'remove-source') {
@@ -776,6 +940,30 @@
     return control && required.every(key => Object.prototype.hasOwnProperty.call(control, key)) ? control : null;
   }
 
+  function deliveryActionControl(kind, action) {
+    if (!actionAllowed(state.card, action)) return null;
+    if (typeof window.buildExpertTeamDeliveryActionPayload !== 'function') return null;
+    const control = window.buildExpertTeamDeliveryActionPayload(state.card, uid(kind));
+    const required = [
+      'session_id', 'run_id', 'expected_version', 'stage_id', 'stage_attempt',
+      'artifact_id', 'artifact_sha256', 'delivery_attempt', 'delivery_binding_sha256',
+      'document_sha256', 'idempotency_key',
+    ];
+    return control && required.every(key => Object.prototype.hasOwnProperty.call(control, key)) ? control : null;
+  }
+
+  function deliveryRecoveryControl(kind) {
+    if (!actionAllowed(state.card, 'delivery_recover')) return null;
+    if (typeof window.buildExpertTeamDeliveryRecoveryPayload !== 'function') return null;
+    const control = window.buildExpertTeamDeliveryRecoveryPayload(state.card, uid(kind));
+    const required = [
+      'session_id', 'run_id', 'expected_version', 'stage_id', 'stage_attempt',
+      'artifact_id', 'artifact_sha256', 'delivery_attempt', 'delivery_binding_sha256',
+      'document_sha256', 'idempotency_key',
+    ];
+    return control && required.every(key => Object.prototype.hasOwnProperty.call(control, key)) ? control : null;
+  }
+
   async function mutateStage(endpoint, action, extra, button, kind) {
     const control = stageActionControl(kind, action);
     if (!control) return setLive('当前阶段操作信息不完整，请刷新任务状态后重试。', true);
@@ -786,6 +974,10 @@
         method: 'POST',
         body: JSON.stringify({ ...control, ...(extra || {}) }),
       });
+      if (action === 'stage_revise') {
+        const field = workbenchRoot()?.querySelector('[data-et3-revision]');
+        if (field) field.value = '';
+      }
       state.conflictRevisionDraft = null;
       applyResponse(payload);
       setLive('操作已保存。');
@@ -797,6 +989,38 @@
         setLive(conflictDraft ? '状态已更新，修改意见已保留，请核对后重试。' : '状态已更新，请核对最新阶段后重试。', true);
       } else {
         setLive(error.message || '操作失败，请刷新状态后重试。', true);
+      }
+      return false;
+    } finally { setBusy(button, false); }
+  }
+
+  async function mutateDelivery(endpoint, action, extra, button, kind, successMessage) {
+    const control = deliveryActionControl(kind, action);
+    if (!control) return setLive('当前交付操作信息不完整，请重新进入任务或刷新会话状态。', true);
+    const conflictDraft = action === 'delivery_revise' ? captureConflictDeliveryDraft(state.card) : null;
+    setBusy(button, true, action === 'delivery_confirm' ? '正在确认…' : '处理中…');
+    try {
+      const payload = await window.api(endpoint, {
+        method: 'POST',
+        body: JSON.stringify({ ...control, ...(extra || {}) }),
+      });
+      if (action !== 'delivery_open_document' && action !== 'delivery_open_folder') {
+        if (action === 'delivery_revise') {
+          const field = workbenchRoot()?.querySelector('[data-et3-delivery-revision]');
+          if (field) field.value = '';
+        }
+        state.conflictDeliveryDraft = null;
+        applyResponse(payload);
+      }
+      setLive(successMessage || '操作已保存。');
+      return true;
+    } catch (error) {
+      if (isConflictError(error) && conflictDraft) state.conflictDeliveryDraft = conflictDraft;
+      if (error && error.payload && error.payload.run) applyResponse(error.payload);
+      if (isConflictError(error)) {
+        setLive(conflictDraft ? '交付状态已更新，修改意见已保留，请核对新文档后重试。' : '交付状态已更新，请核对最新文档后重试。', true);
+      } else {
+        setLive(error.message || '交付操作失败，请刷新状态后重试。', true);
       }
       return false;
     } finally { setBusy(button, false); }
@@ -864,8 +1088,15 @@
   }
 
   function submitRevision(button) {
-    const feedback = String(workbenchRoot().querySelector('[data-et3-revision]')?.value || '').trim();
-    if (!feedback) return setLive('请填写修改意见；若无修改，请使用“无修改，进入下一阶段”。', true);
+    const field = workbenchRoot().querySelector('[data-et3-revision]');
+    const feedback = String(field?.value || '').trim();
+    if (!feedback) {
+      field?.setAttribute('aria-invalid', 'true');
+      field?.setAttribute('aria-errormessage', 'expertTeamV3Live');
+      return setLive('请填写修改意见；若无修改，请使用“无修改，进入下一阶段”。', true);
+    }
+    field?.removeAttribute('aria-invalid');
+    field?.removeAttribute('aria-errormessage');
     return mutateStage('/api/expert-teams/stage/revise', 'stage_revise', { feedback }, button, 'stage-revise');
   }
 
@@ -879,24 +1110,68 @@
     return mutate('/api/expert-teams/stage/input', { input_id: state.card.pendingInputId || '', answer }, button, 'stage-input');
   }
 
-  async function openArtifact(path, kind, button) {
-    if (!path) return setLive('文件入口尚未同步，请刷新任务状态。', true);
-    if (typeof window.openExpertTeamFileArtifact === 'function') {
-      button.dataset.expertTeamArtifactPath = path;
-      button.dataset.expertTeamArtifactKind = kind || 'file';
-      button.dataset.expertTeamArtifactExists = 'true';
-      return window.openExpertTeamFileArtifact(button);
+  function openDelivery(target, button) {
+    const action = target === 'folder' ? 'delivery_open_folder' : 'delivery_open_document';
+    return mutateDelivery(
+      '/api/expert-teams/delivery/open',
+      action,
+      { target },
+      button,
+      `delivery-open-${target}`,
+      target === 'folder' ? '已打开文档所在文件夹。' : '已打开最终文档。',
+    );
+  }
+
+  function submitDeliveryRevision(button) {
+    const field = workbenchRoot().querySelector('[data-et3-delivery-revision]');
+    const feedback = String(field?.value || '').trim();
+    if (!feedback) {
+      field?.setAttribute('aria-invalid', 'true');
+      field?.setAttribute('aria-errormessage', 'expertTeamV3Live');
+      field?.focus();
+      return setLive('请先填写需要修改的内容；如果文档无需修改，请确认可交付。', true);
     }
-    return setLive('当前桌面端不支持打开文件。', true);
+    field?.removeAttribute('aria-invalid');
+    field?.removeAttribute('aria-errormessage');
+    return mutateDelivery(
+      '/api/expert-teams/delivery/revise',
+      'delivery_revise',
+      { feedback },
+      button,
+      'delivery-revise',
+      '修改意见已提交，专家团正在重新生成文档。',
+    );
   }
 
-  function finalDocument() {
-    return list(state.card && state.card.artifacts).find(item => item && (item.kind === 'docx' || /document\.docx$/i.test(item.path || '')));
+  function confirmDelivery(button) {
+    return mutateDelivery(
+      '/api/expert-teams/delivery/confirm',
+      'delivery_confirm',
+      {},
+      button,
+      'delivery-confirm',
+      '本机确认已提交，交付状态以服务端最新结果为准。',
+    );
   }
 
-  function openFinalDocx(button) {
-    const artifact = finalDocument();
-    return openArtifact(artifact && artifact.path, 'docx', button);
+  async function recoverDelivery(button) {
+    const control = deliveryRecoveryControl('delivery-recover');
+    if (!control) return setLive('当前恢复操作信息不完整，请刷新任务状态后重试。', true);
+    setBusy(button, true, '正在重新生成…');
+    try {
+      const payload = await window.api('/api/expert-teams/delivery/recover', {
+        method: 'POST',
+        body: JSON.stringify(control),
+      });
+      applyResponse(payload);
+      setLive('恢复请求已提交，正在重新生成并检查 DOCX。');
+      return true;
+    } catch (error) {
+      if (error && error.payload && error.payload.run) applyResponse(error.payload);
+      if (isConflictError(error)) setLive('交付状态已更新，请核对最新状态后重试。', true);
+      else setLive(error.message || '重新生成 DOCX 失败，请重试。', true);
+      return false;
+    } finally { setBusy(button, false); }
   }
 
   async function refreshRun(button) {
