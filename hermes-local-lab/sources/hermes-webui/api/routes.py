@@ -16261,6 +16261,38 @@ def handle_post(handler, parsed) -> bool:
         except Exception as exc:
             return bad(handler, f"Failed to update document brief: {_sanitize_error(exc)}", 400)
 
+    if parsed.path == "/api/expert-teams/stage/confirm":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if session_id and str(run.get("session_id") or "") != session_id:
+                return bad(handler, "expert team run does not belong to this session", 404)
+            run = expert_teams.confirm_standalone_expert_team_stage(
+                workspace,
+                {**body, "run_id": str(run.get("run_id") or "")},
+            )
+            payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
+            if (
+                str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
+                and str(run.get("workflow_state") or "") in {
+                    "ready_to_generate",
+                    "delivery_validation_required",
+                }
+            ):
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+                stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+                return _expert_team_json_response(handler, stream_payload, status=status)
+            return _expert_team_json_response(handler, payload)
+        except FileNotFoundError:
+            return bad(handler, "expert team run not found", 404)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return bad(handler, f"Failed to confirm expert team stage: {_sanitize_error(exc)}", 400)
+
     if parsed.path == "/api/expert-teams/stage/approve":
         from api import expert_teams
 
@@ -16270,6 +16302,12 @@ def handle_post(handler, parsed) -> bool:
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
+            if str(run.get("product_mode") or "") == "standalone":
+                raise expert_teams.ExpertTeamStateConflict(
+                    "standalone_confirmation_required",
+                    "standalone runs must use local stage confirmation",
+                    run,
+                )
             run = expert_teams.approve_expert_team_stage(
                 workspace,
                 {

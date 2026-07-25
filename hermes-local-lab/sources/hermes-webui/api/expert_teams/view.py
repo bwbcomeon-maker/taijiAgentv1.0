@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from copy import deepcopy
 
 from .contracts import EXPERT_TEAM_CONTRACT_V1, brief_summary, classify_contract_version
@@ -20,7 +22,7 @@ STATE_LABELS = {
     "legacy_result_unverified": "历史结果未绑定",
     "generating": "专家团正在生成",
     "cancelling": "正在停止专家团",
-    "awaiting_stage_input": "需要确认后继续",
+    "awaiting_stage_input": "等待补充阶段信息",
     "generated_invalid": "草稿未通过校验",
     "awaiting_review": "阶段成果待复核",
     "awaiting_local_confirmation": "等待本机确认",
@@ -40,6 +42,28 @@ DOCUMENT_TYPE_LABELS = {
 _GATE_STATUSES = {"pending", "running", "failed", "invalidated", "passed"}
 
 
+def _has_current_local_delivery_confirmation(run: dict) -> bool:
+    confirmation = run.get("local_delivery_confirmation")
+    binding = run.get("current_delivery_manifest_ref")
+    if not isinstance(confirmation, dict) or not isinstance(binding, dict):
+        return False
+    try:
+        confirmation_attempt = int(confirmation.get("delivery_attempt") or 0)
+        binding_attempt = int(binding.get("delivery_attempt") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        confirmation.get("schema_version") == "local-delivery-confirmation/v1"
+        and confirmation_attempt > 0
+        and confirmation_attempt == binding_attempt
+        and str(confirmation.get("delivery_binding_sha256") or "")
+        == str(binding.get("delivery_binding_sha256") or "")
+        and len(str(confirmation.get("delivery_binding_sha256") or "")) == 64
+        and len(str(confirmation.get("document_sha256") or "")) == 64
+        and bool(str(confirmation.get("confirmed_at") or "").strip())
+    )
+
+
 def _effective_state(run: dict) -> str:
     state = str(run.get("workflow_state") or "collecting_required")
     if (
@@ -52,7 +76,11 @@ def _effective_state(run: dict) -> str:
         return "completion_reconciling"
     if state == "completed" and str(integrity.get("status") or "") in {"drifted", "unverified"}:
         return "completed_invalid"
-    if state == "completed" and str(run.get("product_mode") or "") == "standalone":
+    if (
+        state == "completed"
+        and str(run.get("product_mode") or "") == "standalone"
+        and not _has_current_local_delivery_confirmation(run)
+    ):
         return "awaiting_local_confirmation"
     return state
 
@@ -100,13 +128,26 @@ def _secondary_actions(state: str, run: dict | None = None) -> list[dict]:
     if state == "cancelling":
         if str(run.get("cancel_outcome") or "").strip().lower() in {"unknown", "retry_required"}:
             return [{"id": "refresh", "label": "刷新停止状态", "kind": "ghost"}]
-        return [{"id": "retry_cancel", "label": "重试停止", "kind": "ghost"}]
+        return []
     if state == "awaiting_review":
-        approve_label = "无修改，完成任务" if _is_final_stage(run or {}) else "无修改，进入下一阶段"
+        standalone = str(run.get("product_mode") or "") == "standalone"
+        if standalone and _stage_action_binding(run, "awaiting_stage_confirmation") is None:
+            return [{"id": "view_result", "label": "查看成果", "kind": "ghost"}]
+        approve_label = "确认当前成果" if standalone else (
+            "无修改，完成任务" if _is_final_stage(run or {}) else "无修改，进入下一阶段"
+        )
         return [
             {"id": "view_result", "label": "查看成果", "kind": "ghost"},
-            {"id": "approve_stage", "label": approve_label, "kind": "primary"},
-            {"id": "revise_stage", "label": "需要修改", "kind": "ghost"},
+            {
+                "id": "stage_confirm" if standalone else "approve_stage",
+                "label": approve_label,
+                "kind": "primary",
+            },
+            {
+                "id": "stage_revise" if standalone else "revise_stage",
+                "label": "需要修改",
+                "kind": "ghost",
+            },
         ]
     if state == "generated_invalid":
         return [{"id": "view_result", "label": "查看草稿", "kind": "ghost"}]
@@ -240,7 +281,11 @@ def _presentation(run: dict, business_context: dict) -> dict:
     elif state == "awaiting_local_confirmation":
         detail = "文档已生成，请在本机确认后完成任务。"
     elif state == "delivery_validation_required":
-        detail = "正文语义已由受信人员确认，正在等待系统生成并校验唯一 DOCX 交付物。"
+        detail = (
+            "正文已在本机确认，正在等待系统生成并校验 DOCX 交付物。"
+            if standalone
+            else "正文语义已由受信人员确认，正在等待系统生成并校验唯一 DOCX 交付物。"
+        )
     elif state == "completed":
         detail = "所有阶段已完成，结果已写入当前对话。"
     elif state == "completion_reconciling":
@@ -268,9 +313,15 @@ def _presentation(run: dict, business_context: dict) -> dict:
             else {"id": "refresh", "label": "刷新清理状态", "kind": "primary"}
         )
     elif state == "cancelling":
+        retry_cancel = str(run.get("cancel_outcome") or "").strip().lower() in {
+            "unknown",
+            "retry_required",
+        }
+        if standalone:
+            retry_cancel = _cancel_action_binding(run, state) is not None
         primary_action = (
             {"id": "retry_cancel", "label": "重试停止", "kind": "danger"}
-            if str(run.get("cancel_outcome") or "").strip().lower() in {"unknown", "retry_required"}
+            if retry_cancel
             else {"id": "refresh", "label": "刷新停止状态", "kind": "primary"}
         )
     title = STATE_LABELS.get(state, "专家团状态")
@@ -279,6 +330,14 @@ def _presentation(run: dict, business_context: dict) -> dict:
             "awaiting_review": "成果待本机确认",
             "completion_reconciling": "正在恢复交付状态",
         }.get(state, title)
+        if state in {
+            "start_failed",
+            "generation_failed",
+            "result_unverified",
+            "legacy_result_unverified",
+            "generated_invalid",
+        }:
+            primary_action = {"id": "resume", "label": "重新尝试", "kind": "primary"}
     return {
         "state": state,
         "title": title,
@@ -326,7 +385,7 @@ def _progress_text(run: dict, state: str | None = None) -> str:
         return "0/0"
     if progress.get("is_intake"):
         return f"0/{total}"
-    if (state or str(run.get("workflow_state") or "")) in {"completed", "awaiting_local_confirmation"}:
+    if (state or str(run.get("workflow_state") or "")) == "completed":
         return f"{total}/{total}"
     done = int(progress.get("done") or 0)
     return f"{min(total, max(0, done))}/{total}"
@@ -635,17 +694,27 @@ def _completion_model(run: dict, *, enterprise: bool) -> tuple[dict, str, dict]:
 
 def _standalone_completion_model(run: dict) -> tuple[dict, str, dict]:
     document_gates, _status, _next_action = _completion_model(run, enterprise=True)
+    completed = (
+        str(run.get("workflow_state") or "") == "completed"
+        and _has_current_local_delivery_confirmation(run)
+    )
     gates = {
         "content": document_gates["content"],
         "document": document_gates["document"],
         "local_confirmation": {
-            "status": "pending",
-            "label": "等待本机确认",
-            "reason_code": "local_confirmation_required",
+            "status": "passed" if completed else "pending",
+            "label": "已在本机确认" if completed else "等待本机确认",
+            "reason_code": None if completed else "local_confirmation_required",
             "blocking_issue_count": 0,
-            "next_action": {"type": "wait_local_confirmation", "label": "等待本机确认"},
+            "next_action": (
+                {"type": "view_result", "label": "查看完整成果"}
+                if completed
+                else {"type": "wait_local_confirmation", "label": "等待本机确认"}
+            ),
         },
     }
+    if completed:
+        return gates, "passed", {"type": "view_result", "label": "查看完整成果"}
     content_status = str(gates["content"].get("status") or "pending")
     document_status = str(gates["document"].get("status") or "pending")
     if content_status != "passed":
@@ -680,6 +749,211 @@ def _capability_model(run: dict, contract_version: str) -> dict:
     if document_type in DOCUMENT_TYPE_LABELS:
         return {"kind": "enterprise_pilot", "label": "企业合同试点"}
     return {"kind": "ai_draft", "label": "AI 草稿能力"}
+
+
+def _current_stage_artifact(run: dict) -> dict:
+    ref = run.get("current_stage_artifact_ref")
+    if not isinstance(ref, dict):
+        return {}
+    candidates = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and item.get("artifact_id") == ref.get("artifact_id")
+        and item.get("sha256") == ref.get("sha256")
+    ]
+    return deepcopy(candidates[0]) if len(candidates) == 1 else {}
+
+
+def _positive_int_or_zero(value) -> int:
+    return value if type(value) is int and value > 0 else 0
+
+
+def _public_state(run: dict, effective_state: str) -> str:
+    artifact = _current_stage_artifact(run)
+    if effective_state == "cancelling":
+        return "cancelling"
+    if effective_state == "failed":
+        return "failed"
+    if effective_state == "cancelled":
+        return "cancelled"
+    if effective_state in {"collecting_required", "collecting_optional"}:
+        return "intake"
+    if effective_state in {
+        "ready_to_generate",
+        "start_failed",
+        "generation_failed",
+        "result_unverified",
+        "legacy_result_unverified",
+        "awaiting_stage_input",
+        "generated_invalid",
+    }:
+        return "ready"
+    if effective_state in {"starting", "generating"}:
+        return "executing"
+    if effective_state == "revising":
+        return "revising"
+    if effective_state == "delivery_validation_required":
+        return "generating_document"
+    if effective_state == "awaiting_local_confirmation":
+        return "awaiting_delivery_confirmation"
+    if effective_state in {"completion_reconciling", "completed_invalid"}:
+        return "awaiting_delivery_confirmation"
+    if effective_state == "awaiting_review":
+        if str(artifact.get("artifact_type") or "") == "delivery_manifest":
+            return "awaiting_delivery_confirmation"
+        return "awaiting_stage_confirmation"
+    if effective_state == "completed":
+        return "completed"
+    return "ready"
+
+
+def _stage_action_binding(run: dict, public_state: str) -> dict | None:
+    if str(run.get("product_mode") or "") != "standalone":
+        return None
+    if public_state != "awaiting_stage_confirmation":
+        return None
+    artifact = _current_stage_artifact(run)
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    if not artifact:
+        return None
+    ref = run.get("current_stage_artifact_ref")
+    reservation = run.get("current_stage_attempt_reservation")
+    stage_id = str(current.get("task_id") or current.get("id") or "")
+    attempt = _positive_int_or_zero(artifact.get("stage_attempt"))
+    if (
+        not isinstance(ref, dict)
+        or not attempt
+        or _positive_int_or_zero(ref.get("stage_attempt")) != attempt
+        or str(artifact.get("stage_id") or "") != stage_id
+        or str(artifact.get("validation_status") or "") != "valid"
+        or any(
+            isinstance(issue, dict)
+            and str(issue.get("severity") or "") in {"blocking", "error", "warning"}
+            for issue in artifact.get("blocking_issues") or []
+        )
+        or not isinstance(reservation, dict)
+        or str(reservation.get("stage_id") or "") != stage_id
+        or _positive_int_or_zero(reservation.get("stage_attempt")) != attempt
+        or str(reservation.get("artifact_type") or "") != str(artifact.get("artifact_type") or "")
+        or reservation.get("input_refs") != artifact.get("input_refs")
+        or str(reservation.get("status") or "") != "generated_valid"
+    ):
+        return None
+    reservation_id = str(reservation.get("reservation_id") or "")
+    if not reservation_id:
+        return None
+    ledger_matches = [
+        item
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+        and str(item.get("reservation_id") or "") == reservation_id
+        and str(item.get("stage_id") or "") == stage_id
+        and _positive_int_or_zero(item.get("stage_attempt")) == attempt
+        and str(item.get("artifact_type") or "") == str(artifact.get("artifact_type") or "")
+        and item.get("input_refs") == artifact.get("input_refs")
+        and str(item.get("status") or "") == "generated_valid"
+    ]
+    if len(ledger_matches) != 1:
+        return None
+    return {
+        "session_id": str(run.get("session_id") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "expected_version": int(run.get("version") or 0),
+        "stage_id": stage_id,
+        "stage_attempt": attempt,
+        "artifact_id": str(artifact.get("artifact_id") or ""),
+        "artifact_sha256": str(artifact.get("sha256") or ""),
+    }
+
+
+def _cancel_action_binding(run: dict, effective_state: str) -> dict | None:
+    """Return the only request that can safely retry an uncertain cancellation."""
+    if str(run.get("product_mode") or "") != "standalone":
+        return None
+    if effective_state != "cancelling":
+        return None
+    if str(run.get("cancel_outcome") or "").strip().lower() not in {
+        "unknown",
+        "retry_required",
+    }:
+        return None
+
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    task_id = str(current.get("task_id") or "").strip()
+    legacy_id = str(current.get("id") or "").strip()
+    if task_id and legacy_id and task_id != legacy_id:
+        return None
+    stage_id = task_id or legacy_id
+    session_id = str(run.get("session_id") or "").strip()
+    run_id = str(run.get("run_id") or "").strip()
+    request_id = str(run.get("cancel_request_id") or "").strip()
+    expected_version = _positive_int_or_zero(run.get("version"))
+    if not all((session_id, run_id, stage_id, request_id, expected_version)):
+        return None
+
+    # runtime._request_fingerprint deliberately excludes expected_version and
+    # idempotency_key.  Rebuilding the canonical original identity here makes
+    # any missing field, extra-field request, or persisted drift fail closed.
+    fingerprint_body = {
+        "run_id": run_id,
+        "session_id": session_id,
+        "stage_id": stage_id,
+    }
+    raw = json.dumps(
+        {"action": "cancel", "body": fingerprint_body},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    expected_fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    if str(run.get("cancel_request_fingerprint") or "") != expected_fingerprint:
+        return None
+
+    return {
+        "session_id": session_id,
+        "run_id": run_id,
+        "expected_version": expected_version,
+        "stage_id": stage_id,
+        "idempotency_key": request_id,
+    }
+
+
+def _allowed_actions(
+    run: dict,
+    effective_state: str,
+    public_state: str,
+    stage_binding: dict | None,
+    cancel_binding: dict | None,
+) -> list[str]:
+    standalone = str(run.get("product_mode") or "") == "standalone"
+    if not standalone:
+        return []
+    if effective_state in {"collecting_required", "collecting_optional"}:
+        return ["answer"]
+    if effective_state == "ready_to_generate":
+        return ["start_generation"]
+    if effective_state == "awaiting_stage_input":
+        return ["submit_stage_input"]
+    if effective_state in {
+        "start_failed",
+        "generation_failed",
+        "result_unverified",
+        "legacy_result_unverified",
+        "generated_invalid",
+    }:
+        return ["resume"]
+    if effective_state in {"starting", "generating", "revising"}:
+        return ["cancel"]
+    if effective_state == "cancelling":
+        actions = ["refresh"]
+        if cancel_binding is not None:
+            actions.append("retry_cancel")
+        return actions
+    if public_state == "awaiting_stage_confirmation" and stage_binding is not None:
+        return ["stage_confirm", "stage_revise"]
+    return []
 
 
 def expert_team_run_view(run: dict) -> dict:
@@ -718,6 +992,9 @@ def expert_team_run_view(run: dict) -> dict:
         pending_input = _pending_input(run)
     standalone = str(run.get("product_mode") or "") == "standalone"
     document_contract = contract_version == EXPERT_TEAM_CONTRACT_V1
+    public_state = _public_state(run, state)
+    stage_action_binding = _stage_action_binding(run, public_state)
+    cancel_action_binding = _cancel_action_binding(run, state)
     if standalone:
         completion_gates, delivery_status, next_action = _standalone_completion_model(run)
     else:
@@ -726,6 +1003,16 @@ def expert_team_run_view(run: dict) -> dict:
             enterprise=document_contract,
         )
     result = {
+        "public_state": public_state,
+        "allowed_actions": _allowed_actions(
+            run,
+            state,
+            public_state,
+            stage_action_binding,
+            cancel_action_binding,
+        ),
+        "stage_action_binding": stage_action_binding,
+        "cancel_action_binding": cancel_action_binding,
         "business_context": business_context,
         "presentation": presentation,
         "team": _team(run),
@@ -746,8 +1033,10 @@ def expert_team_run_view(run: dict) -> dict:
             "can_cancel": state in {"generating", "revising"},
             "can_submit_stage_input": state == "awaiting_stage_input",
             "can_retry": state in {"start_failed", "generation_failed", "generated_invalid"},
-            "can_approve_stage": state == "awaiting_review",
+            "can_confirm_stage": standalone and public_state == "awaiting_stage_confirmation" and stage_action_binding is not None,
+            "can_approve_stage": (not standalone) and state == "awaiting_review",
             "can_request_revision": state == "awaiting_review",
+            "can_refresh": state == "cancelling",
         },
         "completion_gates": completion_gates,
         "delivery_status": delivery_status,

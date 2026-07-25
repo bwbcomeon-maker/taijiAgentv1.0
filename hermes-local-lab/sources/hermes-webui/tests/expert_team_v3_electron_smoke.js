@@ -22,19 +22,19 @@ function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
-function fixture(sessionId, workflowState = 'awaiting_review', version = 7) {
+function fixture(sessionId, publicState = 'awaiting_stage_confirmation', version = 7) {
   const output = {
     id: 'draft-1', kind: 'chat', title: '工作汇报阶段稿',
     content: '# 工作汇报\n\n## 一、工作开展情况\n已完成重点任务。\n\n## 二、存在问题\n部分数据待核实。\n\n## 三、下一步安排\n继续推进闭环。',
   };
   const stages = [
     { id: 'plan', task_id: 'plan', title: '任务规划', phase: '任务规划', status: 'done', worker_name: '写作总导演' },
-    { id: 'draft', task_id: 'draft', title: '初稿撰写', phase: '初稿撰写', status: workflowState === 'generating' ? 'running' : 'awaiting_review', worker_name: '文案创作专家' },
+    { id: 'draft', task_id: 'draft', title: '初稿撰写', phase: '初稿撰写', status: publicState === 'executing' ? 'running' : 'awaiting_review', worker_name: '文案创作专家' },
     { id: 'delivery', task_id: 'delivery', title: '交付确认', phase: '交付确认', status: 'pending', worker_name: '交付复核专家' },
   ];
   const presentation = {
-    state: workflowState, visible_title: '起草部门月度工作汇报',
-    title: workflowState === 'awaiting_review' ? '阶段成果待复核' : '专家团正在生成',
+    state: publicState, visible_title: '起草部门月度工作汇报',
+    title: publicState === 'awaiting_stage_confirmation' ? '阶段成果待确认' : '专家团正在执行',
     detail: '请阅读阶段成果后决定是否修改。', result: output,
     primary_action: { id: 'review_stage', label: '去复核', kind: 'primary' },
     secondary_actions: [
@@ -43,8 +43,8 @@ function fixture(sessionId, workflowState = 'awaiting_review', version = 7) {
     ],
   };
   return {
-    run_id: `et3-electron-${workflowState}`, session_id: sessionId, schema_version: 3,
-    contract_version: 'expert-team-contract/v1', version, workflow_state: workflowState,
+    run_id: 'et3-electron-run', session_id: sessionId, schema_version: 3,
+    contract_version: 'expert-team-contract/v1', product_mode: 'standalone', version, workflow_state: 'awaiting_review',
     team_id: 'content-creator-team', team_title: '内容创作专家团', current_stage: stages[1],
     document_brief: {
       status: 'confirmed', revision: 3, original_request: '起草部门月度工作汇报', exact_title: '部门月度工作汇报',
@@ -52,11 +52,17 @@ function fixture(sessionId, workflowState = 'awaiting_review', version = 7) {
     },
     questions: [], members: [], tasks: stages, artifacts: [], stage_outputs: [output],
     view: {
+      product_mode: 'standalone', public_state: publicState,
+      allowed_actions: publicState === 'awaiting_stage_confirmation' ? ['stage_confirm', 'stage_revise'] : [],
+      stage_action_binding: publicState === 'awaiting_stage_confirmation' ? {
+        session_id: sessionId, run_id: 'et3-electron-run', expected_version: version,
+        stage_id: 'draft', stage_attempt: 1, artifact_id: 'draft:1', artifact_sha256: 'a'.repeat(64),
+      } : null,
       presentation,
       business_context: { visible_title: '起草部门月度工作汇报', material_type: 'work_report' },
       team: { id: 'content-creator-team', title: '内容创作专家团', members: [] },
       workflow: { stages, current_stage: stages[1], progress: { done: 1, total: 3, current: '初稿撰写' } },
-      workspace: { visible: true, title: '专家团工作台', state: workflowState, current_stage: stages[1], stages },
+      workspace: { visible: true, title: '专家团工作台', state: publicState, current_stage: stages[1], stages },
       brief: {
         status: 'confirmed', revision: 3, original_request: '起草部门月度工作汇报', exact_title: '部门月度工作汇报',
         document_type: 'work_report', document_type_label: '工作汇报', purpose: '内部汇报', audience: '公司分管领导',
@@ -65,7 +71,8 @@ function fixture(sessionId, workflowState = 'awaiting_review', version = 7) {
       stage_result: { output, review_items: [{ id: 'r1', title: '补充关键指标和责任部门', phase: '待人工补充' }] },
       stage_review: { review_id: 'review-1', attempt: 1, actionable: true, output },
       review_items: [{ id: 'r1', title: '补充关键指标和责任部门', phase: '待人工补充' }],
-      completion_gates: { content: { status: 'pending' }, document: { status: 'pending' }, office: { status: 'pending' } },
+      intake: { questions: [] },
+      completion_gates: { content: { status: 'pending' }, document: { status: 'pending' }, local_confirmation: { status: 'pending' } },
       delivery_status: 'pending', timeline_events: [], actions: {},
     },
   };
@@ -172,6 +179,7 @@ async function main() {
     await page.evaluate(() => { S.session = window.__et3TestSession; });
     await page.getByRole('button', { name: '发起专家团任务' }).click();
     await page.waitForSelector('#expertTeamV3Workbench [data-et3-brief-form]', { timeout: 20000 });
+    await page.waitForFunction(() => document.querySelector('[data-et3-action="summon"]')?.getAttribute('aria-busy') === 'false');
     await page.locator('[data-et3-brief-form] input[name="exact_title"]').fill('部门月度工作汇报（Electron 合同验证）');
     await page.locator('[data-et3-brief-form] label.et3-form-field textarea[name="purpose"]').fill('用于内部工作会议汇报');
     await page.locator('[data-et3-brief-form] input[name="audience"]').fill('公司分管领导');
@@ -194,16 +202,36 @@ async function main() {
     await page.evaluate(({ source }) => {
       const makeRun = eval(`(${source})`);
       window.__et3Captured = [];
+      window.__et3Forbidden = [];
+      window.__et3ConflictOnce = false;
+      window.__et3ConflictCaptured = [];
+      window.__et3StageInputCaptured = [];
       const originalApi = window.api;
       window.__et3OriginalApi = originalApi;
       window.api = async (url, options) => {
-        if (String(url).startsWith('/api/expert-teams/identity/status')) {
-          return { enabled: true, authenticated: true, principal: { display_name: '测试审批人', roles: ['document-approver', 'document-reviewer'] } };
+        const target = String(url);
+        if (target.includes('/identity/') || target.endsWith('/stage/approve') || target.includes('/quality/wps-visual') || target.includes('/office-revisions/')) {
+          window.__et3Forbidden.push(target);
+          throw new Error(`standalone forbidden request: ${target}`);
         }
-        if (String(url).startsWith('/api/expert-teams/stage/')) {
-          window.__et3Captured.push({ url, body: JSON.parse(options.body) });
-          const current = makeRun(window.__et3SessionId, url.endsWith('/revise') ? 'revising' : 'generating', Number(JSON.parse(options.body).expected_version || 7) + 1);
+        if (target === '/api/expert-teams/stage/revise' || target === '/api/expert-teams/stage/confirm') {
+          const body = JSON.parse(options.body);
+          if (target.endsWith('/revise') && window.__et3ConflictOnce) {
+            window.__et3ConflictOnce = false;
+            window.__et3ConflictCaptured.push({ url, body });
+            const error = new Error('stage action binding is stale');
+            error.status = 409;
+            error.payload = { ok: false, code: 'stage_action_conflict', error: error.message, run: makeRun(window.__et3SessionId, 'awaiting_stage_confirmation', Number(body.expected_version || 7) + 1) };
+            throw error;
+          }
+          window.__et3Captured.push({ url, body });
+          const current = makeRun(window.__et3SessionId, target.endsWith('/revise') ? 'revising' : 'executing', Number(body.expected_version || 7) + 1);
           return { ok: true, run: current };
+        }
+        if (target === '/api/expert-teams/stage/input') {
+          const body = JSON.parse(options.body);
+          window.__et3StageInputCaptured.push({ url, body });
+          return { ok: true, run: makeRun(window.__et3SessionId, 'executing', Number(body.expected_version || 10) + 1) };
         }
         return originalApi(url, options);
       };
@@ -214,13 +242,16 @@ async function main() {
     await reviewDraft.fill('这是尚未提交的复核草稿');
     await page.evaluate(({ source }) => {
       const makeRun = eval(`(${source})`);
-      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(makeRun(window.__et3SessionId, 'awaiting_review', 8)));
+      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(makeRun(window.__et3SessionId, 'awaiting_stage_confirmation', 8)));
     }, { source: fixture.toString() });
-    assert((await reviewDraft.inputValue()).includes('尚未提交'), 'Review draft was lost during authoritative re-render');
+    assert((await reviewDraft.inputValue()) === '', 'A stale binding draft entered the current revision field');
+    const staleDraft = page.locator('#expertTeamV3Workbench [data-et3-stale-revision]');
+    assert((await staleDraft.inputValue()).includes('尚未提交'), 'Binding change did not preserve the old draft as read-only');
     await page.getByRole('button', { name: '收起专家团工作台' }).click();
     assert(await page.locator('#expertTeamV3Workbench').evaluate(root => root.classList.contains('is-collapsed')), 'Workbench did not enter a recoverable collapsed state');
     await page.getByRole('button', { name: '展开专家团工作台' }).click();
-    assert((await reviewDraft.inputValue()).includes('尚未提交'), 'Review draft was lost after collapse and restore');
+    assert((await reviewDraft.inputValue()) === '', 'Collapsed stale draft entered the current revision field');
+    assert((await staleDraft.inputValue()).includes('尚未提交'), 'Read-only stale draft was lost after collapse and restore');
     await reviewDraft.fill('');
     await page.setViewportSize({ width: 1024, height: 768 });
     assert(await page.locator('#expertTeamV3Workbench').evaluate(root => Math.abs(root.getBoundingClientRect().width - root.parentElement.getBoundingClientRect().width) < 2), '1024px workbench did not switch to full workspace mode');
@@ -236,12 +267,19 @@ async function main() {
     await page.getByRole('button', { name: '加入修改意见' }).click();
     const revision = page.locator('#expertTeamV3Workbench [data-et3-revision]');
     assert((await revision.inputValue()).includes('补充关键指标'), 'Review suggestion was not added to the revision field');
+    await page.evaluate(() => { window.__et3ConflictOnce = true; });
+    await page.getByRole('button', { name: '提交修改意见' }).click();
+    await page.waitForFunction(() => document.body.innerText.includes('状态已更新，修改意见已保留'));
+    assert((await revision.inputValue()) === '', '409 stale binding draft entered the authoritative revision field');
+    assert((await page.locator('[data-et3-stale-revision]').inputValue()).includes('补充关键指标'), '409 did not retain the stale draft as read-only');
+    assert((await page.evaluate(() => window.__et3ConflictCaptured)).length === 1, '409 adversarial branch did not execute');
+    await revision.fill('重新核对：补充关键指标和责任部门');
     await page.getByRole('button', { name: '提交修改意见' }).click();
     await page.waitForFunction(() => window.__et3Captured.length === 1);
 
     await page.evaluate(({ source }) => {
       const makeRun = eval(`(${source})`);
-      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(makeRun(window.__et3SessionId, 'awaiting_review', 9)));
+      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(makeRun(window.__et3SessionId, 'awaiting_stage_confirmation', 9)));
     }, { source: fixture.toString() });
     const approve = page.getByRole('button', { name: '无修改，进入下一阶段' });
     await approve.waitFor({ state: 'visible' });
@@ -250,57 +288,52 @@ async function main() {
     await page.waitForFunction(() => window.__et3Captured.length === 2);
     const captured = await page.evaluate(() => window.__et3Captured);
     assert(captured[0].url.endsWith('/revise') && captured[0].body.feedback.includes('补充关键指标'), 'Revision request contract is wrong', captured[0]);
-    assert(captured[1].url.endsWith('/approve') && captured[1].body.expected_version === 9, 'Approve request contract is wrong', captured[1]);
+    assert(captured[1].url.endsWith('/confirm') && captured[1].body.expected_version === 9, 'Confirm request contract is wrong', captured[1]);
+    for (const request of captured) {
+      for (const field of ['session_id','run_id','expected_version','stage_id','stage_attempt','artifact_id','artifact_sha256','idempotency_key']) {
+        assert(Object.prototype.hasOwnProperty.call(request.body, field), `Stage request is missing ${field}`, request);
+      }
+    }
+    assert((await page.evaluate(() => window.__et3Forbidden)).length === 0, 'Standalone review emitted an enterprise-only request', await page.evaluate(() => window.__et3Forbidden));
     await page.screenshot({ path: path.join(outDir, '08-stage-review.png'), fullPage: false });
 
-    const evidencePath = path.join(outDir, 'office-evidence.png');
-    fs.writeFileSync(evidencePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'));
     await page.evaluate(({ source }) => {
       const makeRun = eval(`(${source})`);
-      const officeRun = makeRun(window.__et3SessionId, 'awaiting_review', 12);
-      officeRun.artifacts = [{ kind: 'docx', title: '最终 DOCX', path: '.taiji/expert-teams/run/delivery/1/document.docx', exists: true }];
-      officeRun.view.completion_gates = { content: { status: 'passed' }, document: { status: 'passed' }, office: { status: 'pending' } };
-      officeRun.view.office_review = {
-        review_id: 'office-review-1', status: 'pending', decision: 'pending', validity: 'active', review_session_status: 'begin_required', issues: [],
-        checklist: Object.fromEntries(['document_opened','title_and_cover_match','genre_and_structure_match','content_order_correct','figures_unique_and_readable','tables_readable','headers_footers_pagination','no_placeholders_or_workflow_text','citations_readable'].map(key => [key, 'not_checked'])),
+      const inputRun = makeRun(window.__et3SessionId, 'ready', 10);
+      inputRun.workflow_state = 'awaiting_stage_input';
+      inputRun.pending_input = {
+        id: 'stage-input-1', stage_id: 'draft', question: '请选择本阶段的统计口径',
+        description: '选择后，专家团将按该口径继续撰写。', options: ['按自然月', '按结算月'], required: true,
       };
-      window.__et3OfficeRun = officeRun;
-      window.__et3OfficeCaptured = [];
-      window.openExpertTeamFileArtifact = async () => true;
-      window.api = async (url, options = {}) => {
-        const target = String(url);
-        if (target.startsWith('/api/expert-teams/identity/status')) return { enabled: true, authenticated: true, principal: { display_name: '测试验收人', roles: ['document-reviewer'] } };
-        if (target === '/api/docx-engine-v2/quality/wps-visual/begin') { window.__et3OfficeCaptured.push({ url: target, kind: 'begin' }); return { ok: true, review_session_status: 'ready' }; }
-        if (target === '/api/docx-engine-v2/quality/wps-visual/evidence') { window.__et3OfficeCaptured.push({ url: target, kind: 'evidence' }); return { ok: true, count: 1, uploaded_count: 1 }; }
-        if (target === '/api/docx-engine-v2/quality/wps-visual') { window.__et3OfficeCaptured.push({ url: target, kind: 'acceptance', body: JSON.parse(options.body) }); return { ok: true }; }
-        if (target.startsWith('/api/expert-teams/run?')) {
-          const completed = structuredClone(window.__et3OfficeRun);
-          completed.workflow_state = 'completed'; completed.view.presentation.state = 'completed';
-          completed.view.completion_gates.office = { status: 'passed' };
-          return { ok: true, run: completed };
-        }
-        return window.__et3OriginalApi(url, options);
-      };
-      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(officeRun));
+      inputRun.view.public_state = 'ready';
+      inputRun.view.allowed_actions = ['submit_stage_input'];
+      inputRun.view.pending_input = inputRun.pending_input;
+      inputRun.view.workspace.pending_input = inputRun.pending_input;
+      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(inputRun));
     }, { source: fixture.toString() });
-    await page.waitForFunction(() => document.querySelectorAll('[data-et3-office-check]').length === 9 && !document.querySelector('[data-et3-action="office-begin"]')?.disabled);
-    await page.getByRole('button', { name: '打开 DOCX 并开始复核' }).click();
-    await page.setInputFiles('[data-et3-office-evidence]', evidencePath);
-    await page.waitForFunction(() => document.querySelector('[data-et3-office-evidence]') && document.querySelector('[data-et3-office-evidence]').disabled === false && document.body.innerText.includes('已上传 1 份'));
-    assert(await page.locator('[data-et3-office-issue]').evaluate(node => getComputedStyle(node).display === 'none'), '通过验收时仍展示不通过问题表单');
-    await page.locator('input[name="et3-office-decision"][value="failed"]').check();
-    assert(await page.locator('[data-et3-office-issue]').evaluate(node => getComputedStyle(node).display !== 'none'), '不通过验收时未展示结构化问题表单');
-    await page.locator('input[name="et3-office-decision"][value="passed"]').check();
-    await page.locator('[data-et3-office-check]').evaluateAll(items => items.forEach(item => { item.checked = true; item.dispatchEvent(new Event('change', { bubbles: true })); }));
-    await page.locator('[data-et3-office-note]').fill('已使用 WPS 打开并逐页检查目录、版式、表格和分页，未发现异常。');
-    await page.screenshot({ path: path.join(outDir, '12-office-form.png'), fullPage: false });
-    await page.getByRole('button', { name: '提交验收结论' }).click();
-    await page.waitForFunction(() => window.__et3OfficeCaptured.some(item => item.kind === 'acceptance'));
-    const officeCaptured = await page.evaluate(() => window.__et3OfficeCaptured);
-    const acceptance = officeCaptured.find(item => item.kind === 'acceptance');
-    assert(officeCaptured.some(item => item.kind === 'begin') && officeCaptured.some(item => item.kind === 'evidence'), 'Office review did not begin and bind evidence', officeCaptured);
-    assert(acceptance.body.status === 'passed' && Object.keys(acceptance.body.checklist).length === 9 && acceptance.body.note.includes('WPS'), 'Office acceptance payload is incomplete', acceptance);
-    await page.screenshot({ path: path.join(outDir, '14-final-delivery.png'), fullPage: false });
+    assert(await page.getByRole('button', { name: '开始生成' }).count() === 0, 'Stage input was incorrectly rendered as start-generation');
+    await page.getByRole('button', { name: '按自然月' }).click();
+    assert(await page.locator('[data-et3-stage-input]').inputValue() === '按自然月', 'Stage input option did not populate the answer');
+    await page.screenshot({ path: path.join(outDir, '10-stage-input.png'), fullPage: false });
+    await page.getByRole('button', { name: '提交并继续' }).click();
+    await page.waitForFunction(() => window.__et3StageInputCaptured.length === 1);
+    const stageInputCaptured = await page.evaluate(() => window.__et3StageInputCaptured);
+    assert(stageInputCaptured[0].body.input_id === 'stage-input-1' && stageInputCaptured[0].body.answer === '按自然月', 'Stage input request contract is wrong', stageInputCaptured[0]);
+    await page.screenshot({ path: path.join(outDir, '11-stage-input-submitted.png'), fullPage: false });
+
+    await page.evaluate(({ source }) => {
+      const makeRun = eval(`(${source})`);
+      const deliveryRun = makeRun(window.__et3SessionId, 'awaiting_delivery_confirmation', 12);
+      deliveryRun.artifacts = [{ kind: 'docx', title: '最终 DOCX', path: '.taiji/expert-teams/run/delivery/1/document.docx', exists: true }];
+      deliveryRun.view.completion_gates = { content: { status: 'passed' }, document: { status: 'passed' }, local_confirmation: { status: 'pending' } };
+      window.__et3Opened = [];
+      window.openExpertTeamFileArtifact = async button => { window.__et3Opened.push(button.dataset.expertTeamArtifactPath); return true; };
+      window.ExpertTeamV3.renderStatusSurface(buildExpertTeamCardFromRun(deliveryRun));
+    }, { source: fixture.toString() });
+    await page.getByRole('button', { name: '打开最终 DOCX' }).click();
+    assert((await page.evaluate(() => window.__et3Opened)).length === 1, 'Local delivery document was not opened through the desktop bridge');
+    assert((await page.evaluate(() => window.__et3Forbidden)).length === 0, 'Delivery confirmation emitted an enterprise-only request', await page.evaluate(() => window.__et3Forbidden));
+    await page.screenshot({ path: path.join(outDir, '14-local-delivery.png'), fullPage: false });
 
     await page.evaluate(async () => { await switchPanel("tasks"); });
     const isolated = await page.evaluate(() => ({ active: document.body.classList.contains('expert-team-v3-active'), workbench: Boolean(document.querySelector('#expertTeamV3Workbench')), tasksVisible: document.querySelector('main.main')?.classList.contains('showing-tasks') }));
@@ -308,7 +341,7 @@ async function main() {
     await page.setViewportSize({ width: 1024, height: 768 });
     await page.screenshot({ path: path.join(outDir, 'non-expert-tasks-1024.png'), fullPage: false });
 
-    const sourceFiles = ['static/expert-team-v3.js', 'static/expert-team-v3.css', 'api/routes.py'];
+    const sourceFiles = ['static/expert-team-v3.js', 'static/expert-team-presenter.js', 'static/expert-team-v3.css', 'api/routes.py'];
     const gitStatus = command(repoRoot, 'git', ['status', '--porcelain']).split('\n').filter(Boolean);
     const ephemeralStatus = gitStatus.filter(line => line.endsWith(' hermes-local-lab/sources/hermes-agent/venv'));
     const relevantGitStatus = gitStatus.filter(line => !ephemeralStatus.includes(line));
@@ -323,9 +356,10 @@ async function main() {
       runtimeRoot: runtime,
       sourceSha256: Object.fromEntries(sourceFiles.map(file => [file, sha256(path.join(webuiDir, file))])),
       realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/run'],
-      mocked: ['/api/expert-teams/identity/status', '/api/expert-teams/stage/revise', '/api/expert-teams/stage/approve', '/api/docx-engine-v2/quality/wps-visual/*'],
+      mocked: ['/api/expert-teams/stage/revise', '/api/expert-teams/stage/confirm', '/api/expert-teams/stage/input'],
     };
-    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, captured, officeCaptured, isolated }, null, 2));
+    const forbiddenRequests = await page.evaluate(() => window.__et3Forbidden || []);
+    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, captured, stageInputCaptured, forbiddenRequests, isolated }, null, 2));
   } finally {
     await app.close();
   }

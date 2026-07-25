@@ -9,7 +9,52 @@
       kind:str(action.kind,'primary')
     };
   }
+  function normalizedStageActionBinding(value){
+    value=value&&typeof value==='object'?value:{};
+    const binding={
+      session_id:str(value.session_id),
+      run_id:str(value.run_id),
+      expected_version:Number(value.expected_version),
+      stage_id:str(value.stage_id),
+      stage_attempt:Number(value.stage_attempt),
+      artifact_id:str(value.artifact_id),
+      artifact_sha256:str(value.artifact_sha256).toLowerCase()
+    };
+    if(
+      !binding.session_id||!binding.run_id||!Number.isInteger(binding.expected_version)||binding.expected_version<0||
+      !binding.stage_id||!Number.isInteger(binding.stage_attempt)||binding.stage_attempt<1||!binding.artifact_id||
+      !/^[0-9a-f]{64}$/.test(binding.artifact_sha256)
+    )return null;
+    return binding;
+  }
+  function normalizedCancelActionBinding(value){
+    value=value&&typeof value==='object'?value:{};
+    const binding={
+      session_id:str(value.session_id),
+      run_id:str(value.run_id),
+      expected_version:Number(value.expected_version),
+      stage_id:str(value.stage_id),
+      idempotency_key:str(value.idempotency_key)
+    };
+    if(
+      !binding.session_id||!binding.run_id||!Number.isInteger(binding.expected_version)||binding.expected_version<0||
+      !binding.stage_id||!binding.idempotency_key
+    )return null;
+    return binding;
+  }
+  function buildExpertTeamStageActionPayload(card,idempotencyKey){
+    const binding=normalizedStageActionBinding(card&&card.stageActionBinding);
+    const key=str(idempotencyKey);
+    if(!binding||!key)return null;
+    return {...binding,idempotency_key:key};
+  }
   const STATE_LABELS={
+    intake:'待确认任务规格',
+    ready:'任务规格已确认',
+    executing:'专家团正在执行',
+    awaiting_stage_confirmation:'阶段成果待确认',
+    generating_document:'正在生成正式文档',
+    awaiting_delivery_confirmation:'最终文档待确认',
     collecting_required:'待确认文档规格',
     collecting_optional:'待补全文档规格',
     ready_to_generate:'文档规格已确认，待开始生成',
@@ -40,11 +85,22 @@
       blockingIssueCount:Number(gate.blocking_issue_count||gate.blockingIssueCount||0)
     };
   }
-  function normalizedGates(value){
+  function normalizedGates(value,standalone){
     value=value&&typeof value==='object'?value:{};
-    return {content:normalizedGate(value.content),document:normalizedGate(value.document),office:normalizedGate(value.office)};
+    const result={content:normalizedGate(value.content),document:normalizedGate(value.document)};
+    if(standalone)result.localConfirmation=normalizedGate(value.local_confirmation);
+    else result.office=normalizedGate(value.office);
+    return result;
   }
-  function gateSummary(gates,deliveryStatus,state){
+  function gateSummary(gates,deliveryStatus,state,standalone){
+    if(standalone){
+      if(state==='completed')return '本机交付已确认';
+      if(gates.document.status==='passed')return 'DOCX 自动检查通过，待本机确认';
+      if(gates.content.status==='passed'&&gates.document.status==='failed')return '内容已确认，DOCX 自动检查未通过';
+      if(gates.content.status==='passed')return '内容已确认，正在生成文档';
+      if(state==='executing'||state==='revising')return '正在生成/待确认内容';
+      return '内容待确认';
+    }
     if(deliveryStatus==='passed'&&gates.content.status==='passed'&&gates.document.status==='passed'&&gates.office.status==='passed')return '交付已通过';
     if(gates.office.status==='failed')return 'Office 验收不通过，待修改';
     if(gates.document.status==='passed'&&gates.office.status!=='passed')return 'DOCX 自动检查通过，待 Office 验收';
@@ -118,8 +174,12 @@
     const presentation=view.presentation||{};
     const business=view.business_context||{};
     const primary_action=presentation.primary_action||presentation.primaryAction||null;
-    const state=str(presentation.state,run.workflow_state||'collecting_required');
-    const gates=normalizedGates(view.completion_gates);
+    const productMode=str(view.product_mode);
+    const standalone=productMode==='standalone';
+    const state=standalone
+      ? str(view.public_state,'contract_error')
+      : str(presentation.state,run.workflow_state||'collecting_required');
+    const gates=normalizedGates(view.completion_gates,standalone);
     const deliveryStatus=str(view.delivery_status,'pending');
     const nextAction=normalizeAction(view.next_action)||(
       view.next_action&&typeof view.next_action==='object'
@@ -142,9 +202,11 @@
       completionGates:gates,
       deliveryStatus,
       nextAction,
-      gateSummary:gateSummary(gates,deliveryStatus,state),
+      gateSummary:gateSummary(gates,deliveryStatus,state,standalone),
       capabilityKind:str(capability.kind,'legacy'),
-      capabilityLabel:str(capability.label,'历史任务，未按企业合同验证')
+      capabilityLabel:str(capability.label,'历史任务，未按企业合同验证'),
+      productMode,
+      publicState:standalone?state:''
     };
   }
   function buildExpertTeamWorkspace(run){
@@ -153,7 +215,9 @@
     return {
       visible:workspace.visible!==false,
       title:str(workspace.title,'专家团工作台'),
-      state:str(workspace.state,run&&run.workflow_state||'collecting_required'),
+      state:str(view.product_mode)==='standalone'
+        ? str(view.public_state,'contract_error')
+        : str(workspace.state,run&&run.workflow_state||'collecting_required'),
       currentStage:workspace.current_stage||{},
       currentWorker:workspace.current_worker||{},
       phases:arr(workspace.phases),
@@ -169,20 +233,34 @@
     const presentation=buildExpertTeamPresentation(run);
     const view=run.view||{};
     const workspace=buildExpertTeamWorkspace(run);
+    const productMode=str(view.product_mode);
+    const standalone=productMode==='standalone';
+    const publicState=standalone?str(view.public_state,'contract_error'):'';
+    const allowedActions=standalone
+      ? arr(view.allowed_actions).map(item=>str(item)).filter(Boolean)
+      : [];
+    const stageActionBinding=standalone?normalizedStageActionBinding(view.stage_action_binding):null;
+    const normalizedCancelBinding=standalone?normalizedCancelActionBinding(view.cancel_action_binding):null;
+    const cancelActionBinding=normalizedCancelBinding&&
+      normalizedCancelBinding.session_id===str(run.session_id)&&normalizedCancelBinding.run_id===str(run.run_id)
+      ? normalizedCancelBinding
+      : null;
     const teamView=view.team||{};
     const workflow=view.workflow||{};
     const pendingInput=view.pending_input||workspace.pendingInput||{};
     const stageResult=view.stage_result||workspace.stageResult||{};
-    const currentStage=workflow.current_stage||workspace.currentStage||run.current_stage||{};
+    const currentStage=standalone
+      ? (workflow.current_stage||workspace.currentStage||{})
+      : (workflow.current_stage||workspace.currentStage||run.current_stage||{});
     const stageReview=view.stage_review||{};
     const stageReviewOutput=stageReview.output||{};
     const stageAttemptReservation=run.current_stage_attempt_reservation||{};
-    const officeReview=view.office_review||view.office_acceptance||run.office_review_view||run.office_review_ref||{};
-    const brief=view.brief||run.document_brief||{};
+    const officeReview=standalone?{}:(view.office_review||view.office_acceptance||run.office_review_view||run.office_review_ref||{});
+    const brief=standalone?(view.brief||{}):(view.brief||run.document_brief||{});
     const schemaVersion=Number(run.schema_version||0);
     const teamTitle=str(teamView.title||run.team_title,'专家团');
     const workflowStages=arr(workflow.stages);
-    const tasks=(workflowStages.length?workflowStages:arr(run.tasks)).map(task=>({
+    const tasks=(standalone?workflowStages:(workflowStages.length?workflowStages:arr(run.tasks))).map(task=>({
       id:str(task&&task.id),
       title:str(task&&task.title,task&&task.id||'阶段任务'),
       phase:str(task&&task.phase),
@@ -192,7 +270,7 @@
       worker_name:str(task&&task.worker_name)
     }));
     const teamMembers=arr(teamView.members);
-    const members=(teamMembers.length?teamMembers:arr(run.members)).map(member=>({
+    const members=(standalone?teamMembers:(teamMembers.length?teamMembers:arr(run.members))).map(member=>({
       id:str(member&&member.id),
       name:str(member&&member.name,member&&member.id||'成员'),
       role:str(member&&member.role),
@@ -208,7 +286,7 @@
       memberImage:str(event&&event.member_image),
       at:str(event&&event.at)
     }));
-    const questions=arr(run.questions).map(question=>({
+    const questions=arr(standalone?(view.intake||{}).questions:run.questions).map(question=>({
       id:str(question&&question.id),
       title:str(question&&question.title,question&&question.id||'问题'),
       placeholder:str(question&&question.placeholder),
@@ -219,7 +297,7 @@
     }));
     const phaseProgress=(workflow&&workflow.progress)||view.phase_progress||{};
     const draftIdentity={
-      stageAttempt:Number(stageReview.stage_attempt||stageReview.attempt||stageResult.stage_attempt||stageResult.attempt||currentStage.stage_attempt||currentStage.attempt||stageAttemptReservation.stage_attempt||0),
+      stageAttempt:Number(standalone?(stageActionBinding&&stageActionBinding.stage_attempt||0):(stageReview.stage_attempt||stageReview.attempt||stageResult.stage_attempt||stageResult.attempt||currentStage.stage_attempt||currentStage.attempt||stageAttemptReservation.stage_attempt||0)),
       artifactAttempt:Number(stageReviewOutput.stage_attempt||stageReviewOutput.attempt||stageResult.artifact_attempt||0),
       executionAttempt:Number(run.execution_attempt||run.current_execution_attempt||(run.execution_context&&run.execution_context.attempt)||0),
       briefRevision:Number(brief.revision||brief.brief_revision||0),
@@ -236,6 +314,11 @@
       sourceSessionId:str(run.session_id),
       schemaVersion,
       version:Number(run.version||0),
+      productMode,
+      publicState,
+      allowedActions,
+      stageActionBinding,
+      cancelActionBinding,
       readOnly:run.read_only===true||schemaVersion<2,
       executionStreamId:str(run.execution_stream_id),
       currentStageId:str(currentStage.task_id||currentStage.id),
@@ -244,14 +327,14 @@
       draftIdentity,
       cancelRequestId:str(run.cancel_request_id),
       team:{id:str(teamView.id||run.team_id),title:teamTitle,category:str((data.team||{}).category,'专家团'),image:str(teamView.image||run.team_image),members},
-      status:presentation.state,
+      status:standalone?publicState:presentation.state,
       phase:str(phaseProgress.current||run.phase,'需求确认'),
       progress:{done:Number(phaseProgress.done||0),total:Number(phaseProgress.total||tasks.length||0)},
       presentation,
       brief:presentation.brief,
       completionGates:presentation.completionGates,
       deliveryStatus:presentation.deliveryStatus,
-      officeReview:normalizedOfficeReview(officeReview),
+      officeReview:standalone?null:normalizedOfficeReview(officeReview),
       nextAction:presentation.nextAction,
       capability:{kind:presentation.capabilityKind,label:presentation.capabilityLabel},
       artifactValidation:view.artifact_validation||{},
@@ -270,7 +353,7 @@
       members,
       artifacts:arr(run.artifacts),
       stageOutputs:arr(run.stage_outputs),
-      actions:view.actions||{},
+      actions:standalone?{}:(view.actions||{}),
       phaselist:arr(view.phases),
       rows:[
         {label:'团队',value:teamTitle},
@@ -283,5 +366,6 @@
   if(typeof window!=='undefined'){
     window.buildExpertTeamPresentation=buildExpertTeamPresentation;
     window.buildExpertTeamCardFromRun=buildExpertTeamCardFromRun;
+    window.buildExpertTeamStageActionPayload=buildExpertTeamStageActionPayload;
   }
 })();

@@ -840,8 +840,15 @@ def _attach_office_review_view(workspace: Path, run: dict) -> dict:
 
 
 def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
-    run = _attach_office_review_view(workspace, run)
-    if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and isinstance(
+    standalone = str(run.get("product_mode") or "") == "standalone"
+    if standalone:
+        # Standalone and enterprise completion are separate products.  Old
+        # Office evidence may remain on disk in development workspaces, but a
+        # read must never attach it or let it advance the standalone Run.
+        run.pop("office_review_view", None)
+    else:
+        run = _attach_office_review_view(workspace, run)
+    if not standalone and classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and isinstance(
         run.get("current_delivery_manifest_ref"), dict
     ):
         from .office_review import (
@@ -2042,9 +2049,20 @@ def _pending_system_descriptor(run: dict) -> dict:
             "expert team has no declared pending system stage",
             run,
         )
-    template = get_template(str(run.get("team_id") or ""))
+    if str(run.get("product_mode") or "") == "standalone":
+        template = run.get("launch_profile_snapshot")
+        task_key = "stages"
+        if not isinstance(template, dict):
+            raise ExpertTeamStateConflict(
+                "launch_profile_snapshot_missing",
+                "standalone launch profile snapshot is missing",
+                run,
+            )
+    else:
+        template = get_template(str(run.get("team_id") or ""))
+        task_key = "tasks"
     candidates = [
-        item for item in (template.get("tasks") or []) + (template.get("post_approval_system_steps") or [])
+        item for item in (template.get(task_key) or []) + (template.get("post_approval_system_steps") or [])
         if isinstance(item, dict) and item.get("executor") == "system"
     ]
     canonical = next((item for item in candidates if item.get("id") == descriptor.get("id")), None)
@@ -3826,8 +3844,255 @@ def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
     )
 
 
+def _require_standalone_stage_action_fields(body: dict) -> None:
+    for field in ("stage_attempt", "artifact_id", "artifact_sha256"):
+        value = body.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"{field} is required for standalone stage mutations")
+    attempt = body.get("stage_attempt")
+    if type(attempt) is not int or attempt <= 0:
+        raise ValueError("stage_attempt must be a positive integer")
+    if not str(body.get("artifact_id") or "").strip():
+        raise ValueError("artifact_id is required for standalone stage mutations")
+    if re.fullmatch(r"[0-9a-f]{64}", str(body.get("artifact_sha256") or "").strip()) is None:
+        raise ValueError("artifact_sha256 must be a lowercase sha256 digest")
+
+
+def _standalone_bound_stage_artifact(run: dict, body: dict) -> dict:
+    """Resolve the one immutable artifact named by a local stage action."""
+
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_not_available",
+            "local stage confirmation is only available for standalone runs",
+            run,
+        )
+    _require_standalone_stage_action_fields(body)
+    stage = _authoritative_stage_for_mutation(run)
+    stage_id = str(stage.get("task_id") or "")
+    requested_attempt = int(body.get("stage_attempt"))
+    requested_artifact_id = str(body.get("artifact_id") or "").strip()
+    requested_sha256 = str(body.get("artifact_sha256") or "").strip()
+    artifact_ref = run.get("current_stage_artifact_ref")
+    if not isinstance(artifact_ref, dict):
+        raise ExpertTeamStateConflict(
+            "stage_artifact_missing",
+            "current stage has no authoritative artifact",
+            run,
+        )
+    try:
+        authoritative_attempt = int(artifact_ref.get("stage_attempt"))
+    except (TypeError, ValueError) as exc:
+        raise ExpertTeamStateConflict(
+            "stage_artifact_identity_mismatch",
+            "current stage artifact attempt is invalid",
+            run,
+        ) from exc
+    if requested_attempt != authoritative_attempt:
+        raise ExpertTeamStateConflict(
+            "stale_stage_attempt",
+            f"expert team stage attempt changed: expected {requested_attempt}, current {authoritative_attempt}",
+            run,
+        )
+    if requested_artifact_id != str(artifact_ref.get("artifact_id") or ""):
+        raise ExpertTeamStateConflict(
+            "stale_artifact",
+            "expert team stage artifact changed",
+            run,
+        )
+    if requested_sha256 != str(artifact_ref.get("sha256") or ""):
+        raise ExpertTeamStateConflict(
+            "stale_artifact_hash",
+            "expert team stage artifact digest changed",
+            run,
+        )
+    candidates = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and item.get("artifact_id") == requested_artifact_id
+        and item.get("sha256") == requested_sha256
+    ]
+    if len(candidates) != 1:
+        raise ExpertTeamStateConflict(
+            "stage_artifact_identity_mismatch",
+            "current stage artifact is missing or ambiguous",
+            run,
+        )
+    artifact = candidates[0]
+    if (
+        str(artifact.get("stage_id") or "") != stage_id
+        or int(artifact.get("stage_attempt") or 0) != requested_attempt
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_artifact_identity_mismatch",
+            "current stage artifact identity changed",
+            run,
+        )
+    reservation = run.get("current_stage_attempt_reservation")
+    if (
+        not isinstance(reservation, dict)
+        or str(reservation.get("stage_id") or "") != stage_id
+        or int(reservation.get("stage_attempt") or 0) != requested_attempt
+        or str(reservation.get("status") or "") != "generated_valid"
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "current stage attempt is no longer authoritative",
+            run,
+        )
+    if (
+        str(reservation.get("artifact_type") or "") != str(artifact.get("artifact_type") or "")
+        or reservation.get("input_refs") != artifact.get("input_refs")
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "current stage attempt inputs do not match the artifact",
+            run,
+        )
+    from .stage_artifacts import StageArtifactError, validate_stage_artifact
+
+    try:
+        validation = validate_stage_artifact(
+            artifact,
+            brief=run.get("document_brief") or {},
+            approved_inputs=artifact.get("input_refs") or [],
+        )
+    except StageArtifactError as exc:
+        raise ExpertTeamStateConflict(exc.code, "stage artifact validation failed", run) from exc
+    if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0) != 0:
+        raise ExpertTeamStateConflict(
+            "stage_artifact_blocked",
+            "stage artifact has unresolved issues",
+            run,
+        )
+    return deepcopy(artifact)
+
+
+def _mark_current_stage_output(run: dict, *, stage_id: str, status: str, at: str) -> None:
+    outputs = [deepcopy(output) for output in run.get("stage_outputs") or [] if isinstance(output, dict)]
+    for output in reversed(outputs):
+        if str(output.get("task_id") or output.get("stage_id") or "") == stage_id:
+            output["status"] = status
+            output[f"{status}_at"] = at
+            break
+    run["stage_outputs"] = outputs
+
+
+@_serialized_body_mutation
+def confirm_standalone_expert_team_stage(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(workspace, body, "confirm_stage")
+    if duplicate is not None:
+        return duplicate
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_not_available",
+            "local stage confirmation is only available for standalone runs",
+            run,
+        )
+    if str((run.get("review_policy") or {}).get("kind") or "") != "local_confirmation":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_policy_mismatch",
+            "standalone run does not allow local stage confirmation",
+            run,
+        )
+    if str(run.get("workflow_state") or "") != "awaiting_review":
+        raise ExpertTeamStateConflict(
+            "stale_state",
+            "expert team stage is not awaiting local confirmation",
+            run,
+        )
+    artifact = _standalone_bound_stage_artifact(run, body)
+    stage_id = str(artifact.get("stage_id") or "")
+    confirmed_at = _now()
+    confirmation = {
+        "schema_version": "local-stage-confirmation/v1",
+        "session_id": str(run.get("session_id") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "stage_id": stage_id,
+        "stage_attempt": int(artifact.get("stage_attempt") or 0),
+        "artifact_id": artifact["artifact_id"],
+        "artifact_sha256": artifact["sha256"],
+        "confirmed_at": confirmed_at,
+    }
+    confirmations = [
+        deepcopy(item)
+        for item in run.get("local_stage_confirmations") or []
+        if isinstance(item, dict)
+    ]
+    confirmations.append(confirmation)
+    run["local_stage_confirmations"] = confirmations
+    _mark_current_stage_output(run, stage_id=stage_id, status="confirmed", at=confirmed_at)
+    run["approved_stage_artifact_refs"] = {
+        **(
+            deepcopy(run.get("approved_stage_artifact_refs"))
+            if isinstance(run.get("approved_stage_artifact_refs"), dict)
+            else {}
+        ),
+        stage_id: {"artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"]},
+    }
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        brief = run.get("document_brief") or {}
+        run["canonical_document_ref"] = {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+            "brief_revision": int(brief.get("confirmed_revision") or 0),
+            "brief_sha256": str(brief.get("confirmed_sha256") or ""),
+        }
+        profile = run.get("launch_profile_snapshot")
+        if not isinstance(profile, dict):
+            raise ExpertTeamStateConflict(
+                "launch_profile_snapshot_missing",
+                "standalone launch profile snapshot is missing",
+                run,
+            )
+        system_descriptors = [
+            item
+            for item in (profile.get("stages") or []) + (profile.get("post_approval_system_steps") or [])
+            if isinstance(item, dict)
+            and item.get("executor") == "system"
+            and stage_id in (item.get("depends_on") or [])
+        ]
+        if len(system_descriptors) != 1:
+            raise ExpertTeamStateConflict(
+                "system_step_contract_missing",
+                "confirmed canonical document has no unique declared delivery stage",
+                run,
+            )
+        run["pending_system_stage"] = deepcopy(system_descriptors[0])
+    run["current_stage_index"] = int(run.get("current_stage_index") or 0) + 1
+    _record_action(run, body, "confirm_stage")
+    reservation_patch = _stage_reservation_status_patch(run, "confirmed")
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        return _transition(
+            workspace,
+            run,
+            "delivery_validation_required",
+            "stage_confirmed",
+            {**_clear_execution_patch(), **reservation_patch},
+        )
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "stage_confirmed",
+        {
+            **_clear_execution_patch(),
+            **reservation_patch,
+            "current_stage_artifact_ref": None,
+        },
+    )
+
+
 @_serialized_body_mutation
 def approve_expert_team_stage(workspace: Path, body: dict) -> dict:
+    authoritative = read_run(workspace, str(body.get("run_id") or ""))
+    if str(authoritative.get("product_mode") or "") == "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_required",
+            "standalone runs must use local stage confirmation",
+            _sync_derived(authoritative),
+        )
     run, duplicate = _prepare_mutation(workspace, body, "approve_stage")
     if duplicate is not None:
         return duplicate
@@ -3995,23 +4260,43 @@ def request_expert_team_stage_revision(workspace: Path, body: dict) -> dict:
     feedback = str(body.get("feedback") or "").strip()
     if not feedback:
         raise ValueError("Expert team revision feedback is required")
+    standalone_artifact = None
+    if str(run.get("product_mode") or "") == "standalone":
+        standalone_artifact = _standalone_bound_stage_artifact(run, body)
     current = _current_stage(_sync_derived(deepcopy(run)))
     stage_id = str(current.get("task_id") or current.get("id") or "")
     feedback_entry = {"stage_id": stage_id, "feedback": feedback, "at": _now()}
+    if standalone_artifact is not None:
+        feedback_entry.update(
+            {
+                "stage_attempt": int(standalone_artifact.get("stage_attempt") or 0),
+                "artifact_id": str(standalone_artifact.get("artifact_id") or ""),
+                "artifact_sha256": str(standalone_artifact.get("sha256") or ""),
+            }
+        )
     run.setdefault("revision_feedback", []).append(feedback_entry)
     outputs = [deepcopy(output) for output in run.get("stage_outputs") or [] if isinstance(output, dict)]
     for output in reversed(outputs):
         if str(output.get("task_id") or output.get("stage_id") or "") == stage_id:
             output.setdefault("feedback_history", []).append(deepcopy(feedback_entry))
+            if standalone_artifact is not None:
+                output["status"] = "revision_requested"
+                output["revision_requested_at"] = feedback_entry["at"]
             break
     run["stage_outputs"] = outputs
     _record_action(run, body, "revise_stage")
+    standalone_patch = {}
+    if standalone_artifact is not None:
+        standalone_patch = {
+            **_stage_reservation_status_patch(run, "revision_requested"),
+            "current_stage_artifact_ref": None,
+        }
     return _transition(
         workspace,
         run,
         "ready_to_generate",
         "stage_revision_requested",
-        _clear_execution_patch(),
+        {**_clear_execution_patch(), **standalone_patch},
     )
 
 

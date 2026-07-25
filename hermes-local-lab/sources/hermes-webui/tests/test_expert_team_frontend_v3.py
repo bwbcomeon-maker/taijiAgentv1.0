@@ -1,5 +1,8 @@
 from pathlib import Path
 from io import BytesIO
+import json
+import subprocess
+import textwrap
 from urllib.parse import urlsplit
 
 
@@ -13,6 +16,43 @@ ELECTRON_SMOKE = ROOT / "tests" / "expert_team_v3_electron_smoke.js"
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _run_node(source: str) -> dict:
+    completed = subprocess.run(
+        ["node", "-e", source],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def _run_v3_hooks(body: str) -> dict:
+    return _run_node(
+        textwrap.dedent(
+            f"""
+            const fs=require('fs');const vm=require('vm');
+            const context={{window:{{}},document:{{readyState:'loading',addEventListener(){{}},getElementById(){{return null;}}}},console}};
+            vm.createContext(context);
+            let source=fs.readFileSync('static/expert-team-v3.js','utf8');
+            source=source.replace(
+              'window.ExpertTeamV3 = Object.freeze({{',
+              `window.__expertTeamV3TestHooks = {{
+                stageBindingFingerprint, conflictDraftMatches, restoreConflictRevisionDraft,
+                draftFingerprint, restoreWorkbenchDraft, stateCopyFor, statePanel, workbenchHtml,
+                handleWorkbenchClick,
+                setConflictDraft(value) {{ state.conflictRevisionDraft = value; }},
+                setCard(value) {{ state.card = value; state.busy = false; }},
+              }};\n  window.ExpertTeamV3 = Object.freeze({{`
+            );
+            vm.runInContext(source,context);
+            const hooks=context.window.__expertTeamV3TestHooks;
+            {body}
+            """
+        )
+    )
 
 
 def test_v3_assets_are_loaded_after_existing_shell_modules():
@@ -84,18 +124,17 @@ def test_v3_source_mutation_matches_backend_contract_and_presenter_keeps_safe_pr
     assert "sources:arr(brief.sources)" in presenter
 
 
-def test_v3_exposes_every_runtime_state_as_a_user_actionable_screen():
+def test_v3_exposes_every_public_state_as_a_user_actionable_screen():
     script = _read(SCRIPT)
 
     for state in (
-        "collecting_required",
-        "collecting_optional",
-        "ready_to_generate",
-        "generating",
-        "awaiting_stage_input",
-        "awaiting_review",
+        "intake",
+        "ready",
+        "executing",
+        "awaiting_stage_confirmation",
         "revising",
-        "office_acceptance_required",
+        "generating_document",
+        "awaiting_delivery_confirmation",
         "completed",
         "legacy_read_only",
     ):
@@ -104,7 +143,6 @@ def test_v3_exposes_every_runtime_state_as_a_user_actionable_screen():
         "加入修改意见",
         "提交修改意见",
         "无修改，进入下一阶段",
-        "Office 验收",
         "打开最终 DOCX",
     ):
         assert label in script
@@ -123,7 +161,7 @@ def test_v3_dialog_and_workbench_have_keyboard_and_live_feedback_contracts():
     assert 'data-team-id="${CSS.escape(state.selectedTeam.id)}"' in script
     assert "trapDialogFocus" in script
     assert 'data-et3-action="choose-source-file"' in script
-    assert 'data-et3-action="choose-office-evidence"' in script
+    assert 'data-et3-revision' in script
     assert 'class="et3-visually-hidden"' in script
 
 
@@ -186,13 +224,13 @@ def test_identity_callback_emits_both_narrow_cookie_paths(monkeypatch):
     assert any("Path=/api/docx-engine-v2/quality/wps-visual;" in value for value in cookies)
 
 
-def test_v3_draft_and_office_evidence_are_bound_to_authoritative_objects():
+def test_v3_revision_draft_and_stage_mutations_are_bound_to_authoritative_objects():
     script = _read(SCRIPT)
 
     assert "draftFingerprint" in script
-    assert "stageReviewId" in script
-    assert "documentSha256" in script
-    assert "officeEvidenceKey" in script
+    assert "stageActionBinding" in script
+    assert "artifact_sha256" in script
+    assert "conflictRevisionDraft" in script
 
 
 def test_v3_has_a_real_electron_flow_and_non_expert_isolation_gate():
@@ -208,42 +246,300 @@ def test_v3_has_a_real_electron_flow_and_non_expert_isolation_gate():
     assert "page.screenshot" in smoke
 
 
-def test_v3_stage_approval_is_fail_closed_behind_trusted_approver_identity():
+def test_v3_standalone_stage_confirmation_uses_local_contract_without_enterprise_calls():
     script = _read(SCRIPT)
 
-    assert "/api/expert-teams/identity/status" in script
-    assert "/api/expert-teams/identity/start" in script
-    assert "document-approver" in script
-    assert "使用企业审批身份登录" in script
-    assert "data-et3-identity-action" in script
-
-
-def test_v3_office_flow_matches_the_enterprise_review_contract():
-    script = _read(SCRIPT)
-
-    for check in (
-        "document_opened",
-        "title_and_cover_match",
-        "genre_and_structure_match",
-        "content_order_correct",
-        "figures_unique_and_readable",
-        "tables_readable",
-        "headers_footers_pagination",
-        "no_placeholders_or_workflow_text",
-        "citations_readable",
-    ):
-        assert check in script
-    for contract in (
-        "document-reviewer",
-        "/api/docx-engine-v2/quality/wps-visual/begin",
-        "/api/docx-engine-v2/quality/wps-visual/evidence",
+    assert "/api/expert-teams/stage/confirm" in script
+    assert "stage_confirm" in script
+    assert "stage_revise" in script
+    for forbidden in (
+        "/api/expert-teams/stage/approve",
+        "/api/expert-teams/identity/",
         "/api/docx-engine-v2/quality/wps-visual",
         "/api/expert-teams/office-revisions/create",
-        "data-et3-office-evidence",
-        "data-et3-office-issue",
+        "使用企业审批身份登录",
+        "使用企业验收身份登录",
     ):
-        assert contract in script
-    assert "mutate('/api/expert-teams/stage/revise'" not in script.split("function submitOffice", 1)[-1]
+        assert forbidden not in script
+
+
+def test_v3_standalone_write_controls_are_fail_closed_by_allowed_actions():
+    script = _read(SCRIPT)
+
+    assert "function actionAllowed(card, action)" in script
+    assert "list(card.allowedActions).includes(action)" in script
+    for action in (
+        "answer",
+        "start_generation",
+        "submit_stage_input",
+        "resume",
+        "cancel",
+        "stage_confirm",
+        "stage_revise",
+    ):
+        assert action in script
+    assert "const requiredAction = {" in script
+    assert "当前状态尚不允许开始生成" in script
+    assert "服务端尚未允许当前操作" in script
+
+
+def test_v3_ready_state_distinguishes_start_stage_input_and_resume_by_allowed_action():
+    script = _read(SCRIPT)
+
+    assert "current === 'ready' && actionAllowed(card, 'submit_stage_input')" in script
+    assert "current === 'ready' && actionAllowed(card, 'resume')" in script
+    assert "return stageInputPanel(card)" in script
+    assert "return resumePanel(card)" in script
+    assert "/api/expert-teams/stage/input" in script
+    assert "input_id: state.card.pendingInputId" in script
+    assert "'submit-stage-input': 'submit_stage_input'" in script
+    assert "'retry-run': 'resume'" in script
+    assert "需要你的补充" in script
+    assert "任务等待恢复" in script
+
+
+def test_presenter_uses_standalone_run_view_as_the_only_public_state_and_action_source():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const binding={session_id:'session-1',run_id:'run-1',expected_version:7,stage_id:'draft',stage_attempt:2,artifact_id:'draft:2',artifact_sha256:'a'.repeat(64)};
+            const run={
+              run_id:'run-1',session_id:'session-1',schema_version:3,version:999,product_mode:'standalone',
+              workflow_state:'completed',questions:[{id:'raw-question',title:'不得使用'}],
+              view:{
+                product_mode:'standalone',public_state:'awaiting_stage_confirmation',
+                allowed_actions:['stage_confirm','stage_revise'],stage_action_binding:binding,
+                presentation:{state:'completed',title:'旧状态不得使用'},
+                workflow:{stages:[{id:'draft',title:'初稿撰写'}],current_stage:{id:'draft',title:'初稿撰写'},progress:{done:1,total:5,current:'初稿撰写'}},
+                workspace:{current_stage:{id:'draft',title:'初稿撰写'}},
+                intake:{questions:[{id:'view-question',title:'服务端视图问题',status:'pending',required:true}]},
+                stage_review:{output:{content:'权威阶段成果'}},stage_result:{content:'权威阶段成果'},
+              },
+            };
+            const card=context.window.buildExpertTeamCardFromRun(run,{});
+            const payload=context.window.buildExpertTeamStageActionPayload(card,'idem-1');
+            console.log(JSON.stringify({
+              status:card.status,publicState:card.publicState,productMode:card.productMode,
+              allowedActions:card.allowedActions,stageActionBinding:card.stageActionBinding,
+              questionIds:card.questions.map(item=>item.id),payload,
+            }));
+            """
+        )
+    )
+
+    assert result["status"] == "awaiting_stage_confirmation"
+    assert result["publicState"] == "awaiting_stage_confirmation"
+    assert result["productMode"] == "standalone"
+    assert result["allowedActions"] == ["stage_confirm", "stage_revise"]
+    assert result["questionIds"] == ["view-question"]
+    assert result["payload"] == {
+        **result["stageActionBinding"],
+        "idempotency_key": "idem-1",
+    }
+    assert set(result["payload"]) == {
+        "session_id",
+        "run_id",
+        "expected_version",
+        "stage_id",
+        "stage_attempt",
+        "artifact_id",
+        "artifact_sha256",
+        "idempotency_key",
+    }
+
+
+def test_presenter_projects_only_a_complete_server_cancel_action_binding():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const binding={session_id:'session-1',run_id:'run-1',expected_version:11,stage_id:'draft',idempotency_key:'server-cancel-retry-1'};
+            function card(cancelBinding){
+              return context.window.buildExpertTeamCardFromRun({
+                run_id:'run-1',session_id:'session-1',schema_version:3,version:11,
+                view:{
+                  product_mode:'standalone',public_state:'cancelling',
+                  allowed_actions:['refresh','retry_cancel'],cancel_action_binding:cancelBinding,
+                  presentation:{},workflow:{stages:[],current_stage:{id:'draft'},progress:{}},
+                },
+              },{});
+            }
+            console.log(JSON.stringify({
+              valid:card(binding).cancelActionBinding ?? null,
+              missingKey:card({...binding,idempotency_key:''}).cancelActionBinding ?? null,
+              missingStage:card({...binding,stage_id:''}).cancelActionBinding ?? null,
+              invalidVersion:card({...binding,expected_version:-1}).cancelActionBinding ?? null,
+              wrongSession:card({...binding,session_id:'session-2'}).cancelActionBinding ?? null,
+              wrongRun:card({...binding,run_id:'run-2'}).cancelActionBinding ?? null,
+            }));
+            """
+        )
+    )
+
+    assert result["valid"] == {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "expected_version": 11,
+        "stage_id": "draft",
+        "idempotency_key": "server-cancel-retry-1",
+    }
+    assert result["missingKey"] is None
+    assert result["missingStage"] is None
+    assert result["invalidVersion"] is None
+    assert result["wrongSession"] is None
+    assert result["wrongRun"] is None
+
+
+def test_v3_409_adopts_authoritative_run_and_keeps_revision_draft():
+    script = _read(SCRIPT)
+
+    assert "isConflictError" in script
+    assert "error.payload.run" in script
+    assert "conflictRevisionDraft" in script
+    assert "restoreConflictRevisionDraft" in script
+    assert "状态已更新，修改意见已保留" in script
+
+
+def test_v3_conflict_revision_draft_is_bound_to_the_exact_stage_artifact():
+    script = _read(SCRIPT)
+
+    assert "stageBindingFingerprint" in script
+    assert "stageFingerprint" in script
+    assert "draft.stageFingerprint === stageBindingFingerprint(card)" in script
+    assert "上一阶段有未提交的修改意见" in script
+    assert "readonly data-et3-stale-revision" in script
+
+
+def test_v3_conflict_draft_behavior_requires_every_stage_binding_field_to_match():
+    result = _run_v3_hooks(
+        """
+        const binding={session_id:'session-1',run_id:'run-1',expected_version:7,stage_id:'draft',stage_attempt:2,artifact_id:'draft:2',artifact_sha256:'a'.repeat(64)};
+        const card={runId:'run-1',sourceSessionId:'session-1',stageActionBinding:binding};
+        const fingerprint=hooks.stageBindingFingerprint(card);
+        const draft={runId:'run-1',stageFingerprint:fingerprint,value:'保留这条意见'};
+        hooks.setConflictDraft(draft);
+        const changes={};
+        for (const [key,value] of Object.entries({session_id:'session-2',run_id:'run-2',expected_version:8,stage_id:'review',stage_attempt:3,artifact_id:'review:3',artifact_sha256:'b'.repeat(64)})) {
+          const changed={...card,stageActionBinding:{...binding,[key]:value}};
+          const field={value:''};
+          changes[key]={matches:hooks.conflictDraftMatches(changed,draft),restored:hooks.restoreConflictRevisionDraft({querySelector(){return field;}},changed),value:field.value};
+        }
+        const sameField={value:''};
+        const sameRestored=hooks.restoreConflictRevisionDraft({querySelector(){return sameField;}},card);
+        console.log(JSON.stringify({fingerprint,incomplete:hooks.stageBindingFingerprint({runId:'run-1',stageActionBinding:{}}),sameRestored,sameValue:sameField.value,changes}));
+        """
+    )
+
+    assert result["fingerprint"]
+    assert result["incomplete"] == ""
+    assert result["sameRestored"] is True
+    assert result["sameValue"] == "保留这条意见"
+    for changed in result["changes"].values():
+        assert changed == {"matches": False, "restored": False, "value": ""}
+
+
+def test_v3_general_draft_restore_cannot_bypass_the_complete_stage_binding():
+    result = _run_v3_hooks(
+        """
+        const binding={session_id:'session-1',run_id:'run-1',expected_version:7,stage_id:'draft',stage_attempt:2,artifact_id:'draft:2',artifact_sha256:'a'.repeat(64)};
+        const card={runId:'run-1',publicState:'awaiting_stage_confirmation',productMode:'standalone',readOnly:false,stageActionBinding:binding};
+        const saved={fingerprint:hooks.draftFingerprint(card),values:[{key:'revision-field',value:'旧阶段意见',checked:false,kind:'textarea'}],focusKey:'',selectionStart:null,selectionEnd:null,scrollTop:0};
+        function restore(targetCard) {
+          const field={id:'revision-field',type:'textarea',tagName:'TEXTAREA',value:'',checked:false,focus(){},setSelectionRange(){}};
+          const root={querySelectorAll(){return [field];},querySelector(){return null;}};
+          hooks.restoreWorkbenchDraft(root,saved,targetCard);
+          return field.value;
+        }
+        const changed={...card,stageActionBinding:{...binding,expected_version:8}};
+        const incomplete={...card,stageActionBinding:{}};
+        console.log(JSON.stringify({same:restore(card),changed:restore(changed),incomplete:restore(incomplete)}));
+        """
+    )
+
+    assert result == {"same": "旧阶段意见", "changed": "", "incomplete": ""}
+
+
+def test_v3_stage_input_and_exception_states_never_use_generation_ready_copy():
+    script = _read(SCRIPT)
+
+    assert "function stateCopyFor(card, current)" in script
+    assert "actionAllowed(card, 'submit_stage_input')" in script
+    assert "需要你的补充" in script
+    for state in ("failed", "cancelled", "cancelling"):
+        assert state in script
+    assert "正在停止专家团" in script
+
+
+def test_v3_state_surfaces_override_stale_ready_copy_and_keep_exception_actions_safe():
+    result = _run_v3_hooks(
+        """
+        const base={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',subtitle:'任务',phase:'初稿撰写',progress:{done:1,total:5},workflow:{currentStage:{}},brief:{sources:[]},presentation:{statusLabel:'任务规格已确认',detail:'旧文案'},team:{title:'内容创作专家团'},allowedActions:[]};
+        const html={};
+        for (const current of ['failed','cancelled','cancelling']) html[current]=hooks.workbenchHtml({...base,publicState:current});
+        const stageInput={...base,publicState:'ready',allowedActions:['submit_stage_input'],pendingInputId:'input-1',pendingInput:{question:'请选择统计口径',description:'确认后继续',options:[]}};
+        html.stageInput=hooks.workbenchHtml(stageInput);
+        const failedResume=hooks.statePanel({...base,allowedActions:['resume']},'failed');
+        console.log(JSON.stringify({html,failedResume}));
+        """
+    )
+
+    for state, label in (("failed", "任务未完成"), ("cancelled", "任务已取消"), ("cancelling", "正在停止专家团")):
+        assert label in result["html"][state]
+        assert '<span class="et3-state-pill">任务规格已确认</span>' not in result["html"][state]
+        assert "开始生成" not in result["html"][state]
+    assert "需要你的补充" in result["html"]["stageInput"]
+    assert '<span class="et3-state-pill">需要你的补充</span>' in result["html"]["stageInput"]
+    assert "刷新停止状态" in result["html"]["cancelling"]
+    assert "恢复任务" in result["failedResume"]
+
+
+def test_v3_retry_cancel_uses_only_the_complete_server_binding_and_keeps_refresh():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const binding={session_id:'session-1',run_id:'run-1',expected_version:11,stage_id:'draft',idempotency_key:'server-cancel-retry-1'};
+          const base={
+            kind:'expert_team',productMode:'standalone',readOnly:false,
+            runId:'run-1',sourceSessionId:'session-1',currentStageId:'draft',version:11,
+            publicState:'cancelling',allowedActions:['refresh','retry_cancel'],
+            presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:1,total:5},
+          };
+          const valid={...base,cancelActionBinding:binding};
+          const missing={...base,cancelActionBinding:null};
+          const validHtml=hooks.statePanel(valid,'cancelling');
+          const missingHtml=hooks.statePanel(missing,'cancelling');
+          const requests=[];
+          context.window.api=async(url,options)=>{requests.push({url,method:options.method,body:JSON.parse(options.body)});return {};};
+          function button(){return {dataset:{et3Action:'retry-cancel'},textContent:'重试停止',disabled:false,setAttribute(){}};}
+          hooks.setCard(valid);
+          await hooks.handleWorkbenchClick({target:{closest(){return button();}}});
+          hooks.setCard(missing);
+          await hooks.handleWorkbenchClick({target:{closest(){return button();}}});
+          console.log(JSON.stringify({validHtml,missingHtml,requests}));
+        })();
+        """
+    )
+
+    assert 'data-et3-action="refresh-run"' in result["validHtml"]
+    assert 'data-et3-action="retry-cancel"' in result["validHtml"]
+    assert 'data-et3-action="refresh-run"' in result["missingHtml"]
+    assert 'data-et3-action="retry-cancel"' not in result["missingHtml"]
+    assert result["requests"] == [
+        {
+            "url": "/api/expert-teams/cancel",
+            "method": "POST",
+            "body": {
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "expected_version": 11,
+                "stage_id": "draft",
+                "idempotency_key": "server-cancel-retry-1",
+            },
+        }
+    ]
 
 
 def test_panel_switch_owns_v3_cleanup_without_changing_non_expert_markup():

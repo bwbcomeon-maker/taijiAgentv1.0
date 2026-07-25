@@ -47,6 +47,16 @@ _LAUNCH_PROFILES = {
         "task_mode": "create",
         "render_template_id": "enterprise-research-report",
         "stages": DEEP_RESEARCH_PHASES,
+        "post_approval_system_steps": [
+            {
+                "id": "delivery",
+                "executor": "system",
+                "artifact_type": "delivery_manifest",
+                "depends_on": ["review"],
+                "trigger": "canonical_approved",
+                "visible_progress": False,
+            }
+        ],
         "review_policy": {"kind": "local_confirmation"},
     },
 }
