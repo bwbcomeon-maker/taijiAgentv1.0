@@ -972,41 +972,153 @@ function _queueWriteflowStatusCard(data){
   };
 }
 
-async function sendExpertTeamAction(payload){
-  const body={...(payload||{})};
-  const wantsNewSession=body.new_session===true||body.open_new_session===true;
-  delete body.new_session;
-  delete body.open_new_session;
-  if(S.busy&&!wantsNewSession){
-    showToast('专家团任务正在执行。');
-    return false;
+let _expertTeamPendingLaunch=null;
+const _expertTeamPendingLaunchStorageKey='taiji-expert-team-pending-launch-v1';
+
+function _expertTeamLaunchSessionOptions(){
+  const options={};
+  const workspace=(S.session&&S.session.workspace)||S._profileDefaultWorkspace||'';
+  const profile=S.activeProfile||'default';
+  const projectId=(typeof _activeProject!=='undefined'
+    && _activeProject
+    && (typeof NO_PROJECT_FILTER==='undefined'||_activeProject!==NO_PROJECT_FILTER))?_activeProject:'';
+  const modelSelect=typeof $==='function'?$('modelSelect'):null;
+  let modelState=null;
+  if(modelSelect&&modelSelect.value&&typeof _modelStateForSelect==='function'){
+    modelState=_modelStateForSelect(modelSelect,modelSelect.value);
+  }else if(typeof _readPersistedModelState==='function'){
+    modelState=_readPersistedModelState();
   }
-  try{
-    if(wantsNewSession||!S.session){
-      await newSession(wantsNewSession);
-      await renderSessionList();
+  if(typeof workspace==='string'&&workspace.trim())options.workspace=workspace.trim();
+  if(typeof profile==='string'&&profile.trim())options.profile=profile.trim();
+  if(typeof projectId==='string'&&projectId.trim())options.project_id=projectId.trim();
+  if(modelState&&typeof modelState.model==='string'&&modelState.model.trim()){
+    options.model=modelState.model.trim();
+    if(typeof modelState.model_provider==='string'&&modelState.model_provider.trim()){
+      options.model_provider=modelState.model_provider.trim();
     }
-    body.session_id=S.session&&S.session.session_id;
-    const data=await api('/api/expert-teams/start',{method:'POST',body:JSON.stringify(body)});
+  }
+  return options;
+}
+
+function _readExpertTeamPendingLaunch(){
+  if(_expertTeamPendingLaunch)return _expertTeamPendingLaunch;
+  try{
+    const parsed=JSON.parse(localStorage.getItem(_expertTeamPendingLaunchStorageKey)||'null');
+    if(parsed&&typeof parsed.fingerprint==='string'&&typeof parsed.idempotencyKey==='string'){
+      _expertTeamPendingLaunch=parsed;
+    }
+  }catch(_){}
+  return _expertTeamPendingLaunch;
+}
+
+function _rememberExpertTeamPendingLaunch(pending){
+  _expertTeamPendingLaunch=pending;
+  try{localStorage.setItem(_expertTeamPendingLaunchStorageKey,JSON.stringify(pending));}catch(_){}
+}
+
+function _forgetExpertTeamPendingLaunch(fingerprint){
+  const pending=_readExpertTeamPendingLaunch();
+  if(!pending||pending.fingerprint!==fingerprint)return;
+  _expertTeamPendingLaunch=null;
+  try{localStorage.removeItem(_expertTeamPendingLaunchStorageKey);}catch(_){}
+}
+
+async function _expertTeamLaunchFingerprint(value){
+  if(globalThis.crypto&&globalThis.crypto.subtle&&typeof TextEncoder!=='undefined'){
+    const digest=await globalThis.crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));
+    return Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+  }
+  let first=2166136261;
+  let second=2246822519;
+  for(let index=0;index<value.length;index+=1){
+    const code=value.charCodeAt(index);
+    first=Math.imul(first^code,16777619)>>>0;
+    second=Math.imul(second^(code+index),3266489917)>>>0;
+  }
+  return `fallback-${value.length}-${first.toString(16)}-${second.toString(16)}`;
+}
+
+async function _expertTeamLaunchRequest(payload){
+  const source=payload&&typeof payload==='object'?payload:{};
+  const launchProfileId=String(source.launch_profile_id||'').trim();
+  const prompt=String(source.prompt||'').trim();
+  if(!launchProfileId)throw new Error('当前文档任务尚未开放，请重新选择。');
+  if(!prompt)throw new Error('请先填写本次任务诉求。');
+  const sessionOptions=_expertTeamLaunchSessionOptions();
+  const fingerprint=await _expertTeamLaunchFingerprint(JSON.stringify({launch_profile_id:launchProfileId,prompt,session_options:sessionOptions}));
+  const providedKey=String(source.idempotency_key||'').trim();
+  let idempotencyKey=providedKey;
+  const pending=_readExpertTeamPendingLaunch();
+  if(!idempotencyKey&&pending&&pending.fingerprint===fingerprint){
+    idempotencyKey=pending.idempotencyKey;
+  }
+  if(!idempotencyKey){
+    const suffix=(globalThis.crypto&&typeof globalThis.crypto.randomUUID==='function')
+      ?globalThis.crypto.randomUUID()
+      :`${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    idempotencyKey=`expert-team-launch:${suffix}`;
+  }
+  _rememberExpertTeamPendingLaunch({fingerprint,idempotencyKey});
+  return {
+    fingerprint,
+    body:{
+      launch_profile_id:launchProfileId,
+      prompt,
+      idempotency_key:idempotencyKey,
+      session_options:sessionOptions,
+    },
+  };
+}
+
+function _adoptExpertTeamLaunchSession(data){
+  const next=data&&data.session;
+  if(!next||!next.session_id)throw new Error('专家团会话状态不可用');
+  const previousWorkspace=S.session&&S.session.workspace;
+  const normalized=typeof sanitizeSessionRuntimeFields==='function'
+    ?sanitizeSessionRuntimeFields(next,previousWorkspace)
+    :next;
+  const safely=callback=>{try{return callback();}catch(error){console.warn('专家团会话已切换，局部界面同步失败。');return null;}};
+  safely(()=>{if(typeof _resetWriteflowDockForSessionChange==='function')_resetWriteflowDockForSessionChange('expert-team-launch');});
+  S.toolCalls=[];
+  if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;
+  if(typeof _oldestIdx!=='undefined')_oldestIdx=0;
+  safely(()=>{if(typeof clearLiveToolCards==='function')clearLiveToolCards();});
+  S.session=normalized;
+  S.messages=Array.isArray(next.messages)
+    ?next.messages.slice()
+    :(Array.isArray(data.session_messages)?data.session_messages.slice():[]);
+  S.lastUsage={...(next.last_usage||{})};
+  S.busy=false;
+  S.activeStreamId=null;
+  try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+  safely(()=>{if(typeof _setActiveSessionUrl==='function')_setActiveSessionUrl(S.session.session_id);});
+  safely(()=>{if(typeof _setSessionViewedCount==='function')_setSessionViewedCount(S.session.session_id,Number(S.session.message_count||S.messages.length||0));});
+  safely(()=>{if(typeof updateSendBtn==='function')updateSendBtn();});
+  safely(()=>{if(typeof setStatus==='function')setStatus('');});
+  safely(()=>{if(typeof setComposerStatus==='function')setComposerStatus('');});
+  safely(()=>{if(typeof updateQueueBadge==='function')updateQueueBadge(S.session.session_id);});
+  safely(()=>{if(typeof syncTopbar==='function')syncTopbar();});
+  safely(()=>{if(typeof renderMessages==='function')renderMessages();});
+  safely(()=>{if(typeof loadDir==='function')Promise.resolve(loadDir('.')).catch(()=>{});});
+}
+
+async function sendExpertTeamAction(payload){
+  let request=null;
+  let adopted=false;
+  try{
+    request=await _expertTeamLaunchRequest(payload);
+    const data=await api('/api/expert-teams/launch',{method:'POST',body:JSON.stringify(request.body)});
     const run=data&&data.run;
     if(!run||!run.run_id)throw new Error('专家团启动失败');
     const card=typeof _expertTeamStatusCardFromRun==='function'
       ? _expertTeamStatusCardFromRun(run,data)
       : (typeof _writeflowStatusCardFromCompose==='function'?_writeflowStatusCardFromCompose({run}):null);
     if(!card)throw new Error('专家团状态不可用');
+    _adoptExpertTeamLaunchSession(data);
+    adopted=true;
+    _forgetExpertTeamPendingLaunch(request.fingerprint);
     if(typeof switchPanel==='function')await switchPanel('chat');
-    const sessionMessages=Array.isArray(data.session_messages)?data.session_messages:[];
-    if(sessionMessages.length&&Array.isArray(S.messages)){
-      sessionMessages.forEach(message=>{
-        if(!message||typeof message!=='object')return;
-        const runId=message.expert_team_run_id||'';
-        const msgType=message.type||'';
-        const content=message.content||'';
-        const exists=S.messages.some(existing=>existing&&existing.expert_team_run_id===runId&&existing.type===msgType&&existing.content===content);
-        if(!exists)S.messages.push(message);
-      });
-      if(typeof renderMessages==='function')renderMessages();
-    }
     if(typeof renderExpertTeamStatusSurface==='function')renderExpertTeamStatusSurface(card);
     if(typeof window!=='undefined'){
       window._pendingWriteflowStatusCard={
@@ -1020,6 +1132,10 @@ async function sendExpertTeamAction(payload){
     showToast('专家团已创建，请先完成需求确认。');
     return true;
   }catch(e){
+    if(adopted){
+      showToast('专家团已创建，但局部页面未完成刷新，可稍后手动刷新。');
+      return true;
+    }
     showToast('专家团启动失败：'+(e&&e.message||e));
     return false;
   }

@@ -18,6 +18,8 @@
     draft: null,
     collapsed: false,
     busy: false,
+    catalogStatus: 'idle',
+    catalogError: '',
   };
 
   const officeChecks = [
@@ -32,7 +34,7 @@
     ['citations_readable', '引用与来源标注可阅读', false],
   ];
 
-  const fallbackTeams = [
+  const teamPresentationDefaults = [
     {
       id: 'content-creator-team',
       title: '内容创作专家团',
@@ -97,7 +99,12 @@
   }
 
   function normalizeTeam(team) {
-    const fallback = fallbackTeams.find(item => item.id === team.id) || {};
+    const fallback = teamPresentationDefaults.find(item => item.id === team.id) || {};
+    const examples = list(team.examples).map(example => ({
+      ...example,
+      available: example.available === true && Boolean(String(example.launch_profile_id || '').trim()),
+      disabled_reason: String(example.disabled_reason || '该任务尚未完成交付验证'),
+    }));
     return {
       ...fallback,
       ...team,
@@ -106,7 +113,8 @@
       image: team.image || fallback.image || '',
       tags: list(team.tags).length ? team.tags : list(fallback.tags),
       members: list(team.members),
-      examples: list(team.examples).length ? team.examples : list(fallback.examples),
+      examples,
+      available: examples.some(example => example.available === true),
     };
   }
 
@@ -116,7 +124,15 @@
   function renderPortal(message) {
     const root = portalRoot();
     if (!root) return false;
-    const teams = state.catalog.length ? state.catalog : fallbackTeams;
+    const teams = state.catalog;
+    const statusMessage = message || (state.catalogStatus === 'loading'
+      ? '正在加载专家团…'
+      : (state.catalogStatus === 'error' ? state.catalogError : ''));
+    const catalogSurface = state.catalogStatus === 'error'
+      ? `<section class="et3-catalog-error" role="alert"><strong>专家团目录暂时不可用</strong><p>${esc(state.catalogError || '无法确认当前可用的专家团。')}</p><button type="button" class="et3-button" data-et3-action="retry-catalog">重新加载</button></section>`
+      : (teams.length
+        ? teams.map(team => teamCard(team)).join('')
+        : `<p class="et3-catalog-empty" role="status">${state.catalogStatus === 'loading' ? '正在读取可用任务…' : '请加载专家团目录。'}</p>`);
     root.innerHTML = `
       <main class="et3-portal" aria-labelledby="expertTeamV3PortalTitle">
         <div class="et3-portal-head">
@@ -130,9 +146,9 @@
             <input id="expertTeamV3Search" type="search" autocomplete="off" placeholder="搜索团队、能力或文档类型">
           </div>
         </div>
-        <p class="et3-status" data-et3-portal-status aria-live="polite">${esc(message || '')}</p>
+        <p class="et3-status" data-et3-portal-status aria-live="polite">${esc(statusMessage)}</p>
         <div class="et3-team-grid" data-et3-team-grid>
-          ${teams.map(team => teamCard(team)).join('')}
+          ${catalogSurface}
         </div>
       </main>
       <div class="et3-dialog-backdrop" data-et3-dialog-backdrop hidden>
@@ -143,14 +159,16 @@
   }
 
   function teamCard(team) {
-    return `<button type="button" class="et3-team-card" data-et3-action="open-team" data-team-id="${esc(team.id)}" aria-label="查看并发起${esc(team.title)}">
+    const unavailable = team.available !== true;
+    const reason = list(team.examples).map(example => example.disabled_reason).find(Boolean) || '暂无通过验证的文档任务';
+    return `<button type="button" class="et3-team-card${unavailable ? ' is-disabled' : ''}" data-et3-action="open-team" data-team-id="${esc(team.id)}" aria-label="${unavailable ? esc(`${team.title}暂不可用：${reason}`) : esc(`查看并发起${team.title}`)}" aria-disabled="${String(unavailable)}" ${unavailable ? 'disabled' : ''}>
       <img src="${esc(team.image)}" alt="" loading="lazy">
       <span>
         <small>${esc(team.category || '专业协作')}</small>
         <h2>${esc(team.title)}</h2>
         <p>${esc(team.description)}</p>
         <span class="et3-tags">${list(team.tags).slice(0, 4).map(tag => `<span class="et3-tag">${esc(tag)}</span>`).join('')}</span>
-        <span class="et3-card-cta">查看并发起 <span aria-hidden="true">→</span></span>
+        <span class="et3-card-cta">${unavailable ? esc(reason) : '查看并发起 <span aria-hidden="true">→</span>'}</span>
       </span>
     </button>`;
   }
@@ -166,7 +184,7 @@
   function handlePortalInput(event) {
     if (event.target.id !== 'expertTeamV3Search') return;
     const query = event.target.value.trim().toLowerCase();
-    const teams = (state.catalog.length ? state.catalog : fallbackTeams).filter(team =>
+    const teams = state.catalog.filter(team =>
       [team.title, team.description, team.category, ...list(team.tags)].join(' ').toLowerCase().includes(query));
     const grid = portalRoot().querySelector('[data-et3-team-grid]');
     const live = portalRoot().querySelector('[data-et3-portal-status]');
@@ -182,13 +200,16 @@
     if (kind === 'close-dialog') closeDialog();
     if (kind === 'select-template') selectTemplate(action.dataset.exampleId);
     if (kind === 'summon') summon(action);
+    if (kind === 'retry-catalog') loadCatalog(true);
   }
 
-  function openTeam(teamId, trigger) {
-    const team = (state.catalog.length ? state.catalog : fallbackTeams).find(item => item.id === teamId);
+  async function openTeam(teamId, trigger) {
+    if (!trigger && typeof switchPanel === 'function') await switchPanel('writing');
+    if (state.catalogStatus !== 'ready') await loadCatalog(true);
+    const team = state.catalog.find(item => item.id === teamId);
     if (!team) return;
     state.selectedTeam = team;
-    state.selectedExample = list(team.examples)[0] || null;
+    state.selectedExample = list(team.examples).find(example => example.available === true) || null;
     state.dialogReturnFocus = trigger || null;
     renderTeamDialog();
   }
@@ -201,6 +222,7 @@
     if (!team || !dialog || !backdrop) return;
     const examples = list(team.examples);
     const prompt = (state.selectedExample && state.selectedExample.prompt) || '';
+    const hasAvailableTask = examples.some(example => example.available === true);
     dialog.innerHTML = `
       <header class="et3-dialog-head">
         <div><p class="et3-eyebrow">选择专家团</p><h2 id="expertTeamV3DialogTitle" tabindex="-1">${esc(team.title)}</h2><p class="et3-subtitle">${esc(team.category || '')}</p></div>
@@ -214,14 +236,20 @@
         <div>
           <section class="et3-section">
             <h3>选择文档任务</h3>
-            <div class="et3-template-list">${examples.map((example, index) => `<button type="button" class="et3-template" data-et3-action="select-template" data-example-id="${esc(example.id)}" aria-pressed="${state.selectedExample ? state.selectedExample.id === example.id : index === 0}"><strong>${esc(example.label || example.id)}</strong><span>${esc(example.document_type || '')}</span></button>`).join('')}</div>
+            <div class="et3-template-list">${examples.map(example => {
+              const unavailable = example.available !== true;
+              const detail = unavailable
+                ? (example.disabled_reason || '暂未开放')
+                : (example.summary || (example.capability && example.capability.label) || '本机协作');
+              return `<button type="button" class="et3-template${unavailable ? ' is-disabled' : ''}" data-et3-action="select-template" data-example-id="${esc(example.id)}" aria-pressed="${state.selectedExample ? state.selectedExample.id === example.id : false}" aria-disabled="${String(unavailable)}" ${unavailable ? 'disabled' : ''}><strong>${esc(example.label || '文档任务')}</strong><span>${esc(detail)}</span></button>`;
+            }).join('')}</div>
             <label class="et3-form-field" for="expertTeamV3Prompt"><span>原始诉求</span><textarea id="expertTeamV3Prompt" rows="6" aria-describedby="expertTeamV3PromptHelp">${esc(prompt)}</textarea></label>
             <p id="expertTeamV3PromptHelp" class="et3-help">发起后先确认完整任务规格，不会直接生成文档。</p>
             <p class="et3-live" data-et3-dialog-live aria-live="polite"></p>
           </section>
         </div>
       </div>
-      <footer class="et3-dialog-actions"><button type="button" class="et3-button" data-et3-action="close-dialog">取消</button><button type="button" class="et3-button et3-button--primary" data-et3-action="summon">发起专家团任务</button></footer>`;
+      <footer class="et3-dialog-actions"><button type="button" class="et3-button" data-et3-action="close-dialog">取消</button><button type="button" class="et3-button et3-button--primary" data-et3-action="summon" ${hasAvailableTask ? '' : 'disabled aria-disabled="true" title="当前没有已通过交付验证的文档任务"'}>发起专家团任务</button></footer>`;
     backdrop.hidden = false;
     const portal = root.querySelector('.et3-portal');
     if (portal) portal.inert = true;
@@ -242,7 +270,7 @@
 
   function selectTemplate(exampleId) {
     const example = list(state.selectedTeam && state.selectedTeam.examples).find(item => item.id === exampleId);
-    if (!example) return;
+    if (!example || example.available !== true) return;
     state.selectedExample = example;
     const prompt = document.getElementById('expertTeamV3Prompt')?.value;
     renderTeamDialog();
@@ -272,16 +300,15 @@
     const live = portalRoot().querySelector('[data-et3-dialog-live]');
     if (!prompt) { live.textContent = '请先填写本次任务诉求。'; return; }
     if (typeof window.sendExpertTeamAction !== 'function') { live.textContent = '专家团启动服务尚未就绪，请刷新后重试。'; return; }
-    setBusy(button, true, '正在发起…');
     const example = state.selectedExample || {};
-    const team = state.selectedTeam;
+    if (example.available !== true || !String(example.launch_profile_id || '').trim()) {
+      live.textContent = example.disabled_reason || '当前文档任务尚未开放，请选择可用任务。';
+      return;
+    }
+    setBusy(button, true, '正在发起…');
     const payload = {
-      action: 'start', new_session: true, summon_only: false,
-      team_id: team.id, prompt, project: prompt.slice(0, 28),
-      contract_version: 'expert-team-contract/v1',
-      intake_example_id: String(example.intake_example_id || example.id || ''),
-      document_type: String(example.document_type || (team.id === 'deep-research-team' ? 'research_report' : 'work_report')),
-      document_brief_seed: { ...(example.document_brief_seed || {}), task_mode: String(example.task_mode || 'create') },
+      launch_profile_id: String(example.launch_profile_id),
+      prompt,
     };
     try {
       const started = await window.sendExpertTeamAction(payload);
@@ -293,16 +320,24 @@
   }
 
   async function loadCatalog(force) {
-    if (state.catalog.length && !force) return renderPortal();
-    renderPortal('正在加载专家团…');
+    if (state.catalogStatus === 'ready' && !force) return renderPortal();
+    state.catalogStatus = 'loading';
+    state.catalogError = '';
+    renderPortal();
     try {
       const payload = await window.api('/api/expert-teams/catalog');
+      if (!payload || payload.product_mode !== 'standalone' || !Array.isArray(payload.teams)) {
+        throw new Error('服务端未返回可用的单机专家团目录');
+      }
       const allowed = new Set(['content-creator-team', 'deep-research-team']);
       state.catalog = list(payload && payload.teams).filter(team => allowed.has(team.id)).map(normalizeTeam);
+      state.catalogStatus = 'ready';
       renderPortal();
     } catch (error) {
-      state.catalog = fallbackTeams.map(normalizeTeam);
-      renderPortal(`暂时无法刷新目录，已显示本地团队：${error.message || error}`);
+      state.catalog = [];
+      state.catalogStatus = 'error';
+      state.catalogError = `无法加载已验证的专家团：${error.message || error}`;
+      renderPortal();
     }
   }
 

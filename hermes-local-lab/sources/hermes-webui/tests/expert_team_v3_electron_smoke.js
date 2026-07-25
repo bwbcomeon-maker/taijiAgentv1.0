@@ -322,7 +322,7 @@ async function main() {
       pythonBin: fs.realpathSync(path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv', 'bin', 'python')),
       runtimeRoot: runtime,
       sourceSha256: Object.fromEntries(sourceFiles.map(file => [file, sha256(path.join(webuiDir, file))])),
-      realHttp: ['/api/session/new', '/api/expert-teams/catalog', '/api/expert-teams/start', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/run'],
+      realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/run'],
       mocked: ['/api/expert-teams/identity/status', '/api/expert-teams/stage/revise', '/api/expert-teams/stage/approve', '/api/docx-engine-v2/quality/wps-visual/*'],
     };
     fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, captured, officeCaptured, isolated }, null, 2));

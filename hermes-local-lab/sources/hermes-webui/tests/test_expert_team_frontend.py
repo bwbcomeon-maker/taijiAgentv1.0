@@ -285,10 +285,13 @@ def test_workspace_review_panel_exposes_stage_review_controls():
 def test_real_expert_team_start_syncs_session_messages_immediately():
     fn_start = COMMANDS_JS.index("async function sendExpertTeamAction")
     fn_body = COMMANDS_JS[fn_start : COMMANDS_JS.index("if(typeof window!=='undefined')window.sendExpertTeamAction", fn_start)]
-    assert "data.session_messages" in fn_body
-    assert "S.messages.push" in fn_body
-    assert "renderMessages()" in fn_body
-    assert "expert_team_run_id" in fn_body
+    adopt_start = COMMANDS_JS.index("function _adoptExpertTeamLaunchSession")
+    adopt_body = COMMANDS_JS[adopt_start:fn_start]
+    assert "_adoptExpertTeamLaunchSession(data)" in fn_body
+    assert "next.messages" in adopt_body
+    assert "data.session_messages" in adopt_body
+    assert "S.messages=" in adopt_body
+    assert "renderMessages()" in adopt_body
 
 
 def test_actions_map_only_presentation_actions_to_api_calls():

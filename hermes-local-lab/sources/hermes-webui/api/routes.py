@@ -3140,15 +3140,34 @@ def _reconcile_initial_expert_team_start_metadata_locked(
         raise _ExpertTeamStartIntegrityError(str(exc)) from exc
 
 
-def _coordinate_expert_team_start(validated_body: dict) -> dict:
+def _coordinate_expert_team_start(
+    validated_body: dict,
+    *,
+    launch_profile_snapshot: dict | None = None,
+) -> dict:
     """Commit one standalone start across receipt, Run, and Session truth."""
     from api import expert_teams
     from api.expert_teams import storage
 
     session_id = validated_body["session_id"]
     idempotency_key = validated_body["idempotency_key"]
-    # Validate all server-owned selectors before resolving mutable Session state.
-    expert_teams.get_launch_profile(validated_body["launch_profile_id"])
+    # Validate all server-owned selectors before resolving mutable Session
+    # state. Portal launches pass their immutable reservation snapshot so a
+    # catalog edit cannot alter or strand same-key recovery.
+    if launch_profile_snapshot is None:
+        launch_profile_snapshot = expert_teams.get_launch_profile(
+            validated_body["launch_profile_id"]
+        )
+    elif (
+        not isinstance(launch_profile_snapshot, dict)
+        or str(launch_profile_snapshot.get("id") or "")
+        != validated_body["launch_profile_id"]
+    ):
+        raise expert_teams.ContractError(
+            "launch_profile_snapshot_invalid",
+            "launch_profile_id",
+            "启动配置快照与任务类型不匹配",
+        )
     try:
         session = get_session(session_id)
     except (KeyError, FileNotFoundError) as exc:
@@ -3331,6 +3350,7 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
                 initial_run = expert_teams.build_standalone_expert_team_run(
                     validated_body,
                     run_id=run_id,
+                    launch_profile_snapshot=launch_profile_snapshot,
                 )
                 initial_run["start_transaction_id"] = transaction_id
                 initial_session_message_pair = (
@@ -3596,6 +3616,578 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
             exc_info=True,
         )
     return result
+
+
+class _ExpertTeamLaunchConflict(RuntimeError):
+    pass
+
+
+class _ExpertTeamLaunchRecoveryRequired(RuntimeError):
+    def __init__(self, message: str, *, session_id: str, run_id: str = ""):
+        super().__init__(message)
+        self.session_id = str(session_id or "")
+        self.run_id = str(run_id or "")
+
+
+def _expert_team_launch_session_is_public(session_id: str, session=None) -> bool:
+    from api.expert_teams import launch_storage
+
+    normalized = str(session_id or "")
+    if not launch_storage.is_session_public(normalized):
+        return False
+    if session is None and normalized:
+        # A missing/corrupt reverse binding must not turn a Session carrying
+        # the durable launch marker public.  Load metadata only so every route
+        # can apply the same fail-closed gate without reading the transcript.
+        try:
+            session = Session.load_metadata_only(normalized)
+        except Exception:
+            return False
+    marker = str(
+        getattr(session, "expert_team_launch_transaction_id", "") or ""
+    ) if session is not None else ""
+    return not marker or launch_storage.is_launch_marker_committed(
+        normalized,
+        marker,
+    )
+
+
+def _expert_team_launch_run_is_public(run_id: str) -> bool:
+    from api.expert_teams import launch_storage
+
+    normalized = str(run_id or "").strip()
+    return not normalized or launch_storage.is_run_public(normalized)
+
+
+def _expert_team_launch_session_snapshot(session) -> dict:
+    """Return the exact durable semantic state owned by a new portal launch."""
+    return {
+        key: copy.deepcopy(value)
+        for key, value in session.__dict__.items()
+        if not key.startswith("_")
+    }
+
+
+def _expert_team_launch_initial_session_from_receipt(receipt: dict):
+    snapshot = copy.deepcopy(receipt.get("initial_session_snapshot"))
+    if not isinstance(snapshot, dict):
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt has no trustworthy initial Session snapshot",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        )
+    try:
+        session = Session(**snapshot)
+    except Exception as exc:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt initial Session snapshot is unreadable",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        ) from exc
+    if _expert_team_launch_session_snapshot(session) != snapshot:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt initial Session snapshot is not canonical",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        )
+    return session
+
+
+def _validate_expert_team_launch_session_before_start(
+    session,
+    receipt: dict,
+    *,
+    workspace: Path,
+    start_transaction_id: str,
+) -> None:
+    """Reject hidden-window mutation before the inner start can absorb it."""
+    from api.expert_teams import storage as start_storage
+
+    initial = receipt.get("initial_session_snapshot")
+    if not isinstance(initial, dict):
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt initial Session snapshot is missing",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        )
+    try:
+        start_receipt = start_storage.read_start_transaction_by_id(
+            workspace,
+            start_transaction_id,
+        )
+    except FileNotFoundError:
+        start_receipt = None
+    except Exception as exc:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch start receipt is unreadable",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        ) from exc
+    if start_receipt is None:
+        if _expert_team_launch_session_snapshot(session) != initial:
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "reserved Session changed before expert-team start",
+                session_id=str(receipt.get("session_id") or ""),
+                run_id=str(receipt.get("run_id") or ""),
+            )
+        return
+
+    compact_initial = Session(**copy.deepcopy(initial)).compact()
+    expected_metadata = {
+        key: copy.deepcopy(compact_initial.get(key))
+        for key in (
+            "title",
+            "message_count",
+            "user_message_count",
+            "updated_at",
+            "last_message_at",
+        )
+    }
+    if start_receipt.get("session_metadata_before_start") != expected_metadata:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "expert-team start absorbed a modified reserved Session",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(start_receipt.get("run_id") or ""),
+        )
+
+
+def _validate_expert_team_launch_pair_before_publish(
+    *,
+    session,
+    receipt: dict,
+    run: dict,
+    workspace: Path,
+    start_transaction_id: str,
+) -> None:
+    """Prove the portal owns exactly one pristine Session/Run pair."""
+    from api.expert_teams import storage as start_storage
+
+    try:
+        start_receipt = start_storage.read_start_transaction_by_id(
+            workspace,
+            start_transaction_id,
+        )
+        if start_receipt is None:
+            raise FileNotFoundError(start_transaction_id)
+        owned_messages = _validate_expert_team_start_transaction_bundle(
+            session,
+            start_receipt,
+            run,
+            allowed_states={"committed"},
+            require_initial_exact=False,
+        )
+    except Exception as exc:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "expert-team launch pair failed its inner transaction proof",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(run.get("run_id") or ""),
+        ) from exc
+
+    initial = copy.deepcopy(receipt.get("initial_session_snapshot") or {})
+    current = _expert_team_launch_session_snapshot(session)
+    allowed_changes = {
+        "title",
+        "updated_at",
+        "messages",
+        "context_messages",
+        "expert_team_start_transaction_ids",
+    }
+    for key in set(initial) | set(current):
+        if key not in allowed_changes and current.get(key) != initial.get(key):
+            raise _ExpertTeamLaunchRecoveryRequired(
+                f"reserved Session field changed before publish: {key}",
+                session_id=str(receipt.get("session_id") or ""),
+                run_id=str(run.get("run_id") or ""),
+            )
+    if (
+        list(current.get("messages") or []) != owned_messages
+        or list(current.get("expert_team_start_transaction_ids") or [])
+        != [start_transaction_id]
+        or list(current.get("context_messages") or [])
+        != _completed_semantic_messages(owned_messages)
+        or current.get("title") != start_receipt.get("session_title_after_start")
+        or current.get("updated_at")
+        != start_receipt.get("session_updated_at_after_start")
+    ):
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "reserved Session contains foreign state before publish",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(run.get("run_id") or ""),
+        )
+
+
+def _coordinate_expert_team_launch(validated_body: dict) -> dict:
+    """Create one Session and one v3 Run behind a global visibility receipt."""
+    from api import expert_teams
+    from api import models as session_models
+    from api.expert_teams import launch_storage, storage as start_storage
+    from api.expert_teams.launch import launch_request_fingerprint
+
+    requested_options = dict(validated_body.get("session_options") or {})
+    fingerprint_options = dict(requested_options)
+    if requested_options.get("workspace"):
+        try:
+            fingerprint_options["workspace"] = str(
+                resolve_trusted_workspace(requested_options["workspace"])
+            )
+        except (TypeError, ValueError) as exc:
+            raise expert_teams.ContractError(
+                "workspace_invalid",
+                "session_options.workspace",
+                str(exc),
+            ) from exc
+    normalized_request = {
+        **validated_body,
+        "session_options": fingerprint_options,
+    }
+    # Bind the key to exactly what the caller selected, not mutable server
+    # defaults. The first reserved receipt snapshots resolved defaults; retries
+    # reuse that snapshot even if config.yaml or last-workspace changes.
+    request_fingerprint = launch_request_fingerprint(normalized_request)
+    idempotency_key = str(validated_body["idempotency_key"])
+    transaction_id = launch_storage.launch_transaction_id(idempotency_key)
+    outer_replayed = False
+    run_result = None
+    reserved_session = None
+
+    with launch_storage.launch_transaction_lock(transaction_id):
+        receipt = launch_storage.read_or_repair_launch_transaction(transaction_id)
+        if receipt is None:
+            try:
+                workspace = resolve_trusted_workspace(
+                    fingerprint_options.get("workspace") or get_last_workspace()
+                )
+            except (TypeError, ValueError) as exc:
+                raise expert_teams.ContractError(
+                    "workspace_invalid",
+                    "session_options.workspace",
+                    str(exc),
+                ) from exc
+            profile = str(fingerprint_options.get("profile") or "").strip()
+            if not profile:
+                try:
+                    from api.profiles import get_active_profile_name
+
+                    profile = str(get_active_profile_name() or "default")
+                except Exception:
+                    profile = "default"
+            requested_model = fingerprint_options.get("model")
+            requested_provider = fingerprint_options.get("model_provider")
+            if requested_model:
+                model, model_provider = _session_model_state_from_request(
+                    requested_model,
+                    requested_provider,
+                )
+            else:
+                model, default_provider = session_models._profile_default_model_state(profile)
+                model_provider = _session_model_state_from_request(
+                    model,
+                    requested_provider or default_provider,
+                )[1]
+            canonical_options = {
+                "workspace": str(workspace),
+                "profile": profile,
+                "model": str(model or ""),
+                "model_provider": str(model_provider or ""),
+            }
+            project_id = str(fingerprint_options.get("project_id") or "").strip()
+            if project_id:
+                canonical_options["project_id"] = project_id
+            launch_profile_snapshot = expert_teams.get_launch_profile(
+                validated_body["launch_profile_id"]
+            )
+            session_id = "etl-" + uuid.uuid4().hex[:20]
+            reserved_session = Session(
+                session_id=session_id,
+                workspace=str(workspace),
+                model=model,
+                model_provider=model_provider,
+                profile=profile,
+                project_id=project_id or None,
+                expert_team_launch_transaction_id=transaction_id,
+            )
+            initial_session_snapshot = _expert_team_launch_session_snapshot(
+                reserved_session
+            )
+            receipt = launch_storage.new_reserved_receipt(
+                transaction_id=transaction_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                launch_profile_id=validated_body["launch_profile_id"],
+                launch_profile_snapshot=launch_profile_snapshot,
+                prompt=validated_body["prompt"],
+                session_options=canonical_options,
+                session_id=session_id,
+                workspace=str(workspace),
+                initial_session_snapshot=initial_session_snapshot,
+            )
+            launch_storage.write_launch_transaction(receipt)
+        else:
+            outer_replayed = True
+            if (
+                receipt.get("request_fingerprint") != request_fingerprint
+                or receipt.get("idempotency_key_hash")
+                != launch_storage.launch_idempotency_key_hash(idempotency_key)
+            ):
+                raise _ExpertTeamLaunchConflict(
+                    "idempotency key is already bound to another launch request"
+                )
+            if receipt.get("state") == "rolled_back":
+                raise _ExpertTeamLaunchConflict(
+                    "launch transaction was rolled back and cannot be reused"
+                )
+            canonical_options = dict(receipt.get("session_options") or {})
+            try:
+                workspace = resolve_trusted_workspace(receipt.get("workspace"))
+            except (TypeError, ValueError) as exc:
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "reserved workspace is no longer trusted",
+                    session_id=str(receipt.get("session_id") or ""),
+                    run_id=str(receipt.get("run_id") or ""),
+                ) from exc
+            profile = str(canonical_options.get("profile") or "default")
+            model = str(canonical_options.get("model") or "") or None
+            model_provider = (
+                str(canonical_options.get("model_provider") or "") or None
+            )
+            project_id = str(canonical_options.get("project_id") or "")
+            launch_profile_snapshot = copy.deepcopy(
+                receipt.get("launch_profile_snapshot")
+            )
+        session_id = str(receipt["session_id"])
+
+        try:
+            session = Session.load(session_id)
+        except Exception as exc:
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "reserved Session state is unreadable",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            ) from exc
+        if session is None:
+            session = (
+                reserved_session
+                if reserved_session is not None
+                else _expert_team_launch_initial_session_from_receipt(receipt)
+            )
+            try:
+                _persist_new_session_truth(session, touch_updated_at=False)
+            except Exception as exc:
+                failed = dict(receipt)
+                failed["state"] = "recovery_required"
+                failed["updated_at"] = time.time()
+                try:
+                    launch_storage.write_launch_transaction(failed)
+                except Exception:
+                    logger.critical(
+                        "failed to record expert-team launch Session recovery state",
+                        exc_info=True,
+                    )
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "failed to persist reserved Session",
+                    session_id=session_id,
+                ) from exc
+        if (
+            str(getattr(session, "expert_team_launch_transaction_id", "") or "")
+            != transaction_id
+            or Path(str(getattr(session, "workspace", "") or "")).resolve()
+            != Path(str(workspace)).resolve()
+            or str(getattr(session, "profile", "") or "default") != profile
+        ):
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "reserved Session no longer matches its launch receipt",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            )
+
+        start_transaction_id = start_storage.start_transaction_id(
+            session_id,
+            idempotency_key,
+        )
+        expected_run_id = "et-" + start_transaction_id
+        if receipt.get("run_id") and receipt.get("run_id") != expected_run_id:
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "launch receipt Run identity changed",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            )
+        if not receipt.get("run_id"):
+            prepared_outer = dict(receipt)
+            prepared_outer.update(
+                {
+                    "run_id": expected_run_id,
+                    "start_transaction_id": start_transaction_id,
+                    "updated_at": time.time(),
+                }
+            )
+            launch_storage.write_launch_transaction(prepared_outer)
+            receipt = prepared_outer
+        _validate_expert_team_launch_session_before_start(
+            session,
+            receipt,
+            workspace=workspace,
+            start_transaction_id=start_transaction_id,
+        )
+        start_body = {
+            "launch_profile_id": validated_body["launch_profile_id"],
+            "session_id": session_id,
+            "prompt": validated_body["prompt"],
+            "idempotency_key": idempotency_key,
+        }
+        try:
+            run_result = _coordinate_expert_team_start(
+                start_body,
+                launch_profile_snapshot=launch_profile_snapshot,
+            )
+        except Exception as exc:
+            failed = dict(receipt)
+            failed["state"] = "recovery_required"
+            failed["updated_at"] = time.time()
+            try:
+                launch_storage.write_launch_transaction(failed)
+            except Exception:
+                logger.critical(
+                    "failed to record expert-team launch Run recovery state",
+                    exc_info=True,
+                )
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "failed to commit expert-team Run",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            ) from exc
+
+        run = run_result["run"]
+        if receipt.get("state") == "committed":
+            if (
+                str(receipt.get("run_id") or "")
+                != str(run.get("run_id") or "")
+                or str(receipt.get("start_transaction_id") or "")
+                != start_transaction_id
+            ):
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "committed launch no longer matches its inner transaction",
+                    session_id=session_id,
+                    run_id=str(receipt.get("run_id") or ""),
+                )
+            current_session = Session.load(session_id)
+            if (
+                current_session is None
+                or not _expert_team_launch_session_is_public(
+                    session_id,
+                    current_session,
+                )
+            ):
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "committed launch Session is unavailable",
+                    session_id=session_id,
+                    run_id=str(run.get("run_id") or ""),
+                )
+            run_result = {
+                **run_result,
+                "session": _expert_team_start_public_session(current_session),
+            }
+            # A committed idempotent replay validates the original launch
+            # binding but must preserve all legitimate post-launch progress.
+            # The pristine two-message check below is only for first publish.
+        else:
+            try:
+                # Re-enter the exact inner lock order before publishing the
+                # outer visibility receipt. This closes the gap where the
+                # inner start was durable but another Session writer could
+                # alter the hidden object before the portal became public.
+                with start_storage.start_transaction_lock(
+                    workspace,
+                    start_transaction_id,
+                ):
+                    with _expert_team_start_session_writer_lock(session_id):
+                        final_session = Session.load(session_id)
+                        if final_session is None:
+                            raise _ExpertTeamLaunchRecoveryRequired(
+                                "reserved Session disappeared before publish",
+                                session_id=session_id,
+                                run_id=str(run.get("run_id") or ""),
+                            )
+                        final_run = start_storage.read_run(
+                            workspace,
+                            str(run["run_id"]),
+                        )
+                        _validate_expert_team_launch_pair_before_publish(
+                            session=final_session,
+                            receipt=receipt,
+                            run=final_run,
+                            workspace=workspace,
+                            start_transaction_id=start_transaction_id,
+                        )
+                        committed = dict(receipt)
+                        committed.update(
+                            {
+                                "state": "committed",
+                                "run_id": str(final_run["run_id"]),
+                                "start_transaction_id": start_transaction_id,
+                                "updated_at": time.time(),
+                            }
+                        )
+                        try:
+                            launch_storage.write_launch_transaction(committed)
+                        except Exception as exc:
+                            try:
+                                durable = launch_storage.read_or_repair_launch_transaction(
+                                    transaction_id
+                                )
+                            except Exception:
+                                durable = None
+                            if not (
+                                isinstance(durable, dict)
+                                and durable.get("state") == "committed"
+                                and durable.get("run_id") == committed["run_id"]
+                                and durable.get("start_transaction_id")
+                                == committed["start_transaction_id"]
+                            ):
+                                raise exc
+                        run_result = {
+                            **run_result,
+                            "run": final_run,
+                            "session": _expert_team_start_public_session(
+                                final_session
+                            ),
+                        }
+            except _ExpertTeamLaunchRecoveryRequired:
+                raise
+            except Exception as exc:
+                recovery = dict(receipt)
+                recovery.update(
+                    {
+                        "state": "recovery_required",
+                        "run_id": str(run.get("run_id") or "") or None,
+                        "start_transaction_id": start_transaction_id,
+                        "updated_at": time.time(),
+                    }
+                )
+                try:
+                    launch_storage.write_launch_transaction(recovery)
+                except Exception:
+                    logger.critical(
+                        "failed to record expert-team outer commit recovery state",
+                        exc_info=True,
+                    )
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "expert-team launch commit requires recovery",
+                    session_id=session_id,
+                    run_id=str(run.get("run_id") or ""),
+                ) from exc
+
+    try:
+        publish_session_list_changed("session_new")
+    except Exception:
+        logger.warning(
+            "failed to publish committed expert-team launch %s",
+            transaction_id,
+            exc_info=True,
+        )
+    return {
+        **run_result,
+        "replayed": outer_replayed or bool(run_result.get("replayed")),
+    }
 
 
 def _latest_expert_team_assistant_content_after_execution(session, run: dict) -> str:
@@ -11782,6 +12374,27 @@ def handle_get(handler, parsed) -> bool:
         # Production BaseHTTPRequestHandler exposes the current path directly.
         pass
 
+    if parsed.path.startswith("/api/"):
+        parsed_query = parse_qs(parsed.query)
+        query_session_id = parsed_query.get("session_id", [""])[0]
+        query_session_id = str(query_session_id or "").strip()
+        if (
+            query_session_id
+            and len(query_session_id) <= 240
+            and is_safe_session_id(query_session_id)
+            and not _expert_team_launch_session_is_public(query_session_id)
+        ):
+            return bad(handler, "Session not found", 404)
+        query_run_id = str(parsed_query.get("run_id", [""])[0] or "").strip()
+        if (
+            parsed.path.startswith("/api/expert-teams/")
+            and query_run_id
+            and len(query_run_id) <= 240
+            and is_safe_session_id(query_run_id)
+            and not _expert_team_launch_run_is_public(query_run_id)
+        ):
+            return bad(handler, "expert team run not found", 404)
+
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
         # starts with "/static/" (its required prefix). _serve_static enforces
@@ -12196,6 +12809,8 @@ def handle_get(handler, parsed) -> bool:
         sid = query.get("session_id", [""])[0]
         if not sid:
             return j(handler, {"error": "session_id is required"}, status=400)
+        if not _expert_team_launch_session_is_public(sid):
+            return bad(handler, "Session not found", 404)
         # ?messages=0 skips the message payload for fast session switching.
         # The frontend uses this when switching conversations in the sidebar
         # (only needs metadata). The full message array is loaded lazily
@@ -12223,6 +12838,8 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            if not _expert_team_launch_session_is_public(sid, s):
+                return bad(handler, "Session not found", 404)
             if load_messages:
                 try:
                     s = _reconcile_prepared_expert_team_starts_for_session(s)
@@ -12553,6 +13170,23 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
+            try:
+                from api.expert_teams.launch_storage import hidden_session_ids
+
+                hidden_launch_sessions = hidden_session_ids()
+            except Exception:
+                logger.error(
+                    "expert-team launch visibility registry is unavailable",
+                    exc_info=True,
+                )
+                return j(
+                    handler,
+                    {
+                        "error": "Conversation visibility is temporarily unavailable",
+                        "code": "launch_visibility_unavailable",
+                    },
+                    status=503,
+                )
             diag.stage("all_sessions")
             webui_sessions = all_sessions(diag=diag)
             diag.stage("reconcile_stale_stream_state")
@@ -12594,6 +13228,33 @@ def handle_get(handler, parsed) -> bool:
                 deduped_cli = []
             diag.stage("sort_sessions")
             merged = webui_sessions + deduped_cli
+            # The sidebar joins WebUI sidecars with a later state.db/CLI
+            # snapshot. A portal launch may reserve and persist its hidden
+            # Session between the preflight above and that second source read.
+            # Re-snapshot the visibility registry after every source has been
+            # merged so no newly reserved row can slip through on a stale set.
+            try:
+                diag.stage("refresh_launch_visibility")
+                hidden_launch_sessions = hidden_session_ids()
+            except Exception:
+                logger.error(
+                    "expert-team launch visibility registry changed during sidebar merge",
+                    exc_info=True,
+                )
+                return j(
+                    handler,
+                    {
+                        "error": "Conversation visibility is temporarily unavailable",
+                        "code": "launch_visibility_unavailable",
+                    },
+                    status=503,
+                )
+            merged = [
+                session
+                for session in merged
+                if str(session.get("session_id") or "")
+                not in hidden_launch_sessions
+            ]
             merged.sort(
                 key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
                 reverse=True,
@@ -13114,6 +13775,8 @@ def handle_get(handler, parsed) -> bool:
         run_id = qs.get("run_id", [""])[0].strip()
         if not run_id and not session_id:
             return bad(handler, "run_id or session_id required", 400)
+        if session_id and not _expert_team_launch_session_is_public(session_id):
+            return bad(handler, "expert team run not found", 404)
         try:
             workspace = _expert_team_workspace(session_id)
             recovery_session_id = session_id
@@ -13163,6 +13826,23 @@ def handle_get(handler, parsed) -> bool:
             run_sid = str(run.get("session_id") or "").strip()
             if run_sid and run_sid != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
+        run_session_id = str((run or {}).get("session_id") or "").strip()
+        if run_session_id and not _expert_team_launch_session_is_public(run_session_id):
+            return bad(handler, "expert team run not found", 404)
+        if (
+            run_session_id
+            and int((run or {}).get("schema_version") or 0) == 3
+            and str((run or {}).get("product_mode") or "") == "standalone"
+        ):
+            try:
+                launch_session = get_session(run_session_id, metadata_only=True)
+            except KeyError:
+                return bad(handler, "expert team run not found", 404)
+            if not _expert_team_launch_session_is_public(
+                run_session_id,
+                launch_session,
+            ):
+                return bad(handler, "expert team run not found", 404)
         run = _expert_team_run_with_execution_truth(workspace, run)
         payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
         return _expert_team_json_response(
@@ -13754,6 +14434,27 @@ def _rewrite_existing_session_truth(
             return semantic_messages
 
 
+def _remove_unpublished_session_sidecar_if_owned(session) -> bool:
+    """CAS-delete only the exact sidecar bytes written by this transaction."""
+    path = session.path
+    if not path.exists():
+        return True
+    expected_digest = str(
+        getattr(session, "_loaded_sidecar_sha256", "") or ""
+    )
+    if not expected_digest:
+        return False
+    try:
+        current_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    if current_digest != expected_digest:
+        return False
+    path.unlink()
+    path.with_suffix(".json.bak").unlink(missing_ok=True)
+    return True
+
+
 def _persist_new_session_truth(
     session,
     *,
@@ -13793,10 +14494,15 @@ def _persist_new_session_truth(
             session.save(touch_updated_at=touch_updated_at, skip_index=True)
         except Exception:
             try:
-                session.path.unlink(missing_ok=True)
-                session.path.with_suffix(".json.bak").unlink(missing_ok=True)
-                prune_session_from_index(session.session_id)
-                truth_rewrite.clear_truth_rewrite_intent(session)
+                removed = _remove_unpublished_session_sidecar_if_owned(session)
+                if removed:
+                    prune_session_from_index(session.session_id)
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                else:
+                    logger.error(
+                        "refused to remove concurrently changed unpublished Session %s",
+                        session.session_id,
+                    )
             except Exception:
                 logger.critical(
                     "failed to remove unpublished session %s after sidecar failure",
@@ -13808,10 +14514,15 @@ def _persist_new_session_truth(
             _replace_state_db_truth(session, semantic_messages)
         except Exception:
             try:
-                session.path.unlink(missing_ok=True)
-                session.path.with_suffix(".json.bak").unlink(missing_ok=True)
-                prune_session_from_index(session.session_id)
-                truth_rewrite.clear_truth_rewrite_intent(session)
+                removed = _remove_unpublished_session_sidecar_if_owned(session)
+                if removed:
+                    prune_session_from_index(session.session_id)
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                else:
+                    logger.error(
+                        "refused to remove concurrently changed unpublished Session %s",
+                        session.session_id,
+                    )
             except Exception:
                 logger.critical(
                     "failed to remove unpublished session %s after state.db failure",
@@ -13919,6 +14630,30 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+
+    if isinstance(body, dict):
+        body_session_id = str(body.get("session_id") or "").strip()
+        if (
+            body_session_id
+            and len(body_session_id) <= 240
+            and is_safe_session_id(body_session_id)
+            and not _expert_team_launch_session_is_public(body_session_id)
+        ):
+            if diag:
+                diag.finish()
+            return bad(handler, "Session not found", 404)
+        body_run_id = str(body.get("run_id") or "").strip()
+        if (
+            parsed.path.startswith("/api/expert-teams/")
+            and parsed.path != "/api/expert-teams/launch"
+            and body_run_id
+            and len(body_run_id) <= 240
+            and is_safe_session_id(body_run_id)
+            and not _expert_team_launch_run_is_public(body_run_id)
+        ):
+            if diag:
+                diag.finish()
+            return bad(handler, "expert team run not found", 404)
 
     if parsed.path == "/api/product/diagnostics/export":
         from api.product_contract import build_product_error
@@ -15282,6 +16017,85 @@ def handle_post(handler, parsed) -> bool:
         handler.end_headers()
         handler.wfile.write(response)
         return True
+
+    if parsed.path == "/api/expert-teams/launch":
+        from api import expert_teams
+        from api.expert_teams import launch_storage
+
+        try:
+            validated = expert_teams.validate_standalone_launch_request(body)
+            result = _coordinate_expert_team_launch(validated)
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": True,
+                    "replayed": result["replayed"],
+                    "run": result["run"],
+                    "session": result["session"],
+                    "teams": expert_teams.expert_team_catalog()["teams"],
+                    "session_messages": result["session_messages"],
+                },
+            )
+        except expert_teams.ContractError as exc:
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": exc.code,
+                    "field": exc.field,
+                    "error": str(exc),
+                },
+                status=400,
+            )
+        except _ExpertTeamLaunchConflict as exc:
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_idempotency_conflict",
+                    "error": str(exc),
+                },
+                status=409,
+            )
+        except (
+            _ExpertTeamLaunchRecoveryRequired,
+            launch_storage.LaunchTransactionLockTimeout,
+        ):
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_recovery_required",
+                    "error": "专家团发起尚未公开，请使用同一次请求重试恢复。",
+                    "retryable": True,
+                },
+                status=503,
+            )
+        except launch_storage.LaunchTransactionIntegrityError:
+            logger.warning(
+                "expert-team launch receipt failed integrity validation",
+                exc_info=True,
+            )
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_receipt_invalid",
+                    "error": "专家团发起记录需要恢复，当前未公开任何任务。",
+                },
+                status=503,
+            )
+        except Exception:
+            logger.exception("Failed to commit standalone expert-team launch")
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_unavailable",
+                    "error": "专家团暂时无法发起，请稍后重试。",
+                },
+                status=503,
+            )
 
     if parsed.path == "/api/expert-teams/start":
         from api import expert_teams

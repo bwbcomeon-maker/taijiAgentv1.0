@@ -51,10 +51,19 @@ _LAUNCH_PROFILES = {
     },
 }
 
+_LAUNCH_PROFILE_ORDER = (
+    "content-work-report",
+    "research-report",
+)
+
 
 def list_launch_profiles() -> list[dict]:
     """Return detached snapshots in stable catalog order."""
-    return [deepcopy(profile) for profile in _LAUNCH_PROFILES.values()]
+    return [
+        deepcopy(_LAUNCH_PROFILES[profile_id])
+        for profile_id in _LAUNCH_PROFILE_ORDER
+        if profile_id in _LAUNCH_PROFILES
+    ]
 
 
 def get_launch_profile(profile_id: str | None) -> dict:

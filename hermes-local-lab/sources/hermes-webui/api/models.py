@@ -681,6 +681,7 @@ class Session:
                  composer_draft=None,
                 privacy_context=None,
                 expert_team_start_transaction_ids=None,
+                expert_team_launch_transaction_id=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -748,6 +749,11 @@ class Session:
             []
             if expert_team_start_transaction_ids is None
             else expert_team_start_transaction_ids
+        )
+        self.expert_team_launch_transaction_id = (
+            str(expert_team_launch_transaction_id)
+            if expert_team_launch_transaction_id is not None
+            else None
         )
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
@@ -836,6 +842,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'privacy_context',
             'expert_team_start_transaction_ids',
+            'expert_team_launch_transaction_id',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -1049,6 +1056,7 @@ class Session:
             'expert_team_start_transaction_ids': copy.deepcopy(
                 self.expert_team_start_transaction_ids
             ),
+            'expert_team_launch_transaction_id': self.expert_team_launch_transaction_id,
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
@@ -2488,7 +2496,17 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None):
+def new_session(
+    workspace=None,
+    model=None,
+    profile=None,
+    model_provider=None,
+    project_id=None,
+    worktree_info=None,
+    *,
+    session_id=None,
+    expert_team_launch_transaction_id=None,
+):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -2531,6 +2549,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
+        session_id=session_id,
         workspace=workspace_path or get_last_workspace(),
         model=effective_model,
         model_provider=effective_model_provider,
@@ -2541,6 +2560,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
+        expert_team_launch_transaction_id=expert_team_launch_transaction_id,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
@@ -2763,6 +2783,7 @@ def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
 def _strip_sidebar_internal_flags(sessions: list[dict]) -> None:
     for session in sessions:
         session.pop('_show_pre_compression_snapshot', None)
+        session.pop('expert_team_launch_transaction_id', None)
 
 
 def _row_may_need_sidecar_metadata_refresh(session: dict) -> bool:
@@ -2962,6 +2983,43 @@ def _diag_stage(diag, name: str) -> None:
             pass
 
 
+def _filter_uncommitted_expert_team_launches(rows: list[dict]) -> list[dict]:
+    """Keep globally reserved portal launches out of every sidebar source.
+
+    The reverse binding is authoritative instead of a compact Session field so
+    the same gate also covers rows reintroduced from state.db/CLI metadata.
+    Ordinary Sessions have no binding and preserve their historical behavior.
+    """
+    try:
+        from api.expert_teams.launch_storage import (
+            hidden_session_ids,
+            is_launch_marker_committed,
+        )
+
+        hidden = hidden_session_ids()
+    except Exception:
+        logger.warning(
+            "failed to load expert-team launch visibility bindings",
+            exc_info=True,
+        )
+        # The sidebar merges sidecars with state.db/CLI rows.  A state.db row
+        # does not necessarily carry the private launch marker, so retaining
+        # "ordinary-looking" rows here would make a broken registry a public
+        # visibility bypass.  Fail closed for this projection; the HTTP route
+        # returns a diagnosable 503 instead of an incomplete/unsafe list.
+        return []
+    visible = []
+    for row in rows:
+        session_id = str(row.get("session_id") or "")
+        if session_id in hidden:
+            continue
+        marker = str(row.get("expert_team_launch_transaction_id") or "")
+        if marker and not is_launch_marker_committed(session_id, marker):
+            continue
+        visible.append(row)
+    return visible
+
+
 def all_sessions(diag=None):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
@@ -2993,6 +3051,26 @@ def all_sessions(diag=None):
                 )
             ]
             backfilled = []
+            # `_index.json` is a rebuildable projection, not durable Session
+            # truth.  Writers in separate desktop/server processes do not
+            # share `_INDEX_WRITE_LOCK`; a stale incremental writer can replace
+            # the file after another process commits a new sidecar.  Discover
+            # any canonical sidecars missing from the projection so a
+            # successful launch cannot disappear from a sibling process'
+            # sidebar.  Only missing rows are parsed, keeping the normal O(1)
+            # index path unchanged.
+            indexed_ids = {
+                str(row.get('session_id') or '')
+                for row in index
+                if isinstance(row, dict)
+            }
+            for missing_sid in sorted(persisted_ids - indexed_ids - in_memory_ids):
+                _diag_stage(diag, "all_sessions.repair_missing_index_row")
+                sidecar = Session.load_metadata_only(missing_sid)
+                if sidecar is None:
+                    continue
+                index.append(sidecar.compact())
+                backfilled.append(sidecar)
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
@@ -3053,6 +3131,7 @@ def all_sessions(diag=None):
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
             result = _preserve_messageful_sidebar_discoverability(sidebar_candidates, visible_result)
             result = _include_project_hidden_background_sidebar_sessions(sidebar_candidates, result)
+            result = _filter_uncommitted_expert_team_launches(result)
             _strip_sidebar_internal_flags(result)
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
@@ -3094,6 +3173,7 @@ def all_sessions(diag=None):
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
     result = _preserve_messageful_sidebar_discoverability(sidebar_candidates, visible_result)
     result = _include_project_hidden_background_sidebar_sessions(sidebar_candidates, result)
+    result = _filter_uncommitted_expert_team_launches(result)
     _strip_sidebar_internal_flags(result)
     for s in result:
         if not s.get('profile'):

@@ -3,6 +3,7 @@
 from .catalog import expert_team_catalog
 from .contracts import ContractError, EXPERT_TEAM_CONTRACT_V1, classify_contract_version
 from .launch_profiles import get_launch_profile, list_launch_profiles
+from .launch import validate_standalone_launch_request
 from .runtime import (
     _business_context_for_view,
     ExpertTeamStateConflict,
@@ -103,6 +104,7 @@ __all__ = [
     "restore_expert_team_after_cancel_completion",
     "start_expert_team",
     "validate_standalone_start_request",
+    "validate_standalone_launch_request",
     "submit_expert_team_stage_input",
     "update_expert_team_document_brief",
     "add_expert_team_brief_source",

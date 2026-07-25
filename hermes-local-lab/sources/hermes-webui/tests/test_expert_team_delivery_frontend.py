@@ -71,7 +71,7 @@ def test_direct_file_open_download_and_legacy_relaunch_use_real_helpers():
         const downloads=[];
         global.downloadFile=(path,name)=>downloads.push([path,name]);
         let relaunched='';
-        global.openWriteflowTeamModal=(team)=>{{relaunched=team;}};
+        global.openWriteflowTeamModal=async(team)=>{{await new Promise(resolve=>setImmediate(resolve));relaunched=team;}};
         window._activeExpertTeamStatusCard={{runId:'legacy-1',schemaVersion:1,readOnly:true,team:{{id:'deep-research-team'}}}};
         const fs=require('fs');
         eval(fs.readFileSync({json.dumps(str(ROOT / 'static' / 'expert-team-actions.js'))},'utf8'));

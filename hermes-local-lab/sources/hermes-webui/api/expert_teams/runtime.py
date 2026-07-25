@@ -1567,9 +1567,26 @@ def validate_standalone_start_request(body: dict) -> dict:
     return validated
 
 
-def _standalone_start_context(body: dict) -> tuple[dict, dict]:
+def _standalone_start_context(
+    body: dict,
+    *,
+    launch_profile_snapshot: dict | None = None,
+) -> tuple[dict, dict]:
     validated = validate_standalone_start_request(body)
-    profile = get_launch_profile(validated["launch_profile_id"])
+    profile = (
+        deepcopy(launch_profile_snapshot)
+        if launch_profile_snapshot is not None
+        else get_launch_profile(validated["launch_profile_id"])
+    )
+    if (
+        not isinstance(profile, dict)
+        or str(profile.get("id") or "") != validated["launch_profile_id"]
+    ):
+        raise ContractError(
+            "launch_profile_snapshot_invalid",
+            "launch_profile_id",
+            "启动配置快照与任务类型不匹配",
+        )
     resolved = {
         "session_id": validated["session_id"],
         "prompt": validated["prompt"],
@@ -1586,12 +1603,20 @@ def _standalone_start_context(body: dict) -> tuple[dict, dict]:
     return profile, resolved
 
 
-def _build_expert_team_run(body: dict, *, run_id: str | None = None) -> dict:
+def _build_expert_team_run(
+    body: dict,
+    *,
+    run_id: str | None = None,
+    launch_profile_snapshot: dict | None = None,
+) -> dict:
     standalone = "launch_profile_id" in body
     launch_profile = None
     resolved_body = body
     if standalone:
-        launch_profile, resolved_body = _standalone_start_context(body)
+        launch_profile, resolved_body = _standalone_start_context(
+            body,
+            launch_profile_snapshot=launch_profile_snapshot,
+        )
 
     contract_version = classify_contract_version(resolved_body)
     if contract_version == EXPERT_TEAM_CONTRACT_V1 and not standalone:
@@ -1676,11 +1701,17 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
     return write_run(workspace, _build_expert_team_run(body))
 
 
-def build_standalone_expert_team_run(body: dict, *, run_id: str) -> dict:
+def build_standalone_expert_team_run(
+    body: dict,
+    *,
+    run_id: str,
+    launch_profile_snapshot: dict | None = None,
+) -> dict:
     """Build a standalone run without making it visible to public readers."""
     return _build_expert_team_run(
         validate_standalone_start_request(body),
         run_id=run_id,
+        launch_profile_snapshot=launch_profile_snapshot,
     )
 
 

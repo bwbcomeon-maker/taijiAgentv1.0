@@ -11,6 +11,7 @@ Validates:
   - Deadlock guard on fallback path
 """
 import json
+import multiprocessing
 import os
 import threading
 import time
@@ -1114,3 +1115,72 @@ def test_all_sessions_ignores_stale_index_entries():
     ids = {e["session_id"] for e in rows}
     assert "sess_a" in ids
     assert "ghost_sid" not in ids
+
+
+def test_all_sessions_repairs_distinct_cross_process_index_updates(
+    monkeypatch,
+):
+    """Canonical sidecars remain discoverable after sibling index writers race.
+
+    The index is explicitly a rebuildable projection.  Separate processes do
+    not share the module's thread lock, so two stale read-modify-replace writes
+    can temporarily leave one row out.  A fresh reader must reconcile the
+    missing canonical sidecar and repair the projection in the same pass.
+    """
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("deterministic cross-process index race requires POSIX fork")
+
+    index_file = models.SESSION_INDEX_FILE
+    sessions = [
+        _make_session("cross_process_a", "Cross process A", updated_at=100.0),
+        _make_session("cross_process_b", "Cross process B", updated_at=200.0),
+    ]
+    for session in sessions:
+        session.path.write_text(
+            json.dumps(session.__dict__, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    _write_index_file(index_file, [])
+
+    ctx = multiprocessing.get_context("fork")
+    both_read_empty_index = ctx.Barrier(2)
+    original_json_loads = models.json.loads
+
+    def synchronized_first_index_parse(value, *args, **kwargs):
+        parsed = original_json_loads(value, *args, **kwargs)
+        both_read_empty_index.wait(timeout=10)
+        return parsed
+
+    monkeypatch.setattr(models.json, "loads", synchronized_first_index_parse)
+
+    def write_one(session_id, title, updated_at):
+        _write_session_index(
+            updates=[_make_session(session_id, title, updated_at=updated_at)]
+        )
+
+    processes = [
+        ctx.Process(
+            target=write_one,
+            args=(session.session_id, session.title, session.updated_at),
+        )
+        for session in sessions
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+
+    # Both canonical sidecars exist, while the stale projection race leaves a
+    # single row. Restore the parser before exercising normal read recovery.
+    monkeypatch.setattr(models.json, "loads", original_json_loads)
+    raw_ids = {row["session_id"] for row in _read_index(index_file)}
+    assert len(raw_ids) == 1
+    models.SESSIONS.clear()
+    models._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
+
+    visible_ids = {row["session_id"] for row in models.all_sessions()}
+    repaired_ids = {row["session_id"] for row in _read_index(index_file)}
+
+    assert visible_ids == {"cross_process_a", "cross_process_b"}
+    assert repaired_ids == {"cross_process_a", "cross_process_b"}
