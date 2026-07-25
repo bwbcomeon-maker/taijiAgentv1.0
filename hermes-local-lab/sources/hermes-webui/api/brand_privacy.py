@@ -332,6 +332,42 @@ _PUBLIC_SESSION_FIELDS = (
     "is_streaming", "_messages_truncated", "_messages_offset",
 )
 
+_PUBLIC_EXPERT_TEAM_FORBIDDEN_START_FIELDS = frozenset(
+    {
+        "start_transaction_id",
+        "expert_team_start_transaction_id",
+        "expert_team_start_transaction_ids",
+    }
+)
+
+
+def _public_expert_team_value_projection(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _public_expert_team_value_projection(item)
+            for key, item in value.items()
+            if key not in _PUBLIC_EXPERT_TEAM_FORBIDDEN_START_FIELDS
+        }
+    if isinstance(value, list):
+        return [_public_expert_team_value_projection(item) for item in value]
+    if isinstance(value, tuple):
+        return [_public_expert_team_value_projection(item) for item in value]
+    if isinstance(value, str):
+        return _mask_public_sensitive_text(value)
+    return copy.deepcopy(value)
+
+
+def public_expert_team_run_projection(payload: Any) -> dict:
+    """Return a Run safe for every public expert-team response surface."""
+    if not isinstance(payload, dict):
+        return {}
+    return _public_expert_team_value_projection(payload)
+
+
+def public_expert_team_response_projection(payload: Any) -> Any:
+    """Strip internal start markers recursively from an endpoint payload."""
+    return _public_expert_team_value_projection(payload)
+
 _PUBLIC_MESSAGE_SCALAR_FIELDS = (
     "role", "content", "timestamp", "_ts", "type", "message_id", "id",
     "name", "tool_call_id", "tool_use_id", "duration_seconds", "_error",
@@ -1780,41 +1816,6 @@ def _message_transactions_have_complete_committed_receipts(
     return True
 
 
-def _expert_team_start_message_pair_is_complete(
-    messages: list,
-    *,
-    transaction_id: str,
-    receipt: dict,
-    session_id: str,
-) -> bool:
-    rows = [
-        item
-        for item in messages
-        if isinstance(item, dict)
-        and str(item.get("expert_team_start_transaction_id") or "")
-        == transaction_id
-    ]
-    if len(rows) != 2:
-        return False
-    by_type = {str(item.get("type") or ""): item for item in rows}
-    if set(by_type) != {"expert_team_start", "expert_team_lifecycle"}:
-        return False
-    expected_run_id = str(receipt.get("run_id") or "")
-    return bool(
-        receipt.get("state") == "committed"
-        and str(receipt.get("session_id") or "") == session_id
-        and expected_run_id
-        and all(
-            str(item.get("expert_team_run_id") or "") == expected_run_id
-            for item in rows
-        )
-        and str(by_type["expert_team_start"].get("role") or "").lower()
-        == "user"
-        and str(by_type["expert_team_lifecycle"].get("role") or "").lower()
-        == "assistant"
-    )
-
-
 def _session_title_from_messages(messages: list, fallback: str) -> str:
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "user":
@@ -1879,18 +1880,65 @@ def public_session_projection(payload: Any) -> dict:
         if messages_loaded and isinstance(payload.get("messages"), list)
         else None
     )
+    validation_messages = raw_messages
+    raw_marker_store = copy.deepcopy(
+        payload.get("expert_team_start_transaction_ids", [])
+    )
+    marker_transaction_values: list[str] = []
+    start_receipt_read_failed = False
+    try:
+        from api.expert_teams import storage
+
+        marker_transaction_values = (
+            storage.validate_start_session_transaction_markers(raw_marker_store)
+        )
+    except Exception:
+        # Marker shape and cardinality are transaction evidence. Never repair,
+        # filter or deduplicate them in a public projection.
+        start_receipt_read_failed = True
+
+    if validation_messages is None and marker_transaction_values:
+        try:
+            # Metadata-only responses still need the full canonical transcript
+            # to prove the start transaction. It is validation-only evidence:
+            # ``raw_messages`` stays None so no message content enters the
+            # response when the caller requested metadata.
+            from api.models import Session
+
+            validation_session = Session.load(session_id)
+            if (
+                validation_session is None
+                or str(getattr(validation_session, "session_id", "") or "")
+                != session_id
+                or str(Path(getattr(validation_session, "workspace", "")).resolve())
+                != str(Path(workspace or "").resolve())
+            ):
+                raise ValueError("Session validation evidence does not match")
+            validation_marker_values = (
+                storage.validate_start_session_transaction_markers(
+                    getattr(
+                        validation_session,
+                        "expert_team_start_transaction_ids",
+                        None,
+                    )
+                )
+            )
+            if validation_marker_values != marker_transaction_values:
+                raise ValueError("Session marker evidence changed")
+            validation_messages = list(
+                getattr(validation_session, "messages", None) or []
+            )
+        except Exception:
+            validation_messages = None
+            start_receipt_read_failed = True
+
     message_transaction_ids = {
         str(item.get("expert_team_start_transaction_id") or "")
-        for item in (raw_messages or [])
+        for item in (validation_messages or [])
         if isinstance(item, dict) and item.get("expert_team_start_transaction_id")
     }
-    marker_transaction_ids = {
-        str(value or "")
-        for value in (payload.get("expert_team_start_transaction_ids") or [])
-        if isinstance(value, str)
-    }
+    marker_transaction_ids = set(marker_transaction_values)
     required_transaction_ids = message_transaction_ids | marker_transaction_ids
-    start_receipt_read_failed = False
     if workspace and session_id:
         try:
             from api.expert_teams import storage
@@ -1925,29 +1973,48 @@ def public_session_projection(payload: Any) -> dict:
     elif required_transaction_ids:
         start_receipt_read_failed = True
 
-    # A receipt proves only transaction ownership.  A committed transcript is
-    # public as an indivisible two-message unit with exact types and roles.
+    # A receipt alone is never enough. Reuse the same cross-store transaction
+    # validator as replay/recovery whenever the full transcript is available.
     for transaction_id, receipt in list(start_receipts.items()):
-        if not isinstance(receipt, dict) or receipt.get("state") != "committed":
+        if not isinstance(receipt, dict):
             continue
-        # The by-session index discovers every transaction that ever claimed
-        # this Session. A committed receipt must still have its durable Session
-        # marker; otherwise metadata-only projections cannot prove ownership.
-        if transaction_id not in marker_transaction_ids:
+        state = str(receipt.get("state") or "")
+        marker_present = transaction_id in marker_transaction_ids
+        message_present = transaction_id in message_transaction_ids
+        if state == "committed" and not marker_present:
             start_receipts[transaction_id] = None
             start_receipt_read_failed = True
             continue
-        # When the full transcript is available, the marker is not enough: the
-        # committed unit must be exactly its user/start + assistant/lifecycle
-        # pair with matching Run and transaction identities.
-        if raw_messages is not None and not _expert_team_start_message_pair_is_complete(
-            raw_messages,
-            transaction_id=transaction_id,
-            receipt=receipt,
-            session_id=session_id,
-        ):
-            start_receipts[transaction_id] = None
-            start_receipt_read_failed = True
+        if validation_messages is not None and (marker_present or message_present):
+            if not marker_present:
+                start_receipts[transaction_id] = None
+                start_receipt_read_failed = True
+                continue
+            try:
+                from api.expert_teams import storage
+
+                run_id = str(receipt.get("run_id") or "")
+                if state in {"prepared", "recovery_required"}:
+                    pending_path = storage.pending_run_path(Path(workspace), run_id)
+                    run = (
+                        storage.read_pending_run(Path(workspace), run_id)
+                        if pending_path.exists()
+                        else storage.read_run_raw(Path(workspace), run_id)
+                    )
+                else:
+                    run = storage.read_run_raw(Path(workspace), run_id)
+                storage.validate_start_transaction_bundle(
+                    receipt,
+                    session_id=session_id,
+                    session_transaction_ids=marker_transaction_values,
+                    session_messages=validation_messages,
+                    run=run,
+                    allowed_states={state},
+                    require_initial_exact=state != "committed",
+                )
+            except Exception:
+                start_receipts[transaction_id] = None
+                start_receipt_read_failed = True
 
     uncommitted_receipts = [
         receipt

@@ -176,6 +176,76 @@ def _run_messages(session, run_id: str):
     ]
 
 
+def _canonical_json_digest(value) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _assert_no_public_start_transaction_markers(value, path: str = "$") -> None:
+    forbidden = {
+        "start_transaction_id",
+        "expert_team_start_transaction_id",
+        "expert_team_start_transaction_ids",
+    }
+    if isinstance(value, dict):
+        leaked = forbidden.intersection(value)
+        assert not leaked, f"internal start marker leaked at {path}: {sorted(leaked)}"
+        for key, item in value.items():
+            _assert_no_public_start_transaction_markers(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _assert_no_public_start_transaction_markers(item, f"{path}[{index}]")
+
+
+def _downgrade_start_transaction_to_v1(
+    storage,
+    workspace: Path,
+    *,
+    session_id: str,
+    idempotency_key: str,
+) -> dict:
+    transaction_id = storage.start_transaction_id(session_id, idempotency_key)
+    receipt_path = storage.start_transaction_path(workspace, transaction_id)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["schema_version"] = 1
+    receipt.pop("initial_session_message_pair_snapshot", None)
+    receipt.pop("initial_session_message_pair_sha256", None)
+    receipt_path.write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    run_binding_path = storage.start_run_binding_path(
+        workspace,
+        str(receipt["run_id"]),
+    )
+    run_binding = json.loads(run_binding_path.read_text(encoding="utf-8"))
+    run_binding["schema_version"] = 1
+    run_binding["receipt_sha256"] = storage.start_receipt_digest(receipt)
+    run_binding.pop("previous_receipt_sha256", None)
+    run_binding_path.write_text(
+        json.dumps(run_binding, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    session_binding_path = storage.start_session_binding_path(workspace, session_id)
+    if session_binding_path.exists():
+        session_binding = json.loads(
+            session_binding_path.read_text(encoding="utf-8")
+        )
+        session_binding["schema_version"] = 1
+        session_binding_path.write_text(
+            json.dumps(session_binding, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return receipt
+
+
 def _hold_cross_process_lock(kind, workspace, identifier, ready, release, result):
     """Fork worker used to prove the OS locks, not only thread locks."""
     try:
@@ -257,6 +327,70 @@ def _commit_ordinary_session_before_start(session_id, ready, result):
         result.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
+@pytest.mark.parametrize(
+    "raw_markers",
+    [
+        "not-a-list",
+        {"transaction_id": "not-a-list"},
+        ["a" * 64, "a" * 64],
+        ["a" * 64, 7],
+    ],
+)
+def test_session_model_preserves_raw_start_transaction_marker_evidence(
+    atomic_env,
+    raw_markers,
+):
+    _routes, models, _sessions, workspace = atomic_env
+
+    session = models.Session(
+        session_id="atomic-raw-marker-shape",
+        workspace=str(workspace),
+        profile="default",
+        expert_team_start_transaction_ids=raw_markers,
+    )
+
+    assert session.expert_team_start_transaction_ids == raw_markers
+    assert type(session.expert_team_start_transaction_ids) is type(raw_markers)
+
+
+@pytest.mark.parametrize(
+    "raw_markers",
+    [
+        None,
+        "a" * 64,
+        {"transaction_id": "a" * 64},
+        ["not-a-sha256"],
+        ["a" * 64, 7],
+        ["a" * 64, "a" * 64],
+        ["b" * 64],
+    ],
+)
+def test_start_transaction_marker_validator_rejects_malformed_or_wrong_evidence(
+    raw_markers,
+):
+    from api.expert_teams import storage
+
+    with pytest.raises(storage.StartTransactionIntegrityError):
+        storage.validate_start_session_transaction_markers(
+            raw_markers,
+            required_transaction_id="a" * 64,
+        )
+
+
+def test_start_transaction_marker_validator_preserves_valid_order_and_values():
+    from api.expert_teams import storage
+
+    raw_markers = ["b" * 64, "a" * 64]
+
+    validated = storage.validate_start_session_transaction_markers(
+        raw_markers,
+        required_transaction_id="a" * 64,
+    )
+
+    assert validated == raw_markers
+    assert validated is not raw_markers
+
+
 def test_unknown_session_is_404_and_never_falls_back_to_last_workspace(atomic_env):
     routes, _models, _sessions, workspace = atomic_env
     routes.set_last_workspace(str(workspace))
@@ -296,6 +430,542 @@ def test_same_start_key_replays_same_run_and_canonical_messages(atomic_env):
     } == {
         _transaction_id(session.session_id, body["idempotency_key"])
     }
+
+
+def test_start_receipt_reserves_the_exact_session_message_pair_once(atomic_env):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-exact-message-snapshot",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="exact-message-snapshot",
+    )
+
+    started = _post(routes, body)
+
+    assert started.status == 200
+    receipt = storage.read_start_transaction(
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    transaction_id = receipt["transaction_id"]
+    durable_pair = [
+        copy.deepcopy(message)
+        for message in models.Session.load(session.session_id).messages
+        if message.get("expert_team_start_transaction_id") == transaction_id
+    ]
+    assert receipt["schema_version"] == 2
+    assert receipt["initial_session_message_pair_snapshot"] == durable_pair
+    assert receipt["initial_session_message_pair_sha256"] == _canonical_json_digest(
+        durable_pair
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "user_content",
+        "assistant_content",
+        "timestamp",
+        "extra_field",
+        "pair_order",
+    ],
+)
+def test_committed_message_snapshot_tamper_is_rejected_by_replay_and_projection(
+    atomic_env,
+    mutation,
+):
+    routes, models, sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=f"atomic-message-snapshot-{mutation}",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key=f"message-snapshot-{mutation}",
+    )
+    started = _post(routes, body)
+    assert started.status == 200
+    run_id = started.json_body()["run"]["run_id"]
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    pair_indexes = [
+        index
+        for index, message in enumerate(payload["messages"])
+        if message.get("expert_team_run_id") == run_id
+    ]
+    assert len(pair_indexes) == 2
+    pair = [payload["messages"][index] for index in pair_indexes]
+    by_type = {message["type"]: message for message in pair}
+    if mutation == "user_content":
+        by_type["expert_team_start"]["content"] = "FORGED_USER_CONTENT_VISIBLE"
+    elif mutation == "assistant_content":
+        by_type["expert_team_lifecycle"]["content"] = (
+            "FORGED_ASSISTANT_CONTENT_VISIBLE"
+        )
+    elif mutation == "timestamp":
+        by_type["expert_team_start"]["timestamp"] += 10
+    elif mutation == "extra_field":
+        by_type["expert_team_lifecycle"]["forged_extra"] = True
+    else:
+        first, second = pair_indexes
+        payload["messages"][first], payload["messages"][second] = (
+            payload["messages"][second],
+            payload["messages"][first],
+        )
+    session.path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    sessions.clear()
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    sessions.clear()
+    public = _get(
+        routes,
+        f"/api/session?session_id={session.session_id}&messages=1",
+    )
+    assert public.status == 200
+    projected = public.json_body()["session"]
+    assert projected["messages"] == []
+    assert projected["message_count"] == 0
+    assert projected["title"] == "Untitled"
+
+
+def test_expert_team_public_responses_never_expose_start_transaction_markers(
+    atomic_env,
+):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-public-start-marker",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="public-start-marker",
+    )
+
+    started = _post(routes, body)
+    replayed = _post(routes, body)
+    fetched = _get(
+        routes,
+        "/api/expert-teams/run?"
+        f"session_id={session.session_id}&run_id={started.json_body()['run']['run_id']}",
+    )
+
+    assert started.status == replayed.status == fetched.status == 200
+    _assert_no_public_start_transaction_markers(started.json_body())
+    _assert_no_public_start_transaction_markers(replayed.json_body())
+    _assert_no_public_start_transaction_markers(fetched.json_body())
+
+
+def test_public_projection_validates_raw_start_pair_before_secret_redaction(
+    atomic_env,
+    monkeypatch,
+):
+    routes, models, sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-public-secret-redaction-order",
+    )
+    credential = "OPENAI_API_KEY=" + ("S" * 40)
+    original_factory = routes._new_expert_team_start_session_messages
+
+    def with_signed_secret(run, transaction_id):
+        pair = original_factory(run, transaction_id)
+        pair[0]["content"] = f"{pair[0]['content']} {credential}"
+        return pair
+
+    monkeypatch.setattr(
+        routes,
+        "_new_expert_team_start_session_messages",
+        with_signed_secret,
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="public-secret-redaction-order",
+        prompt=f"起草迎峰度夏保供电重点工作月度汇报 {credential}",
+    )
+
+    started = _post(routes, body)
+
+    assert started.status == 200
+    durable = models.Session.load(session.session_id)
+    assert any(
+        credential in str(message.get("content") or "")
+        for message in durable.messages
+    )
+    started_payload = started.json_body()
+    start_session = started_payload["session"]
+    assert len(start_session["messages"]) == 2
+    assert credential not in json.dumps(started_payload, ensure_ascii=False)
+
+    sessions.clear()
+    fetched = _get(
+        routes,
+        f"/api/session?session_id={session.session_id}&messages=1",
+    )
+    assert fetched.status == 200
+    fetched_session = fetched.json_body()["session"]
+    assert len(fetched_session["messages"]) == 2
+    assert credential not in json.dumps(fetched_session, ensure_ascii=False)
+
+
+def test_expert_team_public_json_gate_and_conflict_strip_all_marker_variants(
+    atomic_env,
+):
+    routes, _models, _sessions, _workspace = atomic_env
+    internal_run = {
+        "run_id": "et-public-projection",
+        "start_transaction_id": "a" * 64,
+        "nested": {
+            "expert_team_start_transaction_id": "a" * 64,
+            "rows": [
+                {"expert_team_start_transaction_ids": ["a" * 64]},
+            ],
+        },
+    }
+
+    serialized = _RouteHandler({})
+    routes._expert_team_json_response(
+        serialized,
+        {"ok": True, "run": internal_run},
+    )
+    assert serialized.status == 200
+    _assert_no_public_start_transaction_markers(serialized.json_body())
+
+    conflict = type(
+        "Conflict",
+        (Exception,),
+        {"code": "stale_state", "run": internal_run},
+    )("stale")
+    conflicted = _RouteHandler({})
+    routes._expert_team_conflict_response(conflicted, conflict)
+    assert conflicted.status == 409
+    _assert_no_public_start_transaction_markers(conflicted.json_body())
+
+
+@pytest.mark.parametrize(
+    "request_target",
+    [
+        "/api/expert-teams/identity/callback?state=s&code=c",
+        "http://127.0.0.1:8787/api/expert-teams/identity/callback?state=s&code=c",
+    ],
+)
+def test_expert_team_error_branch_cannot_bypass_credential_redaction(
+    atomic_env,
+    monkeypatch,
+    request_target,
+):
+    import api.expert_teams.trusted_identity as trusted_identity
+
+    routes, _models, _sessions, _workspace = atomic_env
+    credential = "OPENAI_API_KEY=" + ("Q" * 40)
+
+    class FailingResolver:
+        def complete_login(self, **_kwargs):
+            raise ValueError(f"identity provider failed with {credential}")
+
+    monkeypatch.setattr(
+        trusted_identity,
+        "get_trusted_identity_resolver",
+        lambda: FailingResolver(),
+    )
+
+    response = _RouteHandler({})
+    response.path = request_target
+    routes.handle_get(response, urlparse(request_target))
+
+    assert response.status == 401
+    serialized = json.dumps(response.json_body(), ensure_ascii=False)
+    assert credential not in serialized
+    assert ("[REDACTED]" in serialized) or ("***" in serialized)
+
+
+def test_json_egress_boundary_is_expert_scoped_and_future_route_safe():
+    from api import helpers
+
+    credential = "OPENAI_API_KEY=" + ("Z" * 40)
+    payload = {
+        "error": f"future branch failed with {credential}",
+        "start_transaction_id": "a" * 64,
+    }
+    expert = _RouteHandler({})
+    expert.path = "/api/expert-teams/future-endpoint"
+    helpers.j(expert, payload, status=400)
+    expert_serialized = json.dumps(expert.json_body(), ensure_ascii=False)
+    assert expert.status == 400
+    assert credential not in expert_serialized
+    _assert_no_public_start_transaction_markers(expert.json_body())
+
+    ordinary = _RouteHandler({})
+    ordinary.path = "/api/unrelated-test-endpoint"
+    helpers.j(ordinary, payload, status=400)
+    assert ordinary.status == 400
+    assert ordinary.json_body() == payload
+
+
+def test_json_egress_scope_uses_current_keep_alive_path_over_stale_marker():
+    from api import helpers
+
+    handler = _RouteHandler({})
+    handler.path = "/api/expert-teams/future-endpoint"
+    handler._taiji_expert_team_json_request = True
+    helpers.j(
+        handler,
+        {
+            "start_transaction_id": "a" * 64,
+            "error": "OPENAI_API_KEY=" + ("E" * 40),
+        },
+    )
+    _assert_no_public_start_transaction_markers(handler.json_body())
+
+    handler.path = "http://127.0.0.1:8787/api/unrelated-delete-endpoint"
+    handler.status = None
+    handler.body.clear()
+    ordinary_payload = {
+        "start_transaction_id": "ordinary-contract-value",
+        "error": "OPENAI_API_KEY=" + ("O" * 40),
+    }
+    helpers.j(handler, ordinary_payload, status=404)
+
+    assert handler.status == 404
+    assert handler.json_body() == ordinary_payload
+
+
+def test_expert_projection_failure_never_logs_or_returns_exception_secret(
+    monkeypatch,
+    caplog,
+):
+    from api import brand_privacy, helpers
+
+    credential = "OPENAI_API_KEY=" + ("L" * 40)
+
+    def fail_projection(_payload):
+        raise RuntimeError(f"projection exploded with {credential}")
+
+    monkeypatch.setattr(
+        brand_privacy,
+        "public_expert_team_response_projection",
+        fail_projection,
+    )
+    caplog.set_level("ERROR")
+    handler = _RouteHandler({})
+    handler.path = "/api/expert-teams/future-endpoint"
+
+    helpers.j(handler, {"ok": True})
+
+    assert handler.status == 500
+    assert handler.json_body()["code"] == "public_projection_failed"
+    assert credential not in json.dumps(handler.json_body(), ensure_ascii=False)
+    assert credential not in caplog.text
+
+
+def test_v1_committed_receipt_is_not_retroactively_signed_from_current_messages(
+    atomic_env,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-v1-committed-fail-closed",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="v1-committed-fail-closed",
+    )
+    first = _post(routes, body)
+    assert first.status == 200
+    _downgrade_start_transaction_to_v1(
+        storage,
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    sessions.clear()
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+
+
+def test_v1_prepared_without_session_evidence_is_rebuilt_as_v2(
+    atomic_env,
+    monkeypatch,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-v1-prepared-rebuild",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="v1-prepared-rebuild",
+    )
+    real_write_pending = storage.write_pending_run
+    monkeypatch.setattr(
+        storage,
+        "write_pending_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit("crash before pending Run")
+        ),
+    )
+    with pytest.raises(SystemExit, match="before pending Run"):
+        _post(routes, body)
+    monkeypatch.setattr(storage, "write_pending_run", real_write_pending)
+    _downgrade_start_transaction_to_v1(
+        storage,
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    sessions.clear()
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 200
+    receipt = storage.read_start_transaction(
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    assert receipt["schema_version"] == 2
+    assert receipt["state"] == "committed"
+
+
+def test_v1_prepared_with_session_evidence_remains_fail_closed(
+    atomic_env,
+    monkeypatch,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-v1-prepared-with-evidence",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="v1-prepared-with-evidence",
+    )
+    real_publish = routes._publish_expert_team_start_run
+    monkeypatch.setattr(
+        routes,
+        "_publish_expert_team_start_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit("crash after Session evidence")
+        ),
+    )
+    with pytest.raises(SystemExit, match="after Session evidence"):
+        _post(routes, body)
+    monkeypatch.setattr(routes, "_publish_expert_team_start_run", real_publish)
+    _downgrade_start_transaction_to_v1(
+        storage,
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    sessions.clear()
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 503
+    assert recovered.json_body()["code"] == "start_receipt_invalid"
+
+
+def test_committed_replay_requires_durable_session_transaction_marker(atomic_env):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(models, workspace, session_id="atomic-replay-marker-missing")
+    body = _start_body(session.session_id, idempotency_key="replay-marker-missing")
+    first = _post(routes, body)
+    assert first.status == 200
+    before_messages = copy.deepcopy(session.messages)
+
+    routes._rewrite_existing_session_truth(
+        session,
+        lambda: setattr(session, "expert_team_start_transaction_ids", []),
+        privacy_reason=None,
+        touch_updated_at=False,
+    )
+    durable = models.Session.load(session.session_id)
+    assert durable.expert_team_start_transaction_ids == []
+    assert durable.messages == before_messages
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    assert "session_messages" not in replay.json_body()
+    assert len(_public_run_files(workspace)) == 1
+    assert models.Session.load(session.session_id).messages == before_messages
+
+
+def test_committed_replay_rejects_duplicate_durable_session_transaction_marker(
+    atomic_env,
+):
+    routes, _models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        _models,
+        workspace,
+        session_id="atomic-replay-marker-duplicated",
+    )
+    body = _start_body(session.session_id, idempotency_key="replay-marker-duplicated")
+    first = _post(routes, body)
+    assert first.status == 200
+    transaction_id = session.expert_team_start_transaction_ids[0]
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    payload["expert_team_start_transaction_ids"] = [transaction_id, transaction_id]
+    session.path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    assert len(_public_run_files(workspace)) == 1
+
+
+def test_committed_replay_fails_closed_for_null_durable_transaction_marker_store(
+    atomic_env,
+):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-replay-marker-null",
+    )
+    body = _start_body(session.session_id, idempotency_key="replay-marker-null")
+    first = _post(routes, body)
+    assert first.status == 200
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    payload["expert_team_start_transaction_ids"] = None
+    session.path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    replay = _post(routes, body)
+
+    assert replay.status == 503
+    assert replay.json_body()["code"] == "start_receipt_invalid"
+    assert len(_public_run_files(workspace)) == 1
 
 
 def test_unicode_equivalent_prompt_replays_same_normalized_request(atomic_env):
@@ -1414,7 +2084,152 @@ def test_metadata_only_session_get_hides_prepared_title_and_message_count(
     public = response.json_body()["session"]
     assert public["title"] == "Untitled"
     assert public["message_count"] == 0
+    assert public["messages"] == []
     assert len(state_sync._get_state_db().get_messages(session.session_id)) == 2
+
+
+def test_prepared_recovery_rejects_duplicate_durable_transaction_marker(
+    atomic_env,
+    monkeypatch,
+):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-recovery-marker-duplicated",
+    )
+    body = _start_body(session.session_id, idempotency_key="recovery-marker-duplicated")
+    real_publish = routes._publish_expert_team_start_run
+    monkeypatch.setattr(
+        routes,
+        "_publish_expert_team_start_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SystemExit("crash after Session commit")
+        ),
+    )
+    with pytest.raises(SystemExit, match="crash after Session commit"):
+        _post(routes, body)
+    monkeypatch.setattr(routes, "_publish_expert_team_start_run", real_publish)
+
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    transaction_id = payload["expert_team_start_transaction_ids"][0]
+    payload["expert_team_start_transaction_ids"] = [transaction_id, transaction_id]
+    session.path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    recovered = _post(routes, body)
+
+    assert recovered.status == 503
+    assert recovered.json_body()["code"] == "start_receipt_invalid"
+
+
+def test_metadata_only_projection_fails_closed_when_committed_run_is_missing(
+    atomic_env,
+):
+    from api import brand_privacy
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-metadata-committed-run-missing",
+    )
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    storage.run_path(workspace, first.json_body()["run"]["run_id"]).unlink()
+
+    metadata = models.Session.load_metadata_only(session.session_id)
+    projected = brand_privacy.public_session_projection(metadata.compact())
+
+    assert projected["title"] == "Untitled"
+    assert projected["message_count"] == 0
+
+
+def test_metadata_only_projection_fails_closed_when_committed_pair_is_incomplete(
+    atomic_env,
+):
+    from api import brand_privacy
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-metadata-committed-pair-incomplete",
+    )
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    run_id = first.json_body()["run"]["run_id"]
+    payload = json.loads(session.path.read_text(encoding="utf-8"))
+    payload["messages"] = [
+        message
+        for message in payload["messages"]
+        if not (
+            message.get("expert_team_run_id") == run_id
+            and message.get("type") == "expert_team_lifecycle"
+        )
+    ]
+    payload["message_count"] = len(payload["messages"])
+    session.path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    metadata = models.Session.load_metadata_only(session.session_id)
+    projected = brand_privacy.public_session_projection(metadata.compact())
+
+    assert projected["title"] == "Untitled"
+    assert projected["message_count"] == 0
+
+
+def test_valid_committed_metadata_and_sidebar_projection_remain_visible(
+    atomic_env,
+    monkeypatch,
+):
+    from api import brand_privacy
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-valid-committed-metadata",
+    )
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+    expected_title = first.json_body()["session"]["title"]
+    metadata = models.Session.load_metadata_only(session.session_id)
+
+    metadata_public = brand_privacy.public_session_projection(metadata.compact())
+    assert metadata_public["title"] == expected_title
+    assert metadata_public["message_count"] == 2
+
+    monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": False})
+    sidebar = _get(routes, "/api/sessions")
+    assert sidebar.status == 200
+    row = next(
+        item
+        for item in sidebar.json_body()["sessions"]
+        if item["session_id"] == session.session_id
+    )
+    assert row["title"] == expected_title
+    assert row["message_count"] == 2
+
+
+def test_valid_committed_metadata_get_does_not_return_loaded_messages(atomic_env):
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-valid-committed-messages-zero",
+    )
+    first = _post(routes, _start_body(session.session_id))
+    assert first.status == 200
+
+    response = _get(
+        routes,
+        f"/api/session?session_id={session.session_id}&messages=0",
+    )
+
+    assert response.status == 200
+    public = response.json_body()["session"]
+    assert public["message_count"] == 2
+    assert public["messages"] == []
 
 
 def test_sidebar_session_row_hides_prepared_title_and_message_count(
@@ -1483,6 +2298,16 @@ def test_public_projection_reads_each_start_receipt_once_and_fails_safe(
         }
 
     monkeypatch.setattr(storage, "read_start_transaction_by_id", committed)
+    monkeypatch.setattr(
+        storage,
+        "read_run_raw",
+        lambda _workspace, run_id: {"run_id": run_id},
+    )
+    monkeypatch.setattr(
+        storage,
+        "validate_start_transaction_bundle",
+        lambda *_args, **_kwargs: copy.deepcopy(messages),
+    )
     payload = {
         "session_id": "projection-session",
         "workspace": str(tmp_path),
@@ -1519,44 +2344,175 @@ def test_public_projection_reads_each_start_receipt_once_and_fails_safe(
     assert never_verified["message_count"] == 0
 
 
-def test_initial_receipt_write_crash_without_session_binding_fails_closed(
+@pytest.mark.parametrize("crash_boundary", ["by_run", "receipt", "by_session"])
+def test_initial_transaction_metadata_crash_recovers_same_key_from_cold_cache(
+    atomic_env,
+    monkeypatch,
+    crash_boundary,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id=f"atomic-metadata-crash-{crash_boundary}",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key=f"metadata-crash-{crash_boundary}",
+    )
+    transaction_id = storage.start_transaction_id(session.session_id, body["idempotency_key"])
+    run_id = "et-" + transaction_id
+    targets = {
+        "by_run": storage.start_run_binding_path(workspace, run_id),
+        "receipt": storage.start_transaction_path(workspace, transaction_id),
+        "by_session": storage.start_session_binding_path(
+            workspace,
+            session.session_id,
+        ),
+    }
+    real_write_json = storage._write_json_atomic
+
+    def crash_after_target_write(path, payload):
+        result = real_write_json(path, payload)
+        if Path(path) == targets[crash_boundary]:
+            raise SystemExit(f"simulated crash after {crash_boundary}")
+        return result
+
+    monkeypatch.setattr(storage, "_write_json_atomic", crash_after_target_write)
+    with pytest.raises(SystemExit, match=f"after {crash_boundary}"):
+        _post(routes, body)
+
+    assert session.messages == []
+    monkeypatch.setattr(storage, "_write_json_atomic", real_write_json)
+    sessions.clear()
+    retry = _post(routes, body)
+
+    assert retry.status == 200
+    receipt = storage.read_start_transaction(
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    assert receipt["state"] == "committed"
+    assert receipt["schema_version"] == 2
+    durable = models.Session.load(session.session_id)
+    assert durable.expert_team_start_transaction_ids == [transaction_id]
+    assert len(_run_messages(durable, run_id)) == 2
+    assert len(_public_run_files(workspace)) == 1
+    assert _pending_run_files(workspace) == []
+
+
+def test_committed_receipt_post_write_exception_is_reconciled_without_compensation(
     atomic_env,
     monkeypatch,
 ):
     import api.expert_teams.storage as storage
 
-    routes, models, _sessions, workspace = atomic_env
-    session = _new_memory_session(models, workspace, session_id="atomic-receipt-write-order")
-    body = _start_body(session.session_id)
-    transaction_id = storage.start_transaction_id(session.session_id, body["idempotency_key"])
-    real_write_json = storage._write_json_atomic
-    writes = []
-
-    def crash_on_third_write(path, payload):
-        writes.append(Path(path))
-        if len(writes) == 3:
-            raise SystemExit("simulated crash on third transaction metadata write")
-        return real_write_json(path, payload)
-
-    monkeypatch.setattr(storage, "_write_json_atomic", crash_on_third_write)
-    with pytest.raises(SystemExit, match="third transaction metadata write"):
-        _post(routes, body)
-
+    routes, models, sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-committed-receipt-post-write-error",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="committed-receipt-post-write-error",
+    )
+    transaction_id = storage.start_transaction_id(
+        session.session_id,
+        body["idempotency_key"],
+    )
     receipt_path = storage.start_transaction_path(workspace, transaction_id)
-    session_binding = storage.start_session_binding_path(workspace, session.session_id)
-    assert receipt_path.is_file()
-    assert session_binding.exists() is False
-    assert session.messages == []
+    real_write_json = storage._write_json_atomic
+    injected = False
 
-    monkeypatch.setattr(storage, "_write_json_atomic", real_write_json)
-    retry = _post(routes, body)
+    def fail_once_after_committed_receipt_write(path, payload):
+        nonlocal injected
+        result = real_write_json(path, payload)
+        if (
+            not injected
+            and Path(path) == receipt_path
+            and payload.get("state") == "committed"
+        ):
+            injected = True
+            raise OSError("injected exception after committed receipt replace")
+        return result
 
-    assert retry.status == 503
-    assert retry.json_body()["code"] == "start_receipt_invalid"
-    with pytest.raises(storage.StartTransactionIntegrityError):
-        storage.read_start_transaction_by_id(workspace, transaction_id)
-    assert session.messages == []
-    assert _public_run_files(workspace) == []
+    monkeypatch.setattr(
+        storage,
+        "_write_json_atomic",
+        fail_once_after_committed_receipt_write,
+    )
+
+    started = _post(routes, body)
+
+    assert injected is True
+    assert started.status == 200
+    assert started.json_body()["replayed"] is False
+    receipt = storage.read_start_transaction(
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    assert receipt["state"] == "committed"
+    run_id = receipt["run_id"]
+    durable = models.Session.load(session.session_id)
+    assert len(_run_messages(durable, run_id)) == 2
+    assert len(_public_run_files(workspace)) == 1
+    assert _pending_run_files(workspace) == []
+
+    sessions.clear()
+    replayed = _post(routes, body)
+    assert replayed.status == 200
+    assert replayed.json_body()["replayed"] is True
+    durable = models.Session.load(session.session_id)
+    assert len(_run_messages(durable, run_id)) == 2
+    assert len(_public_run_files(workspace)) == 1
+
+
+def test_compensation_refuses_stale_prepared_view_of_committed_receipt(
+    atomic_env,
+):
+    import api.expert_teams.storage as storage
+
+    routes, models, _sessions, workspace = atomic_env
+    session = _new_memory_session(
+        models,
+        workspace,
+        session_id="atomic-stale-prepared-compensation",
+    )
+    body = _start_body(
+        session.session_id,
+        idempotency_key="stale-prepared-compensation",
+    )
+    started = _post(routes, body)
+    assert started.status == 200
+    committed = storage.read_start_transaction(
+        workspace,
+        session_id=session.session_id,
+        idempotency_key=body["idempotency_key"],
+    )
+    run_id = committed["run_id"]
+    stale_prepared = dict(committed)
+    stale_prepared["state"] = "prepared"
+    stale_prepared["updated_at"] = committed["created_at"]
+
+    with pytest.raises(routes._ExpertTeamStartIntegrityError):
+        routes._compensate_expert_team_start_finalize_locked(
+            workspace,
+            session,
+            stale_prepared,
+        )
+
+    durable = models.Session.load(session.session_id)
+    assert storage.read_start_transaction_by_id(
+        workspace,
+        committed["transaction_id"],
+    )["state"] == "committed"
+    assert storage.read_run(workspace, run_id)["run_id"] == run_id
+    assert len(_run_messages(durable, run_id)) == 2
 
 
 @pytest.mark.parametrize("wrapped_storage_error", [False, True])
@@ -2493,6 +3449,9 @@ def test_storage_lock_stays_anchored_during_parent_symlink_swap(
 @pytest.mark.parametrize(
     ("crash_point", "expected_exit"),
     [
+        ("after_by_run_metadata", 68),
+        ("after_receipt_metadata", 69),
+        ("after_by_session_metadata", 70),
         ("after_receipt", 71),
         ("after_session", 72),
         ("after_canonical", 73),
@@ -2559,7 +3518,39 @@ def test_fresh_interpreter_recovers_three_durable_start_crash_points(
             "idempotency_key": "fresh-process-idempotency",
         }
         point = os.environ["EXPERT_TEAM_CRASH_POINT"]
-        if point == "after_receipt":
+        metadata_exits = {
+            "after_by_run_metadata": 68,
+            "after_receipt_metadata": 69,
+            "after_by_session_metadata": 70,
+        }
+        if point in metadata_exits:
+            transaction_id = storage.start_transaction_id(
+                session_id,
+                body["idempotency_key"],
+            )
+            run_id = "et-" + transaction_id
+            metadata_targets = {
+                "after_by_run_metadata": storage.start_run_binding_path(
+                    workspace,
+                    run_id,
+                ),
+                "after_receipt_metadata": storage.start_transaction_path(
+                    workspace,
+                    transaction_id,
+                ),
+                "after_by_session_metadata": storage.start_session_binding_path(
+                    workspace,
+                    session_id,
+                ),
+            }
+            original_write_json = storage._write_json_atomic
+            def crash_after_metadata_write(path, payload):
+                result = original_write_json(path, payload)
+                if Path(path) == metadata_targets[point]:
+                    os._exit(metadata_exits[point])
+                return result
+            storage._write_json_atomic = crash_after_metadata_write
+        elif point == "after_receipt":
             def crash_pending(*_args, **_kwargs):
                 os._exit(71)
             storage.write_pending_run = crash_pending

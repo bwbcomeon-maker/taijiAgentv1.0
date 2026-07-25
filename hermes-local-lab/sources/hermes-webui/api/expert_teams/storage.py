@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import math
@@ -11,6 +12,7 @@ import stat
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -25,7 +27,8 @@ except ImportError:  # pragma: no cover - exercised on POSIX only
     msvcrt = None
 
 
-START_TRANSACTION_SCHEMA_VERSION = 1
+START_TRANSACTION_SCHEMA_VERSION = 2
+_SUPPORTED_START_TRANSACTION_SCHEMA_VERSIONS = frozenset({1, 2})
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _START_TRANSACTION_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _START_TRANSACTION_THREAD_LOCKS_GUARD = threading.Lock()
@@ -258,6 +261,67 @@ def start_run_digest(run: dict) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def start_session_message_pair_digest(messages: list[dict]) -> str:
+    """Return the canonical digest for the exact reserved start message pair."""
+    payload = json.dumps(
+        messages,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def validate_start_session_message_pair_snapshot(
+    snapshot: object,
+    *,
+    transaction_id: str,
+    run_id: str,
+) -> list[dict]:
+    """Validate and copy the exact ordered pair reserved by a v2 receipt."""
+    if type(snapshot) is not list or len(snapshot) != 2:
+        raise StartTransactionIntegrityError(
+            "start transaction immutable Session message pair is invalid"
+        )
+    if any(type(message) is not dict for message in snapshot):
+        raise StartTransactionIntegrityError(
+            "start transaction immutable Session message pair is invalid"
+        )
+    messages = copy.deepcopy(snapshot)
+    expected = (
+        ("expert_team_start", "user"),
+        ("expert_team_lifecycle", "assistant"),
+    )
+    for message, (expected_type, expected_role) in zip(messages, expected):
+        if (
+            str(message.get("type") or "") != expected_type
+            or str(message.get("role") or "").lower() != expected_role
+            or str(message.get("expert_team_run_id") or "") != run_id
+            or str(message.get("expert_team_start_transaction_id") or "")
+            != transaction_id
+            or not isinstance(message.get("content"), str)
+        ):
+            raise StartTransactionIntegrityError(
+                "start transaction immutable Session message pair ownership is invalid"
+            )
+        for timestamp_field in ("timestamp", "_ts"):
+            timestamp = message.get(timestamp_field)
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+                or not math.isfinite(float(timestamp))
+                or timestamp < 0
+            ):
+                raise StartTransactionIntegrityError(
+                    "start transaction immutable Session message timestamp is invalid"
+                )
+        if message["timestamp"] != message["_ts"]:
+            raise StartTransactionIntegrityError(
+                "start transaction immutable Session message timestamps disagree"
+            )
+    return messages
+
+
 def start_run_projection_digest(run: dict) -> str:
     projection = {
         key: json.loads(json.dumps(run.get(key), ensure_ascii=False))
@@ -268,6 +332,175 @@ def start_run_projection_digest(run: dict) -> str:
 
 def start_receipt_digest(receipt: dict) -> str:
     return start_run_digest(receipt)
+
+
+def validate_start_session_transaction_markers(
+    markers: object,
+    *,
+    required_transaction_id: str | None = None,
+) -> list[str]:
+    """Return an exact copy of a valid durable Session marker list.
+
+    Marker cardinality is transaction evidence. Callers must pass the raw
+    persisted value: coercing, filtering or deduplicating it first would turn
+    corruption into apparently valid state.
+    """
+    if type(markers) is not list:
+        raise StartTransactionIntegrityError(
+            "start transaction durable Session marker store is not a list"
+        )
+    if any(
+        type(value) is not str or _SHA256_PATTERN.fullmatch(value) is None
+        for value in markers
+    ):
+        raise StartTransactionIntegrityError(
+            "start transaction durable Session marker is invalid"
+        )
+    if len(markers) != len(set(markers)):
+        raise StartTransactionIntegrityError(
+            "start transaction durable Session markers are duplicated"
+        )
+    if (
+        required_transaction_id is not None
+        and markers.count(str(required_transaction_id or "")) != 1
+    ):
+        raise StartTransactionIntegrityError(
+            "start transaction durable Session marker is missing"
+        )
+    return copy.deepcopy(markers)
+
+
+def validate_start_transaction_bundle(
+    receipt: dict,
+    *,
+    session_id: str,
+    session_transaction_ids: object,
+    session_messages: list[dict],
+    run: dict,
+    allowed_states: set[str] | frozenset[str],
+    require_initial_exact: bool,
+) -> list[dict]:
+    """Validate the indivisible receipt, Session and Run start transaction.
+
+    This is the one semantic validator used by committed replay, prepared
+    recovery and public Session projection.  Reverse-index readers establish
+    filesystem ownership; this function proves the remaining cross-store
+    invariants without repairing or publishing any state.
+    """
+    transaction_id = str(receipt.get("transaction_id") or "")
+    if _SHA256_PATTERN.fullmatch(transaction_id) is None:
+        raise StartTransactionIntegrityError(
+            "start transaction identity is invalid"
+        )
+    _validate_start_transaction_payload(receipt, transaction_id)
+    if receipt.get("schema_version") != START_TRANSACTION_SCHEMA_VERSION:
+        # A v1 receipt never reserved the message bytes.  Signing whatever is
+        # currently in the Session would turn existing corruption into trusted
+        # state, so every public/replay bundle must fail closed.
+        raise StartTransactionIntegrityError(
+            "legacy start transaction has no immutable Session message pair"
+        )
+    state = str(receipt.get("state") or "")
+    if state not in allowed_states:
+        raise StartTransactionIntegrityError(
+            "start transaction state is not valid for this operation"
+        )
+    requested_session_id = str(session_id or "")
+    if not requested_session_id or str(receipt.get("session_id") or "") != requested_session_id:
+        raise StartTransactionIntegrityError(
+            "start transaction Session ownership does not match"
+        )
+    markers = validate_start_session_transaction_markers(
+        session_transaction_ids,
+        required_transaction_id=transaction_id,
+    )
+
+    messages = [item for item in (session_messages or []) if isinstance(item, dict)]
+    rows = [
+        item
+        for item in messages
+        if str(item.get("expert_team_start_transaction_id") or "") == transaction_id
+    ]
+    expected_run_id = str(receipt.get("run_id") or "")
+    reserved_rows = validate_start_session_message_pair_snapshot(
+        receipt.get("initial_session_message_pair_snapshot"),
+        transaction_id=transaction_id,
+        run_id=expected_run_id,
+    )
+    if rows != reserved_rows:
+        raise StartTransactionIntegrityError(
+            "start transaction Session message pair differs from its immutable snapshot"
+        )
+    if sum(
+        1
+        for item in messages
+        if str(item.get("expert_team_run_id") or "") == expected_run_id
+    ) != 2:
+        raise StartTransactionIntegrityError(
+            "start transaction Run has foreign or duplicate Session messages"
+        )
+    if not isinstance(run, dict):
+        raise StartTransactionIntegrityError("start transaction Run is not an object")
+    initial = receipt.get("initial_run_snapshot")
+    if not isinstance(initial, dict):
+        raise StartTransactionIntegrityError(
+            "start transaction immutable Run snapshot is missing"
+        )
+    expected = {
+        "run_id": expected_run_id,
+        "session_id": requested_session_id,
+        "start_transaction_id": transaction_id,
+        "launch_profile_id": str(initial.get("launch_profile_id") or ""),
+    }
+    if any(str(run.get(key) or "") != value for key, value in expected.items()):
+        raise StartTransactionIntegrityError(
+            "start transaction Run ownership does not match"
+        )
+    if (
+        int(run.get("schema_version") or 0) != 3
+        or str(run.get("product_mode") or "") != "standalone"
+        or not str(run.get("contract_version") or "")
+    ):
+        raise StartTransactionIntegrityError(
+            "start transaction Run contract markers are invalid"
+        )
+    initial_digest = str(receipt.get("initial_run_sha256") or "")
+    projection_digest = str(receipt.get("initial_start_projection_sha256") or "")
+    if (
+        _SHA256_PATTERN.fullmatch(initial_digest) is None
+        or _SHA256_PATTERN.fullmatch(projection_digest) is None
+        or start_run_digest(initial) != initial_digest
+        or start_run_projection_digest(initial) != projection_digest
+        or start_run_projection_digest(run) != projection_digest
+    ):
+        raise StartTransactionIntegrityError(
+            "start transaction Run immutable digest does not match"
+        )
+    if require_initial_exact and start_run_digest(run) != initial_digest:
+        raise StartTransactionIntegrityError(
+            "prepared start transaction Run differs from its immutable snapshot"
+        )
+    canonical_request = {
+        "contract": "expert-team-standalone-start/v1",
+        "launch_profile_id": unicodedata.normalize(
+            "NFC", str(initial.get("launch_profile_id") or "")
+        ),
+        "session_id": unicodedata.normalize("NFC", requested_session_id),
+        "prompt": unicodedata.normalize("NFC", str(initial.get("prompt") or "")),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            canonical_request,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if fingerprint != str(receipt.get("request_fingerprint") or ""):
+        raise StartTransactionIntegrityError(
+            "start transaction request fingerprint does not match its snapshot"
+        )
+    return copy.deepcopy(rows)
 
 
 def _validate_start_session_metadata_snapshot(receipt: dict) -> None:
@@ -376,11 +609,12 @@ def _read_json_object(path: Path, *, max_bytes: int) -> dict:
 
 
 def _validate_start_transaction_payload(receipt: dict, transaction_id: str) -> dict:
-    required_identity = {
-        "schema_version": START_TRANSACTION_SCHEMA_VERSION,
-        "transaction_id": transaction_id,
-    }
-    if any(receipt.get(key) != value for key, value in required_identity.items()):
+    schema_version = receipt.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version not in _SUPPORTED_START_TRANSACTION_SCHEMA_VERSIONS
+        or receipt.get("transaction_id") != transaction_id
+    ):
         raise StartTransactionIntegrityError("start transaction receipt identity does not match")
     if not str(receipt.get("session_id") or ""):
         raise StartTransactionIntegrityError("start transaction Session identity is invalid")
@@ -424,6 +658,29 @@ def _validate_start_transaction_payload(receipt: dict, transaction_id: str) -> d
     ):
         raise StartTransactionIntegrityError(
             "start transaction immutable Run ownership is invalid"
+        )
+    if schema_version == START_TRANSACTION_SCHEMA_VERSION:
+        message_pair = validate_start_session_message_pair_snapshot(
+            receipt.get("initial_session_message_pair_snapshot"),
+            transaction_id=transaction_id,
+            run_id=str(receipt.get("run_id") or ""),
+        )
+        message_pair_sha = str(
+            receipt.get("initial_session_message_pair_sha256") or ""
+        )
+        if (
+            _SHA256_PATTERN.fullmatch(message_pair_sha) is None
+            or start_session_message_pair_digest(message_pair) != message_pair_sha
+        ):
+            raise StartTransactionIntegrityError(
+                "start transaction immutable Session message pair digest is invalid"
+            )
+    elif (
+        "initial_session_message_pair_snapshot" in receipt
+        or "initial_session_message_pair_sha256" in receipt
+    ):
+        raise StartTransactionIntegrityError(
+            "legacy start transaction contains unsupported Session message evidence"
         )
     pending_sha = receipt.get("pending_run_sha256")
     if pending_sha is not None and pending_sha != initial_sha:
@@ -820,6 +1077,10 @@ def _validate_public_standalone_run(
     receipt = read_start_transaction_for_run(workspace, run_id)
     if receipt is None:
         raise StartTransactionIntegrityError("standalone Run start binding is missing")
+    if receipt.get("schema_version") != START_TRANSACTION_SCHEMA_VERSION:
+        raise StartTransactionIntegrityError(
+            "standalone Run start receipt cannot prove its Session message pair"
+        )
     if require_committed and receipt.get("state") != "committed":
         raise StartTransactionIntegrityError("standalone Run start is not committed")
     initial = receipt.get("initial_run_snapshot")
@@ -864,7 +1125,8 @@ def _read_start_run_binding(workspace: Path, run_id: str) -> dict:
     }
     if (
         not set(binding).issubset(allowed)
-        or binding.get("schema_version") != START_TRANSACTION_SCHEMA_VERSION
+        or binding.get("schema_version")
+        not in _SUPPORTED_START_TRANSACTION_SCHEMA_VERSIONS
         or binding.get("run_id") != requested_run_id
         or not str(binding.get("session_id") or "")
         or _SHA256_PATTERN.fullmatch(transaction_id) is None
@@ -890,7 +1152,8 @@ def _read_start_session_binding(workspace: Path, session_id: str) -> dict:
     transaction_ids = binding.get("transaction_ids")
     if (
         set(binding) != {"schema_version", "session_id", "transaction_ids"}
-        or binding.get("schema_version") != START_TRANSACTION_SCHEMA_VERSION
+        or binding.get("schema_version")
+        not in _SUPPORTED_START_TRANSACTION_SCHEMA_VERSIONS
         or binding.get("session_id") != requested_session_id
         or not isinstance(transaction_ids, list)
     ):
@@ -940,6 +1203,132 @@ def _raw_start_transaction_payload(workspace: Path, transaction_id: str) -> dict
     return _validate_start_transaction_payload(receipt, transaction_id)
 
 
+def inspect_start_transaction_metadata(
+    workspace: Path,
+    *,
+    transaction_id: str,
+    run_id: str,
+    session_id: str,
+) -> dict:
+    """Read independently durable start metadata for locked reconciliation.
+
+    The ordinary readers intentionally require all three files.  Initial
+    creation can die between their atomic renames, so the coordinator needs a
+    narrow inspection API while it holds both the transaction and Session
+    writer locks.  Every file that does exist is still fully shape-validated.
+    """
+    requested_transaction_id = str(transaction_id or "")
+    if _SHA256_PATTERN.fullmatch(requested_transaction_id) is None:
+        raise ValueError("Invalid expert team start transaction_id")
+    requested_run_id = safe_run_id(run_id)
+    requested_session_id = str(session_id or "")
+    if not requested_session_id:
+        raise ValueError("Invalid expert team start session_id")
+
+    receipt = _raw_start_transaction_payload(workspace, requested_transaction_id)
+    run_binding = None
+    if start_run_binding_path(workspace, requested_run_id).exists():
+        run_binding = _read_start_run_binding(workspace, requested_run_id)
+    session_binding = None
+    if start_session_binding_path(workspace, requested_session_id).exists():
+        session_binding = _read_start_session_binding(
+            workspace,
+            requested_session_id,
+        )
+    return {
+        "receipt": copy.deepcopy(receipt),
+        "run_binding": copy.deepcopy(run_binding),
+        "session_binding": copy.deepcopy(session_binding),
+    }
+
+
+def repair_prepared_start_session_binding(
+    workspace: Path,
+    receipt: dict,
+) -> None:
+    """Complete the third initial metadata write for one exact v2 receipt."""
+    transaction_id = str(receipt.get("transaction_id") or "")
+    _validate_start_transaction_payload(receipt, transaction_id)
+    if (
+        receipt.get("schema_version") != START_TRANSACTION_SCHEMA_VERSION
+        or receipt.get("state") != "prepared"
+    ):
+        raise StartTransactionIntegrityError(
+            "only a prepared current-schema start receipt can repair its Session binding"
+        )
+    durable_receipt = _raw_start_transaction_payload(workspace, transaction_id)
+    if durable_receipt != receipt:
+        raise StartTransactionIntegrityError(
+            "start transaction receipt changed during Session binding repair"
+        )
+    run_binding = _read_start_run_binding(workspace, str(receipt["run_id"]))
+    if (
+        run_binding.get("schema_version") != receipt.get("schema_version")
+        or str(run_binding.get("transaction_id") or "") != transaction_id
+        or str(run_binding.get("session_id") or "")
+        != str(receipt.get("session_id") or "")
+        or not _receipt_digest_matches_run_binding(receipt, run_binding)
+    ):
+        raise StartTransactionIntegrityError(
+            "start transaction Run binding cannot authorize Session binding repair"
+        )
+
+    session_id = str(receipt["session_id"])
+    path = start_session_binding_path(workspace, session_id)
+    transaction_ids: list[str] = []
+    if path.exists():
+        binding = _read_start_session_binding(workspace, session_id)
+        transaction_ids = [str(value) for value in binding["transaction_ids"]]
+    if transaction_id in transaction_ids:
+        return
+    transaction_ids.append(transaction_id)
+    _write_json_atomic(
+        path,
+        {
+            "schema_version": START_TRANSACTION_SCHEMA_VERSION,
+            "session_id": session_id,
+            "transaction_ids": transaction_ids,
+        },
+    )
+
+
+def delete_orphan_start_run_binding(workspace: Path, run_id: str) -> None:
+    """Remove the first metadata write after its caller proves no evidence exists."""
+    _unlink_storage_file(start_run_binding_path(workspace, run_id))
+
+
+def delete_start_transaction_metadata(
+    workspace: Path,
+    *,
+    transaction_id: str,
+    run_id: str,
+    session_id: str,
+) -> None:
+    """Remove one uncommitted transaction's indexes in recovery-safe order."""
+    session_path = start_session_binding_path(workspace, session_id)
+    if session_path.exists():
+        binding = _read_start_session_binding(workspace, session_id)
+        remaining = [
+            str(value)
+            for value in binding["transaction_ids"]
+            if str(value) != transaction_id
+        ]
+        if len(remaining) != len(binding["transaction_ids"]):
+            if remaining:
+                _write_json_atomic(
+                    session_path,
+                    {
+                        "schema_version": START_TRANSACTION_SCHEMA_VERSION,
+                        "session_id": session_id,
+                        "transaction_ids": remaining,
+                    },
+                )
+            else:
+                _unlink_storage_file(session_path)
+    _unlink_storage_file(start_transaction_path(workspace, transaction_id))
+    _unlink_storage_file(start_run_binding_path(workspace, run_id))
+
+
 def write_start_transaction(workspace: Path, receipt: dict) -> dict:
     transaction_id = str(receipt.get("transaction_id") or "")
     if _SHA256_PATTERN.fullmatch(transaction_id) is None:
@@ -949,6 +1338,10 @@ def write_start_transaction(workspace: Path, receipt: dict) -> dict:
     if not session_id:
         raise ValueError("Invalid expert team start session_id")
     _validate_start_transaction_payload(receipt, transaction_id)
+    if receipt.get("schema_version") != START_TRANSACTION_SCHEMA_VERSION:
+        raise StartTransactionIntegrityError(
+            "legacy start transaction receipts are read-only"
+        )
     receipt_sha256 = start_receipt_digest(receipt)
 
     # The Run binding is written first so a canonical Run can never become
@@ -990,6 +1383,8 @@ def write_start_transaction(workspace: Path, receipt: dict) -> dict:
                 "initial_run_snapshot",
                 "initial_run_sha256",
                 "initial_start_projection_sha256",
+                "initial_session_message_pair_snapshot",
+                "initial_session_message_pair_sha256",
                 "session_metadata_before_start",
                 "session_metadata_before_start_sha256",
                 "session_updated_at_after_start",
@@ -1072,7 +1467,6 @@ def read_start_transaction(
         return None
     expected_key_hash = start_idempotency_key_hash(idempotency_key)
     required = {
-        "schema_version": START_TRANSACTION_SCHEMA_VERSION,
         "transaction_id": transaction_id,
         "session_id": session_id,
         "idempotency_key_hash": expected_key_hash,
@@ -1093,6 +1487,7 @@ def read_start_transaction_by_id(
     if (
         str(run_binding.get("transaction_id") or "") != transaction_id
         or str(run_binding.get("session_id") or "") != str(receipt["session_id"])
+        or run_binding.get("schema_version") != receipt.get("schema_version")
         or not _receipt_digest_matches_run_binding(receipt, run_binding)
     ):
         raise StartTransactionIntegrityError(

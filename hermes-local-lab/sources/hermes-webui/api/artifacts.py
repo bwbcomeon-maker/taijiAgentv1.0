@@ -63,6 +63,28 @@ class ArtifactConflictError(ArtifactValidationError):
     pass
 
 
+class ArtifactRetirementRollbackError(RuntimeError):
+    """Artifact directory is retired but could not be moved back after failure."""
+
+    def __init__(self, session_id: str, retired_path: Path):
+        super().__init__(
+            f"artifact retirement rollback failed for session {session_id}"
+        )
+        self.session_id = session_id
+        self.retired_path = Path(retired_path)
+
+
+class ArtifactRetirementRestoreDurabilityError(RuntimeError):
+    """Original artifact directory is live again, but parent sync failed."""
+
+    def __init__(self, session_id: str, live_path: Path):
+        super().__init__(
+            f"artifact retirement restore was not durable for session {session_id}"
+        )
+        self.session_id = session_id
+        self.live_path = Path(live_path)
+
+
 @dataclass(frozen=True)
 class AuthorizedArtifact:
     """Immutable verified payload; HTTP handlers must not reopen its path."""
@@ -733,6 +755,23 @@ def _atomic_write(path: Path, data: bytes) -> None:
         temp.unlink(missing_ok=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    """Durably publish directory-entry changes on POSIX filesystems."""
+    if os.name != "posix":
+        return
+    directory_fd = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 class ArtifactRegistry:
     def __init__(
         self,
@@ -1083,26 +1122,84 @@ class ArtifactRegistry:
         session_id = _safe_id(session_id, "session_id")
         with self._session_lock(session_id):
             session_dir = self._session_dir(session_id)
-            if not session_dir.exists():
+            try:
+                session_metadata = session_dir.lstat()
+            except FileNotFoundError:
                 return None
+            if not stat.S_ISDIR(session_metadata.st_mode):
+                raise ArtifactValidationError(
+                    "artifact session path is not a directory"
+                )
+            session_identity = (
+                int(session_metadata.st_dev),
+                int(session_metadata.st_ino),
+            )
             retired_at = float(time.time() if now is None else now)
             trash = self.root / ".trash"
             trash.mkdir(parents=True, exist_ok=True)
             destination = trash / f"{session_dir.name}--{int(retired_at * 1000)}--{uuid.uuid4().hex[:8]}"
             os.replace(session_dir, destination)
             try:
+                _fsync_directory(trash)
+                _fsync_directory(self.root)
                 _atomic_write(
                     destination / ".retired.json",
                     json.dumps({"session_id": session_id, "retired_at": retired_at}).encode("utf-8"),
                 )
+                _fsync_directory(destination)
             except Exception:
+                rollback_error = None
                 try:
                     os.replace(destination, session_dir)
-                except Exception:
+                except Exception as exc:
+                    rollback_error = exc
                     logger.critical(
                         "Artifact retirement rollback failed for %s", session_id,
                         exc_info=True,
                     )
+                try:
+                    restored_metadata = session_dir.lstat()
+                except OSError:
+                    restored_metadata = None
+                try:
+                    destination.lstat()
+                except FileNotFoundError:
+                    destination_absent = True
+                except OSError:
+                    destination_absent = False
+                else:
+                    destination_absent = False
+                restored_identity = (
+                    int(restored_metadata.st_dev),
+                    int(restored_metadata.st_ino),
+                ) if restored_metadata is not None else None
+                # A path merely existing at the old name is insufficient: it
+                # may be a concurrently-created, unrelated directory. First
+                # prove the original artifact identity is back at its live
+                # binding; the parent sync below classifies its durability.
+                if (
+                    restored_metadata is None
+                    or not stat.S_ISDIR(restored_metadata.st_mode)
+                    or restored_identity != session_identity
+                    or not destination_absent
+                ):
+                    raise ArtifactRetirementRollbackError(
+                        session_id,
+                        destination,
+                    ) from rollback_error
+                try:
+                    _fsync_directory(self.root)
+                    _fsync_directory(trash)
+                except Exception as rollback_sync_error:
+                    logger.critical(
+                        "Artifact retirement rollback was not durable for %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    raise ArtifactRetirementRestoreDurabilityError(
+                        session_id,
+                        session_dir,
+                    ) from rollback_sync_error
                 raise
         return destination
 
@@ -1120,7 +1217,10 @@ class ArtifactRegistry:
             if destination.exists():
                 raise ArtifactValidationError("artifact session already exists")
             os.replace(retired, destination)
+            _fsync_directory(destination.parent)
+            _fsync_directory(retired.parent)
             (destination / ".retired.json").unlink(missing_ok=True)
+            _fsync_directory(destination)
 
     @_migration_guarded_artifact_write
     def discard_unpublished_session(self, session_id: str) -> bool:

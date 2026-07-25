@@ -6,6 +6,7 @@ import os
 import re as _re
 import ssl
 from pathlib import Path
+from urllib.parse import urlsplit
 from api.config import IMAGE_EXTS, MD_EXTS
 
 
@@ -97,12 +98,57 @@ def _safe_write(handler, body: bytes) -> None:
         )
 
 
+def _is_expert_team_json_request(handler) -> bool:
+    """Return whether this response belongs to the expert-team API surface."""
+    raw_path = str(getattr(handler, "path", "") or "")
+    if raw_path:
+        # BaseHTTPRequestHandler instances are reused by keep-alive.  Its
+        # current ``path`` is authoritative; a marker from an earlier request
+        # must never project an unrelated response.  Parse both origin-form
+        # and absolute-form request targets exactly as the route dispatcher
+        # does; a string-prefix check would let absolute-form bypass the gate.
+        try:
+            path = urlsplit(raw_path).path
+        except ValueError:
+            return bool(
+                getattr(handler, "_taiji_expert_team_json_request", False)
+            )
+        return path == "/api/expert-teams" or path.startswith(
+            "/api/expert-teams/"
+        )
+    return bool(getattr(handler, "_taiji_expert_team_json_request", False))
+
+
 def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
     """
+    if _is_expert_team_json_request(handler):
+        try:
+            # This is the final defense-in-depth boundary for every expert-team
+            # success and error response, including legacy branches that call
+            # ``bad()`` or helpers imported in another module.
+            from api.brand_privacy import public_expert_team_response_projection
+
+            payload = public_expert_team_response_projection(payload)
+        except Exception as exc:
+            import logging
+
+            # Exception messages and tracebacks may contain the very credential
+            # that this boundary is meant to remove.  Log only a fixed message
+            # and the code-owned exception type.
+            logging.getLogger(__name__).error(
+                "Failed to project expert-team JSON response (error_type=%s)",
+                type(exc).__name__,
+            )
+            payload = {
+                "ok": False,
+                "code": "public_projection_failed",
+                "error": "Response could not be safely serialized.",
+            }
+            status = 500
     body = _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')

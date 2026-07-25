@@ -740,12 +740,14 @@ class Session:
         # had no source turn or expiry, so carrying them forward would recreate
         # the indefinite cross-turn pollution this field replaces.
         self.privacy_context = normalize_session_privacy_context(privacy_context)
-        self.expert_team_start_transaction_ids = list(
-            dict.fromkeys(
-                str(value)
-                for value in (expert_team_start_transaction_ids or [])
-                if re.fullmatch(r"[0-9a-f]{64}", str(value or ""))
-            )
+        # This list is durable transaction evidence, not user-facing metadata.
+        # Preserve its raw shape, values, order and cardinality so the atomic
+        # start validator can detect malformed or duplicated markers instead of
+        # silently normalizing corruption into an apparently valid singleton.
+        self.expert_team_start_transaction_ids = copy.deepcopy(
+            []
+            if expert_team_start_transaction_ids is None
+            else expert_team_start_transaction_ids
         )
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None

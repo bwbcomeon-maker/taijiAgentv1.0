@@ -17,6 +17,7 @@ import platform
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -89,6 +90,702 @@ def _session_field(session, field, default=None):
     if isinstance(session, dict):
         return session.get(field, default)
     return getattr(session, field, default)
+
+
+class _SessionDeleteAuthority:
+    """Anchored access to the three files that define Session authority.
+
+    POSIX uses pinned directory descriptors plus ``*at`` operations and
+    ``O_NOFOLLOW``.  Authority leaves are first moved to unpredictable names
+    in the same pinned directory, then byte/inode checked before those names
+    are removed as one transaction.  This avoids a validate-then-unlink race
+    deleting a newer canonical file.  The lexical Session root is bound through
+    a pinned parent descriptor and root name, while the intent parent is rebound
+    to its snapshotted inode before mutation and commit. Windows Python does not
+    expose equivalent dirfd operations; its fallback repeatedly rejects
+    reparse-like symlinks and verifies identities, but intentionally does not
+    claim POSIX-equivalent TOCTOU strength.
+    """
+
+    _INTENT_DIR = ".truth-rewrite-intents"
+    _ORDER = ("backup", "intent", "primary")
+    # Capture platform capability once, while the module still exposes the
+    # real os functions.  Fault-injection tests (and observability wrappers in
+    # production) may temporarily wrap os.unlink/os.rename; function identity
+    # is not a platform capability and must not silently downgrade an anchored
+    # POSIX delete to the weaker checked-path fallback.
+    _DIRFD_CAPABLE = bool(
+        os.name == "posix"
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and all(
+            operation in os.supports_dir_fd
+            for operation in (os.open, os.stat, os.unlink, os.rename, os.link)
+        )
+        and os.stat in os.supports_follow_symlinks
+        and os.link in os.supports_follow_symlinks
+    )
+
+    def __init__(self, session_root: Path, session_id: str):
+        self.root_path = Path(
+            os.path.abspath(os.fspath(Path(session_root).expanduser()))
+        )
+        self.session_id = session_id
+        self._root_parent_path = self.root_path.parent
+        self._root_name = self.root_path.name
+        self._root_parent_fd: int | None = None
+        self._root_parent_identity: tuple[int, int] | None = None
+        self._root_fd: int | None = None
+        self._root_identity: tuple[int, int] | None = None
+        self._intent_fd: int | None = None
+        self._intent_identity: tuple[int, int] | None = None
+        self._snapshots: dict[str, dict] | None = None
+        self._quarantined: dict[str, dict] = {}
+        self._preserved_conflicts: dict[str, dict] = {}
+        self._restore_dirty_labels: set[str] = set()
+        self._anchored = self._DIRFD_CAPABLE
+        self._leaves = {
+            "primary": f"{session_id}.json",
+            "backup": f"{session_id}.json.bak",
+            "intent": f"{session_id}.json",
+        }
+        self._paths = {
+            "primary": self.root_path / self._leaves["primary"],
+            "backup": self.root_path / self._leaves["backup"],
+            "intent": self.root_path / self._INTENT_DIR / self._leaves["intent"],
+        }
+        if self._anchored:
+            self._open_anchored_directories()
+        else:
+            self._capture_checked_root()
+            self._capture_checked_intent_parent()
+
+    @staticmethod
+    def _identity(metadata) -> tuple[int, int]:
+        return int(metadata.st_dev), int(metadata.st_ino)
+
+    @staticmethod
+    def _directory_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+
+    def _open_anchored_directories(self) -> None:
+        if not self._root_name:
+            raise OSError("Session authority root must have a parent binding")
+        try:
+            self._root_parent_fd = os.open(
+                self._root_parent_path,
+                self._directory_flags(),
+            )
+            parent_metadata = os.fstat(self._root_parent_fd)
+            if not stat.S_ISDIR(parent_metadata.st_mode):
+                raise OSError("Session authority parent is not a directory")
+            self._root_parent_identity = self._identity(parent_metadata)
+
+            self._root_fd = os.open(
+                self._root_name,
+                self._directory_flags(),
+                dir_fd=self._root_parent_fd,
+            )
+            root_metadata = os.fstat(self._root_fd)
+            if not stat.S_ISDIR(root_metadata.st_mode):
+                raise OSError("Session authority root is not a directory")
+            self._root_identity = self._identity(root_metadata)
+            self._assert_root_path_stable()
+
+            try:
+                self._intent_fd = os.open(
+                    self._INTENT_DIR,
+                    self._directory_flags(),
+                    dir_fd=self._root_fd,
+                )
+            except FileNotFoundError:
+                self._intent_fd = None
+                self._intent_identity = None
+            else:
+                metadata = os.fstat(self._intent_fd)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise OSError("Session intent authority is not a directory")
+                self._intent_identity = self._identity(metadata)
+        except Exception:
+            self.close()
+            raise
+
+    def _capture_checked_root(self) -> None:
+        try:
+            metadata = self.root_path.lstat()
+        except FileNotFoundError as exc:
+            raise OSError("Session authority root is unavailable") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session authority root")
+        self._root_identity = self._identity(metadata)
+
+    def _assert_root_path_stable(self) -> None:
+        if self._anchored:
+            if (
+                self._root_parent_fd is None
+                or self._root_parent_identity is None
+                or self._root_fd is None
+                or self._root_identity is None
+            ):
+                raise OSError("Session authority root binding is unavailable")
+
+            pinned_parent = os.fstat(self._root_parent_fd)
+            if (
+                not stat.S_ISDIR(pinned_parent.st_mode)
+                or self._identity(pinned_parent) != self._root_parent_identity
+            ):
+                raise OSError("pinned Session authority parent changed")
+            pinned_root = os.fstat(self._root_fd)
+            if (
+                not stat.S_ISDIR(pinned_root.st_mode)
+                or self._identity(pinned_root) != self._root_identity
+            ):
+                raise OSError("pinned Session authority root changed")
+
+            current_parent_fd: int | None = None
+            current_root_fd: int | None = None
+            try:
+                current_parent_fd = os.open(
+                    self._root_parent_path,
+                    self._directory_flags(),
+                )
+                current_parent = os.fstat(current_parent_fd)
+                if (
+                    not stat.S_ISDIR(current_parent.st_mode)
+                    or self._identity(current_parent)
+                    != self._root_parent_identity
+                ):
+                    raise OSError("Session authority parent changed")
+                current_root_fd = os.open(
+                    self._root_name,
+                    self._directory_flags(),
+                    dir_fd=current_parent_fd,
+                )
+                current_root = os.fstat(current_root_fd)
+                if (
+                    not stat.S_ISDIR(current_root.st_mode)
+                    or self._identity(current_root) != self._root_identity
+                ):
+                    raise OSError("Session authority root changed")
+            except FileNotFoundError as exc:
+                raise OSError("Session authority root disappeared") from exc
+            finally:
+                if current_root_fd is not None:
+                    os.close(current_root_fd)
+                if current_parent_fd is not None:
+                    os.close(current_parent_fd)
+            return
+
+        try:
+            metadata = self.root_path.lstat()
+        except FileNotFoundError as exc:
+            raise OSError("Session authority root disappeared") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session authority root")
+        if (
+            self._root_identity is None
+            or self._identity(metadata) != self._root_identity
+        ):
+            raise OSError("Session authority root changed")
+
+    def _capture_checked_intent_parent(self) -> None:
+        intent_parent = self.root_path / self._INTENT_DIR
+        try:
+            metadata = intent_parent.lstat()
+        except FileNotFoundError:
+            self._intent_identity = None
+            return
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session intent authority parent")
+        self._intent_identity = self._identity(metadata)
+
+    def close(self) -> None:
+        if self._intent_fd is not None:
+            os.close(self._intent_fd)
+            self._intent_fd = None
+        if self._root_fd is not None:
+            os.close(self._root_fd)
+            self._root_fd = None
+        if self._root_parent_fd is not None:
+            os.close(self._root_parent_fd)
+            self._root_parent_fd = None
+
+    def _entry_directory_fd(self, label: str) -> int | None:
+        return self._intent_fd if label == "intent" else self._root_fd
+
+    def _assert_intent_parent_stable(self) -> None:
+        if self._anchored:
+            assert self._root_fd is not None
+            try:
+                current_fd = os.open(
+                    self._INTENT_DIR,
+                    self._directory_flags(),
+                    dir_fd=self._root_fd,
+                )
+            except FileNotFoundError:
+                if self._intent_identity is None:
+                    return
+                raise OSError("Session intent authority parent disappeared")
+            try:
+                current_identity = self._identity(os.fstat(current_fd))
+            finally:
+                os.close(current_fd)
+            if (
+                self._intent_identity is None
+                or current_identity != self._intent_identity
+            ):
+                raise OSError("Session intent authority parent changed")
+            return
+
+        intent_parent = self.root_path / self._INTENT_DIR
+        try:
+            metadata = intent_parent.lstat()
+        except FileNotFoundError:
+            if self._intent_identity is None:
+                return
+            raise OSError("Session intent authority parent disappeared")
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session intent authority parent")
+        if (
+            self._intent_identity is None
+            or self._identity(metadata) != self._intent_identity
+        ):
+            raise OSError("Session intent authority parent changed")
+
+    def _entry_parent_path(self, label: str) -> Path:
+        return self._paths[label].parent
+
+    def _read_named_entry(
+        self,
+        label: str,
+        name: str,
+    ) -> tuple[bytes | None, tuple[int, int] | None]:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                return None, None
+            try:
+                fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError:
+                return None, None
+            try:
+                metadata = os.fstat(fd)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise OSError(
+                        f"unsafe Session delete authority: {name}"
+                    )
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1
+                    payload = handle.read()
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            return payload, self._identity(metadata)
+
+        path = self._entry_parent_path(label) / name
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return None, None
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"unsafe Session delete authority: {path.name}")
+        fd = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            opened = os.fstat(fd)
+            if self._identity(opened) != self._identity(metadata):
+                raise OSError("Session delete authority changed while opening")
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                payload = handle.read()
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        return payload, self._identity(metadata)
+
+    def _read_entry(self, label: str) -> tuple[bytes | None, tuple[int, int] | None]:
+        return self._read_named_entry(label, self._leaves[label])
+
+    def _named_entry_exists(self, label: str, name: str) -> bool:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                return False
+            try:
+                os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return False
+            return True
+        try:
+            (self._entry_parent_path(label) / name).lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
+    def snapshot(self) -> dict[str, dict]:
+        self._assert_root_path_stable()
+        self._assert_intent_parent_stable()
+        snapshots = {}
+        for label in ("primary", "backup", "intent"):
+            payload, identity = self._read_entry(label)
+            snapshots[label] = {"payload": payload, "identity": identity}
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        self._snapshots = snapshots
+        return copy.deepcopy(snapshots)
+
+    def _assert_entry_unchanged(self, label: str) -> bool:
+        if self._snapshots is None:
+            raise RuntimeError("Session authority was not snapshotted")
+        payload, identity = self._read_entry(label)
+        expected = self._snapshots[label]
+        if identity != expected["identity"] or payload != expected["payload"]:
+            raise OSError(
+                f"Session delete authority changed: {self._leaves[label]}"
+            )
+        return payload is not None
+
+    def _rename_entry(self, label: str, source: str, destination: str) -> None:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            os.rename(
+                source,
+                destination,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        else:
+            parent = self._entry_parent_path(label)
+            os.replace(parent / source, parent / destination)
+
+    def _unlink_named_entry(self, label: str, name: str) -> None:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            os.unlink(name, dir_fd=directory_fd)
+        else:
+            (self._entry_parent_path(label) / name).unlink()
+
+    def _restore_quarantined_entry(self, label: str) -> None:
+        record = self._quarantined.get(label)
+        if not isinstance(record, dict):
+            return
+        quarantine_name = str(record["name"])
+        if self._named_entry_exists(label, self._leaves[label]):
+            raise OSError(
+                f"new Session authority appeared while restoring: {self._leaves[label]}"
+            )
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            os.link(
+                quarantine_name,
+                self._leaves[label],
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        else:
+            parent = self._entry_parent_path(label)
+            os.link(
+                parent / quarantine_name,
+                parent / self._leaves[label],
+                follow_symlinks=False,
+            )
+        self._restore_dirty_labels.add(label)
+        payload, identity = self._read_entry(label)
+        if payload != record.get("payload") or identity != record.get("identity"):
+            raise OSError(
+                f"restored Session authority changed: {self._leaves[label]}"
+            )
+        self._unlink_named_entry(label, quarantine_name)
+        self._quarantined.pop(label, None)
+
+    def _quarantine_entry(self, label: str) -> None:
+        if not self._assert_entry_unchanged(label):
+            return
+        quarantine_name = (
+            f".{self._leaves[label]}.{uuid.uuid4().hex}.delete-quarantine"
+        )
+        self._rename_entry(label, self._leaves[label], quarantine_name)
+        self._quarantined[label] = {"name": quarantine_name}
+        try:
+            payload, identity = self._read_named_entry(label, quarantine_name)
+            self._quarantined[label].update(
+                payload=payload,
+                identity=identity,
+            )
+            expected = self._snapshots[label]
+            if payload != expected["payload"] or identity != expected["identity"]:
+                # The canonical leaf changed after validation. Preserve the
+                # newer file exactly as found; the enclosing rollback must not
+                # overwrite it with stale snapshot bytes.
+                self._restore_quarantined_entry(label)
+                self._preserved_conflicts[label] = {
+                    "payload": payload,
+                    "identity": identity,
+                }
+                raise OSError(
+                    f"Session delete authority changed before quarantine: "
+                    f"{self._leaves[label]}"
+                )
+            if self._named_entry_exists(label, self._leaves[label]):
+                raise OSError(
+                    f"new Session authority appeared during delete: "
+                    f"{self._leaves[label]}"
+                )
+        except Exception:
+            # A verified regular conflict can be put back without replacing a
+            # concurrently-created canonical name. If validation itself could
+            # not read the quarantined entry, retain the unpredictable recovery
+            # name rather than performing an unsafe overwrite.
+            if (
+                label in self._quarantined
+                and self._quarantined[label].get("payload") is not None
+            ):
+                try:
+                    self._restore_quarantined_entry(label)
+                except Exception:
+                    pass
+            raise
+
+    def _commit_quarantines(self) -> None:
+        for label, record in self._quarantined.items():
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+            payload, identity = self._read_named_entry(label, str(record["name"]))
+            if payload != record.get("payload") or identity != record.get("identity"):
+                raise OSError(
+                    f"quarantined Session authority changed: {self._leaves[label]}"
+                )
+            if self._named_entry_exists(label, self._leaves[label]):
+                raise OSError(
+                    f"new Session authority appeared before delete commit: "
+                    f"{self._leaves[label]}"
+                )
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+        for label, record in list(self._quarantined.items()):
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+            self._unlink_named_entry(label, str(record["name"]))
+            self._quarantined.pop(label, None)
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+
+    def unlink_all(self) -> None:
+        self._assert_root_path_stable()
+        self._assert_intent_parent_stable()
+        for label in self._ORDER:
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+            self._quarantine_entry(label)
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        self._assert_intent_parent_stable()
+        if self._anchored:
+            for directory_fd in (self._intent_fd, self._root_fd):
+                if directory_fd is not None:
+                    os.fsync(directory_fd)
+        self._commit_quarantines()
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        if self._anchored:
+            for directory_fd in (self._intent_fd, self._root_fd):
+                if directory_fd is not None:
+                    os.fsync(directory_fd)
+
+    def _atomic_restore_entry(self, label: str, payload: bytes) -> None:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            temp = f".{self._leaves[label]}.{uuid.uuid4().hex}.restore.tmp"
+            fd = os.open(
+                temp,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    fd = -1
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.link(
+                    temp,
+                    self._leaves[label],
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                self._restore_dirty_labels.add(label)
+                os.fsync(directory_fd)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                try:
+                    os.unlink(temp, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+            return
+
+        path = self._paths[label]
+        temp = path.parent / f".{path.name}.{uuid.uuid4().hex}.restore.tmp"
+        fd = os.open(
+            temp,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                fd = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temp, path, follow_symlinks=False)
+            self._restore_dirty_labels.add(label)
+            directory_fd = os.open(path.parent, self._directory_flags())
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            temp.unlink(missing_ok=True)
+
+    def _fsync_restored_directories(self) -> None:
+        if not self._restore_dirty_labels:
+            return
+
+        # Intent and root are the only two possible authority parents. Sync
+        # each affected directory once after the complete restored payload and
+        # identity set has been verified.
+        labels = []
+        if "intent" in self._restore_dirty_labels:
+            labels.append("intent")
+        if self._restore_dirty_labels - {"intent"}:
+            labels.append("primary")
+        for label in labels:
+            if self._anchored:
+                directory_fd = self._entry_directory_fd(label)
+                if directory_fd is None:
+                    raise OSError("Session restore authority parent disappeared")
+                os.fsync(directory_fd)
+                continue
+            directory_fd = os.open(
+                self._entry_parent_path(label),
+                self._directory_flags(),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        self._restore_dirty_labels.clear()
+
+    def restore(self) -> None:
+        if self._snapshots is None:
+            raise RuntimeError("Session authority was not snapshotted")
+        if not self._anchored:
+            # The checked-path fallback has no pinned directory descriptor. If
+            # the lexical root moved, refusing recovery is safer than writing
+            # snapshot bytes into the replacement directory.
+            self._assert_root_path_stable()
+
+        recreated = set()
+        # Restore root authority first so even intent-parent drift leaves the
+        # pinned original Session data recoverable. A conflict captured after
+        # validation is authoritative newer data and must never be overwritten
+        # by the older snapshot.
+        for label in ("primary", "backup", "intent"):
+            preserved = self._preserved_conflicts.get(label)
+            if isinstance(preserved, dict):
+                payload, identity = self._read_entry(label)
+                if (
+                    payload != preserved.get("payload")
+                    or identity != preserved.get("identity")
+                ):
+                    raise OSError(
+                        f"preserved Session authority changed: {self._leaves[label]}"
+                    )
+                continue
+            if label in self._quarantined:
+                self._restore_quarantined_entry(label)
+                continue
+
+            expected = self._snapshots[label]
+            payload, identity = self._read_entry(label)
+            if expected["payload"] is None:
+                if payload is not None or identity is not None:
+                    raise OSError(
+                        f"unexpected Session delete authority: {self._leaves[label]}"
+                    )
+                continue
+            if payload is None:
+                self._atomic_restore_entry(label, expected["payload"])
+                recreated.add(label)
+                continue
+            if payload != expected["payload"] or identity != expected["identity"]:
+                raise OSError(
+                    f"Session authority changed during restore: {self._leaves[label]}"
+                )
+
+        for label in ("primary", "backup", "intent"):
+            payload, identity = self._read_entry(label)
+            expected = self._preserved_conflicts.get(label) or self._snapshots[label]
+            if payload != expected.get("payload"):
+                raise OSError(
+                    f"failed to verify restored Session authority: {self._leaves[label]}"
+                )
+            if label not in recreated and identity != expected.get("identity"):
+                raise OSError(
+                    f"restored Session authority identity changed: {self._leaves[label]}"
+                )
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        self._fsync_restored_directories()
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
 
 
 def _expert_identity_session(handler) -> str:
@@ -1514,9 +2211,12 @@ def _persist_expert_team_session_entry_locked(
     run: dict,
     transaction_id: str,
     *,
+    initial_session_message_pair_snapshot: list[dict],
     session_updated_at_after_start: float,
 ) -> list[dict]:
     """Persist the canonical message pair; caller holds the session writer lock."""
+    from api.expert_teams import storage
+
     run_id = str(run.get("run_id") or "")
     existing = _expert_team_start_session_messages(session, run_id, transaction_id)
     if existing:
@@ -1524,13 +2224,20 @@ def _persist_expert_team_session_entry_locked(
 
     before = copy.deepcopy(session.__dict__)
     sidecar_existed = session.path.exists()
-    new_messages = _new_expert_team_start_session_messages(run, transaction_id)
+    try:
+        new_messages = storage.validate_start_session_message_pair_snapshot(
+            initial_session_message_pair_snapshot,
+            transaction_id=transaction_id,
+            run_id=run_id,
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
     messages = list(getattr(session, "messages", None) or [])
 
     def _append_entry():
         session.messages = messages + copy.deepcopy(new_messages)
-        transaction_ids = list(
-            getattr(session, "expert_team_start_transaction_ids", None) or []
+        transaction_ids = storage.validate_start_session_transaction_markers(
+            getattr(session, "expert_team_start_transaction_ids", None)
         )
         if transaction_id not in transaction_ids:
             transaction_ids.append(transaction_id)
@@ -1572,6 +2279,8 @@ def _rollback_expert_team_start_session_entry_locked(
     metadata_before_start: dict | None = None,
     session_updated_at_after_start: float | None = None,
 ) -> None:
+    from api.expert_teams import storage
+
     existing = _expert_team_start_session_messages(session, run_id, transaction_id)
     if not existing:
         return
@@ -1601,12 +2310,14 @@ def _rollback_expert_team_start_session_entry_locked(
                 == transaction_id
             )
         ]
+        transaction_ids = storage.validate_start_session_transaction_markers(
+            getattr(session, "expert_team_start_transaction_ids", None),
+            required_transaction_id=transaction_id,
+        )
         session.expert_team_start_transaction_ids = [
             value
-            for value in (
-                getattr(session, "expert_team_start_transaction_ids", None) or []
-            )
-            if str(value) != transaction_id
+            for value in transaction_ids
+            if value != transaction_id
         ]
         session.context_messages = _completed_semantic_messages(session.messages)
         if (
@@ -1742,6 +2453,34 @@ def _validate_expert_team_start_run_ownership(
     return run
 
 
+def _validate_expert_team_start_transaction_bundle(
+    session,
+    receipt: dict,
+    run: dict,
+    *,
+    allowed_states: set[str] | frozenset[str],
+    require_initial_exact: bool,
+) -> list[dict]:
+    from api.expert_teams import storage
+
+    try:
+        return storage.validate_start_transaction_bundle(
+            receipt,
+            session_id=str(getattr(session, "session_id", "") or ""),
+            session_transaction_ids=getattr(
+                session,
+                "expert_team_start_transaction_ids",
+                None,
+            ),
+            session_messages=list(getattr(session, "messages", None) or []),
+            run=run,
+            allowed_states=allowed_states,
+            require_initial_exact=require_initial_exact,
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+
 def _expert_team_start_run_digest(run: dict) -> str:
     from api.expert_teams import storage
 
@@ -1763,7 +2502,10 @@ def _publish_expert_team_start_run(workspace: Path, run_id: str) -> dict:
 def _expert_team_start_public_session(session) -> dict:
     payload = session.compact()
     payload["messages"] = copy.deepcopy(getattr(session, "messages", None) or [])
-    return public_session_projection(redact_session_data(payload))
+    # Transaction integrity must be proved against the exact durable bytes.
+    # Credential redaction is an egress operation and therefore happens only
+    # after the public projection has finished its fail-closed validation.
+    return redact_session_data(public_session_projection(payload))
 
 
 def _expert_team_start_session_is_busy(session) -> bool:
@@ -1905,6 +2647,18 @@ def _compensate_expert_team_start_finalize_locked(
 
     run_id = str(receipt["run_id"])
     transaction_id = str(receipt["transaction_id"])
+    durable_receipt = storage.read_start_transaction_by_id(
+        workspace,
+        transaction_id,
+    )
+    if (
+        not isinstance(durable_receipt, dict)
+        or durable_receipt != receipt
+        or durable_receipt.get("state") not in {"prepared", "recovery_required"}
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start compensation is not authorized by durable state"
+        )
 
     def _mark_recovery_required() -> None:
         recovery = dict(receipt)
@@ -1969,6 +2723,57 @@ def _compensate_expert_team_start_finalize_locked(
         raise
 
 
+def _inspect_expert_team_start_commit_write_outcome_locked(
+    workspace: Path,
+    session,
+    receipt: dict,
+    validated_body: dict,
+) -> tuple[str, dict, dict]:
+    """Classify an exception raised after the committed write was attempted.
+
+    Atomic replace can make the new receipt durable before a following fsync or
+    anchored-parent check raises.  Destructive compensation is allowed only
+    after rereading the transaction and proving that it is still prepared.  A
+    valid committed receipt is success; an unreadable or contradictory state
+    remains untouched for recovery rather than being split across stores.
+    """
+    from api.expert_teams import storage
+
+    transaction_id = str(receipt.get("transaction_id") or "")
+    durable = storage.read_start_transaction_by_id(workspace, transaction_id)
+    if not isinstance(durable, dict):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start commit outcome is not durably readable"
+        )
+    state = str(durable.get("state") or "")
+    if state not in {"prepared", "recovery_required", "committed"}:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start commit outcome is ambiguous"
+        )
+    run_id = str(durable.get("run_id") or "")
+    if not storage.run_path(workspace, run_id).exists():
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start commit outcome has no canonical Run"
+        )
+    run = _validate_expert_team_start_run_ownership(
+        storage.read_run_raw(workspace, run_id),
+        validated_body,
+        durable,
+        require_initial_exact=True,
+    )
+    durable_session = _reload_expert_team_start_session(
+        str(durable.get("session_id") or "")
+    )
+    _validate_expert_team_start_transaction_bundle(
+        durable_session,
+        durable,
+        run,
+        allowed_states={state},
+        require_initial_exact=True,
+    )
+    return state, run, durable
+
+
 def _finalize_prepared_expert_team_start_locked(
     workspace: Path,
     session,
@@ -1979,16 +2784,7 @@ def _finalize_prepared_expert_team_start_locked(
     from api.expert_teams import storage
 
     run_id = str(receipt["run_id"])
-    transaction_id = str(receipt["transaction_id"])
-    session_messages = _expert_team_start_session_messages(
-        session,
-        run_id,
-        transaction_id,
-    )
-    if not session_messages:
-        raise _ExpertTeamStartIntegrityError(
-            "prepared start has no bound Session message pair"
-        )
+    commit_write_started = False
     try:
         with storage.run_file_lock(workspace, run_id):
             if storage.pending_run_path(workspace, run_id).exists():
@@ -1996,6 +2792,13 @@ def _finalize_prepared_expert_team_start_locked(
                     storage.read_pending_run(workspace, run_id),
                     validated_body,
                     receipt,
+                    require_initial_exact=True,
+                )
+                session_messages = _validate_expert_team_start_transaction_bundle(
+                    session,
+                    receipt,
+                    pending_run,
+                    allowed_states={"prepared", "recovery_required"},
                     require_initial_exact=True,
                 )
                 run = _publish_expert_team_start_run(workspace, run_id)
@@ -2010,6 +2813,13 @@ def _finalize_prepared_expert_team_start_locked(
                     receipt,
                     require_initial_exact=True,
                 )
+                session_messages = _validate_expert_team_start_transaction_bundle(
+                    session,
+                    receipt,
+                    run,
+                    allowed_states={"prepared", "recovery_required"},
+                    require_initial_exact=True,
+                )
             else:
                 raise _ExpertTeamStartIntegrityError(
                     "prepared start has Session messages but no recoverable Run"
@@ -2017,13 +2827,32 @@ def _finalize_prepared_expert_team_start_locked(
             committed = dict(receipt)
             committed["state"] = "committed"
             committed["updated_at"] = time.time()
+            commit_write_started = True
             storage.write_start_transaction(workspace, committed)
     except Exception as finalize_error:
+        compensation_receipt = receipt
+        if commit_write_started:
+            try:
+                durable_state, durable_run, durable_receipt = (
+                    _inspect_expert_team_start_commit_write_outcome_locked(
+                        workspace,
+                        session,
+                        receipt,
+                        validated_body,
+                    )
+                )
+            except Exception as outcome_error:
+                raise _ExpertTeamStartIntegrityError(
+                    "expert team start commit outcome could not be determined"
+                ) from outcome_error
+            if durable_state == "committed":
+                return durable_run, durable_receipt
+            compensation_receipt = durable_receipt
         try:
             _compensate_expert_team_start_finalize_locked(
                 workspace,
                 session,
-                receipt,
+                compensation_receipt,
             )
         except Exception as compensation_error:
             raise _ExpertTeamStartIntegrityError(
@@ -2132,12 +2961,183 @@ def _reconcile_prepared_expert_team_starts_for_session(session):
     return current
 
 
-def _public_expert_team_start_messages(messages: list[dict]) -> list[dict]:
-    public_messages = copy.deepcopy(messages)
-    for message in public_messages:
-        if isinstance(message, dict):
-            message.pop("expert_team_start_transaction_id", None)
-    return public_messages
+def _expert_team_start_has_session_evidence(
+    session,
+    *,
+    run_id: str,
+    transaction_id: str,
+) -> bool:
+    """Return whether durable Session truth names this attempted start."""
+    from api.expert_teams import storage
+
+    try:
+        markers = storage.validate_start_session_transaction_markers(
+            getattr(session, "expert_team_start_transaction_ids", None)
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+    if transaction_id in markers:
+        return True
+    return any(
+        isinstance(message, dict)
+        and (
+            str(message.get("expert_team_start_transaction_id") or "")
+            == transaction_id
+            or str(message.get("expert_team_run_id") or "") == run_id
+        )
+        for message in (getattr(session, "messages", None) or [])
+    )
+
+
+def _reconcile_initial_expert_team_start_metadata_locked(
+    workspace: Path,
+    session,
+    validated_body: dict,
+    *,
+    transaction_id: str,
+    request_fingerprint: str,
+) -> dict | None:
+    """Converge crashes between the three initial transaction metadata writes.
+
+    Caller holds the transaction lock and the Session writer lock.  Only states
+    that cannot have reached Session or Run truth are repaired automatically;
+    every conflicting or ambiguous combination remains fail-closed.
+    """
+    from api.expert_teams import storage
+
+    session_id = str(validated_body["session_id"])
+    run_id = "et-" + transaction_id
+    try:
+        metadata = storage.inspect_start_transaction_metadata(
+            workspace,
+            transaction_id=transaction_id,
+            run_id=run_id,
+            session_id=session_id,
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+    receipt = metadata["receipt"]
+    run_binding = metadata["run_binding"]
+    session_binding = metadata["session_binding"]
+    session_indexed = bool(
+        session_binding
+        and transaction_id in session_binding.get("transaction_ids", [])
+    )
+    session_evidence = _expert_team_start_has_session_evidence(
+        session,
+        run_id=run_id,
+        transaction_id=transaction_id,
+    )
+    pending_exists = storage.pending_run_path(workspace, run_id).exists()
+    canonical_exists = storage.run_path(workspace, run_id).exists()
+    run_evidence = pending_exists or canonical_exists
+
+    if receipt is None:
+        if session_indexed or session_evidence or run_evidence:
+            raise _ExpertTeamStartIntegrityError(
+                "start transaction receipt is missing behind durable evidence"
+            )
+        if run_binding is not None:
+            if (
+                str(run_binding.get("transaction_id") or "") != transaction_id
+                or str(run_binding.get("session_id") or "") != session_id
+                or str(run_binding.get("run_id") or "") != run_id
+            ):
+                raise _ExpertTeamStartIntegrityError(
+                    "orphan start Run binding has conflicting ownership"
+                )
+            storage.delete_orphan_start_run_binding(workspace, run_id)
+        return None
+
+    if (
+        str(receipt.get("transaction_id") or "") != transaction_id
+        or str(receipt.get("session_id") or "") != session_id
+        or str(receipt.get("run_id") or "") != run_id
+        or str(receipt.get("idempotency_key_hash") or "")
+        != storage.start_idempotency_key_hash(validated_body["idempotency_key"])
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "start transaction metadata ownership does not match"
+        )
+    if str(receipt.get("request_fingerprint") or "") != request_fingerprint:
+        raise _ExpertTeamStartIdempotencyConflict(
+            "idempotency key was already used for a different start request"
+        )
+    if run_binding is None:
+        raise _ExpertTeamStartIntegrityError(
+            "start transaction receipt is missing its Run binding"
+        )
+    if (
+        run_binding.get("schema_version") != receipt.get("schema_version")
+        or str(run_binding.get("transaction_id") or "") != transaction_id
+        or str(run_binding.get("session_id") or "") != session_id
+        or str(run_binding.get("run_id") or "") != run_id
+        or storage.start_receipt_digest(receipt)
+        not in {
+            str(run_binding.get("receipt_sha256") or ""),
+            str(run_binding.get("previous_receipt_sha256") or ""),
+        }
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "start transaction receipt and Run binding disagree"
+        )
+
+    if receipt.get("schema_version") == 1:
+        if receipt.get("state") != "prepared" or session_evidence:
+            raise _ExpertTeamStartIntegrityError(
+                "legacy start transaction cannot prove its Session message pair"
+            )
+        # A prepared v1 receipt has no signed message bytes.  With no Session
+        # evidence it was never public, so validate and remove any private Run
+        # copy before rebuilding a new v2 transaction from the request.
+        with storage.run_file_lock(workspace, run_id):
+            if pending_exists:
+                _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+            if canonical_exists:
+                _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+            storage.delete_pending_run(workspace, run_id)
+            storage.delete_canonical_run(workspace, run_id)
+        storage.delete_start_transaction_metadata(
+            workspace,
+            transaction_id=transaction_id,
+            run_id=run_id,
+            session_id=session_id,
+        )
+        return None
+
+    if not session_indexed:
+        if (
+            receipt.get("state") != "prepared"
+            or session_evidence
+            or run_evidence
+        ):
+            raise _ExpertTeamStartIntegrityError(
+                "start transaction Session binding is missing behind later evidence"
+            )
+        try:
+            storage.repair_prepared_start_session_binding(workspace, receipt)
+        except storage.StartTransactionIntegrityError as exc:
+            raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+    try:
+        return storage.read_start_transaction(
+            workspace,
+            session_id=session_id,
+            idempotency_key=validated_body["idempotency_key"],
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
 
 
 def _coordinate_expert_team_start(validated_body: dict) -> dict:
@@ -2191,36 +3191,69 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
                 raise _ExpertTeamStartSessionStateConflict(
                     "expert team session workspace changed during start"
                 )
-            try:
-                receipt = storage.read_start_transaction(
-                    workspace,
-                    session_id=session_id,
-                    idempotency_key=idempotency_key,
-                )
-            except storage.StartTransactionIntegrityError as exc:
-                raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+            receipt = _reconcile_initial_expert_team_start_metadata_locked(
+                workspace,
+                durable_session,
+                validated_body,
+                transaction_id=transaction_id,
+                request_fingerprint=request_fingerprint,
+            )
 
             if receipt is not None and receipt["request_fingerprint"] != request_fingerprint:
                 raise _ExpertTeamStartIdempotencyConflict(
                     "idempotency key was already used for a different start request"
                 )
 
-            if receipt is not None and receipt.get("state") == "committed":
+            if receipt is not None and receipt.get("state") in {
+                "prepared",
+                "recovery_required",
+            }:
                 run_id = str(receipt["run_id"])
-                session_messages = _expert_team_start_session_messages(
+                durable_rows = _expert_team_start_session_messages(
                     durable_session,
                     run_id,
                     transaction_id,
                 )
-                if not session_messages:
-                    raise _ExpertTeamStartIntegrityError(
-                        "committed start receipt is missing its Session message pair"
+                try:
+                    durable_markers = (
+                        storage.validate_start_session_transaction_markers(
+                            getattr(
+                                durable_session,
+                                "expert_team_start_transaction_ids",
+                                None,
+                            )
+                        )
                     )
+                except storage.StartTransactionIntegrityError as exc:
+                    raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+                marker_present = transaction_id in durable_markers
+                if marker_present != bool(durable_rows):
+                    raise _ExpertTeamStartIntegrityError(
+                        "prepared start Session marker and message pair disagree"
+                    )
+                if marker_present:
+                    try:
+                        storage.validate_start_session_transaction_markers(
+                            durable_markers,
+                            required_transaction_id=transaction_id,
+                        )
+                    except storage.StartTransactionIntegrityError as exc:
+                        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+            if receipt is not None and receipt.get("state") == "committed":
+                run_id = str(receipt["run_id"])
                 try:
                     run = _validate_expert_team_start_run_ownership(
                         storage.read_run(workspace, run_id),
                         validated_body,
                         receipt,
+                        require_initial_exact=False,
+                    )
+                    session_messages = _validate_expert_team_start_transaction_bundle(
+                        durable_session,
+                        receipt,
+                        run,
+                        allowed_states={"committed"},
                         require_initial_exact=False,
                     )
                 except (FileNotFoundError, storage.StartTransactionIntegrityError) as exc:
@@ -2259,9 +3292,20 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
                     "expert team session workspace changed during start"
                 )
             if receipt is None:
+                try:
+                    transaction_markers = (
+                        storage.validate_start_session_transaction_markers(
+                            getattr(
+                                session,
+                                "expert_team_start_transaction_ids",
+                                None,
+                            )
+                        )
+                    )
+                except storage.StartTransactionIntegrityError as exc:
+                    raise _ExpertTeamStartIntegrityError(str(exc)) from exc
                 durable_evidence = set(
-                    getattr(session, "expert_team_start_transaction_ids", None)
-                    or []
+                    transaction_markers
                 )
                 durable_evidence.update(
                     str(message.get("expert_team_start_transaction_id") or "")
@@ -2289,14 +3333,17 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
                     run_id=run_id,
                 )
                 initial_run["start_transaction_id"] = transaction_id
+                initial_session_message_pair = (
+                    _new_expert_team_start_session_messages(
+                        initial_run,
+                        transaction_id,
+                    )
+                )
                 planned_title = str(getattr(session, "title", None) or "Untitled")
                 if _is_default_or_empty_session_title(planned_title):
                     planned_title = title_from(
                         list(getattr(session, "messages", None) or [])
-                        + _new_expert_team_start_session_messages(
-                            initial_run,
-                            transaction_id,
-                        ),
+                        + initial_session_message_pair,
                         planned_title,
                     )
                 compact_before_start = session.compact()
@@ -2327,6 +3374,14 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
                     "initial_run_sha256": _expert_team_start_run_digest(initial_run),
                     "initial_start_projection_sha256": (
                         _expert_team_start_projection_digest(initial_run)
+                    ),
+                    "initial_session_message_pair_snapshot": copy.deepcopy(
+                        initial_session_message_pair
+                    ),
+                    "initial_session_message_pair_sha256": (
+                        storage.start_session_message_pair_digest(
+                            initial_session_message_pair
+                        )
                     ),
                     "session_metadata_before_start": metadata_before_start,
                     "session_metadata_before_start_sha256": (
@@ -2388,6 +3443,13 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
                     storage.read_run(workspace, run_id),
                     validated_body,
                     receipt,
+                    require_initial_exact=False,
+                )
+                session_messages = _validate_expert_team_start_transaction_bundle(
+                    session,
+                    receipt,
+                    run,
+                    allowed_states={"committed"},
                     require_initial_exact=False,
                 )
                 if pending_exists:
@@ -2472,6 +3534,9 @@ def _coordinate_expert_team_start(validated_body: dict) -> dict:
                     session,
                     run,
                     transaction_id,
+                    initial_session_message_pair_snapshot=copy.deepcopy(
+                        receipt.get("initial_session_message_pair_snapshot")
+                    ),
                     session_updated_at_after_start=float(
                         session_updated_at_after_start
                     ),
@@ -3534,23 +4599,49 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     return run
 
 
-def _expert_team_response_with_product_state(payload: dict, run: dict | None) -> dict:
-    if not isinstance(run, dict):
-        return payload
-    candidates = [
-        run.get("validation"),
-        run.get("delivery_gate"),
-        (run.get("view") or {}).get("delivery_gate") if isinstance(run.get("view"), dict) else None,
-        (run.get("view") or {}).get("validation") if isinstance(run.get("view"), dict) else None,
-    ]
-    if any(
-        isinstance(item, dict) and str(item.get("status") or "") == "office_acceptance_required"
-        for item in candidates
+def _public_expert_team_response_payload(payload):
+    projected = public_expert_team_response_projection(payload)
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("run"), dict)
+        and isinstance(projected, dict)
     ):
-        from api.product_contract import attach_product_error
+        projected["run"] = public_expert_team_run_projection(payload["run"])
+    return projected
 
-        return attach_product_error(payload, "office_review_required")
-    return payload
+
+def _expert_team_json_response(
+    handler,
+    payload,
+    status: int = 200,
+    extra_headers: dict | None = None,
+):
+    """One serialization gate for every /api/expert-teams/* JSON response."""
+    return j(
+        handler,
+        _public_expert_team_response_payload(payload),
+        status=status,
+        extra_headers=extra_headers,
+    )
+
+
+def _expert_team_response_with_product_state(payload: dict, run: dict | None) -> dict:
+    result = payload
+    if isinstance(run, dict):
+        candidates = [
+            run.get("validation"),
+            run.get("delivery_gate"),
+            (run.get("view") or {}).get("delivery_gate") if isinstance(run.get("view"), dict) else None,
+            (run.get("view") or {}).get("validation") if isinstance(run.get("view"), dict) else None,
+        ]
+        if any(
+            isinstance(item, dict) and str(item.get("status") or "") == "office_acceptance_required"
+            for item in candidates
+        ):
+            from api.product_contract import attach_product_error
+
+            result = attach_product_error(payload, "office_review_required")
+    return result
 
 
 def _cancel_expert_team_runtime_start(adapter, *sources) -> dict:
@@ -4028,7 +5119,7 @@ def _expert_team_conflict_response(handler, exc) -> bool:
     run = getattr(exc, "run", None)
     if isinstance(run, dict) and status != 404:
         payload["run"] = run
-    return j(handler, payload, status=status)
+    return _expert_team_json_response(handler, payload, status=status)
 
 
 def _writeflow_state_path(workspace: Path) -> Path:
@@ -7256,6 +8347,8 @@ from api.brand_privacy import (
     classify_brand_safety_prompt,
     public_approval_projection,
     public_egress_scrub,
+    public_expert_team_response_projection,
+    public_expert_team_run_projection,
     public_profile_projection,
     public_response_projection,
     public_session_search_projection,
@@ -10679,6 +11772,15 @@ def _serve_manifest(handler) -> bool:
 @migration_consistent_http_routes("GET")
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    try:
+        handler._taiji_expert_team_json_request = (
+            parsed.path == "/api/expert-teams"
+            or parsed.path.startswith("/api/expert-teams/")
+        )
+    except (AttributeError, TypeError):
+        # Some isolated route-contract tests use an immutable sentinel handler.
+        # Production BaseHTTPRequestHandler exposes the current path directly.
+        pass
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
@@ -10782,7 +11884,7 @@ def handle_get(handler, parsed) -> bool:
         from api.expert_teams.trusted_identity import get_trusted_identity_resolver
 
         query = parse_qs(parsed.query or "", keep_blank_values=True)
-        return j(
+        return _expert_team_json_response(
             handler,
             get_trusted_identity_resolver().status(
                 _expert_identity_session(handler),
@@ -10802,7 +11904,9 @@ def handle_get(handler, parsed) -> bool:
         except Exception as exc:
             return bad(handler, f"Trusted identity callback failed: {_sanitize_error(exc)}", 401)
         response = json.dumps(
-            {"ok": True, "principal": result["principal"]},
+            _public_expert_team_response_payload(
+                {"ok": True, "principal": result["principal"]}
+            ),
             ensure_ascii=False,
         ).encode("utf-8")
         handler.send_response(200)
@@ -11343,7 +12447,7 @@ def handle_get(handler, parsed) -> bool:
                 raw["model"] = effective_model
             if effective_provider:
                 raw["model_provider"] = effective_provider
-            redact = public_session_projection(redact_session_data(raw))
+            redact = redact_session_data(public_session_projection(raw))
             _t5 = _time.monotonic()
             resp = j(handler, {"session": redact})
             _t6 = _time.monotonic()
@@ -11387,7 +12491,7 @@ def handle_get(handler, parsed) -> bool:
                 }
                 sess = _merge_cli_sidebar_metadata(sess, cli_meta)
                 return j(handler, {
-                    "session": public_session_projection(redact_session_data(sess))
+                    "session": redact_session_data(public_session_projection(sess))
                 })
             return bad(handler, "Session not found", 404)
 
@@ -11985,12 +13089,21 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/expert-teams/catalog":
         from api import expert_teams
 
-        return j(handler, expert_teams.expert_team_catalog())
+        return _expert_team_json_response(
+            handler,
+            expert_teams.expert_team_catalog(),
+        )
 
     if parsed.path == "/api/expert-teams/rollout/status":
         from api import expert_teams
 
-        return j(handler, {"ok": True, "contract_rollout": expert_teams.resolve_contract_rollout()})
+        return _expert_team_json_response(
+            handler,
+            {
+                "ok": True,
+                "contract_rollout": expert_teams.resolve_contract_rollout(),
+            },
+        )
 
     if parsed.path == "/api/expert-teams/run":
         from api import expert_teams
@@ -12052,7 +13165,10 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "expert team run does not belong to this session", 404)
         run = _expert_team_run_with_execution_truth(workspace, run)
         payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
-        return j(handler, _expert_team_response_with_product_state(payload, run))
+        return _expert_team_json_response(
+            handler,
+            _expert_team_response_with_product_state(payload, run),
+        )
 
     if parsed.path == "/api/writeflow/runs":
         qs = parse_qs(parsed.query)
@@ -12734,6 +13850,13 @@ def _persist_new_session_truth(
 @migration_consistent_http_routes("POST")
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    try:
+        handler._taiji_expert_team_json_request = (
+            parsed.path == "/api/expert-teams"
+            or parsed.path.startswith("/api/expert-teams/")
+        )
+    except (AttributeError, TypeError):
+        pass
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
     if parsed.path == "/api/csp-report":
         if diag:
@@ -13541,16 +14664,17 @@ def handle_post(handler, parsed) -> bool:
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
-        worktree_retained = _worktree_retained_payload_for_session_id(sid)
+        # Do not load the sidecar before its leaf and parent are anchored below.
+        # A cold-cache DELETE of a symlinked <sid>.json must not deserialize or
+        # cache the target Session merely to compute this optional response hint.
+        worktree_retained = {}
         registry = _artifact_registry()
         # Best-effort normal cancellation first so the active agent/tool stack
         # receives its standard interrupt signal.  The writer-locked tombstone
         # below is still authoritative and closes a new-stream race between
         # this probe and lock acquisition.
-        try:
-            pre_delete_session = get_session(sid)
-        except Exception:
-            pre_delete_session = None
+        with LOCK:
+            pre_delete_session = SESSIONS.get(sid)
         pre_delete_stream_id = str(
             getattr(pre_delete_session, "active_stream_id", None) or ""
         )
@@ -13577,18 +14701,137 @@ def handle_post(handler, parsed) -> bool:
             legacy_migration_state_guard(),
             truth_rewrite_lock(sid),
         ):
+            # Never deserialize the path before authority validation. A cached
+            # live object is sufficient for in-process stream/tombstone cleanup;
+            # cold sessions can be deleted directly from their anchored bytes.
+            with LOCK:
+                deleted_session = SESSIONS.get(sid) or pre_delete_session
+            authority = None
             try:
-                deleted_session = get_session(sid)
-            except KeyError:
-                deleted_session = pre_delete_session
-            try:
-                registry.retire_session(sid)
+                authority = _SessionDeleteAuthority(SESSION_DIR, sid)
+                authority_snapshot = authority.snapshot()
+                primary_payload = authority_snapshot["primary"]["payload"]
+                if primary_payload is not None:
+                    try:
+                        primary_data = json.loads(primary_payload.decode("utf-8"))
+                    except (UnicodeError, json.JSONDecodeError, AttributeError):
+                        primary_data = None
+                    if isinstance(primary_data, dict) and primary_data.get("worktree_path"):
+                        worktree_retained = {"worktree_retained": True}
+                        if primary_data.get("worktree_branch"):
+                            worktree_retained["worktree_branch"] = str(
+                                primary_data["worktree_branch"]
+                            )
+                elif deleted_session is not None:
+                    worktree_retained = _worktree_retained_payload(deleted_session)
             except Exception:
-                logger.exception("failed to retire artifacts before deleting session %s", sid)
-                return bad(handler, "Failed to retire session artifacts", 500)
+                if authority is not None:
+                    authority.close()
+                logger.exception(
+                    "failed to snapshot Session authority before deleting %s",
+                    sid,
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "code": "session_delete_persistence_failed",
+                        "error": "Conversation files could not be prepared for deletion.",
+                    },
+                    status=500,
+                )
+
+            previous_deleted = bool(
+                getattr(deleted_session, "_deleted", False)
+            ) if deleted_session is not None else False
+            if deleted_session is not None:
+                # This in-process tombstone closes the interval between the
+                # authority unlink and cache eviction. On any failure below it
+                # is reverted only after every removed authority file is
+                # atomically restored and byte-verified.
+                deleted_session._deleted = True
+
+            artifact_retirement_recovery_failed = False
+            try:
+                try:
+                    # Remove recovery sources first and the primary sidecar
+                    # last through directory-fd anchored operations.
+                    authority.unlink_all()
+                    # Artifacts are associated truth: do not retire them until
+                    # Session deletion itself is durably observable.
+                    registry.retire_session(sid)
+                except Exception as delete_error:
+                    from api.artifacts import (
+                        ArtifactRetirementRollbackError,
+                        ArtifactRetirementRestoreDurabilityError,
+                    )
+
+                    if isinstance(delete_error, ArtifactRetirementRollbackError):
+                        # Session authority is already durably absent and the
+                        # original artifact identity is no longer at its live
+                        # binding. It may remain isolated in .trash or be missing;
+                        # restoring the Session would expose inconsistent artifacts.
+                        # Keep the delete authoritative, finish associated cleanup,
+                        # and report the degraded artifact recovery explicitly.
+                        artifact_retirement_recovery_failed = True
+                        logger.critical(
+                            "Session %s was deleted but artifact retirement "
+                            "recovery failed; preserving degraded artifact state",
+                            sid,
+                        )
+                    else:
+                        restore_not_durable = isinstance(
+                            delete_error,
+                            ArtifactRetirementRestoreDurabilityError,
+                        )
+                        try:
+                            authority.restore()
+                            if deleted_session is not None:
+                                deleted_session._deleted = previous_deleted
+                            with LOCK:
+                                if deleted_session is not None:
+                                    SESSIONS[sid] = deleted_session
+                        except Exception:
+                            logger.critical(
+                                "failed to restore partially deleted Session authority for %s",
+                                sid,
+                                exc_info=True,
+                            )
+                            return j(
+                                handler,
+                                {
+                                    "ok": False,
+                                    "code": "session_delete_recovery_failed",
+                                    "error": "Conversation deletion failed and requires recovery.",
+                                },
+                                status=500,
+                            )
+                        logger.warning(
+                            "Session deletion was rolled back for %s: %s",
+                            sid,
+                            _sanitize_error(delete_error),
+                        )
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "code": (
+                                    "session_delete_recovery_failed"
+                                    if restore_not_durable
+                                    else "session_delete_persistence_failed"
+                                ),
+                                "error": (
+                                    "Conversation deletion was rolled back, but artifact recovery durability could not be confirmed."
+                                    if restore_not_durable
+                                    else "Conversation could not be deleted; no related data was removed."
+                                ),
+                            },
+                            status=500,
+                        )
+            finally:
+                authority.close()
 
             if deleted_session is not None:
-                deleted_session._deleted = True
                 current_stream_id = str(
                     getattr(deleted_session, "active_stream_id", None) or ""
                 )
@@ -13622,19 +14865,6 @@ def handle_post(handler, parsed) -> bool:
                     cached_session._deleted = True
 
             try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            try:
-                p.unlink(missing_ok=True)
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-                (SESSION_DIR / ".truth-rewrite-intents" / f"{sid}.json").unlink(
-                    missing_ok=True
-                )
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            try:
                 prune_session_from_index(sid)
             except Exception:
                 logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
@@ -13663,6 +14893,20 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         publish_session_list_changed("session_delete")
+        if artifact_retirement_recovery_failed:
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "code": "session_delete_artifact_recovery_failed",
+                    "error": (
+                        "Conversation was deleted, but artifact recovery requires cleanup."
+                    ),
+                    "deleted": True,
+                    **worktree_retained,
+                },
+                status=500,
+            )
         return j(handler, {"ok": True, **worktree_retained})
 
     if parsed.path == "/api/session/clear":
@@ -14006,7 +15250,7 @@ def handle_post(handler, parsed) -> bool:
                     "delivery_binding_sha256": sha256_file(binding_path),
                     "disallowed_principal_id": str((acceptance.get("reviewer") or {}).get("principal_id") or ""),
                 }
-            return j(
+            return _expert_team_json_response(
                 handler,
                 get_trusted_identity_resolver().start_login(
                     str(body.get("redirect_uri") or ""),
@@ -14045,7 +15289,7 @@ def handle_post(handler, parsed) -> bool:
         try:
             validated_body = expert_teams.validate_standalone_start_request(body)
             result = _coordinate_expert_team_start(validated_body)
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {
                     "ok": True,
@@ -14053,21 +15297,19 @@ def handle_post(handler, parsed) -> bool:
                     "run": result["run"],
                     "session": result["session"],
                     "teams": expert_teams.expert_team_catalog()["teams"],
-                    "session_messages": _public_expert_team_start_messages(
-                        result["session_messages"]
-                    ),
+                    "session_messages": result["session_messages"],
                 },
             )
         except expert_teams.ContractError as exc:
-            return j(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
+            return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
         except _ExpertTeamStartSessionNotFound:
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "session_not_found", "error": "expert team session not found"},
                 status=404,
             )
         except _ExpertTeamStartSessionNotPersisted:
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {
                     "ok": False,
@@ -14077,26 +15319,26 @@ def handle_post(handler, parsed) -> bool:
                 status=409,
             )
         except _ExpertTeamStartSessionBusy:
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "session_busy", "error": "session is currently active"},
                 status=409,
             )
         except _ExpertTeamStartSessionStateConflict as exc:
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "session_state_conflict", "error": str(exc)},
                 status=409,
             )
         except _ExpertTeamStartIdempotencyConflict as exc:
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "start_idempotency_conflict", "error": str(exc)},
                 status=409,
             )
         except _ExpertTeamStartPersistenceError as exc:
             if isinstance(exc.__cause__, SessionWriteConflict):
-                return j(
+                return _expert_team_json_response(
                     handler,
                     {
                         "ok": False,
@@ -14105,26 +15347,26 @@ def handle_post(handler, parsed) -> bool:
                     },
                     status=409,
                 )
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "start_persistence_failed", "error": _sanitize_error(exc)},
                 status=500,
             )
         except _ExpertTeamStartFinalizeError as exc:
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "start_finalize_failed", "error": _sanitize_error(exc)},
                 status=503,
             )
         except _ExpertTeamStartIntegrityError as exc:
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "start_receipt_invalid", "error": _sanitize_error(exc)},
                 status=503,
             )
         except Exception as exc:
             logger.exception("Failed to commit standalone expert team start")
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {"ok": False, "code": "start_unavailable", "error": _sanitize_error(exc)},
                 status=503,
@@ -14156,14 +15398,14 @@ def handle_post(handler, parsed) -> bool:
                 )
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-                return j(handler, payload, status=status)
-            return j(handler, payload)
+                return _expert_team_json_response(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except expert_teams.ContractError as exc:
-            return j(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
+            return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
         except Exception as exc:
             return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
 
@@ -14185,7 +15427,7 @@ def handle_post(handler, parsed) -> bool:
                 "/api/expert-teams/brief/sources/remove": expert_teams.remove_expert_team_brief_source,
             }[parsed.path]
             run = operation(workspace, body)
-            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+            return _expert_team_json_response(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except expert_teams.ExpertTeamStateConflict as exc:
@@ -14201,7 +15443,7 @@ def handle_post(handler, parsed) -> bool:
                     payload["version"] = int(authoritative.get("version") or 0)
                 except Exception:
                     pass
-            return j(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload, status=status)
         except Exception as exc:
             return bad(handler, f"Failed to update document brief: {_sanitize_error(exc)}", 400)
 
@@ -14231,8 +15473,8 @@ def handle_post(handler, parsed) -> bool:
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-                return j(handler, payload, status=status)
-            return j(handler, payload)
+                return _expert_team_json_response(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except expert_teams.ExpertTeamStateConflict as exc:
@@ -14255,7 +15497,7 @@ def handle_post(handler, parsed) -> bool:
             )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-            return j(handler, stream_payload, status=status)
+            return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except expert_teams.ExpertTeamStateConflict as exc:
@@ -14287,8 +15529,8 @@ def handle_post(handler, parsed) -> bool:
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-                return j(handler, payload, status=status)
-            return j(handler, payload)
+                return _expert_team_json_response(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except expert_teams.ExpertTeamStateConflict as exc:
@@ -14312,7 +15554,7 @@ def handle_post(handler, parsed) -> bool:
             )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-            return j(handler, stream_payload, status=status)
+            return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
             return bad(handler, "expert team run not found", 404)
         except expert_teams.ExpertTeamStateConflict as exc:
@@ -14373,7 +15615,7 @@ def handle_post(handler, parsed) -> bool:
                                 "execution_start_id": start_id,
                             },
                         )
-                        return j(
+                        return _expert_team_json_response(
                             handler,
                             {
                                 "ok": True,
@@ -14402,7 +15644,7 @@ def handle_post(handler, parsed) -> bool:
                 cancel_callback=_cancel_runtime,
             )
             pending_cancel = str(run.get("workflow_state") or "") == "cancelling"
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {
                     "ok": True,
@@ -15742,7 +16984,7 @@ def _handle_session_bundle_import(handler):
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
     publish_session_list_changed("session_bundle_import")
-    public_session = public_session_projection(redact_session_data(
+    public_session = redact_session_data(public_session_projection(
         session.compact() | {
             "messages": session.messages,
             "tool_calls": session.tool_calls,
@@ -21318,14 +22560,18 @@ def _handle_expert_team_waiver_create(handler, body):
             release_authorizer_handoff=lambda claim_id: identity_resolver.release_authorizer_handoff(
                 identity_session_id, claim_id),
         )
-        return j(handler, {"ok": True, "waiver": waiver, "run": run}, status=201)
+        return _expert_team_json_response(
+            handler,
+            {"ok": True, "waiver": waiver, "run": run},
+            status=201,
+        )
     except TrustedIdentityError as exc:
-        return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=403)
+        return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=403)
     except WaiverError as exc:
         status = 409 if exc.code in {
             "version_conflict", "waiver_binding_changed", "waiver_idempotency_conflict"
         } else 400
-        return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=status)
+        return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=status)
     except (FileNotFoundError, OSError, ValueError) as exc:
         return bad(handler, _sanitize_error(exc), 400)
 
@@ -21343,10 +22589,14 @@ def _handle_expert_team_office_revision_create(handler, body):
             body,
             now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         )
-        return j(handler, {"ok": True, "revision_request": request, "run": run}, status=201)
+        return _expert_team_json_response(
+            handler,
+            {"ok": True, "revision_request": request, "run": run},
+            status=201,
+        )
     except DeliveryIntegrityError as exc:
         status = 409 if "version conflict" in str(exc) else 400
-        return j(handler, {"ok": False, "code": "office_revision_invalid", "error": str(exc)}, status=status)
+        return _expert_team_json_response(handler, {"ok": False, "code": "office_revision_invalid", "error": str(exc)}, status=status)
     except (FileNotFoundError, OSError, ValueError) as exc:
         return bad(handler, _sanitize_error(exc), 400)
 
@@ -22258,7 +23508,7 @@ def _handle_session_compress(handler, body):
                 privacy_reason=None,
             )
 
-        session_payload = public_session_projection(redact_session_data(
+        session_payload = redact_session_data(public_session_projection(
             s.compact() | {
                 "messages": s.messages,
                 "tool_calls": s.tool_calls,
@@ -23541,9 +24791,9 @@ def _handle_session_import(handler, body):
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
     publish_session_list_changed("session_import")
-    public_session = public_session_projection(
-        redact_session_data(s.compact() | {"messages": s.messages, "tool_calls": s.tool_calls})
-    )
+    public_session = redact_session_data(public_session_projection(
+        s.compact() | {"messages": s.messages, "tool_calls": s.tool_calls}
+    ))
     return j(handler, public_response_projection(
         {"ok": True, "session": public_session}, surface="session_json_import"
     ))
