@@ -164,10 +164,13 @@ def write_semantic_gates_snapshot(
 ) -> dict:
     """Evaluate enterprise semantics once and persist an immutable upstream report."""
 
-    from .stage_artifacts import unresolved_quality_issues
+    from .contracts import required_sections_for_brief
+    from .stage_artifacts import document_section_headings, unresolved_quality_issues
 
     markdown = _normalized_markdown(artifact.get("deliverable_markdown"))
     headings = re.findall(r"(?m)^#\s+(.+?)\s*$", markdown)
+    required_sections = required_sections_for_brief(brief)
+    document_sections = document_section_headings(markdown)
     issues = []
     if headings != [str(brief.get("exact_title") or "")]:
         issues.append(_semantic_issue("title_mismatch", "document:h1", "正文唯一 H1 与确认标题不一致"))
@@ -186,6 +189,16 @@ def write_semantic_gates_snapshot(
     )
     if placeholder_pattern.search(markdown):
         issues.append(_semantic_issue("placeholder_detected", "document:body", "正文包含未处置占位符"))
+    document_section_set = set(document_sections)
+    for section in required_sections:
+        if section not in document_section_set:
+            issues.append(
+                _semantic_issue(
+                    "required_section_missing",
+                    f"section:{section}",
+                    f"正文缺少必备章节：{section}",
+                )
+            )
     review_report = payload.get("review_report") if isinstance(payload.get("review_report"), dict) else {}
     unsupported_claim_ids = [
         str(item).strip()
@@ -219,6 +232,8 @@ def write_semantic_gates_snapshot(
         "artifact_sha256": str(artifact.get("sha256") or ""),
         "brief_revision": int(brief.get("confirmed_revision") or 0),
         "brief_sha256": str(brief.get("confirmed_sha256") or ""),
+        "required_sections": required_sections,
+        "document_sections": document_sections,
         "issues": issues,
     }
     path = Path(delivery_dir).expanduser().resolve() / "reviews" / "semantic-gates.json"

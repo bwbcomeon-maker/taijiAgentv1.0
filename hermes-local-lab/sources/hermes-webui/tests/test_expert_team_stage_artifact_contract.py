@@ -61,7 +61,7 @@ def _brief():
             "document_date": "2026-07-15",
         },
         "content_constraints": {
-            "required_sections": ["工作开展情况", "存在问题", "下一步工安排"],
+            "required_sections": ["工作开展情况", "存在问题", "下一步工作安排"],
             "must_include": [],
             "must_avoid": [],
         },
@@ -77,6 +77,11 @@ def _research_brief():
             "purpose": "支撑企业内部技术路线决策",
             "source_policy": {"mode": "provided_only", "as_of_date": "2026-07-15", "citation_style": "source_id"},
             "details": {"core_question": "如何落地", "time_range": {"start": "2025-01-01", "end": "2026-07-15"}},
+            "content_constraints": {
+                "required_sections": ["研究问题", "证据", "分析", "结论边界", "引用"],
+                "must_include": [],
+                "must_avoid": [],
+            },
         }
     )
     return brief
@@ -101,7 +106,7 @@ def _writing_plan_payload():
             },
             {
                 "section_id": "SEC-3",
-                "heading": "下一步工安排",
+                "heading": "下一步工作安排",
                 "purpose": "明确后续安排",
                 "required_fact_ids": [],
             },
@@ -319,7 +324,13 @@ def test_research_charter_and_outline_use_exact_nested_schemas():
     assert artifact["validation_status"] == "valid"
 
     outline = {
-        "sections": [{"section_id": "SEC-1", "heading": "研究结论", "thesis": "先建受控数据边界", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []}],
+        "sections": [
+            {"section_id": "SEC-1", "heading": "研究问题", "thesis": "明确研究问题", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-2", "heading": "证据", "thesis": "列明证据基础", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-3", "heading": "分析", "thesis": "分析落地边界", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-4", "heading": "结论边界", "thesis": "限定结论适用范围", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-5", "heading": "引用", "thesis": "保留来源引用", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+        ],
         "conclusion_boundaries": ["仅基于已提供资料"],
     }
     parsed = parse_stage_response(_raw("research_outline", outline), artifact_type="research_outline", requires_document=False)
@@ -357,7 +368,11 @@ def test_review_report_requires_exact_check_keys_and_open_issue_ids():
     payload = {
         "title": _brief()["exact_title"],
         "document_type": "work_report",
-        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
         "fact_usage": [],
         "asset_requests": [],
         "review_report": {
@@ -369,7 +384,15 @@ def test_review_report_requires_exact_check_keys_and_open_issue_ids():
         },
         "open_issues": [],
     }
-    parsed = parse_stage_response(_raw("reviewed_document", payload, document=f"# {_brief()['exact_title']}\n\n正文"), artifact_type="reviewed_document", requires_document=True)
+    parsed = parse_stage_response(
+        _raw(
+            "reviewed_document",
+            payload,
+            document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文\n\n## 存在问题\n\n当前资料未记录具体问题。\n\n## 下一步工作安排\n\n持续推进。",
+        ),
+        artifact_type="reviewed_document",
+        requires_document=True,
+    )
     with pytest.raises(StageArtifactError) as error:
         build_stage_artifact(parsed, stage_id="polish", stage_attempt=1, brief=_brief(), input_refs=[], now="2026-07-15T10:00:00+08:00")
     assert error.value.code == "review_checks_mismatch"
@@ -717,7 +740,11 @@ def test_approved_reviewed_document_alone_sets_canonical_pointer_and_waits_for_d
     payload = {
         "title": _brief()["exact_title"],
         "document_type": "work_report",
-        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
         "fact_usage": [],
         "asset_requests": [],
         "review_report": {
@@ -732,7 +759,7 @@ def test_approved_reviewed_document_alone_sets_canonical_pointer_and_waits_for_d
     raw = _raw(
         "reviewed_document",
         payload,
-        document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n重点任务按计划推进。",
+        document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n重点任务按计划推进。\n\n## 存在问题\n\n当前资料未记录具体问题。\n\n## 下一步工作安排\n\n持续推进重点任务。",
     )
     reviewed = expert_teams.mark_expert_team_execution_complete(
         tmp_path,
@@ -810,7 +837,11 @@ def test_system_delivery_dispatch_never_uses_gateway_and_production_adapter_is_c
     )
     payload = {
         "title": _brief()["exact_title"], "document_type": "work_report",
-        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
         "fact_usage": [], "asset_requests": [],
         "review_report": {
             "schema_version": "content-review-report/v1",
@@ -821,7 +852,7 @@ def test_system_delivery_dispatch_never_uses_gateway_and_production_adapter_is_c
     }
     reviewed = expert_teams.mark_expert_team_execution_complete(
         tmp_path, run["run_id"],
-        {"stream_id": generating["execution_stream_id"], "stage_id": "polish", "attempt": generating["execution_attempt"], "id": "review-system", "kind": "chat", "content": _raw("reviewed_document", payload, document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文。")},
+        {"stream_id": generating["execution_stream_id"], "stage_id": "polish", "attempt": generating["execution_attempt"], "id": "review-system", "kind": "chat", "content": _raw("reviewed_document", payload, document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文。\n\n## 存在问题\n\n当前资料未记录具体问题。\n\n## 下一步工作安排\n\n持续推进。")},
     )
     resolver = trusted_identity.TrustedIdentityResolver({"enabled": False}, production=False)
     resolver._config = {"enabled": True}
@@ -926,7 +957,13 @@ def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_cha
         "summary": "研究报告已复核",
         "payload": {
             "title": brief["exact_title"],
-            "section_map": [{"section_id": "SEC-1", "heading": "研究结论"}],
+            "section_map": [
+                {"section_id": "SEC-1", "heading": "研究问题"},
+                {"section_id": "SEC-2", "heading": "证据"},
+                {"section_id": "SEC-3", "heading": "分析"},
+                {"section_id": "SEC-4", "heading": "结论边界"},
+                {"section_id": "SEC-5", "heading": "引用"},
+            ],
             "claim_usage": [],
             "review_report": {
                 "schema_version": "research-review-report/v1",
@@ -939,7 +976,7 @@ def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_cha
             },
             "open_issues": [],
         },
-        "deliverable_markdown": f"# {brief['exact_title']}\n\n## 研究结论\n\n本报告形成受控研究结论。",
+        "deliverable_markdown": f"# {brief['exact_title']}\n\n## 研究问题\n\n研究企业 AI 办公落地。\n\n## 证据\n\n基于已提供资料。\n\n## 分析\n\n分析受控数据边界。\n\n## 结论边界\n\n结论仅适用于已核对资料。\n\n## 引用\n\n[SRC-001]。",
         "blocking_issues": [],
         "created_at": "2026-07-15T10:00:00+08:00",
         "validation_status": "valid",

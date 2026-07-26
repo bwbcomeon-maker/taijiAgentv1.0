@@ -78,6 +78,29 @@ def _list(value) -> list:
     return deepcopy(value) if isinstance(value, list) else []
 
 
+def _text_list(value) -> list[str]:
+    normalized = []
+    seen = set()
+    for item in _list(value):
+        if not isinstance(item, str):
+            continue
+        text = _text(item)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def required_sections_for_brief(brief) -> list[str]:
+    constraints = brief.get("content_constraints") if isinstance(brief, dict) else {}
+    return _text_list(
+        constraints.get("required_sections")
+        if isinstance(constraints, dict)
+        else []
+    )
+
+
 def _deep_merge(base, override) -> dict:
     merged = _mapping(base)
     for key, value in _mapping(override).items():
@@ -222,6 +245,10 @@ def normalize_document_brief(brief) -> dict:
         }
         result["data_handling"] = {}
         result["approval"] = {}
+    constraints = _mapping(result.get("content_constraints"))
+    for key in ("required_sections", "must_include", "must_avoid"):
+        constraints[key] = _text_list(constraints.get(key))
+    result["content_constraints"] = constraints
     return result
 
 

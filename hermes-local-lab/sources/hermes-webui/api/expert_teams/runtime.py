@@ -1677,6 +1677,9 @@ def _standalone_start_context(
         "document_brief_seed": {
             "task_mode": profile["task_mode"],
             "document_control": {"render_template_id": profile["render_template_id"]},
+            "content_constraints": deepcopy(
+                profile.get("content_constraints") or {}
+            ),
         },
     }
     return profile, resolved

@@ -6,7 +6,12 @@ import hashlib
 import json
 from copy import deepcopy
 
-from .contracts import EXPERT_TEAM_CONTRACT_V1, brief_summary, classify_contract_version
+from .contracts import (
+    EXPERT_TEAM_CONTRACT_V1,
+    brief_summary,
+    classify_contract_version,
+    required_sections_for_brief,
+)
 from .document_capabilities import brief_schema, source_requirement
 
 from .materials import business_context_for_run, content_summary
@@ -1396,6 +1401,7 @@ def expert_team_run_view(run: dict) -> dict:
         brief["document_control"] = deepcopy(
             full_brief.get("document_control") if isinstance(full_brief.get("document_control"), dict) else {}
         )
+        brief["required_sections"] = required_sections_for_brief(full_brief)
         source_policy = full_brief.get("source_policy") if isinstance(full_brief.get("source_policy"), dict) else {}
         brief["source_policy_summary"] = {
             "mode": str(source_policy.get("mode") or ""),

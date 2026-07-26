@@ -701,6 +701,12 @@
     return `<label class="et3-form-field et3-brief-field" for="${esc(id)}"><span>${esc(field.label || path)}${field.required ? '<b aria-hidden="true"> *</b>' : ''}</span>${control}${field.help ? `<small id="${esc(helpId)}" class="et3-help">${esc(field.help)}</small>` : ''}<small id="${esc(errorId)}" class="et3-field-error" data-et3-field-error-for="${esc(path)}"${errorMessage ? '' : ' hidden'}>${esc(errorMessage)}</small></label>`;
   }
 
+  function requiredSectionsHtml(brief) {
+    const sections = list(brief?.requiredSections).map(section => String(section || '').trim()).filter(Boolean);
+    if (!sections.length) return '';
+    return `<section class="et3-required-sections" aria-labelledby="expertTeamV3RequiredSectionsTitle"><h4 id="expertTeamV3RequiredSectionsTitle">必备章节</h4><p>以下结构由任务类型确定；阶段成果和 DOCX 自动检查都必须完整保留。</p><ol>${sections.map(section => `<li>${esc(section)}</li>`).join('')}</ol></section>`;
+  }
+
   function briefPanel(card) {
     const brief = card.brief || {};
     const sources = list(brief.sources);
@@ -713,6 +719,7 @@
     const disabled = canAnswer ? '' : 'disabled aria-disabled="true" aria-describedby="expertTeamV3IntakeActionHelp"';
     return `<section class="et3-panel"><h3>任务规格</h3>
       <dl class="et3-kv"><dt>原始诉求</dt><dd>${esc(brief.originalRequest || brief.originalRequestSummary || '')}</dd><dt>文档类型</dt><dd>${esc(brief.documentTypeLabel || brief.documentType || '')}</dd></dl>
+      ${requiredSectionsHtml(brief)}
       <form data-et3-brief-form>
         ${questions.map(question => `<div class="et3-question"><label for="et3-question-${esc(question.id)}">${esc(question.title)}</label><textarea id="et3-question-${esc(question.id)}" name="question__${esc(question.id)}" ${question.required ? 'required' : ''} placeholder="${esc(question.placeholder || '')}">${esc(question.answer || '')}</textarea></div>`).join('')}
         ${fields.map(field => briefFieldHtml(field, brief)).join('')}
@@ -732,7 +739,7 @@
   function readyPanel(card) {
     const brief = card.brief || {};
     const canStart = actionAllowed(card, 'start_generation');
-    return `<section class="et3-panel"><h3>生成前确认</h3><dl class="et3-kv"><dt>标题</dt><dd>${esc(brief.exactTitle || card.subtitle)}</dd><dt>对象</dt><dd>${esc(brief.audience || '以已确认规格为准')}</dd><dt>资料</dt><dd>${list(brief.sources).length} 份已绑定</dd></dl><p>开始后规格将冻结。每个阶段完成后都需要人工确认，不会自动越过复核。</p></section>${canStart ? '<div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="start-generation">开始生成</button></div>' : '<p class="et3-help">当前状态尚不允许开始生成，请刷新后重试。</p>'}`;
+    return `<section class="et3-panel"><h3>生成前确认</h3><dl class="et3-kv"><dt>标题</dt><dd>${esc(brief.exactTitle || card.subtitle)}</dd><dt>对象</dt><dd>${esc(brief.audience || '以已确认规格为准')}</dd><dt>资料</dt><dd>${list(brief.sources).length} 份已绑定</dd></dl>${requiredSectionsHtml(brief)}<p>开始后规格将冻结。每个阶段完成后都需要人工确认，不会自动越过复核。</p></section>${canStart ? '<div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="start-generation">开始生成</button></div>' : '<p class="et3-help">当前状态尚不允许开始生成，请刷新后重试。</p>'}`;
   }
 
   function generatingPanel(card, current) {

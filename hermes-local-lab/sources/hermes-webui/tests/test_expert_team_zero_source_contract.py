@@ -125,7 +125,26 @@ def test_zero_source_work_report_confirms_and_materials_dispatch_binds_empty_sna
             "payload": {
                 "objective": "形成可供用户补充事实的月度汇报",
                 "document_type": "work_report",
-                "section_plan": [],
+                "section_plan": [
+                    {
+                        "section_id": "SEC-1",
+                        "heading": "工作开展情况",
+                        "purpose": "按结构标记待补充的工作事实",
+                        "required_fact_ids": [],
+                    },
+                    {
+                        "section_id": "SEC-2",
+                        "heading": "存在问题",
+                        "purpose": "按结构标记待补充的问题事实",
+                        "required_fact_ids": [],
+                    },
+                    {
+                        "section_id": "SEC-3",
+                        "heading": "下一步工作安排",
+                        "purpose": "按结构标记待补充的后续安排",
+                        "required_fact_ids": [],
+                    },
+                ],
                 "fact_requirements": [],
                 "assumptions": ["当前没有来源资料，事实和数据均标记为待补充"],
                 "acceptance_checks": ["不得编造事实或数据"],

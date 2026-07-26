@@ -86,7 +86,11 @@ _CAPABILITIES = {
             "data_handling": {},
             "document_control": {},
             "content_constraints": {
-                "required_sections": [],
+                "required_sections": [
+                    "工作开展情况",
+                    "存在问题",
+                    "下一步工作安排",
+                ],
                 "must_include": [],
                 "must_avoid": [],
             },
@@ -158,7 +162,13 @@ _CAPABILITIES = {
             "data_handling": {},
             "document_control": {},
             "content_constraints": {
-                "required_sections": [],
+                "required_sections": [
+                    "研究问题",
+                    "证据",
+                    "分析",
+                    "结论边界",
+                    "引用",
+                ],
                 "must_include": [],
                 "must_avoid": [],
             },
@@ -228,10 +238,21 @@ def _has_valid_capability_shape(capability: dict, *, product_mode: str) -> bool:
         or minimum_ready < 0
     ):
         return False
-    if product_mode == "standalone" and not isinstance(
-        capability.get("standalone_defaults"), dict
-    ):
-        return False
+    if product_mode == "standalone":
+        defaults = capability.get("standalone_defaults")
+        if not isinstance(defaults, dict):
+            return False
+        constraints = defaults.get("content_constraints")
+        if not isinstance(constraints, dict):
+            return False
+        for key in ("required_sections", "must_include", "must_avoid"):
+            values = constraints.get(key)
+            if (
+                not isinstance(values, list)
+                or any(not isinstance(value, str) or not value.strip() for value in values)
+                or len(values) != len(set(values))
+            ):
+                return False
     return True
 
 

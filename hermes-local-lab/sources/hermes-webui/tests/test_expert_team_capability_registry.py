@@ -146,6 +146,9 @@ def test_listed_launch_profiles_are_capability_derived_and_mismatches_are_reject
         assert profile["render_template_id"] == capability["render_template_id"]
         assert profile["brief_schema"] == capability["brief_schema"]
         assert profile["source_requirement"] == capability["source_requirement"]
+        assert profile["content_constraints"] == capability["standalone_defaults"][
+            "content_constraints"
+        ]
 
     mismatched = deepcopy(profiles[0])
     mismatched["render_template_id"] = "standalone-research-report"

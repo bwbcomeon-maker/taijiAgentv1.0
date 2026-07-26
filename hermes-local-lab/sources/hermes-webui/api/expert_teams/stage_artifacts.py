@@ -7,6 +7,8 @@ import json
 import re
 from copy import deepcopy
 
+from .contracts import required_sections_for_brief
+
 
 STAGE_ARTIFACT_V1 = "expert-stage-artifact/v1"
 META_START = "<<<TAIJI_META_V1>>>"
@@ -28,6 +30,10 @@ _PURITY_PATTERNS = (
     (re.compile(r"复核交付", re.I), "internal_delivery_label"),
     (re.compile(r"本阶段", re.I), "internal_stage_narration"),
     (re.compile(r"可直接生成\s*DOCX", re.I), "internal_tool_instruction"),
+)
+_FENCE_PATTERN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
+_SECTION_HEADING_PATTERN = re.compile(
+    r"^ {0,3}#{2,6}[ \t]+(?P<heading>.*?)[ \t]*$"
 )
 
 
@@ -153,6 +159,45 @@ def _unique_rows(rows, field, path):
     return rows
 
 
+def _require_section_headings(headings, brief, path):
+    available = {
+        heading.strip()
+        for heading in headings
+        if isinstance(heading, str) and heading.strip()
+    }
+    if any(
+        section not in available
+        for section in required_sections_for_brief(brief)
+    ):
+        raise StageArtifactError("required_section_missing", path)
+
+
+def document_section_headings(markdown):
+    headings = []
+    fence_character = ""
+    fence_length = 0
+    for line in (markdown or "").splitlines():
+        fence = _FENCE_PATTERN.match(line)
+        if fence:
+            marker = fence.group("fence")
+            if not fence_character:
+                fence_character = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_character and len(marker) >= fence_length:
+                fence_character = ""
+                fence_length = 0
+            continue
+        if fence_character:
+            continue
+        match = _SECTION_HEADING_PATTERN.match(line)
+        if not match:
+            continue
+        heading = re.sub(r"[ \t]+#+[ \t]*$", "", match.group("heading")).strip()
+        if heading:
+            headings.append(heading)
+    return headings
+
+
 def _validate_writing_plan(payload, brief):
     _exact(payload, ("objective", "document_type", "section_plan", "fact_requirements", "assumptions", "acceptance_checks"), path="payload")
     _string(payload["objective"], "payload.objective")
@@ -170,9 +215,7 @@ def _validate_writing_plan(payload, brief):
         if not set(row["required_fact_ids"]) <= fact_ids:
             raise StageArtifactError("unknown_fact_id", f"payload.section_plan.{index}.required_fact_ids")
         headings.add(row["heading"])
-    required = set((brief.get("content_constraints") or {}).get("required_sections") or [])
-    if not required <= headings:
-        raise StageArtifactError("required_section_missing", "payload.section_plan")
+    _require_section_headings(headings, brief, "payload.section_plan")
     for index, row in enumerate(facts):
         _exact(row, ("fact_id", "description", "required", "source_requirement"), path=f"payload.fact_requirements.{index}")
         _string(row["description"], f"payload.fact_requirements.{index}.description")
@@ -188,6 +231,7 @@ def _validate_section_map(value, path):
     for index, row in enumerate(rows):
         _exact(row, ("section_id", "heading"), path=f"{path}.{index}")
         _string(row["heading"], f"{path}.{index}.heading")
+    return rows
 
 
 def _validate_usage(value, id_field, path):
@@ -234,7 +278,12 @@ def _validate_document_payload(payload, brief, *, reviewed=False, research=False
         raise StageArtifactError("title_mismatch", "payload.title")
     if not research and payload["document_type"] != brief.get("document_type"):
         raise StageArtifactError("document_type_mismatch", "payload.document_type")
-    _validate_section_map(payload["section_map"], "payload.section_map")
+    sections = _validate_section_map(payload["section_map"], "payload.section_map")
+    _require_section_headings(
+        (row["heading"] for row in sections),
+        brief,
+        "payload.section_map",
+    )
     _validate_usage(payload["claim_usage" if research else "fact_usage"], "claim_id" if research else "fact_id", "payload.claim_usage" if research else "payload.fact_usage")
     if not research:
         _validate_asset_requests(payload["asset_requests"], "payload.asset_requests")
@@ -496,7 +545,7 @@ def _validate_evidence_matrix(payload, snapshot):
     _snapshot_index(snapshot)
 
 
-def _validate_research_outline(payload):
+def _validate_research_outline(payload, brief):
     _exact(payload, ("sections", "conclusion_boundaries"), path="payload")
     rows = _unique_rows(payload["sections"], "section_id", "payload.sections")
     for index, row in enumerate(rows):
@@ -506,6 +555,11 @@ def _validate_research_outline(payload):
         _string(row["thesis"], f"{item_path}.thesis")
         for field in ("claim_ids", "source_ids", "open_questions"):
             _string_list(row[field], f"{item_path}.{field}", unique=True)
+    _require_section_headings(
+        (row["heading"] for row in rows),
+        brief,
+        "payload.sections",
+    )
     _string_list(payload["conclusion_boundaries"], "payload.conclusion_boundaries")
 
 
@@ -568,7 +622,7 @@ def _validate_payload(artifact_type, payload, brief, source_snapshot):
     elif artifact_type == "evidence_matrix":
         _validate_evidence_matrix(payload, source_snapshot)
     elif artifact_type == "research_outline":
-        _validate_research_outline(payload)
+        _validate_research_outline(payload, brief)
     elif artifact_type == "document_draft":
         _validate_document_payload(payload, brief)
     elif artifact_type == "reviewed_document":
@@ -666,6 +720,11 @@ def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, 
         headings = re.findall(r"(?m)^#\s+(.+?)\s*$", markdown or "")
         if len(headings) != 1 or headings[0] != brief.get("exact_title"):
             raise StageArtifactError("title_mismatch", "deliverable_markdown")
+        _require_section_headings(
+            document_section_headings(markdown),
+            brief,
+            "deliverable_markdown",
+        )
         purity = document_purity_issues(markdown)
         if purity:
             raise StageArtifactError("document_purity_failed", "deliverable_markdown", purity[0]["message"])

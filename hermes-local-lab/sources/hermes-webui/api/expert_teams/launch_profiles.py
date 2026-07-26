@@ -77,6 +77,12 @@ def _capability_fields(profile: dict, *, product_mode: str) -> dict:
             "launch_profile_id",
             "专家团启动配置未绑定已放行的文档能力",
         )
+    standalone_defaults = capability.get("standalone_defaults")
+    constraints = (
+        standalone_defaults.get("content_constraints")
+        if isinstance(standalone_defaults, dict)
+        else {}
+    )
     return {
         "capability_id": capability["capability_id"],
         "document_type": capability["document_type"],
@@ -84,6 +90,7 @@ def _capability_fields(profile: dict, *, product_mode: str) -> dict:
         "render_template_id": capability["render_template_id"],
         "brief_schema": deepcopy(capability.get("brief_schema") or ()),
         "source_requirement": deepcopy(capability.get("source_requirement") or {}),
+        "content_constraints": deepcopy(constraints or {}),
     }
 
 
@@ -131,7 +138,11 @@ def validate_launch_profiles(
         expected = _capability_fields(profile, product_mode=product_mode)
         for field, value in expected.items():
             current = profile.get(field)
-            if field in {"brief_schema", "source_requirement"} and current is None:
+            if field in {
+                "brief_schema",
+                "source_requirement",
+                "content_constraints",
+            } and current is None:
                 profile[field] = deepcopy(value)
             elif current != value:
                 raise ContractError(

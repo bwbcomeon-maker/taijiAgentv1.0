@@ -91,6 +91,19 @@ def test_launch_profiles_publish_chinese_profile_driven_brief_schemas():
             assert "classification" not in field["path"]
             assert "approval" not in field["path"]
 
+    assert work["content_constraints"]["required_sections"] == [
+        "工作开展情况",
+        "存在问题",
+        "下一步工作安排",
+    ]
+    assert research["content_constraints"]["required_sections"] == [
+        "研究问题",
+        "证据",
+        "分析",
+        "结论边界",
+        "引用",
+    ]
+
 
 def test_standalone_work_report_defaults_allow_labeled_placeholders_without_enterprise_fields():
     from api.expert_teams.contracts import build_document_brief, validate_document_brief
@@ -113,6 +126,11 @@ def test_standalone_work_report_defaults_allow_labeled_placeholders_without_ente
         "render_template_id": "standalone-work-report"
     }
     assert brief["approval"] == {}
+    assert brief["content_constraints"]["required_sections"] == [
+        "工作开展情况",
+        "存在问题",
+        "下一步工作安排",
+    ]
 
     validation = validate_document_brief(
         _complete_work_report(brief),
@@ -403,4 +421,45 @@ def test_standalone_view_projects_field_values_errors_and_source_requirement():
         "minimum_ready": 1,
         "empty_help": "研究报告必须至少添加一份可核对资料，并在正文中保留引用。",
     }
+    assert view_brief["required_sections"] == [
+        "研究问题",
+        "证据",
+        "分析",
+        "结论边界",
+        "引用",
+    ]
     assert view_brief["field_errors"] == []
+
+
+def test_standalone_brief_uses_frozen_profile_sections_when_registry_drifts(monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import document_capabilities
+    from api.expert_teams.launch_profiles import get_launch_profile
+
+    profile = get_launch_profile("content-work-report")
+    expected = profile["content_constraints"]["required_sections"]
+    drifted = deepcopy(document_capabilities._CAPABILITIES["content-work-report"])
+    drifted["standalone_defaults"][
+        "content_constraints"
+    ]["required_sections"] = ["注册表漂移章节"]
+    monkeypatch.setitem(
+        document_capabilities._CAPABILITIES,
+        "content-work-report",
+        drifted,
+    )
+
+    run = expert_teams.build_standalone_expert_team_run(
+        {
+            "session_id": "frozen-required-sections",
+            "launch_profile_id": "content-work-report",
+            "prompt": "形成工作汇报",
+            "idempotency_key": "frozen-required-sections-1",
+        },
+        run_id="et-frozen-required-sections",
+        launch_profile_snapshot=profile,
+    )
+
+    assert run["launch_profile_snapshot"]["content_constraints"] == profile[
+        "content_constraints"
+    ]
+    assert run["document_brief"]["content_constraints"]["required_sections"] == expected

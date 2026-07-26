@@ -124,6 +124,10 @@ body.expert-team-v3-collapsed #mainChat > .messages-shell { padding-right: 64px;
 .et3-kv { display: grid; grid-template-columns: 105px minmax(0,1fr); gap: 9px 12px; }
 .et3-kv dt { color: var(--et3-muted); }
 .et3-kv dd { margin: 0; font-weight: 650; overflow-wrap: anywhere; }
+.et3-required-sections { margin-top: 14px; padding: 12px 14px; border: 1px solid #d9eaf2; border-radius: 11px; background: #f7fbfd; }
+.et3-required-sections h4 { margin: 0 0 6px; font-size: 13px; }
+.et3-required-sections p { margin: 0 0 8px; font-size: 12px; }
+.et3-required-sections ol { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--et3-ink); font-size: 13px; line-height: 1.5; }
 .et3-question { display: grid; gap: 7px; margin: 13px 0; }
 .et3-question label { font-weight: 720; }
 .et3-question input, .et3-question textarea, .et3-question select { width: 100%; border: 1px solid var(--et3-line); border-radius: 10px; padding: 10px 11px; background: #fff; }

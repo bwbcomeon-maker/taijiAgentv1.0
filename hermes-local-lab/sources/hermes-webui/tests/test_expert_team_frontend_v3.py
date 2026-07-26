@@ -189,6 +189,7 @@ def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
               run_id:'run-brief',session_id:'session-brief',schema_version:3,version:1,
               view:{product_mode:'standalone',public_state:'intake',allowed_actions:['answer'],
                 brief:{status:'draft',revision:1,document_type:'research_report',document_type_label:'研究报告',
+                  required_sections:['研究问题','证据','分析','结论边界','引用'],
                   field_schema:[
                     {path:'exact_title',label:'文档标题',control:'text',required:true,placeholder:'填写标题',help:'使用准确标题',value:'专题研究报告'},
                     {path:'details.core_question',label:'核心研究问题',control:'textarea',required:true,placeholder:'填写研究问题',help:'限定研究主线',value:'如何落地'},
@@ -204,6 +205,7 @@ def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
               fields:card.brief.fieldSchema,
               errors:card.brief.fieldErrors,
               requirement:card.brief.sourceRequirement,
+              requiredSections:card.brief.requiredSections,
             }));
             """
         )
@@ -229,6 +231,7 @@ def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
         "minimumReady": 1,
         "emptyHelp": "必须添加一份可核对资料",
     }
+    assert result["requiredSections"] == ["研究问题", "证据", "分析", "结论边界", "引用"]
 
 
 def test_v3_profile_fields_render_chinese_help_and_associated_inline_errors():
@@ -236,6 +239,7 @@ def test_v3_profile_fields_render_chinese_help_and_associated_inline_errors():
         """
         const card={productMode:'standalone',allowedActions:['answer'],questions:[],brief:{
           originalRequest:'形成专题研究报告',documentTypeLabel:'研究报告',sources:[],
+          requiredSections:['研究问题','证据','分析','结论边界','引用'],
           fieldSchema:[
             {path:'exact_title',label:'文档标题',control:'text',required:true,placeholder:'填写标题',help:'使用准确标题',value:''},
             {path:'details.core_question',label:'核心研究问题',control:'textarea',required:true,placeholder:'填写研究问题',help:'限定研究主线',value:''},
@@ -255,6 +259,24 @@ def test_v3_profile_fields_render_chinese_help_and_associated_inline_errors():
     assert "请填写核心研究问题" in html
     assert "研究报告必须至少添加一份可核对资料" in html
     assert "data-et3-source-error" in html
+
+
+def test_v3_required_sections_are_visible_during_intake_and_before_generation():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',allowedActions:['answer','start_generation'],questions:[],subtitle:'专题研究报告',brief:{
+          originalRequest:'形成专题研究报告',documentTypeLabel:'研究报告',audience:'项目决策小组',sources:[],
+          requiredSections:['研究问题','证据','分析','结论边界','引用'],fieldSchema:[],fieldErrors:[],sourceRequirement:{},
+        }};
+        console.log(JSON.stringify({intake:hooks.briefPanel(card),ready:hooks.statePanel(card,'ready')}));
+        """
+    )
+
+    for html in (result["intake"], result["ready"]):
+        assert "必备章节" in html
+        for section in ("研究问题", "证据", "分析", "结论边界", "引用"):
+            assert section in html
+    assert "DOCX 自动检查" in result["intake"]
 
 
 def test_v3_brief_patch_uses_schema_whitelist_and_writes_nested_fields():

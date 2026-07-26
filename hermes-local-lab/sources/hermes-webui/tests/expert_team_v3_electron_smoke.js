@@ -56,6 +56,7 @@ function fixture(sessionId, publicState = 'awaiting_stage_confirmation', version
     document_brief: {
       status: 'confirmed', revision: 3, original_request: '起草部门月度工作汇报', exact_title: '部门月度工作汇报',
       document_type: 'work_report', purpose: '内部汇报', audience: '公司分管领导', source_refs: [],
+      content_constraints: { required_sections: ['工作开展情况', '存在问题', '下一步工作安排'], must_include: [], must_avoid: [] },
     },
     questions: [], members: [], tasks: stages, artifacts: [], stage_outputs: [output],
     view: {
@@ -85,7 +86,7 @@ function fixture(sessionId, publicState = 'awaiting_stage_confirmation', version
       brief: {
         status: 'confirmed', revision: 3, original_request: '起草部门月度工作汇报', exact_title: '部门月度工作汇报',
         document_type: 'work_report', document_type_label: '工作汇报', purpose: '内部汇报', audience: '公司分管领导',
-        editable: false, sources: [],
+        required_sections: ['工作开展情况', '存在问题', '下一步工作安排'], editable: false, sources: [],
       },
       stage_result: { output, review_items: [{ id: 'r1', title: '补充关键指标和责任部门', phase: '待人工补充' }] },
       stage_review: { review_id: 'review-1', attempt: 1, actionable: true, output },
@@ -123,6 +124,7 @@ async function main() {
       TAIJI_WEBUI_PYTHON: path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv', 'bin', 'python'),
       TAIJI_AGENT_USE_USER_DIRS: '1', TAIJI_LICENSE_REQUIRED: '0', TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: '0',
       TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT: 'pilot',
+      TAIJI_WORKSPACE: workspace,
       TAIJI_DESKTOP_USER_DATA_DIR: path.join(runtime, 'electron-user-data'),
       XDG_CONFIG_HOME: path.join(runtime, 'config'), XDG_DATA_HOME: path.join(runtime, 'data'), XDG_STATE_HOME: path.join(runtime, 'state'),
       AGENT_API_PORT: '21942', API_SERVER_PORT: '21942', WEBUI_PORT: '21987', TAIJI_WEBUI_PORT: '21987',
@@ -155,7 +157,9 @@ async function main() {
     await page.evaluate(async ({ workspace }) => {
       document.getElementById('onboardingOverlay')?.remove();
       const response = await fetch('/api/session/new', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace }) });
+      if (!response.ok) throw new Error(`session/new failed ${response.status}: ${await response.text()}`);
       const payload = await response.json();
+      if (!payload.session?.session_id) throw new Error(`session/new returned no session: ${JSON.stringify(payload)}`);
       window.__et3TestSession = payload.session;
       S.session = payload.session; S.messages = [];
       window.__et3SessionId = payload.session.session_id;
@@ -210,26 +214,78 @@ async function main() {
     await page.getByRole('button', { name: '发起专家团任务' }).click();
     await page.waitForSelector('#expertTeamV3Workbench [data-et3-brief-form]', { timeout: 20000 });
     await page.waitForFunction(() => document.querySelector('[data-et3-action="summon"]')?.getAttribute('aria-busy') === 'false');
+    const workRequiredSections = await page.locator('#expertTeamV3Workbench .et3-required-sections li').allTextContents();
+    assert(JSON.stringify(workRequiredSections) === JSON.stringify(['工作开展情况', '存在问题', '下一步工作安排']), '真实工作汇报 Brief 未展示服务端必备章节', { workRequiredSections });
+    assert(await page.locator('#expertTeamV3Workbench .et3-required-sections input, #expertTeamV3Workbench .et3-required-sections textarea, #expertTeamV3Workbench .et3-required-sections select').count() === 0, '必备章节被错误渲染为客户端可编辑字段');
+    await page.screenshot({ path: path.join(outDir, '03-real-brief-intake.png'), fullPage: false });
     await page.locator('[data-et3-brief-form] input[name="exact_title"]').fill('部门月度工作汇报（Electron 合同验证）');
     await page.locator('[data-et3-brief-form] label.et3-form-field textarea[name="purpose"]').fill('用于内部工作会议汇报');
     await page.locator('[data-et3-brief-form] input[name="audience"]').fill('公司分管领导');
-    await page.locator('[data-et3-brief-form] textarea').evaluateAll(items => items.forEach((item, index) => { if (!item.value.trim()) item.value = `Electron 验证答案 ${index + 1}`; }));
+    await page.locator('[data-et3-brief-form] input[name="usage_scenario"]').fill('月度工作例会');
+    await page.locator('[data-et3-brief-form] input[name="details.reporting_period"]').fill('2026年7月');
+    await page.locator('[data-et3-brief-form] input[name="details.reporting_unit"]').fill('生产运营部');
     await page.locator('[data-et3-source-label]').fill('Electron 验证资料');
     await page.locator('[data-et3-source-text]').fill('六月重点工作按计划推进，本行仅用于隔离测试。');
     await page.getByRole('button', { name: '添加文字资料' }).click();
     await page.waitForFunction(() => document.body.innerText.includes('Electron 验证资料'));
     await page.getByRole('button', { name: '保存规格' }).click();
     await page.waitForFunction(() => document.body.innerText.includes('操作已保存'));
+    const intakeAnswers = await page.locator('[data-et3-brief-form] textarea[name^="question__"]').all();
+    for (let index = 0; index < intakeAnswers.length; index += 1) {
+      await intakeAnswers[index].fill(`Electron 验证答案 ${index + 1}`);
+    }
+    await page.getByRole('button', { name: '保存并继续' }).click();
+    await page.getByRole('button', { name: '确认规格' }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: '确认规格' }).click();
+    await page.getByRole('heading', { name: '生成前确认' }).waitFor({ state: 'visible' });
+    const readyRequiredSections = await page.locator('#expertTeamV3Workbench .et3-required-sections li').allTextContents();
+    assert(JSON.stringify(readyRequiredSections) === JSON.stringify(workRequiredSections), '生成前确认丢失必备章节', { workRequiredSections, readyRequiredSections });
+    const readyLayout = await page.locator('#expertTeamV3Workbench').evaluate(root => {
+      const required = root.querySelector('.et3-required-sections');
+      const rootRect = root.getBoundingClientRect();
+      const requiredRect = required?.getBoundingClientRect();
+      return {
+        scrollWidth: root.scrollWidth, clientWidth: root.clientWidth,
+        requiredWithinWidth: Boolean(requiredRect && requiredRect.left >= rootRect.left && requiredRect.right <= rootRect.right + 1),
+      };
+    });
+    assert(readyLayout.scrollWidth <= readyLayout.clientWidth + 1 && readyLayout.requiredWithinWidth, '生成前必备章节区域发生横向裁切', readyLayout);
     const realBrief = await page.evaluate(async () => {
       const root = document.getElementById('expertTeamV3Workbench');
       const payload = await window.api(`/api/expert-teams/run?session_id=${encodeURIComponent(root.dataset.expertTeamSourceSessionId)}&run_id=${encodeURIComponent(root.dataset.expertTeamRunId)}`);
       const run = payload.run || payload;
-      return { runId: run.run_id, state: run.workflow_state, title: run.document_brief?.exact_title, sourceCount: (run.document_brief?.source_policy?.source_refs || []).length };
+      return { runId: run.run_id, state: run.workflow_state, title: run.document_brief?.exact_title, sourceCount: (run.document_brief?.source_policy?.source_refs || []).length, requiredSections: run.document_brief?.content_constraints?.required_sections || [], profileRequiredSections: run.launch_profile_snapshot?.content_constraints?.required_sections || [] };
     });
-    assert(realBrief.title.includes('Electron') && realBrief.sourceCount === 1, '真实 Brief HTTP 保存或资料绑定未生效', realBrief);
+    assert(realBrief.title.includes('Electron') && realBrief.sourceCount === 1 && realBrief.state === 'ready_to_generate', '真实 Brief HTTP 保存、资料绑定或确认未生效', realBrief);
+    assert(JSON.stringify(realBrief.requiredSections) === JSON.stringify(workRequiredSections) && JSON.stringify(realBrief.profileRequiredSections) === JSON.stringify(workRequiredSections), 'Launch Profile 到 Brief 的必备章节链路不一致', realBrief);
     await page.screenshot({ path: path.join(outDir, '03-real-brief.png'), fullPage: false });
+    await page.screenshot({ path: path.join(outDir, '04-real-ready-required-sections.png'), fullPage: false });
+    await page.setViewportSize({ width: 1024, height: 768 });
+    const compactRequiredLayout = await page.locator('#expertTeamV3Workbench').evaluate(root => ({ scrollWidth: root.scrollWidth, clientWidth: root.clientWidth, rootWidth: Math.round(root.getBoundingClientRect().width), parentWidth: Math.round(root.parentElement.getBoundingClientRect().width) }));
+    assert(compactRequiredLayout.scrollWidth <= compactRequiredLayout.clientWidth + 1 && Math.abs(compactRequiredLayout.rootWidth - compactRequiredLayout.parentWidth) < 2, '1024px 必备章节确认页发生横向溢出或未进入完整工作区', compactRequiredLayout);
+    await page.screenshot({ path: path.join(outDir, '05-real-ready-required-sections-1024.png'), fullPage: false });
+    await page.setViewportSize({ width: 1440, height: 900 });
+
+    const researchSession = await page.evaluate(async ({ workspace }) => {
+      const response = await fetch('/api/session/new', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace }) });
+      if (!response.ok) throw new Error(`session/new failed ${response.status}: ${await response.text()}`);
+      const payload = await response.json();
+      if (!payload.session?.session_id) throw new Error(`session/new returned no session: ${JSON.stringify(payload)}`);
+      S.session = payload.session; S.messages = [];
+      if (typeof renderMessages === 'function') renderMessages();
+      await switchPanel('writing');
+      await window.ExpertTeamV3.loadCatalog(true);
+      return payload.session;
+    }, { workspace });
+    await page.locator('#expertTeamV3PortalRoot .et3-team-card').nth(1).click();
+    await page.getByRole('button', { name: '发起专家团任务' }).click();
+    await page.waitForSelector('#expertTeamV3Workbench [data-et3-brief-form]', { timeout: 20000 });
+    const researchRequiredSections = await page.locator('#expertTeamV3Workbench .et3-required-sections li').allTextContents();
+    assert(JSON.stringify(researchRequiredSections) === JSON.stringify(['研究问题', '证据', '分析', '结论边界', '引用']), '真实研究报告 Brief 未展示完整必备章节', { researchRequiredSections });
+    await page.screenshot({ path: path.join(outDir, '06-real-research-required-sections.png'), fullPage: false });
 
     await page.evaluate(({ source }) => {
+      S.session = window.__et3TestSession;
       const makeRun = eval(`(${source})`);
       window.__et3Captured = [];
       window.__et3Forbidden = [];
@@ -510,7 +566,7 @@ async function main() {
     await page.setViewportSize({ width: 1024, height: 768 });
     await page.screenshot({ path: path.join(outDir, 'non-expert-tasks-1024.png'), fullPage: false });
 
-    const sourceFiles = ['static/expert-team-v3.js', 'static/expert-team-presenter.js', 'static/expert-team-v3.css', 'api/routes.py'];
+    const sourceFiles = ['static/expert-team-v3.js', 'static/expert-team-presenter.js', 'static/expert-team-v3.css', 'api/expert_teams/contracts.py', 'api/expert_teams/document_capabilities.py', 'api/expert_teams/documents.py', 'api/expert_teams/launch_profiles.py', 'api/expert_teams/prompts.py', 'api/expert_teams/runtime.py', 'api/expert_teams/stage_artifacts.py', 'api/expert_teams/view.py', 'api/routes.py'];
     const gitStatus = command(repoRoot, 'git', ['status', '--porcelain']).split('\n').filter(Boolean);
     const ephemeralStatus = gitStatus.filter(line => line.endsWith(' hermes-local-lab/sources/hermes-agent/venv'));
     const relevantGitStatus = gitStatus.filter(line => !ephemeralStatus.includes(line));
@@ -524,13 +580,13 @@ async function main() {
       pythonBin: fs.realpathSync(path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv', 'bin', 'python')),
       runtimeRoot: runtime,
       sourceSha256: Object.fromEntries(sourceFiles.map(file => [file, sha256(path.join(webuiDir, file))])),
-      realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/run'],
+      realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/answer', '/api/expert-teams/brief/confirm', '/api/expert-teams/run'],
       mocked: ['/api/expert-teams/stage/revise', '/api/expert-teams/stage/confirm', '/api/expert-teams/stage/input', '/api/expert-teams/delivery/open', '/api/expert-teams/delivery/revise', '/api/expert-teams/delivery/confirm', '/api/expert-teams/delivery/recover'],
     };
     const forbiddenRequests = await page.evaluate(() => window.__et3Forbidden || []);
     const recoveryCaptured = await page.evaluate(() => window.__et3RecoveryCaptured || []);
     const recoveryConflictCaptured = await page.evaluate(() => window.__et3RecoveryConflictCaptured || []);
-    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, captured, stageInputCaptured, deliveryCaptured, recoveryCaptured, recoveryConflictCaptured, forbiddenRequests, isolated }, null, 2));
+    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, workRequiredSections, readyRequiredSections, readyLayout, compactRequiredLayout, researchSessionId: researchSession.session_id, researchRequiredSections, captured, stageInputCaptured, deliveryCaptured, recoveryCaptured, recoveryConflictCaptured, forbiddenRequests, isolated }, null, 2));
   } finally {
     await app.close();
   }

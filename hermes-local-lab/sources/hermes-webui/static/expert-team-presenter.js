@@ -207,6 +207,7 @@
         minimumReady:Number(sourceRequirement.minimum_ready||0),
         emptyHelp:str(sourceRequirement.empty_help)
       },
+      requiredSections:arr(brief.required_sections).map(section=>str(section)).filter(Boolean),
       sources:arr(brief.sources).map(source=>({
         source_id:str(source&&source.source_id),kind:str(source&&source.kind),label:str(source&&source.label),
         status:str(source&&source.status),size_bytes:Number(source&&source.size_bytes||0),sha256:str(source&&source.sha256)
