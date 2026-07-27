@@ -54,6 +54,7 @@ def test_development_license_not_required_is_presented_as_non_error_state():
 
     assert "if(s==='not_required') return '开发环境无需授权';" in panels_js
     assert "status==='valid'||status==='not_required'" in panels_js
+    assert "开发源码模式无需授权，不影响本机验证。" in panels_js
 
 
 def test_backend_exposes_license_status_and_import_routes():

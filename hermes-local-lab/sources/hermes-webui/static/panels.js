@@ -10700,7 +10700,11 @@ function _renderTaijiLicenseStatus(data){
   }
  }
  if(sourceEl) sourceEl.textContent=_taijiLicenseSourceLabel(_taijiLicenseData);
- if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(_taijiLicenseData.status==='valid'?'授权可用':'授权状态不可用');
+ if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(
+  status==='valid'?'授权可用':
+  status==='not_required'?'开发源码模式无需授权，不影响本机验证。':
+  '授权状态不可用'
+ );
  if(panel){
   panel.dataset.licenseStatus=_taijiLicenseData.status||'unknown';
   const icon=panel.querySelector('.model-config-state-icon');
