@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 LAB_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
-REPO_DIR="$(cd "$LAB_DIR/.." && pwd -P)"
-APP_DIR="$REPO_DIR/apps/taiji-desktop"
-ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
-LOG_DIR="$HOME/.local/state/taiji-agent/logs"
-LOG_FILE="$LOG_DIR/taiji-desktop-launcher.log"
-TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"
-
-mkdir -p "$LOG_DIR"
-exec >>"$LOG_FILE" 2>&1
+COMMAND_LAUNCHER="$LAB_DIR/启动太极Agent桌面端.command"
 
 show_error() {
   local message="$1"
@@ -22,94 +12,14 @@ show_error() {
   /usr/bin/osascript -e "display dialog \"$escaped\" with title \"太极 Agent 启动失败\" buttons {\"好\"} default button \"好\"" >/dev/null 2>&1 || true
 }
 
-echo "========================================"
-echo "太极 Agent 桌面端启动器"
-echo "========================================"
-echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
-echo "App : $APP_DIR"
-echo
-
-if ! command -v npm >/dev/null 2>&1; then
-  show_error "未找到 npm。请先安装 Node.js 20+。"
+if [ ! -x "$COMMAND_LAUNCHER" ]; then
+  show_error "未找到可执行的源码启动脚本，请查看当前 worktree。"
   exit 1
 fi
 
-cd "$APP_DIR"
-
-if [ ! -d node_modules/electron ]; then
-  echo "首次启动：正在安装 Electron 依赖..."
-  if ! npm ci; then
-    show_error "Electron 依赖安装失败。请查看本地日志。"
-    exit 1
-  fi
-fi
-
-if [ ! -x "$ELECTRON_BIN" ]; then
-  show_error "Electron 启动文件不存在。请先安装桌面端依赖。"
+if ! /usr/bin/open -a Terminal "$COMMAND_LAUNCHER"; then
+  show_error "无法通过终端启动太极 Agent，请查看本地日志。"
   exit 1
 fi
 
-TAIJI_SOURCE_ROOT="$REPO_DIR"
-SOURCE_INSTANCE_ID="$(
-  printf '%s' "$TAIJI_SOURCE_ROOT" \
-    | /usr/bin/shasum -a 256 \
-    | /usr/bin/awk '{print substr($1, 1, 16)}'
-)"
-if [ -z "${TAIJI_DESKTOP_USER_DATA_DIR:-}" ]; then
-  TAIJI_DESKTOP_USER_DATA_DIR="$HOME/.local/share/taiji-agent/source-instances/$SOURCE_INSTANCE_ID/electron-user-data"
-fi
-mkdir -p "$TAIJI_DESKTOP_USER_DATA_DIR"
-TAIJI_SOURCE_COMMIT="unknown"
-TAIJI_SOURCE_DIRTY="unknown"
-if [ -x /usr/bin/git ] && /usr/bin/git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  TAIJI_SOURCE_COMMIT="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD)"
-  source_status="$(/usr/bin/git -C "$REPO_DIR" status --porcelain=v1 --untracked-files=normal)"
-  if [ -n "$source_status" ]; then
-    TAIJI_SOURCE_DIRTY="1"
-  else
-    TAIJI_SOURCE_DIRTY="0"
-  fi
-  unset source_status
-fi
-export TAIJI_AGENT_ROOT="$LAB_DIR"
-export TAIJI_SOURCE_ROOT
-export TAIJI_SOURCE_COMMIT
-export TAIJI_SOURCE_DIRTY
-export TAIJI_DESKTOP_USER_DATA_DIR
-
-echo "Electron: $ELECTRON_BIN"
-echo "Root: $TAIJI_SOURCE_ROOT"
-echo "Commit: $TAIJI_SOURCE_COMMIT"
-echo "Dirty: $TAIJI_SOURCE_DIRTY"
-echo "Instance: $SOURCE_INSTANCE_ID"
-echo "Electron data: $TAIJI_DESKTOP_USER_DATA_DIR"
-RUNNER="$LOG_DIR/taiji-desktop-electron-runner-$SOURCE_INSTANCE_ID.sh"
-cat >"$RUNNER" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-export PATH="$PATH"
-export HOME="$HOME"
-export USER="${USER:-$(id -un)}"
-export LOGNAME="${LOGNAME:-$(id -un)}"
-export SHELL="${SHELL:-/bin/zsh}"
-export TMPDIR="${TMPDIR:-/tmp}"
-export LANG="${LANG:-C.UTF-8}"
-export LC_ALL="${LC_ALL:-C.UTF-8}"
-export TAIJI_AGENT_ROOT="$LAB_DIR"
-export TAIJI_SOURCE_ROOT="$TAIJI_SOURCE_ROOT"
-export TAIJI_SOURCE_COMMIT="$TAIJI_SOURCE_COMMIT"
-export TAIJI_SOURCE_DIRTY="$TAIJI_SOURCE_DIRTY"
-export TAIJI_DESKTOP_USER_DATA_DIR="$TAIJI_DESKTOP_USER_DATA_DIR"
-export TAIJI_SOURCE_MODE="$TAIJI_SOURCE_MODE"
-cd "$APP_DIR"
-exec "$ELECTRON_BIN" "$APP_DIR" >>"$LOG_FILE" 2>&1
-EOF
-chmod +x "$RUNNER"
-
-/usr/bin/osascript - "$RUNNER" <<'OSA'
-on run argv
-  do shell script quoted form of (item 1 of argv) & " >/dev/null 2>&1 &"
-end run
-OSA
-echo "Electron launch delegated via osascript runner: $RUNNER"
 exit 0
