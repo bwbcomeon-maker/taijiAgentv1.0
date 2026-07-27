@@ -4328,11 +4328,11 @@ def _latest_expert_team_assistant_content_after_execution(session, run: dict) ->
     return ""
 
 
-def _expert_team_turn_terminal_outcome(run: dict) -> str:
+def _expert_team_turn_terminal_outcome(run: dict) -> dict:
     stream_id = str(run.get("execution_stream_id") or "").strip()
     turn_id = str(run.get("execution_turn_id") or "").strip()
     if not stream_id:
-        return ""
+        return {}
     try:
         from api.turn_journal import read_turn_journal
 
@@ -4345,14 +4345,18 @@ def _expert_team_turn_terminal_outcome(run: dict) -> str:
         ]
         names = {str(event.get("event") or "") for event in events}
         if names != {"interrupted"}:
-            return ""
+            return {}
         reasons = {str(event.get("reason") or "failed") for event in events}
         if len(reasons) != 1:
-            return ""
-        return "cancelled" if reasons == {"cancelled"} else "failed"
+            return {}
+        reason = next(iter(reasons))
+        return {
+            "status": "cancelled" if reason == "cancelled" else "failed",
+            "reason": reason,
+        }
     except Exception:
         logger.debug("Failed to resolve expert team terminal turn outcome", exc_info=True)
-        return ""
+        return {}
 
 
 def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bool:
@@ -5192,19 +5196,30 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                 from api import expert_teams
 
                 terminal_outcome = _expert_team_turn_terminal_outcome(run)
-                if terminal_outcome == "cancelled":
+                if terminal_outcome.get("status") == "cancelled":
                     return expert_teams.mark_expert_team_execution_cancelled(
                         workspace,
                         str(run.get("run_id") or ""),
                         "本轮生成已取消。",
                         stream_id=stream_id,
                     )
-                if terminal_outcome == "failed":
+                if terminal_outcome.get("status") == "failed":
+                    reason = str(terminal_outcome.get("reason") or "")
+                    error_code = (
+                        "model_configuration_required"
+                        if reason == "model_configuration_error"
+                        else "backend_unavailable"
+                    )
+                    from api.product_contract import attach_product_error
+
+                    product_error = attach_product_error({}, error_code)["product_error"]
                     return expert_teams.fail_expert_team_execution(
                         workspace,
                         str(run.get("run_id") or ""),
-                        "本轮生成未成功完成，请重新生成。",
+                        product_error["message"],
                         stream_id=stream_id,
+                        error_code=product_error["code"],
+                        incident_id=product_error["incident_id"],
                     )
 
                 return expert_teams.mark_expert_team_result_unverified(
@@ -5478,6 +5493,10 @@ def _validate_standalone_runtime_provider_context(
         ) from exc
 
 
+class _ExpertTeamModelConfigurationRequired(RuntimeError):
+    """The selected runtime cannot authenticate a standalone generation."""
+
+
 def _resolve_standalone_legacy_provider_context(request) -> dict:
     """Resolve the protocol that the in-process worker would actually use.
 
@@ -5519,13 +5538,24 @@ def _resolve_standalone_legacy_provider_context(request) -> dict:
             resolved_provider = runtime.get("provider")
         if not resolved_base_url:
             resolved_base_url = runtime.get("base_url")
-        resolved_provider, _resolved_api_key, _resolved_base_url = (
+        resolved_provider, resolved_api_key, resolved_base_url = (
             _resolve_custom_provider_runtime_overrides(
                 resolved_provider,
                 resolved_api_key,
                 resolved_base_url,
             )
         )
+        provider_key = str(resolved_provider or "").strip().lower()
+        keyless_local_provider = provider_key in {"lmstudio", "ollama"}
+        keyless_custom_provider = provider_key.startswith("custom:") and bool(
+            str(resolved_base_url or "").strip()
+        )
+        if not str(resolved_api_key or "").strip() and not (
+            keyless_local_provider or keyless_custom_provider
+        ):
+            raise _ExpertTeamModelConfigurationRequired(
+                "model configuration required"
+            )
         api_mode = str(runtime.get("api_mode") or "").strip().lower()
         return {
             "provider": str(resolved_provider or "").strip(),
@@ -5837,7 +5867,13 @@ def _start_expert_team_execution(
     reservation_id = str(reserved_run.get("execution_start_id") or "")
     result = None
 
-    def _fail_reserved_start(message: str, cleanup: dict | None = None) -> dict:
+    def _fail_reserved_start(
+        message: str,
+        cleanup: dict | None = None,
+        *,
+        error_code: str = "",
+        incident_id: str = "",
+    ) -> dict:
         cleanup = cleanup or {}
         try:
             return expert_teams.mark_expert_team_execution_start_failed(
@@ -5849,6 +5885,8 @@ def _start_expert_team_execution(
                 orphan_runtime_adapter=type(adapter).__name__ if adapter is not None else "",
                 execution_cleanup_status="pending" if cleanup.get("pending_run_id") else "",
                 execution_cleanup_error=str(cleanup.get("error") or ""),
+                error_code=error_code,
+                incident_id=incident_id,
             )
         except expert_teams.ExpertTeamStateConflict as conflict:
             return conflict.run or expert_teams.read_expert_team_run(
@@ -5962,6 +6000,25 @@ def _start_expert_team_execution(
                     ),
                 },
             )
+        except _ExpertTeamModelConfigurationRequired:
+            product_error = attach_product_error(
+                {}, "model_configuration_required"
+            )["product_error"]
+            failed_run = _fail_reserved_start(
+                product_error["message"],
+                error_code=product_error["code"],
+                incident_id=product_error["incident_id"],
+            )
+            return attach_product_error(
+                {
+                    "ok": False,
+                    "code": product_error["code"],
+                    "error": product_error["message"],
+                    "run": failed_run,
+                },
+                product_error["code"],
+                incident_id=product_error["incident_id"],
+            ), 409
         except Exception as exc:
             error = str(exc) or "当前运行时无法证明单机专家团的严格模型合同。"
             failed_run = _fail_reserved_start(error)

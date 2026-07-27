@@ -10639,6 +10639,7 @@ let _taijiLicenseData=null;
 function _taijiLicenseStatusLabel(status){
  const s=String(status&&status.status||'').toLowerCase();
  if(s==='valid') return '授权有效';
+ if(s==='not_required') return '开发环境无需授权';
  if(s==='expired') return '授权已到期';
  if(s==='missing') return '未安装授权';
  if(s==='invalid') return '授权无效';
@@ -10673,7 +10674,7 @@ function _renderTaijiLicenseStatus(data){
  const panel=$('taijiLicensePanel');
  const label=_taijiLicenseStatusLabel(_taijiLicenseData);
  const status=String(_taijiLicenseData.status||'unknown').toLowerCase();
- const state=status==='valid'?'ok':(status==='expired'||status==='missing'||status==='invalid')?'danger':'warn';
+ const state=status==='valid'||status==='not_required'?'ok':(status==='expired'||status==='missing'||status==='invalid')?'danger':'warn';
  if(statusEl) statusEl.textContent=label;
  if(customerEl) customerEl.textContent=_taijiLicenseData.customer||'—';
  if(expiresEl) expiresEl.textContent=_formatTaijiLicenseDate(_taijiLicenseData.expires_at);
@@ -10703,7 +10704,7 @@ function _renderTaijiLicenseStatus(data){
  if(panel){
   panel.dataset.licenseStatus=_taijiLicenseData.status||'unknown';
   const icon=panel.querySelector('.model-config-state-icon');
-  if(icon) icon.textContent=status==='valid'?'✓':'!';
+  if(icon) icon.textContent=(status==='valid'||status==='not_required')?'✓':'!';
  }
 }
 
@@ -11148,6 +11149,7 @@ function _setModelConfigDraftStatus(message){
 async function loadModelConfigPanel(force,options){
  const opts=options||{};
  const status=$('modelConfigStatus');
+ const hadLoadedConfig=!!_modelConfigData;
  _bindTaijiLicenseControls();
  loadTaijiLicenseStatus(force).catch(()=>{});
  if(_modelConfigData&&!force){
@@ -11172,7 +11174,7 @@ async function loadModelConfigPanel(force,options){
  try{
   const data=await api('/api/model-config');
   if(generation!==_modelConfigLoadGeneration) return _modelConfigData;
-  if(!opts.skipDirtyGuard&&_modelConfigDraftIdentity()!==draftIdentityAtStart){
+  if(hadLoadedConfig&&!opts.skipDirtyGuard&&_modelConfigDraftIdentity()!==draftIdentityAtStart){
    _setModelConfigDraftStatus('检测到未保存草稿，已保留当前编辑内容；服务器状态未覆盖页面。');
    return _modelConfigData;
   }

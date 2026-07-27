@@ -1453,6 +1453,8 @@ def _clear_execution_patch() -> dict:
         "cancel_next_retry_at": 0,
         "cancel_deadline_at": 0,
         "last_execution_error": "",
+        "last_execution_error_code": "",
+        "last_execution_incident_id": "",
     }
 
 
@@ -2861,6 +2863,8 @@ def mark_expert_team_execution_start_failed(
     orphan_runtime_adapter: str = "",
     execution_cleanup_status: str = "",
     execution_cleanup_error: str = "",
+    error_code: str = "",
+    incident_id: str = "",
 ) -> dict:
     with _run_mutation_lock(workspace, run_id):
         run = read_run(workspace, run_id)
@@ -2897,6 +2901,8 @@ def mark_expert_team_execution_start_failed(
                 "execution_cleanup_next_retry_at": 0,
                 "execution_cleanup_deadline_at": cleanup_deadline,
                 "last_execution_error": str(message or "当前阶段启动失败，请重新尝试。"),
+                "last_execution_error_code": str(error_code or ""),
+                "last_execution_incident_id": str(incident_id or ""),
             },
         )
 
@@ -5215,7 +5221,21 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
     if state not in {"ready_to_generate", "start_failed", "generation_failed", "result_unverified", "generated_invalid"}:
         raise ExpertTeamStateConflict("stale_state", "expert team run is not resumable", run)
     _record_action(run, body, "resume")
-    return _transition(workspace, run, "ready_to_generate", "generation_resumed", _clear_execution_patch())
+    current_reservation = run.get("current_stage_attempt_reservation")
+    stale_reservation_patch = {}
+    if (
+        isinstance(current_reservation, dict)
+        and str(current_reservation.get("status") or "")
+        in {"reserved", "dispatching", "generating"}
+    ):
+        stale_reservation_patch = _stage_reservation_status_patch(run, "failed")
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "generation_resumed",
+        {**_clear_execution_patch(), **stale_reservation_patch},
+    )
 
 
 @_serialized_run_mutation
@@ -5225,6 +5245,8 @@ def fail_expert_team_execution(
     message: str,
     *,
     stream_id: str,
+    error_code: str = "",
+    incident_id: str = "",
 ) -> dict:
     run = read_run(workspace, run_id)
     _require_mutable_v2(run)
@@ -5240,7 +5262,10 @@ def fail_expert_team_execution(
         "generation_failed",
         {
             **_clear_execution_patch(),
+            **_stage_reservation_status_patch(run, "failed"),
             "last_execution_error": str(message or "未检测到生成结果，请重新尝试。"),
+            "last_execution_error_code": str(error_code or ""),
+            "last_execution_incident_id": str(incident_id or ""),
         },
     )
 
@@ -5267,6 +5292,7 @@ def mark_expert_team_result_unverified(
         "result_unverified",
         "generation_result_unverified",
         {
+            **_stage_reservation_status_patch(run, "generated_invalid"),
             "last_execution_error": str(message or "结果绑定证据尚未闭环，请重新核验。"),
         },
     )
@@ -5295,6 +5321,7 @@ def mark_expert_team_execution_cancelled(
         "generation_cancelled",
         {
             **_clear_execution_patch(),
+            **_stage_reservation_status_patch(run, "cancelled"),
             "last_execution_error": str(message or "远程专家团执行已取消。"),
         },
     )
@@ -5326,6 +5353,7 @@ def fail_expert_team_execution_protocol(
         "generation_invalid",
         {
             **_clear_execution_patch(),
+            **_stage_reservation_status_patch(run, "generated_invalid"),
             "orphan_runtime_run_id": runtime_run_id,
             "orphan_runtime_adapter": runtime_adapter,
             "execution_cleanup_status": "pending",

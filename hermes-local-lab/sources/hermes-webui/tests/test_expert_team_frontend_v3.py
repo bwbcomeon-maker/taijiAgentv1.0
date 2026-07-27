@@ -44,11 +44,13 @@ def _run_v3_hooks(body: str) -> dict:
                 deliveryBindingFingerprint, conflictDeliveryDraftMatches, restoreConflictDeliveryDraft,
                 draftFingerprint, restoreWorkbenchDraft, stateCopyFor, statePanel, workbenchHtml,
                 handleWorkbenchClick, deliveryActionControl,
+                deferStatusRenderDuringComposition, releaseDeferredStatusCard,
                 briefPanel, buildBriefPatch, clientBriefFieldErrors,
                 setConflictDraft(value) {{ state.conflictRevisionDraft = value; }},
                 setConflictDeliveryDraft(value) {{ state.conflictDeliveryDraft = value; }},
                 setCard(value) {{ state.card = value; state.busy = false; }},
                 getCard() {{ return state.card; }},
+                setCompositionActive(value) {{ state.compositionActive = value; }},
               }};\n  window.ExpertTeamV3 = Object.freeze({{`
             );
             vm.runInContext(source,context);
@@ -79,6 +81,39 @@ def test_v3_owns_one_scoped_namespace_and_uses_delegated_events():
     assert "writeflowStatusDock" not in script
 
 
+def test_v3_defers_only_the_latest_same_run_card_while_ime_is_composing():
+    result = _run_v3_hooks(
+        """
+        const base={kind:'expert_team',runId:'run-1',sourceSessionId:'session-1',version:4};
+        hooks.setCard(base);
+        hooks.setCompositionActive(true);
+        const first=hooks.deferStatusRenderDuringComposition({...base,version:5});
+        const older=hooks.deferStatusRenderDuringComposition({...base,version:3});
+        const other=hooks.deferStatusRenderDuringComposition({...base,runId:'run-2',version:9});
+        const released=hooks.releaseDeferredStatusCard();
+        console.log(JSON.stringify({first,older,other,released}));
+        """
+    )
+
+    assert result == {
+        "first": True,
+        "older": True,
+        "other": False,
+        "released": {"kind": "expert_team", "runId": "run-1", "sourceSessionId": "session-1", "version": 5},
+    }
+
+
+def test_v3_workbench_binds_composition_events_and_releases_after_final_input_event():
+    script = _read(SCRIPT)
+
+    assert "compositionActive" in script
+    assert "deferredCard" in script
+    assert "root.addEventListener('compositionstart'" in script
+    assert "root.addEventListener('compositionend'" in script
+    assert "setTimeout(() =>" in script
+    assert "renderStatusSurface(deferred)" in script
+
+
 def test_v3_styles_are_scoped_and_do_not_restyle_non_expert_shell():
     style = _read(STYLE)
 
@@ -102,6 +137,26 @@ def test_v3_portal_is_catalog_only_and_exposes_two_pilot_combinations():
         assert (ROOT / "static" / "assets" / "writeflow" / asset).is_file()
 
 
+def test_v3_unavailable_tasks_explain_scope_and_show_team_readiness_count():
+    script = _read(SCRIPT)
+
+    assert "已开放 ${availableCount}/${examples.length}" in script
+    assert "et3-template-unavailable-reason" in script
+    assert "暂未开放：${unavailableReason}" in script
+
+
+def test_v3_maps_active_stage_conflict_to_safe_chinese_guidance():
+    script = _read(SCRIPT)
+
+    assert "function mutationErrorMessage(error" in script
+    assert "stage_attempt_in_progress" in script
+    assert "当前阶段已有生成任务正在处理" in script
+    mutate_body = script.split("async function mutate(endpoint", 1)[1].split(
+        "function isConflictError", 1
+    )[0]
+    assert "mutationErrorMessage(error" in mutate_body
+
+
 def test_v3_brief_exposes_source_binding_and_explicit_start_gate():
     script = _read(SCRIPT)
 
@@ -117,6 +172,30 @@ def test_v3_brief_exposes_source_binding_and_explicit_start_gate():
         assert marker in script
     assert "{ expected_brief_revision: Number(state.card.brief?.revision || 0), patch }" in script
     assert "{ expected_brief_revision: Number(state.card.brief?.revision || 0) }" in script
+
+
+def test_v3_intake_actions_use_truthful_two_step_labels_and_observable_success_feedback():
+    script = _read(SCRIPT)
+
+    assert "保存回答" in script
+    assert "确认规格并继续" in script
+    assert "保存并继续" not in script
+    assert "回答已保存，请确认规格。" in script
+    assert "data-et3-brief-form" in script
+
+
+def test_v3_text_source_fields_clear_only_after_the_server_accepts_the_source():
+    script = _read(SCRIPT)
+    start = script.index("async function addTextSource")
+    end = script.index("async function addLocalFile", start)
+    function_body = script[start:end]
+
+    assert "const saved = await mutate(" in function_body
+    assert "if (!saved) return false" in function_body
+    assert "textField.value = ''" in function_body
+    assert "labelField.value = ''" in function_body
+    assert "labelField?.focus()" in function_body
+    assert function_body.index("if (!saved) return false") < function_body.index("textField.value = ''")
 
 
 def test_v3_source_mutation_matches_backend_contract_and_presenter_keeps_safe_projection():
@@ -744,6 +823,33 @@ def test_v3_state_surfaces_override_stale_ready_copy_and_keep_exception_actions_
     assert '<span class="et3-state-pill">需要你的补充</span>' in result["html"]["stageInput"]
     assert "刷新停止状态" in result["html"]["cancelling"]
     assert "恢复任务" in result["failedResume"]
+
+
+def test_v3_model_configuration_failure_has_safe_visible_recovery_actions():
+    result = _run_v3_hooks(
+        """
+        const card={
+          kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',
+          publicState:'failed',allowedActions:['resume'],presentation:{detail:'内部原始错误不应展示'},
+          productError:{schema:'taiji.product.error.v1',code:'model_configuration_required',title:'模型配置待完成',message:'请先完成模型配置，再重新执行此操作。',recoveryActions:[{id:'open_model_settings',label:'打开模型配置'},{id:'export_diagnostics',label:'导出诊断'}]},
+          workflow:{currentStage:{}},brief:{sources:[]},progress:{done:0,total:5},team:{title:'内容创作专家团'},
+        };
+        console.log(JSON.stringify({html:hooks.statePanel(card,'failed')}));
+        """
+    )
+
+    assert "模型配置待完成" in result["html"]
+    assert "请先完成模型配置" in result["html"]
+    assert 'data-et3-action="open-model-settings"' in result["html"]
+    assert 'data-et3-action="export-diagnostics"' in result["html"]
+    assert "内部原始错误不应展示" not in result["html"]
+
+
+def test_v3_product_error_actions_reuse_existing_settings_and_diagnostics_entrypoints():
+    script = _read(SCRIPT)
+
+    assert "window.switchSettingsSection('models')" in script
+    assert "window.exportProductDiagnostics()" in script
 
 
 def test_v3_retry_cancel_uses_only_the_complete_server_binding_and_keeps_refresh():

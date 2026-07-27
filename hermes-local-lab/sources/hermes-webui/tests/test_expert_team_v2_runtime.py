@@ -2035,6 +2035,9 @@ def test_local_stream_terminal_gateway_error_enters_generation_failed(monkeypatc
     failed = routes._expert_team_run_with_execution_truth(tmp_path, generating)
 
     assert failed["workflow_state"] == "generation_failed"
+    assert failed["last_execution_error_code"] == "model_configuration_required"
+    assert failed["view"]["product_error"]["code"] == "model_configuration_required"
+    assert failed["view"]["product_error"]["schema"] == "taiji.product.error.v1"
     assert failed["view"]["presentation"]["title"] == "生成失败"
     assert failed["view"]["presentation"]["primary_action"]["id"] == "regenerate"
 

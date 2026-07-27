@@ -15,6 +15,8 @@
     conflictDeliveryDraft: null,
     collapsed: false,
     busy: false,
+    compositionActive: false,
+    deferredCard: null,
     catalogStatus: 'idle',
     catalogError: '',
   };
@@ -158,7 +160,10 @@
 
   function teamCard(team) {
     const unavailable = team.available !== true;
-    const reason = list(team.examples).map(example => example.disabled_reason).find(Boolean) || '暂无通过验证的文档任务';
+    const examples = list(team.examples);
+    const availableCount = examples.filter(example => example.available === true).length;
+    const readiness = `已开放 ${availableCount}/${examples.length}`;
+    const reason = examples.map(example => example.disabled_reason).find(Boolean) || '暂无通过验证的文档任务';
     const cover = localExpertTeamImage(team.image);
     const coverAlt = String(team.image_alt || `${team.title || '专家团'}协作插画`).trim();
     const image = cover
@@ -171,7 +176,7 @@
         <h2>${esc(team.title)}</h2>
         <p>${esc(team.description)}</p>
         <span class="et3-tags">${list(team.tags).slice(0, 4).map(tag => `<span class="et3-tag">${esc(tag)}</span>`).join('')}</span>
-        <span class="et3-card-cta">${unavailable ? esc(reason) : '查看并发起 <span aria-hidden="true">→</span>'}</span>
+        <span class="et3-card-cta">${unavailable ? esc(reason) : `${esc(readiness)} · 查看并发起 <span aria-hidden="true">→</span>`}</span>
       </span>
     </button>`;
   }
@@ -220,7 +225,7 @@
       const selected = Boolean(selectedExample && selectedExample.id === example.id);
       const label = example.label || '文档任务';
       const accessibleLabel = unavailable ? `${label}。${summary} 暂未开放：${unavailableReason}` : `${label}。${summary}`;
-      return `<button type="button" class="et3-template${unavailable ? ' is-disabled' : ''}" data-et3-action="select-template" data-example-id="${esc(example.id)}" aria-label="${esc(accessibleLabel)}" aria-pressed="${selected}" aria-disabled="${String(unavailable)}" ${unavailable ? `disabled title="${esc(unavailableReason)}"` : ''}><strong>${esc(label)}</strong>${unavailable ? '<small class="et3-template-status">暂未开放</small>' : ''}<span>${esc(summary)}</span></button>`;
+      return `<button type="button" class="et3-template${unavailable ? ' is-disabled' : ''}" data-et3-action="select-template" data-example-id="${esc(example.id)}" aria-label="${esc(accessibleLabel)}" aria-pressed="${selected}" aria-disabled="${String(unavailable)}" ${unavailable ? `disabled title="${esc(unavailableReason)}"` : ''}><strong>${esc(label)}</strong>${unavailable ? '<small class="et3-template-status">暂未开放</small>' : ''}<span>${esc(summary)}</span>${unavailable ? `<small class="et3-template-unavailable-reason">暂未开放：${esc(unavailableReason)}</small>` : ''}</button>`;
     }).join('');
   }
 
@@ -568,10 +573,30 @@
     return `<section class="et3-panel et3-stale-draft" role="status"><h3>上一份交付修改意见已保留</h3><p>交付文档或校验摘要已变更，为避免误提交，以下内容未自动带入新文档。如仍适用，请手动复制并重新核对。</p><textarea readonly data-et3-stale-delivery-revision aria-label="上一份交付修改意见">${esc(draft.value)}</textarea></section>`;
   }
 
+  function deferStatusRenderDuringComposition(card) {
+    if (!state.compositionActive || !state.card) return false;
+    if (
+      String(card?.runId || '') !== String(state.card.runId || '')
+      || String(card?.sourceSessionId || '') !== String(state.card.sourceSessionId || '')
+    ) return false;
+    const deferredVersion = Number(state.deferredCard?.version || 0);
+    if (!state.deferredCard || Number(card?.version || 0) >= deferredVersion) {
+      state.deferredCard = card;
+    }
+    return true;
+  }
+
+  function releaseDeferredStatusCard() {
+    const deferred = state.deferredCard;
+    state.deferredCard = null;
+    return deferred;
+  }
+
   function renderStatusSurface(card) {
     if (!card || card.kind !== 'expert_team') return clearStatusSurface();
     const activeSession = window.S && window.S.session && window.S.session.session_id;
     if (card.sourceSessionId && activeSession && card.sourceSessionId !== activeSession) return clearStatusSurface();
+    if (deferStatusRenderDuringComposition(card)) return true;
     const previousCard = state.card;
     const main = document.getElementById('mainChat');
     if (!main) return false;
@@ -631,6 +656,8 @@
     state.conflictRevisionDraft = null;
     state.conflictDeliveryDraft = null;
     state.collapsed = false;
+    state.compositionActive = false;
+    state.deferredCard = null;
     return true;
   }
 
@@ -733,7 +760,7 @@
       <div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="add-text-source" ${disabled}>添加文字资料</button><button type="button" class="et3-button" data-et3-action="choose-source-file" aria-describedby="expertTeamV3SourceHelp${canAnswer ? '' : ' expertTeamV3IntakeActionHelp'}" ${canAnswer ? '' : 'disabled aria-disabled="true"'}>添加本地文件</button><input id="expertTeamV3SourceFile" class="et3-visually-hidden" type="file" data-et3-source-file accept=".txt,.md,.markdown,.csv,.json,text/plain,text/markdown,text/csv,application/json" ${canAnswer ? '' : 'disabled'}><span id="expertTeamV3SourceHelp" class="et3-visually-hidden">支持 UTF-8 文本，单份不超过 10MB</span></div>
     </section>
     ${canAnswer ? '' : '<p id="expertTeamV3IntakeActionHelp" class="et3-help">任务规格已被其他操作更新，请刷新状态后继续。</p>'}
-    <div class="et3-primary-actions"><button type="button" class="et3-button" data-et3-action="save-brief" ${disabled}>保存规格</button><button type="button" class="et3-button et3-button--primary" data-et3-action="${questions.length ? 'submit-answers' : 'confirm-brief'}" ${disabled}>${questions.length ? '保存并继续' : '确认规格'}</button></div>`;
+    <div class="et3-primary-actions"><button type="button" class="et3-button" data-et3-action="save-brief" ${disabled}>保存规格</button><button type="button" class="et3-button et3-button--primary" data-et3-action="${questions.length ? 'submit-answers' : 'confirm-brief'}" ${disabled}>${questions.length ? '保存回答' : '确认规格并继续'}</button></div>`;
   }
 
   function readyPanel(card) {
@@ -831,6 +858,11 @@
   function failurePanel(card, current) {
     const canRetry = actionAllowed(card, 'resume');
     const canCancel = actionAllowed(card, 'cancel');
+    const productError = card.productError;
+    if (productError?.schema === 'taiji.product.error.v1') {
+      const actionIds = new Set(list(productError.recoveryActions).map(action => String(action?.id || '')));
+      return `<section class="et3-panel" role="alert"><h3>${esc(productError.title || '操作未能完成')}</h3><p class="et3-error">${esc(productError.message || '请按提示处理后重试。')}</p><div class="et3-inline-actions">${actionIds.has('open_model_settings') ? '<button type="button" class="et3-button et3-button--primary" data-et3-action="open-model-settings">打开模型配置</button>' : ''}${actionIds.has('export_diagnostics') ? '<button type="button" class="et3-button" data-et3-action="export-diagnostics">导出诊断</button>' : ''}${canRetry ? '<button type="button" class="et3-button" data-et3-action="retry-run">配置完成后恢复任务</button>' : ''}</div></section>`;
+    }
     return `<section class="et3-panel"><h3>${esc(stateCopy[current]?.[0] || '任务需要处理')}</h3><p class="et3-error">${esc(card.presentation?.detail || card.presentation?.summary || '当前任务需要恢复或重新发起。')}</p><div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="refresh-run">刷新状态</button>${canRetry ? '<button type="button" class="et3-button et3-button--primary" data-et3-action="retry-run">恢复任务</button>' : ''}${canCancel ? '<button type="button" class="et3-button et3-button--danger" data-et3-action="cancel-run">重试停止</button>' : ''}</div></section>`;
   }
 
@@ -840,12 +872,42 @@
     const signal = state.workbenchController.signal;
     root.addEventListener('click', event => handleWorkbenchClick(event), { signal });
     root.addEventListener('change', event => handleWorkbenchChange(event), { signal });
+    root.addEventListener('compositionstart', event => {
+      if (!event.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
+      state.compositionActive = true;
+    }, { signal });
+    root.addEventListener('compositionend', event => {
+      if (!event.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
+      state.compositionActive = false;
+      const deferred = releaseDeferredStatusCard();
+      if (!deferred) return;
+      setTimeout(() => {
+        if (state.compositionActive) {
+          deferStatusRenderDuringComposition(deferred);
+          return;
+        }
+        const activeSession = window.S && window.S.session && window.S.session.session_id;
+        if (deferred.sourceSessionId && activeSession && deferred.sourceSessionId !== activeSession) return;
+        if (state.card && String(deferred.runId || '') !== String(state.card.runId || '')) return;
+        renderStatusSurface(deferred);
+      }, 0);
+    }, { signal });
   }
 
   async function handleWorkbenchClick(event) {
     const button = event.target.closest('[data-et3-action]');
     if (!button || state.busy) return;
     const action = button.dataset.et3Action;
+    if (action === 'open-model-settings') {
+      if (typeof window.switchSettingsSection === 'function') window.switchSettingsSection('models');
+      else setLive('模型配置入口暂不可用，请从设置中打开模型配置。', true);
+      return true;
+    }
+    if (action === 'export-diagnostics') {
+      if (typeof window.exportProductDiagnostics === 'function') await window.exportProductDiagnostics();
+      else setLive('诊断导出入口暂不可用，请从设置中打开安全诊断。', true);
+      return true;
+    }
     if (action === 'close-workbench') {
       state.draft = captureWorkbenchDraft(workbenchRoot(), state.card);
       state.collapsed = true;
@@ -975,13 +1037,24 @@
           message: error.payload.error || error.message || '请检查此项',
         }]);
       }
-      setLive(error.message || '操作失败，请刷新状态后重试。', true);
+      setLive(mutationErrorMessage(error, '操作失败，请刷新状态后重试。'), true);
       return false;
     } finally { setBusy(button, false); }
   }
 
   function isConflictError(error) {
     return Number(error && error.status || 0) === 409;
+  }
+
+  function mutationErrorMessage(error, fallback) {
+    const code = String(error && error.payload && error.payload.code || '').trim();
+    if (code === 'stage_attempt_in_progress') {
+      return '当前阶段已有生成任务正在处理，请等待状态更新；如长时间无变化，可刷新后重试。';
+    }
+    if (error && error.payload && error.payload.product_error) {
+      return String(error.payload.product_error.message || fallback || '操作未能完成。');
+    }
+    return String(error && error.message || fallback || '操作未能完成。');
   }
 
   function stageActionControl(kind, action) {
@@ -1156,7 +1229,17 @@
     if (!nativeValid || errors.length) { showBriefFieldErrors(errors); return setLive('请先补全页面标出的必填项。', true); }
     const answers = Object.fromEntries(Object.entries(values).filter(([key]) => key.startsWith('question__')).map(([key, value]) => [key.slice('question__'.length), value]));
     if (!await saveBriefFields(button, values)) return false;
-    return mutate('/api/expert-teams/answer', { answers, skip_optional: true }, button, 'answer');
+    const answered = await mutate('/api/expert-teams/answer', { answers, skip_optional: true }, button, 'answer');
+    if (!answered) return false;
+    setLive('回答已保存，请确认规格。');
+    const heading = workbenchRoot()?.querySelector('[data-et3-brief-form]')?.closest('.et3-panel')?.querySelector('h3')
+      || workbenchRoot()?.querySelector('.et3-workbench-scroll h3');
+    if (heading) {
+      heading.setAttribute('tabindex', '-1');
+      heading.focus();
+      heading.scrollIntoView({ block: 'start' });
+    }
+    return true;
   }
 
   function saveBriefFields(button, values) {
@@ -1176,10 +1259,18 @@
   }
 
   async function addTextSource(button) {
-    const text = String(workbenchRoot().querySelector('[data-et3-source-text]')?.value || '').trim();
-    const label = String(workbenchRoot().querySelector('[data-et3-source-label]')?.value || '').trim() || '粘贴资料';
+    const textField = workbenchRoot().querySelector('[data-et3-source-text]');
+    const labelField = workbenchRoot().querySelector('[data-et3-source-label]');
+    const text = String(textField?.value || '').trim();
+    const label = String(labelField?.value || '').trim() || '粘贴资料';
     if (!text) return setLive('请先填写需要添加的文字资料。', true);
-    return mutate('/api/expert-teams/brief/sources/add', { expected_brief_revision: Number(state.card.brief?.revision || 0), source: { kind: 'provided_text', label, text } }, button, 'source-add');
+    const saved = await mutate('/api/expert-teams/brief/sources/add', { expected_brief_revision: Number(state.card.brief?.revision || 0), source: { kind: 'provided_text', label, text } }, button, 'source-add');
+    if (!saved) return false;
+    if (textField) textField.value = '';
+    if (labelField) labelField.value = '';
+    labelField?.focus();
+    setLive('文字资料已添加。');
+    return true;
   }
 
   async function addLocalFile(input) {

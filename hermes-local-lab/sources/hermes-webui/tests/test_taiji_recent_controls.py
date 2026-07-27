@@ -204,6 +204,14 @@ def test_taiji_recent_sessions_classify_expert_team_start_titles():
     assert "rawLooksWriteflow||rawLooksExpertTeam||displayLooksWriteflow" in kind_body
 
 
+def test_taiji_recent_sessions_prefer_durable_expert_team_launch_marker():
+    kind_start = HOME_JS.index("function taijiSessionKind(session)")
+    kind_body = HOME_JS[kind_start : HOME_JS.index("function taijiSessionFullTitle", kind_start)]
+
+    assert "session.expert_team_launch_transaction_id" in kind_body
+    assert "deep-research-team" in HOME_JS
+
+
 def test_taiji_new_chat_inherits_active_project_filter():
     assert "function activeProjectId()" in HOME_JS
     assert "const projectId=activeProjectId();" in HOME_JS

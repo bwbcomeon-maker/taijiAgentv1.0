@@ -1039,8 +1039,13 @@ async function _hydrateExpertTeamStatusCardForSession(sid,options={}){
   if(!run||!run.run_id)return {status:'preserved',reason:'invalid_response'};
   const runId=String(run.run_id);
   const runVersion=Number(run.version||0);
+  const hasLatestVersion=_expertTeamLatestAppliedVersionByRun.has(runId);
   const latestVersion=Number(_expertTeamLatestAppliedVersionByRun.get(runId)||0);
   if(runVersion<latestVersion)return {status:'preserved',reason:'stale_version'};
+  if(hasLatestVersion&&runVersion===latestVersion){
+    _scheduleWriteflowStatusRefresh(sid,run);
+    return {status:'preserved',reason:'unchanged_version'};
+  }
   const card=typeof _expertTeamStatusCardFromRun==='function'
     ? _expertTeamStatusCardFromRun(run,data)
     : (typeof _writeflowStatusCardFromRun==='function'?_writeflowStatusCardFromRun(run,data):null);

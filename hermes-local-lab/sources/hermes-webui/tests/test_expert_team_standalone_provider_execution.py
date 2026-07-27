@@ -403,6 +403,41 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
     ]
 
 
+def test_route_legacy_preflight_rejects_missing_runtime_auth_before_dispatch(
+    monkeypatch, tmp_path
+):
+    from api import config, oauth, profiles, routes, streaming
+    import hermes_constants
+
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(hermes_constants, "set_hermes_home_override", lambda _home: "profile-token")
+    monkeypatch.setattr(hermes_constants, "reset_hermes_home_override", lambda _token: None)
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda _resolver, **_kwargs: {
+            "provider": "deepseek",
+            "api_mode": "chat_completions",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "",
+        },
+    )
+    monkeypatch.setattr(config, "model_with_provider_context", lambda _model, _provider: "@deepseek:deepseek-chat")
+    monkeypatch.setattr(
+        config,
+        "resolve_model_provider",
+        lambda _model: ("deepseek-chat", "deepseek", None),
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_resolve_custom_provider_runtime_overrides",
+        lambda provider, api_key, base_url: (provider, api_key, base_url),
+    )
+
+    with pytest.raises(routes._ExpertTeamModelConfigurationRequired):
+        routes._resolve_standalone_legacy_provider_context(_strict_request())
+
+
 def _ready_direct_run(workspace: Path) -> dict:
     from api import expert_teams
     from api.expert_teams.contracts import confirm_document_brief
@@ -589,6 +624,62 @@ def test_execution_route_provider_preflight_failure_makes_zero_runtime_calls(
 
     assert status == 503
     assert payload["code"] == "runtime_incompatible"
+    assert dispatches == []
+
+
+def test_execution_route_missing_model_auth_returns_recoverable_product_error(
+    monkeypatch, tmp_path
+):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    dispatches = []
+    failed_calls = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda _request: (_ for _ in ()).throw(
+            routes._ExpertTeamModelConfigurationRequired(
+                "provider token should not reach the product UI"
+            )
+        ),
+    )
+
+    def capture_failure(*_args, **kwargs):
+        failed_calls.append(kwargs)
+        failed = deepcopy(run)
+        failed["workflow_state"] = "start_failed"
+        return failed
+
+    monkeypatch.setattr(
+        expert_teams,
+        "mark_expert_team_execution_start_failed",
+        capture_failure,
+    )
+    monkeypatch.setattr(
+        runtime_adapter.LegacyJournalRuntimeAdapter,
+        "start_run",
+        lambda self, request: dispatches.append(request),
+    )
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 409
+    assert payload["code"] == "model_configuration_required"
+    assert payload["product_error"]["code"] == "model_configuration_required"
+    assert payload["product_error"]["title"] == "模型配置待完成"
+    assert "provider token" not in repr(payload)
+    assert failed_calls[0]["error_code"] == "model_configuration_required"
+    assert failed_calls[0]["incident_id"] == payload["product_error"]["incident_id"]
     assert dispatches == []
 
 

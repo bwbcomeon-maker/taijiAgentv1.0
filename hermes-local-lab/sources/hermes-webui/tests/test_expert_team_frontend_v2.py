@@ -799,6 +799,41 @@ def test_overlapping_poll_responses_never_render_an_older_run_version():
     ]
 
 
+def test_polling_does_not_rerender_an_unchanged_expert_team_version():
+    hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    hydrate_end = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)
+    hydrate = SESSIONS_JS[hydrate_start:hydrate_end]
+    result = _run_node(
+        textwrap.dedent(
+            f"""
+            const S={{session:{{session_id:'session-1'}}}};
+            const rendered=[];
+            const api=async()=>({{run:{{run_id:'run-1',session_id:'session-1',version:7}}}});
+            const _isWriteflowHydrationForActiveSession=()=>true;
+            const _expertTeamLatestAppliedVersionByRun=new Map();
+            const _writeflowRunIsActive=()=>true;
+            const _rememberExpertTeamAppliedVersion=(runId,version)=>_expertTeamLatestAppliedVersionByRun.set(runId,version);
+            const _expertTeamStatusCardFromRun=(run)=>({{runId:run.run_id,version:run.version}});
+            const renderExpertTeamStatusSurface=(card)=>rendered.push(card.version);
+            const _scheduleWriteflowStatusRefresh=()=>{{}};
+            const _removeWriteflowStatusCardsFromMessages=()=>{{}};
+            const renderSessionArtifacts=()=>{{}};
+            {hydrate}
+            (async()=>{{
+              const first=await _hydrateExpertTeamStatusCardForSession('session-1');
+              const second=await _hydrateExpertTeamStatusCardForSession('session-1');
+              console.log(JSON.stringify({{rendered,first,second}}));
+            }})();
+            """
+        )
+    )
+    assert result == {
+        "rendered": [7],
+        "first": {"status": "handled"},
+        "second": {"status": "preserved", "reason": "unchanged_version"},
+    }
+
+
 def test_electron_smoke_has_real_out_dir_and_playwright_preflight():
     smoke = (REPO_ROOT / "tests" / "expert_team_electron_artifact_smoke.js").read_text(encoding="utf-8")
     assert 'argv[index] === "--out-dir"' in smoke

@@ -152,6 +152,17 @@
     else result.office=normalizedGate(value.office);
     return result;
   }
+  function normalizedProductError(value){
+    if(!value||typeof value!=='object'||str(value.schema)!=='taiji.product.error.v1')return null;
+    const allowedActions=new Set(['open_model_settings','export_diagnostics','retry']);
+    const actions=arr(value.recovery_actions).map(action=>({
+      id:str(action&&action.id),label:str(action&&action.label)
+    })).filter(action=>allowedActions.has(action.id)&&action.label);
+    return {
+      schema:'taiji.product.error.v1',code:str(value.code),title:str(value.title),message:str(value.message),
+      incidentId:str(value.incident_id),retryable:value.retryable===true,recoveryActions:actions
+    };
+  }
   function gateSummary(gates,deliveryStatus,state,standalone){
     if(standalone){
       if(state==='completed')return '本机交付已确认';
@@ -404,6 +415,7 @@
       confirmationGroup:str(question&&question.confirmation_group)
     }));
     const phaseProgress=(workflow&&workflow.progress)||view.phase_progress||{};
+    const productError=normalizedProductError(view.product_error);
     const draftIdentity={
       stageAttempt:Number(standalone?(stageActionBinding&&stageActionBinding.stage_attempt||0):(stageReview.stage_attempt||stageReview.attempt||stageResult.stage_attempt||stageResult.attempt||currentStage.stage_attempt||currentStage.attempt||stageAttemptReservation.stage_attempt||0)),
       artifactAttempt:Number(stageReviewOutput.stage_attempt||stageReviewOutput.attempt||stageResult.artifact_attempt||0),
@@ -448,6 +460,7 @@
         isIntake:phaseProgress.is_intake===true
       },
       presentation,
+      productError,
       brief:presentation.brief,
       completionGates:presentation.completionGates,
       deliveryStatus:presentation.deliveryStatus,

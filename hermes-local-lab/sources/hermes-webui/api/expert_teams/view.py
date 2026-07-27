@@ -1388,6 +1388,14 @@ def expert_team_run_view(run: dict) -> dict:
         "capability": _capability_model(run, contract_version),
         "artifact_validation": {"status": "unavailable", "blocking_count": 0},
     }
+    product_error_code = str(run.get("last_execution_error_code") or "").strip()
+    if product_error_code:
+        from api.product_contract import build_product_error
+
+        result["product_error"] = build_product_error(
+            product_error_code,
+            incident_id=run.get("last_execution_incident_id"),
+        )
     if standalone:
         result["product_mode"] = "standalone"
     if document_contract:

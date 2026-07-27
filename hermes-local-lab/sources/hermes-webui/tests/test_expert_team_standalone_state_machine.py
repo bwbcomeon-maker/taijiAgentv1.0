@@ -270,6 +270,145 @@ def _binding(run, *, key="confirm-stage-1", **overrides):
     return body
 
 
+def _started_standalone_run(standalone_env, *, key: str):
+    from api import expert_teams
+    from api.expert_teams.storage import read_run, write_run
+
+    _routes, workspace, _session_id, run_id = _launch(standalone_env, key=key)
+    run = read_run(workspace, run_id)
+    run["document_brief"] = _confirmed_brief()
+    run["workflow_state"] = "ready_to_generate"
+    run["status"] = "queued"
+    run["questions"] = []
+    ready = expert_teams.read_expert_team_run(workspace, write_run(workspace, run)["run_id"])
+    reserved = expert_teams.reserve_expert_team_execution_start(
+        workspace,
+        run_id,
+        expected_version=ready["version"],
+    )
+    generating = expert_teams.mark_expert_team_execution_started(
+        workspace,
+        run_id,
+        {
+            "stream_id": f"stream-{key}",
+            "turn_id": f"turn-{key}",
+            "runtime_run_id": f"runtime-{key}",
+            "runtime_adapter": "LegacyJournalRuntimeAdapter",
+            "execution_start_id": reserved["execution_start_id"],
+        },
+    )
+    return workspace, generating
+
+
+def test_failed_execution_terminalizes_stage_reservation_and_retry_allocates_new_attempt(standalone_env):
+    from api import expert_teams
+
+    workspace, generating = _started_standalone_run(
+        standalone_env,
+        key="failed-stage-retry",
+    )
+    first = generating["current_stage_attempt_reservation"]
+
+    failed = expert_teams.fail_expert_team_execution(
+        workspace,
+        generating["run_id"],
+        "model configuration unavailable",
+        stream_id=generating["execution_stream_id"],
+    )
+
+    assert failed["current_stage_attempt_reservation"]["status"] == "failed"
+    assert failed["stage_attempt_reservations"][-1]["status"] == "failed"
+
+    resumed = expert_teams.resume_expert_team(
+        workspace,
+        {
+            "run_id": failed["run_id"],
+            "session_id": failed["session_id"],
+            "expected_version": failed["version"],
+            "stage_id": failed["current_stage"]["task_id"],
+            "idempotency_key": "resume-failed-stage-retry",
+        },
+    )
+    replacement = expert_teams.reserve_expert_team_execution_start(
+        workspace,
+        resumed["run_id"],
+        expected_version=resumed["version"],
+    )
+
+    second = replacement["current_stage_attempt_reservation"]
+    assert second["stage_attempt"] == first["stage_attempt"] + 1
+    assert second["reservation_id"] != first["reservation_id"]
+
+
+def test_resume_repairs_legacy_recoverable_run_with_stale_active_stage_reservation(standalone_env):
+    from api import expert_teams
+    from api.expert_teams.storage import write_run
+
+    workspace, generating = _started_standalone_run(
+        standalone_env,
+        key="legacy-stale-reservation",
+    )
+    legacy = dict(generating)
+    legacy.update({
+        "workflow_state": "generation_failed",
+        "status": "blocked",
+        "execution_stream_id": "",
+        "execution_turn_id": "",
+        "execution_runtime_run_id": "",
+        "execution_start_id": "",
+    })
+    write_run(workspace, legacy)
+
+    resumed = expert_teams.resume_expert_team(
+        workspace,
+        {
+            "run_id": legacy["run_id"],
+            "session_id": legacy["session_id"],
+            "expected_version": legacy["version"],
+            "stage_id": legacy["current_stage"]["task_id"],
+            "idempotency_key": "resume-legacy-stale-reservation",
+        },
+    )
+
+    assert resumed["workflow_state"] == "ready_to_generate"
+    assert resumed["current_stage_attempt_reservation"]["status"] == "failed"
+    assert resumed["stage_attempt_reservations"][-1]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("transition_name", "expected_workflow", "expected_reservation"),
+    [
+        ("mark_expert_team_result_unverified", "result_unverified", "generated_invalid"),
+        ("mark_expert_team_execution_cancelled", "cancelled", "cancelled"),
+        ("fail_expert_team_execution_protocol", "generated_invalid", "generated_invalid"),
+    ],
+)
+def test_every_execution_exit_terminalizes_the_stage_reservation(
+    standalone_env,
+    transition_name,
+    expected_workflow,
+    expected_reservation,
+):
+    from api import expert_teams
+
+    workspace, generating = _started_standalone_run(
+        standalone_env,
+        key=f"terminal-{transition_name}",
+    )
+    transition = getattr(expert_teams, transition_name)
+
+    exited = transition(
+        workspace,
+        generating["run_id"],
+        "execution exited",
+        stream_id=generating["execution_stream_id"],
+    )
+
+    assert exited["workflow_state"] == expected_workflow
+    assert exited["current_stage_attempt_reservation"]["status"] == expected_reservation
+    assert exited["stage_attempt_reservations"][-1]["status"] == expected_reservation
+
+
 def test_local_stage_confirmation_is_bound_idempotent_and_has_no_enterprise_principal(standalone_env):
     from api import expert_teams
 

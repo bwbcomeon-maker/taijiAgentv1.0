@@ -462,6 +462,7 @@
 
   function taijiSessionKind(session){
     if(!session) return '问答';
+    const hasExpertTeamLaunchMarker=Boolean(String(session.expert_team_launch_transaction_id||'').trim());
     const rawTitle=normalizeTaijiSessionTitle(session.title||session.name||'');
     const displayTitle=normalizeTaijiSessionTitle(session.display_title||'');
     const writeflowTitle=normalizeTaijiSessionTitle(session.writeflow_title||'');
@@ -470,7 +471,7 @@
     const rawLooksExpertTeam=/^召唤[^：:\n]{0,64}专家团[：:]/.test(rawTitle);
     const displayLooksWriteflow=['内容创作','深度研究','写作团队','专家团'].includes(displayPrefix);
     const text=[displayTitle,writeflowTitle,rawTitle].filter(Boolean).join(' ');
-    if(session.writeflow_team_id||writeflowTitle||rawLooksWriteflow||rawLooksExpertTeam||displayLooksWriteflow||/接手这个写作任务|workflow-producer/.test(text)){
+    if(hasExpertTeamLaunchMarker||session.writeflow_team_id||writeflowTitle||rawLooksWriteflow||rawLooksExpertTeam||displayLooksWriteflow||/接手这个写作任务|workflow-producer/.test(text)){
       return '专家团';
     }
     return '问答';
