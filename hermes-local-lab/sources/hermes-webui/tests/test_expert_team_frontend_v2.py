@@ -1328,7 +1328,7 @@ def test_presenter_is_a_pure_state_mapper_for_brief_review_delivery_and_capabili
     assert result["confirmed"]["nextAction"]["label"] == "开始生成"
     assert result["generating"]["statusLabel"] == "AI 阶段协作正在生成"
     assert result["review"]["statusLabel"] == "阶段成果待复核"
-    assert result["invalid"]["statusLabel"] == "草稿未通过校验"
+    assert result["invalid"]["statusLabel"] == "生成结果需要重新处理"
     assert result["documentPending"]["gateSummary"] == "内容已确认，正在生成文档"
     assert result["officeFailed"]["gateSummary"] == "Office 验收不通过，待修改"
     assert result["delivered"]["gateSummary"] == "交付已通过"

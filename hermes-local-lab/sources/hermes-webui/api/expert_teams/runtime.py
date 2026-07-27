@@ -3376,7 +3376,7 @@ def _complete_enterprise_stage_artifact(
         run["stage_outputs"][-1] = output
         run["validation"] = {
             "status": "rewrite_required",
-            "message": "阶段产物未通过企业合同校验",
+            "message": "阶段生成结果格式或内容不完整",
             "code": output["artifact_error"]["code"],
         }
         run["last_validation_error"] = run["validation"]["message"]

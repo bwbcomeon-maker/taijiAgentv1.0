@@ -418,6 +418,12 @@
     if (current === 'ready' && actionAllowed(card, 'submit_stage_input')) {
       return ['需要你的补充', '专家团在继续当前阶段前，需要你确认一项信息。'];
     }
+    if (current === 'ready' && card.workflowState === 'generated_invalid' && actionAllowed(card, 'resume')) {
+      return [
+        card.presentation?.title || '生成格式需要重新处理',
+        card.presentation?.detail || '本次生成结果格式不完整，系统没有采用这份内容。请重新生成当前阶段。',
+      ];
+    }
     if (current === 'ready' && actionAllowed(card, 'resume')) {
       return ['任务等待恢复', '上一次执行未完整结束，可以从已保存状态继续。'];
     }
@@ -797,6 +803,9 @@
   }
 
   function resumePanel(card) {
+    if (card.workflowState === 'generated_invalid') {
+      return `<section class="et3-panel"><h3>重新生成当前阶段</h3><p>${esc(card.presentation?.detail || '本次生成结果格式不完整，系统没有采用这份内容。')}</p><p class="et3-help">重新生成只会重试当前阶段，不会新建会话，也不会采用上一次的无效内容。</p></section><div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="retry-run">重新生成当前阶段</button></div>`;
+    }
     return `<section class="et3-panel"><h3>任务等待恢复</h3><p>${esc(card.presentation?.detail || card.presentation?.summary || '上一次执行未完整结束，可以从已保存状态继续。')}</p><p class="et3-help">恢复只会继续当前任务，不会新建会话或重复生成已确认成果。</p></section><div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="retry-run">恢复任务</button></div>`;
   }
 

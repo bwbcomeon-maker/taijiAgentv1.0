@@ -12066,6 +12066,14 @@ function renderMessages(options){
         }
       }
     }
+    if(
+      typeof window.projectExpertTeamTranscriptContent==='function'&&
+      typeof window.isExpertTeamProtocolAssistant==='function'&&
+      window.isExpertTeamProtocolAssistant(S.messages,rawIdx)
+    ){
+      content=window.projectExpertTeamTranscriptContent(S.messages,rawIdx,content);
+      thinkingText='';
+    }
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';

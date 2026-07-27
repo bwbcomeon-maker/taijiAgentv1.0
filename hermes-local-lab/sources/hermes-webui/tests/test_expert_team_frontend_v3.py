@@ -575,6 +575,62 @@ def test_v3_ready_state_distinguishes_start_stage_input_and_resume_by_allowed_ac
     assert "任务等待恢复" in script
 
 
+def test_v3_generated_invalid_state_explains_safe_regeneration_instead_of_generic_recovery():
+    result = _run_v3_hooks(
+        """
+        const card={
+          productMode:'standalone',publicState:'ready',workflowState:'generated_invalid',allowedActions:['resume'],
+          title:'起草工作汇报初稿',presentation:{
+            title:'生成格式需要重新处理',
+            detail:'本次生成结果格式不完整，系统没有采用这份内容。请重新生成当前阶段。'
+          }
+        };
+        const copy=hooks.stateCopyFor(card,'ready');
+        const panel=hooks.statePanel(card,'ready');
+        console.log(JSON.stringify({copy,panel}));
+        """
+    )
+
+    assert result["copy"][0] == "生成格式需要重新处理"
+    assert "系统没有采用" in result["copy"][1]
+    assert "重新生成当前阶段" in result["panel"]
+    assert "任务等待恢复" not in result["panel"]
+
+
+def test_presenter_hides_expert_team_protocol_messages_but_keeps_normal_chat_unchanged():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const messages=[
+              {role:'user',content:'专家团开始生成：流程安排 · 起草工作汇报初稿'},
+              {role:'assistant',content:'<<<TAIJI_META_V1>>>{"payload":{}}<<<TAIJI_META_END>>>'},
+              {role:'user',content:'你好'},
+              {role:'assistant',content:'正常回复'},
+            ];
+            console.log(JSON.stringify({
+              isProtocol:context.window.isExpertTeamProtocolAssistant(messages,1),
+              projected:context.window.projectExpertTeamTranscriptContent(messages,1,messages[1].content),
+              normal:context.window.projectExpertTeamTranscriptContent(messages,3,messages[3].content),
+            }));
+            """
+        )
+    )
+
+    assert result == {
+        "isProtocol": True,
+        "projected": "专家团阶段处理已结束，请在右侧工作台查看结果状态和下一步。",
+        "normal": "正常回复",
+    }
+
+    ui = _read(ROOT / "static" / "ui.js")
+    messages = _read(ROOT / "static" / "messages.js")
+    assert "projectExpertTeamTranscriptContent" in ui
+    assert "isExpertTeamProtocolAssistant" in messages
+    assert "专家团正在生成当前阶段" in messages
+
+
 def test_presenter_uses_standalone_run_view_as_the_only_public_state_and_action_source():
     result = _run_node(
         textwrap.dedent(

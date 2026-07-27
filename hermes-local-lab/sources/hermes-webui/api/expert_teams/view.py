@@ -29,7 +29,7 @@ STATE_LABELS = {
     "generating": "专家团正在生成",
     "cancelling": "正在停止专家团",
     "awaiting_stage_input": "等待补充阶段信息",
-    "generated_invalid": "草稿未通过校验",
+    "generated_invalid": "生成结果需要重新处理",
     "awaiting_review": "阶段成果待复核",
     "awaiting_local_confirmation": "等待本机确认",
     "delivery_validation_required": "正文已确认，等待文档交付",
@@ -46,6 +46,18 @@ DOCUMENT_TYPE_LABELS = {
     "research_report": "研究报告",
 }
 _GATE_STATUSES = {"pending", "running", "failed", "invalidated", "passed"}
+_PROTOCOL_STAGE_ERROR_CODES = {
+    "empty_response",
+    "response_too_large",
+    "invalid_block_count",
+    "invalid_block_layout",
+    "invalid_meta_json",
+    "artifact_type_mismatch",
+    "invalid_type",
+    "unknown_field",
+    "required_field_missing",
+    "invalid_enum",
+}
 
 
 def _nested_brief_value(brief: dict, path: str):
@@ -112,7 +124,7 @@ def _primary_action(state: str) -> dict | None:
         "legacy_result_unverified": {"id": "regenerate_unverified", "label": "重新生成（已有结果保留）", "kind": "primary"},
         "generating": {"id": "cancel", "label": "停止生成", "kind": "danger"},
         "awaiting_stage_input": {"id": "submit_stage_input", "label": "确认并继续生成", "kind": "primary"},
-        "generated_invalid": {"id": "regenerate", "label": "重新生成", "kind": "primary"},
+        "generated_invalid": {"id": "regenerate", "label": "重新生成当前阶段", "kind": "primary"},
         "awaiting_review": {"id": "review_stage", "label": "去复核", "kind": "primary"},
         "revising": {"id": "cancel", "label": "停止生成", "kind": "danger"},
         "completed": {"id": "view_result", "label": "查看成果", "kind": "primary"},
@@ -165,7 +177,7 @@ def _secondary_actions(state: str, run: dict | None = None) -> list[dict]:
             },
         ]
     if state == "generated_invalid":
-        return [{"id": "view_result", "label": "查看草稿", "kind": "ghost"}]
+        return []
     if state == "result_unverified":
         return [{"id": "regenerate_unverified", "label": "放弃本次结果并重新生成", "kind": "ghost"}]
     return []
@@ -188,17 +200,86 @@ def _stage_output(run: dict) -> dict:
     outputs = [item for item in run.get("stage_outputs") or [] if isinstance(item, dict)]
     if not outputs:
         return {}
-    return deepcopy(outputs[-1])
+    output = deepcopy(outputs[-1])
+    if str(output.get("status") or "") != "invalid":
+        return output
+    return {
+        key: deepcopy(output[key])
+        for key in (
+            "task_id",
+            "stage_id",
+            "stage_attempt",
+            "worker_id",
+            "worker_name",
+            "status",
+            "created_at",
+            "finished_at",
+        )
+        if key in output
+    } | {
+        "summary": _generated_invalid_detail(run),
+        "content": "",
+    }
+
+
+def _latest_invalid_error_code(run: dict) -> str:
+    validation = run.get("validation") if isinstance(run.get("validation"), dict) else {}
+    code = str(validation.get("code") or "").strip()
+    if code:
+        return code
+    outputs = run.get("stage_outputs") if isinstance(run.get("stage_outputs"), list) else []
+    for output in reversed(outputs):
+        if not isinstance(output, dict) or str(output.get("status") or "") != "invalid":
+            continue
+        error = output.get("artifact_error") if isinstance(output.get("artifact_error"), dict) else {}
+        return str(error.get("code") or "").strip()
+    return ""
+
+
+def _generated_invalid_detail(run: dict) -> str:
+    if _latest_invalid_error_code(run) in _PROTOCOL_STAGE_ERROR_CODES:
+        return "本次生成结果格式不完整，系统没有采用这份内容。请重新生成当前阶段。"
+    return "本次生成结果未满足当前阶段要求，系统没有采用这份内容。请重新生成当前阶段。"
+
+
+def _generated_invalid_title(run: dict) -> str:
+    if _latest_invalid_error_code(run) in _PROTOCOL_STAGE_ERROR_CODES:
+        return "生成格式需要重新处理"
+    return "阶段内容需要补充或调整"
+
+
+def _public_validation(run: dict) -> dict:
+    validation = run.get("validation") if isinstance(run.get("validation"), dict) else {}
+    if str(run.get("workflow_state") or "") != "generated_invalid":
+        return deepcopy(validation)
+    return {
+        "status": "rewrite_required",
+        "code": _latest_invalid_error_code(run) or "generated_invalid",
+        "message": _generated_invalid_detail(run),
+    }
 
 
 def _stage_result(run: dict) -> dict:
+    output = _stage_output(run)
+    if (
+        str(run.get("workflow_state") or "") == "generated_invalid"
+        and str(output.get("status") or "") == "invalid"
+    ):
+        return {
+            "stage_id": str(output.get("task_id") or output.get("stage_id") or ""),
+            "worker_id": str(output.get("worker_id") or ""),
+            "summary": _generated_invalid_detail(run),
+            "deliverable": "",
+            "review_items": [],
+            "next_action": "重新生成当前阶段。",
+            "validation": _public_validation(run),
+        }
     results = [item for item in run.get("stage_results") or [] if isinstance(item, dict)]
     if results:
         return deepcopy(results[-1])
     result = run.get("stage_result")
     if isinstance(result, dict):
         return deepcopy(result)
-    output = _stage_output(run)
     if not output:
         return {}
     return {
@@ -208,7 +289,7 @@ def _stage_result(run: dict) -> dict:
         "deliverable": str(output.get("content") or ""),
         "review_items": [],
         "next_action": "请复核当前阶段成果。",
-        "validation": deepcopy(run.get("validation") or {}),
+        "validation": _public_validation(run),
     }
 
 
@@ -284,7 +365,7 @@ def _presentation(run: dict, business_context: dict) -> dict:
         pending = _pending_input(run)
         detail = str(pending.get("description") or pending.get("question") or "当前专家需要你确认后继续生成。")
     elif state == "generated_invalid":
-        detail = str(run.get("last_validation_error") or "草稿未通过办公材料口径校验。")
+        detail = _generated_invalid_detail(run)
     elif state == "awaiting_review":
         validation = run.get("validation") if isinstance(run.get("validation"), dict) else {}
         if standalone:
@@ -348,6 +429,7 @@ def _presentation(run: dict, business_context: dict) -> dict:
         )
         title = {
             "awaiting_review": "成果待本机确认",
+            "generated_invalid": _generated_invalid_title(run),
             "completion_reconciling": "正在恢复交付状态",
             "completed_invalid": "交付文档已变化",
         }.get(state, title)
@@ -367,7 +449,11 @@ def _presentation(run: dict, business_context: dict) -> dict:
             "legacy_result_unverified",
             "generated_invalid",
         }:
-            primary_action = {"id": "resume", "label": "重新尝试", "kind": "primary"}
+            primary_action = {
+                "id": "resume",
+                "label": "重新生成当前阶段" if state == "generated_invalid" else "重新尝试",
+                "kind": "primary",
+            }
     return {
         "state": state,
         "title": title,
@@ -1490,8 +1576,12 @@ def expert_team_run_view(run: dict) -> dict:
             result["contract_version"] = contract_version
         result["brief"] = brief
         enterprise_result = _enterprise_stage_result(run)
+        if standalone and state == "generated_invalid" and not enterprise_result:
+            enterprise_result = _stage_result(run)
         result["artifact_validation"] = deepcopy(
-            enterprise_result.get("validation")
+            {"status": "invalid", "blocking_count": 1}
+            if standalone and state == "generated_invalid"
+            else enterprise_result.get("validation")
             if isinstance(enterprise_result.get("validation"), dict)
             else {"status": "unavailable", "blocking_count": 0}
         )

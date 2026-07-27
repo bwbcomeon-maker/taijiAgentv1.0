@@ -1,6 +1,26 @@
 (function(){
   function arr(value){ return Array.isArray(value)?value:[]; }
   function str(value,fallback){ const text=String(value==null?'':value).trim(); return text||fallback||''; }
+  function messageText(message){
+    const content=message&&message.content;
+    if(Array.isArray(content)){
+      return content.filter(part=>part&&part.type==='text').map(part=>part.text||part.content||'').join('\n');
+    }
+    return String(content==null?'':content);
+  }
+  function isExpertTeamProtocolAssistant(messages,index){
+    if(!Array.isArray(messages)||!Number.isInteger(index)||index<1)return false;
+    const message=messages[index];
+    if(!message||message.role!=='assistant')return false;
+    let previousIndex=index-1;
+    while(previousIndex>=0&&messages[previousIndex]&&messages[previousIndex].role==='tool')previousIndex-=1;
+    const previous=messages[previousIndex];
+    return !!(previous&&previous.role==='user'&&/^专家团开始生成：/.test(messageText(previous).trim()));
+  }
+  function projectExpertTeamTranscriptContent(messages,index,content){
+    if(!isExpertTeamProtocolAssistant(messages,index))return content;
+    return '专家团阶段处理已结束，请在右侧工作台查看结果状态和下一步。';
+  }
   function normalizeAction(action){
     if(!action||typeof action!=='object')return null;
     return {
@@ -127,7 +147,7 @@
     revising:'AI 阶段协作正在修改',
     cancelling:'正在停止生成',
     awaiting_stage_input:'当前阶段需要确认',
-    generated_invalid:'草稿未通过校验',
+    generated_invalid:'生成结果需要重新处理',
     awaiting_review:'阶段成果待复核',
     delivery_validation_required:'内容已确认，正在生成文档',
     completion_reconciling:'正在恢复交付完成状态',
@@ -282,6 +302,7 @@
     const capability=view.capability&&typeof view.capability==='object'?view.capability:{};
     return {
       state,
+      workflowState:str(presentation.state,run.workflow_state||state),
       title:str(presentation.title,'专家团状态'),
       statusLabel:STATE_LABELS[state]||str(presentation.title,'专家团状态'),
       visibleTitle:str(presentation.visible_title||business.visible_title||run.title,'专家团任务'),
@@ -436,6 +457,7 @@
       version:Number(run.version||0),
       productMode,
       publicState,
+      workflowState:presentation.workflowState,
       allowedActions,
       stageActionBinding,
       cancelActionBinding,
@@ -499,5 +521,7 @@
     window.buildExpertTeamStageActionPayload=buildExpertTeamStageActionPayload;
     window.buildExpertTeamDeliveryActionPayload=buildExpertTeamDeliveryActionPayload;
     window.buildExpertTeamDeliveryRecoveryPayload=buildExpertTeamDeliveryRecoveryPayload;
+    window.isExpertTeamProtocolAssistant=isExpertTeamProtocolAssistant;
+    window.projectExpertTeamTranscriptContent=projectExpertTeamTranscriptContent;
   }
 })();

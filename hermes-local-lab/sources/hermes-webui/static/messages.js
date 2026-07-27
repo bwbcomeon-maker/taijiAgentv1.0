@@ -1130,6 +1130,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  const _EXPERT_TEAM_LIVE_COPY='专家团正在生成当前阶段，请在右侧工作台查看进度。';
+  function _expertTeamProtocolMessages(){
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&Array.isArray(inflight.messages))return inflight.messages;
+    return _isActiveSession()&&Array.isArray(S.messages)?S.messages:[];
+  }
+  function _isExpertTeamProtocolStream(){
+    if(typeof window.isExpertTeamProtocolAssistant!=='function')return false;
+    const messages=_expertTeamProtocolMessages();
+    for(let index=messages.length-1;index>=0;index--){
+      if(messages[index]&&messages[index].role==='assistant'){
+        return window.isExpertTeamProtocolAssistant(messages,index);
+      }
+    }
+    return false;
+  }
+  function _expertTeamLiveDisplayText(text){
+    return _isExpertTeamProtocolStream()?_EXPERT_TEAM_LIVE_COPY:text;
+  }
   function _clearActivePaneInflightIfOwner(){
     if(_isActiveSession()) clearInflight();
   }
@@ -1857,9 +1876,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _streamFadeCurrentDisplayText(){
     const parsed=_parseStreamState();
-    return segmentStart===0
+    return _expertTeamLiveDisplayText(segmentStart===0
       ? parsed.displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      : _stripXmlToolCalls(assistantText.slice(segmentStart)));
   }
   function _drainStreamFadeBeforeDone(onDone){
     const drainStartedAt=performance.now();
@@ -1896,9 +1915,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const force=!!(options&&options.force);
     if(!assistantBody||(!force&&!_renderPending)) return;
     if(_renderPending) _cancelAnimationFramePendingStreamRender();
-    const displayText=segmentStart===0
+    const displayText=_expertTeamLiveDisplayText(segmentStart===0
       ? _parseStreamState().displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      : _stripXmlToolCalls(assistantText.slice(segmentStart)));
     if(_smdParser){
       _smdWrite(displayText);
     } else if(renderMd){
@@ -1959,11 +1978,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_streamFinalized) return;
       _lastRenderMs=performance.now();
       const parsed=_parseStreamState();
-      _renderLiveThinking(parsed);
+      if(_isExpertTeamProtocolStream())removeThinking();
+      else _renderLiveThinking(parsed);
       if(assistantBody){
-        const displayText = segmentStart===0
+        const displayText = _expertTeamLiveDisplayText(segmentStart===0
           ? parsed.displayText                          // first segment: uses think-tag stripping
-          : _stripXmlToolCalls(assistantText.slice(segmentStart));
+          : _stripXmlToolCalls(assistantText.slice(segmentStart)));
         if(_shouldUseStreamFade()){
           const caughtUp=_renderStreamingFadeMarkdown(displayText);
           if(!caughtUp&&!_streamFinalized){
@@ -1984,9 +2004,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // Fallback: smd not loaded yet, reconnect session, or smd unavailable — use renderMd
             // for every live segment. Without this, the first segment inserts raw
             // parsed.displayText and users see unformatted markdown until done.
-            const fallbackText = segmentStart===0
-              ? parsed.displayText
-              : _stripXmlToolCalls(assistantText.slice(segmentStart));
+            const fallbackText = displayText;
             assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
           }
         }
@@ -2459,7 +2477,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
-          if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+          if(!_isExpertTeamProtocolStream()&&typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
         }
         if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
           const _goalNext=_pendingGoalContinuation;
@@ -2480,7 +2498,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+        sendBrowserNotification(
+          'Response complete',
+          _isExpertTeamProtocolStream()
+            ? '专家团阶段处理已结束，请在右侧工作台查看结果状态。'
+            : (assistantText?assistantText.slice(0,100):'Task finished')
+        );
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();

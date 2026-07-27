@@ -519,6 +519,65 @@ def test_standalone_view_projects_real_workflow_without_enterprise_identity_capa
         assert forbidden not in serialized
 
 
+def test_standalone_invalid_provider_output_is_actionable_without_raw_protocol_leakage():
+    from api import expert_teams
+    from api.expert_teams.view import expert_team_run_view
+
+    run = _build_profile_run(expert_teams)
+    raw_protocol = '{"internal":"RAW-PROTOCOL-MUST-STAY-HIDDEN"}'
+    run["workflow_state"] = "generated_invalid"
+    run["validation"] = {
+        "status": "rewrite_required",
+        "code": "invalid_block_count",
+        "message": "阶段产物未通过企业合同校验",
+    }
+    run["last_validation_error"] = "阶段产物未通过企业合同校验"
+    run["stage_outputs"] = [
+        {
+            "task_id": "plan",
+            "status": "invalid",
+            "content": raw_protocol,
+            "artifact_error": {"code": "invalid_block_count", "field": "meta"},
+        }
+    ]
+
+    view = expert_team_run_view(run)
+    serialized = json.dumps(view, ensure_ascii=False)
+
+    assert view["presentation"]["title"] == "生成格式需要重新处理"
+    assert "重新生成当前阶段" in view["presentation"]["detail"]
+    assert view["stage_result"]["deliverable"] == ""
+    assert raw_protocol not in serialized
+    assert "企业合同" not in serialized
+    assert "resume" in view["allowed_actions"]
+
+
+def test_standalone_valid_protocol_with_blocking_content_uses_content_not_format_copy():
+    from api import expert_teams
+    from api.expert_teams.view import expert_team_run_view
+
+    run = _build_profile_run(expert_teams)
+    run["workflow_state"] = "generated_invalid"
+    run["validation"] = {
+        "status": "rewrite_required",
+        "blocking_count": 1,
+        "message": "阶段产物存在阻断问题",
+    }
+    run["stage_outputs"] = [
+        {
+            "task_id": "plan",
+            "status": "invalid",
+            "content": "已按协议生成，但存在阻断项",
+        }
+    ]
+
+    view = expert_team_run_view(run)
+
+    assert view["presentation"]["title"] == "阶段内容需要补充或调整"
+    assert "未满足当前阶段要求" in view["presentation"]["detail"]
+    assert view["stage_result"]["deliverable"] == ""
+
+
 def test_standalone_completed_without_local_confirmation_projects_as_pending_not_completed():
     from api.expert_teams.contracts import confirm_document_brief
     from api.expert_teams.view import expert_team_run_view
