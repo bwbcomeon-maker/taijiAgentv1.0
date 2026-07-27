@@ -409,6 +409,7 @@
     if(match&&match[1]){
       return match[1]
         .replace(/内容创作专家团/,'内容创作')
+        .replace(/深度材料研究团/,'深度研究')
         .replace(/深度文章研究团/,'深度研究')
         .replace(/专家团$/,'')
         .replace(/研究团$/,'研究')
@@ -419,12 +420,12 @@
 
   function taijiCompactTopic(value){
     let text=normalizeTaijiSessionTitle(value);
-    const expertStartMatch=text.match(/^召唤[^：:\n]{0,64}专家团[：:]\s*(.+)$/);
+    const expertStartMatch=text.match(/^召唤[^：:\n]{0,64}(?:专家团|研究团)[：:]\s*(.+)$/);
     if(expertStartMatch&&expertStartMatch[1]){
       return taijiClampSessionTitle(expertStartMatch[1].trim(),32);
     }
     text=text
-      .replace(/^召唤[^：:\n]{0,64}专家团[：:]\s*/,'')
+      .replace(/^召唤[^：:\n]{0,64}(?:专家团|研究团)[：:]\s*/,'')
       .replace(/^请【[^】]+】接手这个写作任务[。.\s]*/,'')
       .replace(/^请把这个任务交给[^，,。.!！?？]*[，,。.!！?？\s]*/,'')
       .replace(/^请?帮我(整理|写|生成|规划|输出|起草|做)?一篇(关于|有关)?/i,'')
@@ -468,7 +469,7 @@
     const writeflowTitle=normalizeTaijiSessionTitle(session.writeflow_title||'');
     const displayPrefix=normalizeTaijiSessionTitle((displayTitle.split(/[｜|]/)[0]||''));
     const rawLooksWriteflow=rawTitle.startsWith('请【')&&rawTitle.includes('接手这个写作任务');
-    const rawLooksExpertTeam=/^召唤[^：:\n]{0,64}专家团[：:]/.test(rawTitle);
+    const rawLooksExpertTeam=/^召唤[^：:\n]{0,64}(?:专家团|研究团)[：:]/.test(rawTitle);
     const displayLooksWriteflow=['内容创作','深度研究','写作团队','专家团'].includes(displayPrefix);
     const text=[displayTitle,writeflowTitle,rawTitle].filter(Boolean).join(' ');
     if(hasExpertTeamLaunchMarker||session.writeflow_team_id||writeflowTitle||rawLooksWriteflow||rawLooksExpertTeam||displayLooksWriteflow||/接手这个写作任务|workflow-producer/.test(text)){
