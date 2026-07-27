@@ -271,12 +271,33 @@ def _catalog_stage(run: dict, stage: dict) -> dict:
 
 
 def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
-    """Return approved artifacts for declared dependencies only, in dependency order."""
+    """Return human-authorized dependency artifacts in declared order.
+
+    Enterprise approvals and standalone local confirmations use different
+    persisted status names.  Both are authorization decisions, but a local
+    confirmation is accepted only when its immutable artifact reference is
+    present in both the canonical approval map and the confirmation journal.
+    """
     template = get_template(str(run.get("team_id") or ""))
     stage = next((item for item in template.get("tasks") or [] if item.get("id") == stage_id), None)
     if not isinstance(stage, dict):
         raise PromptContractError("unknown_stage", "阶段未在服务器目录中声明")
     outputs = run.get("stage_outputs") if isinstance(run.get("stage_outputs"), list) else []
+    standalone_confirmation = (
+        str(run.get("product_mode") or "") == "standalone"
+        and str((run.get("review_policy") or {}).get("kind") or "") == "local_confirmation"
+    )
+    required_status = "confirmed" if standalone_confirmation else "approved"
+    approved_refs = (
+        run.get("approved_stage_artifact_refs")
+        if isinstance(run.get("approved_stage_artifact_refs"), dict)
+        else {}
+    )
+    confirmations = (
+        run.get("local_stage_confirmations")
+        if isinstance(run.get("local_stage_confirmations"), list)
+        else []
+    )
     selected = []
     for dependency in stage.get("depends_on") or []:
         output = next(
@@ -285,7 +306,7 @@ def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
                 for item in reversed(outputs)
                 if isinstance(item, dict)
                 and item.get("task_id") == dependency
-                and item.get("status") == "approved"
+                and item.get("status") == required_status
                 and isinstance(item.get("artifact"), dict)
             ),
             None,
@@ -295,6 +316,24 @@ def approved_inputs_for_stage(run: dict, stage_id: str) -> list[dict]:
         artifact = deepcopy(output["artifact"])
         if not str(artifact.get("artifact_id") or "") or not str(artifact.get("sha256") or ""):
             raise PromptContractError("approved_artifact_ref_invalid", "已批准产物缺少不可变引用")
+        if standalone_confirmation:
+            expected_ref = approved_refs.get(dependency)
+            immutable_ref = {
+                "artifact_id": str(artifact.get("artifact_id") or ""),
+                "sha256": str(artifact.get("sha256") or ""),
+            }
+            journaled = any(
+                isinstance(item, dict)
+                and str(item.get("stage_id") or "") == dependency
+                and str(item.get("artifact_id") or "") == immutable_ref["artifact_id"]
+                and str(item.get("artifact_sha256") or "") == immutable_ref["sha256"]
+                for item in confirmations
+            )
+            if expected_ref != immutable_ref or not journaled:
+                raise PromptContractError(
+                    "approved_artifact_ref_invalid",
+                    "本机确认产物的不可变引用不一致",
+                )
         selected.append(artifact)
     return selected
 

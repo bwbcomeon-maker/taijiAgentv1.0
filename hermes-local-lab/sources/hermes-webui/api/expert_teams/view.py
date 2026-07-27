@@ -675,14 +675,14 @@ def _progress(run: dict) -> dict:
     done = sum(1 for task in tasks if str(task.get("status") or "") == "done")
     current = str(run.get("phase") or "")
     state = str(run.get("workflow_state") or "")
-    is_intake = state in {
+    current_index = int(run.get("current_stage_index") or 0)
+    is_intake = current_index == 0 and state in {
         "collecting_required",
         "collecting_optional",
         "ready_to_generate",
         "starting",
         "start_failed",
     }
-    current_index = int(run.get("current_stage_index") or 0)
     if is_intake:
         done = 0
         current = "需求确认"

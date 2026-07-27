@@ -426,6 +426,14 @@ def test_local_stage_confirmation_is_bound_idempotent_and_has_no_enterprise_prin
         "artifact_id": reviewed["current_stage_artifact_ref"]["artifact_id"],
         "sha256": reviewed["current_stage_artifact_ref"]["sha256"],
     }
+    assert confirmed["view"]["phase_progress"] == {
+        "done": 1,
+        "total": 5,
+        "current": "素材整理",
+        "current_index": 1,
+        "is_intake": False,
+    }
+    assert confirmed["view"]["presentation"]["current_stage"]["id"] == "materials"
     assert len(confirmed["local_stage_confirmations"]) == 1
     local_confirmation = confirmed["local_stage_confirmations"][0]
     assert local_confirmation["stage_attempt"] == 1

@@ -71,8 +71,18 @@ def test_zero_source_work_report_confirms_and_materials_dispatch_binds_empty_sna
     dispatch_run["stage_outputs"] = [
         {
             "task_id": "plan",
-            "status": "approved",
+            "status": "confirmed",
             "artifact": {"artifact_id": "plan:1", "sha256": "b" * 64},
+        }
+    ]
+    dispatch_run["approved_stage_artifact_refs"] = {
+        "plan": {"artifact_id": "plan:1", "sha256": "b" * 64}
+    }
+    dispatch_run["local_stage_confirmations"] = [
+        {
+            "stage_id": "plan",
+            "artifact_id": "plan:1",
+            "artifact_sha256": "b" * 64,
         }
     ]
     request = routes._expert_team_enterprise_gateway_request(tmp_path, dispatch_run)

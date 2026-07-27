@@ -133,6 +133,61 @@ def test_prompt_is_two_role_separated_messages_with_canonical_data_envelope():
     assert [item["artifact_id"] for item in envelope["approved_input_artifacts"]] == ["art-plan", "art-materials"]
     assert "art-secret" not in request["messages"][1]["content"]
     assert "历史聊天" not in request["messages"][1]["content"]
+
+
+def test_standalone_locally_confirmed_dependency_is_an_approved_prompt_input():
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _run("materials")
+    plan = run["stage_outputs"][0]["artifact"]
+    run.update(
+        {
+            "product_mode": "standalone",
+            "review_policy": {"kind": "local_confirmation"},
+            "approved_stage_artifact_refs": {
+                "plan": {
+                    "artifact_id": plan["artifact_id"],
+                    "sha256": plan["sha256"],
+                }
+            },
+            "local_stage_confirmations": [
+                {
+                    "stage_id": "plan",
+                    "artifact_id": plan["artifact_id"],
+                    "artifact_sha256": plan["sha256"],
+                }
+            ],
+        }
+    )
+    run["stage_outputs"][0]["status"] = "confirmed"
+    source_context = {
+        "snapshot_id": "snapshot-empty",
+        "snapshot_sha256": "4" * 64,
+        "brief_sha256": run["document_brief"]["confirmed_sha256"],
+        "sources": [],
+    }
+    run["source_context_snapshot_ref"] = {
+        "snapshot_id": source_context["snapshot_id"],
+        "sha256": source_context["snapshot_sha256"],
+        "brief_sha256": source_context["brief_sha256"],
+    }
+
+    request = build_stage_gateway_request(
+        run,
+        {
+            "id": "materials",
+            "executor": "model",
+            "artifact_type": "material_ledger",
+            "depends_on": ["plan"],
+        },
+        source_context=source_context,
+    )
+
+    envelope = json.loads(request["messages"][1]["content"])
+    assert [
+        artifact["artifact_id"]
+        for artifact in envelope["approved_input_artifacts"]
+    ] == [plan["artifact_id"]]
     assert CANARY not in request["messages"][0]["content"]
     assert '\\\"role\\\"' in request["messages"][1]["content"]
     assert len(request["messages"]) == 2
