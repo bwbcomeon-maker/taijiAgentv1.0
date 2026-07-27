@@ -230,10 +230,11 @@ async function main() {
     await page.waitForFunction(() => document.body.innerText.includes('Electron 验证资料'));
     await page.getByRole('button', { name: '保存规格' }).click();
     await page.waitForFunction(() => document.body.innerText.includes('操作已保存'));
-    const intakeAnswers = await page.locator('[data-et3-brief-form] textarea[name^="question__"]').all();
+    const intakeAnswers = await page.locator('[data-et3-brief-form] textarea[name^="question__"][required]').all();
     for (let index = 0; index < intakeAnswers.length; index += 1) {
       await intakeAnswers[index].fill(`Electron 验证答案 ${index + 1}`);
     }
+    assert(await page.locator('[data-et3-brief-form] textarea[name^="question__"]:not([required])').count() > 0, '真实任务没有覆盖可选问题留空场景');
     await page.getByRole('button', { name: '保存并继续' }).click();
     await page.getByRole('button', { name: '确认规格' }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: '确认规格' }).click();

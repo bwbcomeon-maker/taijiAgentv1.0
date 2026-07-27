@@ -335,6 +335,15 @@ def test_v3_custom_confirmation_validates_before_request_and_links_server_field_
     assert "aria-describedby" in script
 
 
+def test_v3_save_and_continue_skips_blank_optional_intake_questions():
+    script = _read(SCRIPT)
+    submit_start = script.index("async function submitAnswers(button)")
+    submit_end = script.index("function saveBriefFields", submit_start)
+    submit_source = script[submit_start:submit_end]
+
+    assert "skip_optional: true" in submit_source
+
+
 def test_v3_client_required_validation_returns_one_error_per_profile_field():
     result = _run_v3_hooks(
         """

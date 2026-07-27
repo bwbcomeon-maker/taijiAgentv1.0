@@ -1156,7 +1156,7 @@
     if (!nativeValid || errors.length) { showBriefFieldErrors(errors); return setLive('请先补全页面标出的必填项。', true); }
     const answers = Object.fromEntries(Object.entries(values).filter(([key]) => key.startsWith('question__')).map(([key, value]) => [key.slice('question__'.length), value]));
     if (!await saveBriefFields(button, values)) return false;
-    return mutate('/api/expert-teams/answer', { answers, skip_optional: false }, button, 'answer');
+    return mutate('/api/expert-teams/answer', { answers, skip_optional: true }, button, 'answer');
   }
 
   function saveBriefFields(button, values) {
