@@ -852,6 +852,24 @@ def test_v3_product_error_actions_reuse_existing_settings_and_diagnostics_entryp
     assert "window.exportProductDiagnostics()" in script
 
 
+def test_v3_product_error_takes_priority_over_generic_resume_panel():
+    result = _run_v3_hooks(
+        """
+        const card={
+          productMode:'standalone',allowedActions:['resume'],presentation:{detail:'raw provider detail'},
+          productError:{schema:'taiji.product.error.v1',title:'模型配置待完成',message:'请先完成模型配置，再重新执行此操作。',recoveryActions:[{id:'open_model_settings',label:'打开模型配置'},{id:'export_diagnostics',label:'导出诊断'}]}
+        };
+        console.log(JSON.stringify({html:hooks.statePanel(card,'ready')}));
+        """
+    )
+
+    assert "模型配置待完成" in result["html"]
+    assert "打开模型配置" in result["html"]
+    assert "导出诊断" in result["html"]
+    assert "任务等待恢复" not in result["html"]
+    assert "raw provider detail" not in result["html"]
+
+
 def test_v3_retry_cancel_uses_only_the_complete_server_binding_and_keeps_refresh():
     result = _run_v3_hooks(
         """

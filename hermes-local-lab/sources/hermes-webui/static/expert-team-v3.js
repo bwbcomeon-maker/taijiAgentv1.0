@@ -681,6 +681,7 @@
   function statePanel(card, current) {
     if (current === 'legacy_read_only') return legacyPanel(card);
     if (current === 'intake') return briefPanel(card);
+    if (card.productError?.schema === 'taiji.product.error.v1') return failurePanel(card, current);
     if (current === 'ready' && actionAllowed(card, 'submit_stage_input')) return stageInputPanel(card);
     if (current === 'ready' && actionAllowed(card, 'resume')) return resumePanel(card);
     if (current === 'ready') return readyPanel(card);
