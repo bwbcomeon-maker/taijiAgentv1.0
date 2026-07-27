@@ -735,6 +735,31 @@ def test_stage_review_buttons_are_disabled_when_server_binding_is_missing():
     }
 
 
+def test_stage_review_uses_deliverable_and_summary_before_placeholder():
+    result = _run_v3_hooks(
+        """
+        function render(output){
+          const card={productMode:'standalone',allowedActions:[],stageActionBinding:null,
+            stageReview:{output},stageResult:{},presentation:{},reviewItems:[]};
+          return hooks.statePanel(card,'awaiting_stage_confirmation');
+        }
+        const deliverableHtml=render({deliverable:'完整阶段成果',summary:'阶段摘要'});
+        const summaryHtml=render({summary:'仅有阶段摘要'});
+        console.log(JSON.stringify({
+          usesDeliverable:deliverableHtml.includes('完整阶段成果'),
+          usesSummary:summaryHtml.includes('仅有阶段摘要'),
+          hidesPlaceholder:!deliverableHtml.includes('阶段成果已生成，请稍后刷新状态。'),
+        }));
+        """
+    )
+
+    assert result == {
+        "usesDeliverable": True,
+        "usesSummary": True,
+        "hidesPlaceholder": True,
+    }
+
+
 def test_presenter_projects_only_a_complete_server_cancel_action_binding():
     result = _run_node(
         textwrap.dedent(

@@ -293,6 +293,207 @@ def _stage_result(run: dict) -> dict:
     }
 
 
+_REVIEW_STATUS_LABELS = {
+    "included": "已纳入",
+    "excluded": "未纳入",
+    "verified": "已核验",
+    "provided_unverified": "已提供，待核验",
+    "missing": "缺失",
+    "conflicted": "存在冲突",
+    "insufficient": "证据不足",
+    "open": "待处理",
+    "resolved": "已解决",
+    "covered_by_provided_sources": "已有资料覆盖",
+    "accepted_out_of_scope": "已确认不在本次范围",
+    "fact": "事实",
+    "estimate": "估算",
+    "judgment": "判断",
+    "provided_only": "仅使用已提供资料",
+    "approved_external": "允许使用已批准的外部资料",
+    "footnote": "脚注",
+    "inline": "正文内标注",
+}
+
+
+def _review_label(value) -> str:
+    text = str(value or "").strip()
+    return _REVIEW_STATUS_LABELS.get(text, text)
+
+
+def _review_values(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+def _append_review_list(lines: list[str], title: str, value) -> None:
+    values = _review_values(value)
+    if not values:
+        return
+    lines.extend(["", f"{title}："])
+    lines.extend(f"- {item}" for item in values)
+
+
+def _append_source_assessments(lines: list[str], value) -> None:
+    items = [item for item in value or [] if isinstance(item, dict)]
+    if not items:
+        return
+    lines.extend(["", "资料评估："])
+    for index, item in enumerate(items, start=1):
+        status = _review_label(item.get("status")) or "待评估"
+        grade = str(item.get("evidence_grade") or "").strip()
+        heading = f"- 资料 {index}：{status}"
+        if grade:
+            heading += f"（证据等级 {grade}）"
+        lines.append(heading)
+        applicability = str(item.get("applicability") or item.get("reason") or "").strip()
+        if applicability:
+            lines.append(f"  适用性：{applicability}")
+        exclusion_reason = str(item.get("exclusion_reason") or "").strip()
+        if exclusion_reason:
+            lines.append(f"  未纳入原因：{exclusion_reason}")
+
+
+def _append_gaps(lines: list[str], title: str, value) -> None:
+    items = [item for item in value or [] if isinstance(item, dict)]
+    if not items:
+        return
+    lines.extend(["", f"{title}："])
+    for index, item in enumerate(items, start=1):
+        question = str(item.get("question") or item.get("description") or "").strip()
+        lines.append(f"- {question or f'待补信息 {index}'}")
+        reason = str(item.get("reason") or "").strip()
+        if reason:
+            lines.append(f"  原因：{reason}")
+        status = _review_label(item.get("resolution_status"))
+        if status:
+            lines.append(f"  处理状态：{status}")
+        if item.get("blocks_final") is True:
+            lines.append("  影响：补充后才能形成最终结论")
+
+
+def _artifact_review_content(artifact: dict) -> str:
+    deliverable = str(artifact.get("deliverable_markdown") or "").strip()
+    if deliverable:
+        return deliverable
+    payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    summary = str(artifact.get("summary") or "").strip()
+    lines = [summary] if summary else []
+    artifact_type = str(artifact.get("artifact_type") or "")
+
+    if artifact_type == "writing_plan":
+        objective = str(payload.get("objective") or "").strip()
+        if objective:
+            lines.extend(["", f"写作目标：{objective}"])
+        document_type = DOCUMENT_TYPE_LABELS.get(str(payload.get("document_type") or ""), "")
+        if document_type:
+            lines.append(f"文档类型：{document_type}")
+        sections = [item for item in payload.get("section_plan") or [] if isinstance(item, dict)]
+        if sections:
+            lines.extend(["", "章节安排："])
+            for index, item in enumerate(sections, start=1):
+                heading = str(item.get("heading") or "").strip() or f"第 {index} 章"
+                lines.append(f"{index}. {heading}")
+                purpose = str(item.get("purpose") or "").strip()
+                if purpose:
+                    lines.append(f"   目的：{purpose}")
+        facts = [item for item in payload.get("fact_requirements") or [] if isinstance(item, dict)]
+        if facts:
+            lines.extend(["", "事实与资料要求："])
+            for item in facts:
+                description = str(item.get("description") or "").strip()
+                if not description:
+                    continue
+                requirement = "必需" if item.get("required") is True else "可选"
+                lines.append(f"- {description}（{requirement}）")
+        _append_review_list(lines, "假设与待确认", payload.get("assumptions"))
+        _append_review_list(lines, "验收标准", payload.get("acceptance_checks"))
+
+    elif artifact_type == "material_ledger":
+        _append_source_assessments(lines, payload.get("source_assessments"))
+        facts = [item for item in payload.get("facts") or [] if isinstance(item, dict)]
+        if facts:
+            lines.extend(["", "事实台账："])
+            for item in facts:
+                statement = str(item.get("statement") or "").strip()
+                if statement:
+                    status = _review_label(item.get("status")) or "待核验"
+                    lines.append(f"- {statement}（{status}）")
+        _append_gaps(lines, "待补信息", payload.get("gaps"))
+
+    elif artifact_type == "research_charter":
+        core_question = str(payload.get("core_question") or "").strip()
+        decision = str(payload.get("decision_to_support") or "").strip()
+        if core_question:
+            lines.extend(["", f"核心问题：{core_question}"])
+        if decision:
+            lines.append(f"支持决策：{decision}")
+        time_range = payload.get("time_range") if isinstance(payload.get("time_range"), dict) else {}
+        start = str(time_range.get("start") or "").strip()
+        end = str(time_range.get("end") or "").strip()
+        if start or end:
+            lines.append(f"时间范围：{start or '未指定'} 至 {end or '未指定'}")
+        source_policy = payload.get("source_policy") if isinstance(payload.get("source_policy"), dict) else {}
+        source_mode = _review_label(source_policy.get("mode"))
+        as_of_date = str(source_policy.get("as_of_date") or "").strip()
+        if source_mode:
+            lines.append(f"资料范围：{source_mode}")
+        if as_of_date:
+            lines.append(f"资料截止日期：{as_of_date}")
+        _append_review_list(lines, "纳入范围", payload.get("scope_in"))
+        _append_review_list(lines, "不纳入范围", payload.get("scope_out"))
+        _append_review_list(lines, "研究子问题", payload.get("subquestions"))
+        _append_review_list(lines, "评估标准", payload.get("evaluation_criteria"))
+        _append_review_list(lines, "停止条件", payload.get("stop_conditions"))
+
+    elif artifact_type == "source_register":
+        _append_source_assessments(lines, payload.get("source_assessments"))
+        _append_gaps(lines, "待补资料", payload.get("search_gaps"))
+
+    elif artifact_type == "evidence_matrix":
+        claims = [item for item in payload.get("claims") or [] if isinstance(item, dict)]
+        if claims:
+            lines.extend(["", "核心判断与证据状态："])
+            for item in claims:
+                statement = str(item.get("statement") or "").strip()
+                if not statement:
+                    continue
+                claim_type = _review_label(item.get("claim_type"))
+                status = _review_label(item.get("status"))
+                suffix = "、".join(part for part in (claim_type, status) if part)
+                lines.append(f"- {statement}{f'（{suffix}）' if suffix else ''}")
+        contradictions = [item for item in payload.get("contradictions") or [] if isinstance(item, dict)]
+        if contradictions:
+            lines.extend(["", "证据冲突："])
+            for item in contradictions:
+                description = str(item.get("description") or "").strip()
+                if not description:
+                    continue
+                status = _review_label(item.get("resolution_status"))
+                lines.append(f"- {description}{f'（{status}）' if status else ''}")
+                resolution = str(item.get("resolution") or "").strip()
+                if resolution:
+                    lines.append(f"  处理结论：{resolution}")
+        _append_gaps(lines, "证据缺口", payload.get("gaps"))
+
+    elif artifact_type == "research_outline":
+        sections = [item for item in payload.get("sections") or [] if isinstance(item, dict)]
+        if sections:
+            lines.extend(["", "报告提纲："])
+            for index, item in enumerate(sections, start=1):
+                heading = str(item.get("heading") or "").strip() or f"第 {index} 章"
+                lines.append(f"{index}. {heading}")
+                thesis = str(item.get("thesis") or "").strip()
+                if thesis:
+                    lines.append(f"   核心观点：{thesis}")
+                questions = _review_values(item.get("open_questions"))
+                if questions:
+                    lines.append(f"   待核问题：{'；'.join(questions)}")
+        _append_review_list(lines, "结论边界", payload.get("conclusion_boundaries"))
+
+    return "\n".join(lines).strip()
+
+
 def _enterprise_stage_result(run: dict) -> dict:
     ref = run.get("current_stage_artifact_ref") if isinstance(run.get("current_stage_artifact_ref"), dict) else {}
     artifacts = [item for item in run.get("stage_artifacts") or [] if isinstance(item, dict)]
@@ -316,6 +517,7 @@ def _enterprise_stage_result(run: dict) -> dict:
         "stage_attempt": int(artifact.get("stage_attempt") or 0),
         "summary": str(artifact.get("summary") or ""),
         "deliverable": str(artifact.get("deliverable_markdown") or ""),
+        "content": _artifact_review_content(artifact),
         "validation": {
             "status": str(artifact.get("validation_status") or "invalid"),
             "blocking_count": blocking_count,

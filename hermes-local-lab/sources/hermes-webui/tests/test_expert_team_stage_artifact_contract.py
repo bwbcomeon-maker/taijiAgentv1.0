@@ -626,6 +626,177 @@ def test_contract_model_result_persists_raw_and_immutable_structured_artifact(tm
     assert reviewed["view"]["stage_result"]["artifact_type"] == "writing_plan"
 
 
+@pytest.mark.parametrize(
+    ("artifact_type", "payload", "expected_texts"),
+    [
+        (
+            "writing_plan",
+            _writing_plan_payload(),
+            ("形成面向管理层的月度汇报", "工作开展情况", "重点指标完成情况", "标题与规格一致"),
+        ),
+        (
+            "material_ledger",
+            {
+                "source_assessments": [
+                    {
+                        "source_id": "SRC-001",
+                        "evidence_grade": "A",
+                        "applicability": "包含本月完成率",
+                        "status": "included",
+                        "exclusion_reason": None,
+                    }
+                ],
+                "facts": [
+                    {
+                        "fact_id": "FACT-1",
+                        "statement": "重点指标完成率为98.7%",
+                        "evidence_refs": [],
+                        "status": "verified",
+                    }
+                ],
+                "gaps": [
+                    {
+                        "gap_id": "GAP-1",
+                        "question": "缺少问题原因分析",
+                        "required": True,
+                        "blocks_final": False,
+                        "reason": "当前资料未覆盖",
+                        "resolution_status": "open",
+                        "source_ids": [],
+                    }
+                ],
+            },
+            ("包含本月完成率", "重点指标完成率为98.7%", "缺少问题原因分析"),
+        ),
+        (
+            "research_charter",
+            {
+                "core_question": "本地优先 AI 助理如何落地",
+                "decision_to_support": "是否进入试点",
+                "scope_in": ["企业办公"],
+                "scope_out": ["消费娱乐"],
+                "time_range": {"start": "2025-01-01", "end": "2026-07-27"},
+                "source_policy": {"mode": "provided_only", "as_of_date": "2026-07-27", "citation_style": "footnote"},
+                "subquestions": ["部署成本如何"],
+                "evaluation_criteria": ["数据安全"],
+                "stop_conditions": ["证据不足时停止下结论"],
+            },
+            ("本地优先 AI 助理如何落地", "是否进入试点", "企业办公", "数据安全"),
+        ),
+        (
+            "source_register",
+            {
+                "source_assessments": [
+                    {
+                        "source_id": "SRC-001",
+                        "evidence_grade": "A",
+                        "applicability": "属于权威一手资料",
+                        "status": "included",
+                        "exclusion_reason": None,
+                    }
+                ],
+                "search_gaps": [
+                    {
+                        "gap_id": "GAP-1",
+                        "question": "缺少成本对比资料",
+                        "required": True,
+                        "blocks_final": False,
+                        "reason": "现有资料范围不足",
+                        "resolution_status": "open",
+                        "source_ids": [],
+                    }
+                ],
+            },
+            ("属于权威一手资料", "缺少成本对比资料"),
+        ),
+        (
+            "evidence_matrix",
+            {
+                "claims": [
+                    {
+                        "claim_id": "CLAIM-1",
+                        "statement": "本地部署可降低敏感数据外传风险",
+                        "claim_type": "judgment",
+                        "evidence": [],
+                        "status": "insufficient",
+                    }
+                ],
+                "contradictions": [
+                    {
+                        "contradiction_id": "CONTRA-1",
+                        "claim_id": "CLAIM-1",
+                        "source_ids": ["SRC-001", "SRC-002"],
+                        "description": "不同资料对总体成本判断不一致",
+                        "resolution_status": "open",
+                        "resolution": None,
+                        "chosen_source_ids": [],
+                    }
+                ],
+                "gaps": [
+                    {
+                        "gap_id": "GAP-1",
+                        "question": "缺少三年运维成本数据",
+                        "required": True,
+                        "blocks_final": False,
+                        "reason": "当前证据不足",
+                        "resolution_status": "open",
+                        "source_ids": [],
+                    }
+                ],
+            },
+            ("本地部署可降低敏感数据外传风险", "不同资料对总体成本判断不一致", "缺少三年运维成本数据"),
+        ),
+        (
+            "research_outline",
+            {
+                "sections": [
+                    {
+                        "section_id": "SEC-1",
+                        "heading": "技术路线比较",
+                        "thesis": "本地优先更适合敏感办公场景",
+                        "claim_ids": ["CLAIM-1"],
+                        "source_ids": ["SRC-001"],
+                        "open_questions": ["推理成本仍需核实"],
+                    }
+                ],
+                "conclusion_boundaries": ["不推断未获证据支持的节省比例"],
+            },
+            ("技术路线比较", "本地优先更适合敏感办公场景", "推理成本仍需核实", "不推断未获证据支持的节省比例"),
+        ),
+    ],
+)
+def test_structured_stage_artifacts_project_user_readable_review_content(
+    artifact_type,
+    payload,
+    expected_texts,
+):
+    from api.expert_teams.view import _enterprise_stage_result
+
+    artifact = {
+        "artifact_id": "stage:1",
+        "sha256": "a" * 64,
+        "stage_id": "stage",
+        "artifact_type": artifact_type,
+        "stage_attempt": 1,
+        "summary": "阶段产物已生成。",
+        "payload": payload,
+        "deliverable_markdown": None,
+        "validation_status": "valid",
+        "blocking_issues": [],
+    }
+    result = _enterprise_stage_result(
+        {
+            "stage_artifacts": [artifact],
+            "current_stage_artifact_ref": {"artifact_id": "stage:1", "sha256": "a" * 64},
+        }
+    )
+
+    for expected in expected_texts:
+        assert expected in result["content"]
+    for forbidden in ("section_plan", "fact_requirements", "source_assessments", "<<<TAIJI_META_V1>>>"):
+        assert forbidden not in result["content"]
+
+
 def test_contract_approval_requires_trusted_identity_and_records_safe_snapshot(monkeypatch, tmp_path):
     from api import expert_teams
     from api.expert_teams import trusted_identity

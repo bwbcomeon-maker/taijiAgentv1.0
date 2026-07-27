@@ -811,7 +811,7 @@
 
   function reviewPanel(card) {
     const result = card.stageReview?.output || card.stageResult?.output || card.stageResult || {};
-    const content = result.content || card.presentation?.result?.content || '';
+    const content = result.content || result.deliverable || result.summary || card.presentation?.result?.content || card.presentation?.result?.deliverable || card.presentation?.summary || '';
     const items = list(card.reviewItems);
     const bindingReady = Boolean(stageBindingFingerprint(card));
     const canRevise = bindingReady && actionAllowed(card, 'stage_revise');
