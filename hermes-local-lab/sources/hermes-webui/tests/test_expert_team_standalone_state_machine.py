@@ -755,7 +755,9 @@ def test_confirm_route_persists_document_generation_failure_as_retryable_state(
     standalone_env,
     monkeypatch,
 ):
+    from api import expert_teams
     from api.expert_teams import system_stages
+    from api.expert_teams.storage import read_run, write_run
 
     routes, workspace, _session_id, run_id = _launch(
         standalone_env,
@@ -799,6 +801,18 @@ def test_confirm_route_persists_document_generation_failure_as_retryable_state(
     assert recovered["last_validation_error"] == ""
     assert recovered["last_execution_error"] == ""
     assert recovered["last_execution_error_code"] == ""
+
+    legacy_success = read_run(workspace, run_id)
+    legacy_success["last_validation_error"] = "旧版自动检查失败"
+    legacy_success["last_execution_error"] = "旧版自动检查失败"
+    legacy_success["last_execution_error_code"] = "validation_failed"
+    write_run(workspace, legacy_success)
+
+    migrated = expert_teams.read_expert_team_run(workspace, run_id)
+    assert migrated["last_validation_error"] == ""
+    assert migrated["last_execution_error"] == ""
+    assert migrated["last_execution_error_code"] == ""
+    assert "product_error" not in migrated["view"]
 
 
 def test_delivery_render_holds_attempt_lock_and_releases_before_run_completion(

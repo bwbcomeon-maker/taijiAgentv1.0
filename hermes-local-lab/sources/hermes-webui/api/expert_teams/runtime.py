@@ -1460,6 +1460,21 @@ def _clear_execution_patch() -> dict:
 
 def _sync_derived(run: dict) -> dict:
     state = str(run.get("workflow_state") or "collecting_required")
+    stage_reservation = run.get("current_stage_attempt_reservation")
+    if (
+        state == "awaiting_review"
+        and isinstance(stage_reservation, dict)
+        and stage_reservation.get("executor") == "system"
+        and stage_reservation.get("artifact_type") == "delivery_manifest"
+        and stage_reservation.get("status") == "generated_valid"
+        and run.get("pending_system_stage_result") == "generated_valid"
+    ):
+        # Older standalone runs could persist a successful delivery while
+        # retaining the preceding failed attempt's error fields. Successful,
+        # immutable delivery evidence is authoritative over those stale errors.
+        run["last_validation_error"] = ""
+        run["last_execution_error"] = ""
+        run["last_execution_error_code"] = ""
     if state == "generating" and not str(run.get("execution_stream_id") or "").strip():
         state = "start_failed"
         run["workflow_state"] = state
