@@ -113,11 +113,15 @@ def test_expert_team_v3_css_has_avatar_and_single_scroll_responsive_contract():
     assert "overflow: visible" in style
 
 
-def test_desktop_team_detail_uses_compact_two_column_tasks_without_nested_scroll():
+def test_desktop_team_detail_uses_fixed_header_footer_and_scrollable_body():
     style = STYLE.read_text(encoding="utf-8")
 
     assert ".et3-template-list { display: grid; grid-template-columns: repeat(2" in style
     assert ".et3-dialog {" in style and "overflow: hidden" in style
+    assert "grid-template-rows: auto minmax(0, 1fr) auto" in style
+    assert ".et3-dialog-body" in style and "overflow-y: auto" in style
+    assert ".et3-dialog-actions" in style and "border-top:" in style
+    assert ".et3-dialog-actions" in style and "background:" in style
     assert ".et3-template span" in style
     assert "-webkit-line-clamp: 2" in style
 
@@ -183,15 +187,15 @@ def test_team_dialog_member_rows_render_local_44px_avatar_name_role_and_alt():
     assert 'data-et3-image-fallback' in html
 
 
-def test_unavailable_task_keeps_its_use_case_and_shows_a_separate_release_status():
+def test_released_task_keeps_its_use_case_and_is_selectable_without_unavailable_status():
     result = _run_visual_hooks(
         """
         const html = hooks.exampleTaskRowsHtml([{
           id: 'meeting_minutes',
           label: '会议纪要',
           summary: '整理议题、形成意见、责任分工和后续跟踪事项。',
-          available: false,
-          disabled_reason: '该任务尚未完成完整交付验证',
+          available: true,
+          launch_profile_id: 'content-meeting-minutes',
         }], null);
         console.log(JSON.stringify({html}));
         """
@@ -200,9 +204,11 @@ def test_unavailable_task_keeps_its_use_case_and_shows_a_separate_release_status
     html = result["html"]
     assert "会议纪要" in html
     assert "整理议题、形成意见、责任分工和后续跟踪事项。" in html
-    assert "暂未开放" in html
-    assert "该任务尚未完成完整交付验证" in html
-    assert 'aria-label="会议纪要。整理议题、形成意见、责任分工和后续跟踪事项。 暂未开放：该任务尚未完成完整交付验证"' in html
+    assert "暂未开放" not in html
+    assert 'aria-disabled="false"' in html
+    assert " disabled " not in html
+    assert 'aria-label="会议纪要。整理议题、形成意见、责任分工和后续跟踪事项。"' in html
+    assert 'data-example-id="meeting_minutes"' in html
     assert ">meeting_minutes<" not in html
 
 

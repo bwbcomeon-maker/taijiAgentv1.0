@@ -154,6 +154,7 @@ async function main() {
       window?.focus();
     });
     await page.bringToFront();
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(async ({ workspace }) => {
       document.getElementById('onboardingOverlay')?.remove();
       const response = await fetch('/api/session/new', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace }) });
@@ -178,15 +179,26 @@ async function main() {
     assert(await page.locator('[data-et3-dialog]').getAttribute('role') === 'dialog', 'Team detail is not an accessible dialog');
     const dialogLayout = await page.locator('[data-et3-dialog]').evaluate(dialog => {
       const templateList = dialog.querySelector('.et3-template-list');
+      const body = dialog.querySelector('.et3-dialog-body');
+      const actions = dialog.querySelector('.et3-dialog-actions');
+      const actionsRect = actions?.getBoundingClientRect();
       return {
         clientHeight: dialog.clientHeight,
         scrollHeight: dialog.scrollHeight,
         overflowY: getComputedStyle(dialog).overflowY,
+        bodyOverflowY: body ? getComputedStyle(body).overflowY : '',
+        actionsTop: actionsRect?.top || 0,
+        actionsBottom: actionsRect?.bottom || 0,
+        viewportHeight: innerHeight,
         templateColumns: templateList ? getComputedStyle(templateList).gridTemplateColumns.split(' ').filter(Boolean).length : 0,
+        enabledTasks: Array.from(dialog.querySelectorAll('[data-et3-action="select-template"]:not([disabled])')).map(node => node.textContent.trim()),
       };
     });
     assert(dialogLayout.scrollHeight <= dialogLayout.clientHeight + 1, '1440×900 team detail requires nested scrolling', dialogLayout);
+    assert(dialogLayout.bodyOverflowY === 'auto', 'Team detail content is not isolated in the scrollable body', dialogLayout);
+    assert(dialogLayout.actionsTop >= 0 && dialogLayout.actionsBottom <= dialogLayout.viewportHeight, 'Summon action is outside the viewport', dialogLayout);
     assert(dialogLayout.templateColumns >= 2, 'Document tasks are not arranged compactly', dialogLayout);
+    assert(dialogLayout.enabledTasks.length === 6, 'Content team does not expose six enabled tasks', dialogLayout);
     await page.screenshot({ path: path.join(outDir, '02-team-detail.png'), fullPage: false });
     for (let index = 0; index < 12; index += 1) await page.keyboard.press('Tab');
     assert(await page.locator('[data-et3-dialog]').evaluate(dialog => dialog.contains(document.activeElement)), 'Dialog focus escaped into the page background');
