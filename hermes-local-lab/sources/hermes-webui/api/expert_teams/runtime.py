@@ -2163,7 +2163,10 @@ def reserve_system_stage_attempt(
         _require_mutable_v2(run)
         if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
             raise ExpertTeamStateConflict("system_stage_not_available", "legacy run has no system dispatcher", run)
-        if str(run.get("workflow_state") or "") != "delivery_validation_required":
+        if str(run.get("workflow_state") or "") not in {
+            "delivery_validation_required",
+            "generated_invalid",
+        }:
             raise ExpertTeamStateConflict("stale_state", "system stage is not ready for dispatch", run)
         descriptor = _pending_system_descriptor(run)
         approved = run.get("approved_stage_artifact_refs") if isinstance(run.get("approved_stage_artifact_refs"), dict) else {}
@@ -2310,7 +2313,75 @@ def complete_system_stage_attempt(
             run,
             "awaiting_review",
             "system_stage_completed",
-            _stage_reservation_status_patch(run, "generated_valid"),
+            {
+                **_stage_reservation_status_patch(run, "generated_valid"),
+                "last_validation_error": "",
+                "last_execution_error": "",
+                "last_execution_error_code": "",
+            },
+        )
+
+
+def fail_system_stage_attempt(
+    workspace: Path,
+    run_id: str,
+    *,
+    reservation_id: str,
+    error_code: str,
+    message: str,
+) -> dict:
+    """Persist a failed system stage so the UI exposes a safe retry path."""
+    with _run_mutation_lock(workspace, run_id):
+        run = read_run(workspace, run_id)
+        _require_mutable_v2(run)
+        reservation = run.get("current_stage_attempt_reservation")
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("reservation_id") != reservation_id
+            or reservation.get("executor") != "system"
+        ):
+            raise ExpertTeamStateConflict(
+                "stage_attempt_identity_mismatch",
+                "failed system reservation changed",
+                run,
+            )
+        delivery_reservations = [
+            deepcopy(item)
+            for item in run.get("delivery_attempt_reservations") or []
+            if isinstance(item, dict)
+        ]
+        current_delivery = run.get("current_delivery_attempt_reservation")
+        current_delivery_id = (
+            str(current_delivery.get("reservation_id") or "")
+            if isinstance(current_delivery, dict)
+            else ""
+        )
+        failed_delivery = None
+        if current_delivery_id:
+            for index, item in enumerate(delivery_reservations):
+                if str(item.get("reservation_id") or "") == current_delivery_id:
+                    failed_delivery = {
+                        **item,
+                        "status": "generated_invalid",
+                        "updated_at": _now(),
+                    }
+                    delivery_reservations[index] = deepcopy(failed_delivery)
+                    break
+        error = str(message or "DOCX 交付生成失败，请重新尝试。")
+        return _transition(
+            workspace,
+            run,
+            "generated_invalid",
+            "system_stage_failed",
+            {
+                **_stage_reservation_status_patch(run, "generated_invalid"),
+                "delivery_attempt_reservations": delivery_reservations,
+                "current_delivery_attempt_reservation": failed_delivery,
+                "pending_system_stage_result": "generated_invalid",
+                "last_execution_error": error,
+                "last_execution_error_code": str(error_code or "delivery_generation_failed"),
+                "last_validation_error": error,
+            },
         )
 
 

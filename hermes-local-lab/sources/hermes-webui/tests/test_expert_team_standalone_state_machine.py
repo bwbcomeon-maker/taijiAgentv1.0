@@ -751,6 +751,56 @@ def test_confirm_route_dispatches_document_generation_after_last_semantic_stage(
     assert response.json_body()["run"]["view"]["public_state"] == "generating_document"
 
 
+def test_confirm_route_persists_document_generation_failure_as_retryable_state(
+    standalone_env,
+    monkeypatch,
+):
+    from api.expert_teams import system_stages
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-final-confirm-render-failure-launch",
+    )
+    reviewed = _install_review_artifact(workspace, run_id, stage_index=3)
+
+    original_dispatch = system_stages.dispatch_system_stage
+
+    def fail_dispatch(*_args, **_kwargs):
+        raise system_stages.SystemStageError(
+            "validation_failed",
+            "DOCX 表格未通过自动检查",
+        )
+
+    monkeypatch.setattr(system_stages, "dispatch_system_stage", fail_dispatch)
+    response = _post(
+        routes,
+        "/api/expert-teams/stage/confirm",
+        _binding(reviewed, key="confirm-route-polish-render-failure"),
+    )
+
+    assert response.status == 503
+    payload = response.json_body()
+    assert payload["code"] == "validation_failed"
+    assert payload["run"]["workflow_state"] == "generated_invalid"
+    assert payload["run"]["last_validation_error"] == "DOCX 表格未通过自动检查"
+    assert payload["run"]["view"]["public_state"] == "ready"
+    assert payload["run"]["view"]["actions"]["can_retry"] is True
+
+    monkeypatch.setattr(system_stages, "dispatch_system_stage", original_dispatch)
+    recovered_payload, recovered_status = routes._start_expert_team_execution(
+        workspace,
+        payload["run"],
+        {},
+    )
+
+    assert recovered_status == 200, recovered_payload
+    recovered = recovered_payload["run"]
+    assert recovered["workflow_state"] == "awaiting_review"
+    assert recovered["last_validation_error"] == ""
+    assert recovered["last_execution_error"] == ""
+    assert recovered["last_execution_error_code"] == ""
+
+
 def test_delivery_render_holds_attempt_lock_and_releases_before_run_completion(
     standalone_env,
     monkeypatch,

@@ -145,6 +145,7 @@ function insertRichBlocksBySourceOrder(documentXml, { boundDrawings = [], render
   let cleanDocumentXml = removeRanges(documentXml, extractedTables.map((table) => table.range));
   cleanDocumentXml = removeUnboundTableBlocks(cleanDocumentXml);
   cleanDocumentXml = removeUnboundFigureCaptionBlocks(cleanDocumentXml);
+  cleanDocumentXml = removeTemplatePlaceholderDrawings(cleanDocumentXml);
   cleanDocumentXml = compactCoverPageSpacing(cleanDocumentXml);
 
   const richBlockXmlByBlockId = new Map();
@@ -249,19 +250,27 @@ function extractPlannedTableBlocks(documentXml, renderPlan) {
   const consumedRanges = [];
   (renderPlan.tables || []).forEach((table, index) => {
     const templateTable = templateTablesById.get(table.tableId) || {};
+    const blockId = blockIdByTableId.get(table.tableId) || '';
     const tableBlock = findRenderedTableBlock({
       documentXml,
       title: templateTable.title || table.title,
       consumedRanges,
     });
     if (!tableBlock) {
+      if (dynamicTableXml(templateTable)) {
+        tableBlocks.push({
+          blockId,
+          range: null,
+          xml: tableBlockXml(table, templateTable, '', blockId, index + 1),
+        });
+      }
       return;
     }
     consumedRanges.push({ start: tableBlock.start, end: tableBlock.end });
     tableBlocks.push({
-      blockId: blockIdByTableId.get(table.tableId) || '',
+      blockId,
       range: { start: tableBlock.start, end: tableBlock.end },
-      xml: tableBlockXml(table, templateTable, tableBlock.xml, blockIdByTableId.get(table.tableId) || '', index + 1),
+      xml: tableBlockXml(table, templateTable, tableBlock.xml, blockId, index + 1),
     });
   });
   return tableBlocks;
@@ -435,6 +444,17 @@ function removeUnboundFigureCaptionBlocks(documentXml) {
     }
   }
 
+  return removeRanges(documentXml, removals);
+}
+
+function removeTemplatePlaceholderDrawings(documentXml) {
+  const removals = paragraphRanges(documentXml)
+    .filter((paragraph) => (
+      /<w:drawing\b/.test(paragraph.xml)
+      && /<wp:extent\b[^>]*\bcx="36000"[^>]*\bcy="36000"/.test(paragraph.xml)
+      && /<wp:docPr\b[^>]*\bname="Picture 1"/.test(paragraph.xml)
+    ))
+    .map((paragraph) => ({ start: paragraph.start, end: paragraph.end }));
   return removeRanges(documentXml, removals);
 }
 
@@ -652,7 +672,8 @@ function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
     return null;
   }
 
-  for (const paragraph of paragraphRanges(documentXml)) {
+  const paragraphs = paragraphRanges(documentXml);
+  for (const paragraph of paragraphs) {
     if (
       !hasTableSequenceField(paragraph.xml) ||
       !paragraph.text.includes(normalizedTitle) ||
@@ -670,6 +691,31 @@ function findRenderedTableBlock({ documentXml, title, consumedRanges }) {
     }
     const tableRange = findFirstTableRangeAfter(documentXml, paragraph.end);
     if (!tableRange) {
+      continue;
+    }
+    return {
+      start: paragraph.start,
+      end: tableRange.end,
+      xml: String(documentXml || '').slice(paragraph.start, tableRange.end),
+    };
+  }
+
+  // Standalone templates use a plain title paragraph immediately followed by
+  // a rendered table. Treat that pair as the template block so the canonical
+  // dynamic table replaces it instead of being appended alongside a duplicate.
+  for (const paragraph of paragraphs) {
+    if (
+      paragraph.text.trim() !== normalizedTitle
+      || rangeOverlaps(paragraph, consumedRanges)
+    ) {
+      continue;
+    }
+    const tableRange = findFirstTableRangeAfter(documentXml, paragraph.end);
+    if (
+      !tableRange
+      || rangeOverlaps(tableRange, consumedRanges)
+      || String(documentXml || '').slice(paragraph.end, tableRange.start).trim()
+    ) {
       continue;
     }
     return {

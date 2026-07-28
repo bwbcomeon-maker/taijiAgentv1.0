@@ -309,3 +309,91 @@ test('standalone run-job accepts minimal metadata and preserves missing-data mar
   assert.equal(templateManifest.contractProfile, 'standalone');
   assert.equal(templateManifest.qualityGates.includes('wps_visual'), false);
 });
+
+test('standalone work-report renders markdown tables without template table placeholders', async (t) => {
+  const root = makeTempDir(t);
+  const sourcePath = path.join(root, 'source.md');
+  const assetManifestPath = path.join(root, 'asset-manifest.json');
+  const deliveryDir = path.join(root, 'delivery');
+  fs.writeFileSync(
+    sourcePath,
+    [
+      '# 部门月度工作汇报',
+      '',
+      '## 工作开展情况',
+      '',
+      '| 工作类别 | 完成情况 |',
+      '| --- | --- |',
+      '| 设备巡检 | 待补充 |',
+      '',
+      '## 存在问题',
+      '',
+      '问题明细待补充，问题及下一步安排如下：',
+      '',
+      '| 问题类别 | 下一步措施 |',
+      '| --- | --- |',
+      '| 设备风险 | 待补充 |',
+      '',
+      '## 下一步工作安排',
+      '',
+      '下一步安排待补充。',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(assetManifestPath, '{"schema_version":"expert-asset-manifest/v1","assets":[]}\n', 'utf8');
+
+  const templateId = 'standalone-work-report';
+  const templateBinding = readJson(path.join(ENGINE_ROOT, 'templates', templateId, 'template-package.binding.json'));
+  const rendererIdentity = describeRendererIdentity({
+    engineRoot: ENGINE_ROOT,
+    profileId: 'standalone-default',
+  });
+  const contract = contractFixture({
+    templateId,
+    documentType: 'work_report',
+    sourceSha256: sha256File(sourcePath),
+    assetManifestSha256: sha256File(assetManifestPath),
+  });
+  contract.rendererIdentity = rendererIdentity;
+  contract.renderInputBinding = {
+    ...contract.renderInputBinding,
+    template: {
+      id: templateId,
+      version: '1.0.0',
+      packageSha256: templateBinding.packageSha256,
+    },
+    rendererIdentity,
+  };
+  contract.renderInputFingerprint = canonicalSha256(contract.renderInputBinding);
+
+  const result = await runDocumentJob({
+    engineRoot: ENGINE_ROOT,
+    templateId,
+    sourcePath,
+    sourceType: 'markdown',
+    assetDir: root,
+    assetManifestPath,
+    deliveryDir,
+    ...contract,
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const entries = readZipEntriesFromBuffer(fs.readFileSync(result.documentPath));
+  const documentXml = entries.get('word/document.xml').toString('utf8');
+  assert.match(documentXml, /tableId=tbl-001/);
+  assert.match(documentXml, /tableId=tbl-002/);
+  assert.match(documentXml, /<w:tbl\b/);
+  assert.equal(
+    (documentXml.match(/<w:tbl\b/g) || []).length,
+    2,
+    'standalone output must not retain duplicate template tables after dynamic insertion'
+  );
+  assert.equal(
+    (documentXml.match(/<w:drawing\b/g) || []).length,
+    0,
+    'standalone output without figures must not retain the template placeholder drawing'
+  );
+  assert.match(documentXml, /设备巡检/);
+  assert.match(documentXml, /待补充/);
+});

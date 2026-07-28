@@ -5346,6 +5346,7 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    reservation = {}
     try:
         reserved_run, descriptor, reservation, _created = expert_teams.reserve_system_stage_attempt(
             workspace,
@@ -5366,7 +5367,23 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
         )
         return {"ok": True, "run": completed, "system_stage": True}, 200
     except SystemStageError as exc:
-        current = expert_teams.read_expert_team_run(workspace, str(run.get("run_id") or ""))
+        reservation_id = str(reservation.get("reservation_id") or "")
+        if reservation_id:
+            try:
+                current = expert_teams.fail_system_stage_attempt(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    reservation_id=reservation_id,
+                    error_code=exc.code,
+                    message=str(exc),
+                )
+            except expert_teams.ExpertTeamStateConflict as conflict:
+                current = conflict.run or expert_teams.read_expert_team_run(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                )
+        else:
+            current = expert_teams.read_expert_team_run(workspace, str(run.get("run_id") or ""))
         return {"ok": False, "code": exc.code, "error": str(exc), "run": current}, 503
     except expert_teams.ExpertTeamStateConflict as exc:
         return {"ok": False, "code": exc.code, "error": str(exc), "run": exc.run or run}, 409
