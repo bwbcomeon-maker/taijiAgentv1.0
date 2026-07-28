@@ -90,6 +90,11 @@ def test_launch_profiles_are_the_only_server_owned_startable_combinations():
 
     assert [profile["id"] for profile in profiles] == [
         "content-work-report",
+        "content-meeting-minutes",
+        "content-notice",
+        "content-plan",
+        "content-summary-plan",
+        "content-polish",
         "research-report",
     ]
     assert [
@@ -107,6 +112,41 @@ def test_launch_profiles_are_the_only_server_owned_startable_combinations():
             "work_report",
             "work_report",
             "standalone-work-report",
+            5,
+        ),
+        (
+            "content-creator-team",
+            "meeting_minutes",
+            "meeting_minutes",
+            "meeting-minutes",
+            5,
+        ),
+        (
+            "content-creator-team",
+            "notice",
+            "notice",
+            "general-proposal",
+            5,
+        ),
+        (
+            "content-creator-team",
+            "plan",
+            "plan",
+            "general-proposal",
+            5,
+        ),
+        (
+            "content-creator-team",
+            "summary_plan",
+            "summary_plan",
+            "general-proposal",
+            5,
+        ),
+        (
+            "content-creator-team",
+            "other_office_material",
+            "polish",
+            "general-proposal",
             5,
         ),
         (
@@ -135,7 +175,15 @@ def test_catalog_startable_entries_equal_profiles_without_enterprise_rollout_cop
     assert {example["launch_profile_id"] for example in startable} == {
         profile["id"] for profile in list_launch_profiles()
     }
-    assert {example["id"] for example in startable} == {"work_report", "research_report"}
+    assert {example["id"] for example in startable} == {
+        "work_report",
+        "meeting_minutes",
+        "notice",
+        "plan",
+        "summary_plan",
+        "polish",
+        "research_report",
+    }
     assert all(example["capability"] == {"kind": "standalone", "label": "本机协作"} for example in startable)
     assert all("launch_profile_id" not in example for example in examples if not example.get("available"))
     assert all(

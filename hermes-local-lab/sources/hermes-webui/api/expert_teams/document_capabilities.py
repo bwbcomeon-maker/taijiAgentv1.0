@@ -41,6 +41,50 @@ _COMMON_FIELDS = (
 )
 
 
+def _required_field(
+    path: str,
+    label: str,
+    *,
+    control: str = "text",
+    placeholder: str,
+    help_text: str,
+) -> dict:
+    return {
+        "path": path,
+        "label": label,
+        "control": control,
+        "required": True,
+        "placeholder": placeholder,
+        "help": help_text,
+    }
+
+
+def _content_defaults(
+    *,
+    required_sections: list[str],
+    details: dict,
+    unknown_fact_action: str = "allow_labeled_placeholder",
+) -> dict:
+    return {
+        "source_policy": {
+            "mode": "provided_only",
+            "as_of_date": "",
+            "citation_style": "none",
+            "unknown_fact_action": unknown_fact_action,
+            "source_refs": [],
+        },
+        "data_handling": {},
+        "document_control": {},
+        "content_constraints": {
+            "required_sections": list(required_sections),
+            "must_include": [],
+            "must_avoid": [],
+        },
+        "details": deepcopy(details),
+        "approval": {},
+    }
+
+
 _CAPABILITIES = {
     "content-work-report": {
         "capability_id": "content-work-report",
@@ -100,6 +144,197 @@ _CAPABILITIES = {
         "source_requirement": {
             "minimum_ready": 0,
             "empty_help": "可以不添加资料；缺失事实和数据将明确标注为“待补充”或“需人工确认”。",
+        },
+    },
+    "content-meeting-minutes": {
+        "capability_id": "content-meeting-minutes",
+        "document_type": "meeting_minutes",
+        "task_mode": "create",
+        "releases": {
+            "standalone": {
+                "released": True,
+                "render_template_id": "meeting-minutes",
+            },
+        },
+        "brief_schema": (
+            *_COMMON_FIELDS,
+            _required_field(
+                "details.meeting_time",
+                "会议时间",
+                placeholder="例如：2026年7月28日 14:00",
+                help_text="填写会议召开的准确日期和时间。",
+            ),
+            _required_field(
+                "details.meeting_location",
+                "会议地点",
+                placeholder="例如：公司三楼第一会议室",
+                help_text="填写线下地点或线上会议方式。",
+            ),
+            _required_field(
+                "details.chairperson",
+                "主持人",
+                placeholder="例如：生产运营部负责人",
+                help_text="填写会议主持人姓名或职务。",
+            ),
+            _required_field(
+                "details.attendee_scope",
+                "参会范围",
+                control="textarea",
+                placeholder="例如：相关部门负责人、项目组成员",
+                help_text="填写参会人员名单或人员范围。",
+            ),
+        ),
+        "standalone_defaults": _content_defaults(
+            required_sections=["会议基本情况", "议定事项", "责任分工", "后续跟踪"],
+            details={
+                "meeting_time": "",
+                "meeting_location": "",
+                "chairperson": "",
+                "attendee_scope": "",
+            },
+        ),
+        "source_requirement": {
+            "minimum_ready": 0,
+            "empty_help": "可以不添加资料；不明确的议题、结论和责任信息将标注为“待补充”。",
+        },
+    },
+    "content-notice": {
+        "capability_id": "content-notice",
+        "document_type": "notice",
+        "task_mode": "create",
+        "releases": {
+            "standalone": {
+                "released": True,
+                "render_template_id": "general-proposal",
+            },
+        },
+        "brief_schema": (
+            *_COMMON_FIELDS,
+            _required_field(
+                "details.issuing_unit",
+                "发文单位",
+                placeholder="例如：安全生产部",
+                help_text="填写通知或通报的发布部门、项目组或单位。",
+            ),
+            _required_field(
+                "details.execution_deadline",
+                "执行时间或截止时间",
+                placeholder="例如：2026年8月15日前",
+                help_text="填写事项开始执行的时间或报送截止时间。",
+            ),
+        ),
+        "standalone_defaults": _content_defaults(
+            required_sections=["背景与总体要求", "通知事项", "时间安排", "责任分工", "报送要求"],
+            details={"issuing_unit": "", "execution_deadline": ""},
+        ),
+        "source_requirement": {
+            "minimum_ready": 0,
+            "empty_help": "可以不添加资料；不明确的对象、时间和责任要求将标注为“待补充”。",
+        },
+    },
+    "content-plan": {
+        "capability_id": "content-plan",
+        "document_type": "plan",
+        "task_mode": "create",
+        "releases": {
+            "standalone": {
+                "released": True,
+                "render_template_id": "general-proposal",
+            },
+        },
+        "brief_schema": (
+            *_COMMON_FIELDS,
+            _required_field(
+                "details.implementation_period",
+                "实施周期",
+                placeholder="例如：2026年8月至10月",
+                help_text="填写方案实施的起止时间或阶段范围。",
+            ),
+            _required_field(
+                "details.lead_unit",
+                "牵头单位",
+                placeholder="例如：营销服务部",
+                help_text="填写负责统筹推进方案的部门、项目组或单位。",
+            ),
+        ),
+        "standalone_defaults": _content_defaults(
+            required_sections=["目标", "现状与问题", "主要措施", "进度安排", "保障机制"],
+            details={"implementation_period": "", "lead_unit": ""},
+        ),
+        "source_requirement": {
+            "minimum_ready": 0,
+            "empty_help": "可以不添加资料；缺失的现状、数据和责任信息将标注为“待补充”。",
+        },
+    },
+    "content-summary-plan": {
+        "capability_id": "content-summary-plan",
+        "document_type": "summary_plan",
+        "task_mode": "create",
+        "releases": {
+            "standalone": {
+                "released": True,
+                "render_template_id": "general-proposal",
+            },
+        },
+        "brief_schema": (
+            *_COMMON_FIELDS,
+            _required_field(
+                "details.summary_period",
+                "总结周期",
+                placeholder="例如：2026年上半年",
+                help_text="填写本次总结覆盖的准确时间范围。",
+            ),
+            _required_field(
+                "details.responsible_unit",
+                "责任单位",
+                placeholder="例如：数字化工作部",
+                help_text="填写承担本次总结和后续计划的部门、项目组或单位。",
+            ),
+        ),
+        "standalone_defaults": _content_defaults(
+            required_sections=["阶段性工作总结", "成效与亮点", "问题与不足", "下一步工作计划"],
+            details={"summary_period": "", "responsible_unit": ""},
+        ),
+        "source_requirement": {
+            "minimum_ready": 0,
+            "empty_help": "可以不添加资料；缺失的成效、数据和计划信息将标注为“待补充”。",
+        },
+    },
+    "content-polish": {
+        "capability_id": "content-polish",
+        "document_type": "other_office_material",
+        "task_mode": "polish",
+        "releases": {
+            "standalone": {
+                "released": True,
+                "render_template_id": "general-proposal",
+            },
+        },
+        "brief_schema": (
+            *_COMMON_FIELDS,
+            _required_field(
+                "details.polish_goal",
+                "润色目标",
+                control="textarea",
+                placeholder="例如：提升逻辑层次和正式表达，压缩重复内容",
+                help_text="说明希望重点改善的结构、语气和可读性问题。",
+            ),
+            _required_field(
+                "details.expression_boundary",
+                "表达边界",
+                control="textarea",
+                placeholder="例如：保留原有事实、数字、专名和明确结论",
+                help_text="填写不得改变、删除或新增的事实和表达边界。",
+            ),
+        ),
+        "standalone_defaults": _content_defaults(
+            required_sections=["润色后正文", "修改说明"],
+            details={"polish_goal": "", "expression_boundary": ""},
+            unknown_fact_action="block_final",
+        ),
+        "source_requirement": {
+            "minimum_ready": 1,
+            "empty_help": "请先添加需要润色的原始材料。",
         },
     },
     "research-report": {

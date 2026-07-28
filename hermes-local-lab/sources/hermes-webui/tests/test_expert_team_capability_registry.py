@@ -82,6 +82,101 @@ def _available_profile_ids(catalog: dict) -> set[str]:
     }
 
 
+@pytest.mark.parametrize(
+    (
+        "document_type",
+        "task_mode",
+        "capability_id",
+        "template_id",
+        "sections",
+        "minimum_ready",
+    ),
+    [
+        (
+            "meeting_minutes",
+            "create",
+            "content-meeting-minutes",
+            "meeting-minutes",
+            ["会议基本情况", "议定事项", "责任分工", "后续跟踪"],
+            0,
+        ),
+        (
+            "notice",
+            "create",
+            "content-notice",
+            "general-proposal",
+            ["背景与总体要求", "通知事项", "时间安排", "责任分工", "报送要求"],
+            0,
+        ),
+        (
+            "plan",
+            "create",
+            "content-plan",
+            "general-proposal",
+            ["目标", "现状与问题", "主要措施", "进度安排", "保障机制"],
+            0,
+        ),
+        (
+            "summary_plan",
+            "create",
+            "content-summary-plan",
+            "general-proposal",
+            ["阶段性工作总结", "成效与亮点", "问题与不足", "下一步工作计划"],
+            0,
+        ),
+        (
+            "other_office_material",
+            "polish",
+            "content-polish",
+            "general-proposal",
+            ["润色后正文", "修改说明"],
+            1,
+        ),
+    ],
+)
+def test_all_content_capabilities_are_released(
+    document_type,
+    task_mode,
+    capability_id,
+    template_id,
+    sections,
+    minimum_ready,
+):
+    from api.expert_teams.document_capabilities import resolve_document_capability
+
+    capability = resolve_document_capability(
+        document_type,
+        task_mode,
+        product_mode="standalone",
+    )
+
+    assert capability is not None
+    assert capability["capability_id"] == capability_id
+    assert capability["render_template_id"] == template_id
+    assert capability["standalone_defaults"]["content_constraints"][
+        "required_sections"
+    ] == sections
+    assert capability["source_requirement"]["minimum_ready"] == minimum_ready
+
+
+def test_content_launch_profiles_cover_every_catalog_task_in_stable_order():
+    from api.expert_teams.launch_profiles import CONTENT_PHASES, list_launch_profiles
+
+    profiles = list_launch_profiles()
+    content_profiles = profiles[:6]
+
+    assert [item["id"] for item in content_profiles] == [
+        "content-work-report",
+        "content-meeting-minutes",
+        "content-notice",
+        "content-plan",
+        "content-summary-plan",
+        "content-polish",
+    ]
+    assert all(item["team_id"] == "content-creator-team" for item in content_profiles)
+    assert all(item["stages"] == CONTENT_PHASES for item in content_profiles)
+
+
 def test_mode_specific_capability_resolution_keeps_release_sets_independent(monkeypatch):
     from api.expert_teams import document_capabilities
 

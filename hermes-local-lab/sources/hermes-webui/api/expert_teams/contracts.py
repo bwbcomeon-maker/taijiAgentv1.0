@@ -320,6 +320,15 @@ def _required(brief: dict, fields: list[tuple[str, object]]) -> list[dict]:
     return errors
 
 
+def _value_at_path(mapping: dict, path: str):
+    current = mapping
+    for segment in str(path or "").split("."):
+        if not segment or not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+    return current
+
+
 def validate_document_brief(brief, *, runtime_capabilities, source_registry, model_policy_registry, now="") -> dict:
     normalized = normalize_document_brief(brief)
     errors = []
@@ -367,18 +376,17 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
     if control.get("render_template_id") != expected_template:
         errors.append(_error("document_control.render_template_id", "render_template_mismatch", "文种与模板不兼容"))
 
-    details = normalized.get("details") or {}
-    common = [
-        ("exact_title", normalized.get("exact_title")),
-        ("purpose", normalized.get("purpose")),
-        ("audience", normalized.get("audience")),
-        ("usage_scenario", normalized.get("usage_scenario")),
-    ]
-    if document_type == "work_report":
-        errors.extend(_required(normalized, common + [("details.reporting_period", details.get("reporting_period")), ("details.reporting_unit", details.get("reporting_unit"))]))
-    elif document_type == "research_report":
-        time_range = details.get("time_range") if isinstance(details.get("time_range"), dict) else {}
-        errors.extend(_required(normalized, common + [("details.core_question", details.get("core_question")), ("details.time_range.start", time_range.get("start")), ("details.time_range.end", time_range.get("end")), ("source_policy.as_of_date", source_policy.get("as_of_date"))]))
+    if isinstance(capability, dict):
+        required_fields = []
+        for field in capability.get("brief_schema") or []:
+            if not isinstance(field, dict) or field.get("required") is not True:
+                continue
+            path = _text(field.get("path"))
+            if not path:
+                continue
+            required_fields.append((path, _value_at_path(normalized, path)))
+        errors.extend(_required(normalized, required_fields))
+    if document_type == "research_report":
         if source_policy.get("citation_style") == "none":
             errors.append(_error("source_policy.citation_style", "citation_style_required", "研究报告必须保留可追溯引用"))
 
@@ -400,16 +408,37 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
             errors.append(_error(f"source_policy.source_refs.{index}.sha256", "source_hash_conflict", "资料摘要与服务端原始字节不一致"))
             continue
         ready_count += 1
-    source_required = (
-        not standalone
-        or document_type == "research_report"
-        or source_policy.get("unknown_fact_action") != "allow_labeled_placeholder"
+    requirement = (
+        capability.get("source_requirement")
+        if isinstance(capability, dict)
+        and isinstance(capability.get("source_requirement"), dict)
+        else {}
     )
-    if ready_count == 0 and source_required and not any(item["code"] == "source_unresolved" for item in errors):
-        if standalone and document_type == "research_report":
-            errors.append(_error("source_policy.source_refs", "source_required", "研究报告至少需要一项可核对资料"))
+    capability_minimum = requirement.get("minimum_ready", 0)
+    if not isinstance(capability_minimum, int) or isinstance(capability_minimum, bool):
+        capability_minimum = 0
+    minimum_ready = max(capability_minimum, 0 if standalone else 1)
+    if (
+        ready_count < minimum_ready
+        and not any(item["code"] == "source_unresolved" for item in errors)
+    ):
+        if standalone and capability_minimum > 0:
+            errors.append(
+                _error(
+                    "source_policy.source_refs",
+                    "source_required",
+                    _text(requirement.get("empty_help"))
+                    or "请至少添加一项可核对资料",
+                )
+            )
         else:
-            errors.append(_error("source_policy.source_refs", "source_unresolved", "正式文稿至少需要一项可核对资料"))
+            errors.append(
+                _error(
+                    "source_policy.source_refs",
+                    "source_unresolved",
+                    "正式文稿至少需要一项可核对资料",
+                )
+            )
 
     policy_result = (
         {

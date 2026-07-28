@@ -7,6 +7,11 @@ def _standalone_payload(document_type: str, *, prompt: str = "请生成文档") 
     template = {
         "work_report": "standalone-work-report",
         "research_report": "standalone-research-report",
+        "meeting_minutes": "meeting-minutes",
+        "notice": "general-proposal",
+        "plan": "general-proposal",
+        "summary_plan": "general-proposal",
+        "other_office_material": "general-proposal",
     }[document_type]
     return {
         "contract_version": "expert-team-contract/v1",
@@ -15,7 +20,9 @@ def _standalone_payload(document_type: str, *, prompt: str = "请生成文档") 
         "intake_example_id": document_type,
         "prompt": prompt,
         "document_brief_seed": {
-            "task_mode": "create",
+            "task_mode": (
+                "polish" if document_type == "other_office_material" else "create"
+            ),
             "document_control": {"render_template_id": template},
         },
     }
@@ -103,6 +110,230 @@ def test_launch_profiles_publish_chinese_profile_driven_brief_schemas():
         "结论边界",
         "引用",
     ]
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "paths"),
+    [
+        (
+            "content-meeting-minutes",
+            [
+                "exact_title",
+                "purpose",
+                "audience",
+                "usage_scenario",
+                "details.meeting_time",
+                "details.meeting_location",
+                "details.chairperson",
+                "details.attendee_scope",
+            ],
+        ),
+        (
+            "content-notice",
+            [
+                "exact_title",
+                "purpose",
+                "audience",
+                "usage_scenario",
+                "details.issuing_unit",
+                "details.execution_deadline",
+            ],
+        ),
+        (
+            "content-plan",
+            [
+                "exact_title",
+                "purpose",
+                "audience",
+                "usage_scenario",
+                "details.implementation_period",
+                "details.lead_unit",
+            ],
+        ),
+        (
+            "content-summary-plan",
+            [
+                "exact_title",
+                "purpose",
+                "audience",
+                "usage_scenario",
+                "details.summary_period",
+                "details.responsible_unit",
+            ],
+        ),
+        (
+            "content-polish",
+            [
+                "exact_title",
+                "purpose",
+                "audience",
+                "usage_scenario",
+                "details.polish_goal",
+                "details.expression_boundary",
+            ],
+        ),
+    ],
+)
+def test_new_content_profiles_publish_complete_chinese_brief_schemas(
+    profile_id,
+    paths,
+):
+    from api.expert_teams.launch_profiles import get_launch_profile
+
+    profile = get_launch_profile(profile_id)
+
+    assert [field["path"] for field in profile["brief_schema"]] == paths
+    assert all(field["label"] for field in profile["brief_schema"])
+    assert all(field["placeholder"] for field in profile["brief_schema"])
+    assert all(field["help"] for field in profile["brief_schema"])
+    assert all(field["required"] is True for field in profile["brief_schema"])
+
+
+@pytest.mark.parametrize(
+    ("document_type", "details"),
+    [
+        (
+            "meeting_minutes",
+            {
+                "meeting_time": "2026年7月28日 14:00",
+                "meeting_location": "公司三楼第一会议室",
+                "chairperson": "生产运营部负责人",
+                "attendee_scope": "相关部门负责人和项目组成员",
+            },
+        ),
+        (
+            "notice",
+            {"issuing_unit": "安全生产部", "execution_deadline": "2026年8月15日前"},
+        ),
+        (
+            "plan",
+            {"implementation_period": "2026年8月至10月", "lead_unit": "营销服务部"},
+        ),
+        (
+            "summary_plan",
+            {"summary_period": "2026年上半年", "responsible_unit": "数字化工作部"},
+        ),
+    ],
+)
+def test_new_create_content_briefs_validate_without_sources(document_type, details):
+    from api.expert_teams.contracts import build_document_brief, validate_document_brief
+
+    brief = build_document_brief(
+        "content-creator-team",
+        _standalone_payload(document_type),
+        now="2026-07-28T10:00:00+08:00",
+    )
+    brief.update(
+        {
+            "exact_title": "测试办公材料",
+            "purpose": "支撑内部办公协作",
+            "audience": "公司相关负责人",
+            "usage_scenario": "专题工作会议",
+        }
+    )
+    brief["details"].update(details)
+
+    validation = validate_document_brief(
+        brief,
+        runtime_capabilities={},
+        source_registry={},
+        model_policy_registry={},
+        now="2026-07-28T10:00:00+08:00",
+    )
+
+    assert validation["valid_for_confirmation"] is True
+    assert validation["field_errors"] == []
+
+
+def test_new_content_brief_required_fields_are_capability_driven():
+    from api.expert_teams.contracts import build_document_brief, validate_document_brief
+
+    brief = build_document_brief(
+        "content-creator-team",
+        _standalone_payload("notice"),
+        now="2026-07-28T10:00:00+08:00",
+    )
+    brief.update(
+        {
+            "exact_title": "安全生产专项检查通知",
+            "purpose": "明确专项检查安排",
+            "audience": "各相关部门",
+            "usage_scenario": "内部发文",
+        }
+    )
+    brief["details"]["issuing_unit"] = "安全生产部"
+
+    validation = validate_document_brief(
+        brief,
+        runtime_capabilities={},
+        source_registry={},
+        model_policy_registry={},
+        now="2026-07-28T10:00:00+08:00",
+    )
+
+    assert validation["valid_for_confirmation"] is False
+    assert any(
+        item["field"] == "details.execution_deadline"
+        and item["code"] == "required"
+        for item in validation["field_errors"]
+    )
+
+
+def test_content_polish_requires_ready_original_material():
+    from api.expert_teams.contracts import build_document_brief, validate_document_brief
+
+    brief = build_document_brief(
+        "content-creator-team",
+        _standalone_payload("other_office_material", prompt="润色现有办公材料"),
+        now="2026-07-28T10:00:00+08:00",
+    )
+    brief.update(
+        {
+            "exact_title": "优化后的办公材料",
+            "purpose": "提升正式表达和逻辑层次",
+            "audience": "公司管理层",
+            "usage_scenario": "内部审阅",
+        }
+    )
+    brief["details"].update(
+        {
+            "polish_goal": "压缩重复内容并优化逻辑层次",
+            "expression_boundary": "保留原有事实、数字、专名和明确结论",
+        }
+    )
+
+    missing = validate_document_brief(
+        brief,
+        runtime_capabilities={},
+        source_registry={},
+        model_policy_registry={},
+        now="2026-07-28T10:00:00+08:00",
+    )
+    assert any(
+        item["field"] == "source_policy.source_refs"
+        and item["code"] == "source_required"
+        and item["message"] == "请先添加需要润色的原始材料。"
+        for item in missing["field_errors"]
+    )
+
+    brief["source_policy"]["source_refs"] = [
+        {"source_id": "SRC-POLISH", "kind": "attachment", "label": "待润色原文"}
+    ]
+    ready = validate_document_brief(
+        brief,
+        runtime_capabilities={},
+        source_registry={
+            "SRC-POLISH": {
+                "status": "ready",
+                "sha256": "a" * 64,
+                "kind": "attachment",
+            }
+        },
+        model_policy_registry={},
+        now="2026-07-28T10:00:00+08:00",
+    )
+    assert ready["valid_for_confirmation"] is True
+    assert ready["field_errors"] == []
 
 
 def test_standalone_work_report_defaults_allow_labeled_placeholders_without_enterprise_fields():
