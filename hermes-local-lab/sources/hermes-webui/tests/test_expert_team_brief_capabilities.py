@@ -7,11 +7,11 @@ def _standalone_payload(document_type: str, *, prompt: str = "请生成文档") 
     template = {
         "work_report": "standalone-work-report",
         "research_report": "standalone-research-report",
-        "meeting_minutes": "meeting-minutes",
-        "notice": "general-proposal",
-        "plan": "general-proposal",
-        "summary_plan": "general-proposal",
-        "other_office_material": "general-proposal",
+        "meeting_minutes": "standalone-meeting-minutes",
+        "notice": "standalone-office-material",
+        "plan": "standalone-office-material",
+        "summary_plan": "standalone-office-material",
+        "other_office_material": "standalone-office-material",
     }[document_type]
     return {
         "contract_version": "expert-team-contract/v1",

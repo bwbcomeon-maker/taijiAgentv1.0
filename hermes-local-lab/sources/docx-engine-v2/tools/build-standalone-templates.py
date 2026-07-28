@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import sys
 from io import BytesIO
 from pathlib import Path
 
@@ -216,5 +217,15 @@ def build(template_id, subtitle):
 
 
 if __name__ == "__main__":
-    build("standalone-work-report", "工作汇报")
-    build("standalone-research-report", "深度研究报告")
+    templates = {
+        "standalone-work-report": "工作汇报",
+        "standalone-research-report": "深度研究报告",
+        "standalone-meeting-minutes": "会议纪要",
+        "standalone-office-material": "办公材料",
+    }
+    requested = sys.argv[1:] or list(templates)
+    unknown = [template_id for template_id in requested if template_id not in templates]
+    if unknown:
+        raise SystemExit(f"unknown standalone template: {', '.join(unknown)}")
+    for template_id in requested:
+        build(template_id, templates[template_id])

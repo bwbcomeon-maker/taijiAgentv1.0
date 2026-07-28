@@ -24,6 +24,14 @@
     {
       "templateId": "standalone-research-report",
       "path": "templates/standalone-research-report"
+    },
+    {
+      "templateId": "standalone-meeting-minutes",
+      "path": "templates/standalone-meeting-minutes"
+    },
+    {
+      "templateId": "standalone-office-material",
+      "path": "templates/standalone-office-material"
     }
   ],
   "installed": []

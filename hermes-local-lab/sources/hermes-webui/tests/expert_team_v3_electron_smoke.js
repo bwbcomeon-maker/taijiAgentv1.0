@@ -247,9 +247,9 @@ async function main() {
       await intakeAnswers[index].fill(`Electron 验证答案 ${index + 1}`);
     }
     assert(await page.locator('[data-et3-brief-form] textarea[name^="question__"]:not([required])').count() > 0, '真实任务没有覆盖可选问题留空场景');
-    await page.getByRole('button', { name: '保存并继续' }).click();
-    await page.getByRole('button', { name: '确认规格' }).waitFor({ state: 'visible' });
-    await page.getByRole('button', { name: '确认规格' }).click();
+    await page.getByRole('button', { name: '保存回答' }).click();
+    await page.getByRole('button', { name: '确认规格并继续' }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: '确认规格并继续' }).click();
     await page.getByRole('heading', { name: '生成前确认' }).waitFor({ state: 'visible' });
     const readyRequiredSections = await page.locator('#expertTeamV3Workbench .et3-required-sections li').allTextContents();
     assert(JSON.stringify(readyRequiredSections) === JSON.stringify(workRequiredSections), '生成前确认丢失必备章节', { workRequiredSections, readyRequiredSections });

@@ -191,6 +191,8 @@ test('run-job requires explicit template selection and does not create delivery 
       'enterprise-research-report',
       'standalone-work-report',
       'standalone-research-report',
+      'standalone-meeting-minutes',
+      'standalone-office-material',
     ]
   );
   const listResult = listTemplates();

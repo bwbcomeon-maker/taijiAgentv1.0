@@ -81,7 +81,17 @@ const standaloneDocumentMetadataV1Schema = {
   required: ['title', 'documentType'],
   properties: {
     title: { type: 'string', minLength: 1 },
-    documentType: { enum: ['work_report', 'research_report'] },
+    documentType: {
+      enum: [
+        'work_report',
+        'research_report',
+        'meeting_minutes',
+        'notice',
+        'plan',
+        'summary_plan',
+        'other_office_material',
+      ],
+    },
     client: { type: 'string' },
     versionLabel: { type: 'string' },
     documentDate: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },

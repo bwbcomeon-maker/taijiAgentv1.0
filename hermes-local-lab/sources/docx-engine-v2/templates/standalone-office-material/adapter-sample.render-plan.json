@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "docx-engine-v2/render-plan",
+  "jobId": "job-standalone-office-sample",
+  "templateId": "standalone-office-material",
+  "documentMetadata": {
+    "title": "办公材料",
+    "documentType": "notice"
+  },
+  "sections": [],
+  "tables": [],
+  "figures": [],
+  "templateData": {
+    "title": "办公材料",
+    "sections": [
+      {
+        "sectionId": "sec-1",
+        "title": "背景与总体要求",
+        "level": 2,
+        "metadata": {},
+        "blocks": [
+          {"type": "paragraph", "blockId": "block-1", "text": "已确认正文：正文内容需以用户确认信息为准。"}
+        ]
+      }
+    ],
+    "tables": [],
+    "images": [],
+    "metadata": {}
+  },
+  "warnings": []
+}

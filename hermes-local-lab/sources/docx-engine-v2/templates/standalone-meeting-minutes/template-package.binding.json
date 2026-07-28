@@ -1,0 +1,10 @@
+{
+  "files": {
+    "data-adapter.js": "c2580388fe345ecc44776c3c2f44f23cb9f8998809290337765012ddfb9fce52",
+    "manifest.json": "981ef94f7dd5120b641cc66a081885022d9cffdbf71be3b9cea62453e770c06b",
+    "schema.json": "6029aaad4374b94b70d66622adb0585b822bf2c042f4dec86e140113a7082281",
+    "template.docx": "192cc743f0cc83abf3dc04e04ed8760202a36a798861159efe6c6918b63ad7fc"
+  },
+  "packageSha256": "e5fc2907ecf8491159febf1e2fe4a5076a31b72880535cc24596ae49c4ac586b",
+  "schemaVersion": "docx-template-package-binding/v1"
+}

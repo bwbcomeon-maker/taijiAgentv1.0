@@ -19,6 +19,8 @@ const expectedTemplateIds = [
   'enterprise-research-report',
   'standalone-work-report',
   'standalone-research-report',
+  'standalone-meeting-minutes',
+  'standalone-office-material',
 ];
 
 function readJson(filePath) {
@@ -46,6 +48,8 @@ test('contract templates bind every rendering file outside the manifest', () => 
     'enterprise-research-report',
     'standalone-work-report',
     'standalone-research-report',
+    'standalone-meeting-minutes',
+    'standalone-office-material',
   ]) {
     const template = getTemplatePackage(templateId, { rootDir });
     const binding = readJson(path.join(template.packageDir, 'template-package.binding.json'));

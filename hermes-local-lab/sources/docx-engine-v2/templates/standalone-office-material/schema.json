@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "standalone-office-material.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document", "sections", "tables", "figures", "images"],
+  "properties": {
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "subtitle", "versionLabel", "documentDate"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "subtitle": {"enum": ["通知通报", "方案说明", "总结计划", "材料润色"]},
+        "versionLabel": {"type": "string"},
+        "documentDate": {"type": "string"}
+      }
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sectionId", "title", "paragraphs"],
+        "properties": {
+          "sectionId": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "paragraphs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["text"],
+              "properties": {"text": {"type": "string", "minLength": 1}}
+            }
+          }
+        }
+      }
+    },
+    "tables": {"type": "array"},
+    "figures": {"type": "array"},
+    "images": {"type": "array"}
+  }
+}

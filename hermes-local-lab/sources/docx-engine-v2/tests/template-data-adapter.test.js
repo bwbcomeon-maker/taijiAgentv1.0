@@ -25,6 +25,8 @@ test('template packages declare a package-local data adapter', () => {
     'enterprise-research-report',
     'standalone-work-report',
     'standalone-research-report',
+    'standalone-meeting-minutes',
+    'standalone-office-material',
   ]) {
     const template = getTemplatePackage(templateId, { rootDir: ENGINE_ROOT });
 

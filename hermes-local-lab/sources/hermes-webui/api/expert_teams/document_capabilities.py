@@ -153,7 +153,7 @@ _CAPABILITIES = {
         "releases": {
             "standalone": {
                 "released": True,
-                "render_template_id": "meeting-minutes",
+                "render_template_id": "standalone-meeting-minutes",
             },
         },
         "brief_schema": (
@@ -205,7 +205,7 @@ _CAPABILITIES = {
         "releases": {
             "standalone": {
                 "released": True,
-                "render_template_id": "general-proposal",
+                "render_template_id": "standalone-office-material",
             },
         },
         "brief_schema": (
@@ -239,7 +239,7 @@ _CAPABILITIES = {
         "releases": {
             "standalone": {
                 "released": True,
-                "render_template_id": "general-proposal",
+                "render_template_id": "standalone-office-material",
             },
         },
         "brief_schema": (
@@ -273,7 +273,7 @@ _CAPABILITIES = {
         "releases": {
             "standalone": {
                 "released": True,
-                "render_template_id": "general-proposal",
+                "render_template_id": "standalone-office-material",
             },
         },
         "brief_schema": (
@@ -307,7 +307,7 @@ _CAPABILITIES = {
         "releases": {
             "standalone": {
                 "released": True,
-                "render_template_id": "general-proposal",
+                "render_template_id": "standalone-office-material",
             },
         },
         "brief_schema": (

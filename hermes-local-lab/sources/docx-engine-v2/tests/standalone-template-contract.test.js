@@ -22,6 +22,13 @@ const STANDALONE_TEMPLATES = [
   ['standalone-work-report', 'work_report', '工作汇报'],
   ['standalone-research-report', 'research_report', '深度研究报告'],
 ];
+const CONTENT_TEMPLATE_CASES = [
+  ['standalone-meeting-minutes', 'meeting_minutes', '会议纪要'],
+  ['standalone-office-material', 'notice', '通知通报'],
+  ['standalone-office-material', 'plan', '方案说明'],
+  ['standalone-office-material', 'summary_plan', '总结计划'],
+  ['standalone-office-material', 'other_office_material', '材料润色'],
+];
 const ENTERPRISE_ONLY_WORDS = [
   '签发单位',
   '编制单位',
@@ -92,8 +99,52 @@ test('registry exposes standalone templates after existing enterprise templates'
       'enterprise-research-report',
       'standalone-work-report',
       'standalone-research-report',
+      'standalone-meeting-minutes',
+      'standalone-office-material',
     ]
   );
+});
+
+test('content task standalone templates preserve only approved business content', () => {
+  for (const [templateId, documentType, subtitle] of CONTENT_TEMPLATE_CASES) {
+    const templatePackage = getTemplatePackage(templateId, { rootDir: ENGINE_ROOT });
+    const manifest = templatePackage.manifest;
+    assert.equal(manifest.contractProfile, 'standalone');
+    assert.equal(manifest.rendererProfile, 'standalone-default');
+    assert.equal(manifest.documentTypes.includes(documentType), true);
+    assert.deepEqual(manifest.requiredMetadata, ['title', 'documentType']);
+    assert.equal(manifest.contentPolicy.allowAdapterGeneratedBusinessContent, false);
+    assert.equal(manifest.contentPolicy.allowPlaceholders, false);
+    assert.equal(manifest.qualityGates.includes('wps_visual'), false);
+
+    const templateData = buildTemplateData({
+      templatePackage,
+      renderPlan: {
+        documentMetadata: standaloneMetadata(documentType, '用户确认标题'),
+        templateData: {
+          title: '模型来源标题',
+          sections: [{
+            sectionId: 'sec-1',
+            title: '用户确认章节',
+            blocks: [{ type: 'paragraph', text: '用户确认正文。' }],
+          }],
+          tables: [],
+          images: [],
+          metadata: {},
+        },
+        tables: [],
+        figures: [],
+      },
+    });
+    const serialized = JSON.stringify(templateData);
+    assert.equal(templateData.document.title, '用户确认标题');
+    assert.equal(templateData.document.subtitle, subtitle);
+    assert.deepEqual(templateData.sections.map((section) => section.title), ['用户确认章节']);
+    assert.deepEqual(templateData.sections[0].paragraphs, [{ text: '用户确认正文。' }]);
+    for (const forbidden of [...ENTERPRISE_ONLY_WORDS, '客户单位', '北京太极', '2026年7月', '项目组']) {
+      assert.equal(serialized.includes(forbidden), false, `${templateId}/${documentType}: ${forbidden}`);
+    }
+  }
 });
 
 test('standalone manifests isolate local delivery from enterprise and Office gates', () => {
@@ -114,13 +165,24 @@ test('standalone manifests isolate local delivery from enterprise and Office gat
 });
 
 test('standalone metadata contract accepts only local document identity', () => {
-  assert.equal(
-    validateDomainObject('StandaloneDocumentMetadataV1', {
-      title: '部门月度工作汇报',
-      documentType: 'work_report',
-    }).ok,
-    true
-  );
+  for (const documentType of [
+    'work_report',
+    'research_report',
+    'meeting_minutes',
+    'notice',
+    'plan',
+    'summary_plan',
+    'other_office_material',
+  ]) {
+    assert.equal(
+      validateDomainObject('StandaloneDocumentMetadataV1', {
+        title: '用户确认标题',
+        documentType,
+      }).ok,
+      true,
+      documentType
+    );
+  }
   for (const field of ['issuer', 'compiler', 'classification', 'approver']) {
     const result = validateDomainObject('StandaloneDocumentMetadataV1', {
       title: '部门月度工作汇报',
@@ -246,6 +308,79 @@ test('standalone template samples are editable A4 DOCX files without enterprise 
     for (const forbidden of ENTERPRISE_ONLY_WORDS) {
       assert.equal(documentXml.includes(forbidden), false, forbidden);
     }
+  }
+});
+
+test('content task standalone template samples render editable A4 DOCX files', async (t) => {
+  for (const templateId of ['standalone-meeting-minutes', 'standalone-office-material']) {
+    const template = getTemplatePackage(templateId, { rootDir: ENGINE_ROOT });
+    const outDir = path.join(makeTempDir(t), templateId);
+    const result = await renderTemplateSample({ packageDir: template.packageDir, outDir });
+    assert.equal(result.ok, true);
+    const entries = readZipEntriesFromBuffer(fs.readFileSync(result.documentPath));
+    const documentXml = entries.get('word/document.xml').toString('utf8');
+    assert.match(documentXml, /<w:pgSz[^>]*w:w="1190[0-9]"[^>]*w:h="1683[0-9]"/);
+    assert.equal(documentXml.includes('{d.'), false);
+    assert.match(documentXml, /已确认正文/);
+    for (const forbidden of [...ENTERPRISE_ONLY_WORDS, '客户单位', '北京太极']) {
+      assert.equal(documentXml.includes(forbidden), false, `${templateId}: ${forbidden}`);
+    }
+  }
+});
+
+test('all released content document types complete a standalone DOCX job', async (t) => {
+  for (const [templateId, documentType] of CONTENT_TEMPLATE_CASES) {
+    const root = makeTempDir(t);
+    const sourcePath = path.join(root, 'source.md');
+    const assetManifestPath = path.join(root, 'asset-manifest.json');
+    const deliveryDir = path.join(root, 'delivery');
+    fs.writeFileSync(
+      sourcePath,
+      '# 用户确认标题\n\n## 用户确认章节\n\n用户确认正文；缺失数据【待补充】。\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      assetManifestPath,
+      '{"schema_version":"expert-asset-manifest/v1","assets":[]}\n',
+      'utf8'
+    );
+    const binding = readJson(path.join(ENGINE_ROOT, 'templates', templateId, 'template-package.binding.json'));
+    const rendererIdentity = describeRendererIdentity({
+      engineRoot: ENGINE_ROOT,
+      profileId: 'standalone-default',
+    });
+    const contract = contractFixture({
+      templateId,
+      documentType,
+      sourceSha256: sha256File(sourcePath),
+      assetManifestSha256: sha256File(assetManifestPath),
+    });
+    contract.documentMetadata.title = '用户确认标题';
+    contract.rendererIdentity = rendererIdentity;
+    contract.renderInputBinding = {
+      ...contract.renderInputBinding,
+      template: { id: templateId, version: '1.0.0', packageSha256: binding.packageSha256 },
+      rendererIdentity,
+    };
+    contract.renderInputFingerprint = canonicalSha256(contract.renderInputBinding);
+
+    const result = await runDocumentJob({
+      engineRoot: ENGINE_ROOT,
+      templateId,
+      sourcePath,
+      sourceType: 'markdown',
+      assetDir: root,
+      assetManifestPath,
+      deliveryDir,
+      ...contract,
+    });
+
+    assert.equal(result.ok, true, `${documentType}: ${JSON.stringify(result)}`);
+    const entries = readZipEntriesFromBuffer(fs.readFileSync(result.documentPath));
+    const documentXml = entries.get('word/document.xml').toString('utf8');
+    assert.equal(documentXml.includes('用户确认正文'), true, documentType);
+    assert.equal(documentXml.includes('【待补充】'), true, documentType);
+    assert.equal(documentXml.includes('{d.'), false, documentType);
   }
 });
 
