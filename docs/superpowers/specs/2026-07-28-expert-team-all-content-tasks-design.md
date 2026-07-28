@@ -51,13 +51,13 @@
 
 | capability_id | document_type | task_mode | standalone template |
 | --- | --- | --- | --- |
-| `content-meeting-minutes` | `meeting_minutes` | `create` | `meeting-minutes` |
-| `content-notice` | `notice` | `create` | `general-proposal` |
-| `content-plan` | `plan` | `create` | `general-proposal` |
-| `content-summary-plan` | `summary_plan` | `create` | `general-proposal` |
-| `content-polish` | `other_office_material` | `polish` | `general-proposal` |
+| `content-meeting-minutes` | `meeting_minutes` | `create` | `standalone-meeting-minutes` |
+| `content-notice` | `notice` | `create` | `standalone-office-material` |
+| `content-plan` | `plan` | `create` | `standalone-office-material` |
+| `content-summary-plan` | `summary_plan` | `create` | `standalone-office-material` |
+| `content-polish` | `other_office_material` | `polish` | `standalone-office-material` |
 
-现有 DOCX Engine v2 已登记 `meeting-minutes` 和 `general-proposal`，本次优先复用其稳定渲染底座，不复制五套近似模板。若模板适配器或 schema 对新的 `document_type` 有封闭枚举，则只扩展明确的映射与测试，不降低 schema 校验强度。
+实际审查证明既有 `meeting-minutes` 和 `general-proposal` 属于旧的企业/演示合同：适配器会注入固定日期、客户、公司、密级和责任事项，且包含 `wps_visual` 门禁，不能用于 standalone 交付。因此新增两个共享同一安全渲染结构的单机模板包：会议纪要使用 `standalone-meeting-minutes`，其余四类使用 `standalone-office-material`。二者均声明 `contractProfile=standalone`，只渲染用户确认的标题、章节、表格和图片，不生成任何业务事实或企业元数据。旧模板保持不变，避免影响现有调用方。
 
 ### 4.2 Brief 字段与必备章节
 
@@ -128,7 +128,7 @@ flowchart LR
 3. catalog：六个内容任务均可选，且不存在“暂未开放”标签或 disabled reason。
 4. Brief：各任务必填字段校验；材料润色无来源时必然失败，有来源时通过。
 5. required sections：从默认 Brief 到确认、提示、阶段产物、交付清单和 DOCX 的完整传播与缺失拒绝。
-6. DOCX Engine：`meeting-minutes` 和 `general-proposal` 对五类任务完成 schema、渲染、自检及 ZIP/DOCX 结构验证。
+6. DOCX Engine：`standalone-meeting-minutes` 和 `standalone-office-material` 对五类任务完成 schema、渲染、自检及 ZIP/DOCX 结构验证，并证明产物不含旧模板注入内容。
 7. 回归：工作汇报、专题报告、恢复、重复启动和交付重试测试保持通过。
 
 ### 8.2 前端与桌面验收
@@ -156,5 +156,6 @@ flowchart LR
 
 - **只删除“暂未开放”**：会暴露没有启动配置的死入口。
 - **五项全部伪装成工作汇报**：输入字段、章节和模板语义错误，属于不可接受的假开放。
-- **立即复制五套 DOCX 模板**：重复维护成本高，当前已有会议纪要和通用办公材料底座可复用；只有实际渲染证据证明无法满足时才拆分专用模板。
+- **继续复用旧 `meeting-minutes` / `general-proposal`**：实测会注入固定日期、客户、公司、密级和责任事项，也会错误带入企业版视觉门禁。
+- **立即复制五套 DOCX 模板**：重复维护成本高；两个 standalone 安全模板已覆盖会议纪要与通用办公材料两种结构族。
 - **材料润色允许无原文启动**：无法保证“保持原意”，也无法验收事实是否被篡改。

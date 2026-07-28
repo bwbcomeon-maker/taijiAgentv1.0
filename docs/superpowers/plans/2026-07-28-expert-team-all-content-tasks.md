@@ -4,7 +4,7 @@
 
 **Goal:** 让内容创作专家团的六个任务全部真实可启动、可确认、可生成和可交付，并保证任务弹窗底部主按钮在目标窗口高度内始终可见。
 
-**Architecture:** 服务端继续以 document capability 和 launch profile 作为可用性的唯一真相源，新增五个任务的独立 Brief、来源与章节合同；内容阶段编排保持共享。DOCX 交付复用现有 `meeting-minutes` 与 `general-proposal` 模板，前端只消费 catalog 结果并把弹窗改成固定头尾、中部滚动的三行布局。
+**Architecture:** 服务端继续以 document capability 和 launch profile 作为可用性的唯一真相源，新增五个任务的独立 Brief、来源与章节合同；内容阶段编排保持共享。DOCX 交付使用新建的 `standalone-meeting-minutes` 与 `standalone-office-material` 安全模板，避免旧模板注入固定企业内容；前端只消费 catalog 结果并把弹窗改成固定头尾、中部滚动的三行布局。
 
 **Tech Stack:** Python 3、pytest、原生 JavaScript/CSS、Node.js `node:test`、DOCX Engine v2、Electron/Playwright smoke。
 
@@ -18,7 +18,9 @@
 - `hermes-local-lab/sources/hermes-webui/api/expert_teams/catalog.py`：保留任务展示元数据，由 profile 自动推导可用性。
 - `hermes-local-lab/sources/hermes-webui/static/expert-team-v3.css`：三行弹窗与中部滚动。
 - `hermes-local-lab/sources/hermes-webui/static/expert-team-v3.js`：保留可访问任务选择与字段级错误聚焦。
-- `hermes-local-lab/sources/docx-engine-v2/src/template-data-adapter.js`：仅在现有封闭文种映射拒绝新增类型时扩展显式映射。
+- `hermes-local-lab/sources/docx-engine-v2/templates/standalone-meeting-minutes/`：会议纪要单机安全模板包。
+- `hermes-local-lab/sources/docx-engine-v2/templates/standalone-office-material/`：通知、方案、总结和润色共享的单机安全模板包。
+- `hermes-local-lab/sources/docx-engine-v2/tools/build-standalone-templates.py`：确定性生成两个新模板的 DOCX 二进制。
 - `hermes-local-lab/sources/hermes-webui/tests/test_expert_team_capability_registry.py`：能力注册表与 fail-closed 测试。
 - `hermes-local-lab/sources/hermes-webui/tests/test_expert_team_brief_capabilities.py`：Brief schema、来源和启动配置测试。
 - `hermes-local-lab/sources/hermes-webui/tests/test_expert_team_standalone_contract.py`：catalog 六任务可用性和启动合同。
@@ -41,11 +43,11 @@
 @pytest.mark.parametrize(
     ("document_type", "task_mode", "capability_id", "template_id", "sections", "minimum_ready"),
     [
-        ("meeting_minutes", "create", "content-meeting-minutes", "meeting-minutes", ["会议基本情况", "议定事项", "责任分工", "后续跟踪"], 0),
-        ("notice", "create", "content-notice", "general-proposal", ["背景与总体要求", "通知事项", "时间安排", "责任分工", "报送要求"], 0),
-        ("plan", "create", "content-plan", "general-proposal", ["目标", "现状与问题", "主要措施", "进度安排", "保障机制"], 0),
-        ("summary_plan", "create", "content-summary-plan", "general-proposal", ["阶段性工作总结", "成效与亮点", "问题与不足", "下一步工作计划"], 0),
-        ("other_office_material", "polish", "content-polish", "general-proposal", ["润色后正文", "修改说明"], 1),
+        ("meeting_minutes", "create", "content-meeting-minutes", "standalone-meeting-minutes", ["会议基本情况", "议定事项", "责任分工", "后续跟踪"], 0),
+        ("notice", "create", "content-notice", "standalone-office-material", ["背景与总体要求", "通知事项", "时间安排", "责任分工", "报送要求"], 0),
+        ("plan", "create", "content-plan", "standalone-office-material", ["目标", "现状与问题", "主要措施", "进度安排", "保障机制"], 0),
+        ("summary_plan", "create", "content-summary-plan", "standalone-office-material", ["阶段性工作总结", "成效与亮点", "问题与不足", "下一步工作计划"], 0),
+        ("other_office_material", "polish", "content-polish", "standalone-office-material", ["润色后正文", "修改说明"], 1),
     ],
 )
 def test_all_content_capabilities_are_released(...):
@@ -100,7 +102,7 @@ Expected: FAIL，错误指向新增 capability/profile 不存在，而非测试�
     "capability_id": "content-polish",
     "document_type": "other_office_material",
     "task_mode": "polish",
-    "releases": {"standalone": {"released": True, "render_template_id": "general-proposal"}},
+    "releases": {"standalone": {"released": True, "render_template_id": "standalone-office-material"}},
     "brief_schema": (
         *_COMMON_FIELDS,
         {"path": "details.polish_goal", "label": "润色目标", "control": "textarea", "required": True, ...},
@@ -126,7 +128,7 @@ Expected: FAIL，错误指向新增 capability/profile 不存在，而非测试�
     "document_type": "meeting_minutes",
     "intake_example_id": "meeting_minutes",
     "task_mode": "create",
-    "render_template_id": "meeting-minutes",
+    "render_template_id": "standalone-meeting-minutes",
     "stages": CONTENT_PHASES,
     "review_policy": {"kind": "local_confirmation"},
 },
@@ -302,23 +304,27 @@ git add hermes-local-lab/sources/hermes-webui/static/expert-team-v3.css \
 git commit -m "fix(expert-teams): keep summon action visible"
 ```
 
-### Task 5: 验证两类 DOCX 模板覆盖五种任务
+### Task 5: 新建并验证两类 standalone 安全 DOCX 模板
 
 **Files:**
+- Create: `hermes-local-lab/sources/docx-engine-v2/templates/standalone-meeting-minutes/`
+- Create: `hermes-local-lab/sources/docx-engine-v2/templates/standalone-office-material/`
+- Modify: `hermes-local-lab/sources/docx-engine-v2/template-registry.json`
+- Modify: `hermes-local-lab/sources/docx-engine-v2/tools/build-standalone-templates.py`
 - Modify: `hermes-local-lab/sources/docx-engine-v2/tests/template-data-adapter.test.js`
 - Modify: `hermes-local-lab/sources/docx-engine-v2/tests/standalone-template-contract.test.js`
-- Modify only on demonstrated incompatibility: `hermes-local-lab/sources/docx-engine-v2/src/template-data-adapter.js`
-- Modify only on demonstrated incompatibility: `hermes-local-lab/sources/hermes-webui/api/expert_teams/documents.py`
+- Modify: `hermes-local-lab/sources/hermes-webui/api/expert_teams/document_capabilities.py`
+- Modify: `hermes-local-lab/sources/hermes-webui/api/expert_teams/launch_profiles.py`
 
 - [ ] **Step 1: 参数化模板适配与渲染测试**
 
 ```javascript
 const contentCases = [
-  ['meeting_minutes', 'meeting-minutes'],
-  ['notice', 'general-proposal'],
-  ['plan', 'general-proposal'],
-  ['summary_plan', 'general-proposal'],
-  ['other_office_material', 'general-proposal'],
+  ['meeting_minutes', 'standalone-meeting-minutes'],
+  ['notice', 'standalone-office-material'],
+  ['plan', 'standalone-office-material'],
+  ['summary_plan', 'standalone-office-material'],
+  ['other_office_material', 'standalone-office-material'],
 ];
 for (const [documentType, templateId] of contentCases) {
   test(`${documentType} renders with ${templateId}`, async () => {
@@ -337,7 +343,7 @@ Run from `hermes-local-lab/sources/docx-engine-v2`:
 node --test tests/template-data-adapter.test.js tests/standalone-template-contract.test.js
 ```
 
-Expected: PASS；若封闭枚举导致 FAIL，只增加上述五种显式映射，不放宽未知文种校验。
+Expected before implementation: FAIL，错误指向模板未登记或模板包不存在。实现后 PASS，并断言适配数据与 DOCX XML 不包含“客户单位、北京太极、内部资料”及固定日期。
 
 - [ ] **Step 3: 运行 WebUI 真实引擎交付测试**
 
