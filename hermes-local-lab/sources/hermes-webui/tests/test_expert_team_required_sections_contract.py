@@ -53,6 +53,56 @@ def _draft_payload(headings):
     }
 
 
+@pytest.mark.parametrize(
+    ("profile_id", "expected_sections"),
+    [
+        (
+            "content-meeting-minutes",
+            ["会议基本情况", "议定事项", "责任分工", "后续跟踪"],
+        ),
+        (
+            "content-notice",
+            ["背景与总体要求", "通知事项", "时间安排", "责任分工", "报送要求"],
+        ),
+        (
+            "content-plan",
+            ["目标", "现状与问题", "主要措施", "进度安排", "保障机制"],
+        ),
+        (
+            "content-summary-plan",
+            ["阶段性工作总结", "成效与亮点", "问题与不足", "下一步工作计划"],
+        ),
+        ("content-polish", ["润色后正文", "修改说明"]),
+    ],
+)
+def test_new_content_required_sections_flow_from_profile_to_run_and_prompt(
+    profile_id,
+    expected_sections,
+):
+    from api import expert_teams
+    from api.expert_teams.prompts import _system_message
+
+    run = expert_teams.build_standalone_expert_team_run(
+        {
+            "session_id": f"required-sections-{profile_id}",
+            "launch_profile_id": profile_id,
+            "prompt": "生成章节合同测试文档",
+            "idempotency_key": f"required-sections-{profile_id}-1",
+        },
+        run_id=f"et-required-sections-{profile_id}",
+    )
+    brief = run["document_brief"]
+
+    assert run["launch_profile_snapshot"]["content_constraints"][
+        "required_sections"
+    ] == expected_sections
+    assert brief["content_constraints"]["required_sections"] == expected_sections
+    assert json.dumps(expected_sections, ensure_ascii=False, separators=(",", ":")) in _system_message(
+        "writing_plan",
+        brief,
+    )
+
+
 def test_document_artifact_requires_every_brief_section_in_map_and_markdown():
     from api.expert_teams.stage_artifacts import (
         StageArtifactError,
