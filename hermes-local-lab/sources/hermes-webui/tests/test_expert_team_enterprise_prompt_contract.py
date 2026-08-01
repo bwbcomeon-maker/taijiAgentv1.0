@@ -424,11 +424,15 @@ def test_revision_context_contains_only_previous_ref_and_latest_feedback():
         revision_feedback={"previous_artifact_ref": {"artifact_id": "art-draft-1", "sha256": "4" * 64}, "feedback": feedback},
     )
     envelope = json.loads(request["messages"][1]["content"])
+    system = request["messages"][0]["content"]
     assert envelope["revision_context"] == {
         "previous_artifact_ref": {"artifact_id": "art-draft-1", "sha256": "4" * 64},
         "feedback": feedback,
     }
     assert "旧反馈绝不能进入" not in request["messages"][1]["content"]
+    assert "只修改 feedback 明确要求的内容" in system
+    assert "未被 feedback 点名的字段、事实、等级和结论边界必须保持不变" in system
+    assert CANARY not in system
 
 
 def test_unknown_or_system_stage_fails_closed():
