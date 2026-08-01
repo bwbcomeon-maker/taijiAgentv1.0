@@ -323,6 +323,30 @@ def test_retry_prompt_names_the_previous_contract_error_without_reinjecting_raw_
     assert "RAW-PROVIDER-OUTPUT-MUST-NOT-BE-REINJECTED" not in system
 
 
+def test_retry_prompt_for_truncated_meta_marker_requires_exact_ascii_closure_and_newline():
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _run("plan")
+    run["stage_outputs"] = [
+        {
+            "task_id": "plan",
+            "status": "invalid",
+            "artifact_error": {"code": "invalid_block_count", "field": "meta"},
+        }
+    ]
+
+    request = build_stage_gateway_request(
+        run,
+        {"id": "plan", "executor": "model", "artifact_type": "writing_plan", "depends_on": []},
+    )
+    system = request["messages"][0]["content"]
+
+    assert "<<<TAIJI_META_END>>>" in system
+    assert "三个连续的 ASCII >" in system
+    assert "结束标记后输出一个换行符" in system
+    assert "不得缩写成 <<<TAIJI_META_END>>" in system
+
+
 def test_retry_prompt_rejects_tampered_error_text_instead_of_promoting_it_to_system_content():
     from api.expert_teams.prompts import build_stage_gateway_request
 

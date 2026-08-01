@@ -497,10 +497,17 @@ def _system_message(
         code = str(previous_protocol_error.get("code") or "unknown_error").strip()
         field = str(previous_protocol_error.get("field") or "").strip()
         field_note = f"；字段：{field}" if field else ""
+        marker_correction = ""
+        if code == "invalid_block_count" and field == "meta":
+            marker_correction = (
+                "META 结束标记必须完整为 <<<TAIJI_META_END>>>，最右侧是三个连续的 ASCII >；"
+                "不得缩写成 <<<TAIJI_META_END>>。结束标记后输出一个换行符，再结束响应。\n"
+            )
         correction = (
             "[RETRY CORRECTION]\n"
             f"上一次输出未通过协议检查（错误代码：{code}{field_note}）。"
             "不要复述上一次输出，严格按下面格式重新生成。\n"
+            f"{marker_correction}"
         )
     response_template = _response_template(artifact_type)
     return (
