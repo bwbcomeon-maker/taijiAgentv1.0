@@ -3,9 +3,11 @@
 import base64
 import hashlib
 import json
+import re
 import sys
 from io import BytesIO
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
@@ -24,6 +26,13 @@ HEADING_CJK_FONT = "黑体"
 TRANSPARENT_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+DETERMINISTIC_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+UNAVAILABLE_FONT_REPLACEMENTS = {
+    "ＭＳ 明朝": BODY_CJK_FONT,
+    "ＭＳ ゴシック": HEADING_CJK_FONT,
+    "Courier": "Arial",
+}
+PORTABLE_FONT_FAMILIES = {"", "Arial", "Symbol", BODY_CJK_FONT, HEADING_CJK_FONT}
 
 
 def set_font(run, *, cjk=BODY_CJK_FONT, western="Arial", size=11, bold=False, color=None):
@@ -78,6 +87,28 @@ def configure_styles(document):
             outline = OxmlElement("w:outlineLvl")
             paragraph_properties.append(outline)
         outline.set(qn("w:val"), str(outline_level))
+
+
+def set_current_word_compatibility_mode(document):
+    settings = document.settings._element
+    compatibility = settings.find(qn("w:compat"))
+    if compatibility is None:
+        compatibility = OxmlElement("w:compat")
+        settings.append(compatibility)
+    compatibility_mode = next(
+        (
+            item
+            for item in compatibility.findall(qn("w:compatSetting"))
+            if item.get(qn("w:name")) == "compatibilityMode"
+        ),
+        None,
+    )
+    if compatibility_mode is None:
+        compatibility_mode = OxmlElement("w:compatSetting")
+        compatibility.append(compatibility_mode)
+    compatibility_mode.set(qn("w:name"), "compatibilityMode")
+    compatibility_mode.set(qn("w:uri"), "http://schemas.microsoft.com/office/word")
+    compatibility_mode.set(qn("w:val"), "15")
 
 
 def shade_cell(cell, fill):
@@ -158,6 +189,79 @@ def write_binding(package_dir):
     )
 
 
+def portable_template_xml(filename, data):
+    if not filename.endswith(".xml"):
+        return data
+    text = data.decode("utf-8")
+    if filename == "word/fontTable.xml":
+        text = re.sub(
+            r'\s*<w:font\b(?=[^>]*w:name="([^"]+)")[^>]*(?:/>|>.*?</w:font>)',
+            lambda match: match.group(0) if match.group(1) in PORTABLE_FONT_FAMILIES else "",
+            text,
+            flags=re.DOTALL,
+        )
+
+    def replace_font_attribute(match):
+        attribute = match.group(1)
+        font_name = match.group(2)
+        if font_name in PORTABLE_FONT_FAMILIES:
+            return match.group(0)
+        replacement = UNAVAILABLE_FONT_REPLACEMENTS.get(font_name)
+        if replacement is None:
+            replacement = BODY_CJK_FONT if attribute == "w:eastAsia" else "Arial"
+        return f'{attribute}="{replacement}"'
+
+    text = re.sub(
+        r'<w:rFonts\b[^>]*>',
+        lambda tag_match: re.sub(
+            r'(w:ascii|w:hAnsi|w:eastAsia|w:cs)="([^"]*)"',
+            replace_font_attribute,
+            tag_match.group(0),
+        ),
+        text,
+    )
+    text = re.sub(
+        r'(typeface)="([^"]*)"',
+        replace_font_attribute,
+        text,
+    )
+
+    def chinese_language_tag(match):
+        tag = match.group(0)
+        for attribute in ("w:val", "w:eastAsia"):
+            if re.search(rf'\b{re.escape(attribute)}="[^"]*"', tag):
+                tag = re.sub(
+                    rf'\b{re.escape(attribute)}="[^"]*"',
+                    f'{attribute}="zh-CN"',
+                    tag,
+                )
+            else:
+                closing = "/>" if tag.endswith("/>") else ">"
+                tag = tag[: -len(closing)] + f' {attribute}="zh-CN"' + closing
+        return tag
+
+    text = re.sub(r'<w:lang\b[^>]*>', chinese_language_tag, text)
+    return text.encode("utf-8")
+
+
+def normalize_docx_archive(docx_path):
+    with ZipFile(docx_path, "r") as source:
+        entries = [
+            (item.filename, portable_template_xml(item.filename, source.read(item.filename)))
+            for item in sorted(source.infolist(), key=lambda item: item.filename)
+            if not item.is_dir()
+        ]
+    output = BytesIO()
+    with ZipFile(output, "w", compression=ZIP_DEFLATED, compresslevel=9) as target:
+        for filename, data in entries:
+            info = ZipInfo(filename=filename, date_time=DETERMINISTIC_ZIP_TIMESTAMP)
+            info.compress_type = ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o600 << 16
+            target.writestr(info, data, compress_type=ZIP_DEFLATED, compresslevel=9)
+    docx_path.write_bytes(output.getvalue())
+
+
 def build(template_id, subtitle):
     document = Document()
     section = document.sections[0]
@@ -170,6 +274,7 @@ def build(template_id, subtitle):
     section.header_distance = Mm(12.5)
     section.footer_distance = Mm(12.5)
     configure_styles(document)
+    set_current_word_compatibility_mode(document)
 
     header = section.header.paragraphs[0]
     header.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -212,7 +317,9 @@ def build(template_id, subtitle):
     core.author = "Taiji DOCX Engine V2"
     package_dir = ROOT / "templates" / template_id
     package_dir.mkdir(parents=True, exist_ok=True)
-    document.save(package_dir / "template.docx")
+    template_path = package_dir / "template.docx"
+    document.save(template_path)
+    normalize_docx_archive(template_path)
     write_binding(package_dir)
 
 

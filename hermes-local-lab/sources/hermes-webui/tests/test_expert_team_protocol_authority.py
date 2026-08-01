@@ -427,6 +427,9 @@ def test_ledger_limit_becomes_explicit_retryable_failure(
 
     assert observed["workflow_state"] == "generated_invalid"
     assert observed.get("last_execution_error")
+    assert observed["last_execution_error_code"] == "runtime_observation_limit"
+    assert observed["view"]["product_error"]["code"] == "model_output_invalid"
+    assert observed["view"]["presentation"]["detail"] == observed["view"]["product_error"]["message"]
     assert not observed.get("stage_outputs")
     assert observed["view"]["actions"]["can_retry"] is True
 

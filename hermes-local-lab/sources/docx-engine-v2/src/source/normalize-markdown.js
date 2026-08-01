@@ -186,19 +186,23 @@ function createContext({ sourceType, sourcePath, sourceText }) {
 }
 
 function addHeading(context, text, level, sourceLine) {
+  const sourceText = String(text || '');
+  const displayText = markdownInlineToPlainText(sourceText);
   const isDocumentTitle = level === 1 && !context.title;
   if (isDocumentTitle) {
-    context.title = text;
+    context.title = displayText;
   }
 
-  const section = isDocumentTitle ? null : addSection(context, { title: text, level, sourceLine });
+  const section = isDocumentTitle
+    ? null
+    : addSection(context, { title: displayText, level, sourceLine });
 
   const block = addBlock(context, {
     type: 'heading',
-    text,
-    content: { markdown: '#'.repeat(level) + ` ${text}` },
+    text: displayText,
+    content: { markdown: '#'.repeat(level) + ` ${sourceText}` },
     level,
-    anchorText: text,
+    anchorText: displayText,
     metadata: { sourceLine },
   });
 
@@ -209,16 +213,18 @@ function addHeading(context, text, level, sourceLine) {
 }
 
 function addParagraph(context, text, sourceLine) {
+  const sourceText = String(text || '');
+  const displayText = markdownInlineToPlainText(sourceText);
   ensureCurrentSection(context, sourceLine);
   addBlock(context, {
     type: 'paragraph',
-    text,
-    content: { markdown: text },
+    text: displayText,
+    content: { markdown: sourceText },
     level: context.currentSection?.level || 1,
-    anchorText: anchorText(text),
+    anchorText: anchorText(displayText),
     metadata: { sourceLine },
   });
-  addHtmlFigureReferences(context, text, sourceLine);
+  addHtmlFigureReferences(context, sourceText, sourceLine);
 }
 
 function addImage(context, caption, imagePath, markdown, sourceLine) {
@@ -423,7 +429,20 @@ function isEmptyTableColumn(headers, rows, index) {
 }
 
 function padRow(row, width) {
-  return Array.from({ length: width }, (_value, index) => String(row[index] ?? '').trim());
+  return Array.from(
+    { length: width },
+    (_value, index) => markdownInlineToPlainText(String(row[index] ?? '').trim())
+  );
+}
+
+function markdownInlineToPlainText(value) {
+  return String(value ?? '')
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
+    .replace(/`([^`\r\n]+)`/g, '$1')
+    .replace(/\\([\\`*_[\]{}()#+\-.!])/g, '$1');
 }
 
 function addHtmlFigureReferences(context, text, sourceLine) {

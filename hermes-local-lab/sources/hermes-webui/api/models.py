@@ -47,6 +47,11 @@ def _migration_guarded_session_write(func):
             session_id = getattr(session, "session_id", None)
             if not session_id:
                 return func(*args, **kwargs)
+            # Preserve Session.save()'s established public validation contract.
+            # The cross-process lock must not replace its ValueError with an
+            # internal truth-rewrite exception for an unsafe identifier.
+            if not is_safe_session_id(session_id):
+                return func(*args, **kwargs)
             with truth_rewrite_lock(session_id):
                 return func(*args, **kwargs)
     return guarded

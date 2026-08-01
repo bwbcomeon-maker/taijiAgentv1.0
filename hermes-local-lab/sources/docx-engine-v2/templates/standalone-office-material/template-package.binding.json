@@ -3,8 +3,8 @@
     "data-adapter.js": "ccab947428b3ac6b1c954e18352045c638b844893c72277cd23c3ea51a267886",
     "manifest.json": "1bc66e89f2df8a5d8b8419062859c97182c77181442141420d34c969d858e675",
     "schema.json": "2621cc26b440f988cf5007d8399137026f3fed7e3b5fbb94ff50e574492d2044",
-    "template.docx": "a4d8cabd87e68d8129f9e394425bcea005291b46881b2b05a37ca7d4dac1bee9"
+    "template.docx": "cf1aeb4696ef6314bda74bd9a945b71c44b835b8b390e40a2511f57e015cd49e"
   },
-  "packageSha256": "24aaca9eed62323999fda311b80cf031c653b0699febbc461b6a8e3ab53084d3",
+  "packageSha256": "53ade307a85374658517475d90c20dbfa6810e562433bc607516e6da40bf3446",
   "schemaVersion": "docx-template-package-binding/v1"
 }

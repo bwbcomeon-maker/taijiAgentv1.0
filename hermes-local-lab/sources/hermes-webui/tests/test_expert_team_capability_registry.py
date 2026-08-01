@@ -273,7 +273,11 @@ def test_catalog_fails_closed_for_a_capability_mismatched_profile(monkeypatch):
     mismatched["task_mode"] = "polish"
     monkeypatch.setattr(catalog_module, "list_launch_profiles", lambda: [mismatched])
 
-    assert _available_profile_ids(catalog_module.expert_team_catalog()) == set()
+    catalog = catalog_module.expert_team_catalog()
+    assert _available_profile_ids(catalog) == set()
+    examples = [example for team in catalog["teams"] for example in team["examples"]]
+    assert all(example["capability"] == {"kind": "unavailable", "label": "任务配置异常"} for example in examples)
+    assert all("当前任务配置异常" in example["disabled_reason"] for example in examples)
 
 
 def test_catalog_does_not_silently_overwrite_duplicate_team_example_pairs(monkeypatch):

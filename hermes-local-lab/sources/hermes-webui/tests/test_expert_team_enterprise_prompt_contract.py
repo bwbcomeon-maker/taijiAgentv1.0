@@ -120,7 +120,7 @@ def test_prompt_is_two_role_separated_messages_with_canonical_data_envelope():
 
     assert request["tools_disabled"] is True
     assert [message["role"] for message in request["messages"]] == ["system", "user"]
-    assert request["system_template_version"] == "taiji-stage-system/v2"
+    assert request["system_template_version"] == "taiji-stage-system/v9"
     assert request["system_template_sha256"] == hashlib.sha256(request["messages"][0]["content"].encode()).hexdigest()
     assert request["data_envelope_sha256"] == hashlib.sha256(request["messages"][1]["content"].encode()).hexdigest()
     envelope = json.loads(request["messages"][1]["content"])
@@ -193,6 +193,65 @@ def test_standalone_locally_confirmed_dependency_is_an_approved_prompt_input():
     assert len(request["messages"]) == 2
 
 
+def test_materials_prompt_treats_nonempty_confirmed_brief_fields_as_authoritative_before_declaring_gaps():
+    from api.expert_teams.contracts import brief_digest
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _run("materials")
+    brief = run["document_brief"]
+    brief["document_type"] = "meeting_minutes"
+    brief["details"] = {
+        "meeting_time": "2026年7月31日 14:00",
+        "meeting_location": "线上会议",
+        "host": "产品负责人",
+        "attendees": "产品、研发、测试与交付相关人员",
+    }
+    brief["source_policy"] = {
+        "mode": "none_required",
+        "as_of_date": "2026-07-31",
+        "citation_style": "source_id",
+        "unknown_fact_action": "allow_labeled_placeholder",
+        "source_refs": [],
+    }
+    brief["confirmed_sha256"] = brief_digest(brief)
+    source_context = {
+        "snapshot_id": "snapshot-empty",
+        "snapshot_sha256": "4" * 64,
+        "brief_sha256": brief["confirmed_sha256"],
+        "sources": [],
+    }
+    run["source_context_snapshot_ref"] = {
+        "snapshot_id": source_context["snapshot_id"],
+        "sha256": source_context["snapshot_sha256"],
+        "brief_sha256": source_context["brief_sha256"],
+    }
+
+    request = build_stage_gateway_request(
+        run,
+        {
+            "id": "materials",
+            "executor": "model",
+            "artifact_type": "material_ledger",
+            "depends_on": ["plan"],
+        },
+        source_context=source_context,
+    )
+    system = request["messages"][0]["content"]
+    envelope = json.loads(request["messages"][1]["content"])
+
+    assert "document_brief 是已经由用户确认并冻结的权威输入合同" in system
+    assert "不得把任何非空 Brief 字段标记为 missing 或 gap" in system
+    assert "source_context 为空只表示没有额外附件" in system
+    assert "只有 evidence_refs 非空且全部绑定 source_context" in system
+    assert "status 必须为 provided_unverified" in system
+    assert "source_context.sources 为空时，facts 中不得使用 verified" in system
+    assert "gaps[].blocks_final 必须为 false" in system
+    assert "severity 必须为 warning 或 info" in system
+    assert "不得标记为 blocking 或 error" in system
+    assert envelope["document_brief"]["details"] == brief["details"]
+    assert envelope["source_context"]["sources"] == []
+
+
 def test_writing_plan_prompt_spells_out_the_exact_wire_format_and_nested_payload_contract():
     """A real provider must not have to infer the stage wire protocol."""
     from api.expert_teams.prompts import build_stage_gateway_request
@@ -217,6 +276,28 @@ def test_writing_plan_prompt_spells_out_the_exact_wire_format_and_nested_payload
         '"source_requirement"',
     ):
         assert required_nested_field in system
+
+
+@pytest.mark.parametrize("artifact_type", ["document_draft", "reviewed_document"])
+def test_content_document_prompt_requires_fact_usage_to_bind_a_real_section(artifact_type):
+    from api.expert_teams.prompts import _system_message
+
+    system = _system_message(artifact_type, _run()["document_brief"])
+
+    assert "fact_usage 中每一项的 section_id 必须是非空字符串" in system
+    assert "必须等于 section_map 中实际存在的 section_id" in system
+    assert "文档标题等未归属于正文具体章节的元数据不得写入 fact_usage" in system
+
+
+@pytest.mark.parametrize("artifact_type", ["reviewed_document", "reviewed_research_document"])
+def test_review_prompt_requires_an_actual_language_quality_pass(artifact_type):
+    from api.expert_teams.prompts import _system_message
+
+    system = _system_message(artifact_type, _run()["document_brief"])
+
+    assert "逐句检查错别字、病句、重复表达和标点错误" in system
+    assert "发现后必须在 reviewed DOCUMENT 中修正" in system
+    assert "不得只复制上一阶段正文后直接宣告检查通过" in system
 
 
 def test_retry_prompt_names_the_previous_contract_error_without_reinjecting_raw_output():
@@ -304,6 +385,9 @@ def test_every_model_stage_prompt_exposes_one_parseable_exact_meta_template(
     }
     assert ("<<<TAIJI_DOCUMENT_V1>>>" in system) is requires_document
     assert ("<<<TAIJI_DOCUMENT_END>>>" in system) is requires_document
+    if requires_document:
+        assert "禁止出现 fact_id、fact_001" in system
+        assert "不得使用“暂无”或“待完善”作为缺失事实占位表述" in system
 
 
 def test_revision_context_contains_only_previous_ref_and_latest_feedback():

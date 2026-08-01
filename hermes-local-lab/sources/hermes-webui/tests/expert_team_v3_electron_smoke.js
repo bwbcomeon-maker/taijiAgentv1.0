@@ -102,11 +102,13 @@ async function main() {
   const { _electron } = loadPlaywright();
   const webuiDir = path.resolve(__dirname, '..');
   const repoRoot = path.resolve(webuiDir, '..', '..', '..');
-  const formalRoot = process.env.TAIJI_MAIN_REPO_ROOT || '/Users/bwb/Documents/工作/taiji-agentv1.0';
+  const electronHostRoot = process.env.TAIJI_ELECTRON_HOST_ROOT || process.env.TAIJI_MAIN_REPO_ROOT || repoRoot;
   const appDir = path.join(repoRoot, 'apps', 'taiji-desktop');
-  const electronBin = path.join(formalRoot, 'apps', 'taiji-desktop', 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
+  const electronBin = path.join(electronHostRoot, 'apps', 'taiji-desktop', 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
+  const pythonBin = process.env.HERMES_WEBUI_PYTHON || path.join(repoRoot, 'hermes-local-lab', 'sources', 'hermes-agent', 'venv', 'bin', 'python');
   const outDir = path.resolve(process.argv[process.argv.indexOf('--out-dir') + 1] || path.join(repoRoot, 'output', 'expert-team-v3'));
   assert(fs.existsSync(electronBin), 'Electron binary missing', { electronBin });
+  assert(fs.existsSync(pythonBin), 'Worktree Python runtime missing', { pythonBin });
   fs.mkdirSync(outDir, { recursive: true });
   const runtime = fs.mkdtempSync(path.join(outDir, 'runtime-'));
   const workspace = path.join(runtime, 'workspace');
@@ -119,9 +121,9 @@ async function main() {
       ...process.env,
       TAIJI_SOURCE_MODE: 'development', TAIJI_SOURCE_ROOT: repoRoot,
       TAIJI_AGENT_ROOT: path.join(repoRoot, 'hermes-local-lab'),
-      HERMES_WEBUI_PYTHON: path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv', 'bin', 'python'),
-      TAIJI_AGENT_PYTHON: path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv', 'bin', 'python'),
-      TAIJI_WEBUI_PYTHON: path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv', 'bin', 'python'),
+      HERMES_WEBUI_PYTHON: pythonBin,
+      TAIJI_AGENT_PYTHON: pythonBin,
+      TAIJI_WEBUI_PYTHON: pythonBin,
       TAIJI_AGENT_USE_USER_DIRS: '1', TAIJI_LICENSE_REQUIRED: '0', TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: '0',
       TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT: 'pilot',
       TAIJI_WORKSPACE: workspace,
@@ -241,7 +243,7 @@ async function main() {
     await page.getByRole('button', { name: '添加文字资料' }).click();
     await page.waitForFunction(() => document.body.innerText.includes('Electron 验证资料'));
     await page.getByRole('button', { name: '保存规格' }).click();
-    await page.waitForFunction(() => document.body.innerText.includes('操作已保存'));
+    await page.waitForFunction(() => document.body.innerText.includes('规格已保存'));
     const intakeAnswers = await page.locator('[data-et3-brief-form] textarea[name^="question__"][required]').all();
     for (let index = 0; index < intakeAnswers.length; index += 1) {
       await intakeAnswers[index].fill(`Electron 验证答案 ${index + 1}`);
@@ -487,8 +489,8 @@ async function main() {
     const progressTops = await page.locator('#expertTeamV3Workbench .et3-progress > span').evaluateAll(nodes => nodes.map(node => Math.round(node.getBoundingClientRect().top)));
     assert(new Set(progressTops).size === 1, 'Five-stage delivery progress wrapped onto multiple rows', { progressTops });
     await page.screenshot({ path: path.join(outDir, '13-local-delivery-awaiting.png'), fullPage: false });
-    await page.getByRole('button', { name: '打开文档' }).click();
-    await page.getByRole('button', { name: '打开所在文件夹' }).click();
+    await page.getByRole('button', { name: '打开最终 DOCX' }).click();
+    await page.getByRole('button', { name: '打开文件夹' }).click();
     const deliveryRevision = page.locator('[data-et3-delivery-revision]');
     const reviseRequestCountBeforeEmpty = await page.evaluate(() => window.__et3DeliveryCaptured.filter(item => item.url.endsWith('/revise')).length);
     await page.getByRole('button', { name: '退回修改并重新生成' }).click();
@@ -555,7 +557,7 @@ async function main() {
     }, { source: fixture.toString() });
     const driftedText = await page.locator('#expertTeamV3Workbench').innerText();
     assert(driftedText.includes('交付文档已变化') && driftedText.includes('原本机确认已失效'), 'Drifted delivery did not expose the recovery explanation', { driftedText });
-    assert(await page.getByRole('button', { name: '打开文档' }).count() === 0, 'Drifted delivery still exposed the stale document');
+    assert(await page.getByRole('button', { name: '打开最终 DOCX' }).count() === 0, 'Drifted delivery still exposed the stale document');
     assert(await page.getByRole('button', { name: '确认文档可交付' }).count() === 0, 'Drifted delivery still exposed stale confirmation');
     await page.screenshot({ path: path.join(outDir, '17-delivery-drifted.png'), fullPage: false });
     await page.evaluate(() => { window.__et3RecoveryConflictOnce = true; });
@@ -590,7 +592,9 @@ async function main() {
       gitStatus: relevantGitStatus,
       ignoredEphemeralStatus: ephemeralStatus,
       electronBin: fs.realpathSync(electronBin),
-      pythonBin: fs.realpathSync(path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv', 'bin', 'python')),
+      pythonRequestedPath: path.resolve(pythonBin),
+      pythonBinRealpath: fs.realpathSync(pythonBin),
+      pythonBin: fs.realpathSync(pythonBin),
       runtimeRoot: runtime,
       sourceSha256: Object.fromEntries(sourceFiles.map(file => [file, sha256(path.join(webuiDir, file))])),
       realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/answer', '/api/expert-teams/brief/confirm', '/api/expert-teams/run'],

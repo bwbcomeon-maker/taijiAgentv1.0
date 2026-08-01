@@ -215,3 +215,115 @@ def test_materials_prompt_consumes_verified_real_segments_and_binds_snapshot(tmp
             source_context=snapshot,
         )
     assert error.value.code == "source_context_binding_mismatch"
+
+
+def test_polish_draft_route_keeps_the_frozen_original_source_and_preservation_rules(
+    tmp_path,
+):
+    """Polishing cannot rely on a lossy material summary after the first stage."""
+
+    from api import routes
+    from api.expert_teams.catalog import get_template
+    from api.expert_teams.contracts import brief_digest
+    from api.expert_teams.source_context import build_source_context_snapshot
+    from api.expert_teams.source_registry import resolve_source_registry
+
+    source = tmp_path / "polish-source.txt"
+    source.write_text(
+        "《迎峰计划》由国网空间公司执行，编号 SG-2026-07，完成率 98.7%。",
+        encoding="utf-8",
+    )
+    refs, registry = resolve_source_registry(
+        tmp_path,
+        "et-polish-source",
+        [
+            {
+                "source_id": "SRC-POLISH-001",
+                "kind": "local_file",
+                "label": "待润色原文",
+                "locator": "polish-source.txt",
+            }
+        ],
+    )
+    brief = {
+        "schema_version": "document-brief/v1",
+        "status": "confirmed",
+        "revision": 1,
+        "confirmed_revision": 1,
+        "confirmed_at": "2026-07-31T10:00:00+08:00",
+        "confirmed_sha256": "",
+        "document_type": "other_office_material",
+        "task_mode": "polish",
+        "exact_title": "迎峰计划润色稿",
+        "source_policy": {
+            "mode": "provided_only",
+            "as_of_date": "2026-07-31",
+            "citation_style": "source_id",
+            "unknown_fact_action": "block_final",
+            "source_refs": refs,
+        },
+        "content_constraints": {
+            "required_sections": ["润色后正文", "修改说明"],
+            "must_include": [],
+            "must_avoid": [],
+        },
+        "details": {
+            "polish_goal": "提升逻辑和正式表达",
+            "expression_boundary": "保留原有事实、数字、专名和明确结论",
+        },
+    }
+    brief["confirmed_sha256"] = brief_digest(brief)
+    snapshot_ref = build_source_context_snapshot(
+        tmp_path,
+        "et-polish-source",
+        brief,
+        registry,
+        brief_sha256=brief["confirmed_sha256"],
+        brief_revision=1,
+    )
+    tasks = get_template("content-creator-team")["tasks"]
+    run = {
+        "run_id": "et-polish-source",
+        "contract_version": "expert-team-contract/v1",
+        "team_id": "content-creator-team",
+        "document_brief": brief,
+        "source_context_snapshot_ref": snapshot_ref,
+        "current_stage": {"task_id": "draft"},
+        "tasks": tasks,
+        "stage_outputs": [
+            {
+                "task_id": "plan",
+                "status": "approved",
+                "artifact": {
+                    "artifact_id": "plan:1",
+                    "sha256": "1" * 64,
+                    "artifact_type": "writing_plan",
+                    "payload": {},
+                },
+            },
+            {
+                "task_id": "materials",
+                "status": "approved",
+                "artifact": {
+                    "artifact_id": "materials:1",
+                    "sha256": "2" * 64,
+                    "artifact_type": "material_ledger",
+                    "payload": {},
+                },
+            },
+        ],
+    }
+
+    request = routes._expert_team_enterprise_gateway_request(tmp_path, run)
+    envelope = json.loads(request["messages"][1]["content"])
+    system = request["messages"][0]["content"]
+
+    assert envelope["source_context"]["snapshot_id"] == snapshot_ref["snapshot_id"]
+    assert envelope["source_context"]["sources"][0]["content_text"].startswith("《迎峰计划》")
+    assert request["input_refs"][-1] == {
+        "ref_type": "source_context",
+        "snapshot_id": snapshot_ref["snapshot_id"],
+        "sha256": snapshot_ref["sha256"],
+    }
+    assert "原始材料是事实、数字、专名和明确结论的唯一权威来源" in system
+    assert "只能调整结构、语序、措辞和版式表达" in system

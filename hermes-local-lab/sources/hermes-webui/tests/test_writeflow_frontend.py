@@ -196,7 +196,7 @@ def test_taiji_recent_sessions_use_display_titles_for_rows_and_search():
     assert 'class="taiji-session-title"' in TAIJI_HOME_JS
     assert "title=\"${fullTitle}\" aria-label=\"${fullTitle}\"" in TAIJI_HOME_JS
     assert "请【[^】]+】接手这个写作任务" in TAIJI_HOME_JS
-    assert r"/^召唤[^：:\n]{0,64}专家团[：:]\s*/" in TAIJI_HOME_JS
+    assert r"/^召唤[^：:\n]{0,64}(?:专家团|研究团)[：:]\s*/" in TAIJI_HOME_JS
     assert "taijiCompactTopic(displayTitle)" in TAIJI_HOME_JS
     display_start = TAIJI_HOME_JS.index("function taijiSessionDisplayTitle(session)")
     display_body = TAIJI_HOME_JS[display_start : TAIJI_HOME_JS.index("function taijiSessionFullTitle", display_start)]

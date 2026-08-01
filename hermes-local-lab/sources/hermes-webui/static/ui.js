@@ -3222,7 +3222,7 @@ function _applyExpertTeamStreamResponse(data){
   if(typeof appendThinking==='function')appendThinking();
   if(typeof markInflight==='function')markInflight(sid,data.stream_id);
   if(typeof saveInflightState==='function')saveInflightState(sid,{streamId:data.stream_id,messages:(typeof INFLIGHT!=='undefined'&&INFLIGHT[sid]&&INFLIGHT[sid].messages)||S.messages||[],uploaded:[],toolCalls:[]});
-  if(typeof attachLiveStream==='function')attachLiveStream(sid,data.stream_id,[]);
+  if(typeof attachLiveStream==='function')attachLiveStream(sid,data.stream_id,[],{expertTeamProtocol:true});
   else if(typeof watchInflightSession==='function')watchInflightSession(sid,data.stream_id);
   if(typeof startApprovalPolling==='function')startApprovalPolling(sid);
   if(typeof startClarifyPolling==='function')startClarifyPolling(sid);

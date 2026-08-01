@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,28 @@ class FinalDocumentDeliveryError(RuntimeError):
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _WORKFLOW_TEXT = re.compile(r"负责专家|\bStage\s*\d+|复核交付|本阶段|可直接生成\s*DOCX", re.I)
 _PLACEHOLDER_TEXT = re.compile(r"待补充|待完善|暂无|TBD|TODO|XXX", re.I)
-_STANDALONE_UNSAFE_PLACEHOLDER_TEXT = re.compile(r"待完善|暂无|\b(?:TBD|TODO|XXX)\b", re.I)
+_STANDALONE_UNSAFE_PLACEHOLDER_TEXT = re.compile(r"\b(?:TBD|TODO|XXX)\b", re.I)
+_POLISH_ANCHOR_PATTERNS = (
+    re.compile(r"[《“「『](?P<value>[^》”」』\r\n]{2,80})[》”」』]"),
+    re.compile(
+        r"(?:由|向|与|和|为|在)(?P<value>[\u4e00-\u9fff]{2,20}?"
+        r"(?:有限公司|公司|集团|中心|委员会|办公室|项目部|研究院|研究所|供电所|变电站))"
+    ),
+    re.compile(
+        r"(?:^|[，。；：、\s])(?P<value>[\u4e00-\u9fff]{2,20}?"
+        r"(?:有限公司|公司|集团|中心|委员会|办公室|项目部|研究院|研究所|供电所|变电站))",
+        re.M,
+    ),
+    re.compile(r"(?P<value>[A-Za-z]{2,}[A-Za-z0-9]*(?:[-_/][A-Za-z0-9]+)+)"),
+    re.compile(
+        r"(?P<value>\d{4}\s*年\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?)"
+    ),
+    re.compile(
+        r"(?<![A-Za-z0-9])(?P<value>\d[\d,]*(?:\.\d+)?\s*"
+        r"(?:%|％|万元|亿元|元|万|亿|项|人|天|个|次|台|套|家|公里|千米|米|千瓦|兆瓦|kW|MW|kV|KV))",
+        re.I,
+    ),
+)
 
 
 def assert_standalone_delivery_write_tree(attempt_root: Path) -> Path:
@@ -154,15 +176,446 @@ def _semantic_issue(code: str, target_id: str, message: str) -> dict:
     }
 
 
-def write_semantic_gates_snapshot(
-    delivery_dir: Path,
+def _normalized_anchor(value: object) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[\s,，]", "", text)
+
+
+def _markdown_section_body(markdown: str, heading: str) -> str:
+    matches = list(
+        re.finditer(r"(?m)^(?P<marks>#{2,6})[ \t]+(?P<title>.+?)[ \t]*$", markdown)
+    )
+    for index, match in enumerate(matches):
+        if match.group("title").strip() != heading:
+            continue
+        level = len(match.group("marks"))
+        end = len(markdown)
+        for following in matches[index + 1 :]:
+            if len(following.group("marks")) <= level:
+                end = following.start()
+                break
+        return markdown[match.end() : end]
+    return ""
+
+
+def _source_anchor_fingerprints(source_context: dict | None) -> list[str]:
+    """Extract deterministic high-signal literals without persisting source text."""
+
+    anchors: dict[str, str] = {}
+    sources = (
+        source_context.get("sources")
+        if isinstance(source_context, dict)
+        and isinstance(source_context.get("sources"), list)
+        else []
+    )
+    for source in sources:
+        text = source.get("content_text") if isinstance(source, dict) else None
+        if not isinstance(text, str):
+            continue
+        for pattern in _POLISH_ANCHOR_PATTERNS:
+            for match in pattern.finditer(text):
+                normalized = _normalized_anchor(match.group("value"))
+                if len(normalized) < 2:
+                    continue
+                anchors.setdefault(
+                    normalized,
+                    hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16],
+                )
+    return list(anchors)
+
+
+def _source_ref_is_bound(
+    artifact: dict,
+    approved_artifacts: list[dict],
+    source_context: dict | None,
+) -> bool:
+    if not isinstance(source_context, dict):
+        return False
+    snapshot_id = str(source_context.get("snapshot_id") or "")
+    snapshot_sha256 = str(
+        source_context.get("snapshot_sha256")
+        or source_context.get("sha256")
+        or ""
+    )
+    refs = []
+    for candidate in [artifact, *approved_artifacts]:
+        if not isinstance(candidate, dict):
+            continue
+        refs.extend(
+            item
+            for item in candidate.get("input_refs") or []
+            if isinstance(item, dict)
+        )
+    return any(
+        ref.get("ref_type") == "source_context"
+        and str(ref.get("snapshot_id") or "") == snapshot_id
+        and str(ref.get("sha256") or "") == snapshot_sha256
+        for ref in refs
+    )
+
+
+def _review_contract_issues(
+    brief: dict,
+    payload: dict,
+    *,
+    source_requirement: dict | None,
+    product_mode: str,
+) -> list[dict]:
+    review_report = (
+        payload.get("review_report")
+        if isinstance(payload.get("review_report"), dict)
+        else {}
+    )
+    checks = (
+        review_report.get("checks")
+        if isinstance(review_report.get("checks"), dict)
+        else {}
+    )
+    issues = []
+    for check_id, status in checks.items():
+        if status == "failed":
+            issues.append(
+                _semantic_issue(
+                    "review_check_failed",
+                    f"review-check:{check_id}",
+                    f"复核检查未通过：{check_id}",
+                )
+            )
+    task_mode = str(brief.get("task_mode") or "")
+    document_type = str(brief.get("document_type") or "")
+    required_passed = set()
+    if task_mode == "polish":
+        required_passed.update({"brief_alignment", "fact_traceability"})
+    if document_type == "research_report":
+        required_passed.update(
+            {"brief_alignment", "citation_completeness", "unsupported_claims"}
+        )
+    for check_id in sorted(required_passed):
+        if checks.get(check_id) != "passed":
+            issues.append(
+                _semantic_issue(
+                    "review_attestation_missing",
+                    f"review-check:{check_id}",
+                    f"最终复核没有确认关键检查：{check_id}",
+                )
+            )
+    from .issue_policy import review_issue_blocks_progress
+
+    for item in review_report.get("issues") or []:
+        if (
+            isinstance(item, dict)
+            and item.get("status") == "open"
+            and review_issue_blocks_progress(
+                brief,
+                source_requirement,
+                item,
+                product_mode=product_mode,
+            )
+        ):
+            issue_id = str(item.get("issue_id") or "unknown")
+            description = str(
+                item.get("description")
+                or "最终复核仍有未解决的阻断问题"
+            )
+            issues.append(
+                _semantic_issue(
+                    "review_issue_unresolved",
+                    f"review-issue:{issue_id}",
+                    description,
+                )
+            )
+    for contradiction_id in review_report.get("unresolved_contradiction_ids") or []:
+        value = str(contradiction_id or "").strip()
+        if value:
+            issues.append(
+                _semantic_issue(
+                    "research_contradiction_unresolved",
+                    f"contradiction:{value}",
+                    "研究报告仍有未解决的证据矛盾",
+                )
+            )
+    return issues
+
+
+def _polish_preservation_result(
+    *,
+    brief: dict,
+    artifact: dict,
+    approved_artifacts: list[dict],
+    source_context: dict | None,
+    markdown: str,
+    product_mode: str,
+) -> tuple[dict, list[dict]]:
+    if (
+        str(brief.get("task_mode") or "") != "polish"
+        or str(product_mode or "") != "standalone"
+    ):
+        return {
+            "status": "not_applicable",
+            "checked_anchor_count": 0,
+            "missing_anchor_count": 0,
+        }, []
+    anchors = _source_anchor_fingerprints(source_context)
+    polished_body = _markdown_section_body(markdown, "润色后正文")
+    normalized_polished_body = _normalized_anchor(polished_body)
+    missing = [
+        anchor
+        for anchor in anchors
+        if anchor not in normalized_polished_body
+    ]
+    issues = []
+    sources = (
+        source_context.get("sources")
+        if isinstance(source_context, dict)
+        and isinstance(source_context.get("sources"), list)
+        else []
+    )
+    if not sources:
+        issues.append(
+            _semantic_issue(
+                "polish_source_context_missing",
+                "source-context:polish",
+                "材料润色缺少已冻结的原始材料",
+            )
+        )
+    elif not _source_ref_is_bound(artifact, approved_artifacts, source_context):
+        issues.append(
+            _semantic_issue(
+                "polish_source_context_unbound",
+                "source-context:polish-binding",
+                "润色正文没有绑定本次任务的原始材料快照",
+            )
+        )
+    for anchor in missing:
+        issues.append(
+            _semantic_issue(
+                "source_anchor_missing",
+                f"source-anchor:{hashlib.sha256(anchor.encode('utf-8')).hexdigest()[:16]}",
+                "润色正文遗漏或改写了原文中的关键数字、标识、专名或明确表述",
+            )
+        )
+    return {
+        "status": "passed" if not issues else "failed",
+        "checked_anchor_count": len(anchors),
+        "missing_anchor_count": len(missing),
+    }, issues
+
+
+def _research_citation_result(
+    *,
+    brief: dict,
+    payload: dict,
+    approved_artifacts: list[dict],
+    source_context: dict | None,
+    markdown: str,
+    product_mode: str,
+) -> tuple[dict, list[dict]]:
+    strict = (
+        str(brief.get("document_type") or "") == "research_report"
+        and str(product_mode or "") == "standalone"
+    )
+    if not strict:
+        return {
+            "status": "not_applicable",
+            "required_claim_count": 0,
+            "validated_claim_count": 0,
+        }, []
+    evidence = next(
+        (
+            item
+            for item in approved_artifacts
+            if isinstance(item, dict)
+            and item.get("artifact_type") == "evidence_matrix"
+        ),
+        None,
+    )
+    outline = next(
+        (
+            item
+            for item in approved_artifacts
+            if isinstance(item, dict)
+            and item.get("artifact_type") == "research_outline"
+        ),
+        None,
+    )
+    issues = []
+    if evidence is None or outline is None:
+        issues.append(
+            _semantic_issue(
+                "research_input_missing",
+                "research-inputs:evidence-outline",
+                "研究报告缺少已确认的证据矩阵或提纲",
+            )
+        )
+    evidence_claims = {}
+    for claim in ((evidence or {}).get("payload") or {}).get("claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("claim_id") or "").strip()
+        if claim_id:
+            evidence_claims[claim_id] = claim
+    required_claim_ids = {
+        str(claim_id).strip()
+        for section in ((outline or {}).get("payload") or {}).get("sections") or []
+        if isinstance(section, dict)
+        for claim_id in section.get("claim_ids") or []
+        if str(claim_id).strip()
+    }
+    usage_rows = [
+        item
+        for item in payload.get("claim_usage") or []
+        if isinstance(item, dict)
+    ]
+    usage_by_claim = {
+        str(item.get("claim_id") or "").strip(): item
+        for item in usage_rows
+        if str(item.get("claim_id") or "").strip()
+    }
+    available_source_ids = {
+        str(source.get("source_id") or "").strip()
+        for source in (
+            source_context.get("sources")
+            if isinstance(source_context, dict)
+            and isinstance(source_context.get("sources"), list)
+            else []
+        )
+        if isinstance(source, dict) and str(source.get("source_id") or "").strip()
+    }
+    if not _source_ref_is_bound(
+        {"input_refs": []},
+        approved_artifacts,
+        source_context,
+    ):
+        issues.append(
+            _semantic_issue(
+                "research_source_context_unbound",
+                "source-context:research-binding",
+                "研究报告证据没有绑定本次任务的资料快照",
+            )
+        )
+    usage_claim_ids = [
+        str(item.get("claim_id") or "").strip()
+        for item in usage_rows
+        if str(item.get("claim_id") or "").strip()
+    ]
+    if len(usage_claim_ids) != len(set(usage_claim_ids)):
+        issues.append(
+            _semantic_issue(
+                "claim_usage_duplicate",
+                "claim-usage:duplicates",
+                "研究报告重复声明了同一个 claim 的引用",
+            )
+        )
+    for claim_id in sorted(required_claim_ids - set(usage_by_claim)):
+        issues.append(
+            _semantic_issue(
+                "claim_usage_missing",
+                f"claim:{claim_id}",
+                "研究报告提纲中的 claim 未在最终正文声明引用",
+            )
+        )
+    validated_claim_ids = set()
+    for claim_id, usage in usage_by_claim.items():
+        claim = evidence_claims.get(claim_id)
+        if claim is None:
+            issues.append(
+                _semantic_issue(
+                    "claim_usage_unknown",
+                    f"claim:{claim_id}",
+                    "研究报告引用了证据矩阵中不存在的 claim",
+                )
+            )
+            continue
+        marker = str(usage.get("citation_marker") or "").strip()
+        marker_tokens = set(
+            re.findall(r"[A-Za-z0-9][A-Za-z0-9._:-]*", marker)
+        )
+        allowed_source_ids = {
+            str(ref.get("source_id") or "").strip()
+            for ref in claim.get("evidence") or []
+            if isinstance(ref, dict)
+            and str(claim.get("status") or "") == "verified"
+            and str(ref.get("relationship") or "") in {"supports", "context"}
+            and str(ref.get("source_id") or "").strip() in available_source_ids
+        }
+        valid_marker = bool(marker_tokens & allowed_source_ids)
+        marker_present = bool(marker and marker in markdown)
+        if not valid_marker:
+            issues.append(
+                _semantic_issue(
+                    "citation_source_mismatch",
+                    f"claim:{claim_id}",
+                    "研究报告引用标记未绑定该 claim 的真实 source_id",
+                )
+            )
+        if not marker_present:
+            issues.append(
+                _semantic_issue(
+                    "citation_marker_missing",
+                    f"citation:{claim_id}",
+                    "claim_usage 中的引用标记没有出现在最终正文",
+                )
+            )
+        if valid_marker and marker_present and claim_id in required_claim_ids:
+            validated_claim_ids.add(claim_id)
+    return {
+        "status": "passed" if not issues else "failed",
+        "required_claim_count": len(required_claim_ids),
+        "validated_claim_count": len(validated_claim_ids),
+    }, issues
+
+
+def resolve_approved_input_artifacts(run: dict, artifact: dict) -> list[dict]:
+    """Resolve immutable stage refs and prove each dependency was approved."""
+
+    artifacts = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+    ]
+    approved_refs = (
+        run.get("approved_stage_artifact_refs")
+        if isinstance(run.get("approved_stage_artifact_refs"), dict)
+        else {}
+    )
+    resolved = []
+    for ref in artifact.get("input_refs") or []:
+        if not isinstance(ref, dict) or ref.get("ref_type") != "stage_artifact":
+            continue
+        matches = [
+            item
+            for item in artifacts
+            if item.get("artifact_id") == ref.get("artifact_id")
+            and item.get("sha256") == ref.get("sha256")
+        ]
+        if len(matches) != 1:
+            raise FinalDocumentDeliveryError(
+                "approved input artifact is missing or ambiguous"
+            )
+        candidate = matches[0]
+        expected = {
+            "artifact_id": candidate.get("artifact_id"),
+            "sha256": candidate.get("sha256"),
+        }
+        if approved_refs.get(str(candidate.get("stage_id") or "")) != expected:
+            raise FinalDocumentDeliveryError(
+                "input artifact was not approved"
+            )
+        resolved.append(deepcopy(candidate))
+    return resolved
+
+
+def evaluate_semantic_gates(
     *,
     brief: dict,
     artifact: dict,
     approved_inputs: list[dict],
+    approved_artifacts: list[dict] | None = None,
+    source_context: dict | None = None,
+    source_requirement: dict | None = None,
     product_mode: str = "enterprise",
 ) -> dict:
-    """Evaluate enterprise semantics once and persist an immutable upstream report."""
+    """Evaluate delivery semantics without mutating the delivery attempt tree."""
 
     from .contracts import required_sections_for_brief
     from .stage_artifacts import document_section_headings, unresolved_quality_issues
@@ -177,6 +630,11 @@ def write_semantic_gates_snapshot(
     if artifact.get("artifact_type") not in {"reviewed_document", "reviewed_research_document"}:
         issues.append(_semantic_issue("document_type_mismatch", "artifact:type", "交付正文不是已复核文档"))
     payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    trusted_approved_artifacts = [
+        deepcopy(item)
+        for item in approved_artifacts or []
+        if isinstance(item, dict)
+    ]
     payload_document_type = str(payload.get("document_type") or "").strip()
     if payload_document_type and payload_document_type != str(brief.get("document_type") or ""):
         issues.append(_semantic_issue("document_type_mismatch", "payload:document_type", "正文文种与确认 Brief 不一致"))
@@ -219,6 +677,32 @@ def write_semantic_gates_snapshot(
                 evidence_issues.append(
                     _semantic_issue("claim_without_approved_source", f"claim:{claim_id}", "正文 claim 未绑定批准来源")
                 )
+    issues.extend(
+        _review_contract_issues(
+            brief,
+            payload,
+            source_requirement=source_requirement,
+            product_mode=product_mode,
+        )
+    )
+    source_preservation, source_issues = _polish_preservation_result(
+        brief=brief,
+        artifact=artifact,
+        approved_artifacts=trusted_approved_artifacts,
+        source_context=source_context,
+        markdown=markdown,
+        product_mode=product_mode,
+    )
+    citation_validation, citation_issues = _research_citation_result(
+        brief=brief,
+        payload=payload,
+        approved_artifacts=trusted_approved_artifacts,
+        source_context=source_context,
+        markdown=markdown,
+        product_mode=product_mode,
+    )
+    issues.extend(source_issues)
+    evidence_issues.extend(citation_issues)
     issues.extend(evidence_issues)
     for item in unresolved_quality_issues(artifact):
         issues.append(_semantic_issue(item["code"], item["target_id"], item["message"]))
@@ -234,8 +718,35 @@ def write_semantic_gates_snapshot(
         "brief_sha256": str(brief.get("confirmed_sha256") or ""),
         "required_sections": required_sections,
         "document_sections": document_sections,
+        "source_preservation": source_preservation,
+        "citation_validation": citation_validation,
         "issues": issues,
     }
+    return report
+
+
+def write_semantic_gates_snapshot(
+    delivery_dir: Path,
+    *,
+    brief: dict,
+    artifact: dict,
+    approved_inputs: list[dict],
+    approved_artifacts: list[dict] | None = None,
+    source_context: dict | None = None,
+    source_requirement: dict | None = None,
+    product_mode: str = "enterprise",
+) -> dict:
+    """Evaluate delivery semantics and persist one immutable upstream report."""
+
+    report = evaluate_semantic_gates(
+        brief=brief,
+        artifact=artifact,
+        approved_inputs=approved_inputs,
+        approved_artifacts=approved_artifacts,
+        source_context=source_context,
+        source_requirement=source_requirement,
+        product_mode=product_mode,
+    )
     path = Path(delivery_dir).expanduser().resolve() / "reviews" / "semantic-gates.json"
     _immutable_json(path, report, label="semantic gates")
     return report
@@ -384,6 +895,7 @@ def prepare_canonical_delivery_inputs(
     stage_id: str,
     delivery_attempt: int,
     asset_manifest: dict | None = None,
+    source_context: dict | None = None,
 ) -> dict:
     """Materialize rendering inputs from the approved canonical pointer only."""
 
@@ -410,15 +922,41 @@ def prepare_canonical_delivery_inputs(
         raise FinalDocumentDeliveryError("canonical document artifact was not approved")
     run_id = safe_run_id(str(run.get("run_id") or ""))
     root = canonical_attempt_root(workspace, run_id, stage_id, delivery_attempt)
-    if str(run.get("product_mode") or "") == "standalone":
+    standalone = str(run.get("product_mode") or "") == "standalone"
+    if standalone:
         assert_standalone_delivery_write_tree(root)
     brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    profile = (
+        run.get("launch_profile_snapshot")
+        if isinstance(run.get("launch_profile_snapshot"), dict)
+        else {}
+    )
+    source_requirement = (
+        profile.get("source_requirement")
+        if isinstance(profile.get("source_requirement"), dict)
+        else None
+    )
+    needs_strict_source_semantics = (
+        standalone
+        and (
+            str(brief.get("task_mode") or "") == "polish"
+            or str(brief.get("document_type") or "") == "research_report"
+        )
+    )
+    approved_artifacts = (
+        resolve_approved_input_artifacts(run, artifact)
+        if needs_strict_source_semantics
+        else []
+    )
     paths = write_canonical_snapshot(root, brief=brief, artifact=artifact)
     semantic = write_semantic_gates_snapshot(
         root,
         brief=brief,
         artifact=artifact,
         approved_inputs=artifact.get("input_refs") or [],
+        approved_artifacts=approved_artifacts,
+        source_context=source_context,
+        source_requirement=source_requirement,
         product_mode=str(run.get("product_mode") or "enterprise"),
     )
     assets = deepcopy(asset_manifest) if isinstance(asset_manifest, dict) else {

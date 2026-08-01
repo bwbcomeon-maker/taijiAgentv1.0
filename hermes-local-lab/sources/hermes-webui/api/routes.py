@@ -1963,7 +1963,16 @@ def _expert_team_execution_prompt(run: dict) -> str:
 def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
     """Thin route seam; prompt policy and serialization live in expert_teams.prompts."""
     from api.expert_teams.prompts import build_stage_gateway_request
+    from api import expert_teams
 
+    # Validate the immutable source contract before every model stage.  Prompt
+    # policy decides whether the verified snapshot is injected.  In
+    # particular, every polishing stage needs the original text rather than a
+    # lossy summary from an earlier stage.
+    verified_source_context = expert_teams.verified_source_context_for_execution(
+        workspace,
+        run,
+    )
     task = _expert_team_current_task(run)
     stage = {
         "id": str(task.get("id") or task.get("task_id") or ""),
@@ -1993,20 +2002,11 @@ def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
             },
             "feedback": feedback,
         }
-    source_context = None
-    if (str(run.get("team_id") or ""), stage["id"]) in {
-        ("content-creator-team", "materials"),
-        ("deep-research-team", "research"),
-        ("deep-research-team", "evidence"),
-    }:
-        from api import expert_teams
-
-        source_context = expert_teams.verified_source_context_for_execution(workspace, run)
     return build_stage_gateway_request(
         run,
         stage,
         revision_feedback=revision_context,
-        source_context=source_context,
+        source_context=verified_source_context,
     )
 
 
@@ -5112,6 +5112,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                     str(run.get("run_id") or ""),
                     str(exc),
                     stream_id=str(run.get("execution_stream_id") or ""),
+                    error_code=exc.code,
                 )
             logger.warning("Rejected expert team runtime observation: %s", exc.code)
             current = exc.run or expert_teams.read_expert_team_run(
@@ -5326,6 +5327,7 @@ def _cancel_expert_team_runtime_start(adapter, *sources) -> dict:
 
 def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict, int]:
     from api import expert_teams
+    from api.expert_teams.error_projection import attach_expert_team_product_error
     from api.expert_teams.system_stages import (
         SystemStageError,
         dispatch_system_stage,
@@ -5384,16 +5386,24 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
                 )
         else:
             current = expert_teams.read_expert_team_run(workspace, str(run.get("run_id") or ""))
-        return {"ok": False, "code": exc.code, "error": str(exc), "run": current}, 503
+        return attach_expert_team_product_error(
+            {"ok": False, "code": exc.code, "run": current},
+            exc.code,
+            http_status=503,
+        ), 503
     except expert_teams.ExpertTeamStateConflict as exc:
-        return {"ok": False, "code": exc.code, "error": str(exc), "run": exc.run or run}, 409
+        return attach_expert_team_product_error(
+            {"ok": False, "code": exc.code, "run": exc.run or run},
+            exc.code,
+            http_status=409,
+        ), 409
 
 
 def _open_expert_team_delivery_target(path: Path, target: str) -> None:
-    """Open only a server-resolved standalone delivery document or directory."""
+    """Open only a server-resolved standalone delivery document, report, or directory."""
 
     resolved = Path(path).expanduser().resolve()
-    if target == "document":
+    if target in {"document", "quality_report"}:
         if not resolved.is_file():
             raise FileNotFoundError(resolved)
     elif target == "folder":
@@ -5408,6 +5418,35 @@ def _open_expert_team_delivery_target(path: Path, target: str) -> None:
         os.startfile(str(resolved))  # type: ignore[attr-defined]
     else:  # pragma: no cover - packaged Linux runtime
         subprocess.Popen(["xdg-open", str(resolved)])
+
+
+def _send_expert_team_delivery_download(handler, path: Path, download_name: str) -> bool:
+    """Stream one validated DOCX with a server-derived user-facing filename."""
+
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    size = resolved.stat().st_size
+    handler.send_response(200)
+    handler.send_header(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    handler.send_header("Content-Length", str(size))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header(
+        "Content-Disposition",
+        _content_disposition_value("attachment", download_name or "最终交付文档.docx"),
+    )
+    _security_headers(handler)
+    handler.end_headers()
+    with resolved.open("rb") as source:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+    return True
 
 
 def _expert_team_standalone_execution_binding(
@@ -5653,6 +5692,20 @@ def _expert_team_standalone_compatibility_error(run: dict) -> str:
     return ""
 
 
+def _expert_team_resume_requires_execution(run: dict) -> bool:
+    """Only a ready stage may create a new external execution side effect."""
+
+    state = str((run or {}).get("workflow_state") or "")
+    if state == "ready_to_generate":
+        return True
+    pending = (
+        (run or {}).get("pending_system_stage")
+        if isinstance((run or {}).get("pending_system_stage"), dict)
+        else {}
+    )
+    return state == "generated_invalid" and pending.get("executor") == "system"
+
+
 def _start_expert_team_execution(
     workspace: Path,
     run: dict,
@@ -5668,10 +5721,15 @@ def _start_expert_team_execution(
         build_runtime_adapter,
     )
     from api.product_contract import attach_product_error
+    from api.expert_teams.error_projection import attach_expert_team_product_error
+    from api.expert_teams.source_context import SourceContextError
 
     def _execution_failure(payload: dict, status: int) -> dict:
-        code = "backend_unavailable" if int(status) >= 500 else "unknown_error"
-        return attach_product_error(payload, code)
+        return attach_expert_team_product_error(
+            payload,
+            payload.get("code") or "provider_request_failed",
+            http_status=status,
+        )
 
     def _backend_failure(payload: dict) -> dict:
         return _execution_failure(payload, 503)
@@ -5777,6 +5835,14 @@ def _start_expert_team_execution(
             execution_prompt = ""
         else:
             execution_prompt = _expert_team_execution_prompt(run)
+    except SourceContextError:
+        error = "资料快照缺失、已变更或不符合当前任务的资料要求"
+        return _execution_failure({
+            "ok": False,
+            "code": "source_context_invalid",
+            "error": error,
+            "run": _fail_known_pre_dispatch(error),
+        }, 409), 409
     except Exception as exc:
         error = str(exc) or "当前运行时启动参数无效，请检查配置后重试。"
         return _backend_failure({
@@ -6115,15 +6181,37 @@ def _start_expert_team_execution(
                 "error": error,
                 "run": pending_run,
             }), 202
-        failed_run = _fail_reserved_start(error, cleanup)
-        return _backend_failure({"ok": False, "error": error, "run": failed_run}), 500
+        internal_code = (
+            "provider_timeout"
+            if isinstance(exc, TimeoutError) or "timed out" in error.lower() or "timeout" in error.lower()
+            else "provider_request_failed"
+        )
+        projected = _execution_failure(
+            {"ok": False, "code": internal_code, "error": error},
+            504 if internal_code == "provider_timeout" else 500,
+        )
+        product_error = projected["product_error"]
+        projected["run"] = _fail_reserved_start(
+            product_error["message"],
+            cleanup,
+            error_code=product_error["code"],
+            incident_id=product_error["incident_id"],
+        )
+        return projected, 504 if internal_code == "provider_timeout" else 500
 
     status = int(response.pop("_status", 200) or 200)
     if status >= 400:
         cleanup = _cancel_expert_team_runtime_start(adapter, result, response)
         error = str(response.get("error") or "当前阶段启动失败，请重新尝试。")
-        failed_run = _fail_reserved_start(error, cleanup)
-        return _execution_failure({"ok": False, **response, "run": failed_run}, status), status
+        projected = _execution_failure({"ok": False, **response, "error": error}, status)
+        product_error = projected["product_error"]
+        projected["run"] = _fail_reserved_start(
+            product_error["message"],
+            cleanup,
+            error_code=product_error["code"],
+            incident_id=product_error["incident_id"],
+        )
+        return projected, status
     result_run_id = str(getattr(result, "run_id", "") or "").strip()
     result_session_id = str(getattr(result, "session_id", "") or "").strip()
     if not result_run_id or result_session_id != sid:
@@ -6160,17 +6248,66 @@ def _start_expert_team_execution(
     return response, status
 
 
-def _expert_team_conflict_response(handler, exc) -> bool:
-    status = 404 if str(getattr(exc, "code", "")) == "wrong_session" else 409
-    payload = {
+def _expert_team_product_error_response(
+    handler,
+    code: object,
+    *,
+    status: int,
+    product_code: object | None = None,
+    run: dict | None = None,
+    extra: dict | None = None,
+) -> bool:
+    from api.expert_teams.error_projection import attach_expert_team_product_error
+
+    internal_code = str(code or "unknown_error")
+    payload = attach_expert_team_product_error({
         "ok": False,
-        "code": str(getattr(exc, "code", "stale_state")),
-        "error": str(exc),
-    }
-    run = getattr(exc, "run", None)
+        "code": internal_code,
+        **(extra or {}),
+    }, product_code or internal_code, http_status=status)
     if isinstance(run, dict) and status != 404:
         payload["run"] = run
     return _expert_team_json_response(handler, payload, status=status)
+
+
+def _expert_team_conflict_response(handler, exc) -> bool:
+    status = 404 if str(getattr(exc, "code", "")) == "wrong_session" else 409
+    code = str(getattr(exc, "code", "stale_state"))
+    run = getattr(exc, "run", None)
+    return _expert_team_product_error_response(
+        handler,
+        code,
+        status=status,
+        product_code="expert_team_not_found" if status == 404 else None,
+        run=run if isinstance(run, dict) else None,
+    )
+
+
+def _expert_team_not_found_response(handler) -> bool:
+    return _expert_team_product_error_response(
+        handler,
+        "expert_team_not_found",
+        status=404,
+        product_code="expert_team_not_found",
+    )
+
+
+def _expert_team_exception_response(
+    handler,
+    exc: Exception,
+    *,
+    fallback_code: str,
+    status: int = 400,
+    product_code: str = "unknown_error",
+) -> bool:
+    """Return a fixed public error without copying exception text into the client."""
+
+    return _expert_team_product_error_response(
+        handler,
+        getattr(exc, "code", fallback_code),
+        status=status,
+        product_code=product_code,
+    )
 
 
 def _writeflow_state_path(workspace: Path) -> Path:
@@ -14278,7 +14415,7 @@ def handle_get(handler, parsed) -> bool:
             else:
                 run = expert_teams.latest_expert_team_run_for_session(workspace, session_id or "")
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except Exception as exc:
             return bad(handler, f"Invalid expert team run: {_sanitize_error(exc)}", 400)
         if run and session_id:
@@ -16599,73 +16736,75 @@ def handle_post(handler, parsed) -> bool:
         except expert_teams.ContractError as exc:
             return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
         except _ExpertTeamStartSessionNotFound:
-            return _expert_team_json_response(
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "session_not_found", "error": "expert team session not found"},
+                "session_not_found",
                 status=404,
+                product_code="expert_team_not_found",
             )
         except _ExpertTeamStartSessionNotPersisted:
-            return _expert_team_json_response(
+            return _expert_team_product_error_response(
                 handler,
-                {
-                    "ok": False,
-                    "code": "session_not_persisted",
-                    "error": "expert team start requires an existing durable session",
-                },
                 status=409,
+                code="session_not_persisted",
+                product_code="expert_team_state_conflict",
             )
         except _ExpertTeamStartSessionBusy:
-            return _expert_team_json_response(
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "session_busy", "error": "session is currently active"},
                 status=409,
+                code="session_busy",
+                product_code="expert_team_in_progress",
             )
-        except _ExpertTeamStartSessionStateConflict as exc:
-            return _expert_team_json_response(
+        except _ExpertTeamStartSessionStateConflict:
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "session_state_conflict", "error": str(exc)},
                 status=409,
+                code="session_state_conflict",
+                product_code="expert_team_state_conflict",
             )
-        except _ExpertTeamStartIdempotencyConflict as exc:
-            return _expert_team_json_response(
+        except _ExpertTeamStartIdempotencyConflict:
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "start_idempotency_conflict", "error": str(exc)},
                 status=409,
+                code="start_idempotency_conflict",
+                product_code="expert_team_state_conflict",
             )
         except _ExpertTeamStartPersistenceError as exc:
             if isinstance(exc.__cause__, SessionWriteConflict):
-                return _expert_team_json_response(
+                return _expert_team_product_error_response(
                     handler,
-                    {
-                        "ok": False,
-                        "code": "session_state_conflict",
-                        "error": "session changed on disk; reload and retry",
-                    },
                     status=409,
+                    code="session_state_conflict",
+                    product_code="expert_team_state_conflict",
                 )
-            return _expert_team_json_response(
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "start_persistence_failed", "error": _sanitize_error(exc)},
                 status=500,
+                code="start_persistence_failed",
+                product_code="backend_unavailable",
             )
-        except _ExpertTeamStartFinalizeError as exc:
-            return _expert_team_json_response(
+        except _ExpertTeamStartFinalizeError:
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "start_finalize_failed", "error": _sanitize_error(exc)},
                 status=503,
+                code="start_finalize_failed",
+                product_code="backend_unavailable",
             )
-        except _ExpertTeamStartIntegrityError as exc:
-            return _expert_team_json_response(
+        except _ExpertTeamStartIntegrityError:
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "start_receipt_invalid", "error": _sanitize_error(exc)},
                 status=503,
+                code="start_receipt_invalid",
+                product_code="expert_team_state_conflict",
             )
-        except Exception as exc:
-            logger.exception("Failed to commit standalone expert team start")
-            return _expert_team_json_response(
+        except Exception:
+            logger.warning("Standalone expert-team start failed; details intentionally withheld")
+            return _expert_team_product_error_response(
                 handler,
-                {"ok": False, "code": "start_unavailable", "error": _sanitize_error(exc)},
                 status=503,
+                code="start_unavailable",
+                product_code="backend_unavailable",
             )
 
     if parsed.path == "/api/expert-teams/answer":
@@ -16675,16 +16814,13 @@ def handle_post(handler, parsed) -> bool:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
             existing = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
-            if error := _expert_team_standalone_compatibility_error(existing):
-                return _expert_team_json_response(
+            if _expert_team_standalone_compatibility_error(existing):
+                return _expert_team_product_error_response(
                     handler,
-                    {
-                        "ok": False,
-                        "code": "runtime_incompatible",
-                        "error": error,
-                        "run": existing,
-                    },
                     status=503,
+                    code="runtime_incompatible",
+                    product_code="backend_unavailable",
+                    run=existing,
                 )
             if expert_teams.classify_contract_version(existing) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
                 run = expert_teams.answer_expert_team(workspace, body)
@@ -16708,13 +16844,17 @@ def handle_post(handler, parsed) -> bool:
                 return _expert_team_json_response(handler, payload, status=status)
             return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except expert_teams.ContractError as exc:
             return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
         except Exception as exc:
-            return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="answer_failed",
+            )
 
     if parsed.path in {
         "/api/expert-teams/brief/update",
@@ -16736,7 +16876,7 @@ def handle_post(handler, parsed) -> bool:
             run = operation(workspace, body)
             return _expert_team_json_response(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except expert_teams.ContractError as exc:
@@ -16752,7 +16892,11 @@ def handle_post(handler, parsed) -> bool:
                     pass
             return _expert_team_json_response(handler, payload, status=status)
         except Exception as exc:
-            return bad(handler, f"Failed to update document brief: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="brief_update_failed",
+            )
 
     if parsed.path == "/api/expert-teams/stage/confirm":
         from api import expert_teams
@@ -16762,7 +16906,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             run = expert_teams.confirm_standalone_expert_team_stage(
                 workspace,
                 {**body, "run_id": str(run.get("run_id") or "")},
@@ -16780,11 +16924,15 @@ def handle_post(handler, parsed) -> bool:
                 return _expert_team_json_response(handler, stream_payload, status=status)
             return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to confirm expert team stage: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_confirm_failed",
+            )
 
     if parsed.path == "/api/expert-teams/stage/approve":
         from api import expert_teams
@@ -16794,7 +16942,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             if str(run.get("product_mode") or "") == "standalone":
                 raise expert_teams.ExpertTeamStateConflict(
                     "standalone_confirmation_required",
@@ -16821,11 +16969,15 @@ def handle_post(handler, parsed) -> bool:
                 return _expert_team_json_response(handler, payload, status=status)
             return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to approve expert team stage: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_approve_failed",
+            )
 
     if parsed.path == "/api/expert-teams/stage/revise":
         from api import expert_teams
@@ -16835,7 +16987,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             run = expert_teams.request_expert_team_stage_revision(
                 workspace,
                 {**body, "run_id": str(run.get("run_id") or ""), "feedback": str(body.get("feedback") or "")},
@@ -16844,11 +16996,15 @@ def handle_post(handler, parsed) -> bool:
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to revise expert team stage: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_revision_failed",
+            )
 
     if parsed.path == "/api/expert-teams/delivery/open":
         from api import expert_teams
@@ -16869,11 +17025,88 @@ def handle_post(handler, parsed) -> bool:
                 {"ok": True, "target": str(resolved["target"])},
             )
         except FileNotFoundError:
-            return bad(handler, "standalone delivery file not found", 404)
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_document_missing",
+                status=404,
+                product_code="document_render_failed",
+            )
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to open expert team delivery: {_sanitize_error(exc)}", 400)
+            return _expert_team_product_error_response(
+                handler,
+                getattr(exc, "code", "delivery_open_failed"),
+                status=400,
+                product_code="document_open_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/download":
+        from api import expert_teams
+
+        if {"target", "path", "filename", "document_path", "source_path"}.intersection(body):
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_download_target_forbidden",
+                status=400,
+                product_code="document_open_failed",
+            )
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            resolved = expert_teams.resolve_standalone_expert_team_delivery_open(
+                workspace,
+                {**body, "target": "document"},
+            )
+            return _send_expert_team_delivery_download(
+                handler,
+                Path(resolved["path"]),
+                str(resolved.get("download_name") or ""),
+            )
+        except FileNotFoundError:
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_document_missing",
+                status=404,
+                product_code="document_render_failed",
+            )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_product_error_response(
+                handler,
+                getattr(exc, "code", "delivery_download_failed"),
+                status=400,
+                product_code="document_open_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/save-copy":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            result = expert_teams.save_standalone_expert_team_delivery_copy(
+                workspace,
+                body,
+            )
+            return _expert_team_json_response(handler, result)
+        except FileNotFoundError:
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_document_missing",
+                status=404,
+                product_code="document_render_failed",
+            )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_product_error_response(
+                handler,
+                getattr(exc, "code", "delivery_copy_failed"),
+                status=400,
+                product_code="delivery_copy_failed",
+            )
 
     if parsed.path == "/api/expert-teams/delivery/revise":
         from api import expert_teams
@@ -16889,11 +17122,43 @@ def handle_post(handler, parsed) -> bool:
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to revise expert team delivery: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_revision_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/rerender":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.rerender_standalone_expert_team_delivery(
+                workspace,
+                body,
+            )
+            if str(run.get("workflow_state") or "") == "delivery_validation_required":
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            else:
+                stream_payload, status = {"ok": True, "run": run}, 200
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return _expert_team_json_response(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return _expert_team_not_found_response(handler)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_rerender_failed",
+                product_code="document_render_failed",
+            )
 
     if parsed.path == "/api/expert-teams/delivery/recover":
         from api import expert_teams
@@ -16909,11 +17174,16 @@ def handle_post(handler, parsed) -> bool:
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to recover expert team delivery: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_recovery_failed",
+                product_code="document_render_failed",
+            )
 
     if parsed.path == "/api/expert-teams/delivery/confirm":
         from api import expert_teams
@@ -16931,11 +17201,15 @@ def handle_post(handler, parsed) -> bool:
                 },
             )
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to confirm expert team delivery: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_confirmation_failed",
+            )
 
     if parsed.path == "/api/expert-teams/stage/input":
         from api import expert_teams
@@ -16945,7 +17219,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             run = expert_teams.submit_expert_team_stage_input(
                 workspace,
                 {
@@ -16964,11 +17238,15 @@ def handle_post(handler, parsed) -> bool:
                 return _expert_team_json_response(handler, payload, status=status)
             return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to submit expert team stage input: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_input_failed",
+            )
 
     if parsed.path == "/api/expert-teams/resume":
         from api import expert_teams
@@ -16978,21 +17256,34 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             display_run = _expert_team_run_with_execution_truth(workspace, run)
             run = expert_teams.resume_expert_team(
                 workspace,
                 {**body, "run_id": str((display_run or run).get("run_id") or "")},
             )
+            if not _expert_team_resume_requires_execution(run):
+                return _expert_team_json_response(
+                    handler,
+                    {
+                        "ok": True,
+                        "run": run,
+                        "teams": expert_teams.expert_team_catalog()["teams"],
+                    },
+                )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to resume expert team: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="resume_failed",
+            )
 
     if parsed.path == "/api/expert-teams/cancel":
         from api import expert_teams
@@ -17002,7 +17293,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             existing_run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(existing_run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             adapter = _expert_team_runtime_adapter_for_run(existing_run)
             runtime_run_id = str(
                 existing_run.get("execution_runtime_run_id")
@@ -17088,11 +17379,15 @@ def handle_post(handler, parsed) -> bool:
                 status=202 if pending_cancel else 200,
             )
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to cancel expert team: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="cancel_failed",
+            )
 
     if parsed.path == "/api/writeflow/compose":
         return j(

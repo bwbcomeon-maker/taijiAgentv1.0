@@ -176,7 +176,7 @@ _CATALOG = {
                 "document_type": "research_report",
                 "task_mode": "create",
                 "document_brief_seed": {"document_control": {"render_template_id": "standalone-research-report"}},
-                "label": "专题报告",
+                "label": "研究报告",
                 "summary": "围绕主题做材料研究、结构提纲和初稿建议。",
                 "prompt": "帮我研究本地优先 AI 助理在企业内部办公场景的落地趋势。",
             }
@@ -283,8 +283,10 @@ def expert_team_catalog() -> dict:
             }
             if profile is None:
                 public_example["available"] = False
-                public_example["capability"] = {"kind": "unavailable", "label": "暂未开放"}
-                public_example["disabled_reason"] = "该任务尚未完成完整交付验证"
+                public_example["capability"] = {"kind": "unavailable", "label": "任务配置异常"}
+                public_example["disabled_reason"] = (
+                    "当前任务配置异常，请刷新后重试；若仍存在，请联系管理员。"
+                )
             else:
                 public_example["available"] = True
                 public_example["launch_profile_id"] = profile["id"]

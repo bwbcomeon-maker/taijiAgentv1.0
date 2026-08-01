@@ -361,7 +361,37 @@ def public_expert_team_run_projection(payload: Any) -> dict:
     """Return a Run safe for every public expert-team response surface."""
     if not isinstance(payload, dict):
         return {}
-    return _public_expert_team_value_projection(payload)
+    projected = _public_expert_team_value_projection(payload)
+    projected.pop("execution_cleanup_error", None)
+
+    product_error = (
+        (projected.get("view") or {}).get("product_error")
+        if isinstance(projected.get("view"), dict)
+        else None
+    )
+    safe_message = str(
+        product_error.get("message")
+        if isinstance(product_error, dict)
+        else ""
+    ).strip()
+    if not safe_message and str(projected.get("last_execution_error_code") or "").strip():
+        try:
+            from api.expert_teams.error_projection import expert_team_product_error_code
+            from api.product_contract import build_product_error
+
+            safe_message = str(
+                build_product_error(
+                    expert_team_product_error_code(projected["last_execution_error_code"])
+                ).get("message")
+                or ""
+            ).strip()
+        except Exception:
+            safe_message = ""
+    if safe_message:
+        for field in ("last_execution_error", "last_validation_error"):
+            if projected.get(field):
+                projected[field] = safe_message
+    return projected
 
 
 def public_expert_team_response_projection(payload: Any) -> Any:

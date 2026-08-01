@@ -269,6 +269,7 @@ def _execute_delivery_stage(workspace: Path, request: dict) -> dict:
         workspace_relative_path,
     )
     from .runtime import reserve_document_revision_and_delivery_attempt
+    from .source_context import SourceContextError, verify_source_context_snapshot
     from .stage_artifacts import build_stage_artifact
     from .storage import read_run
 
@@ -281,6 +282,22 @@ def _execute_delivery_stage(workspace: Path, request: dict) -> dict:
         raise SystemStageError("system_stage_request_stale", "系统交付请求已失效")
     brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
     standalone = str(run.get("product_mode") or "") == "standalone"
+    source_context = None
+    needs_strict_source_semantics = (
+        standalone
+        and (
+            str(brief.get("task_mode") or "") == "polish"
+            or str(brief.get("document_type") or "") == "research_report"
+        )
+    )
+    if needs_strict_source_semantics or isinstance(run.get("source_context_snapshot_ref"), dict):
+        try:
+            source_context = verify_source_context_snapshot(root, run)
+        except SourceContextError as exc:
+            raise SystemStageError(
+                "source_context_invalid",
+                "已确认任务的资料快照无法验证",
+            ) from exc
     if standalone:
         profile = run.get("launch_profile_snapshot")
         if not isinstance(profile, dict) or profile.get("id") != run.get("launch_profile_id"):
@@ -297,7 +314,11 @@ def _execute_delivery_stage(workspace: Path, request: dict) -> dict:
 
     with tempfile.TemporaryDirectory(prefix="taiji-delivery-preview-") as preview:
         preview_inputs = prepare_canonical_delivery_inputs(
-            Path(preview), run, stage_id=str(request["stage_id"]), delivery_attempt=1
+            Path(preview),
+            run,
+            stage_id=str(request["stage_id"]),
+            delivery_attempt=1,
+            source_context=source_context,
         )
         preview_binding = build_render_input_binding(
             brief=brief,
@@ -341,7 +362,13 @@ def _execute_delivery_stage(workspace: Path, request: dict) -> dict:
                 reserved_run,
                 stage_id=str(request["stage_id"]),
                 delivery_attempt=delivery_attempt,
+                source_context=source_context,
             )
+            if prepared["semantic_gates"].get("status") != "passed":
+                raise SystemStageError(
+                    "delivery_semantic_blocked",
+                    "已确认正文未通过交付语义检查，请退回内容阶段修改",
+                )
             render_input = build_render_input_binding(
                 brief=brief,
                 artifact=prepared["artifact"],

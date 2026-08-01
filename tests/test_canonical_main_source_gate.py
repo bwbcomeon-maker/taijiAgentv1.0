@@ -165,20 +165,28 @@ class CanonicalMainGateWiringTests(unittest.TestCase):
     def test_desktop_command_uses_the_shared_source_gate(self):
         source = self.read("hermes-local-lab/启动太极Agent桌面端.command")
 
-        self.assertIn('TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"', source)
+        self.assertIn('if [ -z "${TAIJI_SOURCE_MODE:-}" ]; then', source)
+        self.assertIn('if [ -d "$REPO_DIR/.git" ]; then', source)
+        self.assertIn('TAIJI_SOURCE_MODE="formal"', source)
+        self.assertIn('elif [ -f "$REPO_DIR/.git" ]; then', source)
+        self.assertIn('TAIJI_SOURCE_MODE="development"', source)
         self.assertIn("check-clean-worktree.sh", source)
         self.assertIn('--mode "$TAIJI_SOURCE_MODE"', source)
         self.assertIn('--repo-root "$REPO_DIR"', source)
         self.assertIn('--source-root "$REPO_DIR"', source)
+        self.assertIn("export TAIJI_SOURCE_MODE", source)
 
-    def test_finder_desktop_launcher_passes_source_mode_to_electron(self):
+    def test_finder_desktop_launcher_delegates_source_mode_to_adjacent_command(self):
         source = self.read(
             "hermes-local-lab/启动太极Agent桌面端.app/Contents/MacOS/"
             "taiji-agent-desktop-launcher"
         )
+        command_source = self.read("hermes-local-lab/启动太极Agent桌面端.command")
 
-        self.assertIn('TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"', source)
-        self.assertIn('export TAIJI_SOURCE_MODE="$TAIJI_SOURCE_MODE"', source)
+        self.assertIn('COMMAND_LAUNCHER="$LAB_DIR/启动太极Agent桌面端.command"', source)
+        self.assertIn('/usr/bin/open -a Terminal "$COMMAND_LAUNCHER"', source)
+        self.assertNotIn("TAIJI_SOURCE_MODE=", source)
+        self.assertIn("export TAIJI_SOURCE_MODE", command_source)
 
     def test_persistent_credential_lock_is_excluded_from_source_status(self):
         ignore_lines = {

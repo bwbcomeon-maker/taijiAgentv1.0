@@ -29,6 +29,36 @@ const CONTENT_TEMPLATE_CASES = [
   ['standalone-office-material', 'summary_plan', '总结计划'],
   ['standalone-office-material', 'other_office_material', '材料润色'],
 ];
+const RELEASED_TASK_CASES = [
+  {
+    templateId: 'standalone-work-report', documentType: 'work_report', title: '部门月度工作汇报',
+    sections: ['工作开展情况', '存在问题', '下一步工作安排'],
+  },
+  {
+    templateId: 'standalone-meeting-minutes', documentType: 'meeting_minutes', title: '专题会议纪要',
+    sections: ['会议基本情况', '议定事项', '责任分工', '后续跟踪'],
+  },
+  {
+    templateId: 'standalone-office-material', documentType: 'notice', title: '安全生产专项检查通知',
+    sections: ['背景与总体要求', '通知事项', '时间安排', '责任分工', '报送要求'],
+  },
+  {
+    templateId: 'standalone-office-material', documentType: 'plan', title: '服务质量提升实施方案',
+    sections: ['目标', '现状与问题', '主要措施', '进度安排', '保障机制'],
+  },
+  {
+    templateId: 'standalone-office-material', documentType: 'summary_plan', title: '上半年总结及下半年计划',
+    sections: ['阶段性工作总结', '成效与亮点', '问题与不足', '下一步工作计划'],
+  },
+  {
+    templateId: 'standalone-office-material', documentType: 'other_office_material', title: '服务情况说明（润色稿）',
+    sections: ['润色后正文', '修改说明'],
+  },
+  {
+    templateId: 'standalone-research-report', documentType: 'research_report', title: '本地智能办公应用研究报告',
+    sections: ['研究问题', '证据', '分析', '结论边界', '引用'],
+  },
+];
 const ENTERPRISE_ONLY_WORDS = [
   '签发单位',
   '编制单位',
@@ -103,6 +133,92 @@ test('registry exposes standalone templates after existing enterprise templates'
       'standalone-office-material',
     ]
   );
+});
+
+test('standalone templates target the current Word compatibility mode', () => {
+  const templateIds = [
+    'standalone-work-report',
+    'standalone-research-report',
+    'standalone-meeting-minutes',
+    'standalone-office-material',
+  ];
+  for (const templateId of templateIds) {
+    const entries = readZipEntriesFromBuffer(
+      fs.readFileSync(path.join(ENGINE_ROOT, 'templates', templateId, 'template.docx'))
+    );
+    const settingsXml = entries.get('word/settings.xml')?.toString('utf8') || '';
+    assert.match(
+      settingsXml,
+      /w:name="compatibilityMode"[^>]*w:val="15"/,
+      `${templateId} must open in the current Word document mode`
+    );
+    assert.doesNotMatch(
+      settingsXml,
+      /w:name="compatibilityMode"[^>]*w:val="14"/,
+      `${templateId} must not force Word 2010 compatibility mode`
+    );
+  }
+});
+
+test('standalone templates advertise only portable font families', () => {
+  const templateIds = [
+    'standalone-work-report',
+    'standalone-research-report',
+    'standalone-meeting-minutes',
+    'standalone-office-material',
+  ];
+  const portableFonts = new Set(['', 'Arial', 'Symbol', '宋体', '黑体']);
+  for (const templateId of templateIds) {
+    const entries = readZipEntriesFromBuffer(
+      fs.readFileSync(path.join(ENGINE_ROOT, 'templates', templateId, 'template.docx'))
+    );
+    const fontTableXml = entries.get('word/fontTable.xml')?.toString('utf8') || '';
+    const packageXmlParts = [...entries]
+      .filter(([entryName]) => entryName.endsWith('.xml'))
+      .map(([, contents]) => contents.toString('utf8'));
+    const advertisedFonts = [
+      ...[...fontTableXml.matchAll(/<w:font\b[^>]*w:name="([^"]+)"/g)].map((match) => match[1]),
+      ...packageXmlParts.flatMap((xml) =>
+        [...xml.matchAll(/<w:rFonts\b[^>]*>/g)].flatMap((match) =>
+          [...match[0].matchAll(/w:(?:ascii|hAnsi|eastAsia|cs)="([^"]+)"/g)]
+            .map((fontMatch) => fontMatch[1])
+        )
+      ),
+      ...packageXmlParts.flatMap((xml) =>
+        [...xml.matchAll(/\btypeface="([^"]*)"/g)].map((match) => match[1])
+      ),
+    ];
+    for (const fontName of advertisedFonts) {
+      assert.equal(
+        portableFonts.has(fontName),
+        true,
+        `${templateId} must not advertise non-portable font ${fontName}`
+      );
+    }
+  }
+});
+
+test('standalone templates declare Chinese proofing language for document text', () => {
+  const templateIds = [
+    'standalone-work-report',
+    'standalone-research-report',
+    'standalone-meeting-minutes',
+    'standalone-office-material',
+  ];
+  for (const templateId of templateIds) {
+    const entries = readZipEntriesFromBuffer(
+      fs.readFileSync(path.join(ENGINE_ROOT, 'templates', templateId, 'template.docx'))
+    );
+    const packageXmlParts = [...entries]
+      .filter(([entryName]) => entryName.endsWith('.xml'))
+      .map(([, contents]) => contents.toString('utf8'));
+    const languageTags = packageXmlParts.flatMap((xml) => [...xml.matchAll(/<w:lang\b[^>]*>/g)]);
+    assert.ok(languageTags.length > 0, `${templateId} must declare a proofing language`);
+    for (const [languageTag] of languageTags) {
+      assert.match(languageTag, /w:val="zh-CN"/, `${templateId} must use Chinese proofing language`);
+      assert.match(languageTag, /w:eastAsia="zh-CN"/, `${templateId} must use Chinese East Asian language`);
+    }
+  }
 });
 
 test('content task standalone templates preserve only approved business content', () => {
@@ -384,6 +500,87 @@ test('all released content document types complete a standalone DOCX job', async
   }
 });
 
+test('all seven released tasks preserve every required section in the final DOCX', async (t) => {
+  for (const task of RELEASED_TASK_CASES) {
+    const root = makeTempDir(t);
+    const sourcePath = path.join(root, 'source.md');
+    const assetManifestPath = path.join(root, 'asset-manifest.json');
+    const deliveryDir = path.join(root, 'delivery');
+    const markdown = [
+      `# ${task.title}`,
+      '',
+      ...task.sections.flatMap((section, index) => [
+        `## ${section}`,
+        '',
+        task.documentType === 'research_report' && section === '引用'
+          ? '本节引用已核对资料 [SRC-001]。'
+          : `第 ${index + 1} 节为用户确认内容。`,
+        '',
+      ]),
+    ].join('\n');
+    fs.writeFileSync(sourcePath, markdown, 'utf8');
+    fs.writeFileSync(
+      assetManifestPath,
+      '{"schema_version":"expert-asset-manifest/v1","assets":[]}\n',
+      'utf8'
+    );
+
+    const templateBinding = readJson(path.join(
+      ENGINE_ROOT,
+      'templates',
+      task.templateId,
+      'template-package.binding.json'
+    ));
+    const rendererIdentity = describeRendererIdentity({
+      engineRoot: ENGINE_ROOT,
+      profileId: 'standalone-default',
+    });
+    const contract = contractFixture({
+      templateId: task.templateId,
+      documentType: task.documentType,
+      sourceSha256: sha256File(sourcePath),
+      assetManifestSha256: sha256File(assetManifestPath),
+    });
+    contract.documentMetadata.title = task.title;
+    contract.rendererIdentity = rendererIdentity;
+    contract.renderInputBinding = {
+      ...contract.renderInputBinding,
+      template: {
+        id: task.templateId,
+        version: '1.0.0',
+        packageSha256: templateBinding.packageSha256,
+      },
+      rendererIdentity,
+    };
+    contract.renderInputFingerprint = canonicalSha256(contract.renderInputBinding);
+
+    const result = await runDocumentJob({
+      engineRoot: ENGINE_ROOT,
+      templateId: task.templateId,
+      sourcePath,
+      sourceType: 'markdown',
+      assetDir: root,
+      assetManifestPath,
+      deliveryDir,
+      ...contract,
+    });
+
+    assert.equal(result.ok, true, `${task.documentType}: ${JSON.stringify(result)}`);
+    assert.equal(path.basename(result.documentPath), 'document.docx');
+    const entries = readZipEntriesFromBuffer(fs.readFileSync(result.documentPath));
+    const documentXml = entries.get('word/document.xml').toString('utf8');
+    assert.equal(documentXml.includes(task.title), true, `${task.documentType}: title`);
+    for (const section of task.sections) {
+      assert.equal(documentXml.includes(section), true, `${task.documentType}: ${section}`);
+    }
+    assert.equal(documentXml.includes('{d.'), false, task.documentType);
+    assert.equal(documentXml.includes('<<<TAIJI_'), false, task.documentType);
+    for (const forbidden of ENTERPRISE_ONLY_WORDS) {
+      assert.equal(documentXml.includes(forbidden), false, `${task.documentType}: ${forbidden}`);
+    }
+  }
+});
+
 test('standalone run-job accepts minimal metadata and preserves missing-data markers', async (t) => {
   const root = makeTempDir(t);
   const sourcePath = path.join(root, 'source.md');
@@ -456,6 +653,8 @@ test('standalone work-report renders markdown tables without template table plac
       '# 部门月度工作汇报',
       '',
       '## 工作开展情况',
+      '',
+      '- **稳定性验证**：已完成专家团恢复链路检查。',
       '',
       '| 工作类别 | 完成情况 |',
       '| --- | --- |',
@@ -531,4 +730,10 @@ test('standalone work-report renders markdown tables without template table plac
   );
   assert.match(documentXml, /设备巡检/);
   assert.match(documentXml, /待补充/);
+  assert.match(documentXml, /稳定性验证/);
+  assert.equal(
+    documentXml.includes('**'),
+    false,
+    'standalone output must not leak markdown emphasis markers into visible DOCX text'
+  );
 });

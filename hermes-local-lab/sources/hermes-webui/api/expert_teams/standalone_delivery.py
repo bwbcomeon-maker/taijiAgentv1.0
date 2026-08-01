@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from pathlib import Path, PurePosixPath
 
@@ -21,6 +23,31 @@ from .storage import safe_run_id
 
 
 _HEX64 = re.compile(r"[a-f0-9]{64}")
+_UNSAFE_DOCUMENT_NAME = re.compile(r'[\x00-\x1f<>:"/\\|?*]+')
+_WINDOWS_RESERVED_NAMES = {
+    "aux",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "con",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+    "nul",
+    "prn",
+}
 
 
 class StandaloneDeliveryError(ValueError):
@@ -251,7 +278,238 @@ def resolve_standalone_open_target(workspace: Path, run: dict, target: str) -> P
     """Resolve a server-owned open target; callers can never submit a filesystem path."""
 
     normalized = str(target or "").strip()
-    if normalized not in {"document", "folder"}:
-        raise StandaloneDeliveryError("delivery_target_invalid", "只能打开当前文档或所在文件夹")
+    if normalized not in {"document", "folder", "quality_report"}:
+        raise StandaloneDeliveryError(
+            "delivery_target_invalid",
+            "只能打开当前文档、质量报告或所在文件夹",
+        )
     context = validate_standalone_delivery_context(workspace, run)
-    return context["document_path" if normalized == "document" else "delivery_dir"]
+    return context[
+        {
+            "document": "document_path",
+            "folder": "delivery_dir",
+            "quality_report": "quality_path",
+        }[normalized]
+    ]
+
+
+def standalone_delivery_document_name(run: dict) -> str:
+    """Return a portable DOCX filename derived only from the confirmed Brief."""
+
+    brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    title = str(brief.get("exact_title") or run.get("title") or "最终交付文档").strip()
+    stem = _UNSAFE_DOCUMENT_NAME.sub("_", title).strip(" ._") or "最终交付文档"
+    if stem.casefold() in _WINDOWS_RESERVED_NAMES:
+        stem = f"{stem}_文档"
+    # Leave room for the deterministic conflict suffix and the DOCX extension.
+    return f"{stem[:120].rstrip(' ._') or '最终交付文档'}.docx"
+
+
+def materialize_standalone_delivery_open_document(run: dict, context: dict) -> Path:
+    """Create an integrity-bound, title-named view of the canonical DOCX.
+
+    The canonical delivery remains immutable at ``delivery/document.docx`` so
+    its manifest and hashes keep their original meaning.  Native office apps,
+    however, derive the visible document name from the path they open.  This
+    server-owned copy bridges those two requirements without accepting a path
+    or filename from the client.
+    """
+
+    raw_source = Path(str(context.get("document_path") or ""))
+    raw_attempt_root = Path(str(context.get("attempt_root") or ""))
+    if not raw_source.is_absolute() or not raw_attempt_root.is_absolute():
+        raise StandaloneDeliveryError("delivery_open_path_invalid", "最终 DOCX 打开路径无效")
+    if raw_source.is_symlink() or raw_attempt_root.is_symlink():
+        raise StandaloneDeliveryError("delivery_path_symlink", "交付路径包含符号链接")
+    try:
+        attempt_root = raw_attempt_root.resolve(strict=True)
+        source = raw_source.resolve(strict=True)
+        relative_source = raw_source.relative_to(raw_attempt_root)
+        source.relative_to(attempt_root)
+    except (OSError, ValueError) as exc:
+        raise StandaloneDeliveryError("delivery_open_path_invalid", "最终 DOCX 不在当前交付目录") from exc
+    if not attempt_root.is_dir() or not source.is_file():
+        raise StandaloneDeliveryError("delivery_document_missing", "最终 DOCX 不存在")
+
+    current = raw_attempt_root
+    for part in relative_source.parts:
+        current = current / part
+        if current.is_symlink():
+            raise StandaloneDeliveryError("delivery_path_symlink", "交付路径包含符号链接")
+
+    expected_sha256 = str(context.get("document_sha256") or "").strip()
+    if not _HEX64.fullmatch(expected_sha256) or sha256_file(source) != expected_sha256:
+        raise StandaloneDeliveryError("delivery_document_hash_mismatch", "DOCX 文件摘要已变化")
+
+    opened_dir = attempt_root / "opened"
+    try:
+        opened_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        if opened_dir.is_symlink() or not opened_dir.is_dir():
+            raise StandaloneDeliveryError("delivery_open_path_invalid", "DOCX 打开目录无效")
+    except OSError as exc:
+        raise StandaloneDeliveryError("delivery_open_copy_failed", "无法准备最终 DOCX 打开副本") from exc
+    if opened_dir.is_symlink():
+        raise StandaloneDeliveryError("delivery_path_symlink", "交付路径包含符号链接")
+
+    target = opened_dir / standalone_delivery_document_name(run)
+
+    def existing_matches() -> bool:
+        return (
+            target.is_file()
+            and not target.is_symlink()
+            and sha256_file(target) == expected_sha256
+        )
+
+    if target.exists() or target.is_symlink():
+        if existing_matches():
+            return target
+        raise StandaloneDeliveryError(
+            "delivery_open_copy_conflict",
+            "正式标题的打开副本已存在，但内容与当前交付文档不同",
+        )
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    created = False
+    try:
+        descriptor = os.open(target, flags, 0o600)
+        created = True
+        with os.fdopen(descriptor, "wb") as target_file, source.open("rb") as source_file:
+            while True:
+                chunk = source_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                target_file.write(chunk)
+            target_file.flush()
+            os.fsync(target_file.fileno())
+    except FileExistsError:
+        if existing_matches():
+            return target
+        raise StandaloneDeliveryError(
+            "delivery_open_copy_conflict",
+            "正式标题的打开副本已存在，但内容与当前交付文档不同",
+        )
+    except OSError as exc:
+        if created:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise StandaloneDeliveryError("delivery_open_copy_failed", "无法准备最终 DOCX 打开副本") from exc
+
+    if sha256_file(target) != expected_sha256:
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise StandaloneDeliveryError("delivery_open_copy_failed", "最终 DOCX 打开副本校验失败")
+    return target
+
+
+def save_standalone_delivery_copy(
+    run: dict,
+    context: dict,
+    destination_dir: str,
+    *,
+    idempotency_key: str,
+) -> dict:
+    """Copy the validated server-owned DOCX without overwriting user files."""
+
+    raw_destination = str(destination_dir or "").strip()
+    if not raw_destination:
+        raise StandaloneDeliveryError("delivery_copy_destination_missing", "请选择副本保存位置")
+    requested_destination = Path(raw_destination).expanduser()
+    if not requested_destination.is_absolute():
+        raise StandaloneDeliveryError("delivery_copy_destination_invalid", "副本保存位置必须是绝对路径")
+    try:
+        destination = requested_destination.resolve(strict=True)
+    except OSError as exc:
+        raise StandaloneDeliveryError("delivery_copy_destination_invalid", "副本保存位置不存在或不可读") from exc
+    if not destination.is_dir():
+        raise StandaloneDeliveryError("delivery_copy_destination_invalid", "副本保存位置不是文件夹")
+
+    source = Path(context.get("document_path") or "").resolve()
+    attempt_root = Path(context.get("attempt_root") or "").resolve()
+    if destination == attempt_root or attempt_root in destination.parents:
+        raise StandaloneDeliveryError(
+            "delivery_copy_destination_reserved",
+            "不能将副本保存到专家团内部交付目录",
+        )
+    if not source.is_file():
+        raise StandaloneDeliveryError("delivery_document_missing", "最终 DOCX 不存在")
+
+    expected_sha256 = str(context.get("document_sha256") or "").strip()
+    if not _HEX64.fullmatch(expected_sha256) or sha256_file(source) != expected_sha256:
+        raise StandaloneDeliveryError("delivery_document_hash_mismatch", "DOCX 文件摘要已变化")
+
+    requested_name = standalone_delivery_document_name(run)
+    base_target = destination / requested_name
+    suffix = hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()[:8]
+    conflict_target = destination / f"{base_target.stem}-副本-{suffix}{base_target.suffix}"
+
+    def existing_matches(path: Path) -> bool:
+        return path.is_file() and not path.is_symlink() and sha256_file(path) == expected_sha256
+
+    for target in (base_target, conflict_target):
+        if target.exists() or target.is_symlink():
+            if existing_matches(target):
+                return {
+                    "ok": True,
+                    "saved_name": target.name,
+                    "document_sha256": str(context.get("document_sha256") or ""),
+                    "replayed": True,
+                }
+            if target == base_target:
+                continue
+            raise StandaloneDeliveryError(
+                "delivery_copy_conflict",
+                "保存位置已有同名文件，且内容与当前交付文档不同",
+            )
+        try:
+            with source.open("rb") as source_file, target.open("xb") as destination_file:
+                while True:
+                    chunk = source_file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination_file.write(chunk)
+                destination_file.flush()
+                os.fsync(destination_file.fileno())
+        except FileExistsError:
+            if existing_matches(target):
+                return {
+                    "ok": True,
+                    "saved_name": target.name,
+                    "document_sha256": str(context.get("document_sha256") or ""),
+                    "replayed": True,
+                }
+            if target == base_target:
+                continue
+            raise StandaloneDeliveryError(
+                "delivery_copy_conflict",
+                "保存位置已有同名文件，且内容与当前交付文档不同",
+            )
+        except Exception:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        if sha256_file(target) != expected_sha256:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise StandaloneDeliveryError(
+                "delivery_document_hash_mismatch",
+                "DOCX 文件在保存副本时发生变化",
+            )
+        return {
+            "ok": True,
+            "saved_name": target.name,
+            "document_sha256": str(context.get("document_sha256") or ""),
+            "replayed": False,
+        }
+
+    raise StandaloneDeliveryError("delivery_copy_failed", "未能保存最终 DOCX 副本")

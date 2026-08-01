@@ -1123,9 +1123,11 @@ def _questions(template: dict, prompt: str) -> list[dict]:
 
 def _current_stage(run: dict) -> dict:
     tasks = (
-        run.get("_tasks_template")
-        if isinstance(run.get("_tasks_template"), list) and run.get("_tasks_template")
-        else run.get("tasks") if isinstance(run.get("tasks"), list) else []
+        run.get("tasks")
+        if isinstance(run.get("tasks"), list) and run.get("tasks")
+        else run.get("_tasks_template")
+        if isinstance(run.get("_tasks_template"), list)
+        else []
     )
     index = int(run.get("current_stage_index") or 0)
     if not tasks:
@@ -2237,19 +2239,18 @@ def complete_system_stage_attempt(
             )
         except StageArtifactError as exc:
             raise ExpertTeamStateConflict(exc.code, "system artifact validation failed", run) from exc
+        from .issue_policy import effective_artifact_validation
+
+        effective_validation = effective_artifact_validation(artifact)
         if (
             artifact.get("stage_id") != descriptor.get("id")
             or artifact.get("artifact_type") != descriptor.get("artifact_type")
             or int(artifact.get("stage_attempt") or 0) != int(reservation.get("stage_attempt") or 0)
             or artifact.get("input_refs") != reservation.get("input_refs")
-            or artifact.get("validation_status") != "valid"
+            or effective_validation["status"] != "valid"
         ):
             raise ExpertTeamStateConflict("system_artifact_identity_mismatch", "system artifact does not match reservation", run)
-        if any(
-            issue.get("severity") in {"blocking", "error", "warning"}
-            for issue in artifact.get("blocking_issues") or []
-            if isinstance(issue, dict)
-        ):
+        if effective_validation["blocking_count"]:
             raise ExpertTeamStateConflict("system_artifact_blocked", "system artifact has unresolved issues", run)
         existing_artifacts = [
             item
@@ -3404,7 +3405,6 @@ def _complete_enterprise_stage_artifact(
 ) -> dict:
     from .stage_artifacts import (
         StageArtifactError,
-        artifact_digest,
         build_stage_artifact,
         parse_stage_response,
     )
@@ -3469,13 +3469,11 @@ def _complete_enterprise_stage_artifact(
         patch = _stage_reservation_status_patch(run, "generated_invalid")
         return _transition(workspace, run, "generated_invalid", "generation_invalid", patch)
 
-    blocking_count = sum(
-        1 for issue in artifact.get("blocking_issues") or []
-        if issue.get("severity") in {"blocking", "error", "warning"}
-    )
-    if blocking_count:
-        artifact["validation_status"] = "invalid"
-        artifact["sha256"] = artifact_digest(artifact)
+    from .issue_policy import classify_stage_issues
+
+    quality = classify_stage_issues(artifact.get("blocking_issues") or [])
+    blocking_count = int(quality["blocking_count"])
+    warning_count = int(quality["warning_count"])
     existing = next(
         (item for item in run.get("stage_artifacts") or [] if item.get("artifact_id") == artifact["artifact_id"]),
         None,
@@ -3496,10 +3494,22 @@ def _complete_enterprise_stage_artifact(
         "sha256": artifact["sha256"],
         "stage_attempt": stage_attempt,
     }
+    # A semantic confirmation failure belongs to one immutable artifact only.
+    # A newly generated attempt must not inherit the previous artifact's block.
+    run["semantic_validation"] = {}
+    validation_status = "rewrite_required" if blocking_count else "attention" if warning_count else "pass"
+    validation_message = (
+        "阶段产物存在阻断问题"
+        if blocking_count
+        else "阶段产物可继续复核，但有待确认事项"
+        if warning_count
+        else "阶段产物合同校验通过"
+    )
     run["validation"] = {
-        "status": "rewrite_required" if blocking_count else "pass",
+        "status": validation_status,
         "blocking_count": blocking_count,
-        "message": "阶段产物存在阻断问题" if blocking_count else "阶段产物合同校验通过",
+        "warning_count": warning_count,
+        "message": validation_message,
     }
     run["last_validation_error"] = run["validation"]["message"] if blocking_count else ""
     status = "generated_invalid" if blocking_count else "generated_valid"
@@ -3941,7 +3951,10 @@ def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
         )
     except StageArtifactError as exc:
         raise ExpertTeamStateConflict(exc.code, "stage artifact validation failed", run) from exc
-    if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0) != 0:
+    from .issue_policy import effective_artifact_validation
+
+    effective_validation = effective_artifact_validation(artifact)
+    if effective_validation["status"] != "valid" or int(validation.get("blocking_count") or 0) != 0:
         raise ExpertTeamStateConflict("stage_artifact_blocked", "stage artifact has unresolved issues", run)
     if artifact.get("artifact_type") == "delivery_manifest":
         from .office_review import reconcile_enterprise_completion
@@ -4169,7 +4182,10 @@ def _standalone_bound_stage_artifact(run: dict, body: dict) -> dict:
         )
     except StageArtifactError as exc:
         raise ExpertTeamStateConflict(exc.code, "stage artifact validation failed", run) from exc
-    if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0) != 0:
+    from .issue_policy import effective_artifact_validation
+
+    effective_validation = effective_artifact_validation(artifact)
+    if effective_validation["status"] != "valid" or int(validation.get("blocking_count") or 0) != 0:
         raise ExpertTeamStateConflict(
             "stage_artifact_blocked",
             "stage artifact has unresolved issues",
@@ -4213,6 +4229,121 @@ def confirm_standalone_expert_team_stage(workspace: Path, body: dict) -> dict:
         )
     artifact = _standalone_bound_stage_artifact(run, body)
     stage_id = str(artifact.get("stage_id") or "")
+    brief = run.get("document_brief") or {}
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        from .documents import (
+            evaluate_semantic_gates,
+            resolve_approved_input_artifacts,
+        )
+
+        try:
+            needs_strict_source_semantics = (
+                str(brief.get("task_mode") or "") == "polish"
+                or str(brief.get("document_type") or "") == "research_report"
+            )
+            source_context = (
+                verify_source_context_snapshot(workspace, run)
+                if needs_strict_source_semantics
+                or isinstance(run.get("source_context_snapshot_ref"), dict)
+                else None
+            )
+            approved_artifacts = (
+                resolve_approved_input_artifacts(run, artifact)
+                if needs_strict_source_semantics
+                else []
+            )
+            semantic_gates = evaluate_semantic_gates(
+                brief=brief,
+                artifact=artifact,
+                approved_inputs=artifact.get("input_refs") or [],
+                approved_artifacts=approved_artifacts,
+                source_context=source_context,
+                source_requirement=(
+                    (run.get("launch_profile_snapshot") or {}).get(
+                        "source_requirement"
+                    )
+                    if isinstance(run.get("launch_profile_snapshot"), dict)
+                    else None
+                ),
+                product_mode="standalone",
+            )
+        except (SourceContextError, FinalDocumentDeliveryError) as exc:
+            raise ExpertTeamStateConflict(
+                "source_context_invalid",
+                "final artifact source binding could not be verified",
+                _sync_derived(run),
+            ) from exc
+        if semantic_gates["status"] != "passed":
+            issue_codes = ",".join(
+                str(item.get("code") or "semantic_issue")
+                for item in semantic_gates.get("issues") or []
+                if isinstance(item, dict)
+            )
+            blocked_run = deepcopy(run)
+            semantic_issues = [
+                {
+                    "code": str(item.get("code") or "semantic_issue"),
+                    "severity": "blocking",
+                    "message": str(item.get("message") or "内容检查未通过"),
+                    "suggested_action": "提交修改意见后重新生成当前阶段",
+                }
+                for item in semantic_gates.get("issues") or []
+                if isinstance(item, dict)
+            ]
+            blocked_at = _now()
+            blocked_run.update(
+                {
+                    "version": int(run.get("version") or 0) + 1,
+                    "updated_at": blocked_at,
+                    "semantic_validation": {
+                        "schema_version": "expert-semantic-confirmation/v1",
+                        "status": "failed",
+                        "artifact_id": str(artifact.get("artifact_id") or ""),
+                        "artifact_sha256": str(artifact.get("sha256") or ""),
+                        "blocking_count": len(semantic_issues),
+                        "issues": semantic_issues,
+                        "checked_at": blocked_at,
+                    },
+                    "last_validation_error": "当前阶段内容检查未通过，请查看问题并提交修改意见。",
+                }
+            )
+            events = [
+                deepcopy(item)
+                for item in blocked_run.get("events") or []
+                if isinstance(item, dict)
+            ]
+            events.append(
+                {
+                    "type": "semantic_confirmation_blocked",
+                    "from": "awaiting_review",
+                    "to": "awaiting_review",
+                    "at": blocked_at,
+                }
+            )
+            blocked_run["events"] = events
+            timeline = [
+                deepcopy(item)
+                for item in blocked_run.get("timeline_events") or []
+                if isinstance(item, dict)
+            ]
+            timeline.append(
+                {
+                    "type": "semantic_confirmation_blocked",
+                    "title": "内容检查发现必须处理的问题",
+                    "detail": str((blocked_run.get("current_stage") or {}).get("phase") or ""),
+                    "member_id": str((blocked_run.get("current_stage") or {}).get("worker_id") or "reviewer"),
+                    "at": blocked_at,
+                }
+            )
+            blocked_run["timeline_events"] = timeline
+            blocked_run = write_run(workspace, _sync_derived(blocked_run))
+            raise ExpertTeamStateConflict(
+                "stage_artifact_blocked",
+                f"stage artifact failed standalone delivery semantics: {issue_codes}",
+                blocked_run,
+            )
+        run["semantic_validation"] = {}
+        run["last_validation_error"] = ""
     confirmed_at = _now()
     confirmation = {
         "schema_version": "local-stage-confirmation/v1",
@@ -4241,7 +4372,6 @@ def confirm_standalone_expert_team_stage(workspace: Path, body: dict) -> dict:
         stage_id: {"artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"]},
     }
     if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
-        brief = run.get("document_brief") or {}
         run["canonical_document_ref"] = {
             "artifact_id": artifact["artifact_id"],
             "sha256": artifact["sha256"],
@@ -4735,6 +4865,194 @@ def _invalidate_delivery_reservation(run: dict, context: dict, *, at: str) -> li
             run,
         )
     return rows
+
+
+def _invalidate_generated_delivery_stage_reservation(
+    run: dict,
+    context: dict,
+    *,
+    at: str,
+) -> list[dict]:
+    current = run.get("current_stage_attempt_reservation")
+    if (
+        not isinstance(current, dict)
+        or str(current.get("stage_id") or "") != str(context.get("stage_id") or "")
+        or int(current.get("stage_attempt") or 0) != int(context.get("stage_attempt") or 0)
+        or str(current.get("executor") or "") != "system"
+        or str(current.get("artifact_type") or "") != "delivery_manifest"
+        or str(current.get("status") or "") != "generated_valid"
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "current delivery stage reservation is no longer rerenderable",
+            run,
+        )
+    reservation_id = str(current.get("reservation_id") or "")
+    rows = [
+        deepcopy(item)
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    matches = [
+        index
+        for index, item in enumerate(rows)
+        if str(item.get("reservation_id") or "") == reservation_id
+        and item == current
+    ]
+    if not reservation_id or len(matches) != 1:
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "delivery stage reservation ledger is missing or ambiguous",
+            run,
+        )
+    index = matches[0]
+    rows[index] = {**rows[index], "status": "invalidated", "invalidated_at": at}
+    return rows
+
+
+@_serialized_body_mutation
+def rerender_standalone_expert_team_delivery(workspace: Path, body: dict) -> dict:
+    """Regenerate only the bound DOCX while preserving confirmed model content."""
+
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    forbidden_paths = {
+        "path",
+        "document_path",
+        "delivery_dir",
+        "binding_path",
+        "quality_path",
+        "out_dir",
+    }
+    if forbidden_paths.intersection(unknown_fields):
+        raise ValueError("standalone delivery rerender paths are server-owned")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery rerender has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    if type((body or {}).get("expected_version")) is not int or int(body["expected_version"]) <= 0:
+        raise ValueError("expected_version must be a positive integer")
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "rerender_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+
+    at = _now()
+    stage_id = str(body.get("stage_id") or "")
+    delivery_attempt = int(body.get("delivery_attempt") or 0)
+    with delivery_attempt_lock(
+        workspace,
+        str(run.get("run_id") or ""),
+        stage_id,
+        delivery_attempt,
+    ):
+        context = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review"},
+        )
+        stage_rows = _invalidate_generated_delivery_stage_reservation(
+            run,
+            context,
+            at=at,
+        )
+        delivery_rows = _invalidate_delivery_reservation(
+            run,
+            context,
+            at=at,
+        )
+
+    _pending_system_descriptor(run)
+    _record_action(run, body, "rerender_delivery")
+    generation = int(run.get("delivery_recovery_generation") or 0) + 1
+    history = [
+        deepcopy(item)
+        for item in run.get("delivery_recovery_history") or []
+        if isinstance(item, dict)
+    ]
+    history.append(
+        {
+            "schema_version": "standalone-delivery-recovery/v1",
+            "generation": generation,
+            "requested_at": at,
+            "reason": "manual_docx_rerender",
+            "previous_delivery": _standalone_delivery_identity(context),
+        }
+    )
+    next_run = deepcopy(run)
+    next_run.update(
+        {
+            **_clear_execution_patch(),
+            "workflow_state": "delivery_validation_required",
+            "version": int(run.get("version") or 0) + 1,
+            "updated_at": at,
+            "delivery_recovery_generation": generation,
+            "delivery_recovery_history": history,
+            "stage_attempt_reservations": stage_rows,
+            "delivery_attempt_reservations": delivery_rows,
+            "current_stage_attempt_reservation": None,
+            "current_delivery_attempt_reservation": None,
+            "current_stage_artifact_ref": None,
+            "current_delivery_manifest_ref": None,
+            "local_delivery_confirmation": None,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "invalidated",
+                "invalidated_at": at,
+                "reason": "manual_docx_rerender",
+                "previous_delivery_attempt": int(context.get("delivery_attempt") or 0),
+                "previous_delivery_binding_sha256": str(
+                    context.get("delivery_binding_sha256") or ""
+                ),
+                "previous_document_sha256": str(context.get("document_sha256") or ""),
+            },
+            "completion_integrity": {
+                "status": "rerender_requested",
+                "checked_at": at,
+                "message": "已保留确认正文，正在重新生成 DOCX。",
+            },
+            "pending_system_stage_result": "rerender_requested",
+        }
+    )
+    events = [
+        deepcopy(item)
+        for item in run.get("events") or []
+        if isinstance(item, dict)
+    ]
+    events.append(
+        {
+            "type": "delivery_rerender_requested",
+            "from": "awaiting_review",
+            "to": "delivery_validation_required",
+            "at": at,
+        }
+    )
+    next_run["events"] = events
+    timeline = [
+        deepcopy(item)
+        for item in run.get("timeline_events") or []
+        if isinstance(item, dict)
+    ]
+    timeline.append(
+        {
+            "type": "delivery_rerender_requested",
+            "title": "正在重新生成 DOCX",
+            "detail": "已确认正文保持不变，不会重新调用模型",
+            "member_id": "director",
+            "at": at,
+        }
+    )
+    next_run["timeline_events"] = timeline
+    return write_run(workspace, _sync_derived(next_run))
 
 
 @_serialized_body_mutation
@@ -5254,8 +5572,8 @@ def resolve_standalone_expert_team_delivery_open(workspace: Path, body: dict) ->
             + ", ".join(sorted(unknown_fields))
         )
     target = str((body or {}).get("target") or "").strip()
-    if target not in {"document", "folder"}:
-        raise ValueError("target must be document or folder")
+    if target not in {"document", "folder", "quality_report"}:
+        raise ValueError("target must be document, folder, or quality_report")
     run_id = str((body or {}).get("run_id") or "")
     with _run_mutation_lock(workspace, run_id):
         run, _duplicate = _prepare_mutation(
@@ -5274,14 +5592,185 @@ def resolve_standalone_expert_team_delivery_open(workspace: Path, body: dict) ->
         from .standalone_delivery import resolve_standalone_open_target
 
         resolved = resolve_standalone_open_target(workspace, run, target)
-        expected = context["document_path"] if target == "document" else context["delivery_dir"]
+        expected = context[
+            {
+                "document": "document_path",
+                "folder": "delivery_dir",
+                "quality_report": "quality_path",
+            }[target]
+        ]
         if Path(resolved).resolve() != Path(expected).resolve():
             raise ExpertTeamStateConflict(
                 "delivery_open_target_changed",
                 "standalone delivery open target changed after validation",
                 run,
             )
-        return {"target": target, "path": Path(resolved)}
+        from .standalone_delivery import (
+            materialize_standalone_delivery_open_document,
+            standalone_delivery_document_name,
+        )
+
+        open_path = Path(resolved)
+        if target == "document":
+            open_path = materialize_standalone_delivery_open_document(run, context)
+
+        return {
+            "target": target,
+            "path": open_path,
+            "download_name": (
+                standalone_delivery_document_name(run)
+                if target == "document"
+                else "quality-report.json" if target == "quality_report" else ""
+            ),
+        }
+
+
+@_serialized_body_mutation
+def save_standalone_expert_team_delivery_copy(workspace: Path, body: dict) -> dict:
+    """Save the bound final DOCX to a user-selected directory without overwrite."""
+
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+        "destination_dir",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    server_owned_fields = {
+        "path",
+        "document_path",
+        "source_path",
+        "filename",
+        "quality_path",
+        "delivery_dir",
+        "binding_path",
+        "out_dir",
+    }
+    if server_owned_fields.intersection(unknown_fields):
+        raise ValueError("standalone delivery copy source and filename are server-owned")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery copy has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    destination_dir = str((body or {}).get("destination_dir") or "").strip()
+    if not destination_dir:
+        raise ValueError("destination_dir is required for standalone delivery copy")
+    run, _duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "save_delivery_copy",
+        skip_idempotency_result=True,
+        require_stage=False,
+    )
+    context = _require_bound_standalone_delivery(
+        workspace,
+        run,
+        body,
+        allowed_states={"awaiting_review", "completed"},
+    )
+    from .standalone_delivery import save_standalone_delivery_copy
+
+    return save_standalone_delivery_copy(
+        run,
+        context,
+        destination_dir,
+        idempotency_key=str(body.get("idempotency_key") or ""),
+    )
+
+
+def _warning_only_review_recovery_patch(run: dict) -> dict | None:
+    """Recover one immutable legacy warning-only result without redispatch."""
+
+    if str(run.get("workflow_state") or "") != "generated_invalid":
+        return None
+    if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+        return None
+    ref = run.get("current_stage_artifact_ref")
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    stage_id = str(current.get("task_id") or current.get("id") or "")
+    if not isinstance(ref, dict) or not stage_id:
+        return None
+    artifacts = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and item.get("artifact_id") == ref.get("artifact_id")
+        and item.get("sha256") == ref.get("sha256")
+    ]
+    if len(artifacts) != 1:
+        return None
+    artifact = artifacts[0]
+    if str(artifact.get("stage_id") or "") != stage_id:
+        return None
+    try:
+        from .issue_policy import effective_artifact_validation
+        from .stage_artifacts import StageArtifactError, validate_stage_artifact
+
+        validate_stage_artifact(
+            artifact,
+            brief=run.get("document_brief") or {},
+            approved_inputs=artifact.get("input_refs") or [],
+        )
+    except (StageArtifactError, TypeError, ValueError):
+        return None
+    effective = effective_artifact_validation(artifact)
+    if not effective["legacy_warning_only"] or effective["blocking_count"]:
+        return None
+    reservation = run.get("current_stage_attempt_reservation")
+    attempt = int(artifact.get("stage_attempt") or 0)
+    if (
+        not isinstance(reservation, dict)
+        or str(reservation.get("stage_id") or "") != stage_id
+        or int(reservation.get("stage_attempt") or 0) != attempt
+        or str(reservation.get("artifact_type") or "") != str(artifact.get("artifact_type") or "")
+        or reservation.get("input_refs") != artifact.get("input_refs")
+        or str(reservation.get("status") or "") != "generated_invalid"
+    ):
+        return None
+    reservation_id = str(reservation.get("reservation_id") or "")
+    ledger = [
+        item
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+        and str(item.get("reservation_id") or "") == reservation_id
+        and str(item.get("stage_id") or "") == stage_id
+        and int(item.get("stage_attempt") or 0) == attempt
+        and str(item.get("status") or "") == "generated_invalid"
+    ]
+    if not reservation_id or len(ledger) != 1:
+        return None
+    outputs = [
+        deepcopy(item)
+        for item in run.get("stage_outputs") or []
+        if isinstance(item, dict)
+    ]
+    matches = [
+        output
+        for output in outputs
+        if str(output.get("task_id") or output.get("stage_id") or "") == stage_id
+        and int(output.get("stage_attempt") or 0) == attempt
+        and isinstance(output.get("artifact"), dict)
+        and output["artifact"].get("artifact_id") == artifact.get("artifact_id")
+        and output["artifact"].get("sha256") == artifact.get("sha256")
+    ]
+    if len(matches) != 1:
+        return None
+    matches[0]["status"] = "generated"
+    return {
+        **_clear_execution_patch(),
+        **_stage_reservation_status_patch(run, "generated_valid"),
+        "stage_outputs": outputs,
+        "validation": {
+            "status": "attention",
+            "blocking_count": 0,
+            "warning_count": int(effective["warning_count"]),
+            "message": "阶段产物可继续复核，但有待确认事项",
+        },
+        "last_validation_error": "",
+        "last_execution_error": "",
+        "last_execution_error_code": "",
+        "last_execution_incident_id": "",
+    }
 
 
 @_serialized_body_mutation
@@ -5307,6 +5796,35 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
     if state not in {"ready_to_generate", "start_failed", "generation_failed", "result_unverified", "generated_invalid"}:
         raise ExpertTeamStateConflict("stale_state", "expert team run is not resumable", run)
     _record_action(run, body, "resume")
+    if recovery_patch := _warning_only_review_recovery_patch(run):
+        return _transition(
+            workspace,
+            run,
+            "awaiting_review",
+            "warning_only_result_recovered",
+            recovery_patch,
+        )
+    pending_system_stage = (
+        run.get("pending_system_stage")
+        if isinstance(run.get("pending_system_stage"), dict)
+        else {}
+    )
+    if (
+        pending_system_stage.get("executor") == "system"
+        and state in {"generated_invalid", "ready_to_generate"}
+    ):
+        # A failed system delivery is retried by the system dispatcher itself.
+        # Moving it into the model-stage ready state makes the dispatcher reject
+        # its own retry and leaves the UI in a resume loop.  Preserve the
+        # retryable system state until the route reserves/finishes that exact
+        # delivery side effect.
+        return _transition(
+            workspace,
+            run,
+            "generated_invalid",
+            "system_stage_retry_requested",
+            _clear_execution_patch(),
+        )
     current_reservation = run.get("current_stage_attempt_reservation")
     stale_reservation_patch = {}
     if (
@@ -5420,6 +5938,7 @@ def fail_expert_team_execution_protocol(
     message: str,
     *,
     stream_id: str,
+    error_code: str = "runtime_protocol_error",
 ) -> dict:
     """Stop delivery safely while retaining the remote cleanup gate."""
     run = read_run(workspace, run_id)
@@ -5448,6 +5967,7 @@ def fail_expert_team_execution_protocol(
             "execution_cleanup_next_retry_at": 0,
             "execution_cleanup_deadline_at": time.time() + _CONTROL_RETRY_DEADLINE_SECONDS,
             "last_execution_error": error,
+            "last_execution_error_code": str(error_code or "runtime_protocol_error"),
             "last_validation_error": error,
         },
     )

@@ -313,6 +313,7 @@ test('validateDeliveryPackage accepts complete delivery package and reports requ
       'footer_portability',
       'cover_layout',
       'template_markers',
+      'markdown_artifacts',
       'asset_semantics',
       'logical_figure_identity',
       'image_coverage',
@@ -487,6 +488,24 @@ test('validateDeliveryPackage fails when DOCX document XML is malformed', async 
   assert.equal(report.status, 'failed');
   assert.equal(xmlCheck?.status, 'failed');
   assert.match(xmlCheck?.message || '', /document\.xml|mismatched|well-formed/i);
+});
+
+test('validateDeliveryPackage fails when visible DOCX text contains unresolved markdown markers', async (t) => {
+  const { deliveryDir } = await makeDeliveryPackage(t);
+  await rewriteDocumentXml(path.join(deliveryDir, 'document.docx'), (documentXml) =>
+    documentXml.replace(
+      'The delivery package must keep source, assets, render plan, and quality checks together.',
+      '**Unresolved emphasis marker**'
+    )
+  );
+  refreshDeliveryDocumentHash(deliveryDir);
+
+  const report = validateDeliveryPackage({ deliveryDir });
+  const markdownCheck = report.checks.find((check) => check.id === 'markdown_artifacts');
+
+  assert.equal(report.status, 'failed');
+  assert.equal(markdownCheck?.status, 'failed');
+  assert.match(markdownCheck?.message || '', /markdown/i);
 });
 
 test('validateDeliveryPackage final mode fails when replay-report.json is missing', async (t) => {

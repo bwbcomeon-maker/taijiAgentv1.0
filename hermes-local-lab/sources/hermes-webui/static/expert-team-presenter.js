@@ -8,6 +8,9 @@
     }
     return String(content==null?'':content);
   }
+  function isExpertTeamExecutionDisplayMessage(content){
+    return /^专家团开始生成：/.test(String(content==null?'':content).trim());
+  }
   function isExpertTeamProtocolAssistant(messages,index){
     if(!Array.isArray(messages)||!Number.isInteger(index)||index<1)return false;
     const message=messages[index];
@@ -15,7 +18,20 @@
     let previousIndex=index-1;
     while(previousIndex>=0&&messages[previousIndex]&&messages[previousIndex].role==='tool')previousIndex-=1;
     const previous=messages[previousIndex];
-    return !!(previous&&previous.role==='user'&&/^专家团开始生成：/.test(messageText(previous).trim()));
+    return !!(previous&&previous.role==='user'&&isExpertTeamExecutionDisplayMessage(messageText(previous)));
+  }
+  function isExpertTeamProtocolLiveStream(options,messages){
+    const context=options&&typeof options==='object'?options:{};
+    if(Object.prototype.hasOwnProperty.call(context,'expertTeamProtocol')){
+      return context.expertTeamProtocol===true;
+    }
+    if(!Array.isArray(messages))return false;
+    for(let index=messages.length-1;index>=0;index--){
+      if(messages[index]&&messages[index].role==='assistant'){
+        return isExpertTeamProtocolAssistant(messages,index);
+      }
+    }
+    return false;
   }
   function projectExpertTeamTranscriptContent(messages,index,content){
     if(!isExpertTeamProtocolAssistant(messages,index))return content;
@@ -174,13 +190,23 @@
   }
   function normalizedProductError(value){
     if(!value||typeof value!=='object'||str(value.schema)!=='taiji.product.error.v1')return null;
-    const allowedActions=new Set(['open_model_settings','export_diagnostics','retry']);
+    const allowedActions=new Set(['open_model_settings','export_diagnostics','retry','refresh','regenerate','open_result','start_new']);
     const actions=arr(value.recovery_actions).map(action=>({
       id:str(action&&action.id),label:str(action&&action.label)
     })).filter(action=>allowedActions.has(action.id)&&action.label);
     return {
       schema:'taiji.product.error.v1',code:str(value.code),title:str(value.title),message:str(value.message),
       incidentId:str(value.incident_id),retryable:value.retryable===true,recoveryActions:actions
+    };
+  }
+  function normalizedDiagnostics(value){
+    if(!value||typeof value!=='object'||str(value.schema)!=='expert-team-diagnostics/v1')return null;
+    return {
+      schema:'expert-team-diagnostics/v1',commit:str(value.commit,'unknown'),sourceMode:str(value.source_mode,'unknown'),
+      runId:str(value.run_id),stageId:str(value.stage_id),stageAttempt:Number(value.stage_attempt||0),
+      errorCode:str(value.error_code),incidentId:str(value.incident_id),blockingCount:Number(value.blocking_count||0),
+      warningCount:Number(value.warning_count||0),providerErrorCategory:str(value.provider_error_category),
+      deliveryState:str(value.delivery_state)
     };
   }
   function gateSummary(gates,deliveryStatus,state,standalone){
@@ -437,6 +463,7 @@
     }));
     const phaseProgress=(workflow&&workflow.progress)||view.phase_progress||{};
     const productError=normalizedProductError(view.product_error);
+    const diagnostics=normalizedDiagnostics(view.diagnostics);
     const draftIdentity={
       stageAttempt:Number(standalone?(stageActionBinding&&stageActionBinding.stage_attempt||0):(stageReview.stage_attempt||stageReview.attempt||stageResult.stage_attempt||stageResult.attempt||currentStage.stage_attempt||currentStage.attempt||stageAttemptReservation.stage_attempt||0)),
       artifactAttempt:Number(stageReviewOutput.stage_attempt||stageReviewOutput.attempt||stageResult.artifact_attempt||0),
@@ -483,6 +510,7 @@
       },
       presentation,
       productError,
+      diagnostics,
       brief:presentation.brief,
       completionGates:presentation.completionGates,
       deliveryStatus:presentation.deliveryStatus,
@@ -521,7 +549,9 @@
     window.buildExpertTeamStageActionPayload=buildExpertTeamStageActionPayload;
     window.buildExpertTeamDeliveryActionPayload=buildExpertTeamDeliveryActionPayload;
     window.buildExpertTeamDeliveryRecoveryPayload=buildExpertTeamDeliveryRecoveryPayload;
+    window.isExpertTeamExecutionDisplayMessage=isExpertTeamExecutionDisplayMessage;
     window.isExpertTeamProtocolAssistant=isExpertTeamProtocolAssistant;
+    window.isExpertTeamProtocolLiveStream=isExpertTeamProtocolLiveStream;
     window.projectExpertTeamTranscriptContent=projectExpertTeamTranscriptContent;
   }
 })();

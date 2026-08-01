@@ -618,6 +618,38 @@ def test_standalone_semantic_gates_allow_disclosed_missing_data_but_enterprise_s
     assert any(item["code"] == "placeholder_detected" for item in enterprise["issues"])
 
 
+def test_standalone_semantic_gates_allow_natural_absence_language_with_explicit_confirmation(tmp_path):
+    from api.expert_teams.documents import write_semantic_gates_snapshot
+
+    brief = {
+        "status": "confirmed",
+        "exact_title": "部门月度工作汇报",
+        "confirmed_revision": 1,
+        "confirmed_sha256": HEX_B,
+    }
+    artifact = {
+        "artifact_id": "polish:1",
+        "sha256": HEX_A,
+        "artifact_type": "reviewed_document",
+        "deliverable_markdown": (
+            "# 部门月度工作汇报\n\n"
+            "目前暂无实际数据支持，相关数据待补充并需人工确认。\n"
+        ),
+        "payload": {"review_report": {}, "open_issues": []},
+    }
+
+    report = write_semantic_gates_snapshot(
+        tmp_path,
+        brief=brief,
+        artifact=artifact,
+        approved_inputs=[],
+        product_mode="standalone",
+    )
+
+    assert report["status"] == "passed"
+    assert all(item["code"] != "placeholder_detected" for item in report["issues"])
+
+
 @pytest.mark.parametrize("placeholder", ("TODO", "TBD", "XXX"))
 def test_standalone_semantic_gates_still_block_undisclosed_engineering_placeholders(tmp_path, placeholder):
     from api.expert_teams.documents import write_semantic_gates_snapshot

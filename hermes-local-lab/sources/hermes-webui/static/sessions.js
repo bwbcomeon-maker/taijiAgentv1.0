@@ -868,7 +868,10 @@ async function loadSession(sid){
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
       if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {
+        reconnecting:true,
+        expertTeamProtocol:window.isExpertTeamExecutionDisplayMessage(S.session.pending_user_message),
+      });
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
     }else{
       S.busy=false;

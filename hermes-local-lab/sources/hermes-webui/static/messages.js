@@ -778,6 +778,20 @@ async function send(){
       }
     }
   }
+  if(
+    !isVisionRetry
+    && !options.skipExpertTeamSuggestion
+    && !S.pendingFiles.length
+    && typeof window!=='undefined'
+    && window.ExpertTeamV3
+    && typeof window.ExpertTeamV3.suggestFromPrompt==='function'
+  ){
+    try{
+      if(await window.ExpertTeamV3.suggestFromPrompt(text)) return false;
+    }catch(error){
+      try{console.warn('[webui] expert-team suggestion unavailable; continuing as regular chat',error&&error.message||error);}catch(_){ }
+    }
+  }
   if(!S.session){await newSession();await renderSessionList();}
 
   const activeSid=S.session.session_id;
@@ -1137,12 +1151,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return _isActiveSession()&&Array.isArray(S.messages)?S.messages:[];
   }
   function _isExpertTeamProtocolStream(){
-    if(typeof window.isExpertTeamProtocolAssistant!=='function')return false;
     const messages=_expertTeamProtocolMessages();
+    if(typeof window.isExpertTeamProtocolLiveStream==='function'){
+      return window.isExpertTeamProtocolLiveStream(options,messages);
+    }
+    if(Object.prototype.hasOwnProperty.call(options||{},'expertTeamProtocol'))return options.expertTeamProtocol===true;
+    if(typeof window.isExpertTeamProtocolAssistant!=='function')return false;
     for(let index=messages.length-1;index>=0;index--){
-      if(messages[index]&&messages[index].role==='assistant'){
-        return window.isExpertTeamProtocolAssistant(messages,index);
-      }
+      if(messages[index]&&messages[index].role==='assistant')return window.isExpertTeamProtocolAssistant(messages,index);
     }
     return false;
   }

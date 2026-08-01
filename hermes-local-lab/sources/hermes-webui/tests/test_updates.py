@@ -1,4 +1,5 @@
 """Tests for self-update diagnostics (api/updates.py)."""
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import api.updates as updates
@@ -207,7 +208,14 @@ def test_dirty_suffix_includes_local_change_stamp(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['diff-index', '--quiet', 'HEAD', '--']:
             return 'git exited with status 1', False
-        if args == ['diff', '--name-only', '--diff-filter=ACMRTUXB', 'HEAD', '--']:
+        if args == [
+            'diff',
+            '--name-only',
+            '--diff-filter=ACMRTUXB',
+            '--relative',
+            'HEAD',
+            '--',
+        ]:
             return 'static/panels.js', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -218,6 +226,58 @@ def test_dirty_suffix_includes_local_change_stamp(tmp_path):
 
     with patch.object(updates, '_run_git', side_effect=fake_git):
         second = updates._dirty_suffix(tmp_path)
+
+    assert first.startswith("-dirty.")
+    assert second.startswith("-dirty.")
+    assert first != second
+
+
+def test_dirty_suffix_changes_for_nested_webui_checkout_root(tmp_path):
+    """Asset cache keys must follow edits when WebUI lives below the Git root."""
+    subprocess.run(
+        ["git", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    webui_root = tmp_path / "nested" / "hermes-webui"
+    asset = webui_root / "static" / "expert-team-v3.js"
+    asset.parent.mkdir(parents=True)
+    asset.write_text("base\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    asset.write_text("first edit\n", encoding="utf-8")
+    first = updates._dirty_suffix(webui_root)
+    asset.write_text("second edit with different size\n", encoding="utf-8")
+    second = updates._dirty_suffix(webui_root)
 
     assert first.startswith("-dirty.")
     assert second.startswith("-dirty.")

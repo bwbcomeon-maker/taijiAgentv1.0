@@ -440,7 +440,8 @@ def test_route_legacy_preflight_rejects_missing_runtime_auth_before_dispatch(
 
 def _ready_direct_run(workspace: Path) -> dict:
     from api import expert_teams
-    from api.expert_teams.contracts import confirm_document_brief
+    from api.expert_teams.contracts import brief_digest, confirm_document_brief
+    from api.expert_teams.source_context import build_source_context_snapshot
 
     run = expert_teams.build_standalone_expert_team_run(
         {
@@ -466,6 +467,45 @@ def _ready_direct_run(workspace: Path) -> dict:
     run["document_brief"] = confirm_document_brief(
         brief,
         now="2026-07-25T10:00:00+08:00",
+    )
+    run["source_context_snapshot_ref"] = build_source_context_snapshot(
+        workspace,
+        run["run_id"],
+        run["document_brief"],
+        {},
+        brief_sha256=brief_digest(run["document_brief"]),
+        brief_revision=run["document_brief"]["confirmed_revision"],
+        allow_empty=True,
+    )
+    run["workflow_state"] = "ready_to_generate"
+    return run
+
+
+def _source_required_direct_run(workspace: Path, launch_profile_id: str) -> dict:
+    from api import expert_teams
+    from api.expert_teams.contracts import confirm_document_brief
+
+    run = expert_teams.build_standalone_expert_team_run(
+        {
+            "session_id": "direct-runtime-session",
+            "launch_profile_id": launch_profile_id,
+            "prompt": "生成需要来源资料的文档",
+            "idempotency_key": f"{launch_profile_id}-missing-source",
+        },
+        run_id=f"et-{launch_profile_id}-missing-source",
+    )
+    brief = deepcopy(run["document_brief"])
+    brief.update(
+        {
+            "exact_title": "需要来源资料的测试文档",
+            "purpose": "验证模型调用前的资料硬门禁",
+            "audience": "测试人员",
+            "usage_scenario": "发布前验收",
+        }
+    )
+    run["document_brief"] = confirm_document_brief(
+        brief,
+        now="2026-07-30T10:00:00+08:00",
     )
     run["workflow_state"] = "ready_to_generate"
     return run
@@ -627,6 +667,39 @@ def test_execution_route_provider_preflight_failure_makes_zero_runtime_calls(
     assert dispatches == []
 
 
+@pytest.mark.parametrize("launch_profile_id", ["content-polish", "research-report"])
+def test_source_required_tasks_fail_before_any_provider_call_when_snapshot_is_missing(
+    monkeypatch,
+    tmp_path,
+    launch_profile_id,
+):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _source_required_direct_run(tmp_path, launch_profile_id)
+    session = _direct_session(tmp_path)
+    dispatches = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        runtime_adapter.LegacyJournalRuntimeAdapter,
+        "start_run",
+        lambda self, request: dispatches.append(request),
+    )
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 409
+    assert payload["code"] == "source_context_invalid"
+    assert payload["product_error"]["code"] == "expert_team_source_invalid"
+    assert dispatches == []
+
+
 def test_execution_route_missing_model_auth_returns_recoverable_product_error(
     monkeypatch, tmp_path
 ):
@@ -681,6 +754,130 @@ def test_execution_route_missing_model_auth_returns_recoverable_product_error(
     assert failed_calls[0]["error_code"] == "model_configuration_required"
     assert failed_calls[0]["incident_id"] == payload["product_error"]["incident_id"]
     assert dispatches == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "product_code"),
+    [
+        (401, "provider_authorization_failed"),
+        (429, "provider_rate_limited"),
+        (504, "provider_timeout"),
+    ],
+)
+def test_execution_route_projects_and_persists_provider_http_failures(
+    monkeypatch,
+    tmp_path,
+    status_code,
+    product_code,
+):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    failed_calls = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda request: {
+            "provider": request.provider,
+            "model": request.model,
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+        },
+    )
+    monkeypatch.setattr(routes, "_cancel_expert_team_runtime_start", lambda *_args: {})
+
+    def capture_failure(*_args, **kwargs):
+        failed_calls.append(kwargs)
+        failed = deepcopy(run)
+        failed["workflow_state"] = "start_failed"
+        return failed
+
+    monkeypatch.setattr(
+        expert_teams,
+        "mark_expert_team_execution_start_failed",
+        capture_failure,
+    )
+    monkeypatch.setattr(
+        runtime_adapter.LegacyJournalRuntimeAdapter,
+        "start_run",
+        lambda self, request: runtime_adapter.RunStartResult(
+            run_id="provider-failed-run",
+            session_id=request.session_id,
+            stream_id="provider-failed-stream",
+            payload={
+                "_status": status_code,
+                "error": "raw provider failure /Users/private/.env",
+            },
+        ),
+    )
+
+    payload, response_status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert response_status == status_code
+    assert payload["product_error"]["code"] == product_code
+    assert payload["error"] == payload["product_error"]["message"]
+    assert "raw provider" not in repr(payload)
+    assert failed_calls[0]["error_code"] == product_code
+    assert failed_calls[0]["incident_id"] == payload["product_error"]["incident_id"]
+
+
+def test_execution_route_projects_and_persists_provider_timeout_exception(
+    monkeypatch,
+    tmp_path,
+):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    failed_calls = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda request: {
+            "provider": request.provider,
+            "model": request.model,
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+        },
+    )
+    monkeypatch.setattr(routes, "_cancel_expert_team_runtime_start", lambda *_args: {})
+
+    def capture_failure(*_args, **kwargs):
+        failed_calls.append(kwargs)
+        failed = deepcopy(run)
+        failed["workflow_state"] = "start_failed"
+        return failed
+
+    monkeypatch.setattr(expert_teams, "mark_expert_team_execution_start_failed", capture_failure)
+    monkeypatch.setattr(
+        runtime_adapter.LegacyJournalRuntimeAdapter,
+        "start_run",
+        lambda *_args: (_ for _ in ()).throw(TimeoutError("provider timed out with secret")),
+    )
+
+    payload, response_status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert response_status == 504
+    assert payload["product_error"]["code"] == "provider_timeout"
+    assert "secret" not in repr(payload)
+    assert failed_calls[0]["error_code"] == "provider_timeout"
 
 
 def test_standalone_runner_runtime_fails_before_any_client_or_reservation_call(

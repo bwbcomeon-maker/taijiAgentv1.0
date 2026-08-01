@@ -61,6 +61,9 @@
 .et3-section + .et3-section { margin-top: 14px; }
 .et3-section h3 { margin: 0 0 9px; font-size: 15px; }
 .et3-section p { margin: 0; color: var(--et3-muted); line-height: 1.65; }
+.et3-suggestion { margin: 0 0 14px; padding: 12px 14px; border: 1px solid #b8e3ec; border-radius: 12px; background: #eefafd; color: var(--et3-ink); }
+.et3-suggestion strong { display: block; margin-bottom: 4px; color: var(--et3-accent-strong); }
+.et3-suggestion p { color: var(--et3-muted); }
 .et3-member-list { display: grid; gap: 8px; }
 .et3-member { display: grid; grid-template-columns: 44px minmax(0,1fr); align-items: center; gap: 11px; padding: 7px 0; border-bottom: 1px solid #edf3f7; }
 .et3-member-avatar { width: 44px; height: 44px; border-radius: 12px; object-fit: cover; background: var(--et3-soft); border: 1px solid #e1edf3; }
@@ -120,6 +123,7 @@ body.expert-team-v3-collapsed #mainChat > .messages-shell { padding-right: 64px;
 .et3-state-pill { flex: none; border-radius: 999px; padding: 5px 10px; background: #eaf9fb; color: var(--et3-accent-strong); font-size: 12px; font-weight: 750; }
 .et3-panel { margin-top: 13px; padding: 16px; border: 1px solid #dceaf2; border-radius: 14px; background: rgba(255,255,255,.9); }
 .et3-panel--warning { border-color: #efd6aa; background: #fffaf2; }
+.et3-panel--blocked { border-color: #e6b7b7; background: #fff6f6; }
 .et3-panel h3 { margin: 0 0 11px; font-size: 15px; }
 .et3-panel p { color: var(--et3-muted); line-height: 1.62; }
 .et3-kv { display: grid; grid-template-columns: 105px minmax(0,1fr); gap: 9px 12px; }
@@ -137,11 +141,34 @@ body.expert-team-v3-collapsed #mainChat > .messages-shell { padding-right: 64px;
 .et3-source strong, .et3-review-item strong, .et3-artifact strong { display: block; margin-bottom: 3px; }
 .et3-source small, .et3-review-item small, .et3-artifact small { color: var(--et3-muted); }
 .et3-inline-actions, .et3-primary-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 13px; }
+.et3-quality-report { margin-top: 13px; }
+.et3-quality-report > summary { display: inline-flex; list-style: none; }
+.et3-quality-report > summary::-webkit-details-marker { display: none; }
+.et3-quality-report > summary::after { content: '展开'; margin-left: 8px; color: var(--et3-muted); font-size: 12px; }
+.et3-quality-report[open] > summary::after { content: '收起'; }
+.et3-quality-report-body { margin-top: 10px; padding: 14px; border: 1px solid #dceaf2; border-radius: 11px; background: #f7fbfd; }
+.et3-quality-report-body h4 { margin: 0 0 10px; font-size: 14px; }
+.et3-quality-report-body p:last-child { margin-bottom: 0; }
 .et3-primary-actions { position: sticky; bottom: 0; margin: 20px -20px 0; padding: 14px 20px 18px; border-top: 1px solid #dceaf2; background: rgba(247,252,254,.96); backdrop-filter: blur(12px); }
 .et3-primary-actions .et3-button--primary { flex: 1; }
 .et3-live { min-height: 20px; margin-top: 9px; color: var(--et3-accent-strong); }
 .et3-error { color: var(--et3-danger); }
 .et3-document { max-height: 330px; overflow: auto; padding: 16px; border: 1px solid #e2ecf2; border-radius: 11px; background: #fff; white-space: pre-wrap; line-height: 1.75; }
+.et3-document--rendered { white-space: normal; }
+.et3-document--rendered h2,
+.et3-document--rendered h3,
+.et3-document--rendered h4 { margin: 18px 0 8px; color: var(--et3-navy); line-height: 1.45; }
+.et3-document--rendered h2:first-child,
+.et3-document--rendered h3:first-child,
+.et3-document--rendered h4:first-child { margin-top: 0; }
+.et3-document--rendered h2 { font-size: 20px; }
+.et3-document--rendered h3 { font-size: 17px; }
+.et3-document--rendered h4 { font-size: 15px; }
+.et3-document--rendered p { margin: 8px 0; }
+.et3-document--rendered ul,
+.et3-document--rendered ol { margin: 8px 0; padding-left: 24px; }
+.et3-document--rendered li + li { margin-top: 4px; }
+.et3-document--rendered code { padding: 1px 5px; border-radius: 4px; background: #eff6f8; font: inherit; }
 .et3-skeleton { height: 14px; margin: 10px 0; border-radius: 7px; background: linear-gradient(90deg,#edf4f7,#f9fcfd,#edf4f7); background-size: 200% 100%; animation: et3-shimmer 1.4s linear infinite; }
 @keyframes et3-shimmer { to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { [data-expert-team-v3] * { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }

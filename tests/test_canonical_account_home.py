@@ -427,6 +427,7 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                 {
                     "TAIJI_AGENT_AGENT_DIR": "missing-agent",
                     "TAIJI_AGENT_WEBUI_DIR": "missing-webui",
+                    "TAIJI_WEBUI_PORT": "0",
                     "API_SERVER_KEY": "unit-test-api-key",
                 },
                 "Taiji web service entrypoint not found",

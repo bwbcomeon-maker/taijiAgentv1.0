@@ -197,7 +197,10 @@ def test_parser_rejects_duplicate_missing_or_extraneous_blocks(raw):
         parse_stage_response(raw, artifact_type=artifact_type, requires_document=requires_document)
 
 
-@pytest.mark.parametrize("phrase", ["负责专家", "Stage 4", "复核交付", "本阶段", "可直接生成 DOCX"])
+@pytest.mark.parametrize(
+    "phrase",
+    ["负责专家", "Stage 4", "复核交付", "本阶段", "可直接生成 DOCX", "事实编号 fact_001"],
+)
 def test_document_purity_rejects_internal_workflow_language(phrase):
     from api.expert_teams.stage_artifacts import document_purity_issues
 

@@ -11,7 +11,7 @@ from api.expert_teams.contracts import brief_digest, required_sections_for_brief
 from api.expert_teams.data_egress import authorize_actual_provider
 
 
-SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v2"
+SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v9"
 DATA_ENVELOPE_VERSION = "TAIJI_STAGE_INPUT_V1"
 _SOURCE_STAGES = {("content-creator-team", "materials"), ("deep-research-team", "research"), ("deep-research-team", "evidence")}
 _DOCUMENT_ARTIFACT_TYPES = {
@@ -413,6 +413,9 @@ def _system_message(
         "缺失的事实和数据不得编造，必须写入本阶段输出合同允许的缺口字段"
         "（如 assumptions、gaps、search_gaps、open_questions 或 open_issues），"
         "并在文档对应位置明确标注“待补充”或“需人工确认”；"
+        "这类缺口在 gaps[].blocks_final 必须为 false；"
+        "对应 open_issues 和 review_report.issues 的 severity 必须为 warning 或 info，"
+        "不得标记为 blocking 或 error；"
         "仅仅没有资料不构成 blocking_issue，只有结构、安全或合同失败才能阻断本阶段。"
         if allows_placeholders
         else "不确定或缺失资料必须写入 blocking_issues，不得编造。"
@@ -432,6 +435,58 @@ def _system_message(
         if structure_field and required_sections
         else ""
     )
+    usage_binding_rule = (
+        "fact_usage 中每一项的 section_id 必须是非空字符串，"
+        "并且必须等于 section_map 中实际存在的 section_id；"
+        "只记录实际用于该正文章节的 fact_id，"
+        "文档标题等未归属于正文具体章节的元数据不得写入 fact_usage。"
+        if artifact_type in {"document_draft", "reviewed_document"}
+        else ""
+    )
+    review_quality_rule = (
+        "这是审稿阶段：必须逐句检查错别字、病句、重复表达和标点错误，"
+        "发现后必须在 reviewed DOCUMENT 中修正，并在 review_report.change_summary 中如实概括；"
+        "不得只复制上一阶段正文后直接宣告检查通过。"
+        "修正仅限表达和已批准结构，不得借校对新增事实、数字、来源或结论。"
+        if artifact_type in {"reviewed_document", "reviewed_research_document"}
+        else ""
+    )
+    task_mode = str(brief.get("task_mode") or "").strip()
+    document_type = str(brief.get("document_type") or "").strip()
+    brief_authority_rule = (
+        "document_brief 是已经由用户确认并冻结的权威输入合同；"
+        "其中 exact_title、purpose、audience、usage_scenario、original_request、"
+        "additional_context、details 和 content_constraints 的非空值，"
+        "均表示用户已经提供并确认的任务事实、文档口径或约束，必须先按原意使用。"
+        "不得把任何非空 Brief 字段标记为 missing 或 gap，也不得要求用户重复提供。"
+        "source_context 为空只表示没有额外附件，不表示 document_brief 中已经确认的信息缺失。"
+        "这些 Brief 值不自动升级为第三方外部证据；需要外部证据的研究 claim 仍必须遵循引用合同。"
+    )
+    if artifact_type == "material_ledger":
+        brief_authority_rule += (
+            "生成 facts 和 gaps 前，必须逐项核对 document_brief；"
+            "只有 Brief 与批准资料中都没有的具体事实，才可列入 missing 或 gap。"
+            "只有 evidence_refs 非空且全部绑定 source_context 中真实 source/segment 的事实，"
+            "status 才能为 verified；"
+            "来自非空 Brief 字段但没有外部证据的事实，status 必须为 provided_unverified、"
+            "usable 必须为 true、evidence_refs 必须为 []；"
+            "source_context.sources 为空时，facts 中不得使用 verified，"
+            "source_assessments 必须为 []，也不得虚构 evidence_refs。"
+        )
+    task_specific_rule = ""
+    if task_mode == "polish":
+        task_specific_rule = (
+            "这是材料润色任务：source_context 中的原始材料是事实、数字、专名和明确结论的唯一权威来源；"
+            "只能调整结构、语序、措辞和版式表达，不得新增、删除、替换或弱化这些信息；"
+            "draft 和 reviewed_document 必须逐项保留原文关键数字、标识、机构名称与明确结论，"
+            "review_report.fact_traceability 必须在逐项核对后标记为 passed，修改说明只描述表达层调整。"
+        )
+    elif document_type == "research_report":
+        task_specific_rule = (
+            "这是研究报告任务：每个事实或估算 claim 只能使用批准 evidence_matrix 中绑定的 source_id；"
+            "claim_usage.citation_marker 必须包含对应的真实 source_id，且同一标记必须原样出现在 DOCUMENT 正文中；"
+            "不得虚构来源、引用标记或扩大结论边界。"
+        )
     correction = ""
     if previous_protocol_error:
         code = str(previous_protocol_error.get("code") or "unknown_error").strip()
@@ -460,8 +515,15 @@ def _system_message(
         f"{response_template}\n"
         "[CONTENT RULES]\n"
         f"只能使用输入合同列出的来源；{missing_fact_rule}\n"
+        f"{brief_authority_rule}\n"
         f"{required_section_rule}\n"
+        f"{usage_binding_rule}\n"
+        f"{review_quality_rule}\n"
+        f"{task_specific_rule}\n"
         "DOCUMENT 不得包含工作日志、专家名称、Stage、复核交付或聊天建议；"
+        "DOCUMENT 只面向最终用户，禁止出现 fact_id、fact_001、FACT-TBD-1 等内部字段名或事实编号；"
+        "缺失事实必须直接用自然语言标注“待补充”或“需人工确认”；"
+        "不得使用“暂无”或“待完善”作为缺失事实占位表述；"
         "如需 DOCUMENT，H1 必须等于 Brief exact_title。"
         "不得调用工具、网络或文件系统。"
     )
@@ -504,7 +566,14 @@ def build_stage_gateway_request(
     declared = _catalog_stage(run, stage)
     brief = _confirmed_brief(run)
     stage_key = (str(run.get("team_id") or ""), str(declared.get("id") or ""))
-    if stage_key not in _SOURCE_STAGES:
+    uses_source_context = (
+        stage_key in _SOURCE_STAGES
+        or (
+            str(run.get("team_id") or "") == "content-creator-team"
+            and str(brief.get("task_mode") or "") == "polish"
+        )
+    )
+    if not uses_source_context:
         source_value = None
     else:
         source_value = deepcopy(source_context if source_context is not None else run.get("verified_source_context"))

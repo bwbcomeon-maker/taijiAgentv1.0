@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "static" / "index.html"
 SCRIPT = ROOT / "static" / "expert-team-v3.js"
+MESSAGES = ROOT / "static" / "messages.js"
 STYLE = ROOT / "static" / "expert-team-v3.css"
 PANELS = ROOT / "static" / "panels.js"
 ELECTRON_SMOKE = ROOT / "tests" / "expert_team_v3_electron_smoke.js"
@@ -41,16 +42,39 @@ def _run_v3_hooks(body: str) -> dict:
               'window.ExpertTeamV3 = Object.freeze({{',
               `window.__expertTeamV3TestHooks = {{
                 stageBindingFingerprint, conflictDraftMatches, restoreConflictRevisionDraft,
-                deliveryBindingFingerprint, conflictDeliveryDraftMatches, restoreConflictDeliveryDraft,
-                draftFingerprint, restoreWorkbenchDraft, stateCopyFor, statePanel, workbenchHtml,
-                handleWorkbenchClick, deliveryActionControl,
+              deliveryBindingFingerprint, conflictDeliveryDraftMatches, restoreConflictDeliveryDraft,
+              draftFingerprint, captureWorkbenchDraft, restoreWorkbenchDraft, stateCopyFor, statePanel, workbenchHtml,
+              classifyDocumentTaskPrompt,
+              replacementExample,
+              returnSuggestionToComposer, continueRegularChat,
+              clearSuggestionComposerAfterLaunch,
+              resumePanel, reviewDocumentHtml,
+              handleWorkbenchClick, deliveryActionControl, applyResponse,
+                expertTeamDiagnosticText, copyExpertTeamDiagnostics,
                 deferStatusRenderDuringComposition, releaseDeferredStatusCard,
+                bindWorkbenchEvents, renderStatusSurface,
                 briefPanel, buildBriefPatch, clientBriefFieldErrors,
+                showBriefFieldErrors,
                 setConflictDraft(value) {{ state.conflictRevisionDraft = value; }},
                 setConflictDeliveryDraft(value) {{ state.conflictDeliveryDraft = value; }},
                 setCard(value) {{ state.card = value; state.busy = false; }},
                 getCard() {{ return state.card; }},
+                setCatalog(value) {{ state.catalog = value; state.catalogStatus = 'ready'; }},
+                getRelaunchState() {{
+                  return {{
+                    teamId: String(state.selectedTeam?.id || ''),
+                    exampleId: String(state.selectedExample?.id || ''),
+                    suggestionMode: state.suggestionMode,
+                    prompt: state.suggestedPrompt,
+                  }};
+                }},
                 setCompositionActive(value) {{ state.compositionActive = value; }},
+                setSuggestion(value, prompt, returnFocus, sourceSessionId) {{
+                  state.suggestionMode = Boolean(value);
+                  state.suggestedPrompt = String(prompt || '');
+                  state.dialogReturnFocus = returnFocus || null;
+                  state.suggestedSourceSessionId = String(sourceSessionId || '');
+                }},
               }};\n  window.ExpertTeamV3 = Object.freeze({{`
             );
             vm.runInContext(source,context);
@@ -79,6 +103,139 @@ def test_v3_owns_one_scoped_namespace_and_uses_delegated_events():
     assert "onclick=" not in script
     assert "window._activeExpertTeamStatusCard" not in script
     assert "writeflowStatusDock" not in script
+
+
+def test_v3_free_form_document_intent_suggests_a_confirmable_task_without_hijacking_questions():
+    result = _run_v3_hooks(
+        """
+        const prompts=[
+          '请帮我写一份方案，主题是提升营业厅服务质效',
+          '请起草一份部门月度工作汇报',
+          '整理一次供电服务专题会议纪要',
+          '起草近期安全生产检查通知',
+          '形成阶段性工作总结和下一步计划',
+          '请帮我润色这份办公材料',
+          '编制一份本地 AI 助理专题研究报告',
+          '请问怎么写一份方案',
+          '分析一下这份方案的问题',
+          '请总结一下这段对话',
+        ];
+        console.log(JSON.stringify(prompts.map(prompt=>hooks.classifyDocumentTaskPrompt(prompt)?.launchProfileId||null)));
+        """
+    )
+
+    assert result == [
+        "content-plan",
+        "content-work-report",
+        "content-meeting-minutes",
+        "content-notice",
+        "content-summary-plan",
+        "content-polish",
+        "research-report",
+        None,
+        None,
+        None,
+    ]
+
+
+def test_v3_free_form_suggestion_requires_visible_confirmation_change_or_regular_chat_choice():
+    script = _read(SCRIPT)
+    messages = _read(MESSAGES)
+
+    for text in (
+        "已识别为",
+        "更换文档任务",
+        "系统不会未经确认自动发起",
+        'data-et3-action="continue-regular-chat"',
+        "继续普通对话",
+        "suggestFromPrompt",
+    ):
+        assert text in script
+    assert "suggestFromPrompt" in script[script.index("window.ExpertTeamV3") :]
+    send_body = messages[messages.index("async function send()") : messages.index("const LIVE_STREAMS")]
+    assert "options.skipExpertTeamSuggestion" in send_body
+    assert "window.ExpertTeamV3.suggestFromPrompt(text)" in send_body
+    suggestion_at = send_body.index("window.ExpertTeamV3.suggestFromPrompt(text)")
+    normal_session_at = send_body.index(
+        "if(!S.session){await newSession();await renderSessionList();}", suggestion_at
+    )
+    assert suggestion_at < normal_session_at
+
+
+def test_v3_free_form_exit_paths_restore_the_visible_chat_composer_before_sending():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const calls=[];
+          const composer={value:'',isConnected:true,focus(){calls.push('focus');}};
+          const promptField={value:'用户修改后的方案需求'};
+          const backdrop={hidden:false};
+          const portal={inert:true};
+          const root={querySelector(selector){
+            if(selector==='[data-et3-dialog-backdrop]')return backdrop;
+            if(selector==='.et3-portal')return portal;
+            return null;
+          }};
+          context.document.getElementById=id=>{
+            if(id==='expertTeamV3PortalRoot')return root;
+            if(id==='expertTeamV3Prompt')return promptField;
+            if(id==='msg')return composer;
+            return null;
+          };
+          context.switchPanel=async panel=>{calls.push(`panel:${panel}`);};
+          context.autoResize=()=>{calls.push('resize');};
+          context.window.send=async options=>{calls.push(`send:${Boolean(options&&options.skipExpertTeamSuggestion)}`);return true;};
+
+          hooks.setSuggestion(true,'原始方案需求',composer);
+          const returned=await hooks.returnSuggestionToComposer();
+          const first={returned,value:composer.value,backdropHidden:backdrop.hidden,portalInert:portal.inert,calls:[...calls]};
+
+          calls.length=0;backdrop.hidden=false;portal.inert=true;promptField.value='继续普通聊天的方案需求';
+          hooks.setSuggestion(true,'原始方案需求',composer);
+          const sent=await hooks.continueRegularChat();
+          console.log(JSON.stringify({first,second:{sent,value:composer.value,backdropHidden:backdrop.hidden,portalInert:portal.inert,calls}}));
+        })();
+        """
+    )
+
+    assert result["first"]["returned"] == "用户修改后的方案需求"
+    assert result["first"]["value"] == "用户修改后的方案需求"
+    assert result["first"]["backdropHidden"] is True
+    assert result["first"]["portalInert"] is False
+    assert "panel:chat" in result["first"]["calls"]
+    assert result["second"]["sent"] is True
+    assert result["second"]["value"] == "继续普通聊天的方案需求"
+    assert result["second"]["backdropHidden"] is True
+    assert result["second"]["portalInert"] is False
+    assert result["second"]["calls"].index("panel:chat") < result["second"]["calls"].index("send:true")
+
+
+def test_v3_successful_suggestion_launch_consumes_the_original_composer_and_draft_once():
+    result = _run_v3_hooks(
+        """
+        const calls=[];
+        const composer={value:'请帮我写一份方案'};
+        context.document.getElementById=id=>id==='msg'?composer:null;
+        context._clearComposerDraft=sessionId=>calls.push(`clear:${sessionId}`);
+        context.autoResize=()=>calls.push('resize');
+        context.updateSendBtn=()=>calls.push('button');
+        hooks.setSuggestion(true,'请帮我写一份方案',null,'source-session-1');
+        hooks.clearSuggestionComposerAfterLaunch();
+        console.log(JSON.stringify({value:composer.value,calls}));
+        """
+    )
+
+    assert result == {
+        "value": "",
+        "calls": ["clear:source-session-1", "resize", "button"],
+    }
+
+    script = _read(SCRIPT)
+    summon = script[script.index("async function summon(") : script.index("async function loadCatalog(")]
+    success = summon[summon.index("if (started)") :]
+    assert "launchedFromSuggestion" in summon
+    assert "clearSuggestionComposerAfterLaunch()" in success
+    assert success.index("clearSuggestionComposerAfterLaunch()") < success.index("closeDialog()")
 
 
 def test_v3_defers_only_the_latest_same_run_card_while_ime_is_composing():
@@ -114,6 +271,153 @@ def test_v3_workbench_binds_composition_events_and_releases_after_final_input_ev
     assert "renderStatusSurface(deferred)" in script
 
 
+def test_v3_ime_composition_defers_poll_renders_and_restores_final_input_focus_selection_and_scroll():
+    result = _run_v3_hooks(
+        """
+        const queued=[];
+        context.setTimeout=(callback)=>{queued.push(callback);return queued.length;};
+        context.AbortController=AbortController;
+        context.window.S={session:{session_id:'session-1'}};
+        const listeners={};
+        let replaced=0;
+        let useNewControls=false;
+        const oldScroll={scrollTop:318};
+        const newScroll={scrollTop:0};
+        const oldControl={
+          id:'et3-brief-purpose',type:'textarea',tagName:'TEXTAREA',dataset:{et3BriefPath:'purpose'},
+          value:'候选词尚未确认',checked:false,selectionStart:3,selectionEnd:6,
+          closest(){return this;},
+        };
+        const newControl={
+          id:'et3-brief-purpose',type:'textarea',tagName:'TEXTAREA',dataset:{et3BriefPath:'purpose'},
+          value:'',checked:false,focusOptions:null,selection:null,
+          focus(options){this.focusOptions=options;context.document.activeElement=this;},
+          setSelectionRange(start,end){this.selection=[start,end];},
+        };
+        const root={
+          id:'expertTeamV3Workbench',dataset:{},parentElement:null,
+          classList:{toggle(){}},
+          addEventListener(name,handler){listeners[name]=handler;},
+          querySelectorAll(){return useNewControls?[newControl]:[oldControl];},
+          querySelector(selector){
+            if(selector==='.et3-workbench-scroll')return useNewControls?newScroll:oldScroll;
+            return null;
+          },
+          set innerHTML(value){this._innerHTML=value;replaced+=1;useNewControls=true;},
+          get innerHTML(){return this._innerHTML||'';},
+        };
+        const host={appendChild(node){node.parentElement=this;}};
+        root.parentElement=host;
+        const main={parentElement:host};
+        let domReads=0;
+        context.document.activeElement=oldControl;
+        context.document.body={classList:{add(){},toggle(){},remove(){}}};
+        context.document.querySelector=()=>null;
+        context.document.getElementById=(id)=>{
+          domReads+=1;
+          if(id==='mainChat')return main;
+          if(id==='expertTeamV3Workbench')return root;
+          return null;
+        };
+        const base={
+          kind:'expert_team',runId:'run-1',sourceSessionId:'session-1',version:4,
+          productMode:'standalone',readOnly:false,publicState:'intake',allowedActions:['answer'],
+          questions:[],presentation:{visibleTitle:'输入法测试'},team:{title:'内容创作专家团'},
+          progress:{done:0,total:5},workflow:{currentStage:{}},
+          brief:{originalRequest:'测试输入法',documentTypeLabel:'工作汇报',fieldSchema:[
+            {path:'purpose',label:'文档用途',control:'textarea',required:true,value:''},
+          ],sources:[]},
+        };
+        hooks.setCard(base);
+        hooks.bindWorkbenchEvents(root);
+        listeners.compositionstart({target:oldControl});
+        domReads=0;
+        const first=hooks.renderStatusSurface({...base,version:5});
+        const second=hooks.renderStatusSurface({...base,version:6});
+        const deferredDidNotTouchDom={domReads,replaced};
+        oldControl.value='最终确认的中文内容';
+        oldControl.selectionStart=4;
+        oldControl.selectionEnd=7;
+        listeners.compositionend({target:oldControl});
+        const queuedAfterCompositionEnd=queued.length;
+        while(queued.length)queued.shift()();
+        console.log(JSON.stringify({
+          first,second,deferredDidNotTouchDom,queuedAfterCompositionEnd,
+          appliedVersion:hooks.getCard().version,
+          value:newControl.value,
+          focusPreventedScroll:newControl.focusOptions?.preventScroll===true,
+          selection:newControl.selection,
+          scrollTop:newScroll.scrollTop,
+          replaced,
+        }));
+        """
+    )
+
+    assert result == {
+        "first": True,
+        "second": True,
+        "deferredDidNotTouchDom": {"domReads": 0, "replaced": 0},
+        "queuedAfterCompositionEnd": 1,
+        "appliedVersion": 6,
+        "value": "最终确认的中文内容",
+        "focusPreventedScroll": True,
+        "selection": [4, 7],
+        "scrollTop": 318,
+        "replaced": 1,
+    }
+
+
+def test_v3_poll_render_preserves_the_open_quality_report_disclosure():
+    result = _run_v3_hooks(
+        """
+        context.AbortController=AbortController;
+        context.window.S={session:{session_id:'session-1'}};
+        let useNewNodes=false;
+        const oldDetails={dataset:{et3Disclosure:'quality-report'},open:true};
+        const newDetails={dataset:{et3Disclosure:'quality-report'},open:false};
+        const oldScroll={scrollTop:91};
+        const newScroll={scrollTop:0};
+        const root={
+          id:'expertTeamV3Workbench',dataset:{},parentElement:null,
+          classList:{toggle(){}},addEventListener(){},
+          querySelectorAll(selector){
+            if(selector==='details[data-et3-disclosure]')return [useNewNodes?newDetails:oldDetails];
+            return [];
+          },
+          querySelector(selector){
+            if(selector==='.et3-workbench-scroll')return useNewNodes?newScroll:oldScroll;
+            return null;
+          },
+          set innerHTML(value){this._innerHTML=value;useNewNodes=true;},
+          get innerHTML(){return this._innerHTML||'';},
+        };
+        const host={appendChild(node){node.parentElement=this;}};
+        root.parentElement=host;
+        const main={parentElement:host};
+        context.document.activeElement=null;
+        context.document.body={classList:{add(){},toggle(){},remove(){}}};
+        context.document.querySelector=()=>null;
+        context.document.getElementById=(id)=>{
+          if(id==='mainChat')return main;
+          if(id==='expertTeamV3Workbench')return root;
+          return null;
+        };
+        const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+        const base={
+          kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,
+          currentStageId:'delivery',publicState:'completed',allowedActions:['delivery_open_quality_report'],
+          deliveryActionBinding:binding,standaloneDelivery:{automaticCheckSummary:{status:'passed',passedCount:25}},
+          presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5},team:{title:'内容创作专家团'},
+        };
+        hooks.setCard(base);
+        hooks.renderStatusSurface({...base,version:13});
+        console.log(JSON.stringify({open:newDetails.open,scrollTop:newScroll.scrollTop}));
+        """
+    )
+
+    assert result == {"open": True, "scrollTop": 91}
+
+
 def test_v3_styles_are_scoped_and_do_not_restyle_non_expert_shell():
     style = _read(STYLE)
 
@@ -137,20 +441,22 @@ def test_v3_portal_is_catalog_only_and_exposes_two_pilot_combinations():
         assert (ROOT / "static" / "assets" / "writeflow" / asset).is_file()
 
 
-def test_v3_unavailable_tasks_explain_scope_and_show_team_readiness_count():
+def test_v3_configuration_errors_are_not_presented_as_unreleased_tasks():
     script = _read(SCRIPT)
 
     assert "已开放 ${availableCount}/${examples.length}" in script
     assert "et3-template-unavailable-reason" in script
-    assert "暂未开放：${unavailableReason}" in script
+    assert "当前任务配置异常" in script
+    assert "暂未开放" not in script
+    assert "当前没有已通过交付验证的文档任务" not in script
 
 
-def test_v3_maps_active_stage_conflict_to_safe_chinese_guidance():
+def test_v3_uses_server_product_error_instead_of_frontend_business_mapping():
     script = _read(SCRIPT)
 
     assert "function mutationErrorMessage(error" in script
-    assert "stage_attempt_in_progress" in script
-    assert "当前阶段已有生成任务正在处理" in script
+    assert "stage_attempt_in_progress" not in script
+    assert "当前阶段已有生成任务正在处理" not in script
     mutate_body = script.split("async function mutate(endpoint", 1)[1].split(
         "function isConflictError", 1
     )[0]
@@ -192,10 +498,12 @@ def test_v3_text_source_fields_clear_only_after_the_server_accepts_the_source():
 
     assert "const saved = await mutate(" in function_body
     assert "if (!saved) return false" in function_body
-    assert "textField.value = ''" in function_body
-    assert "labelField.value = ''" in function_body
-    assert "labelField?.focus()" in function_body
-    assert function_body.index("if (!saved) return false") < function_body.index("textField.value = ''")
+    assert "const clearedTextField = workbenchRoot().querySelector('[data-et3-source-text]')" in function_body
+    assert "const clearedLabelField = workbenchRoot().querySelector('[data-et3-source-label]')" in function_body
+    assert "clearedTextField.value = ''" in function_body
+    assert "clearedLabelField.value = ''" in function_body
+    assert "clearedLabelField?.focus()" in function_body
+    assert function_body.index("if (!saved) return false") < function_body.index("clearedTextField.value = ''")
 
 
 def test_v3_source_mutation_matches_backend_contract_and_presenter_keeps_safe_projection():
@@ -256,6 +564,25 @@ def test_v3_preserves_drafts_and_saves_brief_fields_before_answering():
     assert "await saveBriefFields(button," in script
     assert "Object.values(patch).some(Boolean)" not in script
     assert "question__" in script
+
+
+def test_v3_multi_request_brief_actions_do_not_replace_the_active_form_mid_sequence():
+    script = _read(SCRIPT)
+
+    assert "function updateCardFromResponse" in script
+    assert "saveBriefFields(button, values, false)" in script
+    assert "renderResponse: false" in script
+    assert "保存中…" in script
+    assert "正在确认规格…" in script
+
+
+def test_v3_source_integrity_failure_offers_a_visible_new_task_action():
+    script = _read(SCRIPT)
+
+    assert "actionIds.has('start_new')" in script
+    assert 'data-et3-action="start-new-task"' in script
+    assert "action === 'start-new-task'" in script
+    assert "重新发起任务" in script
 
 
 def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
@@ -414,6 +741,34 @@ def test_v3_custom_confirmation_validates_before_request_and_links_server_field_
     assert "aria-describedby" in script
 
 
+def test_v3_source_requirement_error_focuses_and_scrolls_to_actionable_source_input():
+    result = _run_v3_hooks(
+        """
+        let focused=false;let scrolled=false;
+        const sourceSlot={dataset:{},textContent:'',hidden:true};
+        const sourceField={focus(){focused=true;},scrollIntoView(options){scrolled=options&&options.block==='center';}};
+        const form={querySelectorAll(selector){return [];}};
+        const root={querySelector(selector){
+          if(selector==='[data-et3-brief-form]')return form;
+          if(selector==='[data-et3-source-error]')return sourceSlot;
+          if(selector==='[data-et3-source-text]')return sourceField;
+          return null;
+        }};
+        context.document.getElementById=()=>root;
+        const accepted=hooks.showBriefFieldErrors([{field:'source_policy.source_refs',code:'source_required',message:'请先添加需要润色的原始材料。'}]);
+        console.log(JSON.stringify({accepted,focused,scrolled,message:sourceSlot.textContent,hidden:sourceSlot.hidden}));
+        """
+    )
+
+    assert result == {
+        "accepted": False,
+        "focused": True,
+        "scrolled": True,
+        "message": "请先添加需要润色的原始材料。",
+        "hidden": False,
+    }
+
+
 def test_v3_save_and_continue_skips_blank_optional_intake_questions():
     script = _read(SCRIPT)
     submit_start = script.index("async function submitAnswers(button)")
@@ -523,6 +878,20 @@ def test_v3_electron_smoke_script_covers_flow_and_non_expert_isolation_gate():
     assert "page.screenshot" in smoke
 
 
+def test_v3_electron_smoke_binds_python_to_the_current_worktree_by_default():
+    smoke = _read(ELECTRON_SMOKE)
+
+    assert "process.env.HERMES_WEBUI_PYTHON || path.join(repoRoot" in smoke
+    assert "HERMES_WEBUI_PYTHON: pythonBin" in smoke
+    assert "TAIJI_AGENT_PYTHON: pythonBin" in smoke
+    assert "TAIJI_WEBUI_PYTHON: pythonBin" in smoke
+    assert "pythonRequestedPath: path.resolve(pythonBin)" in smoke
+    assert "pythonBinRealpath: fs.realpathSync(pythonBin)" in smoke
+    assert "const electronHostRoot = process.env.TAIJI_ELECTRON_HOST_ROOT || process.env.TAIJI_MAIN_REPO_ROOT || repoRoot" in smoke
+    assert "/Users/bwb/" not in smoke
+    assert "path.join(formalRoot, 'hermes-local-lab', 'sources', 'hermes-agent', '.venv'" not in smoke
+
+
 def test_v3_standalone_stage_confirmation_uses_local_contract_without_enterprise_calls():
     script = _read(SCRIPT)
 
@@ -552,6 +921,7 @@ def test_v3_standalone_write_controls_are_fail_closed_by_allowed_actions():
         "resume",
         "cancel",
         "stage_confirm",
+        "stage_recheck",
         "stage_revise",
     ):
         assert action in script
@@ -597,6 +967,33 @@ def test_v3_generated_invalid_state_explains_safe_regeneration_instead_of_generi
     assert "任务等待恢复" not in result["panel"]
 
 
+def test_v3_delivery_failure_names_the_safe_docx_only_retry():
+    result = _run_v3_hooks(
+        """
+        const card={
+          productMode:'standalone',publicState:'failed',workflowState:'generated_invalid',
+          currentStageId:'delivery',allowedActions:['resume'],
+          title:'起草工作汇报初稿',
+          productError:{
+            schema:'taiji.product.error.v1',
+            title:'DOCX 生成未完成',
+            message:'已确认内容仍然保留，可以只重新生成最终文档。',
+            recoveryActions:[{id:'open_result'},{id:'retry'}],
+          },
+        };
+        console.log(JSON.stringify({
+          failure:hooks.statePanel(card,'failed'),
+          resume:hooks.resumePanel(card),
+        }));
+        """
+    )
+
+    assert "重新生成最终 DOCX" in result["failure"]
+    assert "重新生成最终 DOCX" in result["resume"]
+    assert "不会重新调用模型" in result["resume"]
+    assert "重试当前阶段" not in result["failure"]
+
+
 def test_presenter_hides_expert_team_protocol_messages_but_keeps_normal_chat_unchanged():
     result = _run_node(
         textwrap.dedent(
@@ -610,7 +1007,12 @@ def test_presenter_hides_expert_team_protocol_messages_but_keeps_normal_chat_unc
               {role:'assistant',content:'正常回复'},
             ];
             console.log(JSON.stringify({
+              launchMessage:context.window.isExpertTeamExecutionDisplayMessage(messages[0].content),
               isProtocol:context.window.isExpertTeamProtocolAssistant(messages,1),
+              explicitLive:context.window.isExpertTeamProtocolLiveStream({expertTeamProtocol:true},[
+                {role:'assistant',content:'stale snapshot without the current launch marker'},
+              ]),
+              explicitNormal:context.window.isExpertTeamProtocolLiveStream({expertTeamProtocol:false},messages),
               projected:context.window.projectExpertTeamTranscriptContent(messages,1,messages[1].content),
               normal:context.window.projectExpertTeamTranscriptContent(messages,3,messages[3].content),
             }));
@@ -619,9 +1021,55 @@ def test_presenter_hides_expert_team_protocol_messages_but_keeps_normal_chat_unc
     )
 
     assert result == {
+        "launchMessage": True,
         "isProtocol": True,
+        "explicitLive": True,
+        "explicitNormal": False,
         "projected": "专家团阶段处理已结束，请在右侧工作台查看结果状态和下一步。",
         "normal": "正常回复",
+    }
+
+
+def test_expert_team_live_stream_uses_explicit_start_context_instead_of_stale_inflight_position():
+    ui = _read(ROOT / "static" / "ui.js")
+    sessions = _read(ROOT / "static" / "sessions.js")
+    messages = _read(ROOT / "static" / "messages.js")
+
+    apply_start = ui.index("function _applyExpertTeamStreamResponse(data)")
+    apply_end = ui.index("async function resumeExpertTeamRun", apply_start)
+    apply_body = ui[apply_start:apply_end]
+    assert "attachLiveStream(sid,data.stream_id,[],{expertTeamProtocol:true})" in apply_body
+
+    attach_start = messages.index("function attachLiveStream(")
+    attach_end = messages.index("function transcript()", attach_start)
+    attach_body = messages[attach_start:attach_end]
+    assert "window.isExpertTeamProtocolLiveStream(options" in attach_body
+
+    reconnect = "expertTeamProtocol:window.isExpertTeamExecutionDisplayMessage(S.session.pending_user_message)"
+    assert reconnect in sessions
+
+
+def test_v3_response_hands_stream_to_the_shared_chat_runtime_before_rendering():
+    result = _run_v3_hooks(
+        """
+        const calls=[];
+        context.window._applyExpertTeamStreamResponse=payload=>{
+          calls.push({kind:'stream',streamId:payload.stream_id});
+          return true;
+        };
+        context.window.buildExpertTeamCardFromRun=()=>null;
+        const rendered=hooks.applyResponse({
+          stream_id:'stream-v3',
+          pending_user_message:'专家团开始生成：流程安排 · 起草通知通报初稿',
+          run:{run_id:'run-v3',session_id:'session-v3',workflow_state:'generating',execution_stream_id:'stream-v3'},
+        });
+        console.log(JSON.stringify({calls,rendered}));
+        """
+    )
+
+    assert result == {
+        "calls": [{"kind": "stream", "streamId": "stream-v3"}],
+        "rendered": False,
     }
 
     ui = _read(ROOT / "static" / "ui.js")
@@ -757,6 +1205,135 @@ def test_stage_review_uses_deliverable_and_summary_before_placeholder():
         "usesDeliverable": True,
         "usesSummary": True,
         "hidesPlaceholder": True,
+    }
+
+
+def test_stage_review_renders_safe_readable_document_instead_of_raw_markdown():
+    result = _run_v3_hooks(
+        """
+        const html=hooks.reviewDocumentHtml(`# 月度工作汇报
+
+## 工作开展情况
+
+- **稳定性验证**：已完成。
+- 风险项：<script>alert('x')</script>
+
+## 下一步工作安排
+
+1. 完成真实用户验收
+2. 形成交付记录`);
+        console.log(JSON.stringify({html}));
+        """
+    )
+
+    assert "<h2>月度工作汇报</h2>" in result["html"]
+    assert "<h3>工作开展情况</h3>" in result["html"]
+    assert "<ul>" in result["html"]
+    assert "<strong>稳定性验证</strong>" in result["html"]
+    assert "<ol>" in result["html"]
+    assert "## 工作开展情况" not in result["html"]
+    assert "- **稳定性验证**" not in result["html"]
+    assert "<script>" not in result["html"]
+    assert "&lt;script&gt;alert(&#039;x&#039;)&lt;/script&gt;" in result["html"]
+
+
+def test_stage_review_explains_warning_is_reviewable_and_shows_next_action():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',allowedActions:[],stageActionBinding:null,
+          stageReview:{output:{content:'会议纪要素材台账'}},presentation:{},reviewItems:[],
+          stageResult:{stage_quality:{state:'attention',blocking_count:0,warning_count:1,issues:[
+            {severity:'warning',message:'当前未提供会议原始记录',suggested_action:'请人工核对并补充'}
+          ]}}};
+        const html=hooks.statePanel(card,'awaiting_stage_confirmation');
+        console.log(JSON.stringify({
+          hasAttentionTitle:html.includes('可继续，但有待确认事项'),
+          hasMessage:html.includes('当前未提供会议原始记录'),
+          hasAction:html.includes('请人工核对并补充'),
+          doesNotClaimClear:!html.includes('未发现阻断问题。仍建议阅读完整成果后确认。'),
+        }));
+        """
+    )
+
+    assert result == {
+        "hasAttentionTitle": True,
+        "hasMessage": True,
+        "hasAction": True,
+        "doesNotClaimClear": True,
+    }
+
+
+def test_stage_review_shows_persisted_semantic_block_and_disables_confirmation():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',allowedActions:['stage_revise'],
+          stageActionBinding:{
+            session_id:'session-1',run_id:'run-1',expected_version:7,stage_id:'draft',
+            stage_attempt:2,artifact_id:'draft:2',artifact_sha256:'a'.repeat(64)
+          },
+          stageReview:{output:{content:'润色后的正式材料'}},presentation:{},reviewItems:[],
+          stageResult:{stage_quality:{state:'blocked',blocking_count:1,warning_count:0,issues:[
+            {
+              severity:'blocking',
+              code:'source_anchor_missing',
+              message:'润色正文遗漏了原文中的关键事实或数字。',
+              suggested_action:'提交修改意见后重新生成当前阶段。'
+            }
+          ]}}};
+        const html=hooks.statePanel(card,'awaiting_stage_confirmation');
+        console.log(JSON.stringify({
+          hasBlockedTitle:html.includes('当前成果存在阻断问题'),
+          hasMessage:html.includes('润色正文遗漏了原文中的关键事实或数字。'),
+          hasAction:html.includes('提交修改意见后重新生成当前阶段。'),
+          confirmDisabled:html.includes('data-et3-action="confirm-stage" disabled'),
+          revisionEnabled:html.includes('data-et3-action="submit-revision"')
+            && !html.includes('data-et3-action="submit-revision" disabled'),
+          doesNotClaimClear:!html.includes('未发现阻断问题。仍建议阅读完整成果后确认。'),
+        }));
+        """
+    )
+
+    assert result == {
+        "hasBlockedTitle": True,
+        "hasMessage": True,
+        "hasAction": True,
+        "confirmDisabled": True,
+        "revisionEnabled": True,
+        "doesNotClaimClear": True,
+    }
+
+
+def test_stage_review_exposes_recheck_for_same_artifact_when_server_allows_it():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',allowedActions:['stage_recheck','stage_revise'],
+          stageActionBinding:{
+            session_id:'session-1',run_id:'run-1',expected_version:8,stage_id:'polish',
+            stage_attempt:1,artifact_id:'polish:1',artifact_sha256:'a'.repeat(64)
+          },
+          stageReview:{output:{content:'已保留的通知通报正文'}},presentation:{},reviewItems:[],
+          stageResult:{stage_quality:{state:'blocked',blocking_count:1,warning_count:0,issues:[
+            {severity:'blocking',code:'review_issue_unresolved',message:'旧版复核策略将待补充事项标记为阻断',suggested_action:'可重新检查当前结果'}
+          ]}}};
+        const html=hooks.statePanel(card,'awaiting_stage_confirmation');
+        console.log(JSON.stringify({
+          hasRecheck:html.includes('data-et3-action="recheck-stage"'),
+          label:html.includes('重新检查当前结果'),
+          recheckEnabled:html.includes('data-et3-action="recheck-stage"')
+            && !html.includes('data-et3-action="recheck-stage" disabled'),
+          normalConfirmHidden:!html.includes('data-et3-action="confirm-stage"'),
+          revisionEnabled:html.includes('data-et3-action="submit-revision"')
+            && !html.includes('data-et3-action="submit-revision" disabled'),
+        }));
+        """
+    )
+
+    assert result == {
+        "hasRecheck": True,
+        "label": True,
+        "recheckEnabled": True,
+        "normalConfirmHidden": True,
+        "revisionEnabled": True,
     }
 
 
@@ -923,6 +1500,8 @@ def test_v3_model_configuration_failure_has_safe_visible_recovery_actions():
     assert "请先完成模型配置" in result["html"]
     assert 'data-et3-action="open-model-settings"' in result["html"]
     assert 'data-et3-action="export-diagnostics"' in result["html"]
+    assert 'data-et3-action="copy-diagnostics"' in result["html"]
+    assert "导出完整诊断" in result["html"]
     assert "内部原始错误不应展示" not in result["html"]
 
 
@@ -946,9 +1525,204 @@ def test_v3_product_error_takes_priority_over_generic_resume_panel():
 
     assert "模型配置待完成" in result["html"]
     assert "打开模型配置" in result["html"]
-    assert "导出诊断" in result["html"]
+    assert "导出完整诊断" in result["html"]
     assert "任务等待恢复" not in result["html"]
     assert "raw provider detail" not in result["html"]
+
+
+def test_v3_generated_invalid_failure_exposes_preserved_result_and_concrete_remedies():
+    result = _run_v3_hooks(
+        """
+        const card={
+          productMode:'standalone',publicState:'failed',workflowState:'generated_invalid',
+          currentStageId:'research',allowedActions:['resume'],presentation:{detail:'内部原始错误不应展示'},
+          productError:{
+            schema:'taiji.product.error.v1',title:'当前阶段需要补充依据',
+            message:'阶段成果未通过企业合同校验，已保留供你核对。',
+            recoveryActions:[{id:'open_result'},{id:'regenerate'},{id:'export_diagnostics'}],
+          },
+          stageResult:{
+            summary:'研究阶段已形成初步分析，但证据不足。',
+            content:'# 研究阶段结果\\n\\n## 证据\\n\\n当前资料仅能支持任务类型和资料门槛。',
+            stage_quality:{state:'blocked',blocking_count:2,warning_count:0,issues:[
+              {severity:'blocking',message:'缺少具体复核步骤与责任角色依据。',suggested_action:'补充包含复核流程和责任分工的资料后重新发起。'},
+              {severity:'blocking',message:'缺少 DOCX 自动检查机制依据。',suggested_action:'补充交付校验规则或缩小研究结论范围。'},
+            ]},
+          },
+        };
+        console.log(JSON.stringify({html:hooks.statePanel(card,'failed')}));
+        """
+    )
+
+    assert "已保留的阶段结果" in result["html"]
+    assert "研究阶段结果" in result["html"]
+    assert "当前资料仅能支持任务类型和资料门槛。" in result["html"]
+    assert "缺少具体复核步骤与责任角色依据。" in result["html"]
+    assert "补充包含复核流程和责任分工的资料后重新发起。" in result["html"]
+    assert "缺少 DOCX 自动检查机制依据。" in result["html"]
+    assert "补充交付校验规则或缩小研究结论范围。" in result["html"]
+    assert 'data-et3-result-document' in result["html"]
+    assert "查看已保留结果" in result["html"]
+    assert "以下结果未被采用" in result["html"]
+    assert "<<<TAIJI_META_V1>>>" not in result["html"]
+    assert "内部原始错误不应展示" not in result["html"]
+
+
+def test_v3_evidence_block_offers_prefilled_relaunch_without_blind_retry():
+    result = _run_v3_hooks(
+        """
+        const team={examples:[
+          {id:'work-report',document_type:'work_report',launch_profile_id:'content-work-report',available:true},
+          {id:'research',document_type:'research_report',launch_profile_id:'research-report',available:true},
+        ]};
+        const selected=hooks.replacementExample(
+          team,
+          'research_report',
+          '请基于所附资料形成专家团交付机制研究报告。'
+        );
+        const card={
+          productMode:'standalone',publicState:'failed',workflowState:'generated_invalid',
+          currentStageId:'research',allowedActions:['resume'],
+          productError:{
+            schema:'taiji.product.error.v1',code:'expert_team_evidence_required',
+            title:'研究依据需要补充',
+            message:'当前冻结规格中的依据不足，直接重试不会增加资料。',
+            recoveryActions:[{id:'open_result'},{id:'start_new'},{id:'export_diagnostics'}],
+          },
+          stageResult:{content:'已保留的研究阶段结果'},
+        };
+        console.log(JSON.stringify({selectedId:selected?.id||'',html:hooks.statePanel(card,'failed')}));
+        """
+    )
+
+    assert result["selectedId"] == "research"
+    assert "重新发起并补充资料" in result["html"]
+    assert 'data-et3-action="start-new-task"' in result["html"]
+    assert 'data-et3-action="retry-run"' not in result["html"]
+    assert "查看已保留结果" in result["html"]
+
+    script = _read(SCRIPT)
+    assert "card.brief?.originalRequest" in script
+    assert "card.brief?.documentType" in script
+    assert "correction: true" in script
+
+
+def test_v3_evidence_relaunch_click_preserves_task_type_and_original_request():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          context.document.body={classList:{remove(){}}};
+          hooks.setCatalog([{
+            id:'deep-research-team',title:'深度材料研究团',examples:[
+              {id:'research',document_type:'research_report',launch_profile_id:'research-report',available:true},
+            ],
+          }]);
+          hooks.setCard({
+            team:{id:'deep-research-team'},
+            brief:{
+              originalRequest:'请基于所附资料形成专家团交付机制研究报告。',
+              documentType:'research_report',
+            },
+          });
+          const button={dataset:{et3Action:'start-new-task'}};
+          await hooks.handleWorkbenchClick({target:{closest(){return button;}}});
+          console.log(JSON.stringify(hooks.getRelaunchState()));
+        })();
+        """
+    )
+
+    assert result == {
+        "teamId": "deep-research-team",
+        "exampleId": "research",
+        "suggestionMode": True,
+        "prompt": "请基于所附资料形成专家团交付机制研究报告。",
+    }
+
+
+def test_presenter_projects_only_allowlisted_expert_team_diagnostics():
+    result = _run_node(
+        textwrap.dedent(
+            """
+            const fs=require('fs');const vm=require('vm');const context={window:{},console};vm.createContext(context);
+            vm.runInContext(fs.readFileSync('static/expert-team-presenter.js','utf8'),context);
+            const run={run_id:'run-1',session_id:'session-1',schema_version:3,version:7,
+              view:{product_mode:'standalone',public_state:'failed',allowed_actions:['resume'],
+                product_error:{schema:'taiji.product.error.v1',code:'model_output_invalid',title:'生成结果格式异常',message:'安全提示',incident_id:'inc-0123456789ab',retryable:true,recovery_actions:[{id:'regenerate',label:'重新生成'},{id:'start_new',label:'重新发起'},{id:'export_diagnostics',label:'导出诊断'},{id:'unsafe_action',label:'不得透传'}]},
+                diagnostics:{schema:'expert-team-diagnostics/v1',commit:'abc123',source_mode:'development-linked-worktree',run_id:'run-1',stage_id:'draft',stage_attempt:3,error_code:'model_output_invalid',incident_id:'inc-0123456789ab',blocking_count:1,warning_count:2,provider_error_category:'',delivery_state:'pending',absolute_path:'/Users/example/private.docx',raw_prompt:'不得透传'},
+                presentation:{},workflow:{stages:[],current_stage:{id:'draft'},progress:{}},workspace:{}}};
+            const card=context.window.buildExpertTeamCardFromRun(run,{});
+            console.log(JSON.stringify({diagnostics:card.diagnostics,productError:card.productError}));
+            """
+        )
+    )
+
+    assert result["diagnostics"] == {
+        "schema": "expert-team-diagnostics/v1",
+        "commit": "abc123",
+        "sourceMode": "development-linked-worktree",
+        "runId": "run-1",
+        "stageId": "draft",
+        "stageAttempt": 3,
+        "errorCode": "model_output_invalid",
+        "incidentId": "inc-0123456789ab",
+        "blockingCount": 1,
+        "warningCount": 2,
+        "providerErrorCategory": "",
+        "deliveryState": "pending",
+    }
+    assert [action["id"] for action in result["productError"]["recoveryActions"]] == [
+        "regenerate",
+        "start_new",
+        "export_diagnostics",
+    ]
+
+
+def test_v3_copies_only_the_allowlisted_diagnostic_summary():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          let copied='';
+          context.window._copyText=async value=>{copied=value;};
+          hooks.setCard({runId:'run-1',currentStageId:'draft',deliveryStatus:'pending',
+            presentation:{detail:'用户正文和 secret=must-not-copy'},workspace:{path:'/Users/example/private'},
+            productError:{schema:'taiji.product.error.v1',code:'model_output_invalid',incidentId:'inc-0123456789ab'},
+            diagnostics:{schema:'expert-team-diagnostics/v1',commit:'abc123',sourceMode:'development-linked-worktree',runId:'run-1',stageId:'draft',stageAttempt:3,errorCode:'model_output_invalid',incidentId:'inc-0123456789ab',blockingCount:1,warningCount:2,providerErrorCategory:'',deliveryState:'pending'}});
+          const ok=await hooks.copyExpertTeamDiagnostics();
+          console.log(JSON.stringify({ok,copied}));
+        })();
+        """
+    )
+
+    assert result["ok"] is True
+    assert result["copied"].splitlines() == [
+        "commit: abc123",
+        "source_mode: development-linked-worktree",
+        "run_id: run-1",
+        "stage_id: draft",
+        "stage_attempt: 3",
+        "error_code: model_output_invalid",
+        "incident_id: inc-0123456789ab",
+        "blocking_count: 1",
+        "warning_count: 2",
+        "provider_error_category: ",
+        "delivery_state: pending",
+    ]
+    assert "用户正文" not in result["copied"]
+    assert "secret" not in result["copied"]
+    assert "/Users/" not in result["copied"]
+
+
+def test_v3_model_output_failure_uses_explicit_regenerate_action():
+    result = _run_v3_hooks(
+        """
+        const card={productMode:'standalone',readOnly:false,allowedActions:['resume'],presentation:{},
+          productError:{schema:'taiji.product.error.v1',code:'model_output_invalid',title:'生成结果格式异常',message:'任务规格和资料已保留。',incidentId:'inc-0123456789ab',recoveryActions:[{id:'regenerate',label:'重新生成'},{id:'export_diagnostics',label:'导出诊断'}]}};
+        console.log(JSON.stringify({html:hooks.statePanel(card,'failed')}));
+        """
+    )
+
+    assert 'data-et3-action="retry-run">重新生成当前阶段</button>' in result["html"]
+    assert "配置完成后恢复任务" not in result["html"]
 
 
 def test_v3_retry_cancel_uses_only_the_complete_server_binding_and_keeps_refresh():
@@ -1100,6 +1874,7 @@ def test_presenter_projects_a_separate_strict_delivery_recovery_binding_and_payl
 def test_v3_delivery_surface_is_driven_only_by_allowed_actions_and_shows_text_progress():
     result = _run_v3_hooks(
         """
+        context.document.documentElement={dataset:{taijiDesktop:'1'}};
         const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
         const base={
           kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,
@@ -1107,7 +1882,7 @@ def test_v3_delivery_surface_is_driven_only_by_allowed_actions_and_shows_text_pr
           workflow:{currentStage:{id:'delivery',title:'正式文档交付'},progress:{done:5,total:5,current:'正式文档交付',current_index:4}},brief:{sources:[]},presentation:{},team:{title:'内容创作专家团'},
           deliveryActionBinding:binding,standaloneDelivery:{documentName:'部门月度工作汇报.docx',automaticCheckSummary:{status:'passed',passedCount:5,failedCount:0,warningCount:0,blockingCount:0}},
         };
-        const all=hooks.workbenchHtml({...base,allowedActions:['delivery_open_document','delivery_open_folder','delivery_revise','delivery_confirm']});
+        const all=hooks.workbenchHtml({...base,allowedActions:['delivery_open_document','delivery_save_copy','delivery_open_folder','delivery_open_quality_report','delivery_rerender','delivery_revise','delivery_confirm']});
         const openOnly=hooks.statePanel({...base,allowedActions:['delivery_open_document']},'awaiting_delivery_confirmation');
         const confirmOnly=hooks.statePanel({...base,allowedActions:['delivery_confirm']},'awaiting_delivery_confirmation');
         const invalid=hooks.statePanel({...base,allowedActions:['delivery_open_document','delivery_confirm'],deliveryActionBinding:null},'awaiting_delivery_confirmation');
@@ -1118,17 +1893,76 @@ def test_v3_delivery_surface_is_driven_only_by_allowed_actions_and_shows_text_pr
     assert "第 5/5 步 · 正式文档交付" in result["all"]
     assert "部门月度工作汇报.docx" in result["all"]
     assert "自动检查通过 5 项" in result["all"]
-    for label in ("打开文档", "打开所在文件夹", "退回修改并重新生成", "确认文档可交付"):
+    for label in ("打开最终 DOCX", "保存副本", "打开文件夹", "查看质量报告", "仅重新生成 DOCX", "退回修改并重新生成", "确认文档可交付"):
         assert label in result["all"]
-    assert "打开文档" in result["openOnly"]
-    assert "打开所在文件夹" not in result["openOnly"]
+    assert "打开最终 DOCX" in result["openOnly"]
+    assert "打开文件夹" not in result["openOnly"]
     assert "退回修改并重新生成" not in result["openOnly"]
     assert "确认文档可交付" not in result["openOnly"]
     assert "确认文档可交付" in result["confirmOnly"]
-    assert "打开文档" not in result["confirmOnly"]
+    assert "打开最终 DOCX" not in result["confirmOnly"]
     assert 'data-et3-action="delivery-open-document"' not in result["invalid"]
     assert 'data-et3-action="delivery-confirm"' not in result["invalid"]
     assert "交付操作信息不完整" in result["invalid"]
+
+
+def test_v3_browser_delivery_open_degrades_to_an_explicit_download_without_server_open():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          context.document.documentElement={dataset:{}};
+          const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+          const card={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,currentStageId:'delivery',publicState:'completed',allowedActions:['delivery_open_document'],deliveryActionBinding:binding,standaloneDelivery:{documentName:'部门月度工作汇报.docx'},presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5}};
+          const live={textContent:'',classList:{toggle(){}},setAttribute(){}};
+          const root={querySelector(selector){if(selector==='[data-et3-live]')return live;return null;}};
+          let clicked=false;const requests=[];
+          context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+          context.document.createElement=()=>({click(){clicked=true;},remove(){},set href(value){this._href=value;},get href(){return this._href;},download:''});
+          context.document.body={appendChild(){}};
+          context.window.URL={createObjectURL:()=> 'blob:delivery',revokeObjectURL(){}};
+          context.window.fetch=async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {ok:true,blob:async()=>({kind:'docx'})};};
+          context.window.api=async(url)=>{requests.push({url});return {ok:true};};
+          context.window.buildExpertTeamDeliveryActionPayload=(target,key)=>({...target.deliveryActionBinding,idempotency_key:key});
+          const button={dataset:{et3Action:'delivery-open-document'},textContent:'下载最终 DOCX',disabled:false,setAttribute(){}};
+          hooks.setCard(card);
+          const html=hooks.statePanel(card,'completed');
+          await hooks.handleWorkbenchClick({target:{closest(){return button;}}});
+          console.log(JSON.stringify({html,requests,clicked,live:live.textContent}));
+        })();
+        """
+    )
+
+    assert "下载最终 DOCX" in result["html"]
+    assert "打开最终 DOCX" not in result["html"]
+    assert [item["url"] for item in result["requests"]] == [
+        "/api/expert-teams/delivery/download",
+    ]
+    assert result["clicked"] is True
+    assert result["live"] == "已开始下载最终 DOCX：部门月度工作汇报.docx"
+
+
+def test_v3_quality_report_is_user_readable_in_workbench_not_a_raw_json_open_action():
+    result = _run_v3_hooks(
+        """
+        const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+        const card={
+          kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,
+          publicState:'completed',allowedActions:['delivery_open_document','delivery_open_quality_report'],
+          deliveryActionBinding:binding,presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5},
+          standaloneDelivery:{documentName:'部门月度工作汇报.docx',documentSha256:'c'.repeat(64),qualityReportSha256:'d'.repeat(64),automaticCheckSummary:{status:'passed',passedCount:25,failedCount:0,warningCount:0,blockingCount:0}},
+        };
+        console.log(JSON.stringify({html:hooks.statePanel(card,'completed')}));
+        """
+    )
+
+    html = result["html"]
+    assert "<details" in html
+    assert "文档质量报告" in html
+    assert "总体结果" in html
+    assert "25 项通过" in html
+    assert "已完成本机确认" in html
+    assert "底层校验明细已随交付证据保留" in html
+    assert 'data-et3-action="delivery-open-quality-report"' not in html
 
 
 def test_v3_delivery_drift_has_one_explicit_recovery_surface_and_no_stale_file_actions():
@@ -1193,8 +2027,9 @@ def test_v3_delivery_requests_are_hash_bound_never_send_paths_and_do_not_fake_co
     result = _run_v3_hooks(
         """
         (async()=>{
+          context.document.documentElement={dataset:{taijiDesktop:'1'}};
           const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
-          const card={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,currentStageId:'delivery',publicState:'awaiting_delivery_confirmation',allowedActions:['delivery_open_document','delivery_open_folder','delivery_revise','delivery_confirm'],deliveryActionBinding:binding,presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5}};
+          const card={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,currentStageId:'delivery',publicState:'awaiting_delivery_confirmation',allowedActions:['delivery_open_document','delivery_open_folder','delivery_rerender','delivery_revise','delivery_confirm'],deliveryActionBinding:binding,presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5}};
           let feedback='';const live={textContent:'',classList:{toggle(){}},setAttribute(){}};
           const feedbackField={get value(){return feedback;},set value(value){feedback=value;},setAttribute(){},removeAttribute(){},focus(){}};
           const root={querySelector(selector){if(selector==='[data-et3-delivery-revision]')return feedbackField;if(selector==='[data-et3-live]')return live;return null;}};
@@ -1206,6 +2041,7 @@ def test_v3_delivery_requests_are_hash_bound_never_send_paths_and_do_not_fake_co
           hooks.setCard(card);
           await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-open-document');}}});
           await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-open-folder');}}});
+          await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-rerender');}}});
           await hooks.handleWorkbenchClick({target:{closest(){return button('submit-delivery-revision');}}});
           const emptyMessage=live.textContent;
           feedback='补充第三部分负责人和时间节点';
@@ -1220,12 +2056,14 @@ def test_v3_delivery_requests_are_hash_bound_never_send_paths_and_do_not_fake_co
     assert [item["url"] for item in result["requests"]] == [
         "/api/expert-teams/delivery/open",
         "/api/expert-teams/delivery/open",
+        "/api/expert-teams/delivery/rerender",
         "/api/expert-teams/delivery/revise",
         "/api/expert-teams/delivery/confirm",
     ]
     assert result["requests"][0]["body"]["target"] == "document"
     assert result["requests"][1]["body"]["target"] == "folder"
-    assert result["requests"][2]["body"]["feedback"] == "补充第三部分负责人和时间节点"
+    assert "feedback" not in result["requests"][2]["body"]
+    assert result["requests"][3]["body"]["feedback"] == "补充第三部分负责人和时间节点"
     assert all("path" not in item["body"] for item in result["requests"])
     for item in result["requests"]:
         for field in (
@@ -1235,3 +2073,69 @@ def test_v3_delivery_requests_are_hash_bound_never_send_paths_and_do_not_fake_co
         ):
             assert field in item["body"]
     assert result["publicState"] == "awaiting_delivery_confirmation"
+
+
+def test_v3_delivery_save_copy_uses_native_directory_picker_and_legacy_quality_report_click_is_inert():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+          const card={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,currentStageId:'delivery',publicState:'awaiting_delivery_confirmation',allowedActions:['delivery_save_copy','delivery_open_quality_report'],deliveryActionBinding:binding,standaloneDelivery:{documentName:'部门月度工作汇报.docx'},presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5}};
+          const live={textContent:'',classList:{toggle(){}},setAttribute(){}};
+          const root={querySelector(selector){if(selector==='[data-et3-live]')return live;return null;}};
+          context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+          context.window.buildExpertTeamDeliveryActionPayload=(target,key)=>({...target.deliveryActionBinding,idempotency_key:key});
+          context.window.taijiDesktop={pickDirectory:async()=>({ok:true,path:'/Users/example/Documents'})};
+          const requests=[];
+          context.window.api=async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {ok:true,saved_name:'部门月度工作汇报.docx'};};
+          function button(action){return {dataset:{et3Action:action},textContent:action,disabled:false,setAttribute(){}};}
+          hooks.setCard(card);
+          await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-save-copy');}}});
+          const saveMessage=live.textContent;
+          await hooks.handleWorkbenchClick({target:{closest(){return button('delivery-open-quality-report');}}});
+          console.log(JSON.stringify({requests,saveMessage,finalMessage:live.textContent}));
+        })();
+        """
+    )
+
+    assert [item["url"] for item in result["requests"]] == [
+        "/api/expert-teams/delivery/save-copy",
+    ]
+    save_body = result["requests"][0]["body"]
+    assert save_body["destination_dir"] == "/Users/example/Documents"
+    assert "path" not in save_body
+    assert "filename" not in save_body
+    assert result["saveMessage"] == "已保存副本：部门月度工作汇报.docx"
+    assert result["finalMessage"] == result["saveMessage"]
+
+
+def test_v3_delivery_save_copy_falls_back_to_an_explicit_browser_download():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+          const card={kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,currentStageId:'delivery',publicState:'completed',allowedActions:['delivery_save_copy'],deliveryActionBinding:binding,standaloneDelivery:{documentName:'部门月度工作汇报.docx'},presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5}};
+          const live={textContent:'',classList:{toggle(){}},setAttribute(){}};
+          const root={querySelector(selector){if(selector==='[data-et3-live]')return live;return null;}};
+          let clicked=false;let revoked='';const requests=[];
+          context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+          context.document.createElement=()=>({click(){clicked=true;},remove(){},set href(value){this._href=value;},get href(){return this._href;},download:''});
+          context.document.body={appendChild(){}};
+          context.window.URL={createObjectURL:()=> 'blob:delivery',revokeObjectURL:value=>{revoked=value;}};
+          context.window.fetch=async(url,options)=>{requests.push({url,body:JSON.parse(options.body),credentials:options.credentials});return {ok:true,blob:async()=>({kind:'docx'})};};
+          context.window.buildExpertTeamDeliveryActionPayload=(target,key)=>({...target.deliveryActionBinding,idempotency_key:key});
+          const button={dataset:{et3Action:'delivery-save-copy'},textContent:'保存副本',disabled:false,setAttribute(){}};
+          hooks.setCard(card);
+          await hooks.handleWorkbenchClick({target:{closest(){return button;}}});
+          console.log(JSON.stringify({requests,clicked,revoked,live:live.textContent}));
+        })();
+        """
+    )
+
+    assert len(result["requests"]) == 1
+    assert result["requests"][0]["url"] == "/api/expert-teams/delivery/download"
+    assert result["requests"][0]["credentials"] == "include"
+    assert "path" not in result["requests"][0]["body"]
+    assert result["clicked"] is True
+    assert result["revoked"] == "blob:delivery"
+    assert result["live"] == "已开始下载副本：部门月度工作汇报.docx"

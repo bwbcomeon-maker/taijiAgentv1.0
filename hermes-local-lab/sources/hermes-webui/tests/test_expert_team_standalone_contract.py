@@ -57,6 +57,73 @@ def _build_profile_run(expert_teams, **overrides):
     )
 
 
+def test_view_never_labels_a_contract_anomaly_as_unreleased_document_type():
+    from api import expert_teams
+    from api.expert_teams.contracts import TASK_CONFIGURATION_ERROR_MESSAGE
+    from api.expert_teams.view import expert_team_run_view
+
+    run = _build_profile_run(expert_teams)
+    run["document_brief"]["document_type"] = "unknown_document_type"
+
+    view = expert_team_run_view(run)
+
+    assert view["brief"]["document_type_label"] == TASK_CONFIGURATION_ERROR_MESSAGE
+    assert "未放行文种" not in json.dumps(view, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_label"),
+    [
+        ("content-work-report", "工作汇报"),
+        ("content-meeting-minutes", "会议纪要"),
+        ("content-notice", "通知通报"),
+        ("content-plan", "方案说明"),
+        ("content-summary-plan", "总结计划"),
+        ("content-polish", "材料润色"),
+        ("research-report", "研究报告"),
+    ],
+)
+def test_view_uses_product_labels_for_every_standalone_document_type(
+    profile_id,
+    expected_label,
+):
+    from api import expert_teams
+    from api.expert_teams.view import expert_team_run_view
+
+    run = _build_profile_run(
+        expert_teams,
+        launch_profile_id=profile_id,
+        session_id=f"session-{profile_id}",
+        idempotency_key=f"start-{profile_id}",
+    )
+
+    view = expert_team_run_view(run)
+
+    assert view["brief"]["document_type_label"] == expected_label
+
+
+def test_standalone_business_context_prefers_frozen_document_contract_over_prompt_keywords():
+    from api import expert_teams
+    from api.expert_teams.materials import business_context_for_run
+
+    run = _build_profile_run(
+        expert_teams,
+        launch_profile_id="content-summary-plan",
+        session_id="session-summary-plan-conflicting-keywords",
+        idempotency_key="start-summary-plan-conflicting-keywords",
+        prompt=(
+            "起草7月总结和8月计划；已完成工作汇报、会议纪要、通知通报和方案说明复验，"
+            "接下来继续验证总结计划。"
+        ),
+    )
+
+    context = business_context_for_run(run)
+
+    assert context["material_type"] == "summary_plan"
+    assert context["visible_title"] == "起草总结计划初稿"
+    assert "总结计划口径" in context["style_contract"]
+
+
 def _legacy_office_timeline():
     return [
         {
@@ -184,10 +251,22 @@ def test_catalog_startable_entries_equal_profiles_without_enterprise_rollout_cop
         "polish",
         "research_report",
     }
+    assert {
+        example["launch_profile_id"]: example["label"]
+        for example in startable
+    } == {
+        "content-work-report": "工作汇报",
+        "content-meeting-minutes": "会议纪要",
+        "content-notice": "通知通报",
+        "content-plan": "方案说明",
+        "content-summary-plan": "总结计划",
+        "content-polish": "材料润色",
+        "research-report": "研究报告",
+    }
     assert all(example["capability"] == {"kind": "standalone", "label": "本机协作"} for example in startable)
     assert all("launch_profile_id" not in example for example in examples if not example.get("available"))
     assert all(
-        example["capability"] == {"kind": "unavailable", "label": "暂未开放"}
+        example["capability"] == {"kind": "unavailable", "label": "任务配置异常"}
         for example in examples
         if not example.get("available")
     )
@@ -561,7 +640,17 @@ def test_standalone_view_projects_real_workflow_without_enterprise_identity_capa
     }
     projected = expert_team_run_view(run)
     assert projected["stage_result"]["artifact_type"] == "research_charter"
-    assert projected["artifact_validation"] == {"status": "valid", "blocking_count": 0}
+    assert projected["artifact_validation"] == {
+        "status": "valid",
+        "blocking_count": 0,
+        "warning_count": 0,
+    }
+    assert projected["stage_result"]["stage_quality"] == {
+        "state": "clear",
+        "blocking_count": 0,
+        "warning_count": 0,
+        "issues": [],
+    }
     serialized = json.dumps(projected, ensure_ascii=False)
     for forbidden in ("企业合同试点", "企业审批", "OIDC", "审批角色"):
         assert forbidden not in serialized
@@ -600,6 +689,42 @@ def test_standalone_invalid_provider_output_is_actionable_without_raw_protocol_l
     assert "resume" in view["allowed_actions"]
 
 
+def test_standalone_artifact_contract_error_is_not_misreported_as_preserved_content():
+    from api import expert_teams
+    from api.expert_teams.view import expert_team_run_view
+
+    run = _build_profile_run(expert_teams)
+    run["workflow_state"] = "generated_invalid"
+    run["validation"] = {
+        "status": "rewrite_required",
+        "code": "verified_without_evidence",
+        "message": "阶段生成结果格式或内容不完整",
+    }
+    run["stage_outputs"] = [
+        {
+            "task_id": "materials",
+            "status": "invalid",
+            "content": "RAW-MATERIAL-LEDGER-MUST-STAY-HIDDEN",
+            "artifact_error": {
+                "code": "verified_without_evidence",
+                "field": "payload.facts.0.evidence_refs",
+            },
+        }
+    ]
+
+    view = expert_team_run_view(run)
+    serialized = json.dumps(view, ensure_ascii=False)
+
+    assert view["presentation"]["title"] == "生成格式需要重新处理"
+    assert view["product_error"]["code"] == "model_output_invalid"
+    assert [item["id"] for item in view["product_error"]["recovery_actions"]] == [
+        "regenerate",
+        "export_diagnostics",
+    ]
+    assert "内容已保留" not in view["presentation"]["detail"]
+    assert "RAW-MATERIAL-LEDGER" not in serialized
+
+
 def test_standalone_valid_protocol_with_blocking_content_uses_content_not_format_copy():
     from api import expert_teams
     from api.expert_teams.view import expert_team_run_view
@@ -622,7 +747,9 @@ def test_standalone_valid_protocol_with_blocking_content_uses_content_not_format
     view = expert_team_run_view(run)
 
     assert view["presentation"]["title"] == "阶段内容需要补充或调整"
-    assert "未满足当前阶段要求" in view["presentation"]["detail"]
+    assert view["product_error"]["code"] == "expert_team_content_blocked"
+    assert view["presentation"]["detail"] == view["product_error"]["message"]
+    assert "存在必须处理的阻断项" in view["presentation"]["detail"]
     assert view["stage_result"]["deliverable"] == ""
 
 

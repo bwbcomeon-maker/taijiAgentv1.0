@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from copy import deepcopy
 
 from .contracts import (
     EXPERT_TEAM_CONTRACT_V1,
+    TASK_CONFIGURATION_ERROR_MESSAGE,
     brief_summary,
     classify_contract_version,
     required_sections_for_brief,
@@ -43,8 +46,38 @@ STATE_LABELS = {
 
 DOCUMENT_TYPE_LABELS = {
     "work_report": "工作汇报",
+    "meeting_minutes": "会议纪要",
+    "notice": "通知通报",
+    "plan": "方案说明",
+    "summary_plan": "总结计划",
+    "other_office_material": "材料润色",
     "research_report": "研究报告",
 }
+
+_PUBLIC_BUILD_REF = re.compile(r"[A-Za-z0-9._-]{1,96}")
+
+
+def _public_build_ref(name: str) -> str:
+    value = str(os.environ.get(name) or "").strip()
+    return value if _PUBLIC_BUILD_REF.fullmatch(value) else "unknown"
+
+
+def _stable_incident_id(run: dict, product_code: str) -> str:
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    reservation = (
+        run.get("current_stage_attempt_reservation")
+        if isinstance(run.get("current_stage_attempt_reservation"), dict)
+        else {}
+    )
+    raw = ":".join(
+        (
+            str(run.get("run_id") or "unknown"),
+            str(current.get("task_id") or current.get("id") or "unknown"),
+            str(reservation.get("stage_attempt") or run.get("execution_attempt") or 0),
+            str(product_code or "unknown_error"),
+        )
+    )
+    return "inc-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 _GATE_STATUSES = {"pending", "running", "failed", "invalidated", "passed"}
 _PROTOCOL_STAGE_ERROR_CODES = {
     "empty_response",
@@ -222,28 +255,40 @@ def _stage_output(run: dict) -> dict:
     }
 
 
-def _latest_invalid_error_code(run: dict) -> str:
-    validation = run.get("validation") if isinstance(run.get("validation"), dict) else {}
-    code = str(validation.get("code") or "").strip()
-    if code:
-        return code
+def _latest_invalid_artifact_error(run: dict) -> dict:
     outputs = run.get("stage_outputs") if isinstance(run.get("stage_outputs"), list) else []
     for output in reversed(outputs):
         if not isinstance(output, dict) or str(output.get("status") or "") != "invalid":
             continue
         error = output.get("artifact_error") if isinstance(output.get("artifact_error"), dict) else {}
-        return str(error.get("code") or "").strip()
+        return error
+    return {}
+
+
+def _latest_invalid_error_code(run: dict) -> str:
+    validation = run.get("validation") if isinstance(run.get("validation"), dict) else {}
+    code = str(validation.get("code") or "").strip()
+    if code:
+        return code
+    return str(_latest_invalid_artifact_error(run).get("code") or "").strip()
+
+
+def _is_protocol_stage_error(run: dict) -> bool:
+    artifact_error = _latest_invalid_artifact_error(run)
+    if str(artifact_error.get("code") or "").strip():
+        return True
+    return _latest_invalid_error_code(run) in _PROTOCOL_STAGE_ERROR_CODES
     return ""
 
 
 def _generated_invalid_detail(run: dict) -> str:
-    if _latest_invalid_error_code(run) in _PROTOCOL_STAGE_ERROR_CODES:
+    if _is_protocol_stage_error(run):
         return "本次生成结果格式不完整，系统没有采用这份内容。请重新生成当前阶段。"
     return "本次生成结果未满足当前阶段要求，系统没有采用这份内容。请重新生成当前阶段。"
 
 
 def _generated_invalid_title(run: dict) -> str:
-    if _latest_invalid_error_code(run) in _PROTOCOL_STAGE_ERROR_CODES:
+    if _is_protocol_stage_error(run):
         return "生成格式需要重新处理"
     return "阶段内容需要补充或调整"
 
@@ -495,6 +540,8 @@ def _artifact_review_content(artifact: dict) -> str:
 
 
 def _enterprise_stage_result(run: dict) -> dict:
+    from .issue_policy import effective_artifact_validation, public_stage_issues
+
     ref = run.get("current_stage_artifact_ref") if isinstance(run.get("current_stage_artifact_ref"), dict) else {}
     artifacts = [item for item in run.get("stage_artifacts") or [] if isinstance(item, dict)]
     artifact = next(
@@ -506,10 +553,24 @@ def _enterprise_stage_result(run: dict) -> dict:
     )
     if not isinstance(artifact, dict):
         return {}
-    blocking_count = sum(
-        1 for issue in artifact.get("blocking_issues") or []
-        if isinstance(issue, dict) and issue.get("severity") in {"blocking", "error", "warning"}
-    )
+    quality = effective_artifact_validation(artifact)
+    semantic_validation = _active_semantic_validation(run, artifact)
+    semantic_issues = [
+        {
+            "code": str(item.get("code") or "semantic_issue"),
+            "severity": "blocking",
+            "message": str(item.get("message") or "内容检查未通过"),
+            "suggested_action": str(
+                item.get("suggested_action")
+                or "提交修改意见后重新生成当前阶段"
+            ),
+        }
+        for item in semantic_validation.get("issues") or []
+        if isinstance(item, dict)
+    ]
+    blocking_count = int(quality["blocking_count"]) + len(semantic_issues)
+    public_issues = public_stage_issues(artifact.get("blocking_issues") or [])
+    public_issues.extend(semantic_issues)
     approved_ref = (run.get("approved_stage_artifact_refs") or {}).get(str(artifact.get("stage_id") or ""))
     return {
         "stage_id": str(artifact.get("stage_id") or ""),
@@ -519,11 +580,77 @@ def _enterprise_stage_result(run: dict) -> dict:
         "deliverable": str(artifact.get("deliverable_markdown") or ""),
         "content": _artifact_review_content(artifact),
         "validation": {
-            "status": str(artifact.get("validation_status") or "invalid"),
+            "status": "invalid" if semantic_issues else quality["status"],
             "blocking_count": blocking_count,
+            "warning_count": quality["warning_count"],
+        },
+        "stage_quality": {
+            "state": "blocked" if semantic_issues else quality["state"],
+            "blocking_count": blocking_count,
+            "warning_count": quality["warning_count"],
+            "issues": public_issues,
         },
         "approved_ref": deepcopy(approved_ref) if isinstance(approved_ref, dict) else None,
     }
+
+
+def _active_semantic_validation(
+    run: dict,
+    artifact: dict | None = None,
+) -> dict:
+    validation = (
+        run.get("semantic_validation")
+        if isinstance(run.get("semantic_validation"), dict)
+        else {}
+    )
+    if validation.get("status") != "failed":
+        return {}
+    candidate = artifact if isinstance(artifact, dict) else None
+    if candidate is None:
+        ref = (
+            run.get("current_stage_artifact_ref")
+            if isinstance(run.get("current_stage_artifact_ref"), dict)
+            else {}
+        )
+        artifact_id = str(ref.get("artifact_id") or "")
+        artifact_sha256 = str(ref.get("sha256") or "")
+    else:
+        artifact_id = str(candidate.get("artifact_id") or "")
+        artifact_sha256 = str(candidate.get("sha256") or "")
+    if (
+        str(validation.get("artifact_id") or "") != artifact_id
+        or str(validation.get("artifact_sha256") or "") != artifact_sha256
+    ):
+        return {}
+    return validation
+
+
+def _semantic_recheck_allowed(run: dict) -> bool:
+    validation = _active_semantic_validation(run)
+    if not validation:
+        return False
+    issues = [
+        item
+        for item in validation.get("issues") or []
+        if isinstance(item, dict)
+    ]
+    if not issues or any(
+        str(item.get("code") or "") != "review_issue_unresolved"
+        for item in issues
+    ):
+        return False
+    profile = (
+        run.get("launch_profile_snapshot")
+        if isinstance(run.get("launch_profile_snapshot"), dict)
+        else {}
+    )
+    from .issue_policy import brief_allows_labeled_placeholders
+
+    return brief_allows_labeled_placeholders(
+        run.get("document_brief"),
+        profile.get("source_requirement"),
+        product_mode=str(run.get("product_mode") or ""),
+    )
 
 
 def _stage_review(run: dict, state: str) -> dict:
@@ -840,6 +967,8 @@ def _normalized_gate_status(value, default: str = "pending") -> str:
 
 
 def _gate_issue_count(run: dict, names: set[str]) -> int:
+    from .issue_policy import BLOCKING_SEVERITIES
+
     issues = run.get("enterprise_quality_issues") if isinstance(run.get("enterprise_quality_issues"), list) else []
     return sum(
         1
@@ -849,7 +978,7 @@ def _gate_issue_count(run: dict, names: set[str]) -> int:
         and str(issue.get("disposition") or "unresolved") != "resolved"
         and (
             issue.get("completion_blocking") is True
-            or str(issue.get("severity") or "") in {"blocking", "error", "warning"}
+            or str(issue.get("severity") or "") in BLOCKING_SEVERITIES
         )
     )
 
@@ -1150,6 +1279,18 @@ def _current_stage_artifact(run: dict) -> dict:
     return deepcopy(candidates[0]) if len(candidates) == 1 else {}
 
 
+def _generated_invalid_needs_new_evidence(run: dict) -> bool:
+    from .issue_policy import BLOCKING_SEVERITIES
+
+    artifact = _current_stage_artifact(run)
+    return any(
+        isinstance(issue, dict)
+        and str(issue.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
+        and str(issue.get("category") or "").strip().lower() in {"evidence", "source"}
+        for issue in artifact.get("blocking_issues") or []
+    )
+
+
 def _positive_int_or_zero(value) -> int:
     return value if type(value) is int and value > 0 else 0
 
@@ -1211,17 +1352,25 @@ def _stage_action_binding(run: dict, public_state: str) -> dict | None:
     reservation = run.get("current_stage_attempt_reservation")
     stage_id = str(current.get("task_id") or current.get("id") or "")
     attempt = _positive_int_or_zero(artifact.get("stage_attempt"))
+    try:
+        from .issue_policy import effective_artifact_validation
+        from .stage_artifacts import validate_stage_artifact
+
+        validate_stage_artifact(
+            artifact,
+            brief=run.get("document_brief") or {},
+            approved_inputs=artifact.get("input_refs") or [],
+        )
+        effective_validation = effective_artifact_validation(artifact)
+    except (TypeError, ValueError):
+        return None
     if (
         not isinstance(ref, dict)
         or not attempt
         or _positive_int_or_zero(ref.get("stage_attempt")) != attempt
         or str(artifact.get("stage_id") or "") != stage_id
-        or str(artifact.get("validation_status") or "") != "valid"
-        or any(
-            isinstance(issue, dict)
-            and str(issue.get("severity") or "") in {"blocking", "error", "warning"}
-            for issue in artifact.get("blocking_issues") or []
-        )
+        or effective_validation["status"] != "valid"
+        or effective_validation["blocking_count"] != 0
         or not isinstance(reservation, dict)
         or str(reservation.get("stage_id") or "") != stage_id
         or _positive_int_or_zero(reservation.get("stage_attempt")) != attempt
@@ -1306,6 +1455,7 @@ def _delivery_action_binding(run: dict, public_state: str) -> dict | None:
     artifact = artifacts[0]
     payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
     try:
+        from .issue_policy import effective_artifact_validation
         from .stage_artifacts import StageArtifactError, validate_stage_artifact
 
         validation = validate_stage_artifact(
@@ -1315,12 +1465,13 @@ def _delivery_action_binding(run: dict, public_state: str) -> dict | None:
         )
     except (StageArtifactError, TypeError, ValueError):
         return None
+    effective_validation = effective_artifact_validation(artifact)
     summary = payload.get("automatic_check_summary") if isinstance(payload.get("automatic_check_summary"), dict) else {}
     stage_id = str(artifact.get("stage_id") or "")
     document_sha256 = str(payload.get("document_sha256") or "")
     if (
         artifact.get("artifact_type") != "delivery_manifest"
-        or str(artifact.get("validation_status") or "") != "valid"
+        or effective_validation["status"] != "valid"
         or int(validation.get("blocking_count") or 0) != 0
         or _positive_int_or_zero(artifact.get("stage_attempt")) != stage_attempt
         or payload.get("schema_version") != "delivery-manifest/v2"
@@ -1553,16 +1704,28 @@ def _allowed_actions(
     if effective_state == "completed_invalid" and delivery_recovery_binding is not None:
         return ["delivery_recover"]
     if public_state == "awaiting_stage_confirmation" and stage_binding is not None:
+        if _active_semantic_validation(run):
+            if _semantic_recheck_allowed(run):
+                return ["stage_recheck", "stage_revise"]
+            return ["stage_revise"]
         return ["stage_confirm", "stage_revise"]
     if public_state == "awaiting_delivery_confirmation" and delivery_binding is not None:
         return [
             "delivery_open_document",
+            "delivery_save_copy",
             "delivery_open_folder",
+            "delivery_open_quality_report",
+            "delivery_rerender",
             "delivery_revise",
             "delivery_confirm",
         ]
     if public_state == "completed" and delivery_binding is not None:
-        return ["delivery_open_document", "delivery_open_folder"]
+        return [
+            "delivery_open_document",
+            "delivery_save_copy",
+            "delivery_open_folder",
+            "delivery_open_quality_report",
+        ]
     return []
 
 
@@ -1654,7 +1817,18 @@ def expert_team_run_view(run: dict) -> dict:
             "can_cancel": state in {"generating", "revising"},
             "can_submit_stage_input": state == "awaiting_stage_input",
             "can_retry": state in {"start_failed", "generation_failed", "generated_invalid"},
-            "can_confirm_stage": standalone and public_state == "awaiting_stage_confirmation" and stage_action_binding is not None,
+            "can_confirm_stage": (
+                standalone
+                and public_state == "awaiting_stage_confirmation"
+                and stage_action_binding is not None
+                and not _active_semantic_validation(run)
+            ),
+            "can_recheck_stage": (
+                standalone
+                and public_state == "awaiting_stage_confirmation"
+                and stage_action_binding is not None
+                and _semantic_recheck_allowed(run)
+            ),
             "can_approve_stage": (not standalone) and state == "awaiting_review",
             "can_request_revision": state == "awaiting_review",
             "can_refresh": state == "cancelling",
@@ -1677,13 +1851,26 @@ def expert_team_run_view(run: dict) -> dict:
         "artifact_validation": {"status": "unavailable", "blocking_count": 0},
     }
     product_error_code = str(run.get("last_execution_error_code") or "").strip()
+    if state == "generated_invalid" and _is_protocol_stage_error(run):
+        product_error_code = "model_output_invalid"
+    elif state == "generated_invalid" and _generated_invalid_needs_new_evidence(run):
+        product_error_code = "expert_team_evidence_required"
+    elif not product_error_code and state == "generated_invalid":
+        product_error_code = "expert_team_content_blocked"
     if product_error_code:
         from api.product_contract import build_product_error
+        from .error_projection import expert_team_product_error_code
 
+        normalized_product_code = expert_team_product_error_code(product_error_code)
         result["product_error"] = build_product_error(
-            product_error_code,
-            incident_id=run.get("last_execution_incident_id"),
+            normalized_product_code,
+            incident_id=(
+                run.get("last_execution_incident_id")
+                or _stable_incident_id(run, normalized_product_code)
+            ),
         )
+        result["presentation"]["detail"] = result["product_error"]["message"]
+        result["dock"]["detail"] = result["product_error"]["message"]
     if standalone:
         result["product_mode"] = "standalone"
     if document_contract:
@@ -1691,7 +1878,10 @@ def expert_team_run_view(run: dict) -> dict:
         full_brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
         original_request = str(brief.get("original_request") or "")
         brief["original_request_summary"] = content_summary(original_request)
-        brief["document_type_label"] = DOCUMENT_TYPE_LABELS.get(str(brief.get("document_type") or ""), "未放行文种")
+        brief["document_type_label"] = DOCUMENT_TYPE_LABELS.get(
+            str(brief.get("document_type") or ""),
+            TASK_CONFIGURATION_ERROR_MESSAGE,
+        )
         for field in ("purpose", "audience", "usage_scenario", "additional_context"):
             brief[field] = str(full_brief.get(field) or "")
         brief["document_control"] = deepcopy(
@@ -1796,4 +1986,44 @@ def expert_team_run_view(run: dict) -> dict:
             "actionable": stage_review.get("actionable"),
             "output": enterprise_result,
         }
+    stage_result = result.get("stage_result") if isinstance(result.get("stage_result"), dict) else {}
+    stage_quality = (
+        stage_result.get("stage_quality")
+        if isinstance(stage_result.get("stage_quality"), dict)
+        else {}
+    )
+    reservation = (
+        run.get("current_stage_attempt_reservation")
+        if isinstance(run.get("current_stage_attempt_reservation"), dict)
+        else {}
+    )
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    public_error = result.get("product_error") if isinstance(result.get("product_error"), dict) else {}
+    public_error_code = str(public_error.get("code") or "")
+    result["diagnostics"] = {
+        "schema": "expert-team-diagnostics/v1",
+        "commit": _public_build_ref("TAIJI_SOURCE_COMMIT"),
+        "source_mode": _public_build_ref("TAIJI_SOURCE_MODE"),
+        "run_id": str(run.get("run_id") or ""),
+        "stage_id": str(
+            current.get("task_id")
+            or current.get("id")
+            or stage_result.get("stage_id")
+            or ""
+        ),
+        "stage_attempt": int(
+            reservation.get("stage_attempt")
+            or stage_result.get("stage_attempt")
+            or run.get("execution_attempt")
+            or 0
+        ),
+        "error_code": public_error_code,
+        "incident_id": str(public_error.get("incident_id") or ""),
+        "blocking_count": int(stage_quality.get("blocking_count") or 0),
+        "warning_count": int(stage_quality.get("warning_count") or 0),
+        "provider_error_category": (
+            public_error_code if public_error_code.startswith("provider_") else ""
+        ),
+        "delivery_state": str(result.get("delivery_status") or ""),
+    }
     return result

@@ -100,7 +100,14 @@ def _launch(standalone_env, *, profile_id="content-work-report", key="standalone
     return routes, workspace, payload["session"]["session_id"], payload["run"]["run_id"]
 
 
-def _confirmed_brief(*, document_type="work_report", exact_title="迎峰度夏保供电重点工作月度汇报"):
+def _confirmed_brief(
+    *,
+    document_type="work_report",
+    exact_title="迎峰度夏保供电重点工作月度汇报",
+    required_sections=None,
+    source_policy=None,
+    task_mode="create",
+):
     return {
         "schema_version": "document-brief/v1",
         "revision": 2,
@@ -109,7 +116,11 @@ def _confirmed_brief(*, document_type="work_report", exact_title="迎峰度夏�
         "confirmed_sha256": "b" * 64,
         "exact_title": exact_title,
         "document_type": document_type,
-        "content_constraints": {"required_sections": ["工作开展情况"]},
+        "task_mode": task_mode,
+        "content_constraints": {
+            "required_sections": required_sections or ["工作开展情况"]
+        },
+        "source_policy": source_policy or {},
         "document_control": {"render_template_id": "standalone-test"},
     }
 
@@ -156,17 +167,30 @@ def _writing_plan_artifact(*, attempt=1, brief=None):
     )
 
 
-def _reviewed_document_artifact(*, attempt=1, brief=None):
+def _reviewed_document_artifact(
+    *,
+    attempt=1,
+    brief=None,
+    deliverable_markdown=None,
+    review_issues=None,
+):
     from api.expert_teams.stage_artifacts import build_stage_artifact
 
     brief = brief or _confirmed_brief()
+    review_issues = deepcopy(review_issues or [])
     parsed = {
         "artifact_type": "reviewed_document",
         "summary": "正文已完成语义复核。",
         "payload": {
             "title": brief["exact_title"],
             "document_type": brief["document_type"],
-            "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+            "section_map": [
+                {"section_id": f"SEC-{index}", "heading": heading}
+                for index, heading in enumerate(
+                    brief["content_constraints"]["required_sections"],
+                    start=1,
+                )
+            ],
             "fact_usage": [],
             "asset_requests": [],
             "review_report": {
@@ -178,14 +202,22 @@ def _reviewed_document_artifact(*, attempt=1, brief=None):
                     "confidentiality": "passed",
                     "document_structure": "passed",
                 },
-                "issues": [],
+                "issues": review_issues,
                 "change_summary": ["已完成语义复核"],
-                "unresolved_issue_ids": [],
+                "unresolved_issue_ids": [
+                    item["issue_id"]
+                    for item in review_issues
+                    if item.get("status") == "open"
+                ],
             },
-            "open_issues": [],
+            "open_issues": review_issues,
         },
         "blocking_issues": [],
-        "deliverable_markdown": f"# {brief['exact_title']}\n\n## 工作开展情况\n\n重点任务按计划推进。",
+        "deliverable_markdown": (
+            deliverable_markdown
+            if deliverable_markdown is not None
+            else f"# {brief['exact_title']}\n\n## 工作开展情况\n\n重点任务按计划推进。"
+        ),
     }
     return build_stage_artifact(
         parsed,
@@ -200,14 +232,28 @@ def _reviewed_document_artifact(*, attempt=1, brief=None):
     )
 
 
-def _install_review_artifact(workspace, run_id, *, stage_index=0, attempt=1):
+def _install_review_artifact(
+    workspace,
+    run_id,
+    *,
+    stage_index=0,
+    attempt=1,
+    deliverable_markdown=None,
+    brief=None,
+    review_issues=None,
+):
     from api import expert_teams
     from api.expert_teams.storage import read_run, write_run
 
     run = read_run(workspace, run_id)
-    brief = _confirmed_brief()
+    brief = brief or _confirmed_brief()
     artifact = (
-        _reviewed_document_artifact(attempt=attempt, brief=brief)
+        _reviewed_document_artifact(
+            attempt=attempt,
+            brief=brief,
+            deliverable_markdown=deliverable_markdown,
+            review_issues=review_issues,
+        )
         if stage_index == 3
         else _writing_plan_artifact(attempt=attempt, brief=brief)
     )
@@ -751,6 +797,147 @@ def test_confirm_route_dispatches_document_generation_after_last_semantic_stage(
     assert response.json_body()["run"]["view"]["public_state"] == "generating_document"
 
 
+def test_confirm_route_rejects_semantically_blocked_document_before_delivery_dispatch(
+    standalone_env,
+    monkeypatch,
+):
+    from api.expert_teams.storage import read_run
+
+    routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        key="standalone-final-confirm-semantic-block-launch",
+    )
+    reviewed = _install_review_artifact(
+        workspace,
+        run_id,
+        stage_index=3,
+        deliverable_markdown=(
+            "# 迎峰度夏保供电重点工作月度汇报\n\n"
+            "## 工作开展情况\n\n"
+            "完成量：TODO\n"
+        ),
+    )
+    dispatched = []
+
+    def record_dispatch(_workspace, run, _body):
+        dispatched.append(run["run_id"])
+        return {"ok": True, "run": run}, 200
+
+    monkeypatch.setattr(routes, "_start_expert_team_execution", record_dispatch)
+
+    response = _post(
+        routes,
+        "/api/expert-teams/stage/confirm",
+        _binding(reviewed, key="confirm-route-polish-semantic-block"),
+    )
+
+    assert response.status == 409
+    payload = response.json_body()
+    assert payload["code"] == "stage_artifact_blocked"
+    assert payload["product_error"]["code"] == "expert_team_content_blocked"
+    assert payload["run"]["workflow_state"] == "awaiting_review"
+    assert payload["run"]["view"]["allowed_actions"] == ["stage_revise"]
+    stage_quality = payload["run"]["view"]["stage_result"]["stage_quality"]
+    assert stage_quality["state"] == "blocked"
+    assert stage_quality["blocking_count"] >= 1
+    assert "placeholder_detected" in {
+        item["code"] for item in stage_quality["issues"]
+    }
+    persisted = read_run(workspace, run_id)
+    assert persisted["version"] == payload["run"]["version"]
+    assert (
+        persisted["semantic_validation"]["artifact_id"]
+        == reviewed["current_stage_artifact_ref"]["artifact_id"]
+    )
+    assert persisted["semantic_validation"]["status"] == "failed"
+    assert dispatched == []
+
+
+def test_warning_policy_rechecks_same_reviewed_artifact_without_a_second_model_attempt(
+    standalone_env,
+):
+    from api import expert_teams
+    from api.expert_teams.storage import read_run, write_run
+
+    _routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        profile_id="content-notice",
+        key="standalone-zero-source-semantic-recheck-launch",
+    )
+    sections = ["背景与总体要求", "通知事项", "时间安排", "责任分工", "报送要求"]
+    brief = _confirmed_brief(
+        document_type="notice",
+        exact_title="关于开展专家团功能试运行的通知",
+        required_sections=sections,
+        source_policy={
+            "mode": "provided_only",
+            "unknown_fact_action": "allow_labeled_placeholder",
+        },
+    )
+    issue = {
+        "issue_id": "ISSUE-ROLE-001",
+        "severity": "blocking",
+        "category": "brief",
+        "section_id": "SEC-4",
+        "description": "各实施小组负责人尚未明确",
+        "resolution": None,
+        "status": "open",
+    }
+    markdown = f"# {brief['exact_title']}\n\n" + "\n\n".join(
+        f"## {section}\n\n"
+        + (
+            "具体负责人需人工确认。"
+            if section == "责任分工"
+            else "已按确认规格编制，未明确事项待补充。"
+        )
+        for section in sections
+    )
+    reviewed = _install_review_artifact(
+        workspace,
+        run_id,
+        stage_index=3,
+        brief=brief,
+        deliverable_markdown=markdown,
+        review_issues=[issue],
+    )
+    persisted = read_run(workspace, run_id)
+    persisted["semantic_validation"] = {
+        "schema_version": "expert-semantic-confirmation/v1",
+        "status": "failed",
+        "artifact_id": reviewed["current_stage_artifact_ref"]["artifact_id"],
+        "artifact_sha256": reviewed["current_stage_artifact_ref"]["sha256"],
+        "blocking_count": 1,
+        "issues": [
+            {
+                "code": "review_issue_unresolved",
+                "severity": "blocking",
+                "message": "最终复核仍有未解决的阻断问题",
+                "suggested_action": "提交修改意见后重新生成当前阶段",
+            }
+        ],
+    }
+    persisted["last_validation_error"] = "当前阶段内容检查未通过"
+    reopened = expert_teams.read_expert_team_run(
+        workspace,
+        write_run(workspace, persisted)["run_id"],
+    )
+
+    assert reopened["view"]["allowed_actions"] == ["stage_recheck", "stage_revise"]
+    original_ref = deepcopy(reopened["current_stage_artifact_ref"])
+    original_attempts = deepcopy(reopened["stage_attempt_counters"])
+    confirmed = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reopened, key="recheck-same-polish-artifact"),
+    )
+
+    assert confirmed["workflow_state"] == "delivery_validation_required"
+    assert confirmed["current_stage_artifact_ref"] == original_ref
+    assert confirmed["stage_attempt_counters"] == original_attempts
+    assert confirmed["semantic_validation"] == {}
+    assert confirmed["last_validation_error"] == ""
+    assert len(confirmed["stage_artifacts"]) == 1
+
+
 def test_confirm_route_persists_document_generation_failure_as_retryable_state(
     standalone_env,
     monkeypatch,
@@ -783,21 +970,38 @@ def test_confirm_route_persists_document_generation_failure_as_retryable_state(
     assert response.status == 503
     payload = response.json_body()
     assert payload["code"] == "validation_failed"
+    assert payload["product_error"]["code"] == "document_render_failed"
+    assert payload["error"] == payload["product_error"]["message"]
+    assert "DOCX 表格未通过自动检查" not in payload["error"]
     assert payload["run"]["workflow_state"] == "generated_invalid"
-    assert payload["run"]["last_validation_error"] == "DOCX 表格未通过自动检查"
+    assert payload["run"]["last_validation_error"] == payload["product_error"]["message"]
+    assert "DOCX 表格未通过自动检查" not in payload["run"]["last_validation_error"]
     assert payload["run"]["view"]["public_state"] == "ready"
     assert payload["run"]["view"]["actions"]["can_retry"] is True
 
+    persisted_failure = read_run(workspace, run_id)
+    assert persisted_failure["last_validation_error"] == "DOCX 表格未通过自动检查"
+
     monkeypatch.setattr(system_stages, "dispatch_system_stage", original_dispatch)
-    recovered_payload, recovered_status = routes._start_expert_team_execution(
-        workspace,
-        payload["run"],
-        {},
+    failed_run = payload["run"]
+    recovered_response = _post(
+        routes,
+        "/api/expert-teams/resume",
+        {
+            "session_id": failed_run["session_id"],
+            "run_id": failed_run["run_id"],
+            "expected_version": failed_run["version"],
+            "stage_id": failed_run["current_stage"]["task_id"],
+            "idempotency_key": "retry-failed-system-delivery",
+        },
     )
 
-    assert recovered_status == 200, recovered_payload
-    recovered = recovered_payload["run"]
+    assert recovered_response.status == 200, recovered_response.json_body()
+    recovered = recovered_response.json_body()["run"]
     assert recovered["workflow_state"] == "awaiting_review"
+    assert recovered["stage_attempt_counters"]["delivery"] == 1
+    assert recovered["delivery_attempt_counter"] == 1
+    assert recovered["stage_attempt_counters"]["polish"] == 1
     assert recovered["last_validation_error"] == ""
     assert recovered["last_execution_error"] == ""
     assert recovered["last_execution_error_code"] == ""
@@ -1032,10 +1236,13 @@ def test_real_standalone_delivery_generation_confirmation_and_drift_detection(
     assert generated["view"]["public_state"] == "awaiting_delivery_confirmation"
     assert generated["view"]["allowed_actions"] == [
         "delivery_open_document",
-        "delivery_open_folder",
-        "delivery_revise",
-        "delivery_confirm",
-    ]
+            "delivery_save_copy",
+            "delivery_open_folder",
+            "delivery_open_quality_report",
+            "delivery_rerender",
+            "delivery_revise",
+            "delivery_confirm",
+        ]
     action_binding = generated["view"]["delivery_action_binding"]
     assert action_binding["document_sha256"]
     delivery = validate_standalone_delivery_context(workspace, generated)
@@ -1051,11 +1258,16 @@ def test_real_standalone_delivery_generation_confirmation_and_drift_detection(
     assert response.status == 200, response.json_body()
     completed = response.json_body()["run"]
     assert completed["workflow_state"] == "completed"
+    assert completed["current_stage"]["status"] == "done"
+    assert completed["tasks"][-1]["id"] == "delivery"
+    assert completed["tasks"][-1]["status"] == "done"
     assert completed["completion_integrity"]["status"] == "valid"
     assert completed["view"]["public_state"] == "completed"
     assert completed["view"]["allowed_actions"] == [
         "delivery_open_document",
+        "delivery_save_copy",
         "delivery_open_folder",
+        "delivery_open_quality_report",
     ]
 
     opened = []
@@ -1075,7 +1287,13 @@ def test_real_standalone_delivery_generation_confirmation_and_drift_detection(
         },
     )
     assert open_response.status == 200, open_response.json_body()
-    assert opened == [(delivery["document_path"], "document")]
+    opened_document = (
+        delivery["attempt_root"]
+        / "opened"
+        / "迎峰度夏保供电重点工作月度汇报.docx"
+    )
+    assert opened == [(opened_document, "document")]
+    assert opened_document.read_bytes() == delivery["document_path"].read_bytes()
 
     replay = _post(
         routes,

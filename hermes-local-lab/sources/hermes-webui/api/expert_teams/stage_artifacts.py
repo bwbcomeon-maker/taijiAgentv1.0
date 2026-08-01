@@ -30,6 +30,13 @@ _PURITY_PATTERNS = (
     (re.compile(r"复核交付", re.I), "internal_delivery_label"),
     (re.compile(r"本阶段", re.I), "internal_stage_narration"),
     (re.compile(r"可直接生成\s*DOCX", re.I), "internal_tool_instruction"),
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:fact_id|fact_\d+|fact-(?:tbd-)?\d+)(?![A-Za-z0-9_])",
+            re.I,
+        ),
+        "internal_fact_reference",
+    ),
 )
 _FENCE_PATTERN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 _SECTION_HEADING_PATTERN = re.compile(
@@ -673,9 +680,11 @@ def document_purity_issues(markdown):
 def unresolved_quality_issues(artifact):
     """Project model-produced stage issues into stable, non-waivable upstream targets."""
 
+    from .issue_policy import BLOCKING_SEVERITIES
+
     result = []
     for issue in artifact.get("blocking_issues") or []:
-        if not isinstance(issue, dict) or issue.get("severity") not in {"blocking", "error", "warning"}:
+        if not isinstance(issue, dict) or issue.get("severity") not in BLOCKING_SEVERITIES:
             continue
         result.append(
             {
@@ -771,4 +780,7 @@ def validate_stage_artifact(artifact, *, brief, approved_inputs):
     _input_refs(artifact.get("input_refs"))
     _issues(artifact.get("blocking_issues"))
     _enum(artifact.get("validation_status"), {"valid", "invalid"}, "validation_status")
-    return {"valid": True, "blocking_count": sum(1 for issue in artifact["blocking_issues"] if issue["severity"] in {"blocking", "error", "warning"})}
+    from .issue_policy import classify_stage_issues
+
+    quality = classify_stage_issues(artifact["blocking_issues"])
+    return {"valid": True, **quality}

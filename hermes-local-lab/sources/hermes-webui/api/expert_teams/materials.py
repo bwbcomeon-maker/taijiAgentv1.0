@@ -89,7 +89,31 @@ def style_contract(material_type: str) -> str:
     return MATERIAL_DEFINITIONS.get(material_type, MATERIAL_DEFINITIONS["office_material"])["style_contract"]
 
 
+def _frozen_contract_material_type(run: dict) -> str:
+    """Resolve product copy from the server-owned Brief before text heuristics."""
+    brief = run.get("document_brief")
+    if not isinstance(brief, dict):
+        return ""
+    task_mode = str(brief.get("task_mode") or "").strip()
+    if task_mode == "polish":
+        return "polish"
+    document_type = str(brief.get("document_type") or "").strip()
+    if document_type == "other_office_material":
+        return "office_material"
+    if document_type in MATERIAL_DEFINITIONS:
+        return document_type
+    return ""
+
+
 def business_context_for_run(run: dict) -> dict:
+    frozen_material_type = _frozen_contract_material_type(run)
+    if frozen_material_type:
+        return {
+            "material_type": frozen_material_type,
+            "style_contract": style_contract(frozen_material_type),
+            "visible_title": normalize_visible_title(frozen_material_type),
+            "forbidden_terms": list(FORBIDDEN_TERMS),
+        }
     if str(run.get("team_id") or "") == "deep-research-team":
         return {
             "material_type": "research_report",
@@ -209,7 +233,10 @@ def validate_stage_output(
                 "missing_sections": [],
                 "message": "阶段产物未通过企业语义合同校验。",
             }
-        if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0):
+        from .issue_policy import effective_artifact_validation
+
+        effective_validation = effective_artifact_validation(artifact)
+        if effective_validation["status"] != "valid" or int(validation.get("blocking_count") or 0):
             return {
                 "status": "rewrite_required",
                 "violations": ["blocking_issues"],

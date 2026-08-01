@@ -195,7 +195,14 @@ def _dirty_worktree_stamp(path: Path, timeout=1) -> str:
     tracked local edit gets a new cache-bust token after restart.
     """
     out, ok = _run_git(
-        ['diff', '--name-only', '--diff-filter=ACMRTUXB', 'HEAD', '--'],
+        [
+            'diff',
+            '--name-only',
+            '--diff-filter=ACMRTUXB',
+            '--relative',
+            'HEAD',
+            '--',
+        ],
         path,
         timeout=timeout,
     )

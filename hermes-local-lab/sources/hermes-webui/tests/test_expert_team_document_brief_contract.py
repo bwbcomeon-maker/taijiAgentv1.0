@@ -130,6 +130,46 @@ def test_build_brief_rejects_missing_intent_empty_prompt_and_template_mismatch()
         assert error.value.code == code
 
 
+def test_contract_anomalies_use_actionable_configuration_copy():
+    from api.expert_teams.contracts import (
+        TASK_CONFIGURATION_ERROR_MESSAGE,
+        ContractError,
+        build_document_brief,
+        validate_document_brief,
+    )
+
+    payload = _payload(document_type="unknown_document_type")
+    with pytest.raises(ContractError) as error:
+        build_document_brief(
+            "content-creator-team",
+            payload,
+            now="2026-07-15T10:00:00+08:00",
+        )
+    assert error.value.code == "document_type_not_released"
+    assert error.value.message == TASK_CONFIGURATION_ERROR_MESSAGE
+
+    runtime, sources, policies = _registries()
+    brief = build_document_brief(
+        "content-creator-team",
+        _payload(),
+        now="2026-07-15T10:00:00+08:00",
+    )
+    brief["document_type"] = "unknown_document_type"
+    validation = validate_document_brief(
+        brief,
+        runtime_capabilities=runtime,
+        source_registry=sources,
+        model_policy_registry=policies,
+        now="2026-07-15T10:00:00+08:00",
+    )
+    document_type_error = next(
+        item
+        for item in validation["field_errors"]
+        if item["code"] == "document_type_not_released"
+    )
+    assert document_type_error["message"] == TASK_CONFIGURATION_ERROR_MESSAGE
+
+
 def test_digest_is_stable_and_excludes_lifecycle_fields_but_includes_canary():
     from api.expert_teams.contracts import brief_digest, build_document_brief, confirm_document_brief
 

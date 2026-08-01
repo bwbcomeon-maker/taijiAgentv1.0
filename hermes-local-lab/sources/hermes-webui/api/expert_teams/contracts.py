@@ -17,6 +17,7 @@ from .document_capabilities import (
 
 EXPERT_TEAM_CONTRACT_V1 = "expert-team-contract/v1"
 DOCUMENT_BRIEF_V1 = "document-brief/v1"
+TASK_CONFIGURATION_ERROR_MESSAGE = "当前任务配置异常，请重新发起或复制诊断信息"
 _MISSING = object()
 _LIFECYCLE_FIELDS = {"revision", "status", "confirmed_revision", "confirmed_at", "confirmed_sha256"}
 _TASK_MODES = {"create", "polish"}
@@ -153,12 +154,12 @@ def build_document_brief(team_id, payload, *, now) -> dict:
             raise ContractError(
                 "document_type_not_released",
                 "document_type",
-                "当前产品模式尚未放行该文种",
+                TASK_CONFIGURATION_ERROR_MESSAGE,
             )
         raise ContractError(
             "capability_not_released",
             "task_mode",
-            "当前文种与处理方式的组合尚未放行",
+            TASK_CONFIGURATION_ERROR_MESSAGE,
         )
     defaults = deepcopy(capability.get("standalone_defaults") or {}) if standalone else {}
     control = _deep_merge(defaults.get("document_control"), seed.get("document_control"))
@@ -342,7 +343,13 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
     if task_mode not in _TASK_MODES:
         errors.append(_error("task_mode", "invalid_enum", "任务模式无效"))
     if not has_document_capability(document_type):
-        errors.append(_error("document_type", "document_type_not_released", "当前文种尚未放行"))
+        errors.append(
+            _error(
+                "document_type",
+                "document_type_not_released",
+                TASK_CONFIGURATION_ERROR_MESSAGE,
+            )
+        )
     capability = (
         resolve_document_capability(
             document_type,
@@ -358,7 +365,13 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
         and capability is None
         and product_mode_valid
     ):
-        errors.append(_error("task_mode", "capability_not_released", "当前文种与处理方式的组合尚未放行"))
+        errors.append(
+            _error(
+                "task_mode",
+                "capability_not_released",
+                TASK_CONFIGURATION_ERROR_MESSAGE,
+            )
+        )
     source_policy = normalized.get("source_policy") or {}
     if source_policy.get("mode") not in _SOURCE_MODES:
         errors.append(_error("source_policy.mode", "invalid_enum", "资料模式无效"))

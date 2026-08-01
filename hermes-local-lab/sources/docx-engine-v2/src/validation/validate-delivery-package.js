@@ -26,6 +26,7 @@ const CHECK_IDS = [
   'footer_portability',
   'cover_layout',
   'template_markers',
+  'markdown_artifacts',
   'asset_semantics',
   'logical_figure_identity',
   'image_coverage',
@@ -61,6 +62,7 @@ const RENDER_CHECK_IDS = new Set([
   'footer_portability',
   'cover_layout',
   'template_markers',
+  'markdown_artifacts',
   'table_placement',
   'table_caption',
   'block_order',
@@ -203,6 +205,7 @@ function validateDeliveryPackage({
   addFooterPortabilityCheck({ addCheck, deliveryDir });
   addCoverLayoutCheck({ addCheck, documentXml });
   addTemplateMarkersCheck({ addCheck, documentXml });
+  addMarkdownArtifactsCheck({ addCheck, documentXml });
   addAssetSemanticsCheck({ addCheck, deliveryDir, documentXml, assetPackage: jsonFiles.assetPackage });
   addLogicalFigureIdentityCheck({
     addCheck,
@@ -1653,6 +1656,49 @@ function addTemplateMarkersCheck({ addCheck, documentXml }) {
   }
 
   addCheck('template_markers', 'passed');
+}
+
+function addMarkdownArtifactsCheck({ addCheck, documentXml }) {
+  if (!documentXml) {
+    addCheck(
+      'markdown_artifacts',
+      'failed',
+      'Cannot inspect unresolved markdown syntax without word/document.xml.'
+    );
+    return;
+  }
+
+  const artifactTypes = unresolvedMarkdownArtifactTypes(documentXml);
+  if (artifactTypes.length > 0) {
+    addCheck(
+      'markdown_artifacts',
+      'failed',
+      `Unresolved markdown syntax remains in visible DOCX text: ${artifactTypes.join(', ')}.`
+    );
+    return;
+  }
+
+  addCheck('markdown_artifacts', 'passed');
+}
+
+function unresolvedMarkdownArtifactTypes(documentXml) {
+  const paragraphs = paragraphRanges(documentXml).map((paragraph) => paragraph.text);
+  const patterns = [
+    ['bold_emphasis', /\*\*(?=\S)[^*\r\n]+?\*\*/],
+    ['underscore_emphasis', /__(?=\S)[^_\r\n]+?__/],
+    ['inline_code', /`[^`\r\n]+`/],
+    ['markdown_link', /\[[^\]\r\n]+\]\([^)]+\)/],
+    ['heading_marker', /^#{1,6}\s+/],
+  ];
+  const matches = new Set();
+  for (const text of paragraphs) {
+    for (const [type, pattern] of patterns) {
+      if (pattern.test(text)) {
+        matches.add(type);
+      }
+    }
+  }
+  return [...matches].sort();
 }
 
 function addAssetSemanticsCheck({ addCheck, deliveryDir, documentXml, assetPackage }) {

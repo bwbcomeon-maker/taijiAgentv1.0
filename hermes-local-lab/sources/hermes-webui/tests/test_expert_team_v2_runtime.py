@@ -342,7 +342,9 @@ def test_failed_start_stays_recoverable_and_never_reports_generating(monkeypatch
     assert payload["run"]["workflow_state"] == "start_failed"
     assert stored["workflow_state"] == "start_failed"
     assert stored["execution_status"] != "running"
-    assert stored["last_execution_error"] == "provider unavailable"
+    assert payload["product_error"]["code"] == "backend_unavailable"
+    assert stored["last_execution_error"] == payload["product_error"]["message"]
+    assert "provider unavailable" not in json.dumps(payload, ensure_ascii=False)
 
 
 def test_answer_rejects_a_different_session_owner(monkeypatch, tmp_path):
@@ -375,7 +377,10 @@ def test_answer_rejects_a_different_session_owner(monkeypatch, tmp_path):
 
     stored = expert_teams.read_expert_team_run(tmp_path, run["run_id"])
     assert handler.status == 404
-    assert handler.json_body()["error"] == "expert team run does not belong to this session"
+    payload = handler.json_body()
+    assert payload["product_error"]["code"] == "expert_team_not_found"
+    assert payload["error"] == payload["product_error"]["message"]
+    assert "does not belong" not in json.dumps(payload, ensure_ascii=False)
     assert all(question.get("status") == "pending" for question in stored["questions"])
 
 
