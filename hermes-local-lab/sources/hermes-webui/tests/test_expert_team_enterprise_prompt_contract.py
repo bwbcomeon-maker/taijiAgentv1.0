@@ -120,7 +120,7 @@ def test_prompt_is_two_role_separated_messages_with_canonical_data_envelope():
 
     assert request["tools_disabled"] is True
     assert [message["role"] for message in request["messages"]] == ["system", "user"]
-    assert request["system_template_version"] == "taiji-stage-system/v10"
+    assert request["system_template_version"] == "taiji-stage-system/v11"
     assert request["system_template_sha256"] == hashlib.sha256(request["messages"][0]["content"].encode()).hexdigest()
     assert request["data_envelope_sha256"] == hashlib.sha256(request["messages"][1]["content"].encode()).hexdigest()
     envelope = json.loads(request["messages"][1]["content"])
@@ -303,6 +303,18 @@ def test_review_prompt_requires_an_actual_language_quality_pass(artifact_type):
     assert "不得只复制上一阶段正文后直接宣告检查通过" in system
 
 
+@pytest.mark.parametrize("artifact_type", ["reviewed_document", "reviewed_research_document"])
+def test_review_prompt_keeps_open_issue_lists_in_one_consistent_projection(artifact_type):
+    from api.expert_teams.prompts import _system_message
+
+    system = _system_message(artifact_type, _run()["document_brief"])
+
+    assert "payload.open_issues 中 status=open 的每一项" in system
+    assert "必须原样复制到 payload.review_report.issues" in system
+    assert "unresolved_issue_ids 必须与 review_report.issues 中 status=open" in system
+    assert "issue_id 集合完全一致" in system
+
+
 def test_retry_prompt_names_the_previous_contract_error_without_reinjecting_raw_output():
     from api.expert_teams.prompts import build_stage_gateway_request
 
@@ -348,6 +360,24 @@ def test_retry_prompt_for_truncated_meta_marker_requires_exact_ascii_closure_and
     assert "三个连续的 ASCII >" in system
     assert "结束标记后输出一个换行符" in system
     assert "不得缩写成 <<<TAIJI_META_END>>" in system
+
+
+def test_retry_prompt_for_unresolved_issue_mismatch_names_the_exact_repair():
+    from api.expert_teams.prompts import _system_message
+
+    system = _system_message(
+        "reviewed_document",
+        _run()["document_brief"],
+        previous_protocol_error={
+            "code": "unresolved_issue_mismatch",
+            "field": "payload.review_report.unresolved_issue_ids",
+        },
+    )
+    correction = system.split("[RETRY CORRECTION]", 1)[1].split("[EXACT RESPONSE FORMAT]", 1)[0]
+
+    assert "unresolved_issue_mismatch" in correction
+    assert "把 payload.open_issues 中所有 status=open 的问题逐项原样复制" in correction
+    assert "unresolved_issue_ids 必须等于这些 open 问题的 issue_id 集合" in correction
 
 
 def test_retry_prompt_rejects_tampered_error_text_instead_of_promoting_it_to_system_content():

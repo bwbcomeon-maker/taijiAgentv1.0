@@ -401,6 +401,87 @@ def test_review_report_requires_exact_check_keys_and_open_issue_ids():
     assert error.value.code == "review_checks_mismatch"
 
 
+def test_review_report_requires_exact_open_issue_projection():
+    from api.expert_teams.stage_artifacts import StageArtifactError, build_stage_artifact, parse_stage_response
+
+    open_issue = {
+        "issue_id": "G-001",
+        "severity": "warning",
+        "category": "evidence",
+        "section_id": "SEC-2",
+        "description": "问题数据仍需人工确认",
+        "resolution": None,
+        "status": "open",
+    }
+    payload = {
+        "title": _brief()["exact_title"],
+        "document_type": "work_report",
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
+        "fact_usage": [],
+        "asset_requests": [],
+        "review_report": {
+            "schema_version": "content-review-report/v1",
+            "checks": {
+                key: "passed"
+                for key in (
+                    "brief_alignment",
+                    "fact_traceability",
+                    "document_purity",
+                    "confidentiality",
+                    "document_structure",
+                )
+            },
+            "issues": [],
+            "change_summary": ["完成审稿"],
+            "unresolved_issue_ids": [],
+        },
+        "open_issues": [open_issue],
+    }
+    document = (
+        f"# {_brief()['exact_title']}\n\n"
+        "## 工作开展情况\n\n重点工作按计划推进。\n\n"
+        "## 存在问题\n\n问题数据需人工确认。\n\n"
+        "## 下一步工作安排\n\n持续推进重点任务。"
+    )
+
+    parsed = parse_stage_response(
+        _raw("reviewed_document", payload, document=document),
+        artifact_type="reviewed_document",
+        requires_document=True,
+    )
+    with pytest.raises(StageArtifactError) as missing_projection:
+        build_stage_artifact(
+            parsed,
+            stage_id="polish",
+            stage_attempt=1,
+            brief=_brief(),
+            input_refs=[],
+            now="2026-07-15T10:00:00+08:00",
+        )
+    assert missing_projection.value.code == "open_issue_projection_mismatch"
+
+    payload["review_report"]["issues"] = [dict(open_issue)]
+    payload["review_report"]["unresolved_issue_ids"] = [open_issue["issue_id"]]
+    parsed = parse_stage_response(
+        _raw("reviewed_document", payload, document=document),
+        artifact_type="reviewed_document",
+        requires_document=True,
+    )
+    artifact = build_stage_artifact(
+        parsed,
+        stage_id="polish",
+        stage_attempt=1,
+        brief=_brief(),
+        input_refs=[],
+        now="2026-07-15T10:00:00+08:00",
+    )
+    assert artifact["payload"]["review_report"]["issues"] == [open_issue]
+
+
 def test_delivery_manifest_rejects_unknown_fields_and_path_escape():
     from api.expert_teams.stage_artifacts import StageArtifactError, build_stage_artifact, parse_stage_response
 

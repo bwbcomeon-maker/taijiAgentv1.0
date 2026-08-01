@@ -297,6 +297,21 @@ def _validate_document_payload(payload, brief, *, reviewed=False, research=False
     _review_issues(payload["open_issues"], "payload.open_issues")
     if reviewed:
         _validate_review_report(payload["review_report"], research=research)
+        open_issues = {
+            item["issue_id"]: item
+            for item in payload["open_issues"]
+            if item["status"] == "open"
+        }
+        reported_open_issues = {
+            item["issue_id"]: item
+            for item in payload["review_report"]["issues"]
+            if item["status"] == "open"
+        }
+        if open_issues != reported_open_issues:
+            raise StageArtifactError(
+                "open_issue_projection_mismatch",
+                "payload.open_issues",
+            )
 
 
 def _validate_review_report(report, *, research):

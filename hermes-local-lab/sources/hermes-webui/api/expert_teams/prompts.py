@@ -11,7 +11,7 @@ from api.expert_teams.contracts import brief_digest, required_sections_for_brief
 from api.expert_teams.data_egress import authorize_actual_provider
 
 
-SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v10"
+SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v11"
 DATA_ENVELOPE_VERSION = "TAIJI_STAGE_INPUT_V2"
 _SOURCE_STAGES = {
     ("content-creator-team", "materials"),
@@ -454,6 +454,9 @@ def _system_message(
         "发现后必须在 reviewed DOCUMENT 中修正，并在 review_report.change_summary 中如实概括；"
         "不得只复制上一阶段正文后直接宣告检查通过。"
         "修正仅限表达和已批准结构，不得借校对新增事实、数字、来源或结论。"
+        "payload.open_issues 中 status=open 的每一项必须原样复制到 payload.review_report.issues；"
+        "review_report.issues 可以额外包含本次审稿发现且 status=resolved 的问题；"
+        "unresolved_issue_ids 必须与 review_report.issues 中 status=open 的 issue_id 集合完全一致。"
         if artifact_type in {"reviewed_document", "reviewed_research_document"}
         else ""
     )
@@ -512,6 +515,12 @@ def _system_message(
             marker_correction = (
                 "META 结束标记必须完整为 <<<TAIJI_META_END>>>，最右侧是三个连续的 ASCII >；"
                 "不得缩写成 <<<TAIJI_META_END>>。结束标记后输出一个换行符，再结束响应。\n"
+            )
+        elif code == "unresolved_issue_mismatch":
+            marker_correction = (
+                "把 payload.open_issues 中所有 status=open 的问题逐项原样复制到 "
+                "payload.review_report.issues；unresolved_issue_ids 必须等于这些 open 问题的 "
+                "issue_id 集合。已解决的审稿问题可以继续保留为 status=resolved。\n"
             )
         correction = (
             "[RETRY CORRECTION]\n"
