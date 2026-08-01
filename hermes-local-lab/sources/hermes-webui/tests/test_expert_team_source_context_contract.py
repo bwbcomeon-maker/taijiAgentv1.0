@@ -217,6 +217,45 @@ def test_materials_prompt_consumes_verified_real_segments_and_binds_snapshot(tmp
     assert error.value.code == "source_context_binding_mismatch"
 
 
+def test_research_direction_prompt_consumes_verified_source_context(tmp_path):
+    """The first research stage must see the sources it uses to set scope."""
+
+    from api.expert_teams.prompts import build_stage_gateway_request
+    from api.expert_teams.source_context import verify_source_context_snapshot
+
+    run = _confirmed_run(tmp_path)
+    run.update(
+        {
+            "team_id": "deep-research-team",
+            "stage_outputs": [],
+        }
+    )
+    snapshot = verify_source_context_snapshot(tmp_path, run)
+
+    request = build_stage_gateway_request(
+        run,
+        {
+            "id": "direction",
+            "executor": "model",
+            "artifact_type": "research_charter",
+            "depends_on": [],
+        },
+        source_context=snapshot,
+    )
+
+    envelope = json.loads(request["messages"][1]["content"])
+    assert envelope["source_context"]["sources"][0]["segments"][0]["text"].startswith(
+        "已完成重点任务"
+    )
+    assert request["input_refs"] == [
+        {
+            "ref_type": "source_context",
+            "snapshot_id": run["source_context_snapshot_ref"]["snapshot_id"],
+            "sha256": run["source_context_snapshot_ref"]["sha256"],
+        }
+    ]
+
+
 def test_polish_draft_route_keeps_the_frozen_original_source_and_preservation_rules(
     tmp_path,
 ):

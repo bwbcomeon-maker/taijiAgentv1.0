@@ -13,7 +13,12 @@ from api.expert_teams.data_egress import authorize_actual_provider
 
 SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v9"
 DATA_ENVELOPE_VERSION = "TAIJI_STAGE_INPUT_V1"
-_SOURCE_STAGES = {("content-creator-team", "materials"), ("deep-research-team", "research"), ("deep-research-team", "evidence")}
+_SOURCE_STAGES = {
+    ("content-creator-team", "materials"),
+    ("deep-research-team", "direction"),
+    ("deep-research-team", "research"),
+    ("deep-research-team", "evidence"),
+}
 _DOCUMENT_ARTIFACT_TYPES = {
     "document_draft",
     "reviewed_document",
