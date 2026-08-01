@@ -1803,6 +1803,18 @@ def _expert_team_revision_feedback(run: dict) -> str:
     return ""
 
 
+def _expert_team_revision_feedback_entry(run: dict, stage_id: str) -> dict:
+    for entry in reversed(run.get("revision_feedback") or []):
+        if not isinstance(entry, dict):
+            continue
+        entry_stage_id = str(entry.get("stage_id") or "")
+        if entry_stage_id and entry_stage_id != str(stage_id or ""):
+            continue
+        if str(entry.get("feedback") or "").strip():
+            return copy.deepcopy(entry)
+    return {}
+
+
 def _expert_team_prompt_header(run: dict, task: dict) -> str:
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     feedback = _expert_team_revision_feedback(run)
@@ -1983,16 +1995,28 @@ def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
     feedback = _expert_team_revision_feedback(run)
     revision_context = None
     if feedback:
-        previous = next(
-            (
-                item.get("artifact")
-                for item in reversed(run.get("stage_outputs") or [])
-                if isinstance(item, dict)
-                and str(item.get("task_id") or "") == stage["id"]
-                and isinstance(item.get("artifact"), dict)
-            ),
-            None,
-        )
+        feedback_entry = _expert_team_revision_feedback_entry(run, stage["id"])
+        expected_artifact_id = str(feedback_entry.get("artifact_id") or "")
+        expected_artifact_sha256 = str(feedback_entry.get("artifact_sha256") or "")
+        candidates = [
+            item.get("artifact")
+            for item in reversed(run.get("stage_outputs") or [])
+            if isinstance(item, dict)
+            and str(item.get("task_id") or "") == stage["id"]
+            and isinstance(item.get("artifact"), dict)
+        ]
+        if expected_artifact_id or expected_artifact_sha256:
+            previous = next(
+                (
+                    artifact
+                    for artifact in candidates
+                    if str(artifact.get("artifact_id") or "") == expected_artifact_id
+                    and str(artifact.get("sha256") or "") == expected_artifact_sha256
+                ),
+                None,
+            )
+        else:
+            previous = candidates[0] if candidates else None
         if not isinstance(previous, dict):
             raise ValueError("enterprise stage revision requires an immutable previous artifact reference")
         revision_context = {
@@ -2000,6 +2024,7 @@ def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
                 "artifact_id": str(previous.get("artifact_id") or ""),
                 "sha256": str(previous.get("sha256") or ""),
             },
+            "previous_artifact": previous,
             "feedback": feedback,
         }
     return build_stage_gateway_request(

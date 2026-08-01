@@ -120,11 +120,11 @@ def test_prompt_is_two_role_separated_messages_with_canonical_data_envelope():
 
     assert request["tools_disabled"] is True
     assert [message["role"] for message in request["messages"]] == ["system", "user"]
-    assert request["system_template_version"] == "taiji-stage-system/v9"
+    assert request["system_template_version"] == "taiji-stage-system/v10"
     assert request["system_template_sha256"] == hashlib.sha256(request["messages"][0]["content"].encode()).hexdigest()
     assert request["data_envelope_sha256"] == hashlib.sha256(request["messages"][1]["content"].encode()).hexdigest()
     envelope = json.loads(request["messages"][1]["content"])
-    assert envelope["schema_version"] == "TAIJI_STAGE_INPUT_V1"
+    assert envelope["schema_version"] == "TAIJI_STAGE_INPUT_V2"
     assert envelope["document_brief"]["exact_title"] == "迎峰度夏保供电重点工作月度汇报"
     assert envelope["document_brief"]["document_control"]["classification"] == "internal"
     assert envelope["document_brief"]["content_constraints"]["must_avoid"][0].endswith(CANARY)
@@ -414,25 +414,138 @@ def test_every_model_stage_prompt_exposes_one_parseable_exact_meta_template(
         assert "不得使用“暂无”或“待完善”作为缺失事实占位表述" in system
 
 
-def test_revision_context_contains_only_previous_ref_and_latest_feedback():
+def test_revision_context_contains_bound_previous_artifact_and_latest_feedback():
     from api.expert_teams.prompts import build_stage_gateway_request
 
     feedback = f"只修改当前阶段；{CANARY}"
+    previous_artifact = {
+        "artifact_type": "document_draft",
+        "summary": f"用户已复核的上一版摘要；{CANARY}",
+        "payload": {
+            "title": "迎峰度夏保供电重点工作月度汇报",
+            "section_map": [],
+            "open_issues": [],
+            "document_type": "work_report",
+            "fact_usage": [],
+            "asset_requests": [],
+        },
+        "deliverable_markdown": "# 迎峰度夏保供电重点工作月度汇报",
+        "blocking_issues": [],
+    }
     request = build_stage_gateway_request(
         _run(),
         {"id": "draft", "executor": "model", "artifact_type": "document_draft", "depends_on": ["plan", "materials"]},
-        revision_feedback={"previous_artifact_ref": {"artifact_id": "art-draft-1", "sha256": "4" * 64}, "feedback": feedback},
+        revision_feedback={
+            "previous_artifact_ref": {"artifact_id": "art-draft-1", "sha256": "4" * 64},
+            "previous_artifact": previous_artifact,
+            "feedback": feedback,
+        },
     )
     envelope = json.loads(request["messages"][1]["content"])
     system = request["messages"][0]["content"]
     assert envelope["revision_context"] == {
         "previous_artifact_ref": {"artifact_id": "art-draft-1", "sha256": "4" * 64},
+        "previous_artifact": previous_artifact,
         "feedback": feedback,
     }
     assert "旧反馈绝不能进入" not in request["messages"][1]["content"]
-    assert "只修改 feedback 明确要求的内容" in system
-    assert "未被 feedback 点名的字段、事实、等级和结论边界必须保持不变" in system
+    assert "previous_artifact 是上一版规范化内容基线" in system
+    assert "只修改 feedback 明确要求变更的内容" in system
+    assert "feedback 要求保持不变的内容必须逐字保留" in system
     assert CANARY not in system
+
+
+def test_revision_artifact_projection_excludes_server_enrichment_and_source_locator():
+    from api.expert_teams.prompts import revision_artifact_projection
+
+    projection = revision_artifact_projection(
+        {
+            "artifact_type": "source_register",
+            "summary": "资料评估完成",
+            "payload": {
+                "source_assessments": [],
+                "search_gaps": [],
+                "sources": [
+                    {
+                        "source_id": "SRC-001",
+                        "locator": "/Users/example/private/source.txt",
+                    }
+                ],
+            },
+            "deliverable_markdown": None,
+            "blocking_issues": [],
+        }
+    )
+
+    assert projection["payload"] == {"source_assessments": [], "search_gaps": []}
+    assert "locator" not in json.dumps(projection, ensure_ascii=False)
+
+
+def test_route_revision_context_uses_the_feedback_bound_artifact_not_the_latest_candidate(monkeypatch, tmp_path):
+    from api import expert_teams, routes
+    from api.expert_teams import prompts
+
+    captured = {}
+
+    monkeypatch.setattr(
+        expert_teams,
+        "verified_source_context_for_execution",
+        lambda _workspace, _run: None,
+    )
+
+    def capture_request(run, stage, *, revision_feedback, source_context):
+        captured.update(
+            {
+                "run": run,
+                "stage": stage,
+                "revision_feedback": revision_feedback,
+                "source_context": source_context,
+            }
+        )
+        return {"captured": True}
+
+    monkeypatch.setattr(prompts, "build_stage_gateway_request", capture_request)
+    bound_artifact = {
+        "artifact_id": "research:4",
+        "sha256": "4" * 64,
+        "artifact_type": "source_register",
+    }
+    newer_artifact = {
+        "artifact_id": "research:5",
+        "sha256": "5" * 64,
+        "artifact_type": "source_register",
+    }
+    run = {
+        "team_id": "deep-research-team",
+        "current_stage": {"task_id": "research"},
+        "tasks": [
+            {
+                "id": "research",
+                "executor": "model",
+                "artifact_type": "source_register",
+                "depends_on": ["direction"],
+            }
+        ],
+        "revision_feedback": [
+            {
+                "stage_id": "research",
+                "feedback": "只调整证据等级",
+                "artifact_id": bound_artifact["artifact_id"],
+                "artifact_sha256": bound_artifact["sha256"],
+            }
+        ],
+        "stage_outputs": [
+            {"task_id": "research", "artifact": bound_artifact},
+            {"task_id": "research", "artifact": newer_artifact},
+        ],
+    }
+
+    assert routes._expert_team_enterprise_gateway_request(tmp_path, run) == {"captured": True}
+    assert captured["revision_feedback"]["previous_artifact_ref"] == {
+        "artifact_id": bound_artifact["artifact_id"],
+        "sha256": bound_artifact["sha256"],
+    }
+    assert captured["revision_feedback"]["previous_artifact"] == bound_artifact
 
 
 def test_unknown_or_system_stage_fails_closed():
