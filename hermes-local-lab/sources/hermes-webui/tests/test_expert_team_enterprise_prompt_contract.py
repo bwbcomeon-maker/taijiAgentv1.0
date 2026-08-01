@@ -266,6 +266,9 @@ def test_writing_plan_prompt_spells_out_the_exact_wire_format_and_nested_payload
     assert "<<<TAIJI_META_END>>>" in system
     assert "<<<TAIJI_DOCUMENT_V1>>>" not in system
     assert "不得使用 Markdown 代码围栏" in system
+    assert "所有结束标记最右侧都必须是三个连续的 ASCII >" in system
+    assert "不得在最后一个 > 前停止" in system
+    assert "最后一个结束标记后输出一个换行符" in system
     for required_nested_field in (
         '"section_id"',
         '"purpose"',
