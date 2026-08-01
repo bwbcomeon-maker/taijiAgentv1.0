@@ -45,6 +45,7 @@ def _run_v3_hooks(body: str) -> dict:
               deliveryBindingFingerprint, conflictDeliveryDraftMatches, restoreConflictDeliveryDraft,
               draftFingerprint, captureWorkbenchDraft, restoreWorkbenchDraft, stateCopyFor, statePanel, workbenchHtml,
               classifyDocumentTaskPrompt,
+              requestV3Confirmation,
               replacementExample,
               returnSuggestionToComposer, continueRegularChat,
               clearSuggestionComposerAfterLaunch,
@@ -103,6 +104,49 @@ def test_v3_owns_one_scoped_namespace_and_uses_delegated_events():
     assert "onclick=" not in script
     assert "window._activeExpertTeamStatusCard" not in script
     assert "writeflowStatusDock" not in script
+
+
+def test_v3_source_removal_uses_accessible_fail_closed_confirmation():
+    result = _run_v3_hooks(
+        """
+        (async()=>{
+          const calls=[];
+          context.window.showConfirmDialog=async options=>{calls.push(options);return true;};
+          const confirmed=await hooks.requestV3Confirmation({
+            title:'移除这份资料？',confirmLabel:'移除资料',cancelLabel:'保留资料',danger:true,
+          });
+          delete context.window.showConfirmDialog;
+          const unavailable=await hooks.requestV3Confirmation({title:'unavailable'});
+          context.window.showConfirmDialog=async()=>{throw new Error('dialog failed');};
+          const failed=await hooks.requestV3Confirmation({title:'failed'});
+          console.log(JSON.stringify({confirmed,unavailable,failed,calls}));
+        })();
+        """
+    )
+
+    assert result == {
+        "confirmed": True,
+        "unavailable": False,
+        "failed": False,
+        "calls": [
+            {
+                "title": "移除这份资料？",
+                "confirmLabel": "移除资料",
+                "cancelLabel": "保留资料",
+                "danger": True,
+                "focusCancel": True,
+            }
+        ],
+    }
+
+    script = _read(SCRIPT)
+    remove_source = script[
+        script.index("if (action === 'remove-source')") : script.index("if (action === 'save-brief')")
+    ]
+    assert "await requestV3Confirmation" in remove_source
+    assert "window.confirm" not in remove_source
+    assert "cancelLabel: '保留资料'" in remove_source
+    assert "danger: true" in remove_source
 
 
 def test_v3_free_form_document_intent_suggests_a_confirmable_task_without_hijacking_questions():

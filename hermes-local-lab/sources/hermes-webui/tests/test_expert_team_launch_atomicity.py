@@ -792,6 +792,31 @@ def test_launch_response_never_exposes_internal_transaction_markers(launch_env):
     assert "start_transaction_id" not in serialized
 
 
+def test_launch_visibility_keeps_legacy_duck_session_without_marker_public(
+    launch_env,
+):
+    routes, _models, _sessions, _workspace = launch_env
+    legacy_session = type("LegacySession", (), {})()
+
+    assert routes._expert_team_launch_session_is_public(
+        "legacy-session",
+        legacy_session,
+    ) is True
+
+
+def test_launch_visibility_rejects_explicit_malformed_session_marker(
+    launch_env,
+):
+    routes, _models, _sessions, _workspace = launch_env
+    malformed_session = type("MalformedSession", (), {})()
+    malformed_session.expert_team_launch_transaction_id = {"invalid": True}
+
+    assert routes._expert_team_launch_session_is_public(
+        "malformed-session",
+        malformed_session,
+    ) is False
+
+
 def test_missing_launch_reverse_binding_fails_closed_for_every_public_read(
     launch_env,
 ):

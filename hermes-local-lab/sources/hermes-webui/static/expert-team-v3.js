@@ -153,6 +153,22 @@
     return `expert-team-v3:${kind}:${id}`;
   }
 
+  async function requestV3Confirmation(options = {}) {
+    const dialog = typeof window.showConfirmDialog === 'function'
+      ? window.showConfirmDialog
+      : null;
+    if (!dialog) {
+      setLive('确认弹窗尚未就绪，未执行此操作。', true);
+      return false;
+    }
+    try {
+      return Boolean(await dialog({ ...options, focusCancel: true }));
+    } catch (_error) {
+      setLive('无法打开确认弹窗，未执行此操作。', true);
+      return false;
+    }
+  }
+
   function classifyDocumentTaskPrompt(value) {
     const prompt = String(value || '').replace(/\s+/g, ' ').trim();
     if (prompt.length < 4 || /^(?:请问[，,\s]*)?(?:怎么|如何|为什么|是否|能否|可否)/.test(prompt)) return null;
@@ -1308,7 +1324,14 @@
     if (action === 'choose-source-file') { workbenchRoot().querySelector('[data-et3-source-file]')?.click(); return true; }
     if (action === 'add-text-source') return addTextSource(button);
     if (action === 'remove-source') {
-      if (!window.confirm('移除后该资料不再用于本任务，确定继续吗？')) return false;
+      const confirmed = await requestV3Confirmation({
+        title: '移除这份资料？',
+        message: '移除后，该资料不再用于本任务，已保存的历史记录不受影响。',
+        confirmLabel: '移除资料',
+        cancelLabel: '保留资料',
+        danger: true,
+      });
+      if (!confirmed) return false;
       return mutate('/api/expert-teams/brief/sources/remove', { expected_brief_revision: Number(state.card.brief?.revision || 0), source_id: button.dataset.sourceId }, button);
     }
     if (action === 'save-brief') return saveBrief(button, false);

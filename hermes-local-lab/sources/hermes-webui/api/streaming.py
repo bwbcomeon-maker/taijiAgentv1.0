@@ -5,6 +5,7 @@ Includes Sprint 10 cancel support via CANCEL_FLAGS.
 import base64
 import contextlib
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -2738,6 +2739,15 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             s.pending_attachments = []
             s.pending_started_at = None
             try:
+                # Session.save() enforces sidecar CAS.  Rebinding the object to
+                # old_sid must also bind its write authority to the exact old
+                # sidecar revision read above; a digest from the continuation
+                # SID must never authorize this snapshot write.  save() then
+                # rechecks the digest while holding old_sid's truth lock, so a
+                # concurrent writer still wins with SessionWriteConflict.
+                s._loaded_sidecar_sha256 = hashlib.sha256(
+                    existing_text.encode('utf-8')
+                ).hexdigest()
                 # skip_index=False so the snapshot appears in _index.json with
                 # the pre_compression_snapshot marker. The sidebar projection
                 # (#2285) reads that marker to hide the snapshot from active
@@ -2749,6 +2759,11 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 )
             finally:
                 s.session_id = saved_sid
+                # CAS authority is identity-specific.  When the caller had
+                # already rotated to a new SID, discard old_sid's digest so the
+                # continuation may create its sidecar for the first time.
+                if saved_sid != old_sid:
+                    s.__dict__.pop('_loaded_sidecar_sha256', None)
                 s.pre_compression_snapshot = saved_snapshot
                 s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
@@ -6786,7 +6801,6 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
-                    s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls
@@ -6817,6 +6831,13 @@ def _run_agent_streaming(
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
                     _preserve_pre_compression_snapshot(s, old_sid)
+                    # Only after the old snapshot is durably preserved does the
+                    # in-memory session assume the continuation identity.  The
+                    # old sidecar digest cannot authorize writes to new_sid;
+                    # clearing it is what permits the continuation's first CAS-
+                    # protected create while all later saves remain guarded.
+                    s.session_id = new_sid
+                    s.__dict__.pop('_loaded_sidecar_sha256', None)
                     # The continuation is the live/tip session, not another archived
                     # snapshot. If the in-memory object was itself loaded from a
                     # pre-compression snapshot (possible on repeated compression chains

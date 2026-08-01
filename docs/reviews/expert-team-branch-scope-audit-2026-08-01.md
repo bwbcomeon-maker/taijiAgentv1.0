@@ -1,12 +1,12 @@
 # 专家团分支范围审计
 
-> 审计日期：2026-08-01。比较范围：本地 `main...codex/expert-team-standalone-core`。本表包含本审计文件自身，因此对应拟提交 PR 的 176 个唯一路径。路径分类用于审查导航，不替代逐行代码审查。
+> 审计日期：2026-08-01。比较范围：本地 `main...codex/expert-team-standalone-core` 及本轮候选工作树。本表包含本审计文件自身，因此对应拟提交 PR 的 182 个唯一路径。路径分类用于审查导航，不替代逐行代码审查。
 
 ## 结论
 
 - 专家团直接实现：38 个路径。
 - 专家团必要基础设施：37 个路径。
-- 测试、模板与文档：101 个路径。
+- 测试、模板与文档：107 个路径。
 - 无关变更：0 个路径。
 - 当前未发现应从专家团成果排除的无关路径；若 PR 审查发现类别归属不成立，应在原分支移除后重新跑门禁。
 
@@ -99,7 +99,7 @@
 - `hermes-local-lab/sources/hermes-webui/static/style.css`
 - `hermes-local-lab/sources/hermes-webui/static/ui.js`
 
-## 测试、模板与文档（101）
+## 测试、模板与文档（107）
 
 - `apps/taiji-desktop/tests/source-provenance-launcher.test.js`
 - `docs/reviews/expert-team-branch-scope-audit-2026-08-01.md`
@@ -191,10 +191,16 @@
 - `hermes-local-lab/sources/hermes-webui/tests/test_expert_team_visual_assets.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_expert_team_zero_source_contract.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_issue765_streaming_persistence.py`
+- `hermes-local-lab/sources/hermes-webui/tests/test_issue2223_compression_no_rename.py`
+- `hermes-local-lab/sources/hermes-webui/tests/test_issue3256_context_length_default_only_guard.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_memory_session_lifecycle_generation.py`
+- `hermes-local-lab/sources/hermes-webui/tests/test_metadata_save_wipe_1558.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_model_config_frontend.py`
+- `hermes-local-lab/sources/hermes-webui/tests/test_notify_on_complete_webui.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_phase2_gateway_context_persistence.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_phase2_session_lifecycle.py`
+- `hermes-local-lab/sources/hermes-webui/tests/test_product_error_mapping.py`
+- `hermes-local-lab/sources/hermes-webui/tests/test_regressions.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_session_index.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_taiji_license_routes.py`
 - `hermes-local-lab/sources/hermes-webui/tests/test_taiji_recent_controls.py`

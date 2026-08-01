@@ -12,12 +12,14 @@ def test_webui_drains_only_matching_background_completion_events():
     assert "completion_queue.put(evt)" in src
 
 
-def test_webui_injects_process_notifications_without_persisting_them_as_user_text():
+def test_webui_injects_process_notifications_only_for_ordinary_chat_without_persisting_them():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
-    assert "_process_notifications = _drain_webui_process_notifications(session_id)" in src
+    assert "[] if strict_turn else _drain_webui_process_notifications(session_id)" in src
     assert "[*_process_notifications, msg_text]" in src
-    prepare_idx = src.index("user_message = prepare_webui_chat_input(")
+    assert 'str(turn_envelope.model_messages[1]["content"])' in src
+    assert "if strict_turn" in src
+    prepare_idx = src.index("else prepare_webui_chat_input(")
     run_idx = src.index("result = agent.run_conversation(", prepare_idx)
     assert prepare_idx < run_idx
     assert "except WebUIChatInputError as exc:" in src[prepare_idx:run_idx]

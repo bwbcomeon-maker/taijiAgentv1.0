@@ -3679,9 +3679,27 @@ def _expert_team_launch_session_is_public(session_id: str, session=None) -> bool
             session = Session.load_metadata_only(normalized)
         except Exception:
             return False
-    marker = str(
-        getattr(session, "expert_team_launch_transaction_id", "") or ""
-    ) if session is not None else ""
+    marker = ""
+    if session is not None:
+        try:
+            raw_marker = vars(session).get(
+                "expert_team_launch_transaction_id"
+            )
+        except TypeError:
+            raw_marker = getattr(
+                session,
+                "expert_team_launch_transaction_id",
+                None,
+            )
+        if raw_marker is not None:
+            # Canonical Session loading normalizes this durable field to
+            # ``str | None``.  Reject an explicitly malformed value, while an
+            # object that does not persist the field remains an ordinary
+            # pre-launch Session (important for alternate loaders and legacy
+            # duck-typed callers).
+            if not isinstance(raw_marker, str):
+                return False
+            marker = raw_marker.strip()
     return not marker or launch_storage.is_launch_marker_committed(
         normalized,
         marker,
@@ -13405,8 +13423,6 @@ def handle_get(handler, parsed) -> bool:
         sid = query.get("session_id", [""])[0]
         if not sid:
             return j(handler, {"error": "session_id is required"}, status=400)
-        if not _expert_team_launch_session_is_public(sid):
-            return bad(handler, "Session not found", 404)
         # ?messages=0 skips the message payload for fast session switching.
         # The frontend uses this when switching conversations in the sidebar
         # (only needs metadata). The full message array is loaded lazily
@@ -13434,6 +13450,12 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            # Apply launch visibility to the Session returned by this route's
+            # canonical loader.  A pre-load check would perform a second,
+            # different Session read and bypass alternate/test loaders.  This
+            # post-load gate still runs before any Session data is processed or
+            # returned, and the durable launch marker keeps missing reverse
+            # bindings fail closed.
             if not _expert_team_launch_session_is_public(sid, s):
                 return bad(handler, "Session not found", 404)
             if load_messages:

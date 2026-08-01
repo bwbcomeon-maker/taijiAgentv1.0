@@ -46,6 +46,9 @@
 ### Fixed
 
 - Fixed standalone expert-team warnings being counted as blocking failures. Warnings now enter human review, while only blocking/error issues stop a stage; legacy warning-only results can resume without another Provider call.
+- Fixed ordinary and legacy sessions being hidden by the expert-team launch visibility gate. Session reads now apply the gate to the route's canonical loaded Session, while malformed launch markers and missing expert-team reverse bindings still fail closed.
+- Fixed context-compression snapshot persistence carrying one session sidecar's CAS digest across a rotated session id. The old snapshot is now bound to its exact durable revision before the continuation id is adopted, preserving concurrent writes and allowing the continuation's first save.
+- Replaced the expert-team source-removal browser confirmation with the shared accessible app dialog. Cancellation receives the initial focus, keyboard focus returns to the triggering control, and dialog failures leave the source untouched.
 - Fixed expert-team protocol JSON appearing in live chat, preserved invalid-stage content being hidden behind generic errors, and evidence failures offering a blind retry that could not add sources.
 - Fixed expert-team polling interrupting active IME composition and losing focus, selection, or scroll state while users edit long Chinese forms.
 - Fixed standalone DOCX delivery losing required sections or carrying enterprise/template residue by binding required sections through capability, Brief, prompt, artifact, Markdown, template, manifest, and final package validation.
