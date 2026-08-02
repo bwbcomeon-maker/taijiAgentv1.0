@@ -16,6 +16,7 @@ KNOWN_SEVERITIES = frozenset({"blocking", "error", "warning", "info"})
 _ZERO_SOURCE_PLACEHOLDER_DOCUMENT_TYPES = frozenset(
     {"work_report", "meeting_minutes", "notice", "plan", "summary_plan"}
 )
+_PLACEHOLDER_REVIEW_CATEGORIES = frozenset({"brief", "evidence"})
 
 
 def _known_issues(issues: Iterable[object] | None) -> list[dict]:
@@ -89,6 +90,24 @@ def artifact_blocks_progress(artifact: dict | None) -> bool:
     return effective["status"] != "valid" or effective["blocking_count"] != 0
 
 
+def brief_declares_labeled_placeholders(brief: dict | None) -> bool:
+    """Return whether the frozen Brief declares the safe placeholder policy."""
+
+    candidate = brief if isinstance(brief, dict) else {}
+    source_policy = (
+        candidate.get("source_policy")
+        if isinstance(candidate.get("source_policy"), dict)
+        else {}
+    )
+    return (
+        str(candidate.get("task_mode") or "") == "create"
+        and str(candidate.get("document_type") or "")
+        in _ZERO_SOURCE_PLACEHOLDER_DOCUMENT_TYPES
+        and source_policy.get("unknown_fact_action")
+        == "allow_labeled_placeholder"
+    )
+
+
 def brief_allows_labeled_placeholders(
     brief: dict | None,
     source_requirement: dict | None,
@@ -97,23 +116,13 @@ def brief_allows_labeled_placeholders(
 ) -> bool:
     """Return the frozen zero-source policy for ordinary standalone drafting."""
 
-    candidate = brief if isinstance(brief, dict) else {}
     requirement = source_requirement if isinstance(source_requirement, dict) else {}
-    source_policy = (
-        candidate.get("source_policy")
-        if isinstance(candidate.get("source_policy"), dict)
-        else {}
-    )
     minimum_ready = requirement.get("minimum_ready")
     return (
         str(product_mode or "") == "standalone"
         and type(minimum_ready) is int
         and minimum_ready == 0
-        and str(candidate.get("task_mode") or "") == "create"
-        and str(candidate.get("document_type") or "")
-        in _ZERO_SOURCE_PLACEHOLDER_DOCUMENT_TYPES
-        and source_policy.get("unknown_fact_action")
-        == "allow_labeled_placeholder"
+        and brief_declares_labeled_placeholders(brief)
     )
 
 
@@ -154,6 +163,54 @@ def review_issue_blocks_progress(
         issue,
         product_mode=product_mode,
     ) in BLOCKING_SEVERITIES
+
+
+def review_check_blocks_progress(
+    brief: dict | None,
+    source_requirement: dict | None,
+    *,
+    check_id: str,
+    status: str,
+    review_issues: Iterable[object] | None,
+    product_mode: str,
+) -> bool:
+    """Interpret a failed review check through the frozen source contract.
+
+    A provider can conservatively mark ``fact_traceability`` failed when the
+    only unresolved items are explicitly labelled missing facts.  For the five
+    zero-source standalone drafting profiles, those placeholders are an
+    intentional product contract, not unsupported claims.  Every other failed
+    check remains fail closed.
+    """
+
+    if str(status or "") != "failed":
+        return False
+    if str(check_id or "") != "fact_traceability":
+        return True
+    if not brief_allows_labeled_placeholders(
+        brief,
+        source_requirement,
+        product_mode=product_mode,
+    ):
+        return True
+
+    open_issues = [
+        issue
+        for issue in review_issues or []
+        if isinstance(issue, dict) and issue.get("status") == "open"
+    ]
+    if not open_issues:
+        return True
+    return any(
+        str(issue.get("category") or "") not in _PLACEHOLDER_REVIEW_CATEGORIES
+        or review_issue_blocks_progress(
+            brief,
+            source_requirement,
+            issue,
+            product_mode=product_mode,
+        )
+        for issue in open_issues
+    )
 
 
 def public_stage_issues(issues: Iterable[object] | None) -> list[dict]:

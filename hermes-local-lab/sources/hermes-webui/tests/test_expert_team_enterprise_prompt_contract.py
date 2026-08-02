@@ -16,6 +16,7 @@ def _brief(*, classification="internal"):
         "confirmed_revision": 1,
         "confirmed_sha256": "b" * 64,
         "document_type": "work_report",
+        "task_mode": "create",
         "exact_title": "迎峰度夏保供电重点工作月度汇报",
         "purpose": "向分管领导汇报进展",
         "audience": "公司分管领导",
@@ -120,7 +121,7 @@ def test_prompt_is_two_role_separated_messages_with_canonical_data_envelope():
 
     assert request["tools_disabled"] is True
     assert [message["role"] for message in request["messages"]] == ["system", "user"]
-    assert request["system_template_version"] == "taiji-stage-system/v11"
+    assert request["system_template_version"] == "taiji-stage-system/v12"
     assert request["system_template_sha256"] == hashlib.sha256(request["messages"][0]["content"].encode()).hexdigest()
     assert request["data_envelope_sha256"] == hashlib.sha256(request["messages"][1]["content"].encode()).hexdigest()
     envelope = json.loads(request["messages"][1]["content"])

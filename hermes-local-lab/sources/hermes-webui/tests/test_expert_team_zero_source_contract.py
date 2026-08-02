@@ -219,6 +219,28 @@ def test_zero_source_work_report_confirms_and_materials_dispatch_binds_empty_sna
     assert ledger["payload"]["sources"] == []
 
 
+def test_zero_source_review_prompt_distinguishes_safe_placeholders_from_unsupported_facts():
+    from api import expert_teams
+    from api.expert_teams.prompts import _system_message
+
+    run = expert_teams.build_standalone_expert_team_run(
+        {
+            "session_id": "zero-source-review-prompt",
+            "launch_profile_id": "content-work-report",
+            "prompt": "起草部门月度工作汇报",
+            "idempotency_key": "zero-source-review-prompt-launch",
+        },
+        run_id="et-zero-source-review-prompt",
+    )
+
+    system = _system_message("reviewed_document", run["document_brief"])
+
+    assert "只是将缺失事实明确标为“待补充”或“需人工确认”" in system
+    assert "fact_traceability 必须为 passed" in system
+    assert "正文仍包含实际无依据事实" in system
+    assert "blocking 或 error" in system
+
+
 def test_empty_source_snapshot_remains_fail_closed_without_server_authorization(tmp_path):
     from api.expert_teams.source_context import (
         SourceContextError,

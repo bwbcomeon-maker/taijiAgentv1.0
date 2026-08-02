@@ -377,7 +377,7 @@ def test_zero_source_standalone_brief_placeholders_do_not_become_delivery_blocke
             "asset_requests": [],
             "open_issues": [unresolved],
             "review_report": {
-                "checks": _review_checks(),
+                "checks": _review_checks(failed="fact_traceability"),
                 "issues": [unresolved],
                 "unresolved_issue_ids": [unresolved["issue_id"]],
             },
@@ -403,6 +403,21 @@ def test_zero_source_standalone_brief_placeholders_do_not_become_delivery_blocke
     assert allowed["status"] == "passed"
     assert "review_issue_unresolved" not in {
         item["code"] for item in allowed["issues"]
+    }
+    assert "review_check_failed" not in {
+        item["code"] for item in allowed["issues"]
+    }
+
+    sources_required = evaluate_semantic_gates(
+        brief=brief,
+        artifact=artifact,
+        approved_inputs=[],
+        source_requirement={"minimum_ready": 1},
+        product_mode="standalone",
+    )
+    assert sources_required["status"] == "failed"
+    assert "review_check_failed" in {
+        item["code"] for item in sources_required["issues"]
     }
 
     strict = deepcopy(artifact)

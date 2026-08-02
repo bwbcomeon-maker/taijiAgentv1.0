@@ -271,9 +271,22 @@ def _review_contract_issues(
         if isinstance(review_report.get("checks"), dict)
         else {}
     )
+    review_issues = review_report.get("issues") or []
+    from .issue_policy import (
+        review_check_blocks_progress,
+        review_issue_blocks_progress,
+    )
+
     issues = []
     for check_id, status in checks.items():
-        if status == "failed":
+        if review_check_blocks_progress(
+            brief,
+            source_requirement,
+            check_id=str(check_id),
+            status=str(status),
+            review_issues=review_issues,
+            product_mode=product_mode,
+        ):
             issues.append(
                 _semantic_issue(
                     "review_check_failed",
@@ -299,9 +312,7 @@ def _review_contract_issues(
                     f"最终复核没有确认关键检查：{check_id}",
                 )
             )
-    from .issue_policy import review_issue_blocks_progress
-
-    for item in review_report.get("issues") or []:
+    for item in review_issues:
         if (
             isinstance(item, dict)
             and item.get("status") == "open"

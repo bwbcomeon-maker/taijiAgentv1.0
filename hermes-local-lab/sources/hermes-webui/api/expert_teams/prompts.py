@@ -9,9 +9,10 @@ import json
 from api.expert_teams.catalog import get_template
 from api.expert_teams.contracts import brief_digest, required_sections_for_brief
 from api.expert_teams.data_egress import authorize_actual_provider
+from api.expert_teams.issue_policy import brief_declares_labeled_placeholders
 
 
-SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v11"
+SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v12"
 DATA_ENVELOPE_VERSION = "TAIJI_STAGE_INPUT_V2"
 _SOURCE_STAGES = {
     ("content-creator-team", "materials"),
@@ -410,11 +411,7 @@ def _system_message(
             "unknown_fields": "forbidden",
         }
     )
-    source_policy = brief.get("source_policy") if isinstance(brief, dict) else {}
-    allows_placeholders = (
-        isinstance(source_policy, dict)
-        and source_policy.get("unknown_fact_action") == "allow_labeled_placeholder"
-    )
+    allows_placeholders = brief_declares_labeled_placeholders(brief)
     missing_fact_rule = (
         "缺失的事实和数据不得编造，必须写入本阶段输出合同允许的缺口字段"
         "（如 assumptions、gaps、search_gaps、open_questions 或 open_issues），"
@@ -458,6 +455,15 @@ def _system_message(
         "review_report.issues 可以额外包含本次审稿发现且 status=resolved 的问题；"
         "unresolved_issue_ids 必须与 review_report.issues 中 status=open 的 issue_id 集合完全一致。"
         if artifact_type in {"reviewed_document", "reviewed_research_document"}
+        else ""
+    )
+    placeholder_review_rule = (
+        "对允许标注占位的零资料起草任务，如果正文没有实际无依据事实，"
+        "只是将缺失事实明确标为“待补充”或“需人工确认”，"
+        "相应问题必须保持为 warning 或 info，fact_traceability 必须为 passed；"
+        "只有正文仍包含实际无依据事实时，fact_traceability 才能为 failed，"
+        "并且必须同时给出 severity 为 blocking 或 error、category 为 evidence 的问题。"
+        if allows_placeholders and artifact_type == "reviewed_document"
         else ""
     )
     task_mode = str(brief.get("task_mode") or "").strip()
@@ -564,6 +570,7 @@ def _system_message(
         f"{required_section_rule}\n"
         f"{usage_binding_rule}\n"
         f"{review_quality_rule}\n"
+        f"{placeholder_review_rule}\n"
         f"{task_specific_rule}\n"
         f"{revision_rule}\n"
         "DOCUMENT 不得包含工作日志、专家名称、Stage、复核交付或聊天建议；"
