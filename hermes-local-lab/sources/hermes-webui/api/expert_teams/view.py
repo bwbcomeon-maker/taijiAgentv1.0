@@ -634,23 +634,81 @@ def _semantic_recheck_allowed(run: dict) -> bool:
         for item in validation.get("issues") or []
         if isinstance(item, dict)
     ]
-    if not issues or any(
-        str(item.get("code") or "") != "review_issue_unresolved"
-        for item in issues
-    ):
+    issue_codes = {str(item.get("code") or "") for item in issues}
+    compatible_codes = {"review_issue_unresolved", "review_check_failed"}
+    if not issue_codes or not issue_codes.issubset(compatible_codes):
         return False
     profile = (
         run.get("launch_profile_snapshot")
         if isinstance(run.get("launch_profile_snapshot"), dict)
         else {}
     )
-    from .issue_policy import brief_allows_labeled_placeholders
-
-    return brief_allows_labeled_placeholders(
-        run.get("document_brief"),
-        profile.get("source_requirement"),
-        product_mode=str(run.get("product_mode") or ""),
+    from .issue_policy import (
+        brief_allows_labeled_placeholders,
+        review_check_blocks_progress,
+        review_issue_blocks_progress,
     )
+
+    brief = run.get("document_brief")
+    source_requirement = profile.get("source_requirement")
+    product_mode = str(run.get("product_mode") or "")
+    if not brief_allows_labeled_placeholders(
+        brief,
+        source_requirement,
+        product_mode=product_mode,
+    ):
+        return False
+
+    artifact = _current_stage_artifact(run)
+    payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+    review_report = (
+        payload.get("review_report")
+        if isinstance(payload.get("review_report"), dict)
+        else {}
+    )
+    review_issues = [
+        item
+        for item in review_report.get("issues") or []
+        if isinstance(item, dict) and item.get("status") == "open"
+    ]
+    if "review_issue_unresolved" in issue_codes and (
+        not review_issues
+        or any(
+            review_issue_blocks_progress(
+                brief,
+                source_requirement,
+                item,
+                product_mode=product_mode,
+            )
+            for item in review_issues
+        )
+    ):
+        return False
+
+    if "review_check_failed" in issue_codes:
+        checks = (
+            review_report.get("checks")
+            if isinstance(review_report.get("checks"), dict)
+            else {}
+        )
+        failed_checks = [
+            (str(check_id), str(status))
+            for check_id, status in checks.items()
+            if status == "failed"
+        ]
+        if not failed_checks or any(
+            review_check_blocks_progress(
+                brief,
+                source_requirement,
+                check_id=check_id,
+                status=status,
+                review_issues=review_issues,
+                product_mode=product_mode,
+            )
+            for check_id, status in failed_checks
+        ):
+            return False
+    return True
 
 
 def _stage_review(run: dict, state: str) -> dict:

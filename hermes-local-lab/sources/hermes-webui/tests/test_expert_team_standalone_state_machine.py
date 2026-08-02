@@ -173,6 +173,7 @@ def _reviewed_document_artifact(
     brief=None,
     deliverable_markdown=None,
     review_issues=None,
+    failed_review_check=None,
 ):
     from api.expert_teams.stage_artifacts import build_stage_artifact
 
@@ -197,7 +198,11 @@ def _reviewed_document_artifact(
                 "schema_version": "content-review-report/v1",
                 "checks": {
                     "brief_alignment": "passed",
-                    "fact_traceability": "passed",
+                    "fact_traceability": (
+                        "failed"
+                        if failed_review_check == "fact_traceability"
+                        else "passed"
+                    ),
                     "document_purity": "passed",
                     "confidentiality": "passed",
                     "document_structure": "passed",
@@ -241,6 +246,7 @@ def _install_review_artifact(
     deliverable_markdown=None,
     brief=None,
     review_issues=None,
+    failed_review_check=None,
 ):
     from api import expert_teams
     from api.expert_teams.storage import read_run, write_run
@@ -253,6 +259,7 @@ def _install_review_artifact(
             brief=brief,
             deliverable_markdown=deliverable_markdown,
             review_issues=review_issues,
+            failed_review_check=failed_review_check,
         )
         if stage_index == 3
         else _writing_plan_artifact(attempt=attempt, brief=brief)
@@ -928,6 +935,84 @@ def test_warning_policy_rechecks_same_reviewed_artifact_without_a_second_model_a
     confirmed = expert_teams.confirm_standalone_expert_team_stage(
         workspace,
         _binding(reopened, key="recheck-same-polish-artifact"),
+    )
+
+    assert confirmed["workflow_state"] == "delivery_validation_required"
+    assert confirmed["current_stage_artifact_ref"] == original_ref
+    assert confirmed["stage_attempt_counters"] == original_attempts
+    assert confirmed["semantic_validation"] == {}
+    assert confirmed["last_validation_error"] == ""
+    assert len(confirmed["stage_artifacts"]) == 1
+
+
+def test_warning_policy_rechecks_legacy_failed_fact_traceability_without_a_second_model_attempt(
+    standalone_env,
+):
+    from api import expert_teams
+    from api.expert_teams.storage import read_run, write_run
+
+    _routes, workspace, _session_id, run_id = _launch(
+        standalone_env,
+        profile_id="content-work-report",
+        key="standalone-zero-source-traceability-recheck-launch",
+    )
+    sections = ["工作开展情况", "存在问题", "下一步工作安排"]
+    brief = _confirmed_brief(
+        required_sections=sections,
+        source_policy={
+            "mode": "provided_only",
+            "unknown_fact_action": "allow_labeled_placeholder",
+        },
+    )
+    issue = {
+        "issue_id": "ISSUE-EVIDENCE-001",
+        "severity": "warning",
+        "category": "evidence",
+        "section_id": "SEC-1",
+        "description": "重点任务和关键指标需人工补充",
+        "resolution": None,
+        "status": "open",
+    }
+    markdown = f"# {brief['exact_title']}\n\n" + "\n\n".join(
+        f"## {section}\n\n本节事实需人工确认。" for section in sections
+    )
+    reviewed = _install_review_artifact(
+        workspace,
+        run_id,
+        stage_index=3,
+        brief=brief,
+        deliverable_markdown=markdown,
+        review_issues=[issue],
+        failed_review_check="fact_traceability",
+    )
+    persisted = read_run(workspace, run_id)
+    persisted["semantic_validation"] = {
+        "schema_version": "expert-semantic-confirmation/v1",
+        "status": "failed",
+        "artifact_id": reviewed["current_stage_artifact_ref"]["artifact_id"],
+        "artifact_sha256": reviewed["current_stage_artifact_ref"]["sha256"],
+        "blocking_count": 1,
+        "issues": [
+            {
+                "code": "review_check_failed",
+                "severity": "blocking",
+                "message": "复核检查未通过：fact_traceability",
+                "suggested_action": "提交修改意见后重新生成当前阶段",
+            }
+        ],
+    }
+    persisted["last_validation_error"] = "当前阶段内容检查未通过"
+    reopened = expert_teams.read_expert_team_run(
+        workspace,
+        write_run(workspace, persisted)["run_id"],
+    )
+
+    assert reopened["view"]["allowed_actions"] == ["stage_recheck", "stage_revise"]
+    original_ref = deepcopy(reopened["current_stage_artifact_ref"])
+    original_attempts = deepcopy(reopened["stage_attempt_counters"])
+    confirmed = expert_teams.confirm_standalone_expert_team_stage(
+        workspace,
+        _binding(reopened, key="recheck-same-traceability-artifact"),
     )
 
     assert confirmed["workflow_state"] == "delivery_validation_required"
