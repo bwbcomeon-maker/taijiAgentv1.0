@@ -166,7 +166,11 @@ def build_document_brief(team_id, payload, *, now) -> dict:
     expected_template = capability["render_template_id"]
     render_template_id = _text(control.get("render_template_id")) or expected_template
     if render_template_id != expected_template:
-        raise ContractError("render_template_mismatch", "document_control.render_template_id", "文种与交付模板不兼容")
+        raise ContractError(
+            "render_template_mismatch",
+            "document_control.render_template_id",
+            TASK_CONFIGURATION_ERROR_MESSAGE,
+        )
     control["render_template_id"] = render_template_id
 
     source_policy = _deep_merge(defaults.get("source_policy"), seed.get("source_policy"))
@@ -387,7 +391,13 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
             errors.append(_error("document_control.classification_label", "required", "请填写自定义密级标签"))
     expected_template = capability.get("render_template_id") if isinstance(capability, dict) else None
     if control.get("render_template_id") != expected_template:
-        errors.append(_error("document_control.render_template_id", "render_template_mismatch", "文种与模板不兼容"))
+        errors.append(
+            _error(
+                "document_control.render_template_id",
+                "render_template_mismatch",
+                TASK_CONFIGURATION_ERROR_MESSAGE,
+            )
+        )
 
     if isinstance(capability, dict):
         required_fields = []

@@ -169,6 +169,39 @@ def test_contract_anomalies_use_actionable_configuration_copy():
     )
     assert document_type_error["message"] == TASK_CONFIGURATION_ERROR_MESSAGE
 
+    mismatched_payload = _payload()
+    mismatched_payload["document_brief_seed"]["document_control"] = {
+        "render_template_id": "general-proposal",
+    }
+    with pytest.raises(ContractError) as mismatch:
+        build_document_brief(
+            "content-creator-team",
+            mismatched_payload,
+            now="2026-07-15T10:00:00+08:00",
+        )
+    assert mismatch.value.code == "render_template_mismatch"
+    assert mismatch.value.message == TASK_CONFIGURATION_ERROR_MESSAGE
+
+    brief = build_document_brief(
+        "content-creator-team",
+        _payload(),
+        now="2026-07-15T10:00:00+08:00",
+    )
+    brief["document_control"]["render_template_id"] = "general-proposal"
+    validation = validate_document_brief(
+        brief,
+        runtime_capabilities=runtime,
+        source_registry=sources,
+        model_policy_registry=policies,
+        now="2026-07-15T10:00:00+08:00",
+    )
+    mismatch_error = next(
+        item
+        for item in validation["field_errors"]
+        if item["code"] == "render_template_mismatch"
+    )
+    assert mismatch_error["message"] == TASK_CONFIGURATION_ERROR_MESSAGE
+
 
 def test_digest_is_stable_and_excludes_lifecycle_fields_but_includes_canary():
     from api.expert_teams.contracts import brief_digest, build_document_brief, confirm_document_brief
