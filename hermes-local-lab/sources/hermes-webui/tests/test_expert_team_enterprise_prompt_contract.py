@@ -380,6 +380,41 @@ def test_retry_prompt_for_unresolved_issue_mismatch_names_the_exact_repair():
     assert "unresolved_issue_ids 必须等于这些 open 问题的 issue_id 集合" in correction
 
 
+@pytest.mark.parametrize(
+    "artifact_type",
+    ["research_document_draft", "reviewed_research_document"],
+)
+def test_research_document_prompt_requires_one_claim_usage_row_per_claim(
+    artifact_type,
+):
+    from api.expert_teams.prompts import _system_message
+
+    system = _system_message(artifact_type, _run()["document_brief"])
+
+    assert "claim_usage 中每个 claim_id 必须且只能出现一次" in system
+    assert "不得因同一 claim 在多个正文章节被引用而重复列出" in system
+
+
+def test_retry_prompt_for_duplicate_claim_usage_names_the_exact_repair():
+    from api.expert_teams.prompts import _system_message
+
+    system = _system_message(
+        "reviewed_research_document",
+        _run()["document_brief"],
+        previous_protocol_error={
+            "code": "claim_usage_duplicate",
+            "field": "payload.claim_usage.10.claim_id",
+        },
+    )
+    correction = system.split("[RETRY CORRECTION]", 1)[1].split(
+        "[EXACT RESPONSE FORMAT]", 1
+    )[0]
+
+    assert "删除重复的 claim_usage 行" in correction
+    assert "每个 claim_id 仅保留一行" in correction
+    assert "不得删除正文中已经存在的合法引用标记" in correction
+
+
 def test_retry_prompt_rejects_tampered_error_text_instead_of_promoting_it_to_system_content():
     from api.expert_teams.prompts import build_stage_gateway_request
 

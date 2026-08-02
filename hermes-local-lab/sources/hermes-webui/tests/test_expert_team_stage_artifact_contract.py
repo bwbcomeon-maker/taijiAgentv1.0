@@ -341,6 +341,64 @@ def test_research_charter_and_outline_use_exact_nested_schemas():
     assert artifact["payload"]["sections"][0]["claim_ids"] == ["CLM-1"]
 
 
+def test_research_document_rejects_duplicate_claim_usage_before_review():
+    from api.expert_teams.stage_artifacts import (
+        StageArtifactError,
+        build_stage_artifact,
+        parse_stage_response,
+    )
+
+    payload = {
+        "title": _research_brief()["exact_title"],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "研究问题"},
+            {"section_id": "SEC-2", "heading": "证据"},
+            {"section_id": "SEC-3", "heading": "分析"},
+            {"section_id": "SEC-4", "heading": "结论边界"},
+            {"section_id": "SEC-5", "heading": "引用"},
+        ],
+        "claim_usage": [
+            {
+                "claim_id": "CLM-1",
+                "section_id": "SEC-2",
+                "citation_marker": "[SRC-001]",
+            },
+            {
+                "claim_id": "CLM-1",
+                "section_id": "SEC-4",
+                "citation_marker": "[SRC-001]",
+            },
+        ],
+        "open_issues": [],
+    }
+    document = (
+        f"# {_research_brief()['exact_title']}\n\n"
+        "## 研究问题\n\n如何落地。\n\n"
+        "## 证据\n\n已核对来源。[SRC-001]\n\n"
+        "## 分析\n\n在来源边界内分析。\n\n"
+        "## 结论边界\n\n不外推。\n\n"
+        "## 引用\n\n[SRC-001]"
+    )
+    parsed = parse_stage_response(
+        _raw("research_document_draft", payload, document=document),
+        artifact_type="research_document_draft",
+        requires_document=True,
+    )
+
+    with pytest.raises(StageArtifactError) as duplicate:
+        build_stage_artifact(
+            parsed,
+            stage_id="draft",
+            stage_attempt=1,
+            brief=_research_brief(),
+            input_refs=[],
+            now="2026-07-15T10:00:00+08:00",
+        )
+
+    assert duplicate.value.code == "claim_usage_duplicate"
+    assert duplicate.value.field == "payload.claim_usage.1.claim_id"
+
+
 def test_source_register_and_evidence_matrix_are_enriched_from_snapshot():
     from api.expert_teams.stage_artifacts import build_stage_artifact, parse_stage_response
 

@@ -244,11 +244,20 @@ def _validate_section_map(value, path):
 def _validate_usage(value, id_field, path):
     if not isinstance(value, list):
         raise StageArtifactError("invalid_type", path)
+    seen_ids = set()
     for index, row in enumerate(value):
         fields = (id_field, "section_id") if id_field == "fact_id" else (id_field, "section_id", "citation_marker")
         _exact(row, fields, path=f"{path}.{index}")
         for field in fields:
             _string(row[field], f"{path}.{index}.{field}")
+        if id_field == "claim_id":
+            claim_id = row[id_field]
+            if claim_id in seen_ids:
+                raise StageArtifactError(
+                    "claim_usage_duplicate",
+                    f"{path}.{index}.{id_field}",
+                )
+            seen_ids.add(claim_id)
 
 
 def _validate_asset_requests(value, path):

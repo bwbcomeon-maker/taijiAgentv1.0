@@ -490,9 +490,15 @@ def _system_message(
             "draft 和 reviewed_document 必须逐项保留原文关键数字、标识、机构名称与明确结论，"
             "review_report.fact_traceability 必须在逐项核对后标记为 passed，修改说明只描述表达层调整。"
         )
-    elif document_type == "research_report":
+    elif document_type == "research_report" or artifact_type in {
+        "research_document_draft",
+        "reviewed_research_document",
+    }:
         task_specific_rule = (
             "这是研究报告任务：每个事实或估算 claim 只能使用批准 evidence_matrix 中绑定的 source_id；"
+            "claim_usage 中每个 claim_id 必须且只能出现一次；"
+            "不得因同一 claim 在多个正文章节被引用而重复列出；"
+            "若同一 claim 出现在多个章节，section_id 选择主要论证章节，正文中的合法引用标记仍可按需重复出现；"
             "claim_usage.citation_marker 必须包含对应的真实 source_id，且同一标记必须原样出现在 DOCUMENT 正文中；"
             "不得虚构来源、引用标记或扩大结论边界。"
         )
@@ -521,6 +527,12 @@ def _system_message(
                 "把 payload.open_issues 中所有 status=open 的问题逐项原样复制到 "
                 "payload.review_report.issues；unresolved_issue_ids 必须等于这些 open 问题的 "
                 "issue_id 集合。已解决的审稿问题可以继续保留为 status=resolved。\n"
+            )
+        elif code == "claim_usage_duplicate":
+            marker_correction = (
+                "删除重复的 claim_usage 行，每个 claim_id 仅保留一行，"
+                "section_id 选择该 claim 的主要论证章节；"
+                "不得删除正文中已经存在的合法引用标记，也不得改写其他内容。\n"
             )
         correction = (
             "[RETRY CORRECTION]\n"
