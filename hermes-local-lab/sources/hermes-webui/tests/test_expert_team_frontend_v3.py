@@ -1985,6 +1985,29 @@ def test_v3_browser_delivery_open_degrades_to_an_explicit_download_without_serve
     assert result["live"] == "已开始下载最终 DOCX：部门月度工作汇报.docx"
 
 
+def test_v3_browser_delivery_surface_hides_native_folder_and_labels_copy_as_download():
+    result = _run_v3_hooks(
+        """
+        context.document.documentElement={dataset:{}};
+        const binding={session_id:'session-1',run_id:'run-1',expected_version:12,stage_id:'delivery',stage_attempt:1,artifact_id:'delivery:1',artifact_sha256:'a'.repeat(64),delivery_attempt:1,delivery_binding_sha256:'b'.repeat(64),document_sha256:'c'.repeat(64)};
+        const card={
+          kind:'expert_team',productMode:'standalone',readOnly:false,runId:'run-1',sourceSessionId:'session-1',version:12,
+          publicState:'completed',allowedActions:['delivery_open_document','delivery_save_copy','delivery_open_folder','delivery_open_quality_report'],
+          deliveryActionBinding:binding,presentation:{},workflow:{currentStage:{}},brief:{sources:[]},progress:{done:5,total:5},
+          standaloneDelivery:{documentName:'部门月度工作汇报.docx',automaticCheckSummary:{status:'passed',passedCount:25,failedCount:0,warningCount:0,blockingCount:0}},
+        };
+        console.log(JSON.stringify({html:hooks.statePanel(card,'completed')}));
+        """
+    )
+
+    html = result["html"]
+    assert "下载最终 DOCX" in html
+    assert "下载副本" in html
+    assert "保存副本" not in html
+    assert 'data-et3-action="delivery-open-folder"' not in html
+    assert "打开文件夹" not in html
+
+
 def test_v3_quality_report_is_user_readable_in_workbench_not_a_raw_json_open_action():
     result = _run_v3_hooks(
         """

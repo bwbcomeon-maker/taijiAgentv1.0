@@ -1115,20 +1115,26 @@
     return canOpenDeliveryNatively() ? '打开最终 DOCX' : '下载最终 DOCX';
   }
 
+  function deliverySaveCopyActionLabel() {
+    return canOpenDeliveryNatively() ? '保存副本' : '下载副本';
+  }
+
   function deliveryConfirmationPanel(card) {
     const delivery = card.standaloneDelivery || {};
     const checks = delivery.automaticCheckSummary || {};
     const bindingReady = Boolean(deliveryBindingFingerprint(card));
     const canOpenDocument = bindingReady && actionAllowed(card, 'delivery_open_document');
     const canSaveCopy = bindingReady && actionAllowed(card, 'delivery_save_copy');
-    const canOpenFolder = bindingReady && actionAllowed(card, 'delivery_open_folder');
+    const canOpenFolder = canOpenDeliveryNatively()
+      && bindingReady
+      && actionAllowed(card, 'delivery_open_folder');
     const canOpenQualityReport = bindingReady && actionAllowed(card, 'delivery_open_quality_report');
     const canRerender = bindingReady && actionAllowed(card, 'delivery_rerender');
     const canRevise = bindingReady && actionAllowed(card, 'delivery_revise');
     const canConfirm = bindingReady && actionAllowed(card, 'delivery_confirm');
     const openActions = [
       canOpenDocument ? `<button type="button" class="et3-button et3-button--primary" data-et3-action="delivery-open-document">${deliveryDocumentActionLabel()}</button>` : '',
-      canSaveCopy ? '<button type="button" class="et3-button" data-et3-action="delivery-save-copy">保存副本</button>' : '',
+      canSaveCopy ? `<button type="button" class="et3-button" data-et3-action="delivery-save-copy">${deliverySaveCopyActionLabel()}</button>` : '',
       canOpenFolder ? '<button type="button" class="et3-button" data-et3-action="delivery-open-folder">打开文件夹</button>' : '',
     ].filter(Boolean).join('');
     return `<section class="et3-panel"><h3>最终文档</h3><p>正式 DOCX 已生成。请先在本机打开检查，再确认是否可交付。</p><dl class="et3-kv"><dt>文件</dt><dd>${esc(delivery.documentName || '最终交付文档.docx')}</dd><dt>自动检查</dt><dd>${checks.status === 'passed' ? `自动检查通过 ${Number(checks.passedCount || 0)} 项` : '自动检查状态待同步'}</dd><dt>状态</dt><dd>等待本机确认</dd></dl>${openActions ? `<div class="et3-inline-actions">${openActions}</div>` : ''}${canOpenQualityReport ? qualityReportDetails(card) : ''}</section>
@@ -1143,9 +1149,11 @@
     const bindingReady = Boolean(deliveryBindingFingerprint(card));
     const canOpenDocument = bindingReady && actionAllowed(card, 'delivery_open_document');
     const canSaveCopy = bindingReady && actionAllowed(card, 'delivery_save_copy');
-    const canOpenFolder = bindingReady && actionAllowed(card, 'delivery_open_folder');
+    const canOpenFolder = canOpenDeliveryNatively()
+      && bindingReady
+      && actionAllowed(card, 'delivery_open_folder');
     const canOpenQualityReport = bindingReady && actionAllowed(card, 'delivery_open_quality_report');
-    return `<section class="et3-panel"><h3>最终交付</h3><p>文档内容、DOCX 自动检查和本机确认已经形成完整交付链。</p><dl class="et3-kv"><dt>文件</dt><dd>${esc(delivery.documentName || '最终交付文档.docx')}</dd><dt>交付状态</dt><dd>已完成</dd><dt>确认链</dt><dd>内容确认 · DOCX 自检 · 本机确认</dd></dl><div class="et3-inline-actions">${canOpenDocument ? `<button type="button" class="et3-button et3-button--primary" data-et3-action="delivery-open-document">${deliveryDocumentActionLabel()}</button>` : ''}${canSaveCopy ? '<button type="button" class="et3-button" data-et3-action="delivery-save-copy">保存副本</button>' : ''}${canOpenFolder ? '<button type="button" class="et3-button" data-et3-action="delivery-open-folder">打开文件夹</button>' : ''}</div>${canOpenQualityReport ? qualityReportDetails(card) : ''}</section>${bindingReady ? '' : '<p class="et3-help">交付文件入口已失效，请刷新会话状态后再试。</p>'}`;
+    return `<section class="et3-panel"><h3>最终交付</h3><p>文档内容、DOCX 自动检查和本机确认已经形成完整交付链。</p><dl class="et3-kv"><dt>文件</dt><dd>${esc(delivery.documentName || '最终交付文档.docx')}</dd><dt>交付状态</dt><dd>已完成</dd><dt>确认链</dt><dd>内容确认 · DOCX 自检 · 本机确认</dd></dl><div class="et3-inline-actions">${canOpenDocument ? `<button type="button" class="et3-button et3-button--primary" data-et3-action="delivery-open-document">${deliveryDocumentActionLabel()}</button>` : ''}${canSaveCopy ? `<button type="button" class="et3-button" data-et3-action="delivery-save-copy">${deliverySaveCopyActionLabel()}</button>` : ''}${canOpenFolder ? '<button type="button" class="et3-button" data-et3-action="delivery-open-folder">打开文件夹</button>' : ''}</div>${canOpenQualityReport ? qualityReportDetails(card) : ''}</section>${bindingReady ? '' : '<p class="et3-help">交付文件入口已失效，请刷新会话状态后再试。</p>'}`;
   }
 
   function legacyPanel(card) {
