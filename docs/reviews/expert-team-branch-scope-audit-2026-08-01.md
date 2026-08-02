@@ -1,6 +1,6 @@
 # 专家团分支范围审计
 
-> 审计日期：2026-08-02。比较范围：本地 `main...codex/expert-team-standalone-core`，候选 HEAD `63a8aef55bdb891a14a3d56dccd41352e3ed37d1`。本表包含本审计文件自身，因此对应拟提交 PR 的 182 个唯一路径、46 个提交。路径分类用于审查导航，不替代逐行代码审查。
+> 审计日期：2026-08-02。比较范围：本地 `main...codex/expert-team-standalone-core`，已复验的实现候选 HEAD `8d49fae72a8f8ae9d35b4de8faca778ffbdd3a86`。该实现候选相对本地 `main` 为 182 个唯一路径、48 个提交；本次审计文本更新将另形成不改变实现树的文档 checkpoint。路径分类用于审查导航，不替代逐行代码审查。
 
 ## 结论
 
