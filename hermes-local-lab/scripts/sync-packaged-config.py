@@ -27,7 +27,10 @@ _agent_roots = [
 for _agent_root in _agent_roots:
     if (
         _agent_root is not None
-        and (_agent_root / "agent" / "provider_credentials.py").is_file()
+        and any(
+            (_agent_root / "agent" / f"provider_credentials{suffix}").is_file()
+            for suffix in (".py", ".pyc")
+        )
     ):
         sys.path.insert(0, str(_agent_root))
         break
