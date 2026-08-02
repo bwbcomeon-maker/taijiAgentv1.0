@@ -451,7 +451,10 @@ def _restore_or_build_system_prompt(
     # Plugin hook: on_session_start — fired once when a brand-new
     # session is created (not on continuation).  Plugins can use this
     # to initialise session-scoped state (e.g. warm a memory cache).
-    if not conversation_history:
+    if (
+        not conversation_history
+        and not bool(getattr(agent, "strict_execution_contract", False))
+    ):
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
@@ -467,7 +470,10 @@ def _restore_or_build_system_prompt(
     # to log at DEBUG, which silently broke prefix-cache reuse on the
     # gateway path (fresh AIAgent per turn → reads from this row every
     # subsequent turn).
-    if agent._session_db:
+    if (
+        agent._session_db
+        and not bool(getattr(agent, "strict_execution_contract", False))
+    ):
         try:
             agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
         except Exception as exc:
@@ -589,21 +595,55 @@ def _run_conversation_impl(
     # Installed once, transparent when streams are healthy, prevents crash on write.
     _install_safe_stdio()
 
-    agent._ensure_db_session()
+    strict_execution = bool(
+        getattr(agent, "strict_execution_contract", False)
+    )
+    if strict_execution:
+        if conversation_history:
+            raise ValueError(
+                "strict execution does not accept conversation history"
+            )
+        if not isinstance(system_message, str) or not system_message.strip():
+            raise ValueError(
+                "strict execution requires a non-empty exact system message"
+            )
+        if not isinstance(user_message, str):
+            raise ValueError(
+                "strict execution requires one exact string user message"
+            )
+        if _sanitize_surrogates(user_message) != user_message:
+            raise ValueError(
+                "strict execution rejects invalid Unicode in the user message"
+            )
+        if getattr(agent, "tools", None) or getattr(
+            agent, "valid_tool_names", None
+        ):
+            raise RuntimeError("strict execution tool surface is not empty")
+        if getattr(agent, "prefill_messages", None):
+            raise RuntimeError("strict execution does not allow prefill messages")
+        if getattr(agent, "ephemeral_system_prompt", None):
+            raise RuntimeError(
+                "strict execution does not allow an ephemeral system prompt"
+            )
+        if getattr(agent, "_fallback_chain", None):
+            raise RuntimeError("strict execution does not allow provider fallback")
+    else:
+        agent._ensure_db_session()
 
     # Tell auxiliary_client what the live main provider/model are for
     # this turn. Used by tools whose behaviour depends on the active
     # main model (e.g. vision_analyze's native fast path) so they see
     # the CLI/gateway override instead of the stale config.yaml
     # default. Idempotent — fine to call every turn.
-    try:
-        from agent.auxiliary_client import set_runtime_main
-        set_runtime_main(
-            getattr(agent, "provider", "") or "",
-            getattr(agent, "model", "") or "",
-        )
-    except Exception:
-        pass
+    if not strict_execution:
+        try:
+            from agent.auxiliary_client import set_runtime_main
+            set_runtime_main(
+                getattr(agent, "provider", "") or "",
+                getattr(agent, "model", "") or "",
+            )
+        except Exception:
+            pass
 
     # Tag all log records on this thread with the session ID so
     # ``hermes logs --session <id>`` can filter a single conversation.
@@ -616,20 +656,24 @@ def _run_conversation_impl(
     # a foreground user-directed turn. Set at the top of each call;
     # the review fork runs on its own thread with a fresh context,
     # so the foreground value here does not leak into it.
-    from tools.skill_provenance import set_current_write_origin
-    set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
+    if not strict_execution:
+        from tools.skill_provenance import set_current_write_origin
+        set_current_write_origin(
+            getattr(agent, "_memory_write_origin", "assistant_tool")
+        )
 
     # If the previous turn activated fallback, restore the primary
     # runtime so this turn gets a fresh attempt with the preferred model.
     # No-op when _fallback_activated is False (gateway, first turn, etc.).
-    agent._restore_primary_runtime()
+    if not strict_execution:
+        agent._restore_primary_runtime()
 
     # Sanitize surrogate characters from user input.  Clipboard paste from
     # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
     # that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
-    if isinstance(user_message, str):
+    if isinstance(user_message, str) and not strict_execution:
         user_message = _sanitize_surrogates(user_message)
-    if isinstance(persist_user_message, str):
+    if isinstance(persist_user_message, str) and not strict_execution:
         persist_user_message = _sanitize_surrogates(persist_user_message)
 
     # Store stream callback for _interruptible_api_call to pick up
@@ -691,9 +735,16 @@ def _run_conversation_impl(
     agent.iteration_budget = IterationBudget(agent.max_iterations)
 
     # Log conversation turn start for debugging/observability
-    _preview_text = _summarize_user_message_for_log(user_message)
-    _msg_preview = (_preview_text[:80] + "...") if len(_preview_text) > 80 else _preview_text
-    _msg_preview = _msg_preview.replace("\n", " ")
+    if strict_execution:
+        _msg_preview = f"<strict payload redacted; chars={len(user_message)}>"
+    else:
+        _preview_text = _summarize_user_message_for_log(user_message)
+        _msg_preview = (
+            (_preview_text[:80] + "...")
+            if len(_preview_text) > 80
+            else _preview_text
+        )
+        _msg_preview = _msg_preview.replace("\n", " ")
     logger.info(
         "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
         agent.session_id or "none", agent.model, agent.provider or "unknown",
@@ -884,34 +935,38 @@ def _run_conversation_impl(
     #
     # All injected context is ephemeral (not persisted to session DB).
     _plugin_user_context = ""
-    try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _pre_results = _invoke_hook(
-            "pre_llm_call",
-            session_id=agent.session_id,
-            user_message=original_user_message,
-            conversation_history=list(messages),
-            is_first_turn=(not bool(conversation_history)),
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-            sender_id=getattr(agent, "_user_id", None) or "",
-        )
-        _ctx_parts: list[str] = []
-        for r in _pre_results:
-            if isinstance(r, dict) and r.get("context"):
-                _ctx_parts.append(str(r["context"]))
-            elif isinstance(r, str) and r.strip():
-                _ctx_parts.append(r)
-        if _ctx_parts:
-            _plugin_user_context = "\n\n".join(_ctx_parts)
-    except Exception as exc:
-        logger.warning("pre_llm_call hook failed: %s", exc)
+    if not strict_execution:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _pre_results = _invoke_hook(
+                "pre_llm_call",
+                session_id=agent.session_id,
+                user_message=original_user_message,
+                conversation_history=list(messages),
+                is_first_turn=(not bool(conversation_history)),
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+                sender_id=getattr(agent, "_user_id", None) or "",
+            )
+            _ctx_parts: list[str] = []
+            for r in _pre_results:
+                if isinstance(r, dict) and r.get("context"):
+                    _ctx_parts.append(str(r["context"]))
+                elif isinstance(r, str) and r.strip():
+                    _ctx_parts.append(r)
+            if _ctx_parts:
+                _plugin_user_context = "\n\n".join(_ctx_parts)
+        except Exception as exc:
+            logger.warning("pre_llm_call hook failed: %s", exc)
 
     # Main conversation loop
     api_call_count = 0
     final_response = None
     interrupted = False
     failed = False
+    strict_partial = False
+    strict_error = None
+    strict_provider_call_started = False
     codex_ack_continuations = 0
     length_continue_retries = 0
     truncated_tool_call_retries = 0
@@ -987,15 +1042,16 @@ def _run_conversation_impl(
     # ordinary tool executor after the codex app-server bypass. Provider I/O,
     # progress callbacks, cancellation and route events remain owned by the
     # normal image_generate tool path.
-    _run_deterministic_image_intent(
-        agent,
-        original_user_message=original_user_message,
-        conversation_history=conversation_history,
-        messages=messages,
-        effective_task_id=effective_task_id,
-        image_turn_id=image_turn_id,
-        image_gate_owner=image_gate_owner,
-    )
+    if not strict_execution:
+        _run_deterministic_image_intent(
+            agent,
+            original_user_message=original_user_message,
+            conversation_history=conversation_history,
+            messages=messages,
+            effective_task_id=effective_task_id,
+            image_turn_id=image_turn_id,
+            image_gate_owner=image_gate_owner,
+        )
 
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
@@ -1220,7 +1276,7 @@ def _run_conversation_impl(
         # inject cache_control breakpoints (system + last 3 messages)
         # to reduce input token costs by ~75% on multi-turn
         # conversations.
-        if agent._use_prompt_caching:
+        if agent._use_prompt_caching and not strict_execution:
             api_messages = apply_anthropic_cache_control(
                 api_messages,
                 cache_ttl=agent._cache_ttl,
@@ -1231,7 +1287,8 @@ def _run_conversation_impl(
         # results before sending to the API.  Runs unconditionally — not
         # gated on context_compressor — so orphans from session loading or
         # manual message manipulation are always caught.
-        api_messages = agent._sanitize_api_messages(api_messages)
+        if not strict_execution:
+            api_messages = agent._sanitize_api_messages(api_messages)
 
         # Drop thinking-only assistant turns (reasoning but no visible
         # output and no tool_calls) and merge any adjacent user messages
@@ -1241,7 +1298,8 @@ def _run_conversation_impl(
         # a thinking-only turn. Runs on the per-call copy only — the
         # stored conversation history keeps the reasoning block for the
         # UI transcript and session persistence.
-        api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
+        if not strict_execution:
+            api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
 
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
@@ -1249,9 +1307,10 @@ def _run_conversation_impl(
         # (llama.cpp, vLLM, Ollama) and improves cache hit rates for
         # cloud providers.  Operates on api_messages (the API copy) so
         # the original conversation history in `messages` is untouched.
-        for am in api_messages:
-            if isinstance(am.get("content"), str):
-                am["content"] = am["content"].strip()
+        if not strict_execution:
+            for am in api_messages:
+                if isinstance(am.get("content"), str):
+                    am["content"] = am["content"].strip()
         for am in api_messages:
             tcs = am.get("tool_calls")
             if not tcs:
@@ -1280,7 +1339,17 @@ def _run_conversation_impl(
         # Models served via Ollama (Kimi K2.5, GLM-5, Qwen) can return
         # lone surrogates (U+D800-U+DFFF) that crash json.dumps() inside
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
-        _sanitize_messages_surrogates(api_messages)
+        if strict_execution:
+            expected_messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ]
+            if api_messages != expected_messages:
+                raise RuntimeError(
+                    "strict execution message contract changed before dispatch"
+                )
+        else:
+            _sanitize_messages_surrogates(api_messages)
 
         # Calculate approximate request size for logging
         total_chars = sum(len(str(msg)) for msg in api_messages)
@@ -1423,42 +1492,46 @@ def _run_conversation_impl(
                 if agent.api_mode == "codex_responses":
                     api_kwargs = agent._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
 
-                try:
-                    from hermes_cli.plugins import invoke_hook as _invoke_hook
-                    request_messages = api_kwargs.get("messages")
-                    if not isinstance(request_messages, list):
-                        request_messages = api_kwargs.get("input")
-                    if not isinstance(request_messages, list):
-                        request_messages = api_messages
-                    # Shallow-copy the outer list so plugins that retain the
-                    # reference for async snapshotting don't observe later
-                    # mutations of api_messages.  The inner dicts are not
-                    # mutated by the agent loop, so a shallow copy is
-                    # sufficient; a deepcopy would walk every tool result
-                    # and base64 image on every API call.
-                    _invoke_hook(
-                        "pre_api_request",
-                        task_id=effective_task_id,
-                        session_id=agent.session_id or "",
-                        user_message=original_user_message,
-                        conversation_history=list(messages),
-                        platform=agent.platform or "",
-                        model=agent.model,
-                        provider=agent.provider,
-                        base_url=agent.base_url,
-                        api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
-                        request_messages=list(request_messages) if isinstance(request_messages, list) else [],
-                        message_count=len(api_messages),
-                        tool_count=len(agent.tools or []),
-                        approx_input_tokens=approx_tokens,
-                        request_char_count=total_chars,
-                        max_tokens=agent.max_tokens,
-                    )
-                except Exception:
-                    pass
+                if not strict_execution:
+                    try:
+                        from hermes_cli.plugins import invoke_hook as _invoke_hook
+                        request_messages = api_kwargs.get("messages")
+                        if not isinstance(request_messages, list):
+                            request_messages = api_kwargs.get("input")
+                        if not isinstance(request_messages, list):
+                            request_messages = api_messages
+                        # Shallow-copy the outer list so plugins that retain the
+                        # reference for async snapshotting don't observe later
+                        # mutations of api_messages.  The inner dicts are not
+                        # mutated by the agent loop, so a shallow copy is
+                        # sufficient; a deepcopy would walk every tool result
+                        # and base64 image on every API call.
+                        _invoke_hook(
+                            "pre_api_request",
+                            task_id=effective_task_id,
+                            session_id=agent.session_id or "",
+                            user_message=original_user_message,
+                            conversation_history=list(messages),
+                            platform=agent.platform or "",
+                            model=agent.model,
+                            provider=agent.provider,
+                            base_url=agent.base_url,
+                            api_mode=agent.api_mode,
+                            api_call_count=api_call_count,
+                            request_messages=list(request_messages) if isinstance(request_messages, list) else [],
+                            message_count=len(api_messages),
+                            tool_count=len(agent.tools or []),
+                            approx_input_tokens=approx_tokens,
+                            request_char_count=total_chars,
+                            max_tokens=agent.max_tokens,
+                        )
+                    except Exception:
+                        pass
 
-                if env_var_enabled("HERMES_DUMP_REQUESTS"):
+                if (
+                    not strict_execution
+                    and env_var_enabled("HERMES_DUMP_REQUESTS")
+                ):
                     agent._dump_api_request_debug(api_kwargs, reason="preflight")
 
                 # Always prefer the streaming path — even without stream
@@ -1503,6 +1576,43 @@ def _run_conversation_impl(
                     from unittest.mock import Mock
                     if isinstance(getattr(agent, "client", None), Mock):
                         _use_streaming = False
+
+                if strict_execution and strict_provider_call_started:
+                    failed = True
+                    strict_error = (
+                        "strict execution blocked an additional provider call"
+                    )
+                    _turn_exit_reason = "strict_multiple_provider_call_blocked"
+                    response = None
+                    break
+                if strict_execution:
+                    strict_call_lock = getattr(
+                        agent,
+                        "_strict_provider_call_lock",
+                        None,
+                    )
+                    if strict_call_lock is None:
+                        raise RuntimeError(
+                            "strict execution provider-call lock is missing"
+                        )
+                    with strict_call_lock:
+                        if getattr(
+                            agent,
+                            "_strict_provider_call_consumed",
+                            False,
+                        ):
+                            failed = True
+                            strict_error = (
+                                "strict execution agent already consumed its "
+                                "single provider call"
+                            )
+                            _turn_exit_reason = (
+                                "strict_agent_provider_call_already_consumed"
+                            )
+                            response = None
+                            break
+                        agent._strict_provider_call_consumed = True
+                        strict_provider_call_started = True
 
                 if _use_streaming:
                     response = agent._interruptible_streaming_api_call(
@@ -1784,6 +1894,11 @@ def _run_conversation_impl(
                         finish_reason = "length"
 
                 if finish_reason == "length":
+                    if strict_execution:
+                        # The strict contract permits exactly one Provider
+                        # request.  Preserve this response as a non-authoritative
+                        # partial failure; never issue a hidden continuation.
+                        break
                     if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
                         agent._vprint(
                             f"{agent.log_prefix}⚠️  Stream interrupted by network error "
@@ -2154,7 +2269,7 @@ def _run_conversation_impl(
                 agent._touch_activity(f"API call #{api_call_count} completed")
                 break  # Success, exit retry loop
 
-            except InterruptedError:
+            except InterruptedError as interrupt_error:
                 if thinking_spinner:
                     thinking_spinner.stop("")
                     thinking_spinner = None
@@ -2162,9 +2277,30 @@ def _run_conversation_impl(
                     agent.thinking_callback("")
                 api_elapsed = time.time() - api_start_time
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
-                agent._persist_session(messages, conversation_history)
                 interrupted = True
-                final_response = f"Operation interrupted: waiting for model response ({api_elapsed:.1f}s elapsed)."
+                if strict_execution:
+                    failed = True
+                    streamed_partial = agent._strip_think_blocks(
+                        getattr(
+                            agent,
+                            "_current_streamed_assistant_text",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    strict_partial = bool(streamed_partial)
+                    final_response = streamed_partial or None
+                    strict_error = (
+                        "strict provider call interrupted: "
+                        f"{type(interrupt_error).__name__}: {interrupt_error}"
+                    )
+                    _turn_exit_reason = "strict_provider_call_interrupted"
+                else:
+                    agent._persist_session(messages, conversation_history)
+                    final_response = (
+                        "Operation interrupted: waiting for model response "
+                        f"({api_elapsed:.1f}s elapsed)."
+                    )
                 break
 
             except Exception as api_error:
@@ -2175,6 +2311,16 @@ def _run_conversation_impl(
                     thinking_spinner = None
                 if agent.thinking_callback:
                     agent.thinking_callback("")
+
+                if strict_execution:
+                    failed = True
+                    strict_error = (
+                        "strict provider call failed: "
+                        f"{type(api_error).__name__}: {api_error}"
+                    )
+                    _turn_exit_reason = "strict_provider_call_failed"
+                    response = None
+                    break
 
                 # -----------------------------------------------------------
                 # UnicodeEncodeError recovery.  Two common causes:
@@ -3592,7 +3738,8 @@ def _run_conversation_impl(
         
         # If the API call was interrupted, skip response processing
         if interrupted:
-            _turn_exit_reason = "interrupted_during_api_call"
+            if not strict_execution:
+                _turn_exit_reason = "interrupted_during_api_call"
             break
 
         if restart_with_compressed_messages:
@@ -3653,32 +3800,85 @@ def _run_conversation_impl(
                 else:
                     assistant_message.content = str(raw)
 
-            try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _assistant_tool_calls = getattr(assistant_message, "tool_calls", None) or []
-                _assistant_text = assistant_message.content or ""
-                _invoke_hook(
-                    "post_api_request",
-                    task_id=effective_task_id,
-                    session_id=agent.session_id or "",
-                    platform=agent.platform or "",
-                    model=agent.model,
-                    provider=agent.provider,
-                    base_url=agent.base_url,
-                    api_mode=agent.api_mode,
-                    api_call_count=api_call_count,
-                    api_duration=api_duration,
-                    finish_reason=finish_reason,
-                    message_count=len(api_messages),
-                    response_model=getattr(response, "model", None),
-                    response=response,
-                    usage=agent._usage_summary_for_api_request_hook(response),
-                    assistant_message=assistant_message,
-                    assistant_content_chars=len(_assistant_text),
-                    assistant_tool_call_count=len(_assistant_tool_calls),
+            if strict_execution:
+                strict_tool_calls = list(
+                    getattr(assistant_message, "tool_calls", None) or []
                 )
-            except Exception:
-                pass
+                strict_content = assistant_message.content or ""
+                strict_incomplete = (
+                    finish_reason in {"length", "incomplete"}
+                    or str(getattr(response, "status", "") or "").lower()
+                    == "incomplete"
+                )
+                if strict_tool_calls:
+                    failed = True
+                    strict_error = (
+                        "strict execution rejected provider tool calls"
+                    )
+                    _turn_exit_reason = "strict_provider_returned_tool_calls"
+                elif strict_incomplete:
+                    failed = True
+                    strict_partial = bool(strict_content)
+                    strict_error = (
+                        "strict execution received a truncated provider response"
+                    )
+                    _turn_exit_reason = "strict_provider_response_incomplete"
+                    final_response = strict_content or None
+                elif not strict_content.strip():
+                    failed = True
+                    strict_error = (
+                        "strict execution received an empty provider response"
+                    )
+                    _turn_exit_reason = "strict_provider_response_empty"
+                else:
+                    final_response = agent._strip_think_blocks(
+                        strict_content
+                    ).strip()
+                    if not final_response:
+                        failed = True
+                        strict_error = (
+                            "strict execution received no visible provider output"
+                        )
+                        _turn_exit_reason = "strict_provider_output_not_visible"
+                    else:
+                        _turn_exit_reason = "strict_single_provider_call_completed"
+
+                if final_response:
+                    messages.append(
+                        agent._build_assistant_message(
+                            assistant_message,
+                            finish_reason,
+                        )
+                    )
+                break
+
+            if not strict_execution:
+                try:
+                    from hermes_cli.plugins import invoke_hook as _invoke_hook
+                    _assistant_tool_calls = getattr(assistant_message, "tool_calls", None) or []
+                    _assistant_text = assistant_message.content or ""
+                    _invoke_hook(
+                        "post_api_request",
+                        task_id=effective_task_id,
+                        session_id=agent.session_id or "",
+                        platform=agent.platform or "",
+                        model=agent.model,
+                        provider=agent.provider,
+                        base_url=agent.base_url,
+                        api_mode=agent.api_mode,
+                        api_call_count=api_call_count,
+                        api_duration=api_duration,
+                        finish_reason=finish_reason,
+                        message_count=len(api_messages),
+                        response_model=getattr(response, "model", None),
+                        response=response,
+                        usage=agent._usage_summary_for_api_request_hook(response),
+                        assistant_message=assistant_message,
+                        assistant_content_chars=len(_assistant_text),
+                        assistant_tool_call_count=len(_assistant_tool_calls),
+                    )
+                except Exception:
+                    pass
 
             # Handle assistant response
             if assistant_message.content and not agent.quiet_mode:
@@ -4489,6 +4689,13 @@ def _run_conversation_impl(
             # recover the call site.  logger.exception() includes the
             # traceback automatically and emits at ERROR.
             logger.exception("Outer loop error in API call #%d", api_call_count)
+
+            if strict_execution:
+                failed = True
+                strict_error = error_msg
+                final_response = None
+                _turn_exit_reason = "strict_provider_call_failed"
+                break
             
             # If an assistant message with tool_calls was already appended,
             # the API expects a role="tool" result for every tool_call_id.
@@ -4539,24 +4746,36 @@ def _run_conversation_impl(
         # Budget exhausted — ask the model for a summary via one extra
         # API call with tools stripped.  _handle_max_iterations injects a
         # user message and makes a single toolless request.
-        _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
-        agent._emit_status(
-            f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-            "— asking model to summarise"
-        )
-        if not agent.quiet_mode:
-            agent._safe_print(
-                f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-                "— requesting summary..."
+        if strict_execution:
+            failed = True
+            strict_error = strict_error or (
+                "strict execution ended without one complete provider response"
             )
-        final_response = agent._handle_max_iterations(messages, api_call_count)
+            if _turn_exit_reason == "unknown":
+                _turn_exit_reason = "strict_provider_response_missing"
+        else:
+            _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+            agent._emit_status(
+                f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                "— asking model to summarise"
+            )
+            if not agent.quiet_mode:
+                agent._safe_print(
+                    f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                    "— requesting summary..."
+                )
+            final_response = agent._handle_max_iterations(messages, api_call_count)
 
         # If running as a kanban worker, block the task so the dispatcher
         # knows the worker could not complete (rather than treating it as a
         # protocol violation).  The agent loop strips tools before calling
         # _handle_max_iterations, so the model cannot call kanban_block
         # itself — we must do it on its behalf.
-        _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
+        _kanban_task = (
+            None
+            if strict_execution
+            else os.environ.get("HERMES_KANBAN_TASK")
+        )
         if _kanban_task:
             try:
                 _ra().handle_function_call(
@@ -4588,23 +4807,40 @@ def _run_conversation_impl(
     # Determine if conversation completed successfully
     completed = (
         final_response is not None
-        and api_call_count < agent.max_iterations
         and not failed
+        and (
+            (
+                strict_execution
+                and strict_provider_call_started
+                and api_call_count == 1
+            )
+            or (
+                not strict_execution
+                and api_call_count < agent.max_iterations
+            )
+        )
     )
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
     # list of parts; the trajectory format wants a plain string.
-    agent._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
+    if not strict_execution:
+        agent._save_trajectory(
+            messages,
+            _summarize_user_message_for_log(user_message),
+            completed,
+        )
 
     # Clean up VM and browser for this task after conversation completes
-    agent._cleanup_task_resources(effective_task_id)
+    if not strict_execution:
+        agent._cleanup_task_resources(effective_task_id)
 
     # Persist session to both JSON log and SQLite only after private retry
     # scaffolding has been removed. Otherwise a later user "continue" turn
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
     agent._drop_trailing_empty_response_scaffolding(messages)
-    agent._persist_session(messages, conversation_history)
+    if not strict_execution:
+        agent._persist_session(messages, conversation_history)
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────
     # Always logged at INFO so agent.log captures WHY every turn ended.
@@ -4665,7 +4901,7 @@ def _run_conversation_impl(
     # Gate: only applied when a real text response exists for this
     # turn and the user didn't interrupt.  Empty/interrupted turns
     # already have other surface text that shouldn't be augmented.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not strict_execution:
         try:
             _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
             if _failed and agent._file_mutation_verifier_enabled():
@@ -4681,7 +4917,7 @@ def _run_conversation_impl(
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can transform the LLM's output text before it's returned.
     # First hook to return a string wins; None/empty return leaves text unchanged.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not strict_execution:
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _transform_results = _invoke_hook(
@@ -4703,7 +4939,7 @@ def _run_conversation_impl(
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can use this to persist conversation data (e.g. sync
     # to an external memory system).
-    if final_response and not interrupted:
+    if final_response and not interrupted and not strict_execution:
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
@@ -4744,7 +4980,7 @@ def _run_conversation_impl(
         "completed": completed,
         "turn_exit_reason": _turn_exit_reason,
         "failed": failed,
-        "partial": False,  # True only when stopped due to invalid tool calls
+        "partial": strict_partial,
         "interrupted": interrupted,
         "response_transformed": _response_transformed,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
@@ -4765,6 +5001,8 @@ def _run_conversation_impl(
         "cost_source": agent.session_cost_source,
         "session_id": agent.session_id,
     }
+    if strict_error:
+        result["error"] = strict_error
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # If a /steer landed after the final assistant turn (no more tool
@@ -4794,16 +5032,22 @@ def _run_conversation_impl(
         agent._iters_since_skill = 0
 
     # External memory provider: sync the completed turn + queue next prefetch.
-    agent._sync_external_memory_for_turn(
-        original_user_message=original_user_message,
-        final_response=final_response,
-        interrupted=interrupted,
-        messages=messages,
-    )
+    if not strict_execution:
+        agent._sync_external_memory_for_turn(
+            original_user_message=original_user_message,
+            final_response=final_response,
+            interrupted=interrupted,
+            messages=messages,
+        )
 
     # Background memory/skill review — runs AFTER the response is delivered
     # so it never competes with the user's task for model attention.
-    if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+    if (
+        not strict_execution
+        and final_response
+        and not interrupted
+        and (_should_review_memory or _should_review_skills)
+    ):
         try:
             agent._spawn_background_review(
                 messages_snapshot=list(messages),
@@ -4823,18 +5067,19 @@ def _run_conversation_impl(
     # Plugin hook: on_session_end
     # Fired at the very end of every run_conversation call.
     # Plugins can use this for cleanup, flushing buffers, etc.
-    try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _invoke_hook(
-            "on_session_end",
-            session_id=agent.session_id,
-            completed=completed,
-            interrupted=interrupted,
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-        )
-    except Exception as exc:
-        logger.warning("on_session_end hook failed: %s", exc)
+    if not strict_execution:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_end",
+                session_id=agent.session_id,
+                completed=completed,
+                interrupted=interrupted,
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+        except Exception as exc:
+            logger.warning("on_session_end hook failed: %s", exc)
 
     return result
 

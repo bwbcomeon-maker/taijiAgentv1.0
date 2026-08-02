@@ -31,7 +31,6 @@ const mainSource = fs.readFileSync(
 for (const [label, source] of [
   ["command", commandLauncher],
   ["browser command", browserLauncher],
-  ["app", appLauncher],
 ]) {
   test(`${label} launcher resolves the repository from its own physical location`, () => {
     assert.doesNotMatch(source, /\/Users\/bwb\/Documents\/工作\/taiji-agentv1\.0/);
@@ -43,15 +42,47 @@ for (const [label, source] of [
   });
 }
 
+test("Finder app resolves its adjacent command launcher from its physical location", () => {
+  assert.doesNotMatch(appLauncher, /\/Users\/bwb\/Documents\/工作\/taiji-agentv1\.0/);
+  assert.match(appLauncher, /BASH_SOURCE\[0\]/);
+  assert.match(appLauncher, /pwd -P/);
+  assert.match(appLauncher, /COMMAND_LAUNCHER=.*启动太极Agent桌面端\.command/);
+  assert.match(appLauncher, /\/usr\/bin\/open -a Terminal "\$COMMAND_LAUNCHER"/);
+});
+
 test("the source command launcher never silently redirects to a stale app bundle", () => {
   assert.doesNotMatch(commandLauncher, /open "\$APP_BUNDLE"/);
   assert.doesNotMatch(commandLauncher, /Opening app bundle/);
   assert.match(commandLauncher, /Electron\.app\/Contents\/MacOS\/Electron/);
 });
 
+test("source command launcher defaults linked worktrees to development and runs the source gate", () => {
+  assert.match(commandLauncher, /\[ -d "\$REPO_DIR\/\.git" \]/);
+  assert.match(commandLauncher, /\[ -f "\$REPO_DIR\/\.git" \]/);
+  assert.match(commandLauncher, /TAIJI_SOURCE_MODE="development"/);
+  assert.match(commandLauncher, /TAIJI_SOURCE_MODE="formal"/);
+  assert.match(commandLauncher, /\[ -z "\$\{TAIJI_SOURCE_MODE:-\}" \]/);
+  assert.match(commandLauncher, /check-clean-worktree\.sh/);
+  assert.match(commandLauncher, /\/bin\/bash "\$SOURCE_GATE"/);
+  assert.match(commandLauncher, /--mode "\$TAIJI_SOURCE_MODE"/);
+  assert.match(commandLauncher, /--repo-root "\$REPO_DIR"/);
+  assert.match(commandLauncher, /--source-root "\$REPO_DIR"/);
+  assert.match(commandLauncher, /export TAIJI_SOURCE_MODE/);
+});
+
+test("source command launcher isolates all mutable runtime state by physical source root", () => {
+  assert.match(commandLauncher, /XDG_STATE_HOME=.*source-instances.*SOURCE_INSTANCE_ID/);
+  assert.match(commandLauncher, /TAIJI_RUNTIME_HOME=.*source-instances.*SOURCE_INSTANCE_ID/);
+  assert.match(commandLauncher, /TAIJI_WORKSPACE=.*source-instances.*SOURCE_INSTANCE_ID/);
+  assert.match(commandLauncher, /TAIJI_AGENT_TMP_DIR=.*source-instances.*SOURCE_INSTANCE_ID/);
+  assert.match(commandLauncher, /export XDG_STATE_HOME/);
+  assert.match(commandLauncher, /export TAIJI_RUNTIME_HOME/);
+  assert.match(commandLauncher, /export TAIJI_WORKSPACE/);
+  assert.match(commandLauncher, /export TAIJI_AGENT_TMP_DIR/);
+});
+
 for (const [label, source] of [
   ["command", commandLauncher],
-  ["app", appLauncher],
 ]) {
   test(`${label} desktop launcher isolates Electron single-instance state by physical source root`, () => {
     assert.match(source, /SOURCE_INSTANCE_ID/);

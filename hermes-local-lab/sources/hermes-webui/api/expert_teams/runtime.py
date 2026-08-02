@@ -15,6 +15,7 @@ from functools import wraps
 from pathlib import Path
 
 from .catalog import CONTENT_CREATOR_TEAM_ID, get_template
+from .launch_profiles import get_launch_profile
 from .rollout import enforce_new_contract_rollout
 from .contracts import (
     EXPERT_TEAM_CONTRACT_V1,
@@ -27,7 +28,12 @@ from .contracts import (
     validate_document_brief,
 )
 from .data_egress import load_model_policy_registry
-from .source_context import build_source_context_snapshot, verify_source_context_snapshot
+from .source_context import (
+    SourceContextError,
+    allows_empty_source_context,
+    build_source_context_snapshot,
+    verify_source_context_snapshot,
+)
 from .source_registry import SourceRegistryError, resolve_source_registry
 from .documents import (
     FinalDocumentDeliveryError,
@@ -87,6 +93,16 @@ _START_LOCKS: dict[str, threading.RLock] = {}
 _START_LOCKS_GUARD = threading.Lock()
 _RUN_FILE_LOCK_DEPTH = threading.local()
 _EXPECTED_CURSOR_UNSET = object()
+_STANDALONE_START_FIELDS = frozenset(
+    {"launch_profile_id", "prompt", "session_id", "idempotency_key"}
+)
+_STANDALONE_START_MAX_LENGTHS = {
+    "launch_profile_id": 128,
+    "session_id": 240,
+    "prompt": 20_000,
+    "idempotency_key": 240,
+}
+_STANDALONE_IDEMPOTENCY_PATTERN = re.compile(r"[A-Za-z0-9:._-]+")
 
 
 class ExpertTeamStateConflict(ValueError):
@@ -829,8 +845,72 @@ def _attach_office_review_view(workspace: Path, run: dict) -> dict:
 
 
 def _completion_integrity_for_read(workspace: Path, run: dict) -> dict:
-    run = _attach_office_review_view(workspace, run)
-    if classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and isinstance(
+    standalone = str(run.get("product_mode") or "") == "standalone"
+    if standalone:
+        # Standalone and enterprise completion are separate products.  Old
+        # Office evidence may remain on disk in development workspaces, but a
+        # read must never attach it or let it advance the standalone Run.
+        run.pop("office_review_view", None)
+    else:
+        run = _attach_office_review_view(workspace, run)
+    if standalone and str(run.get("workflow_state") or "") == "completed":
+        checked_at = _now()
+        confirmation = (
+            run.get("local_delivery_confirmation")
+            if isinstance(run.get("local_delivery_confirmation"), dict)
+            else {}
+        )
+        gate = run.get("delivery_gate") if isinstance(run.get("delivery_gate"), dict) else {}
+        if confirmation.get("schema_version") != "local-delivery-confirmation/v1":
+            run["completion_integrity"] = {
+                "status": "unverified",
+                "checked_at": checked_at,
+                "message": "已完成交付缺少当前本机确认，不能证明文件仍可交付。",
+            }
+            return run
+        try:
+            from .standalone_delivery import validate_standalone_delivery_context
+
+            attempt = int(confirmation.get("delivery_attempt") or 0)
+            stage_id = str(confirmation.get("stage_id") or "")
+            with delivery_attempt_lock(
+                workspace,
+                str(run.get("run_id") or ""),
+                stage_id,
+                attempt,
+            ):
+                context = validate_standalone_delivery_context(workspace, run)
+                snapshot = _standalone_delivery_snapshot(context)
+            expected = gate.get("digest_set") if isinstance(gate.get("digest_set"), dict) else {}
+            if not expected or snapshot != expected:
+                raise DeliveryIntegrityError("standalone delivery digest snapshot changed")
+            confirmation_identity = {
+                "session_id": str(confirmation.get("session_id") or ""),
+                "run_id": str(confirmation.get("run_id") or ""),
+                "stage_id": stage_id,
+                "stage_attempt": int(confirmation.get("stage_attempt") or 0),
+                "artifact_id": str(confirmation.get("artifact_id") or ""),
+                "artifact_sha256": str(confirmation.get("artifact_sha256") or ""),
+                "delivery_attempt": attempt,
+                "delivery_binding_sha256": str(confirmation.get("delivery_binding_sha256") or ""),
+                "document_sha256": str(confirmation.get("document_sha256") or ""),
+            }
+            if confirmation_identity != _standalone_delivery_identity(context):
+                raise DeliveryIntegrityError("standalone local confirmation is stale")
+        except (DeliveryIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as exc:
+            run["completion_integrity"] = {
+                "status": "drifted",
+                "checked_at": checked_at,
+                "message": f"已完成交付文件缺失或摘要变化：{exc}",
+            }
+            return run
+        run["completion_integrity"] = {
+            "status": "valid",
+            "checked_at": checked_at,
+            "message": "本机确认的 DOCX、质量报告与交付绑定摘要仍然一致。",
+        }
+        return run
+    if not standalone and classify_contract_version(run) == EXPERT_TEAM_CONTRACT_V1 and isinstance(
         run.get("current_delivery_manifest_ref"), dict
     ):
         from .office_review import (
@@ -1043,9 +1123,11 @@ def _questions(template: dict, prompt: str) -> list[dict]:
 
 def _current_stage(run: dict) -> dict:
     tasks = (
-        run.get("_tasks_template")
-        if isinstance(run.get("_tasks_template"), list) and run.get("_tasks_template")
-        else run.get("tasks") if isinstance(run.get("tasks"), list) else []
+        run.get("tasks")
+        if isinstance(run.get("tasks"), list) and run.get("tasks")
+        else run.get("_tasks_template")
+        if isinstance(run.get("_tasks_template"), list)
+        else []
     )
     index = int(run.get("current_stage_index") or 0)
     if not tasks:
@@ -1237,7 +1319,16 @@ def _idempotency_result(
             )
         replay = _refresh_artifact_existence(workspace, deepcopy(run))
         replay = _completion_integrity_for_read(workspace, replay)
-        return _sync_derived(replay)
+        # An idempotent replay must not change merely because the wall clock
+        # crossed a one-second boundary between the original response and the
+        # retry.  ``duration_seconds`` is a volatile view field that is already
+        # persisted with the committed mutation, so retain that committed value
+        # after refreshing the durable artifact/completion truth.
+        committed_duration = run.get("duration_seconds")
+        replay = _sync_derived(replay)
+        if isinstance(committed_duration, int) and not isinstance(committed_duration, bool):
+            replay["duration_seconds"] = committed_duration
+        return replay
     return None
 
 
@@ -1364,11 +1455,28 @@ def _clear_execution_patch() -> dict:
         "cancel_next_retry_at": 0,
         "cancel_deadline_at": 0,
         "last_execution_error": "",
+        "last_execution_error_code": "",
+        "last_execution_incident_id": "",
     }
 
 
 def _sync_derived(run: dict) -> dict:
     state = str(run.get("workflow_state") or "collecting_required")
+    stage_reservation = run.get("current_stage_attempt_reservation")
+    if (
+        state == "awaiting_review"
+        and isinstance(stage_reservation, dict)
+        and stage_reservation.get("executor") == "system"
+        and stage_reservation.get("artifact_type") == "delivery_manifest"
+        and stage_reservation.get("status") == "generated_valid"
+        and run.get("pending_system_stage_result") == "generated_valid"
+    ):
+        # Older standalone runs could persist a successful delivery while
+        # retaining the preceding failed attempt's error fields. Successful,
+        # immutable delivery evidence is authoritative over those stale errors.
+        run["last_validation_error"] = ""
+        run["last_execution_error"] = ""
+        run["last_execution_error_code"] = ""
     if state == "generating" and not str(run.get("execution_stream_id") or "").strip():
         state = "start_failed"
         run["workflow_state"] = state
@@ -1508,30 +1616,137 @@ def _transition(workspace: Path, run: dict, state: str, event: str, patch: dict 
     return write_run(workspace, _sync_derived(next_run))
 
 
-def start_expert_team(workspace: Path, body: dict) -> dict:
-    contract_version = classify_contract_version(body)
-    if contract_version == EXPERT_TEAM_CONTRACT_V1:
-        enforce_new_contract_rollout(
-            team_id=str(body.get("team_id") or CONTENT_CREATOR_TEAM_ID),
-            document_type=str(body.get("document_type") or ""),
-            intake_example_id=str(body.get("intake_example_id") or body.get("template_id") or ""),
+def _standalone_required_text(body: dict, field: str) -> str:
+    required_code = "launch_profile_required" if field == "launch_profile_id" else f"{field}_required"
+    if field not in body:
+        raise ContractError(required_code, field, f"{field} 为必填项")
+    value = body[field]
+    if type(value) is not str:
+        raise ContractError(f"{field}_invalid_type", field, f"{field} 必须是字符串")
+    if not value.strip():
+        raise ContractError(required_code, field, f"{field} 不能为空")
+    if len(value) > _STANDALONE_START_MAX_LENGTHS[field]:
+        raise ContractError(f"{field}_too_long", field, f"{field} 超出长度限制")
+    return value.strip() if field in {"launch_profile_id", "prompt"} else value
+
+
+def validate_standalone_start_request(body: dict) -> dict:
+    """Validate and normalize the public standalone start request without side effects."""
+    if type(body) is not dict:
+        raise ContractError("start_request_invalid_type", "request", "启动请求必须是对象")
+
+    validated = {
+        field: _standalone_required_text(body, field)
+        for field in ("launch_profile_id", "session_id", "prompt", "idempotency_key")
+    }
+    unknown_fields = sorted(set(body) - _STANDALONE_START_FIELDS)
+    if unknown_fields:
+        field = unknown_fields[0]
+        raise ContractError(
+            "server_owned_launch_field",
+            field,
+            "任务类型和流程由服务端启动配置决定",
         )
-    template = get_template(str(body.get("team_id") or CONTENT_CREATOR_TEAM_ID))
+
+    from api.models import is_safe_session_id
+
+    if not is_safe_session_id(validated["session_id"]):
+        raise ContractError("session_id_invalid_format", "session_id", "session_id 不是安全的会话标识")
+    idempotency_key = validated["idempotency_key"]
+    if len(idempotency_key) < 8:
+        raise ContractError("idempotency_key_too_short", "idempotency_key", "幂等键至少需要 8 个字符")
+    if _STANDALONE_IDEMPOTENCY_PATTERN.fullmatch(idempotency_key) is None:
+        raise ContractError(
+            "idempotency_key_invalid_format",
+            "idempotency_key",
+            "幂等键只能包含英文字母、数字、冒号、点、下划线和连字符",
+        )
+    return validated
+
+
+def _standalone_start_context(
+    body: dict,
+    *,
+    launch_profile_snapshot: dict | None = None,
+) -> tuple[dict, dict]:
+    validated = validate_standalone_start_request(body)
+    profile = (
+        deepcopy(launch_profile_snapshot)
+        if launch_profile_snapshot is not None
+        else get_launch_profile(validated["launch_profile_id"])
+    )
+    if (
+        not isinstance(profile, dict)
+        or str(profile.get("id") or "") != validated["launch_profile_id"]
+    ):
+        raise ContractError(
+            "launch_profile_snapshot_invalid",
+            "launch_profile_id",
+            "启动配置快照与任务类型不匹配",
+        )
+    resolved = {
+        "session_id": validated["session_id"],
+        "prompt": validated["prompt"],
+        "idempotency_key": validated["idempotency_key"],
+        "team_id": profile["team_id"],
+        "contract_version": EXPERT_TEAM_CONTRACT_V1,
+        "product_mode": "standalone",
+        "intake_example_id": profile["intake_example_id"],
+        "document_type": profile["document_type"],
+        "document_brief_seed": {
+            "task_mode": profile["task_mode"],
+            "document_control": {"render_template_id": profile["render_template_id"]},
+            "content_constraints": deepcopy(
+                profile.get("content_constraints") or {}
+            ),
+        },
+    }
+    return profile, resolved
+
+
+def _build_expert_team_run(
+    body: dict,
+    *,
+    run_id: str | None = None,
+    launch_profile_snapshot: dict | None = None,
+) -> dict:
+    standalone = "launch_profile_id" in body
+    launch_profile = None
+    resolved_body = body
+    if standalone:
+        launch_profile, resolved_body = _standalone_start_context(
+            body,
+            launch_profile_snapshot=launch_profile_snapshot,
+        )
+
+    contract_version = classify_contract_version(resolved_body)
+    if contract_version == EXPERT_TEAM_CONTRACT_V1 and not standalone:
+        enforce_new_contract_rollout(
+            team_id=str(resolved_body.get("team_id") or CONTENT_CREATOR_TEAM_ID),
+            document_type=str(resolved_body.get("document_type") or ""),
+            intake_example_id=str(
+                resolved_body.get("intake_example_id") or resolved_body.get("template_id") or ""
+            ),
+        )
+    template = get_template(str(resolved_body.get("team_id") or CONTENT_CREATOR_TEAM_ID))
     if contract_version == EXPERT_TEAM_CONTRACT_V1:
-        prompt = str(body.get("prompt") or "")
-        document_brief = build_document_brief(template["id"], body, now=_now())
+        prompt = str(resolved_body.get("prompt") or "")
+        document_brief = build_document_brief(template["id"], resolved_body, now=_now())
     else:
-        prompt = str(body.get("prompt") or body.get("message") or "").strip()
+        prompt = str(resolved_body.get("prompt") or resolved_body.get("message") or "").strip()
         document_brief = None
     if not prompt and contract_version == "legacy":
         prompt = "请起草一份办公材料。"
-    session_id = str(body.get("session_id") or "").strip()
+    session_id = str(resolved_body.get("session_id") or "").strip()
     if not session_id:
         raise ValueError("session_id is required to start an expert team")
+    task_template = deepcopy(
+        launch_profile["stages"] if standalone and launch_profile is not None else template.get("tasks") or []
+    )
     run = {
-        "schema_version": 2,
+        "schema_version": 3 if standalone else 2,
         "version": 1,
-        "run_id": "et-" + uuid.uuid4().hex[:16],
+        "run_id": run_id or "et-" + uuid.uuid4().hex[:16],
         "session_id": session_id,
         "team_id": template["id"],
         "team_title": template["title"],
@@ -1545,8 +1760,8 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
         "questions": _questions(template, prompt),
         "answers": [],
         "members": _members(template),
-        "_tasks_template": deepcopy(template.get("tasks") or []),
-        "tasks": deepcopy(template.get("tasks") or []),
+        "_tasks_template": task_template,
+        "tasks": deepcopy(task_template),
         "artifacts": [],
         "stage_outputs": [],
         "review_items": [],
@@ -1563,7 +1778,49 @@ def start_expert_team(workspace: Path, body: dict) -> dict:
                 "canonical_document_ref": None,
             }
         )
-    return write_run(workspace, _sync_derived(run))
+    if standalone and launch_profile is not None:
+        run.update(
+            {
+                "product_mode": "standalone",
+                "launch_profile_id": launch_profile["id"],
+                "launch_profile_snapshot": deepcopy(launch_profile),
+                "review_policy": deepcopy(launch_profile["review_policy"]),
+            }
+        )
+    return _sync_derived(run)
+
+
+def start_expert_team(workspace: Path, body: dict) -> dict:
+    """Build and persist a legacy/internal non-standalone Run.
+
+    Public canonical standalone Runs require an atomic committed receipt and
+    must use the pending/publish launch path behind ``POST /api/expert-teams/start``.
+    """
+    return write_run(workspace, _build_expert_team_run(body))
+
+
+def build_standalone_expert_team_run(
+    body: dict,
+    *,
+    run_id: str,
+    launch_profile_snapshot: dict | None = None,
+) -> dict:
+    """Build a standalone run without making it visible to public readers."""
+    return _build_expert_team_run(
+        validate_standalone_start_request(body),
+        run_id=run_id,
+        launch_profile_snapshot=launch_profile_snapshot,
+    )
+
+
+def start_standalone_expert_team(workspace: Path, body: dict) -> dict:
+    """Reject the removed non-atomic standalone constructor."""
+    del workspace, body
+    raise ContractError(
+        "atomic_launch_required",
+        "launch_profile_id",
+        "standalone tasks must be launched through the atomic start API",
+    )
 
 
 def read_expert_team_run(workspace: Path, run_id: str) -> dict:
@@ -1696,7 +1953,10 @@ def _reserve_stage_attempt_in_run(
         "created_at": _now(),
     }
     for item in reservations:
-        if item.get("stage_id") == stage_id and item.get("status") != "superseded":
+        if (
+            item.get("stage_id") == stage_id
+            and item.get("status") not in {"superseded", "invalidated"}
+        ):
             item["status"] = "superseded"
             item["superseded_at"] = _now()
     reservations.append(reservation)
@@ -1789,7 +2049,7 @@ def _reserve_document_revision_and_delivery_attempt_in_run(
     next_run["document_revision_counter"] = document_revision_counter
     next_run["delivery_attempt_counter"] = delivery_attempt
     for item in reservations:
-        if item.get("status") != "superseded":
+        if item.get("status") not in {"superseded", "invalidated"}:
             item["status"] = "superseded"
             item["superseded_at"] = _now()
     next_run["delivery_attempt_reservations"] = reservations + [deepcopy(reservation)]
@@ -1883,9 +2143,20 @@ def _pending_system_descriptor(run: dict) -> dict:
             "expert team has no declared pending system stage",
             run,
         )
-    template = get_template(str(run.get("team_id") or ""))
+    if str(run.get("product_mode") or "") == "standalone":
+        template = run.get("launch_profile_snapshot")
+        task_key = "stages"
+        if not isinstance(template, dict):
+            raise ExpertTeamStateConflict(
+                "launch_profile_snapshot_missing",
+                "standalone launch profile snapshot is missing",
+                run,
+            )
+    else:
+        template = get_template(str(run.get("team_id") or ""))
+        task_key = "tasks"
     candidates = [
-        item for item in (template.get("tasks") or []) + (template.get("post_approval_system_steps") or [])
+        item for item in (template.get(task_key) or []) + (template.get("post_approval_system_steps") or [])
         if isinstance(item, dict) and item.get("executor") == "system"
     ]
     canonical = next((item for item in candidates if item.get("id") == descriptor.get("id")), None)
@@ -1909,7 +2180,10 @@ def reserve_system_stage_attempt(
         _require_mutable_v2(run)
         if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
             raise ExpertTeamStateConflict("system_stage_not_available", "legacy run has no system dispatcher", run)
-        if str(run.get("workflow_state") or "") != "delivery_validation_required":
+        if str(run.get("workflow_state") or "") not in {
+            "delivery_validation_required",
+            "generated_invalid",
+        }:
             raise ExpertTeamStateConflict("stale_state", "system stage is not ready for dispatch", run)
         descriptor = _pending_system_descriptor(run)
         approved = run.get("approved_stage_artifact_refs") if isinstance(run.get("approved_stage_artifact_refs"), dict) else {}
@@ -1965,22 +2239,47 @@ def complete_system_stage_attempt(
             )
         except StageArtifactError as exc:
             raise ExpertTeamStateConflict(exc.code, "system artifact validation failed", run) from exc
+        from .issue_policy import effective_artifact_validation
+
+        effective_validation = effective_artifact_validation(artifact)
         if (
             artifact.get("stage_id") != descriptor.get("id")
             or artifact.get("artifact_type") != descriptor.get("artifact_type")
             or int(artifact.get("stage_attempt") or 0) != int(reservation.get("stage_attempt") or 0)
             or artifact.get("input_refs") != reservation.get("input_refs")
-            or artifact.get("validation_status") != "valid"
+            or effective_validation["status"] != "valid"
         ):
             raise ExpertTeamStateConflict("system_artifact_identity_mismatch", "system artifact does not match reservation", run)
-        if any(
-            issue.get("severity") in {"blocking", "error", "warning"}
-            for issue in artifact.get("blocking_issues") or []
-            if isinstance(issue, dict)
-        ):
+        if effective_validation["blocking_count"]:
             raise ExpertTeamStateConflict("system_artifact_blocked", "system artifact has unresolved issues", run)
-        if any(item.get("artifact_id") == artifact.get("artifact_id") for item in run.get("stage_artifacts") or []):
-            raise ExpertTeamStateConflict("stage_artifact_immutable_conflict", "system artifact already exists", run)
+        existing_artifacts = [
+            item
+            for item in run.get("stage_artifacts") or []
+            if isinstance(item, dict) and item.get("artifact_id") == artifact.get("artifact_id")
+        ]
+        if existing_artifacts:
+            current_ref = run.get("current_stage_artifact_ref")
+            if (
+                len(existing_artifacts) == 1
+                and existing_artifacts[0] == artifact
+                and str(run.get("workflow_state") or "") == "awaiting_review"
+                and str(reservation.get("status") or "") == "generated_valid"
+                and isinstance(current_ref, dict)
+                and current_ref
+                == {
+                    "artifact_id": artifact["artifact_id"],
+                    "sha256": artifact["sha256"],
+                    "stage_attempt": artifact["stage_attempt"],
+                }
+            ):
+                # Concurrent idempotent dispatchers may both finish the same
+                # immutable attempt. The second completion is a read-only replay.
+                return _sync_derived(run)
+            raise ExpertTeamStateConflict(
+                "stage_artifact_immutable_conflict",
+                "system artifact already exists",
+                run,
+            )
         run.setdefault("stage_artifacts", []).append(deepcopy(artifact))
         run["current_stage_artifact_ref"] = {
             "artifact_id": artifact["artifact_id"],
@@ -2016,13 +2315,89 @@ def complete_system_stage_attempt(
                 "delivery_binding_path": payload.get("delivery_binding_path"),
                 "delivery_binding_sha256": payload.get("delivery_binding_sha256"),
             }
+            if str(run.get("product_mode") or "") == "standalone":
+                run["delivery_gate"] = {
+                    "schema_version": "standalone-delivery-gate/v1",
+                    "status": "pending_confirmation",
+                    "delivery_attempt": delivery_attempt,
+                    "delivery_binding_sha256": payload.get("delivery_binding_sha256"),
+                    "document_sha256": payload.get("document_sha256"),
+                }
         run["pending_system_stage_result"] = "generated_valid"
         return _transition(
             workspace,
             run,
             "awaiting_review",
             "system_stage_completed",
-            _stage_reservation_status_patch(run, "generated_valid"),
+            {
+                **_stage_reservation_status_patch(run, "generated_valid"),
+                "last_validation_error": "",
+                "last_execution_error": "",
+                "last_execution_error_code": "",
+            },
+        )
+
+
+def fail_system_stage_attempt(
+    workspace: Path,
+    run_id: str,
+    *,
+    reservation_id: str,
+    error_code: str,
+    message: str,
+) -> dict:
+    """Persist a failed system stage so the UI exposes a safe retry path."""
+    with _run_mutation_lock(workspace, run_id):
+        run = read_run(workspace, run_id)
+        _require_mutable_v2(run)
+        reservation = run.get("current_stage_attempt_reservation")
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("reservation_id") != reservation_id
+            or reservation.get("executor") != "system"
+        ):
+            raise ExpertTeamStateConflict(
+                "stage_attempt_identity_mismatch",
+                "failed system reservation changed",
+                run,
+            )
+        delivery_reservations = [
+            deepcopy(item)
+            for item in run.get("delivery_attempt_reservations") or []
+            if isinstance(item, dict)
+        ]
+        current_delivery = run.get("current_delivery_attempt_reservation")
+        current_delivery_id = (
+            str(current_delivery.get("reservation_id") or "")
+            if isinstance(current_delivery, dict)
+            else ""
+        )
+        failed_delivery = None
+        if current_delivery_id:
+            for index, item in enumerate(delivery_reservations):
+                if str(item.get("reservation_id") or "") == current_delivery_id:
+                    failed_delivery = {
+                        **item,
+                        "status": "generated_invalid",
+                        "updated_at": _now(),
+                    }
+                    delivery_reservations[index] = deepcopy(failed_delivery)
+                    break
+        error = str(message or "DOCX 交付生成失败，请重新尝试。")
+        return _transition(
+            workspace,
+            run,
+            "generated_invalid",
+            "system_stage_failed",
+            {
+                **_stage_reservation_status_patch(run, "generated_invalid"),
+                "delivery_attempt_reservations": delivery_reservations,
+                "current_delivery_attempt_reservation": failed_delivery,
+                "pending_system_stage_result": "generated_invalid",
+                "last_execution_error": error,
+                "last_execution_error_code": str(error_code or "delivery_generation_failed"),
+                "last_validation_error": error,
+            },
         )
 
 
@@ -2184,14 +2559,22 @@ def confirm_expert_team_document_brief(workspace: Path, body: dict) -> dict:
         first = validation["field_errors"][0]
         raise ContractError(first["code"], first["field"], first["message"])
     confirmed = confirm_document_brief(brief, now=checked_at)
-    snapshot_ref = build_source_context_snapshot(
-        workspace,
-        str(run.get("run_id") or ""),
-        confirmed,
-        source_registry,
-        brief_sha256=brief_digest(confirmed),
-        brief_revision=int(confirmed.get("confirmed_revision") or 0),
-    )
+    try:
+        snapshot_ref = build_source_context_snapshot(
+            workspace,
+            str(run.get("run_id") or ""),
+            confirmed,
+            source_registry,
+            brief_sha256=brief_digest(confirmed),
+            brief_revision=int(confirmed.get("confirmed_revision") or 0),
+            allow_empty=allows_empty_source_context(run, brief=confirmed),
+        )
+    except SourceContextError as exc:
+        raise ContractError(
+            "source_context_invalid",
+            "source_policy.source_refs",
+            "资料快照无法固化，请检查资料后重试",
+        ) from exc
     _record_action(run, body, "brief_confirm")
     return _transition(
         workspace,
@@ -2567,6 +2950,8 @@ def mark_expert_team_execution_start_failed(
     orphan_runtime_adapter: str = "",
     execution_cleanup_status: str = "",
     execution_cleanup_error: str = "",
+    error_code: str = "",
+    incident_id: str = "",
 ) -> dict:
     with _run_mutation_lock(workspace, run_id):
         run = read_run(workspace, run_id)
@@ -2603,6 +2988,8 @@ def mark_expert_team_execution_start_failed(
                 "execution_cleanup_next_retry_at": 0,
                 "execution_cleanup_deadline_at": cleanup_deadline,
                 "last_execution_error": str(message or "当前阶段启动失败，请重新尝试。"),
+                "last_execution_error_code": str(error_code or ""),
+                "last_execution_incident_id": str(incident_id or ""),
             },
         )
 
@@ -3018,7 +3405,6 @@ def _complete_enterprise_stage_artifact(
 ) -> dict:
     from .stage_artifacts import (
         StageArtifactError,
-        artifact_digest,
         build_stage_artifact,
         parse_stage_response,
     )
@@ -3076,20 +3462,18 @@ def _complete_enterprise_stage_artifact(
         run["stage_outputs"][-1] = output
         run["validation"] = {
             "status": "rewrite_required",
-            "message": "阶段产物未通过企业合同校验",
+            "message": "阶段生成结果格式或内容不完整",
             "code": output["artifact_error"]["code"],
         }
         run["last_validation_error"] = run["validation"]["message"]
         patch = _stage_reservation_status_patch(run, "generated_invalid")
         return _transition(workspace, run, "generated_invalid", "generation_invalid", patch)
 
-    blocking_count = sum(
-        1 for issue in artifact.get("blocking_issues") or []
-        if issue.get("severity") in {"blocking", "error", "warning"}
-    )
-    if blocking_count:
-        artifact["validation_status"] = "invalid"
-        artifact["sha256"] = artifact_digest(artifact)
+    from .issue_policy import classify_stage_issues
+
+    quality = classify_stage_issues(artifact.get("blocking_issues") or [])
+    blocking_count = int(quality["blocking_count"])
+    warning_count = int(quality["warning_count"])
     existing = next(
         (item for item in run.get("stage_artifacts") or [] if item.get("artifact_id") == artifact["artifact_id"]),
         None,
@@ -3110,10 +3494,22 @@ def _complete_enterprise_stage_artifact(
         "sha256": artifact["sha256"],
         "stage_attempt": stage_attempt,
     }
+    # A semantic confirmation failure belongs to one immutable artifact only.
+    # A newly generated attempt must not inherit the previous artifact's block.
+    run["semantic_validation"] = {}
+    validation_status = "rewrite_required" if blocking_count else "attention" if warning_count else "pass"
+    validation_message = (
+        "阶段产物存在阻断问题"
+        if blocking_count
+        else "阶段产物可继续复核，但有待确认事项"
+        if warning_count
+        else "阶段产物合同校验通过"
+    )
     run["validation"] = {
-        "status": "rewrite_required" if blocking_count else "pass",
+        "status": validation_status,
         "blocking_count": blocking_count,
-        "message": "阶段产物存在阻断问题" if blocking_count else "阶段产物合同校验通过",
+        "warning_count": warning_count,
+        "message": validation_message,
     }
     run["last_validation_error"] = run["validation"]["message"] if blocking_count else ""
     status = "generated_invalid" if blocking_count else "generated_valid"
@@ -3555,7 +3951,10 @@ def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
         )
     except StageArtifactError as exc:
         raise ExpertTeamStateConflict(exc.code, "stage artifact validation failed", run) from exc
-    if artifact.get("validation_status") != "valid" or int(validation.get("blocking_count") or 0) != 0:
+    from .issue_policy import effective_artifact_validation
+
+    effective_validation = effective_artifact_validation(artifact)
+    if effective_validation["status"] != "valid" or int(validation.get("blocking_count") or 0) != 0:
         raise ExpertTeamStateConflict("stage_artifact_blocked", "stage artifact has unresolved issues", run)
     if artifact.get("artifact_type") == "delivery_manifest":
         from .office_review import reconcile_enterprise_completion
@@ -3667,8 +4066,372 @@ def _approve_enterprise_stage(workspace: Path, run: dict, body: dict) -> dict:
     )
 
 
+def _require_standalone_stage_action_fields(body: dict) -> None:
+    for field in ("stage_attempt", "artifact_id", "artifact_sha256"):
+        value = body.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"{field} is required for standalone stage mutations")
+    attempt = body.get("stage_attempt")
+    if type(attempt) is not int or attempt <= 0:
+        raise ValueError("stage_attempt must be a positive integer")
+    if not str(body.get("artifact_id") or "").strip():
+        raise ValueError("artifact_id is required for standalone stage mutations")
+    if re.fullmatch(r"[0-9a-f]{64}", str(body.get("artifact_sha256") or "").strip()) is None:
+        raise ValueError("artifact_sha256 must be a lowercase sha256 digest")
+
+
+def _standalone_bound_stage_artifact(run: dict, body: dict) -> dict:
+    """Resolve the one immutable artifact named by a local stage action."""
+
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_not_available",
+            "local stage confirmation is only available for standalone runs",
+            run,
+        )
+    _require_standalone_stage_action_fields(body)
+    stage = _authoritative_stage_for_mutation(run)
+    stage_id = str(stage.get("task_id") or "")
+    requested_attempt = int(body.get("stage_attempt"))
+    requested_artifact_id = str(body.get("artifact_id") or "").strip()
+    requested_sha256 = str(body.get("artifact_sha256") or "").strip()
+    artifact_ref = run.get("current_stage_artifact_ref")
+    if not isinstance(artifact_ref, dict):
+        raise ExpertTeamStateConflict(
+            "stage_artifact_missing",
+            "current stage has no authoritative artifact",
+            run,
+        )
+    try:
+        authoritative_attempt = int(artifact_ref.get("stage_attempt"))
+    except (TypeError, ValueError) as exc:
+        raise ExpertTeamStateConflict(
+            "stage_artifact_identity_mismatch",
+            "current stage artifact attempt is invalid",
+            run,
+        ) from exc
+    if requested_attempt != authoritative_attempt:
+        raise ExpertTeamStateConflict(
+            "stale_stage_attempt",
+            f"expert team stage attempt changed: expected {requested_attempt}, current {authoritative_attempt}",
+            run,
+        )
+    if requested_artifact_id != str(artifact_ref.get("artifact_id") or ""):
+        raise ExpertTeamStateConflict(
+            "stale_artifact",
+            "expert team stage artifact changed",
+            run,
+        )
+    if requested_sha256 != str(artifact_ref.get("sha256") or ""):
+        raise ExpertTeamStateConflict(
+            "stale_artifact_hash",
+            "expert team stage artifact digest changed",
+            run,
+        )
+    candidates = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and item.get("artifact_id") == requested_artifact_id
+        and item.get("sha256") == requested_sha256
+    ]
+    if len(candidates) != 1:
+        raise ExpertTeamStateConflict(
+            "stage_artifact_identity_mismatch",
+            "current stage artifact is missing or ambiguous",
+            run,
+        )
+    artifact = candidates[0]
+    if (
+        str(artifact.get("stage_id") or "") != stage_id
+        or int(artifact.get("stage_attempt") or 0) != requested_attempt
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_artifact_identity_mismatch",
+            "current stage artifact identity changed",
+            run,
+        )
+    reservation = run.get("current_stage_attempt_reservation")
+    if (
+        not isinstance(reservation, dict)
+        or str(reservation.get("stage_id") or "") != stage_id
+        or int(reservation.get("stage_attempt") or 0) != requested_attempt
+        or str(reservation.get("status") or "") != "generated_valid"
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "current stage attempt is no longer authoritative",
+            run,
+        )
+    if (
+        str(reservation.get("artifact_type") or "") != str(artifact.get("artifact_type") or "")
+        or reservation.get("input_refs") != artifact.get("input_refs")
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "current stage attempt inputs do not match the artifact",
+            run,
+        )
+    from .stage_artifacts import StageArtifactError, validate_stage_artifact
+
+    try:
+        validation = validate_stage_artifact(
+            artifact,
+            brief=run.get("document_brief") or {},
+            approved_inputs=artifact.get("input_refs") or [],
+        )
+    except StageArtifactError as exc:
+        raise ExpertTeamStateConflict(exc.code, "stage artifact validation failed", run) from exc
+    from .issue_policy import effective_artifact_validation
+
+    effective_validation = effective_artifact_validation(artifact)
+    if effective_validation["status"] != "valid" or int(validation.get("blocking_count") or 0) != 0:
+        raise ExpertTeamStateConflict(
+            "stage_artifact_blocked",
+            "stage artifact has unresolved issues",
+            run,
+        )
+    return deepcopy(artifact)
+
+
+def _mark_current_stage_output(run: dict, *, stage_id: str, status: str, at: str) -> None:
+    outputs = [deepcopy(output) for output in run.get("stage_outputs") or [] if isinstance(output, dict)]
+    for output in reversed(outputs):
+        if str(output.get("task_id") or output.get("stage_id") or "") == stage_id:
+            output["status"] = status
+            output[f"{status}_at"] = at
+            break
+    run["stage_outputs"] = outputs
+
+
+@_serialized_body_mutation
+def confirm_standalone_expert_team_stage(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(workspace, body, "confirm_stage")
+    if duplicate is not None:
+        return duplicate
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_not_available",
+            "local stage confirmation is only available for standalone runs",
+            run,
+        )
+    if str((run.get("review_policy") or {}).get("kind") or "") != "local_confirmation":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_policy_mismatch",
+            "standalone run does not allow local stage confirmation",
+            run,
+        )
+    if str(run.get("workflow_state") or "") != "awaiting_review":
+        raise ExpertTeamStateConflict(
+            "stale_state",
+            "expert team stage is not awaiting local confirmation",
+            run,
+        )
+    artifact = _standalone_bound_stage_artifact(run, body)
+    stage_id = str(artifact.get("stage_id") or "")
+    brief = run.get("document_brief") or {}
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        from .documents import (
+            evaluate_semantic_gates,
+            resolve_approved_input_artifacts,
+        )
+
+        try:
+            needs_strict_source_semantics = (
+                str(brief.get("task_mode") or "") == "polish"
+                or str(brief.get("document_type") or "") == "research_report"
+            )
+            source_context = (
+                verify_source_context_snapshot(workspace, run)
+                if needs_strict_source_semantics
+                or isinstance(run.get("source_context_snapshot_ref"), dict)
+                else None
+            )
+            approved_artifacts = (
+                resolve_approved_input_artifacts(run, artifact)
+                if needs_strict_source_semantics
+                else []
+            )
+            semantic_gates = evaluate_semantic_gates(
+                brief=brief,
+                artifact=artifact,
+                approved_inputs=artifact.get("input_refs") or [],
+                approved_artifacts=approved_artifacts,
+                source_context=source_context,
+                source_requirement=(
+                    (run.get("launch_profile_snapshot") or {}).get(
+                        "source_requirement"
+                    )
+                    if isinstance(run.get("launch_profile_snapshot"), dict)
+                    else None
+                ),
+                product_mode="standalone",
+            )
+        except (SourceContextError, FinalDocumentDeliveryError) as exc:
+            raise ExpertTeamStateConflict(
+                "source_context_invalid",
+                "final artifact source binding could not be verified",
+                _sync_derived(run),
+            ) from exc
+        if semantic_gates["status"] != "passed":
+            issue_codes = ",".join(
+                str(item.get("code") or "semantic_issue")
+                for item in semantic_gates.get("issues") or []
+                if isinstance(item, dict)
+            )
+            blocked_run = deepcopy(run)
+            semantic_issues = [
+                {
+                    "code": str(item.get("code") or "semantic_issue"),
+                    "severity": "blocking",
+                    "message": str(item.get("message") or "内容检查未通过"),
+                    "suggested_action": "提交修改意见后重新生成当前阶段",
+                }
+                for item in semantic_gates.get("issues") or []
+                if isinstance(item, dict)
+            ]
+            blocked_at = _now()
+            blocked_run.update(
+                {
+                    "version": int(run.get("version") or 0) + 1,
+                    "updated_at": blocked_at,
+                    "semantic_validation": {
+                        "schema_version": "expert-semantic-confirmation/v1",
+                        "status": "failed",
+                        "artifact_id": str(artifact.get("artifact_id") or ""),
+                        "artifact_sha256": str(artifact.get("sha256") or ""),
+                        "blocking_count": len(semantic_issues),
+                        "issues": semantic_issues,
+                        "checked_at": blocked_at,
+                    },
+                    "last_validation_error": "当前阶段内容检查未通过，请查看问题并提交修改意见。",
+                }
+            )
+            events = [
+                deepcopy(item)
+                for item in blocked_run.get("events") or []
+                if isinstance(item, dict)
+            ]
+            events.append(
+                {
+                    "type": "semantic_confirmation_blocked",
+                    "from": "awaiting_review",
+                    "to": "awaiting_review",
+                    "at": blocked_at,
+                }
+            )
+            blocked_run["events"] = events
+            timeline = [
+                deepcopy(item)
+                for item in blocked_run.get("timeline_events") or []
+                if isinstance(item, dict)
+            ]
+            timeline.append(
+                {
+                    "type": "semantic_confirmation_blocked",
+                    "title": "内容检查发现必须处理的问题",
+                    "detail": str((blocked_run.get("current_stage") or {}).get("phase") or ""),
+                    "member_id": str((blocked_run.get("current_stage") or {}).get("worker_id") or "reviewer"),
+                    "at": blocked_at,
+                }
+            )
+            blocked_run["timeline_events"] = timeline
+            blocked_run = write_run(workspace, _sync_derived(blocked_run))
+            raise ExpertTeamStateConflict(
+                "stage_artifact_blocked",
+                f"stage artifact failed standalone delivery semantics: {issue_codes}",
+                blocked_run,
+            )
+        run["semantic_validation"] = {}
+        run["last_validation_error"] = ""
+    confirmed_at = _now()
+    confirmation = {
+        "schema_version": "local-stage-confirmation/v1",
+        "session_id": str(run.get("session_id") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "stage_id": stage_id,
+        "stage_attempt": int(artifact.get("stage_attempt") or 0),
+        "artifact_id": artifact["artifact_id"],
+        "artifact_sha256": artifact["sha256"],
+        "confirmed_at": confirmed_at,
+    }
+    confirmations = [
+        deepcopy(item)
+        for item in run.get("local_stage_confirmations") or []
+        if isinstance(item, dict)
+    ]
+    confirmations.append(confirmation)
+    run["local_stage_confirmations"] = confirmations
+    _mark_current_stage_output(run, stage_id=stage_id, status="confirmed", at=confirmed_at)
+    run["approved_stage_artifact_refs"] = {
+        **(
+            deepcopy(run.get("approved_stage_artifact_refs"))
+            if isinstance(run.get("approved_stage_artifact_refs"), dict)
+            else {}
+        ),
+        stage_id: {"artifact_id": artifact["artifact_id"], "sha256": artifact["sha256"]},
+    }
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        run["canonical_document_ref"] = {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+            "brief_revision": int(brief.get("confirmed_revision") or 0),
+            "brief_sha256": str(brief.get("confirmed_sha256") or ""),
+        }
+        profile = run.get("launch_profile_snapshot")
+        if not isinstance(profile, dict):
+            raise ExpertTeamStateConflict(
+                "launch_profile_snapshot_missing",
+                "standalone launch profile snapshot is missing",
+                run,
+            )
+        system_descriptors = [
+            item
+            for item in (profile.get("stages") or []) + (profile.get("post_approval_system_steps") or [])
+            if isinstance(item, dict)
+            and item.get("executor") == "system"
+            and stage_id in (item.get("depends_on") or [])
+        ]
+        if len(system_descriptors) != 1:
+            raise ExpertTeamStateConflict(
+                "system_step_contract_missing",
+                "confirmed canonical document has no unique declared delivery stage",
+                run,
+            )
+        run["pending_system_stage"] = deepcopy(system_descriptors[0])
+    run["current_stage_index"] = int(run.get("current_stage_index") or 0) + 1
+    _record_action(run, body, "confirm_stage")
+    reservation_patch = _stage_reservation_status_patch(run, "confirmed")
+    if artifact.get("artifact_type") in {"reviewed_document", "reviewed_research_document"}:
+        return _transition(
+            workspace,
+            run,
+            "delivery_validation_required",
+            "stage_confirmed",
+            {**_clear_execution_patch(), **reservation_patch},
+        )
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "stage_confirmed",
+        {
+            **_clear_execution_patch(),
+            **reservation_patch,
+            "current_stage_artifact_ref": None,
+        },
+    )
+
+
 @_serialized_body_mutation
 def approve_expert_team_stage(workspace: Path, body: dict) -> dict:
+    authoritative = read_run(workspace, str(body.get("run_id") or ""))
+    if str(authoritative.get("product_mode") or "") == "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_confirmation_required",
+            "standalone runs must use local stage confirmation",
+            _sync_derived(authoritative),
+        )
     run, duplicate = _prepare_mutation(workspace, body, "approve_stage")
     if duplicate is not None:
         return duplicate
@@ -3836,24 +4599,1178 @@ def request_expert_team_stage_revision(workspace: Path, body: dict) -> dict:
     feedback = str(body.get("feedback") or "").strip()
     if not feedback:
         raise ValueError("Expert team revision feedback is required")
+    standalone_artifact = None
+    if str(run.get("product_mode") or "") == "standalone":
+        standalone_artifact = _standalone_bound_stage_artifact(run, body)
     current = _current_stage(_sync_derived(deepcopy(run)))
     stage_id = str(current.get("task_id") or current.get("id") or "")
     feedback_entry = {"stage_id": stage_id, "feedback": feedback, "at": _now()}
+    if standalone_artifact is not None:
+        feedback_entry.update(
+            {
+                "stage_attempt": int(standalone_artifact.get("stage_attempt") or 0),
+                "artifact_id": str(standalone_artifact.get("artifact_id") or ""),
+                "artifact_sha256": str(standalone_artifact.get("sha256") or ""),
+            }
+        )
     run.setdefault("revision_feedback", []).append(feedback_entry)
     outputs = [deepcopy(output) for output in run.get("stage_outputs") or [] if isinstance(output, dict)]
     for output in reversed(outputs):
         if str(output.get("task_id") or output.get("stage_id") or "") == stage_id:
             output.setdefault("feedback_history", []).append(deepcopy(feedback_entry))
+            if standalone_artifact is not None:
+                output["status"] = "revision_requested"
+                output["revision_requested_at"] = feedback_entry["at"]
             break
     run["stage_outputs"] = outputs
     _record_action(run, body, "revise_stage")
+    standalone_patch = {}
+    if standalone_artifact is not None:
+        standalone_patch = {
+            **_stage_reservation_status_patch(run, "revision_requested"),
+            "current_stage_artifact_ref": None,
+        }
     return _transition(
         workspace,
         run,
         "ready_to_generate",
         "stage_revision_requested",
-        _clear_execution_patch(),
+        {**_clear_execution_patch(), **standalone_patch},
     )
+
+
+_STANDALONE_DELIVERY_IDENTITY_FIELDS = (
+    "session_id",
+    "run_id",
+    "stage_id",
+    "stage_attempt",
+    "artifact_id",
+    "artifact_sha256",
+    "delivery_attempt",
+    "delivery_binding_sha256",
+    "document_sha256",
+)
+
+
+def _require_standalone_delivery_action_fields(body: dict) -> None:
+    for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS:
+        value = body.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"{field} is required for standalone delivery actions")
+    for field in ("stage_attempt", "delivery_attempt"):
+        if type(body.get(field)) is not int or int(body[field]) <= 0:
+            raise ValueError(f"{field} must be a positive integer")
+    for field in ("artifact_sha256", "delivery_binding_sha256", "document_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(body.get(field) or "")) is None:
+            raise ValueError(f"{field} must be a lowercase sha256 digest")
+
+
+def _standalone_delivery_identity(context: dict) -> dict:
+    identity = {
+        field: context.get(field)
+        for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS
+    }
+    identity["stage_attempt"] = int(identity.get("stage_attempt") or 0)
+    identity["delivery_attempt"] = int(identity.get("delivery_attempt") or 0)
+    for field in set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) - {
+        "stage_attempt",
+        "delivery_attempt",
+    }:
+        identity[field] = str(identity.get(field) or "")
+    return identity
+
+
+def _standalone_delivery_snapshot(context: dict) -> dict:
+    """Return a hash-closed snapshot used both at confirmation and later reads."""
+
+    binding_path = Path(context.get("binding_path") or "")
+    document_path = Path(context.get("document_path") or "")
+    quality_path = Path(context.get("quality_path") or "")
+    return {
+        **_standalone_delivery_identity(context),
+        "binding_file_sha256": sha256_file(binding_path),
+        "document_file_sha256": sha256_file(document_path),
+        "quality_file_sha256": sha256_file(quality_path),
+    }
+
+
+def _require_current_delivery_reservation(
+    run: dict,
+    context: dict,
+    *,
+    expected_status: str,
+) -> dict:
+    current = run.get("current_delivery_attempt_reservation")
+    if not isinstance(current, dict):
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "current delivery reservation is missing",
+            run,
+        )
+    reservation_id = str(current.get("reservation_id") or "")
+    attempt = int(context.get("delivery_attempt") or 0)
+    if (
+        not reservation_id
+        or int(current.get("delivery_attempt") or 0) != attempt
+        or str(current.get("status") or "") != expected_status
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "current delivery reservation is no longer confirmable",
+            run,
+        )
+    matches = [
+        item
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+        and str(item.get("reservation_id") or "") == reservation_id
+        and int(item.get("delivery_attempt") or 0) == attempt
+        and str(item.get("status") or "") == expected_status
+    ]
+    if len(matches) != 1 or matches[0] != current:
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "delivery reservation ledger is missing or ambiguous",
+            run,
+        )
+    return deepcopy(current)
+
+
+def _require_bound_standalone_delivery(
+    workspace: Path,
+    run: dict,
+    body: dict,
+    *,
+    allowed_states: set[str],
+) -> dict:
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_delivery_not_available",
+            "standalone delivery actions are only available for standalone runs",
+            run,
+        )
+    if str(run.get("workflow_state") or "") not in allowed_states:
+        raise ExpertTeamStateConflict(
+            "stale_state",
+            "standalone delivery is not awaiting this action",
+            run,
+        )
+    _require_standalone_delivery_action_fields(body)
+    from .standalone_delivery import validate_standalone_delivery_context
+
+    try:
+        context = validate_standalone_delivery_context(workspace, run)
+    except (DeliveryIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        raise ExpertTeamStateConflict(
+            "delivery_integrity_failed",
+            f"standalone delivery failed integrity validation: {exc}",
+            run,
+        ) from exc
+    requested = {
+        field: body.get(field)
+        for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS
+    }
+    requested["stage_attempt"] = int(requested["stage_attempt"])
+    requested["delivery_attempt"] = int(requested["delivery_attempt"])
+    authoritative = _standalone_delivery_identity(context)
+    conflict_codes = {
+        "session_id": "wrong_session",
+        "run_id": "wrong_run",
+        "stage_id": "stale_stage",
+        "stage_attempt": "stale_stage_attempt",
+        "artifact_id": "stale_artifact",
+        "artifact_sha256": "stale_artifact_hash",
+        "delivery_attempt": "stale_delivery_attempt",
+        "delivery_binding_sha256": "stale_delivery_binding",
+        "document_sha256": "stale_document_hash",
+    }
+    for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS:
+        if requested[field] != authoritative[field]:
+            raise ExpertTeamStateConflict(
+                conflict_codes[field],
+                f"standalone delivery {field} changed",
+                run,
+            )
+    quality = context.get("quality_report") if isinstance(context.get("quality_report"), dict) else {}
+    if str(quality.get("status") or "") != "passed":
+        raise ExpertTeamStateConflict(
+            "delivery_quality_failed",
+            "standalone delivery automatic quality checks did not pass",
+            run,
+        )
+    expected_reservation_status = (
+        "confirmed" if str(run.get("workflow_state") or "") == "completed" else "generated_valid"
+    )
+    _require_current_delivery_reservation(
+        run,
+        context,
+        expected_status=expected_reservation_status,
+    )
+    return context
+
+
+def _standalone_delivery_revision_stage(run: dict) -> tuple[int, str]:
+    descriptor = run.get("pending_system_stage")
+    if not isinstance(descriptor, dict) or descriptor.get("executor") != "system":
+        raise ExpertTeamStateConflict(
+            "system_step_contract_missing",
+            "standalone delivery has no immutable system descriptor",
+            run,
+        )
+    dependencies = [str(item or "") for item in descriptor.get("depends_on") or [] if str(item or "")]
+    if len(dependencies) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_revision_target_ambiguous",
+            "standalone delivery does not declare one semantic revision target",
+            run,
+        )
+    target = dependencies[0]
+    matches = [
+        index
+        for index, item in enumerate(run.get("_tasks_template") or [])
+        if isinstance(item, dict)
+        and str(item.get("id") or item.get("task_id") or "") == target
+        and item.get("executor") == "model"
+    ]
+    if len(matches) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_revision_target_ambiguous",
+            "standalone delivery semantic revision target is missing or ambiguous",
+            run,
+        )
+    return matches[0], target
+
+
+def _invalidate_delivery_reservation(run: dict, context: dict, *, at: str) -> list[dict]:
+    current = _require_current_delivery_reservation(
+        run,
+        context,
+        expected_status="generated_valid",
+    )
+    reservation_id = str(current.get("reservation_id") or "")
+    rows = [
+        deepcopy(item)
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    changed = 0
+    for index, item in enumerate(rows):
+        if str(item.get("reservation_id") or "") == reservation_id:
+            rows[index] = {**item, "status": "invalidated", "invalidated_at": at}
+            changed += 1
+    if changed != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_attempt_identity_mismatch",
+            "delivery reservation could not be invalidated exactly once",
+            run,
+        )
+    return rows
+
+
+def _invalidate_generated_delivery_stage_reservation(
+    run: dict,
+    context: dict,
+    *,
+    at: str,
+) -> list[dict]:
+    current = run.get("current_stage_attempt_reservation")
+    if (
+        not isinstance(current, dict)
+        or str(current.get("stage_id") or "") != str(context.get("stage_id") or "")
+        or int(current.get("stage_attempt") or 0) != int(context.get("stage_attempt") or 0)
+        or str(current.get("executor") or "") != "system"
+        or str(current.get("artifact_type") or "") != "delivery_manifest"
+        or str(current.get("status") or "") != "generated_valid"
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "current delivery stage reservation is no longer rerenderable",
+            run,
+        )
+    reservation_id = str(current.get("reservation_id") or "")
+    rows = [
+        deepcopy(item)
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    matches = [
+        index
+        for index, item in enumerate(rows)
+        if str(item.get("reservation_id") or "") == reservation_id
+        and item == current
+    ]
+    if not reservation_id or len(matches) != 1:
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "delivery stage reservation ledger is missing or ambiguous",
+            run,
+        )
+    index = matches[0]
+    rows[index] = {**rows[index], "status": "invalidated", "invalidated_at": at}
+    return rows
+
+
+@_serialized_body_mutation
+def rerender_standalone_expert_team_delivery(workspace: Path, body: dict) -> dict:
+    """Regenerate only the bound DOCX while preserving confirmed model content."""
+
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    forbidden_paths = {
+        "path",
+        "document_path",
+        "delivery_dir",
+        "binding_path",
+        "quality_path",
+        "out_dir",
+    }
+    if forbidden_paths.intersection(unknown_fields):
+        raise ValueError("standalone delivery rerender paths are server-owned")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery rerender has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    if type((body or {}).get("expected_version")) is not int or int(body["expected_version"]) <= 0:
+        raise ValueError("expected_version must be a positive integer")
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "rerender_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+
+    at = _now()
+    stage_id = str(body.get("stage_id") or "")
+    delivery_attempt = int(body.get("delivery_attempt") or 0)
+    with delivery_attempt_lock(
+        workspace,
+        str(run.get("run_id") or ""),
+        stage_id,
+        delivery_attempt,
+    ):
+        context = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review"},
+        )
+        stage_rows = _invalidate_generated_delivery_stage_reservation(
+            run,
+            context,
+            at=at,
+        )
+        delivery_rows = _invalidate_delivery_reservation(
+            run,
+            context,
+            at=at,
+        )
+
+    _pending_system_descriptor(run)
+    _record_action(run, body, "rerender_delivery")
+    generation = int(run.get("delivery_recovery_generation") or 0) + 1
+    history = [
+        deepcopy(item)
+        for item in run.get("delivery_recovery_history") or []
+        if isinstance(item, dict)
+    ]
+    history.append(
+        {
+            "schema_version": "standalone-delivery-recovery/v1",
+            "generation": generation,
+            "requested_at": at,
+            "reason": "manual_docx_rerender",
+            "previous_delivery": _standalone_delivery_identity(context),
+        }
+    )
+    next_run = deepcopy(run)
+    next_run.update(
+        {
+            **_clear_execution_patch(),
+            "workflow_state": "delivery_validation_required",
+            "version": int(run.get("version") or 0) + 1,
+            "updated_at": at,
+            "delivery_recovery_generation": generation,
+            "delivery_recovery_history": history,
+            "stage_attempt_reservations": stage_rows,
+            "delivery_attempt_reservations": delivery_rows,
+            "current_stage_attempt_reservation": None,
+            "current_delivery_attempt_reservation": None,
+            "current_stage_artifact_ref": None,
+            "current_delivery_manifest_ref": None,
+            "local_delivery_confirmation": None,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "invalidated",
+                "invalidated_at": at,
+                "reason": "manual_docx_rerender",
+                "previous_delivery_attempt": int(context.get("delivery_attempt") or 0),
+                "previous_delivery_binding_sha256": str(
+                    context.get("delivery_binding_sha256") or ""
+                ),
+                "previous_document_sha256": str(context.get("document_sha256") or ""),
+            },
+            "completion_integrity": {
+                "status": "rerender_requested",
+                "checked_at": at,
+                "message": "已保留确认正文，正在重新生成 DOCX。",
+            },
+            "pending_system_stage_result": "rerender_requested",
+        }
+    )
+    events = [
+        deepcopy(item)
+        for item in run.get("events") or []
+        if isinstance(item, dict)
+    ]
+    events.append(
+        {
+            "type": "delivery_rerender_requested",
+            "from": "awaiting_review",
+            "to": "delivery_validation_required",
+            "at": at,
+        }
+    )
+    next_run["events"] = events
+    timeline = [
+        deepcopy(item)
+        for item in run.get("timeline_events") or []
+        if isinstance(item, dict)
+    ]
+    timeline.append(
+        {
+            "type": "delivery_rerender_requested",
+            "title": "正在重新生成 DOCX",
+            "detail": "已确认正文保持不变，不会重新调用模型",
+            "member_id": "director",
+            "at": at,
+        }
+    )
+    next_run["timeline_events"] = timeline
+    return write_run(workspace, _sync_derived(next_run))
+
+
+@_serialized_body_mutation
+def request_standalone_expert_team_delivery_revision(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "revise_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+    feedback = str(body.get("feedback") or "").strip()
+    if not feedback:
+        raise ValueError("standalone delivery revision feedback is required")
+    attempt = body.get("delivery_attempt")
+    stage_id = str(body.get("stage_id") or "")
+    with delivery_attempt_lock(
+        workspace,
+        str(run.get("run_id") or ""),
+        stage_id,
+        int(attempt or 0),
+    ):
+        context = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review"},
+        )
+        invalidated_reservations = _invalidate_delivery_reservation(
+            run,
+            context,
+            at=_now(),
+        )
+    target_index, target_stage_id = _standalone_delivery_revision_stage(run)
+    at = _now()
+    entry = {
+        "stage_id": target_stage_id,
+        "feedback": feedback,
+        "at": at,
+        **{
+            field: _standalone_delivery_identity(context)[field]
+            for field in (
+                "stage_attempt",
+                "artifact_id",
+                "artifact_sha256",
+                "delivery_attempt",
+                "delivery_binding_sha256",
+                "document_sha256",
+            )
+        },
+    }
+    delivery_feedback = [
+        deepcopy(item)
+        for item in run.get("delivery_revision_feedback") or []
+        if isinstance(item, dict)
+    ]
+    delivery_feedback.append(deepcopy(entry))
+    revision_feedback = [
+        deepcopy(item)
+        for item in run.get("revision_feedback") or []
+        if isinstance(item, dict)
+    ]
+    revision_feedback.append(deepcopy(entry))
+    outputs = [deepcopy(item) for item in run.get("stage_outputs") or [] if isinstance(item, dict)]
+    for output in reversed(outputs):
+        if str(output.get("stage_id") or output.get("task_id") or "") == target_stage_id:
+            output["status"] = "revision_requested"
+            output["revision_requested_at"] = at
+            output.setdefault("feedback_history", []).append(deepcopy(entry))
+            break
+    approved = (
+        deepcopy(run.get("approved_stage_artifact_refs"))
+        if isinstance(run.get("approved_stage_artifact_refs"), dict)
+        else {}
+    )
+    approved.pop(target_stage_id, None)
+    _record_action(run, body, "revise_delivery")
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "delivery_revision_requested",
+        {
+            **_clear_execution_patch(),
+            "current_stage_index": target_index,
+            "stage_outputs": outputs,
+            "revision_feedback": revision_feedback,
+            "delivery_revision_feedback": delivery_feedback,
+            "approved_stage_artifact_refs": approved,
+            "canonical_document_ref": None,
+            "current_stage_artifact_ref": None,
+            "current_stage_attempt_reservation": None,
+            "current_delivery_manifest_ref": None,
+            "current_delivery_attempt_reservation": None,
+            "delivery_attempt_reservations": invalidated_reservations,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "invalidated",
+                "invalidated_at": at,
+                "delivery_attempt": int(context.get("delivery_attempt") or 0),
+                "delivery_binding_sha256": str(context.get("delivery_binding_sha256") or ""),
+                "document_sha256": str(context.get("document_sha256") or ""),
+            },
+            "local_delivery_confirmation": None,
+            "pending_system_stage": None,
+            "pending_system_stage_result": "invalidated",
+        },
+    )
+
+
+@_serialized_body_mutation
+def confirm_standalone_expert_team_delivery(workspace: Path, body: dict) -> dict:
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "confirm_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+    _require_standalone_delivery_action_fields(body)
+    stage_id = str(body.get("stage_id") or "")
+    delivery_attempt = int(body.get("delivery_attempt") or 0)
+    with delivery_attempt_lock(
+        workspace,
+        str(run.get("run_id") or ""),
+        stage_id,
+        delivery_attempt,
+    ):
+        first = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review"},
+        )
+        first_snapshot = _standalone_delivery_snapshot(first)
+        from .standalone_delivery import validate_standalone_delivery_context
+
+        try:
+            second = validate_standalone_delivery_context(workspace, run)
+        except (DeliveryIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as exc:
+            raise ExpertTeamStateConflict(
+                "delivery_changed_during_confirmation",
+                f"standalone delivery changed during final confirmation: {exc}",
+                run,
+            ) from exc
+        second_snapshot = _standalone_delivery_snapshot(second)
+        if first_snapshot != second_snapshot:
+            raise ExpertTeamStateConflict(
+                "delivery_changed_during_confirmation",
+                "standalone delivery changed while final confirmation was being committed",
+                run,
+            )
+    confirmed_at = _now()
+    identity = _standalone_delivery_identity(second)
+    confirmation = {
+        "schema_version": "local-delivery-confirmation/v1",
+        **identity,
+        "confirmed_at": confirmed_at,
+    }
+    delivery_rows = [
+        deepcopy(item)
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    current_delivery = _require_current_delivery_reservation(
+        run,
+        second,
+        expected_status="generated_valid",
+    )
+    current_delivery_id = str(current_delivery.get("reservation_id") or "")
+    for index, item in enumerate(delivery_rows):
+        if str(item.get("reservation_id") or "") == current_delivery_id:
+            delivery_rows[index] = {**item, "status": "confirmed", "confirmed_at": confirmed_at}
+            current_delivery = deepcopy(delivery_rows[index])
+            break
+    _record_action(run, body, "confirm_delivery")
+    return _transition(
+        workspace,
+        run,
+        "completed",
+        "delivery_confirmed",
+        {
+            **_stage_reservation_status_patch(run, "confirmed"),
+            "delivery_attempt_reservations": delivery_rows,
+            "current_delivery_attempt_reservation": current_delivery,
+            "local_delivery_confirmation": confirmation,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "passed",
+                "validated_at": confirmed_at,
+                "digest_set": second_snapshot,
+            },
+            "completion_integrity": {
+                # Use the same integrity vocabulary as the completed-read path
+                # so the UI does not change state labels after an app restart.
+                "status": "valid",
+                "checked_at": confirmed_at,
+                "message": "DOCX、质量报告和交付绑定已在锁内复核并由本机用户确认。",
+            },
+            "pending_system_stage_result": "confirmed",
+        },
+    )
+
+
+def _require_recoverable_confirmed_delivery(run: dict, body: dict) -> dict:
+    """Validate drift recovery against durable confirmation facts, never the changed file."""
+
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ExpertTeamStateConflict(
+            "standalone_delivery_not_available",
+            "standalone delivery recovery is only available for standalone runs",
+            run,
+        )
+    integrity = run.get("completion_integrity") if isinstance(run.get("completion_integrity"), dict) else {}
+    if (
+        str(run.get("workflow_state") or "") != "completed"
+        or str(integrity.get("status") or "") != "drifted"
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_not_required",
+            "standalone delivery recovery requires a completed delivery with digest drift",
+            run,
+        )
+    _require_standalone_delivery_action_fields(body)
+    confirmation = (
+        run.get("local_delivery_confirmation")
+        if isinstance(run.get("local_delivery_confirmation"), dict)
+        else {}
+    )
+    if confirmation.get("schema_version") != "local-delivery-confirmation/v1":
+        raise ExpertTeamStateConflict(
+            "delivery_confirmation_missing",
+            "standalone delivery recovery has no durable local confirmation",
+            run,
+        )
+    requested = _standalone_delivery_identity(body)
+    confirmed = _standalone_delivery_identity(confirmation)
+    conflict_codes = {
+        "session_id": "wrong_session",
+        "run_id": "wrong_run",
+        "stage_id": "stale_stage",
+        "stage_attempt": "stale_stage_attempt",
+        "artifact_id": "stale_artifact",
+        "artifact_sha256": "stale_artifact_hash",
+        "delivery_attempt": "stale_delivery_attempt",
+        "delivery_binding_sha256": "stale_delivery_binding",
+        "document_sha256": "stale_document_hash",
+    }
+    for field in _STANDALONE_DELIVERY_IDENTITY_FIELDS:
+        if requested[field] != confirmed[field]:
+            raise ExpertTeamStateConflict(
+                conflict_codes[field],
+                f"confirmed standalone delivery {field} changed",
+                run,
+            )
+
+    ref = run.get("current_delivery_manifest_ref")
+    stage_ref = run.get("current_stage_artifact_ref")
+    if not isinstance(ref, dict) or not isinstance(stage_ref, dict):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery references are missing",
+            run,
+        )
+    ref_identity = {
+        "artifact_id": str(ref.get("artifact_id") or ""),
+        "artifact_sha256": str(ref.get("sha256") or ""),
+        "stage_attempt": int(ref.get("stage_attempt") or 0),
+        "delivery_attempt": int(ref.get("delivery_attempt") or 0),
+        "delivery_binding_sha256": str(ref.get("delivery_binding_sha256") or ""),
+    }
+    if any(ref_identity[field] != confirmed[field] for field in ref_identity):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery manifest reference changed",
+            run,
+        )
+    if (
+        str(stage_ref.get("artifact_id") or "") != confirmed["artifact_id"]
+        or str(stage_ref.get("sha256") or "") != confirmed["artifact_sha256"]
+        or int(stage_ref.get("stage_attempt") or 0) != confirmed["stage_attempt"]
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery artifact reference changed",
+            run,
+        )
+    artifacts = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and str(item.get("artifact_id") or "") == confirmed["artifact_id"]
+        and str(item.get("sha256") or "") == confirmed["artifact_sha256"]
+        and int(item.get("stage_attempt") or 0) == confirmed["stage_attempt"]
+        and str(item.get("stage_id") or "") == confirmed["stage_id"]
+        and str(item.get("artifact_type") or "") == "delivery_manifest"
+    ]
+    if len(artifacts) != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery artifact is missing or ambiguous",
+            run,
+        )
+
+    current_delivery = _require_current_delivery_reservation(
+        run,
+        confirmed,
+        expected_status="confirmed",
+    )
+    current_stage = run.get("current_stage_attempt_reservation")
+    if (
+        not isinstance(current_stage, dict)
+        or str(current_stage.get("stage_id") or "") != confirmed["stage_id"]
+        or int(current_stage.get("stage_attempt") or 0) != confirmed["stage_attempt"]
+        or str(current_stage.get("artifact_type") or "") != "delivery_manifest"
+        or str(current_stage.get("status") or "") != "confirmed"
+    ):
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "confirmed delivery stage reservation changed",
+            run,
+        )
+    stage_reservation_id = str(current_stage.get("reservation_id") or "")
+    stage_matches = [
+        item
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+        and str(item.get("reservation_id") or "") == stage_reservation_id
+        and item == current_stage
+    ]
+    if not stage_reservation_id or len(stage_matches) != 1:
+        raise ExpertTeamStateConflict(
+            "stage_attempt_identity_mismatch",
+            "confirmed delivery stage reservation ledger is ambiguous",
+            run,
+        )
+    gate = run.get("delivery_gate") if isinstance(run.get("delivery_gate"), dict) else {}
+    digest_set = gate.get("digest_set") if isinstance(gate.get("digest_set"), dict) else {}
+    if (
+        gate.get("schema_version") != "standalone-delivery-gate/v1"
+        or str(gate.get("status") or "") != "passed"
+        or _standalone_delivery_identity(digest_set) != confirmed
+    ):
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery digest gate changed",
+            run,
+        )
+    _pending_system_descriptor(run)
+    return {
+        "identity": confirmed,
+        "stage_reservation": deepcopy(current_stage),
+        "delivery_reservation": deepcopy(current_delivery),
+        "confirmation": deepcopy(confirmation),
+        "digest_set": deepcopy(digest_set),
+    }
+
+
+@_serialized_body_mutation
+def recover_standalone_expert_team_delivery(workspace: Path, body: dict) -> dict:
+    """Invalidate a drifted completed delivery and reserve a new system-delivery lineage."""
+
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    forbidden_paths = {
+        "path",
+        "document_path",
+        "delivery_dir",
+        "binding_path",
+        "quality_path",
+        "out_dir",
+    }
+    if forbidden_paths.intersection(unknown_fields):
+        raise ValueError("standalone delivery recovery paths are server-owned")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery recovery has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    if type((body or {}).get("expected_version")) is not int or int(body["expected_version"]) <= 0:
+        raise ValueError("expected_version must be a positive integer")
+    run, duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "recover_delivery",
+        require_stage=False,
+    )
+    if duplicate is not None:
+        return duplicate
+    recovery = _require_recoverable_confirmed_delivery(run, body)
+    at = _now()
+    old_stage = recovery["stage_reservation"]
+    old_delivery = recovery["delivery_reservation"]
+    stage_rows = [
+        deepcopy(item)
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    delivery_rows = [
+        deepcopy(item)
+        for item in run.get("delivery_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    stage_changed = 0
+    delivery_changed = 0
+    for index, item in enumerate(stage_rows):
+        if str(item.get("reservation_id") or "") == str(old_stage.get("reservation_id") or ""):
+            stage_rows[index] = {**item, "status": "invalidated", "invalidated_at": at}
+            stage_changed += 1
+    for index, item in enumerate(delivery_rows):
+        if str(item.get("reservation_id") or "") == str(old_delivery.get("reservation_id") or ""):
+            delivery_rows[index] = {**item, "status": "invalidated", "invalidated_at": at}
+            delivery_changed += 1
+    if stage_changed != 1 or delivery_changed != 1:
+        raise ExpertTeamStateConflict(
+            "delivery_recovery_identity_mismatch",
+            "confirmed delivery reservations could not be invalidated exactly once",
+            run,
+        )
+
+    _record_action(run, body, "recover_delivery")
+    generation = int(run.get("delivery_recovery_generation") or 0) + 1
+    history = [
+        deepcopy(item)
+        for item in run.get("delivery_recovery_history") or []
+        if isinstance(item, dict)
+    ]
+    history.append(
+        {
+            "schema_version": "standalone-delivery-recovery/v1",
+            "generation": generation,
+            "requested_at": at,
+            "detected_at": str((run.get("completion_integrity") or {}).get("checked_at") or ""),
+            "reason": "completed_delivery_digest_drift",
+            "previous_confirmation": recovery["confirmation"],
+            "previous_digest_set": recovery["digest_set"],
+        }
+    )
+    next_run = deepcopy(run)
+    next_run.update(
+        {
+            **_clear_execution_patch(),
+            "workflow_state": "delivery_validation_required",
+            "version": int(run.get("version") or 0) + 1,
+            "updated_at": at,
+            "delivery_recovery_generation": generation,
+            "delivery_recovery_history": history,
+            "stage_attempt_reservations": stage_rows,
+            "delivery_attempt_reservations": delivery_rows,
+            "current_stage_attempt_reservation": None,
+            "current_delivery_attempt_reservation": None,
+            "current_stage_artifact_ref": None,
+            "current_delivery_manifest_ref": None,
+            "local_delivery_confirmation": None,
+            "delivery_gate": {
+                "schema_version": "standalone-delivery-gate/v1",
+                "status": "invalidated",
+                "invalidated_at": at,
+                "reason": "completed_delivery_digest_drift",
+                "previous_delivery_attempt": recovery["identity"]["delivery_attempt"],
+                "previous_delivery_binding_sha256": recovery["identity"]["delivery_binding_sha256"],
+                "previous_document_sha256": recovery["identity"]["document_sha256"],
+            },
+            "completion_integrity": {
+                "status": "recovery_requested",
+                "checked_at": at,
+                "message": "已使旧交付失效，正在从已确认正文重新生成 DOCX。",
+            },
+            "pending_system_stage_result": "recovery_requested",
+        }
+    )
+    events = [deepcopy(item) for item in run.get("events") or [] if isinstance(item, dict)]
+    events.append(
+        {
+            "type": "delivery_recovery_requested",
+            "from": "completed",
+            "to": "delivery_validation_required",
+            "at": at,
+        }
+    )
+    next_run["events"] = events
+    timeline = [
+        deepcopy(item)
+        for item in run.get("timeline_events") or []
+        if isinstance(item, dict)
+    ]
+    timeline.append(
+        {
+            "type": "delivery_recovery_requested",
+            "title": "已发现交付文件变化，正在重新生成",
+            "detail": "旧文档确认和交付绑定已失效",
+            "member_id": "director",
+            "at": at,
+        }
+    )
+    next_run["timeline_events"] = timeline
+    return write_run(workspace, _sync_derived(next_run))
+
+
+def resolve_standalone_expert_team_delivery_open(workspace: Path, body: dict) -> dict:
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+        "target",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    if "path" in unknown_fields:
+        raise ValueError("path is server-owned for standalone delivery open")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery open has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    target = str((body or {}).get("target") or "").strip()
+    if target not in {"document", "folder", "quality_report"}:
+        raise ValueError("target must be document, folder, or quality_report")
+    run_id = str((body or {}).get("run_id") or "")
+    with _run_mutation_lock(workspace, run_id):
+        run, _duplicate = _prepare_mutation(
+            workspace,
+            body,
+            "open_delivery",
+            skip_idempotency_result=True,
+            require_stage=False,
+        )
+        context = _require_bound_standalone_delivery(
+            workspace,
+            run,
+            body,
+            allowed_states={"awaiting_review", "completed"},
+        )
+        from .standalone_delivery import resolve_standalone_open_target
+
+        resolved = resolve_standalone_open_target(workspace, run, target)
+        expected = context[
+            {
+                "document": "document_path",
+                "folder": "delivery_dir",
+                "quality_report": "quality_path",
+            }[target]
+        ]
+        if Path(resolved).resolve() != Path(expected).resolve():
+            raise ExpertTeamStateConflict(
+                "delivery_open_target_changed",
+                "standalone delivery open target changed after validation",
+                run,
+            )
+        from .standalone_delivery import (
+            materialize_standalone_delivery_open_document,
+            standalone_delivery_document_name,
+        )
+
+        open_path = Path(resolved)
+        if target == "document":
+            open_path = materialize_standalone_delivery_open_document(run, context)
+
+        return {
+            "target": target,
+            "path": open_path,
+            "download_name": (
+                standalone_delivery_document_name(run)
+                if target == "document"
+                else "quality-report.json" if target == "quality_report" else ""
+            ),
+        }
+
+
+@_serialized_body_mutation
+def save_standalone_expert_team_delivery_copy(workspace: Path, body: dict) -> dict:
+    """Save the bound final DOCX to a user-selected directory without overwrite."""
+
+    allowed_fields = set(_STANDALONE_DELIVERY_IDENTITY_FIELDS) | {
+        "expected_version",
+        "idempotency_key",
+        "destination_dir",
+    }
+    unknown_fields = set(body or {}) - allowed_fields
+    server_owned_fields = {
+        "path",
+        "document_path",
+        "source_path",
+        "filename",
+        "quality_path",
+        "delivery_dir",
+        "binding_path",
+        "out_dir",
+    }
+    if server_owned_fields.intersection(unknown_fields):
+        raise ValueError("standalone delivery copy source and filename are server-owned")
+    if unknown_fields:
+        raise ValueError(
+            "standalone delivery copy has unknown fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    destination_dir = str((body or {}).get("destination_dir") or "").strip()
+    if not destination_dir:
+        raise ValueError("destination_dir is required for standalone delivery copy")
+    run, _duplicate = _prepare_mutation(
+        workspace,
+        body,
+        "save_delivery_copy",
+        skip_idempotency_result=True,
+        require_stage=False,
+    )
+    context = _require_bound_standalone_delivery(
+        workspace,
+        run,
+        body,
+        allowed_states={"awaiting_review", "completed"},
+    )
+    from .standalone_delivery import save_standalone_delivery_copy
+
+    return save_standalone_delivery_copy(
+        run,
+        context,
+        destination_dir,
+        idempotency_key=str(body.get("idempotency_key") or ""),
+    )
+
+
+def _warning_only_review_recovery_patch(run: dict) -> dict | None:
+    """Recover one immutable legacy warning-only result without redispatch."""
+
+    if str(run.get("workflow_state") or "") != "generated_invalid":
+        return None
+    if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
+        return None
+    ref = run.get("current_stage_artifact_ref")
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    stage_id = str(current.get("task_id") or current.get("id") or "")
+    if not isinstance(ref, dict) or not stage_id:
+        return None
+    artifacts = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and item.get("artifact_id") == ref.get("artifact_id")
+        and item.get("sha256") == ref.get("sha256")
+    ]
+    if len(artifacts) != 1:
+        return None
+    artifact = artifacts[0]
+    if str(artifact.get("stage_id") or "") != stage_id:
+        return None
+    try:
+        from .issue_policy import effective_artifact_validation
+        from .stage_artifacts import StageArtifactError, validate_stage_artifact
+
+        validate_stage_artifact(
+            artifact,
+            brief=run.get("document_brief") or {},
+            approved_inputs=artifact.get("input_refs") or [],
+        )
+    except (StageArtifactError, TypeError, ValueError):
+        return None
+    effective = effective_artifact_validation(artifact)
+    if not effective["legacy_warning_only"] or effective["blocking_count"]:
+        return None
+    reservation = run.get("current_stage_attempt_reservation")
+    attempt = int(artifact.get("stage_attempt") or 0)
+    if (
+        not isinstance(reservation, dict)
+        or str(reservation.get("stage_id") or "") != stage_id
+        or int(reservation.get("stage_attempt") or 0) != attempt
+        or str(reservation.get("artifact_type") or "") != str(artifact.get("artifact_type") or "")
+        or reservation.get("input_refs") != artifact.get("input_refs")
+        or str(reservation.get("status") or "") != "generated_invalid"
+    ):
+        return None
+    reservation_id = str(reservation.get("reservation_id") or "")
+    ledger = [
+        item
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+        and str(item.get("reservation_id") or "") == reservation_id
+        and str(item.get("stage_id") or "") == stage_id
+        and int(item.get("stage_attempt") or 0) == attempt
+        and str(item.get("status") or "") == "generated_invalid"
+    ]
+    if not reservation_id or len(ledger) != 1:
+        return None
+    outputs = [
+        deepcopy(item)
+        for item in run.get("stage_outputs") or []
+        if isinstance(item, dict)
+    ]
+    matches = [
+        output
+        for output in outputs
+        if str(output.get("task_id") or output.get("stage_id") or "") == stage_id
+        and int(output.get("stage_attempt") or 0) == attempt
+        and isinstance(output.get("artifact"), dict)
+        and output["artifact"].get("artifact_id") == artifact.get("artifact_id")
+        and output["artifact"].get("sha256") == artifact.get("sha256")
+    ]
+    if len(matches) != 1:
+        return None
+    matches[0]["status"] = "generated"
+    return {
+        **_clear_execution_patch(),
+        **_stage_reservation_status_patch(run, "generated_valid"),
+        "stage_outputs": outputs,
+        "validation": {
+            "status": "attention",
+            "blocking_count": 0,
+            "warning_count": int(effective["warning_count"]),
+            "message": "阶段产物可继续复核，但有待确认事项",
+        },
+        "last_validation_error": "",
+        "last_execution_error": "",
+        "last_execution_error_code": "",
+        "last_execution_incident_id": "",
+    }
 
 
 @_serialized_body_mutation
@@ -3879,7 +5796,50 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
     if state not in {"ready_to_generate", "start_failed", "generation_failed", "result_unverified", "generated_invalid"}:
         raise ExpertTeamStateConflict("stale_state", "expert team run is not resumable", run)
     _record_action(run, body, "resume")
-    return _transition(workspace, run, "ready_to_generate", "generation_resumed", _clear_execution_patch())
+    if recovery_patch := _warning_only_review_recovery_patch(run):
+        return _transition(
+            workspace,
+            run,
+            "awaiting_review",
+            "warning_only_result_recovered",
+            recovery_patch,
+        )
+    pending_system_stage = (
+        run.get("pending_system_stage")
+        if isinstance(run.get("pending_system_stage"), dict)
+        else {}
+    )
+    if (
+        pending_system_stage.get("executor") == "system"
+        and state in {"generated_invalid", "ready_to_generate"}
+    ):
+        # A failed system delivery is retried by the system dispatcher itself.
+        # Moving it into the model-stage ready state makes the dispatcher reject
+        # its own retry and leaves the UI in a resume loop.  Preserve the
+        # retryable system state until the route reserves/finishes that exact
+        # delivery side effect.
+        return _transition(
+            workspace,
+            run,
+            "generated_invalid",
+            "system_stage_retry_requested",
+            _clear_execution_patch(),
+        )
+    current_reservation = run.get("current_stage_attempt_reservation")
+    stale_reservation_patch = {}
+    if (
+        isinstance(current_reservation, dict)
+        and str(current_reservation.get("status") or "")
+        in {"reserved", "dispatching", "generating"}
+    ):
+        stale_reservation_patch = _stage_reservation_status_patch(run, "failed")
+    return _transition(
+        workspace,
+        run,
+        "ready_to_generate",
+        "generation_resumed",
+        {**_clear_execution_patch(), **stale_reservation_patch},
+    )
 
 
 @_serialized_run_mutation
@@ -3889,6 +5849,8 @@ def fail_expert_team_execution(
     message: str,
     *,
     stream_id: str,
+    error_code: str = "",
+    incident_id: str = "",
 ) -> dict:
     run = read_run(workspace, run_id)
     _require_mutable_v2(run)
@@ -3904,7 +5866,10 @@ def fail_expert_team_execution(
         "generation_failed",
         {
             **_clear_execution_patch(),
+            **_stage_reservation_status_patch(run, "failed"),
             "last_execution_error": str(message or "未检测到生成结果，请重新尝试。"),
+            "last_execution_error_code": str(error_code or ""),
+            "last_execution_incident_id": str(incident_id or ""),
         },
     )
 
@@ -3931,6 +5896,7 @@ def mark_expert_team_result_unverified(
         "result_unverified",
         "generation_result_unverified",
         {
+            **_stage_reservation_status_patch(run, "generated_invalid"),
             "last_execution_error": str(message or "结果绑定证据尚未闭环，请重新核验。"),
         },
     )
@@ -3959,6 +5925,7 @@ def mark_expert_team_execution_cancelled(
         "generation_cancelled",
         {
             **_clear_execution_patch(),
+            **_stage_reservation_status_patch(run, "cancelled"),
             "last_execution_error": str(message or "远程专家团执行已取消。"),
         },
     )
@@ -3971,6 +5938,7 @@ def fail_expert_team_execution_protocol(
     message: str,
     *,
     stream_id: str,
+    error_code: str = "runtime_protocol_error",
 ) -> dict:
     """Stop delivery safely while retaining the remote cleanup gate."""
     run = read_run(workspace, run_id)
@@ -3990,6 +5958,7 @@ def fail_expert_team_execution_protocol(
         "generation_invalid",
         {
             **_clear_execution_patch(),
+            **_stage_reservation_status_patch(run, "generated_invalid"),
             "orphan_runtime_run_id": runtime_run_id,
             "orphan_runtime_adapter": runtime_adapter,
             "execution_cleanup_status": "pending",
@@ -3998,6 +5967,7 @@ def fail_expert_team_execution_protocol(
             "execution_cleanup_next_retry_at": 0,
             "execution_cleanup_deadline_at": time.time() + _CONTROL_RETRY_DEADLINE_SECONDS,
             "last_execution_error": error,
+            "last_execution_error_code": str(error_code or "runtime_protocol_error"),
             "last_validation_error": error,
         },
     )

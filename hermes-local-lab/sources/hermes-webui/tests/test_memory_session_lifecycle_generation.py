@@ -422,7 +422,9 @@ def test_clear_session_evicts_outside_session_lock():
     assert "_rewrite_existing_session_truth" in locked_section
     helper_start = src.index("def _rewrite_existing_session_truth")
     helper_end = src.index("\ndef _persist_new_session_truth", helper_start)
-    assert "session.save(skip_index=True)" in src[helper_start:helper_end]
+    helper_block = src[helper_start:helper_end]
+    assert "session.save(" in helper_block
+    assert "skip_index=True" in helper_block
     assert "_evict_session_agent(sid)" in outside_section
     assert "provider" in outside_section and "I/O" in outside_section
 

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "docx-engine-v2/render-plan",
+  "jobId": "job-standalone-meeting-sample",
+  "templateId": "standalone-meeting-minutes",
+  "documentMetadata": {
+    "title": "专题会议纪要",
+    "documentType": "meeting_minutes"
+  },
+  "sections": [],
+  "tables": [],
+  "figures": [],
+  "templateData": {
+    "title": "专题会议纪要",
+    "sections": [
+      {
+        "sectionId": "sec-1",
+        "title": "会议基本情况",
+        "level": 2,
+        "metadata": {},
+        "blocks": [
+          {"type": "paragraph", "blockId": "block-1", "text": "已确认正文：会议基本信息需以用户确认内容为准。"}
+        ]
+      }
+    ],
+    "tables": [],
+    "images": [],
+    "metadata": {}
+  },
+  "warnings": []
+}

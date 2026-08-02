@@ -21,6 +21,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
 
+try:  # POSIX desktop/server targets.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows only
+    fcntl = None
+
+try:  # Windows packaged desktop fallback.
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX only
+    msvcrt = None
+
 
 INTENT_SCHEMA_VERSION = "taiji-truth-rewrite-intent/v1"
 _INTENT_DIR_NAME = ".truth-rewrite-intents"
@@ -50,6 +60,12 @@ _INTENT_KEYS = {
 }
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.RLock] = {}
+_LOCK_STATE = threading.local()
+# A coordinated rewrite includes sidecar fsync, a transactional state.db
+# replace, and intent cleanup. Large local transcripts can legitimately exceed
+# a short HTTP-style timeout on slower disks, while explicit tests still prove
+# callers can request a bounded sub-second wait when needed.
+TRUTH_REWRITE_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 class TruthRewriteRecoveryError(RuntimeError):
@@ -92,13 +108,97 @@ def truth_rewrite_intent_path(session) -> Path:
     return _session_path(session).parent / _INTENT_DIR_NAME / f"{session_id}.json"
 
 
+def _truth_rewrite_lock_path(session_id: str) -> Path:
+    # Resolve the live Session store at call time. Tests and profile switching
+    # replace SESSION_DIR after import; a module-level copy would lock a
+    # different directory than the sidecar being protected.
+    from api import config
+
+    digest = hashlib.sha256(
+        f"taiji-session-writer-v1\0{session_id}".encode("utf-8")
+    ).hexdigest()
+    return Path(config.SESSION_DIR) / ".session-writer-locks" / f"{digest}.lock"
+
+
+def _acquire_process_file_lock(fd: int, deadline: float) -> None:
+    while True:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif msvcrt is not None:  # pragma: no cover - Windows only
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                    os.fsync(fd)
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:  # pragma: no cover - unsupported platform only
+                raise RuntimeError("No supported OS file-lock implementation is available")
+            return
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting for Session writer lock")
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+
+
 @contextmanager
-def truth_rewrite_lock(session_id: object):
-    key = _safe_session_id(session_id)
+def truth_rewrite_lock(
+    session_id: object,
+    *,
+    timeout_seconds: float = TRUTH_REWRITE_LOCK_TIMEOUT_SECONDS,
+):
+    """Serialize one Session writer across threads and desktop processes.
+
+    The lock is reentrant for the current thread because coordinated rewrites
+    call ``Session.save()`` while already holding it. Only the outermost entry
+    owns the OS file lock.
+    """
+    session_key = _safe_session_id(session_id)
+    timeout = float(timeout_seconds)
+    if timeout < 0:
+        raise TimeoutError("timed out waiting for Session writer lock")
+    deadline = time.monotonic() + timeout
+    path = _truth_rewrite_lock_path(session_key)
+    # Reentrancy is scoped to the actual durable store, not merely the sid.
+    # Profile/tests may switch SESSION_DIR in one process; the same sid under a
+    # second resolved root is a different resource and needs its own OS lock.
+    key = str(path.resolve(strict=False))
     with _LOCKS_GUARD:
         lock = _LOCKS.setdefault(key, threading.RLock())
-    with lock:
+    if not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("timed out waiting for Session writer lock")
+    held = getattr(_LOCK_STATE, "held", None)
+    if held is None:
+        held = {}
+        _LOCK_STATE.held = held
+    state = held.get(key)
+    if state is not None:
+        state["depth"] += 1
+        try:
+            yield
+        finally:
+            state["depth"] -= 1
+            lock.release()
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    try:
+        _acquire_process_file_lock(fd, deadline)
+        acquired = True
+        held[key] = {"fd": fd, "depth": 1}
         yield
+    finally:
+        held.pop(key, None)
+        try:
+            if acquired and fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif acquired and msvcrt is not None:  # pragma: no cover - Windows only
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(fd)
+            lock.release()
 
 
 def _normalized_semantic_messages(messages) -> list[dict]:

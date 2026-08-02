@@ -9,14 +9,14 @@ import importlib
 import json
 import os
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
 
-# Isolate state dir so tests never touch real sessions
-_TEST_STATE = Path(tempfile.mkdtemp())
-os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
+# conftest publishes this isolated state root before collection.  Import-time
+# mutation of HERMES_WEBUI_STATE_DIR leaks into later api.config imports and can
+# split pytest-side writes from the isolated test-server process.
+_TEST_STATE = Path(os.environ["HERMES_WEBUI_TEST_STATE_DIR"])
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

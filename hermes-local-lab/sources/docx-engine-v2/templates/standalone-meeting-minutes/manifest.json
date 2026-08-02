@@ -1,0 +1,34 @@
+{
+  "id": "standalone-meeting-minutes",
+  "name": "单机版会议纪要模板",
+  "version": "1.0.0",
+  "description": "仅承载用户确认内容的本地会议纪要，不补造参会人员、议定事项或责任信息。",
+  "template": "template.docx",
+  "schema": "schema.json",
+  "prompt": "prompt.md",
+  "sample": "sample.json",
+  "dataAdapter": "data-adapter.js",
+  "adapterSample": "adapter-sample.render-plan.json",
+  "outputFormat": "docx",
+  "documentTypes": ["meeting_minutes"],
+  "contractProfile": "standalone",
+  "rendererProfile": "standalone-default",
+  "requiredMetadata": ["title", "documentType"],
+  "contentPolicy": {
+    "allowAdapterGeneratedBusinessContent": false,
+    "allowPlaceholders": false
+  },
+  "missingDataPolicy": {
+    "markers": ["待补充", "需人工确认"],
+    "forbidFabrication": true
+  },
+  "capabilities": ["sections", "tables", "images", "toc", "headers", "footers", "page_numbers"],
+  "requiredAssets": [],
+  "qualityGates": ["schema_valid", "docx_zip", "docx_xml", "missing_data_markers", "file_integrity"],
+  "compatibility": {
+    "engine": "docx-engine-v2",
+    "minVersion": "0.1.0",
+    "format": "docx",
+    "paper": "A4"
+  }
+}

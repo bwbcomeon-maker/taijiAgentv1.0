@@ -43,7 +43,178 @@ def classify_delivery_binding(binding: dict) -> str:
 
     if isinstance(binding, dict) and binding.get("schema_version") == "expert-delivery-binding/v2":
         return "enterprise_pre_office"
+    if (
+        isinstance(binding, dict)
+        and binding.get("schema_version") == "expert-delivery-binding/v3"
+        and binding.get("product_mode") == "standalone"
+    ):
+        return "standalone_pre_confirmation"
     return "legacy_unverified"
+
+
+def validate_standalone_delivery_binding(workspace: Path, identity: dict, binding: dict) -> dict:
+    """Validate a v3 binding and every hash-bound standalone file fail-closed."""
+
+    root = Path(workspace).expanduser().resolve()
+    if not isinstance(identity, dict):
+        raise DeliveryIntegrityError("standalone delivery identity is invalid")
+    try:
+        run_id = safe_run_id(str(identity.get("run_id") or ""))
+        stage_id = safe_stage_id(str(identity.get("stage_id") or ""))
+    except (TypeError, ValueError) as exc:
+        raise DeliveryIntegrityError("standalone delivery identity is invalid") from exc
+    attempt = identity.get("attempt")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0:
+        raise DeliveryIntegrityError("standalone delivery identity is invalid")
+    attempt_root = canonical_attempt_root(root, run_id, stage_id, attempt)
+    expected_fields = {
+        "schema_version", "product_mode", "session_id", "run_id", "stage_id",
+        "stage_attempt", "delivery_attempt", "document_revision",
+        "render_input_fingerprint", "brief", "canonical_artifact",
+        "canonical_markdown", "asset_manifest", "semantic_gates", "template",
+        "renderer", "document", "automatic_quality_report",
+        "standalone_quality_report",
+    }
+    if not isinstance(binding, dict) or set(binding) != expected_fields:
+        raise DeliveryIntegrityError("standalone delivery binding shape is invalid")
+    if binding.get("schema_version") != "expert-delivery-binding/v3" or binding.get("product_mode") != "standalone":
+        raise DeliveryIntegrityError("standalone delivery binding schema is invalid")
+    if (
+        binding.get("run_id") != run_id
+        or binding.get("stage_id") != stage_id
+        or not isinstance(binding.get("delivery_attempt"), int)
+        or isinstance(binding.get("delivery_attempt"), bool)
+        or binding.get("delivery_attempt") != attempt
+        or not str(binding.get("session_id") or "").strip()
+        or not isinstance(binding.get("stage_attempt"), int)
+        or isinstance(binding.get("stage_attempt"), bool)
+        or binding.get("stage_attempt") <= 0
+        or not isinstance(binding.get("document_revision"), int)
+        or isinstance(binding.get("document_revision"), bool)
+        or binding.get("document_revision") <= 0
+        or not re.fullmatch(r"[a-f0-9]{64}", str(binding.get("render_input_fingerprint") or ""))
+    ):
+        raise DeliveryIntegrityError("standalone delivery binding identity is stale")
+    brief = binding.get("brief")
+    canonical = binding.get("canonical_artifact")
+    template = binding.get("template")
+    renderer = binding.get("renderer")
+    if (
+        not isinstance(brief, dict)
+        or set(brief) != {"revision", "sha256"}
+        or not isinstance(brief.get("revision"), int)
+        or isinstance(brief.get("revision"), bool)
+        or brief.get("revision") <= 0
+        or not re.fullmatch(r"[a-f0-9]{64}", str(brief.get("sha256") or ""))
+        or not isinstance(canonical, dict)
+        or set(canonical) != {"artifact_id", "sha256"}
+        or not str(canonical.get("artifact_id") or "").strip()
+        or not re.fullmatch(r"[a-f0-9]{64}", str(canonical.get("sha256") or ""))
+        or not isinstance(template, dict)
+        or set(template) != {"id", "version", "package_sha256"}
+        or not str(template.get("id") or "").startswith("standalone-")
+        or not str(template.get("version") or "").strip()
+        or not re.fullmatch(r"[a-f0-9]{64}", str(template.get("package_sha256") or ""))
+        or not isinstance(renderer, dict)
+        or set(renderer) != {"name", "version", "build_sha256", "profile_id", "profile_sha256"}
+        or renderer.get("profile_id") != "standalone-default"
+        or not str(renderer.get("name") or "").strip()
+        or not str(renderer.get("version") or "").strip()
+        or not re.fullmatch(r"[a-f0-9]{64}", str(renderer.get("build_sha256") or ""))
+        or not re.fullmatch(r"[a-f0-9]{64}", str(renderer.get("profile_sha256") or ""))
+    ):
+        raise DeliveryIntegrityError("standalone delivery binding metadata is invalid")
+    references = (
+        ("canonical_markdown", "canonical/document.md"),
+        ("asset_manifest", "assets/asset-manifest.json"),
+        ("semantic_gates", "reviews/semantic-gates.json"),
+        ("document", "delivery/document.docx"),
+        ("automatic_quality_report", "delivery/quality-report.json"),
+        ("standalone_quality_report", "reviews/standalone-quality-report.json"),
+    )
+    for field, expected_relative in references:
+        reference = binding.get(field)
+        if (
+            not isinstance(reference, dict)
+            or set(reference) != {"path", "sha256"}
+            or reference.get("path") != expected_relative
+            or not re.fullmatch(r"[a-f0-9]{64}", str(reference.get("sha256") or ""))
+        ):
+            raise DeliveryIntegrityError(f"standalone delivery binding {field} is invalid")
+        target = attempt_root / expected_relative
+        if path_contains_symlink(root, target):
+            raise DeliveryIntegrityError("standalone delivery path contains a symlink")
+        if not target.is_file():
+            raise DeliveryIntegrityError(f"standalone delivery binding {field} input is missing")
+        if reference["sha256"] != sha256_file(target):
+            raise DeliveryIntegrityError(f"standalone delivery binding {field} hash is stale")
+    semantic_path = attempt_root / "reviews" / "semantic-gates.json"
+    quality_path = attempt_root / "reviews" / "standalone-quality-report.json"
+    try:
+        semantic = json.loads(semantic_path.read_text(encoding="utf-8"))
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DeliveryIntegrityError("standalone delivery quality facts are invalid") from exc
+    quality_fields = {
+        "schema_version",
+        "status",
+        "statuses",
+        "document_sha256",
+        "checks",
+        "issues",
+        "report_sha256",
+    }
+    status_fields = {"brief", "semantic", "evidence", "asset", "render", "document"}
+    quality_without_digest = dict(quality) if isinstance(quality, dict) else {}
+    recorded_report_sha256 = str(quality_without_digest.pop("report_sha256", ""))
+    computed_report_sha256 = hashlib.sha256(
+        json.dumps(
+            quality_without_digest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    document_sha256 = str((binding.get("document") or {}).get("sha256") or "")
+    statuses = quality.get("statuses") if isinstance(quality, dict) else None
+    checks = quality.get("checks") if isinstance(quality, dict) else None
+    issues = quality.get("issues") if isinstance(quality, dict) else None
+    check_ids: set[str] = set()
+    checks_are_passed = isinstance(checks, list) and bool(checks)
+    if isinstance(checks, list):
+        for item in checks:
+            if not isinstance(item, dict):
+                checks_are_passed = False
+                continue
+            check_id = str(item.get("id") or "").strip()
+            if not check_id or check_id in check_ids or item.get("status") != "passed":
+                checks_are_passed = False
+            check_ids.add(check_id)
+    issues_are_nonblocking = isinstance(issues, list) and all(
+        isinstance(item, dict) and item.get("completion_blocking") is False
+        for item in issues
+    )
+    if (
+        not isinstance(semantic, dict)
+        or semantic.get("status") != "passed"
+        or not isinstance(quality, dict)
+        or set(quality) != quality_fields
+        or quality.get("schema_version") != "expert-standalone-quality/v1"
+        or quality.get("status") != "passed"
+        or quality.get("document_sha256") != document_sha256
+        or not isinstance(statuses, dict)
+        or set(statuses) != status_fields
+        or any(value != "passed" for value in statuses.values())
+        or not checks_are_passed
+        or not issues_are_nonblocking
+        or not re.fullmatch(r"[a-f0-9]{64}", recorded_report_sha256)
+        or recorded_report_sha256 != computed_report_sha256
+    ):
+        raise DeliveryIntegrityError("standalone delivery quality gates are stale or blocked")
+    forbidden = json.dumps(quality, ensure_ascii=False, sort_keys=True).lower()
+    if any(token in forbidden for token in ("office", "wps", "approval", "approver")):
+        raise DeliveryIntegrityError("standalone delivery quality report contains enterprise review semantics")
+    return dict(binding)
 
 
 def safe_stage_id(value: str) -> str:
@@ -289,7 +460,8 @@ def validated_binding_for_identity(workspace: Path, identity: dict) -> dict:
     root = Path(workspace).expanduser().resolve()
     run_id = safe_run_id(str(identity.get("run_id") or ""))
     stage_id = safe_stage_id(str(identity.get("stage_id") or ""))
-    attempt = int(identity.get("attempt") or 0)
+    raw_attempt = identity.get("attempt")
+    attempt = int(raw_attempt or 0)
     attempt_root = canonical_attempt_root(root, run_id, stage_id, attempt)
     delivery_dir = attempt_root / "delivery"
     document_path = delivery_dir / "document.docx"
@@ -300,6 +472,12 @@ def validated_binding_for_identity(workspace: Path, identity: dict) -> dict:
     if not document_path.is_file() or not manifest_path.is_file():
         raise DeliveryIntegrityError("expert-team delivery binding inputs are missing")
     manifest = read_binding_manifest(manifest_path)
+    if classify_delivery_binding(manifest) == "standalone_pre_confirmation":
+        return validate_standalone_delivery_binding(
+            root,
+            {"run_id": run_id, "stage_id": stage_id, "attempt": raw_attempt},
+            manifest,
+        )
     if classify_delivery_binding(manifest) == "enterprise_pre_office":
         if (
             manifest.get("run_id") != run_id
@@ -355,7 +533,10 @@ def office_binding_identity(workspace: Path, identity: dict, binding: dict) -> d
     """Normalize legacy/v2 bindings for Office tokens without weakening v2 mirrors."""
 
     root = Path(workspace).expanduser().resolve()
-    if classify_delivery_binding(binding) != "enterprise_pre_office":
+    classification = classify_delivery_binding(binding)
+    if classification == "standalone_pre_confirmation":
+        raise DeliveryIntegrityError("standalone delivery does not support Office review")
+    if classification != "enterprise_pre_office":
         return dict(binding)
     attempt_root = canonical_attempt_root(
         root,
@@ -573,8 +754,9 @@ def delivery_digest_set(
     delivery_dir = attempt_root / "delivery"
     manifest_path = attempt_root / BINDING_MANIFEST_NAME
     binding = read_binding_manifest(manifest_path) if manifest_path.is_file() else {}
-    enterprise = classify_delivery_binding(binding) == "enterprise_pre_office"
-    source_path = attempt_root / ("canonical/document.md" if enterprise else "final.md")
+    classification = classify_delivery_binding(binding)
+    bound_delivery = classification in {"enterprise_pre_office", "standalone_pre_confirmation"}
+    source_path = attempt_root / ("canonical/document.md" if bound_delivery else "final.md")
     if not source_path.is_file() or not delivery_dir.is_dir():
         raise DeliveryIntegrityError("expert-team delivery snapshot inputs are missing")
     candidates = [source_path]
@@ -599,13 +781,18 @@ def delivery_digest_set(
             if child.is_symlink() or not child.is_file():
                 raise DeliveryIntegrityError(f"expert-team delivery snapshot contains a non-regular file: {child}")
             candidates.append(child)
-    if enterprise:
+    if bound_delivery:
+        report_name = (
+            "reviews/enterprise-quality-report.json"
+            if classification == "enterprise_pre_office"
+            else "reviews/standalone-quality-report.json"
+        )
         for relative in (
             "brief.json",
             "canonical/artifact.json",
             "assets/asset-manifest.json",
             "reviews/semantic-gates.json",
-            "reviews/enterprise-quality-report.json",
+            report_name,
         ):
             child = attempt_root / relative
             if path_contains_symlink(root, child) or not child.is_file():
@@ -654,7 +841,7 @@ def delivery_digest_set(
         "session_id": str(session_id or "").strip(),
         "stage_id": safe_stage_id(stage_id),
         "attempt": int(attempt),
-        "source_sha256": files["canonical/document.md" if enterprise else "final.md"],
+        "source_sha256": files["canonical/document.md" if bound_delivery else "final.md"],
         "document_sha256": files[document_key],
         "files": files,
         "workspace_roots": sorted(set(extra_root_names)),

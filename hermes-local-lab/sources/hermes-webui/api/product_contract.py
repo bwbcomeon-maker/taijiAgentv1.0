@@ -28,6 +28,8 @@ _RECOVERY_ACTIONS: Final = {
     "open_result": {"id": "open_result", "label": "查看文档成果"},
     "open_office_review": {"id": "open_office_review", "label": "打开 Office 验收"},
     "export_diagnostics": {"id": "export_diagnostics", "label": "导出诊断"},
+    "refresh": {"id": "refresh", "label": "刷新任务状态"},
+    "start_new": {"id": "start_new", "label": "重新发起任务"},
 }
 
 _ERROR_CATALOG: Final = {
@@ -39,7 +41,7 @@ _ERROR_CATALOG: Final = {
     },
     "backend_unavailable": {
         "title": "本地服务暂不可用",
-        "message": "太极智能体的本地服务尚未准备完成，请稍后重试。",
+        "message": "本次操作未完成，已保存的会话、任务规格和结果不会丢失。请稍后重试。",
         "actions": ("retry", "restart_app", "export_diagnostics"),
         "retryable": True,
     },
@@ -79,6 +81,84 @@ _ERROR_CATALOG: Final = {
         "actions": ("open_office_review", "export_diagnostics"),
         "retryable": False,
     },
+    "provider_authorization_failed": {
+        "title": "模型服务授权已失效",
+        "message": "任务规格、资料和已有结果已保留。请更新模型配置后恢复当前阶段。",
+        "actions": ("open_model_settings", "export_diagnostics"),
+        "retryable": False,
+    },
+    "provider_rate_limited": {
+        "title": "模型服务暂时繁忙",
+        "message": "任务规格和已有结果已保留。请稍后由你重试当前阶段，系统不会自动重复调用。",
+        "actions": ("retry", "export_diagnostics"),
+        "retryable": True,
+    },
+    "provider_timeout": {
+        "title": "模型服务响应超时",
+        "message": "任务规格和已有结果已保留。本次状态会先完成对账，请刷新后再决定是否重试。",
+        "actions": ("refresh", "retry", "export_diagnostics"),
+        "retryable": True,
+    },
+    "model_output_invalid": {
+        "title": "生成结果格式异常",
+        "message": "任务规格和资料已保留，这份异常结果未被采用。请由你重新生成当前阶段。",
+        "actions": ("regenerate", "export_diagnostics"),
+        "retryable": True,
+    },
+    "expert_team_content_blocked": {
+        "title": "阶段内容需要处理",
+        "message": "本次生成内容已保留，但存在必须处理的阻断项。请查看问题后重新生成当前阶段。",
+        "actions": ("open_result", "regenerate", "export_diagnostics"),
+        "retryable": True,
+    },
+    "expert_team_evidence_required": {
+        "title": "研究依据需要补充",
+        "message": "本次阶段结果、任务规格和现有资料已保留。当前冻结规格中的依据不足，直接重试不会增加资料。请重新发起任务，补充资料或缩小研究范围后再生成。",
+        "actions": ("open_result", "start_new", "export_diagnostics"),
+        "retryable": False,
+    },
+    "expert_team_state_conflict": {
+        "title": "任务状态已更新",
+        "message": "当前任务已被另一个请求推进，你的草稿和已有结果已保留。请刷新后按最新状态操作。",
+        "actions": ("refresh", "export_diagnostics"),
+        "retryable": True,
+    },
+    "expert_team_in_progress": {
+        "title": "当前阶段正在处理",
+        "message": "同一阶段已有生成任务在运行，已有进度和结果不会丢失。请等待状态更新，不要重复发起。",
+        "actions": ("refresh", "export_diagnostics"),
+        "retryable": True,
+    },
+    "expert_team_not_found": {
+        "title": "未找到当前专家团任务",
+        "message": "当前会话中未找到这项任务，其他任务和已有交付文件已保留、不受影响。请返回会话列表重新打开。",
+        "actions": ("refresh", "export_diagnostics"),
+        "retryable": False,
+    },
+    "expert_team_source_invalid": {
+        "title": "资料校验未通过",
+        "message": "任务规格和已添加资料已保留，本次未调用模型。资料数量或完整性与当前任务合同不一致，请重新发起任务并按页面提示添加资料。",
+        "actions": ("start_new", "export_diagnostics"),
+        "retryable": False,
+    },
+    "document_render_failed": {
+        "title": "DOCX 生成未完成",
+        "message": "已确认的正文已保留，无需重做内容。请只重新生成并检查 DOCX。",
+        "actions": ("retry", "open_result", "export_diagnostics"),
+        "retryable": True,
+    },
+    "document_open_failed": {
+        "title": "未能打开交付文件",
+        "message": "交付文件已保留，不会丢失。请重试，或打开文件夹后使用 WPS/Word 打开。",
+        "actions": ("retry", "export_diagnostics"),
+        "retryable": True,
+    },
+    "delivery_copy_failed": {
+        "title": "副本保存未完成",
+        "message": "原交付文件已保留，不会丢失。请选择另一个可写目录后重试。",
+        "actions": ("retry", "export_diagnostics"),
+        "retryable": True,
+    },
     "diagnostics_unavailable": {
         "title": "安全诊断暂不可用",
         "message": "暂时无法生成安全诊断，请稍后重试。",
@@ -87,8 +167,8 @@ _ERROR_CATALOG: Final = {
     },
     "unknown_error": {
         "title": "操作未能完成",
-        "message": "应用遇到暂时性问题，请重试或导出诊断。",
-        "actions": ("retry", "export_diagnostics"),
+        "message": "本次操作未完成，已保存的任务规格和结果不会丢失。请刷新后重试或导出诊断。",
+        "actions": ("refresh", "retry", "export_diagnostics"),
         "retryable": True,
     },
 }

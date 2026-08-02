@@ -55,7 +55,7 @@ def _failing_replace_worker(workspace: str, body: dict, result_path: str) -> Non
 
     original_replace = storage.os.replace
 
-    def fail_replace(_source, _target):
+    def fail_replace(_source, _target, **_kwargs):
         raise OSError("injected replace failure")
 
     storage.os.replace = fail_replace
@@ -165,7 +165,7 @@ def test_cross_process_same_version_has_one_winner_and_one_version_conflict(tmp_
             "marker": "B" if winners[0]["marker"] == "A" else "A",
             "code": "version_conflict",
         }
-    ]
+    ], results
 
 
 def test_failed_cross_process_writer_releases_lock_and_preserves_json(tmp_path):

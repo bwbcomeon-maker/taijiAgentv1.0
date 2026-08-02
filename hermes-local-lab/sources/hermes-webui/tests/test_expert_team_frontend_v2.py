@@ -14,26 +14,25 @@ PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
-def test_expert_team_pilot_payload_is_explicit_and_fails_closed_when_rollout_is_off():
+def test_expert_team_portal_payload_is_the_minimal_standalone_launch_contract():
     assert "function _writeflowExpertTeamStartPayload" in PANELS_JS
     body = _function_body(
         PANELS_JS,
         "function _writeflowExpertTeamStartPayload",
         "async function summonWriteflowTeam",
     )
-    for token in (
+    for token in ("launch_profile_id", "prompt"):
+        assert token in body
+    for forbidden in (
         "contract_version",
         "intake_example_id",
         "document_type",
         "document_brief_seed",
-        "example.capability",
         "enterprise_contract_pilot",
+        "template_id",
+        "team_id",
     ):
-        assert token in body
-    assert "_writeflowContractRollout" not in body
-    assert "['work_report','research_report']" not in body
-    assert "delete payload.template_id" in body
-    assert "template_id:example.id" in body
+        assert forbidden not in body
 
 
 def test_expert_team_modal_labels_draft_capability_and_has_a_visible_prompt_label():
@@ -50,7 +49,7 @@ def test_expert_team_modal_names_original_request_and_explains_no_automatic_gene
     assert '不会自动开始生成' in PANELS_JS
 
 
-def test_expert_team_start_payload_runtime_behavior_for_off_and_pilot_modes():
+def test_expert_team_start_payload_runtime_behavior_ignores_legacy_capability_fields():
     helper = _function_body(
         PANELS_JS,
         "function _writeflowExpertTeamStartPayload",
@@ -63,6 +62,7 @@ def test_expert_team_start_payload_runtime_behavior_for_off_and_pilot_modes():
             const team={{id:'content-creator-team'}};
             const example={{
               id:'work_report',intake_example_id:'work_report',document_type:'work_report',task_mode:'create',
+              launch_profile_id:'content-work-report',available:true,
               prompt:'起草工作汇报',document_brief_seed:{{document_control:{{render_template_id:'enterprise-work-report'}}}},
               capability:{{kind:'draft',label:'AI 草稿能力',contract_version:''}},
             }};
@@ -73,13 +73,12 @@ def test_expert_team_start_payload_runtime_behavior_for_off_and_pilot_modes():
             """
         )
     )
-    assert result["off"]["template_id"] == "work_report"
-    assert "contract_version" not in result["off"]
-    assert "template_id" not in result["pilot"]
-    assert result["pilot"]["contract_version"] == "expert-team-contract/v1"
-    assert result["pilot"]["intake_example_id"] == "work_report"
-    assert result["pilot"]["document_type"] == "work_report"
-    assert result["pilot"]["document_brief_seed"]["task_mode"] == "create"
+    expected = {
+        "launch_profile_id": "content-work-report",
+        "prompt": "起草工作汇报",
+    }
+    assert result["off"] == expected
+    assert result["pilot"] == expected
 
 
 def test_electron_smoke_covers_off_and_pilot_catalog_keyboard_and_brief_gate():
@@ -800,6 +799,41 @@ def test_overlapping_poll_responses_never_render_an_older_run_version():
     ]
 
 
+def test_polling_does_not_rerender_an_unchanged_expert_team_version():
+    hydrate_start = SESSIONS_JS.index("async function _hydrateExpertTeamStatusCardForSession")
+    hydrate_end = SESSIONS_JS.index("async function _hydrateWriteflowStatusCardForSession", hydrate_start)
+    hydrate = SESSIONS_JS[hydrate_start:hydrate_end]
+    result = _run_node(
+        textwrap.dedent(
+            f"""
+            const S={{session:{{session_id:'session-1'}}}};
+            const rendered=[];
+            const api=async()=>({{run:{{run_id:'run-1',session_id:'session-1',version:7}}}});
+            const _isWriteflowHydrationForActiveSession=()=>true;
+            const _expertTeamLatestAppliedVersionByRun=new Map();
+            const _writeflowRunIsActive=()=>true;
+            const _rememberExpertTeamAppliedVersion=(runId,version)=>_expertTeamLatestAppliedVersionByRun.set(runId,version);
+            const _expertTeamStatusCardFromRun=(run)=>({{runId:run.run_id,version:run.version}});
+            const renderExpertTeamStatusSurface=(card)=>rendered.push(card.version);
+            const _scheduleWriteflowStatusRefresh=()=>{{}};
+            const _removeWriteflowStatusCardsFromMessages=()=>{{}};
+            const renderSessionArtifacts=()=>{{}};
+            {hydrate}
+            (async()=>{{
+              const first=await _hydrateExpertTeamStatusCardForSession('session-1');
+              const second=await _hydrateExpertTeamStatusCardForSession('session-1');
+              console.log(JSON.stringify({{rendered,first,second}}));
+            }})();
+            """
+        )
+    )
+    assert result == {
+        "rendered": [7],
+        "first": {"status": "handled"},
+        "second": {"status": "preserved", "reason": "unchanged_version"},
+    }
+
+
 def test_electron_smoke_has_real_out_dir_and_playwright_preflight():
     smoke = (REPO_ROOT / "tests" / "expert_team_electron_artifact_smoke.js").read_text(encoding="utf-8")
     assert 'argv[index] === "--out-dir"' in smoke
@@ -1294,7 +1328,7 @@ def test_presenter_is_a_pure_state_mapper_for_brief_review_delivery_and_capabili
     assert result["confirmed"]["nextAction"]["label"] == "开始生成"
     assert result["generating"]["statusLabel"] == "AI 阶段协作正在生成"
     assert result["review"]["statusLabel"] == "阶段成果待复核"
-    assert result["invalid"]["statusLabel"] == "草稿未通过校验"
+    assert result["invalid"]["statusLabel"] == "生成结果需要重新处理"
     assert result["documentPending"]["gateSummary"] == "内容已确认，正在生成文档"
     assert result["officeFailed"]["gateSummary"] == "Office 验收不通过，待修改"
     assert result["delivered"]["gateSummary"] == "交付已通过"

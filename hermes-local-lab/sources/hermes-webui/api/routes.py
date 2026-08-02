@@ -17,15 +17,17 @@ import platform
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, contextmanager
 from urllib.parse import parse_qs, urlsplit
 from api.turn_duration import stamp_turn_duration_on_latest_assistant
 from api.agent_sessions import (
@@ -88,6 +90,702 @@ def _session_field(session, field, default=None):
     if isinstance(session, dict):
         return session.get(field, default)
     return getattr(session, field, default)
+
+
+class _SessionDeleteAuthority:
+    """Anchored access to the three files that define Session authority.
+
+    POSIX uses pinned directory descriptors plus ``*at`` operations and
+    ``O_NOFOLLOW``.  Authority leaves are first moved to unpredictable names
+    in the same pinned directory, then byte/inode checked before those names
+    are removed as one transaction.  This avoids a validate-then-unlink race
+    deleting a newer canonical file.  The lexical Session root is bound through
+    a pinned parent descriptor and root name, while the intent parent is rebound
+    to its snapshotted inode before mutation and commit. Windows Python does not
+    expose equivalent dirfd operations; its fallback repeatedly rejects
+    reparse-like symlinks and verifies identities, but intentionally does not
+    claim POSIX-equivalent TOCTOU strength.
+    """
+
+    _INTENT_DIR = ".truth-rewrite-intents"
+    _ORDER = ("backup", "intent", "primary")
+    # Capture platform capability once, while the module still exposes the
+    # real os functions.  Fault-injection tests (and observability wrappers in
+    # production) may temporarily wrap os.unlink/os.rename; function identity
+    # is not a platform capability and must not silently downgrade an anchored
+    # POSIX delete to the weaker checked-path fallback.
+    _DIRFD_CAPABLE = bool(
+        os.name == "posix"
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and all(
+            operation in os.supports_dir_fd
+            for operation in (os.open, os.stat, os.unlink, os.rename, os.link)
+        )
+        and os.stat in os.supports_follow_symlinks
+        and os.link in os.supports_follow_symlinks
+    )
+
+    def __init__(self, session_root: Path, session_id: str):
+        self.root_path = Path(
+            os.path.abspath(os.fspath(Path(session_root).expanduser()))
+        )
+        self.session_id = session_id
+        self._root_parent_path = self.root_path.parent
+        self._root_name = self.root_path.name
+        self._root_parent_fd: int | None = None
+        self._root_parent_identity: tuple[int, int] | None = None
+        self._root_fd: int | None = None
+        self._root_identity: tuple[int, int] | None = None
+        self._intent_fd: int | None = None
+        self._intent_identity: tuple[int, int] | None = None
+        self._snapshots: dict[str, dict] | None = None
+        self._quarantined: dict[str, dict] = {}
+        self._preserved_conflicts: dict[str, dict] = {}
+        self._restore_dirty_labels: set[str] = set()
+        self._anchored = self._DIRFD_CAPABLE
+        self._leaves = {
+            "primary": f"{session_id}.json",
+            "backup": f"{session_id}.json.bak",
+            "intent": f"{session_id}.json",
+        }
+        self._paths = {
+            "primary": self.root_path / self._leaves["primary"],
+            "backup": self.root_path / self._leaves["backup"],
+            "intent": self.root_path / self._INTENT_DIR / self._leaves["intent"],
+        }
+        if self._anchored:
+            self._open_anchored_directories()
+        else:
+            self._capture_checked_root()
+            self._capture_checked_intent_parent()
+
+    @staticmethod
+    def _identity(metadata) -> tuple[int, int]:
+        return int(metadata.st_dev), int(metadata.st_ino)
+
+    @staticmethod
+    def _directory_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+
+    def _open_anchored_directories(self) -> None:
+        if not self._root_name:
+            raise OSError("Session authority root must have a parent binding")
+        try:
+            self._root_parent_fd = os.open(
+                self._root_parent_path,
+                self._directory_flags(),
+            )
+            parent_metadata = os.fstat(self._root_parent_fd)
+            if not stat.S_ISDIR(parent_metadata.st_mode):
+                raise OSError("Session authority parent is not a directory")
+            self._root_parent_identity = self._identity(parent_metadata)
+
+            self._root_fd = os.open(
+                self._root_name,
+                self._directory_flags(),
+                dir_fd=self._root_parent_fd,
+            )
+            root_metadata = os.fstat(self._root_fd)
+            if not stat.S_ISDIR(root_metadata.st_mode):
+                raise OSError("Session authority root is not a directory")
+            self._root_identity = self._identity(root_metadata)
+            self._assert_root_path_stable()
+
+            try:
+                self._intent_fd = os.open(
+                    self._INTENT_DIR,
+                    self._directory_flags(),
+                    dir_fd=self._root_fd,
+                )
+            except FileNotFoundError:
+                self._intent_fd = None
+                self._intent_identity = None
+            else:
+                metadata = os.fstat(self._intent_fd)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise OSError("Session intent authority is not a directory")
+                self._intent_identity = self._identity(metadata)
+        except Exception:
+            self.close()
+            raise
+
+    def _capture_checked_root(self) -> None:
+        try:
+            metadata = self.root_path.lstat()
+        except FileNotFoundError as exc:
+            raise OSError("Session authority root is unavailable") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session authority root")
+        self._root_identity = self._identity(metadata)
+
+    def _assert_root_path_stable(self) -> None:
+        if self._anchored:
+            if (
+                self._root_parent_fd is None
+                or self._root_parent_identity is None
+                or self._root_fd is None
+                or self._root_identity is None
+            ):
+                raise OSError("Session authority root binding is unavailable")
+
+            pinned_parent = os.fstat(self._root_parent_fd)
+            if (
+                not stat.S_ISDIR(pinned_parent.st_mode)
+                or self._identity(pinned_parent) != self._root_parent_identity
+            ):
+                raise OSError("pinned Session authority parent changed")
+            pinned_root = os.fstat(self._root_fd)
+            if (
+                not stat.S_ISDIR(pinned_root.st_mode)
+                or self._identity(pinned_root) != self._root_identity
+            ):
+                raise OSError("pinned Session authority root changed")
+
+            current_parent_fd: int | None = None
+            current_root_fd: int | None = None
+            try:
+                current_parent_fd = os.open(
+                    self._root_parent_path,
+                    self._directory_flags(),
+                )
+                current_parent = os.fstat(current_parent_fd)
+                if (
+                    not stat.S_ISDIR(current_parent.st_mode)
+                    or self._identity(current_parent)
+                    != self._root_parent_identity
+                ):
+                    raise OSError("Session authority parent changed")
+                current_root_fd = os.open(
+                    self._root_name,
+                    self._directory_flags(),
+                    dir_fd=current_parent_fd,
+                )
+                current_root = os.fstat(current_root_fd)
+                if (
+                    not stat.S_ISDIR(current_root.st_mode)
+                    or self._identity(current_root) != self._root_identity
+                ):
+                    raise OSError("Session authority root changed")
+            except FileNotFoundError as exc:
+                raise OSError("Session authority root disappeared") from exc
+            finally:
+                if current_root_fd is not None:
+                    os.close(current_root_fd)
+                if current_parent_fd is not None:
+                    os.close(current_parent_fd)
+            return
+
+        try:
+            metadata = self.root_path.lstat()
+        except FileNotFoundError as exc:
+            raise OSError("Session authority root disappeared") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session authority root")
+        if (
+            self._root_identity is None
+            or self._identity(metadata) != self._root_identity
+        ):
+            raise OSError("Session authority root changed")
+
+    def _capture_checked_intent_parent(self) -> None:
+        intent_parent = self.root_path / self._INTENT_DIR
+        try:
+            metadata = intent_parent.lstat()
+        except FileNotFoundError:
+            self._intent_identity = None
+            return
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session intent authority parent")
+        self._intent_identity = self._identity(metadata)
+
+    def close(self) -> None:
+        if self._intent_fd is not None:
+            os.close(self._intent_fd)
+            self._intent_fd = None
+        if self._root_fd is not None:
+            os.close(self._root_fd)
+            self._root_fd = None
+        if self._root_parent_fd is not None:
+            os.close(self._root_parent_fd)
+            self._root_parent_fd = None
+
+    def _entry_directory_fd(self, label: str) -> int | None:
+        return self._intent_fd if label == "intent" else self._root_fd
+
+    def _assert_intent_parent_stable(self) -> None:
+        if self._anchored:
+            assert self._root_fd is not None
+            try:
+                current_fd = os.open(
+                    self._INTENT_DIR,
+                    self._directory_flags(),
+                    dir_fd=self._root_fd,
+                )
+            except FileNotFoundError:
+                if self._intent_identity is None:
+                    return
+                raise OSError("Session intent authority parent disappeared")
+            try:
+                current_identity = self._identity(os.fstat(current_fd))
+            finally:
+                os.close(current_fd)
+            if (
+                self._intent_identity is None
+                or current_identity != self._intent_identity
+            ):
+                raise OSError("Session intent authority parent changed")
+            return
+
+        intent_parent = self.root_path / self._INTENT_DIR
+        try:
+            metadata = intent_parent.lstat()
+        except FileNotFoundError:
+            if self._intent_identity is None:
+                return
+            raise OSError("Session intent authority parent disappeared")
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe Session intent authority parent")
+        if (
+            self._intent_identity is None
+            or self._identity(metadata) != self._intent_identity
+        ):
+            raise OSError("Session intent authority parent changed")
+
+    def _entry_parent_path(self, label: str) -> Path:
+        return self._paths[label].parent
+
+    def _read_named_entry(
+        self,
+        label: str,
+        name: str,
+    ) -> tuple[bytes | None, tuple[int, int] | None]:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                return None, None
+            try:
+                fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError:
+                return None, None
+            try:
+                metadata = os.fstat(fd)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise OSError(
+                        f"unsafe Session delete authority: {name}"
+                    )
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1
+                    payload = handle.read()
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            return payload, self._identity(metadata)
+
+        path = self._entry_parent_path(label) / name
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return None, None
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"unsafe Session delete authority: {path.name}")
+        fd = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            opened = os.fstat(fd)
+            if self._identity(opened) != self._identity(metadata):
+                raise OSError("Session delete authority changed while opening")
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                payload = handle.read()
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        return payload, self._identity(metadata)
+
+    def _read_entry(self, label: str) -> tuple[bytes | None, tuple[int, int] | None]:
+        return self._read_named_entry(label, self._leaves[label])
+
+    def _named_entry_exists(self, label: str, name: str) -> bool:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                return False
+            try:
+                os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return False
+            return True
+        try:
+            (self._entry_parent_path(label) / name).lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
+    def snapshot(self) -> dict[str, dict]:
+        self._assert_root_path_stable()
+        self._assert_intent_parent_stable()
+        snapshots = {}
+        for label in ("primary", "backup", "intent"):
+            payload, identity = self._read_entry(label)
+            snapshots[label] = {"payload": payload, "identity": identity}
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        self._snapshots = snapshots
+        return copy.deepcopy(snapshots)
+
+    def _assert_entry_unchanged(self, label: str) -> bool:
+        if self._snapshots is None:
+            raise RuntimeError("Session authority was not snapshotted")
+        payload, identity = self._read_entry(label)
+        expected = self._snapshots[label]
+        if identity != expected["identity"] or payload != expected["payload"]:
+            raise OSError(
+                f"Session delete authority changed: {self._leaves[label]}"
+            )
+        return payload is not None
+
+    def _rename_entry(self, label: str, source: str, destination: str) -> None:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            os.rename(
+                source,
+                destination,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        else:
+            parent = self._entry_parent_path(label)
+            os.replace(parent / source, parent / destination)
+
+    def _unlink_named_entry(self, label: str, name: str) -> None:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            os.unlink(name, dir_fd=directory_fd)
+        else:
+            (self._entry_parent_path(label) / name).unlink()
+
+    def _restore_quarantined_entry(self, label: str) -> None:
+        record = self._quarantined.get(label)
+        if not isinstance(record, dict):
+            return
+        quarantine_name = str(record["name"])
+        if self._named_entry_exists(label, self._leaves[label]):
+            raise OSError(
+                f"new Session authority appeared while restoring: {self._leaves[label]}"
+            )
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            os.link(
+                quarantine_name,
+                self._leaves[label],
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        else:
+            parent = self._entry_parent_path(label)
+            os.link(
+                parent / quarantine_name,
+                parent / self._leaves[label],
+                follow_symlinks=False,
+            )
+        self._restore_dirty_labels.add(label)
+        payload, identity = self._read_entry(label)
+        if payload != record.get("payload") or identity != record.get("identity"):
+            raise OSError(
+                f"restored Session authority changed: {self._leaves[label]}"
+            )
+        self._unlink_named_entry(label, quarantine_name)
+        self._quarantined.pop(label, None)
+
+    def _quarantine_entry(self, label: str) -> None:
+        if not self._assert_entry_unchanged(label):
+            return
+        quarantine_name = (
+            f".{self._leaves[label]}.{uuid.uuid4().hex}.delete-quarantine"
+        )
+        self._rename_entry(label, self._leaves[label], quarantine_name)
+        self._quarantined[label] = {"name": quarantine_name}
+        try:
+            payload, identity = self._read_named_entry(label, quarantine_name)
+            self._quarantined[label].update(
+                payload=payload,
+                identity=identity,
+            )
+            expected = self._snapshots[label]
+            if payload != expected["payload"] or identity != expected["identity"]:
+                # The canonical leaf changed after validation. Preserve the
+                # newer file exactly as found; the enclosing rollback must not
+                # overwrite it with stale snapshot bytes.
+                self._restore_quarantined_entry(label)
+                self._preserved_conflicts[label] = {
+                    "payload": payload,
+                    "identity": identity,
+                }
+                raise OSError(
+                    f"Session delete authority changed before quarantine: "
+                    f"{self._leaves[label]}"
+                )
+            if self._named_entry_exists(label, self._leaves[label]):
+                raise OSError(
+                    f"new Session authority appeared during delete: "
+                    f"{self._leaves[label]}"
+                )
+        except Exception:
+            # A verified regular conflict can be put back without replacing a
+            # concurrently-created canonical name. If validation itself could
+            # not read the quarantined entry, retain the unpredictable recovery
+            # name rather than performing an unsafe overwrite.
+            if (
+                label in self._quarantined
+                and self._quarantined[label].get("payload") is not None
+            ):
+                try:
+                    self._restore_quarantined_entry(label)
+                except Exception:
+                    pass
+            raise
+
+    def _commit_quarantines(self) -> None:
+        for label, record in self._quarantined.items():
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+            payload, identity = self._read_named_entry(label, str(record["name"]))
+            if payload != record.get("payload") or identity != record.get("identity"):
+                raise OSError(
+                    f"quarantined Session authority changed: {self._leaves[label]}"
+                )
+            if self._named_entry_exists(label, self._leaves[label]):
+                raise OSError(
+                    f"new Session authority appeared before delete commit: "
+                    f"{self._leaves[label]}"
+                )
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+        for label, record in list(self._quarantined.items()):
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+            self._unlink_named_entry(label, str(record["name"]))
+            self._quarantined.pop(label, None)
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+
+    def unlink_all(self) -> None:
+        self._assert_root_path_stable()
+        self._assert_intent_parent_stable()
+        for label in self._ORDER:
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+            self._quarantine_entry(label)
+            self._assert_root_path_stable()
+            if label == "intent":
+                self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        self._assert_intent_parent_stable()
+        if self._anchored:
+            for directory_fd in (self._intent_fd, self._root_fd):
+                if directory_fd is not None:
+                    os.fsync(directory_fd)
+        self._commit_quarantines()
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        if self._anchored:
+            for directory_fd in (self._intent_fd, self._root_fd):
+                if directory_fd is not None:
+                    os.fsync(directory_fd)
+
+    def _atomic_restore_entry(self, label: str, payload: bytes) -> None:
+        if self._anchored:
+            directory_fd = self._entry_directory_fd(label)
+            if directory_fd is None:
+                raise OSError("Session intent authority parent disappeared")
+            temp = f".{self._leaves[label]}.{uuid.uuid4().hex}.restore.tmp"
+            fd = os.open(
+                temp,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    fd = -1
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.link(
+                    temp,
+                    self._leaves[label],
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                self._restore_dirty_labels.add(label)
+                os.fsync(directory_fd)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                try:
+                    os.unlink(temp, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+            return
+
+        path = self._paths[label]
+        temp = path.parent / f".{path.name}.{uuid.uuid4().hex}.restore.tmp"
+        fd = os.open(
+            temp,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                fd = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temp, path, follow_symlinks=False)
+            self._restore_dirty_labels.add(label)
+            directory_fd = os.open(path.parent, self._directory_flags())
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            temp.unlink(missing_ok=True)
+
+    def _fsync_restored_directories(self) -> None:
+        if not self._restore_dirty_labels:
+            return
+
+        # Intent and root are the only two possible authority parents. Sync
+        # each affected directory once after the complete restored payload and
+        # identity set has been verified.
+        labels = []
+        if "intent" in self._restore_dirty_labels:
+            labels.append("intent")
+        if self._restore_dirty_labels - {"intent"}:
+            labels.append("primary")
+        for label in labels:
+            if self._anchored:
+                directory_fd = self._entry_directory_fd(label)
+                if directory_fd is None:
+                    raise OSError("Session restore authority parent disappeared")
+                os.fsync(directory_fd)
+                continue
+            directory_fd = os.open(
+                self._entry_parent_path(label),
+                self._directory_flags(),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        self._restore_dirty_labels.clear()
+
+    def restore(self) -> None:
+        if self._snapshots is None:
+            raise RuntimeError("Session authority was not snapshotted")
+        if not self._anchored:
+            # The checked-path fallback has no pinned directory descriptor. If
+            # the lexical root moved, refusing recovery is safer than writing
+            # snapshot bytes into the replacement directory.
+            self._assert_root_path_stable()
+
+        recreated = set()
+        # Restore root authority first so even intent-parent drift leaves the
+        # pinned original Session data recoverable. A conflict captured after
+        # validation is authoritative newer data and must never be overwritten
+        # by the older snapshot.
+        for label in ("primary", "backup", "intent"):
+            preserved = self._preserved_conflicts.get(label)
+            if isinstance(preserved, dict):
+                payload, identity = self._read_entry(label)
+                if (
+                    payload != preserved.get("payload")
+                    or identity != preserved.get("identity")
+                ):
+                    raise OSError(
+                        f"preserved Session authority changed: {self._leaves[label]}"
+                    )
+                continue
+            if label in self._quarantined:
+                self._restore_quarantined_entry(label)
+                continue
+
+            expected = self._snapshots[label]
+            payload, identity = self._read_entry(label)
+            if expected["payload"] is None:
+                if payload is not None or identity is not None:
+                    raise OSError(
+                        f"unexpected Session delete authority: {self._leaves[label]}"
+                    )
+                continue
+            if payload is None:
+                self._atomic_restore_entry(label, expected["payload"])
+                recreated.add(label)
+                continue
+            if payload != expected["payload"] or identity != expected["identity"]:
+                raise OSError(
+                    f"Session authority changed during restore: {self._leaves[label]}"
+                )
+
+        for label in ("primary", "backup", "intent"):
+            payload, identity = self._read_entry(label)
+            expected = self._preserved_conflicts.get(label) or self._snapshots[label]
+            if payload != expected.get("payload"):
+                raise OSError(
+                    f"failed to verify restored Session authority: {self._leaves[label]}"
+                )
+            if label not in recreated and identity != expected.get("identity"):
+                raise OSError(
+                    f"restored Session authority identity changed: {self._leaves[label]}"
+                )
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
+        self._fsync_restored_directories()
+        self._assert_intent_parent_stable()
+        self._assert_root_path_stable()
 
 
 def _expert_identity_session(handler) -> str:
@@ -1105,6 +1803,18 @@ def _expert_team_revision_feedback(run: dict) -> str:
     return ""
 
 
+def _expert_team_revision_feedback_entry(run: dict, stage_id: str) -> dict:
+    for entry in reversed(run.get("revision_feedback") or []):
+        if not isinstance(entry, dict):
+            continue
+        entry_stage_id = str(entry.get("stage_id") or "")
+        if entry_stage_id and entry_stage_id != str(stage_id or ""):
+            continue
+        if str(entry.get("feedback") or "").strip():
+            return copy.deepcopy(entry)
+    return {}
+
+
 def _expert_team_prompt_header(run: dict, task: dict) -> str:
     current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
     feedback = _expert_team_revision_feedback(run)
@@ -1265,7 +1975,16 @@ def _expert_team_execution_prompt(run: dict) -> str:
 def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
     """Thin route seam; prompt policy and serialization live in expert_teams.prompts."""
     from api.expert_teams.prompts import build_stage_gateway_request
+    from api import expert_teams
 
+    # Validate the immutable source contract before every model stage.  Prompt
+    # policy decides whether the verified snapshot is injected.  In
+    # particular, every polishing stage needs the original text rather than a
+    # lossy summary from an earlier stage.
+    verified_source_context = expert_teams.verified_source_context_for_execution(
+        workspace,
+        run,
+    )
     task = _expert_team_current_task(run)
     stage = {
         "id": str(task.get("id") or task.get("task_id") or ""),
@@ -1276,16 +1995,28 @@ def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
     feedback = _expert_team_revision_feedback(run)
     revision_context = None
     if feedback:
-        previous = next(
-            (
-                item.get("artifact")
-                for item in reversed(run.get("stage_outputs") or [])
-                if isinstance(item, dict)
-                and str(item.get("task_id") or "") == stage["id"]
-                and isinstance(item.get("artifact"), dict)
-            ),
-            None,
-        )
+        feedback_entry = _expert_team_revision_feedback_entry(run, stage["id"])
+        expected_artifact_id = str(feedback_entry.get("artifact_id") or "")
+        expected_artifact_sha256 = str(feedback_entry.get("artifact_sha256") or "")
+        candidates = [
+            item.get("artifact")
+            for item in reversed(run.get("stage_outputs") or [])
+            if isinstance(item, dict)
+            and str(item.get("task_id") or "") == stage["id"]
+            and isinstance(item.get("artifact"), dict)
+        ]
+        if expected_artifact_id or expected_artifact_sha256:
+            previous = next(
+                (
+                    artifact
+                    for artifact in candidates
+                    if str(artifact.get("artifact_id") or "") == expected_artifact_id
+                    and str(artifact.get("sha256") or "") == expected_artifact_sha256
+                ),
+                None,
+            )
+        else:
+            previous = candidates[0] if candidates else None
         if not isinstance(previous, dict):
             raise ValueError("enterprise stage revision requires an immutable previous artifact reference")
         revision_context = {
@@ -1293,22 +2024,14 @@ def _expert_team_enterprise_gateway_request(workspace: Path, run: dict) -> dict:
                 "artifact_id": str(previous.get("artifact_id") or ""),
                 "sha256": str(previous.get("sha256") or ""),
             },
+            "previous_artifact": previous,
             "feedback": feedback,
         }
-    source_context = None
-    if (str(run.get("team_id") or ""), stage["id"]) in {
-        ("content-creator-team", "materials"),
-        ("deep-research-team", "research"),
-        ("deep-research-team", "evidence"),
-    }:
-        from api import expert_teams
-
-        source_context = expert_teams.verified_source_context_for_execution(workspace, run)
     return build_stage_gateway_request(
         run,
         stage,
         revision_feedback=revision_context,
-        source_context=source_context,
+        source_context=verified_source_context,
     )
 
 
@@ -1380,6 +2103,2170 @@ def _append_expert_team_session_entry(run: dict) -> list[dict]:
         logger.debug("Failed to persist expert team session entry", exc_info=True)
         return []
     return new_messages
+
+
+class _ExpertTeamStartPersistenceError(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartIntegrityError(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartIdempotencyConflict(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartSessionNotFound(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartSessionNotPersisted(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartSessionBusy(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartSessionStateConflict(RuntimeError):
+    pass
+
+
+class _ExpertTeamStartFinalizeError(RuntimeError):
+    pass
+
+
+def _expert_team_start_session_messages(
+    session,
+    run_id: str,
+    transaction_id: str,
+) -> list[dict]:
+    messages = [
+        message
+        for message in (getattr(session, "messages", None) or [])
+        if isinstance(message, dict)
+    ]
+    rows = [
+        message
+        for message in messages
+        if str(message.get("expert_team_start_transaction_id") or "")
+        == transaction_id
+    ]
+    if not rows:
+        if any(
+            str(message.get("expert_team_run_id") or "") == run_id
+            for message in messages
+        ):
+            raise _ExpertTeamStartIntegrityError(
+                "expert team start session Run has a mismatched transaction row"
+            )
+        return []
+    types = [str(message.get("type") or "") for message in rows]
+    if len(rows) != 2 or sorted(types) != ["expert_team_lifecycle", "expert_team_start"]:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start session message pair is incomplete or duplicated"
+        )
+    if any(
+        str(message.get("expert_team_run_id") or "") != run_id
+        for message in rows
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start session message Run binding does not match"
+        )
+    if sum(
+        1
+        for message in messages
+        if str(message.get("expert_team_run_id") or "") == run_id
+    ) != len(rows):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start session Run contains another transaction row"
+        )
+    by_type = {str(message.get("type") or ""): message for message in rows}
+    if (
+        str(by_type["expert_team_start"].get("role") or "").lower() != "user"
+        or str(by_type["expert_team_lifecycle"].get("role") or "").lower()
+        != "assistant"
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start session message roles are invalid"
+        )
+    return copy.deepcopy(rows)
+
+
+def _new_expert_team_start_session_messages(
+    run: dict,
+    transaction_id: str,
+) -> list[dict]:
+    run_id = str(run.get("run_id") or "")
+    title = str(run.get("title") or run.get("team_title") or "专家团任务").strip()
+    team_title = str(run.get("team_title") or "专家团").strip()
+    visible_title = str(
+        ((run.get("view") or {}).get("business_context") or {}).get("visible_title")
+        or title
+    ).strip()
+    now = time.time()
+    return [
+        {
+            "role": "user",
+            "content": f"召唤{team_title}：{title[:120]}",
+            "timestamp": now,
+            "_ts": now,
+            "type": "expert_team_start",
+            "expert_team_run_id": run_id,
+            "expert_team_start_transaction_id": transaction_id,
+        },
+        {
+            "role": "assistant",
+            "content": (
+                f"{team_title}已创建，等待需求确认。\n\n"
+                f"本次任务：{visible_title}。请在右侧专家团工作台补充必填信息。"
+            ),
+            "timestamp": now + 0.001,
+            "_ts": now + 0.001,
+            "type": "expert_team_lifecycle",
+            "expert_team_run_id": run_id,
+            "expert_team_start_transaction_id": transaction_id,
+        },
+    ]
+
+
+def _persist_expert_team_session_entry_locked(
+    session,
+    run: dict,
+    transaction_id: str,
+    *,
+    initial_session_message_pair_snapshot: list[dict],
+    session_updated_at_after_start: float,
+) -> list[dict]:
+    """Persist the canonical message pair; caller holds the session writer lock."""
+    from api.expert_teams import storage
+
+    run_id = str(run.get("run_id") or "")
+    existing = _expert_team_start_session_messages(session, run_id, transaction_id)
+    if existing:
+        return existing
+
+    before = copy.deepcopy(session.__dict__)
+    sidecar_existed = session.path.exists()
+    try:
+        new_messages = storage.validate_start_session_message_pair_snapshot(
+            initial_session_message_pair_snapshot,
+            transaction_id=transaction_id,
+            run_id=run_id,
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+    messages = list(getattr(session, "messages", None) or [])
+
+    def _append_entry():
+        session.messages = messages + copy.deepcopy(new_messages)
+        transaction_ids = storage.validate_start_session_transaction_markers(
+            getattr(session, "expert_team_start_transaction_ids", None)
+        )
+        if transaction_id not in transaction_ids:
+            transaction_ids.append(transaction_id)
+        session.expert_team_start_transaction_ids = transaction_ids
+        session.context_messages = _completed_semantic_messages(session.messages)
+        if _is_default_or_empty_session_title(getattr(session, "title", None)):
+            session.title = title_from(
+                session.messages,
+                getattr(session, "title", None) or "Untitled",
+            )
+        # Use the timestamp durably reserved by the start receipt.  Compensation
+        # can then restore the previous timestamp only while this transaction
+        # still owns it; a later rename or metadata-only save changes the value
+        # and must be preserved.
+        session.updated_at = session_updated_at_after_start
+
+    try:
+        if sidecar_existed:
+            _rewrite_existing_session_truth(
+                session,
+                _append_entry,
+                privacy_reason=None,
+                touch_updated_at=False,
+            )
+        else:
+            _append_entry()
+            _persist_new_session_truth(session, touch_updated_at=False)
+    except Exception as exc:
+        session.__dict__.clear()
+        session.__dict__.update(copy.deepcopy(before))
+        raise _ExpertTeamStartPersistenceError(str(exc)) from exc
+    return copy.deepcopy(new_messages)
+
+
+def _rollback_expert_team_start_session_entry_locked(
+    session,
+    run_id: str,
+    transaction_id: str,
+    metadata_before_start: dict | None = None,
+    session_updated_at_after_start: float | None = None,
+) -> None:
+    from api.expert_teams import storage
+
+    existing = _expert_team_start_session_messages(session, run_id, transaction_id)
+    if not existing:
+        return
+    before = copy.deepcopy(session.__dict__)
+
+    def _remove_entry():
+        expected_generated_title = None
+        snapshot_message_count = None
+        snapshot_title = None
+        snapshot_updated_at = None
+        if isinstance(metadata_before_start, dict):
+            snapshot_title = metadata_before_start.get("title")
+            snapshot_message_count = metadata_before_start.get("message_count")
+            snapshot_updated_at = metadata_before_start.get("updated_at")
+            if isinstance(snapshot_title, str):
+                expected_generated_title = title_from(
+                    session.messages,
+                    snapshot_title,
+                )
+        session.messages = [
+            message
+            for message in (session.messages or [])
+            if not (
+                isinstance(message, dict)
+                and str(message.get("expert_team_run_id") or "") == run_id
+                and str(message.get("expert_team_start_transaction_id") or "")
+                == transaction_id
+            )
+        ]
+        transaction_ids = storage.validate_start_session_transaction_markers(
+            getattr(session, "expert_team_start_transaction_ids", None),
+            required_transaction_id=transaction_id,
+        )
+        session.expert_team_start_transaction_ids = [
+            value
+            for value in transaction_ids
+            if value != transaction_id
+        ]
+        session.context_messages = _completed_semantic_messages(session.messages)
+        if (
+            isinstance(snapshot_title, str)
+            and session.title == expected_generated_title
+        ):
+            session.title = title_from(session.messages, snapshot_title)
+        transaction_still_owns_updated_at = (
+            isinstance(session_updated_at_after_start, (int, float))
+            and not isinstance(session_updated_at_after_start, bool)
+            and getattr(session, "updated_at", None) == session_updated_at_after_start
+        )
+        if (
+            transaction_still_owns_updated_at
+            and type(snapshot_message_count) is int
+            and len(session.messages) == snapshot_message_count
+            and isinstance(snapshot_updated_at, (int, float))
+            and not isinstance(snapshot_updated_at, bool)
+        ):
+            session.updated_at = snapshot_updated_at
+        elif type(snapshot_message_count) is int and len(session.messages) > snapshot_message_count:
+            remaining_last_message_at = max(
+                (
+                    float(message.get("timestamp") or message.get("_ts") or 0)
+                    for message in session.messages
+                    if isinstance(message, dict)
+                ),
+                default=0,
+            )
+            session.updated_at = max(
+                float(getattr(session, "updated_at", 0) or 0),
+                float(snapshot_updated_at or 0),
+                remaining_last_message_at,
+            )
+
+    try:
+        _rewrite_existing_session_truth(
+            session,
+            _remove_entry,
+            privacy_reason=None,
+            touch_updated_at=False,
+        )
+    except Exception as exc:
+        session.__dict__.clear()
+        session.__dict__.update(copy.deepcopy(before))
+        raise _ExpertTeamStartIntegrityError(
+            "failed to compensate expert team Session messages"
+        ) from exc
+
+
+def _expert_team_start_fingerprint(validated_body: dict) -> str:
+    def _nfc(value: str) -> str:
+        return unicodedata.normalize("NFC", str(value))
+
+    canonical = {
+        "contract": "expert-team-standalone-start/v1",
+        "launch_profile_id": _nfc(validated_body["launch_profile_id"]),
+        "session_id": _nfc(validated_body["session_id"]),
+        "prompt": _nfc(validated_body["prompt"]),
+    }
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_expert_team_start_run_ownership(
+    run: dict,
+    validated_body: dict,
+    receipt: dict,
+    *,
+    require_initial_exact: bool,
+) -> dict:
+    from api import expert_teams
+    from api.expert_teams import storage
+
+    if not isinstance(run, dict):
+        raise _ExpertTeamStartIntegrityError("expert team start Run is not an object")
+    expected = {
+        "run_id": str(receipt["run_id"]),
+        "session_id": str(validated_body["session_id"]),
+        "launch_profile_id": str(validated_body["launch_profile_id"]),
+    }
+    if not storage.uses_early_v1_start_projection(receipt):
+        expected["start_transaction_id"] = str(receipt["transaction_id"])
+    if any(str(run.get(key) or "") != value for key, value in expected.items()):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run ownership does not match its receipt"
+        )
+    if (
+        int(run.get("schema_version") or 0) != 3
+        or str(run.get("product_mode") or "") != "standalone"
+        or str(run.get("contract_version") or "") != expert_teams.EXPERT_TEAM_CONTRACT_V1
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run is not the standalone v3 contract"
+        )
+    if unicodedata.normalize("NFC", str(run.get("prompt") or "")) != unicodedata.normalize(
+        "NFC", str(validated_body["prompt"])
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run prompt does not match its receipt"
+        )
+    snapshot = run.get("launch_profile_snapshot")
+    if not isinstance(snapshot, dict) or str(snapshot.get("id") or "") != expected["launch_profile_id"]:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start Run launch snapshot does not match its receipt"
+        )
+    initial_snapshot = receipt.get("initial_run_snapshot")
+    initial_digest = str(receipt.get("initial_run_sha256") or "")
+    projection_digest = str(receipt.get("initial_start_projection_sha256") or "")
+    if not isinstance(initial_snapshot, dict) or not initial_digest or not projection_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt is missing its immutable initial Run snapshot"
+        )
+    if _expert_team_start_run_digest(initial_snapshot) != initial_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt initial Run snapshot was modified"
+        )
+    if (
+        storage.start_receipt_run_projection_digest(receipt, initial_snapshot)
+        != projection_digest
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt launch projection was modified"
+        )
+    if storage.start_receipt_run_projection_digest(receipt, run) != projection_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team Run immutable launch projection changed"
+        )
+    if require_initial_exact and _expert_team_start_run_digest(run) != initial_digest:
+        raise _ExpertTeamStartIntegrityError(
+            "pending expert team Run differs from its prepared snapshot"
+        )
+    return run
+
+
+def _validate_expert_team_start_transaction_bundle(
+    session,
+    receipt: dict,
+    run: dict,
+    *,
+    allowed_states: set[str] | frozenset[str],
+    require_initial_exact: bool,
+) -> list[dict]:
+    from api.expert_teams import storage
+
+    try:
+        return storage.validate_start_transaction_bundle(
+            receipt,
+            session_id=str(getattr(session, "session_id", "") or ""),
+            session_transaction_ids=getattr(
+                session,
+                "expert_team_start_transaction_ids",
+                None,
+            ),
+            session_messages=list(getattr(session, "messages", None) or []),
+            run=run,
+            allowed_states=allowed_states,
+            require_initial_exact=require_initial_exact,
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+
+def _expert_team_start_run_digest(run: dict) -> str:
+    from api.expert_teams import storage
+
+    return storage.start_run_digest(run)
+
+
+def _expert_team_start_projection_digest(run: dict) -> str:
+    from api.expert_teams import storage
+
+    return storage.start_run_projection_digest(run)
+
+
+def _publish_expert_team_start_run(workspace: Path, run_id: str) -> dict:
+    from api.expert_teams import storage
+
+    return storage.publish_pending_run(workspace, run_id)
+
+
+def _expert_team_start_public_session(session) -> dict:
+    payload = session.compact()
+    payload["messages"] = copy.deepcopy(getattr(session, "messages", None) or [])
+    # Transaction integrity must be proved against the exact durable bytes.
+    # Credential redaction is an egress operation and therefore happens only
+    # after the public projection has finished its fail-closed validation.
+    return redact_session_data(public_session_projection(payload))
+
+
+def _expert_team_start_session_is_busy(session) -> bool:
+    return any(
+        (
+            getattr(session, "active_stream_id", None),
+            getattr(session, "pending_user_message", None),
+            getattr(session, "pending_started_at", None),
+            getattr(session, "pending_attachments", None),
+        )
+    )
+
+
+@contextmanager
+def _expert_team_start_session_writer_lock(session_id: str):
+    """Use the one canonical lock order for every Session truth rewrite."""
+    from api.legacy_session_migration import legacy_migration_state_guard
+    from api.truth_rewrite import truth_rewrite_lock
+
+    with _get_session_agent_lock(session_id):
+        with legacy_migration_state_guard(), truth_rewrite_lock(session_id):
+            yield
+
+
+_EXPERT_TEAM_START_SEQUENCE_FIELDS = ("messages", "context_messages", "tool_calls")
+_EXPERT_TEAM_START_VOLATILE_FIELDS = {
+    "updated_at",
+    "active_stream_id",
+    "pending_user_message",
+    "pending_attachments",
+    "pending_started_at",
+}
+
+
+def _replace_cached_expert_team_start_session(session_id: str, cached, fresh) -> None:
+    cached.__dict__.clear()
+    cached.__dict__.update(copy.deepcopy(fresh.__dict__))
+    with LOCK:
+        SESSIONS[session_id] = cached
+        SESSIONS.move_to_end(session_id)
+        while len(SESSIONS) > SESSIONS_MAX:
+            SESSIONS.popitem(last=False)
+
+
+def _expert_team_start_durable_scalar_state(session) -> dict:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in session.__dict__.items()
+        if key not in _EXPERT_TEAM_START_SEQUENCE_FIELDS
+        and key not in _EXPERT_TEAM_START_VOLATILE_FIELDS
+        and not key.startswith("_")
+    }
+
+
+def _reload_expert_team_start_session(session_id: str):
+    """Reconcile every durable Session field without losing an unsaved tail."""
+    cached = get_session(session_id)
+    if _expert_team_start_session_is_busy(cached):
+        raise _ExpertTeamStartSessionBusy(session_id)
+    if not cached.path.exists():
+        return cached
+    fresh = Session.load(session_id)
+    if fresh is None:
+        raise _ExpertTeamStartSessionNotFound(session_id)
+    if _expert_team_start_session_is_busy(fresh):
+        raise _ExpertTeamStartSessionBusy(session_id)
+    if (
+        str(getattr(cached, "session_id", "") or "") != session_id
+        or str(getattr(fresh, "session_id", "") or "") != session_id
+    ):
+        # Never retain a sidecar whose payload identity disagrees with its
+        # filename/cache key; a retry must reload and fail closed again rather
+        # than mutate the mismatched Session under the requested lock.
+        with LOCK:
+            SESSIONS.pop(session_id, None)
+        raise _ExpertTeamStartSessionStateConflict(
+            "Session identity does not match its durable key"
+        )
+
+    cached_identity = tuple(
+        str(getattr(cached, field, None) or "")
+        for field in ("session_id", "workspace", "profile")
+    )
+    fresh_identity = tuple(
+        str(getattr(fresh, field, None) or "")
+        for field in ("session_id", "workspace", "profile")
+    )
+    if cached_identity != fresh_identity:
+        # Workspace/profile drift changes the authority boundary.  Refresh the
+        # cache so a retry cannot write the old workspace, but reject this
+        # request because it acquired locks for the old identity.
+        _replace_cached_expert_team_start_session(session_id, cached, fresh)
+        raise _ExpertTeamStartSessionStateConflict(
+            "cached and durable Session identity changed"
+        )
+
+    if _expert_team_start_durable_scalar_state(cached) != _expert_team_start_durable_scalar_state(fresh):
+        _replace_cached_expert_team_start_session(session_id, cached, fresh)
+        raise _ExpertTeamStartSessionStateConflict(
+            "cached and durable Session metadata diverged"
+        )
+
+    exact = True
+    fresh_extends_cache = True
+    for field in _EXPERT_TEAM_START_SEQUENCE_FIELDS:
+        cached_rows = copy.deepcopy(getattr(cached, field, None) or [])
+        fresh_rows = copy.deepcopy(getattr(fresh, field, None) or [])
+        exact = exact and cached_rows == fresh_rows
+        fresh_extends_cache = (
+            fresh_extends_cache
+            and len(fresh_rows) >= len(cached_rows)
+            and fresh_rows[: len(cached_rows)] == cached_rows
+        )
+    if exact:
+        # Recency alone is not a semantic conflict, but it is still durable
+        # ownership state.  Carry the locked sidecar value into the receipt so
+        # a later compensation cannot restore an older process-cache timestamp.
+        cached.updated_at = copy.deepcopy(fresh.updated_at)
+        cached._loaded_sidecar_sha256 = copy.deepcopy(
+            getattr(fresh, "_loaded_sidecar_sha256", None)
+        )
+        return cached
+    if not fresh_extends_cache:
+        raise _ExpertTeamStartSessionStateConflict(
+            "cached and durable Session sequences diverged or contain an unsaved tail"
+        )
+    # A different process committed a strict append while this request waited
+    # for the cross-process lock. Refresh all durable fields as one snapshot.
+    _replace_cached_expert_team_start_session(session_id, cached, fresh)
+    return cached
+
+
+def _compensate_expert_team_start_finalize_locked(
+    workspace: Path,
+    session,
+    receipt: dict,
+) -> None:
+    from api.expert_teams import storage
+
+    run_id = str(receipt["run_id"])
+    transaction_id = str(receipt["transaction_id"])
+    durable_receipt = storage.read_start_transaction_by_id(
+        workspace,
+        transaction_id,
+    )
+    if (
+        not isinstance(durable_receipt, dict)
+        or durable_receipt != receipt
+        or durable_receipt.get("state") not in {"prepared", "recovery_required"}
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start compensation is not authorized by durable state"
+        )
+
+    def _mark_recovery_required() -> None:
+        recovery = dict(receipt)
+        recovery["state"] = "recovery_required"
+        recovery["updated_at"] = time.time()
+        try:
+            storage.write_start_transaction(workspace, recovery)
+        except Exception:
+            # The original prepared receipt and its reverse indexes remain the
+            # durable recovery marker if even this best-effort state write fails.
+            logger.critical(
+                "failed to mark expert team start %s for recovery",
+                transaction_id,
+                exc_info=True,
+            )
+
+    try:
+        with storage.run_file_lock(workspace, run_id):
+            if storage.pending_run_path(workspace, run_id).exists():
+                _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    _expert_team_start_request_from_receipt(receipt),
+                    receipt,
+                    require_initial_exact=True,
+                )
+            if storage.run_path(workspace, run_id).exists():
+                _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    _expert_team_start_request_from_receipt(receipt),
+                    receipt,
+                    require_initial_exact=True,
+                )
+            # Run truth must be safely removed before its Session marker.  A
+            # failure leaves the message pair discoverable for lazy recovery.
+            storage.delete_pending_run(workspace, run_id)
+            storage.delete_canonical_run(workspace, run_id)
+    except Exception:
+        _mark_recovery_required()
+        raise
+
+    try:
+        session = _reload_expert_team_start_session(str(receipt["session_id"]))
+        _rollback_expert_team_start_session_entry_locked(
+            session,
+            run_id,
+            transaction_id,
+            metadata_before_start=receipt.get("session_metadata_before_start"),
+            session_updated_at_after_start=receipt.get(
+                "session_updated_at_after_start"
+            ),
+        )
+    except Exception:
+        _mark_recovery_required()
+        raise
+    rolled_back = dict(receipt)
+    rolled_back["state"] = "rolled_back"
+    rolled_back["updated_at"] = time.time()
+    try:
+        storage.write_start_transaction(workspace, rolled_back)
+    except Exception:
+        _mark_recovery_required()
+        raise
+
+
+def _inspect_expert_team_start_commit_write_outcome_locked(
+    workspace: Path,
+    session,
+    receipt: dict,
+    validated_body: dict,
+) -> tuple[str, dict, dict]:
+    """Classify an exception raised after the committed write was attempted.
+
+    Atomic replace can make the new receipt durable before a following fsync or
+    anchored-parent check raises.  Destructive compensation is allowed only
+    after rereading the transaction and proving that it is still prepared.  A
+    valid committed receipt is success; an unreadable or contradictory state
+    remains untouched for recovery rather than being split across stores.
+    """
+    from api.expert_teams import storage
+
+    transaction_id = str(receipt.get("transaction_id") or "")
+    durable = storage.read_start_transaction_by_id(workspace, transaction_id)
+    if not isinstance(durable, dict):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start commit outcome is not durably readable"
+        )
+    state = str(durable.get("state") or "")
+    if state not in {"prepared", "recovery_required", "committed"}:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start commit outcome is ambiguous"
+        )
+    run_id = str(durable.get("run_id") or "")
+    if not storage.run_path(workspace, run_id).exists():
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start commit outcome has no canonical Run"
+        )
+    run = _validate_expert_team_start_run_ownership(
+        storage.read_run_raw(workspace, run_id),
+        validated_body,
+        durable,
+        require_initial_exact=True,
+    )
+    durable_session = _reload_expert_team_start_session(
+        str(durable.get("session_id") or "")
+    )
+    _validate_expert_team_start_transaction_bundle(
+        durable_session,
+        durable,
+        run,
+        allowed_states={state},
+        require_initial_exact=True,
+    )
+    return state, run, durable
+
+
+def _finalize_prepared_expert_team_start_locked(
+    workspace: Path,
+    session,
+    receipt: dict,
+    validated_body: dict,
+) -> tuple[dict, dict]:
+    """Publish one prepared start or precisely remove its bound public state."""
+    from api.expert_teams import storage
+
+    run_id = str(receipt["run_id"])
+    commit_write_started = False
+    try:
+        with storage.run_file_lock(workspace, run_id):
+            if storage.pending_run_path(workspace, run_id).exists():
+                pending_run = _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+                session_messages = _validate_expert_team_start_transaction_bundle(
+                    session,
+                    receipt,
+                    pending_run,
+                    allowed_states={"prepared", "recovery_required"},
+                    require_initial_exact=True,
+                )
+                run = _publish_expert_team_start_run(workspace, run_id)
+                if run != pending_run:
+                    raise _ExpertTeamStartIntegrityError(
+                        "published expert team Run does not match its pending snapshot"
+                    )
+            elif storage.run_path(workspace, run_id).exists():
+                run = _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+                session_messages = _validate_expert_team_start_transaction_bundle(
+                    session,
+                    receipt,
+                    run,
+                    allowed_states={"prepared", "recovery_required"},
+                    require_initial_exact=True,
+                )
+            else:
+                raise _ExpertTeamStartIntegrityError(
+                    "prepared start has Session messages but no recoverable Run"
+                )
+            committed = dict(receipt)
+            committed["state"] = "committed"
+            committed["updated_at"] = time.time()
+            commit_write_started = True
+            storage.write_start_transaction(workspace, committed)
+    except Exception as finalize_error:
+        compensation_receipt = receipt
+        if commit_write_started:
+            try:
+                durable_state, durable_run, durable_receipt = (
+                    _inspect_expert_team_start_commit_write_outcome_locked(
+                        workspace,
+                        session,
+                        receipt,
+                        validated_body,
+                    )
+                )
+            except Exception as outcome_error:
+                raise _ExpertTeamStartIntegrityError(
+                    "expert team start commit outcome could not be determined"
+                ) from outcome_error
+            if durable_state == "committed":
+                return durable_run, durable_receipt
+            compensation_receipt = durable_receipt
+        try:
+            _compensate_expert_team_start_finalize_locked(
+                workspace,
+                session,
+                compensation_receipt,
+            )
+        except Exception as compensation_error:
+            raise _ExpertTeamStartIntegrityError(
+                "expert team start could not be finalized or compensated"
+            ) from compensation_error
+        raise _ExpertTeamStartFinalizeError(
+            "expert team start finalization failed and was rolled back"
+        ) from finalize_error
+    return run, committed
+
+
+def _expert_team_start_request_from_receipt(receipt: dict) -> dict:
+    snapshot = receipt.get("initial_run_snapshot")
+    if not isinstance(snapshot, dict):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt has no immutable Run snapshot"
+        )
+    validated_body = {
+        "session_id": str(receipt.get("session_id") or ""),
+        "launch_profile_id": str(snapshot.get("launch_profile_id") or ""),
+        "prompt": str(snapshot.get("prompt") or ""),
+    }
+    if (
+        not all(validated_body.values())
+        or _expert_team_start_fingerprint(validated_body)
+        != str(receipt.get("request_fingerprint") or "")
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team start receipt request binding does not match"
+        )
+    return validated_body
+
+
+def _reconcile_prepared_expert_team_starts_for_session(session):
+    """Narrow read-time recovery for starts that died after Session commit."""
+    from api.expert_teams import storage
+
+    session_id = str(getattr(session, "session_id", "") or "")
+    raw_workspace = str(getattr(session, "workspace", "") or "").strip()
+    if not session_id or not raw_workspace:
+        return session
+    workspace = resolve_trusted_workspace(raw_workspace)
+    transaction_ids = {
+        str(message.get("expert_team_start_transaction_id") or "")
+        for message in (getattr(session, "messages", None) or [])
+        if isinstance(message, dict)
+        and message.get("expert_team_start_transaction_id")
+    }
+    transaction_ids.update(
+        str(receipt.get("transaction_id") or "")
+        for receipt in storage.list_start_transactions_for_session(
+            workspace,
+            session_id,
+        )
+    )
+    transaction_ids.discard("")
+    if not transaction_ids:
+        return session
+    current = session
+    for transaction_id in sorted(transaction_ids):
+        with storage.start_transaction_lock(workspace, transaction_id):
+            with _expert_team_start_session_writer_lock(session_id):
+                current = _reload_expert_team_start_session(session_id)
+                locked_workspace = str(
+                    getattr(current, "workspace", "") or ""
+                ).strip()
+                if (
+                    not locked_workspace
+                    or resolve_trusted_workspace(locked_workspace) != workspace
+                ):
+                    raise _ExpertTeamStartIntegrityError(
+                        "expert team session workspace changed during recovery"
+                    )
+                receipt = storage.read_start_transaction_by_id(
+                    workspace,
+                    transaction_id,
+                )
+                if receipt is None or receipt.get("state") not in {
+                    "prepared",
+                    "recovery_required",
+                }:
+                    continue
+                if str(receipt.get("session_id") or "") != session_id:
+                    raise _ExpertTeamStartIntegrityError(
+                        "expert team start receipt Session binding does not match"
+                    )
+                validated_body = _expert_team_start_request_from_receipt(receipt)
+                _validate_expert_team_start_run_ownership(
+                    copy.deepcopy(receipt.get("initial_run_snapshot")),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+                if not _expert_team_start_session_messages(
+                    current,
+                    str(receipt["run_id"]),
+                    transaction_id,
+                ):
+                    continue
+                _finalize_prepared_expert_team_start_locked(
+                    workspace,
+                    current,
+                    receipt,
+                    validated_body,
+                )
+    return current
+
+
+def _expert_team_start_has_session_evidence(
+    session,
+    *,
+    run_id: str,
+    transaction_id: str,
+) -> bool:
+    """Return whether durable Session truth names this attempted start."""
+    from api.expert_teams import storage
+
+    try:
+        markers = storage.validate_start_session_transaction_markers(
+            getattr(session, "expert_team_start_transaction_ids", None)
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+    durable_rows = []
+    for field in ("messages", "context_messages"):
+        value = getattr(session, field, None)
+        if not isinstance(value, list):
+            raise _ExpertTeamStartIntegrityError(
+                f"expert team Session {field} is not a list"
+            )
+        durable_rows.extend(value)
+    if transaction_id in markers:
+        return True
+    return any(
+        isinstance(message, dict)
+        and (
+            str(message.get("expert_team_start_transaction_id") or "")
+            == transaction_id
+            or str(message.get("expert_team_run_id") or "") == run_id
+        )
+        for message in durable_rows
+    )
+
+
+def _validate_expert_team_start_raw_session_sequences(session) -> None:
+    """Require proven list-shaped bytes before destructive v1 recovery."""
+    shapes = getattr(session, "_loaded_raw_sequence_shapes", None)
+    if not isinstance(shapes, dict):
+        raise _ExpertTeamStartIntegrityError(
+            "expert team Session raw sequence shapes are unavailable"
+        )
+    invalid = [
+        field
+        for field in ("messages", "context_messages")
+        if shapes.get(field) is not True
+    ]
+    if invalid:
+        raise _ExpertTeamStartIntegrityError(
+            "expert team Session raw sequence shape is invalid: "
+            + ", ".join(invalid)
+        )
+
+
+def _reconcile_initial_expert_team_start_metadata_locked(
+    workspace: Path,
+    session,
+    validated_body: dict,
+    *,
+    transaction_id: str,
+    request_fingerprint: str,
+) -> dict | None:
+    """Converge crashes between the three initial transaction metadata writes.
+
+    Caller holds the transaction lock and the Session writer lock.  Only states
+    that cannot have reached Session or Run truth are repaired automatically;
+    every conflicting or ambiguous combination remains fail-closed.
+    """
+    from api.expert_teams import storage
+
+    session_id = str(validated_body["session_id"])
+    run_id = "et-" + transaction_id
+    try:
+        metadata = storage.inspect_start_transaction_metadata(
+            workspace,
+            transaction_id=transaction_id,
+            run_id=run_id,
+            session_id=session_id,
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+    receipt = metadata["receipt"]
+    if receipt is not None and receipt.get("schema_version") == 1:
+        run_id = str(receipt.get("run_id") or "")
+    run_binding = metadata["run_binding"]
+    session_binding = metadata["session_binding"]
+    session_indexed = bool(
+        session_binding
+        and transaction_id in session_binding.get("transaction_ids", [])
+    )
+    if receipt is not None and receipt.get("schema_version") == 1:
+        # Session.__init__ deliberately normalizes some corrupt/legacy fields
+        # for ordinary reads.  A v1 receipt has no signed Session message
+        # bytes, so deletion is allowed only when the original locked sidecar
+        # itself proves both evidence stores are list-shaped.
+        _validate_expert_team_start_raw_session_sequences(session)
+    session_evidence = _expert_team_start_has_session_evidence(
+        session,
+        run_id=run_id,
+        transaction_id=transaction_id,
+    )
+    pending_exists = storage.pending_run_path(workspace, run_id).exists()
+    canonical_exists = storage.run_path(workspace, run_id).exists()
+    run_evidence = pending_exists or canonical_exists
+
+    if receipt is None:
+        if session_indexed or session_evidence or run_evidence:
+            raise _ExpertTeamStartIntegrityError(
+                "start transaction receipt is missing behind durable evidence"
+            )
+        if run_binding is not None:
+            if (
+                str(run_binding.get("transaction_id") or "") != transaction_id
+                or str(run_binding.get("session_id") or "") != session_id
+                or str(run_binding.get("run_id") or "") != run_id
+            ):
+                raise _ExpertTeamStartIntegrityError(
+                    "orphan start Run binding has conflicting ownership"
+                )
+            storage.delete_orphan_start_run_binding(workspace, run_id)
+        return None
+
+    if (
+        str(receipt.get("transaction_id") or "") != transaction_id
+        or str(receipt.get("session_id") or "") != session_id
+        or str(receipt.get("run_id") or "") != run_id
+        or str(receipt.get("idempotency_key_hash") or "")
+        != storage.start_idempotency_key_hash(validated_body["idempotency_key"])
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "start transaction metadata ownership does not match"
+        )
+    if str(receipt.get("request_fingerprint") or "") != request_fingerprint:
+        raise _ExpertTeamStartIdempotencyConflict(
+            "idempotency key was already used for a different start request"
+        )
+    if run_binding is None:
+        raise _ExpertTeamStartIntegrityError(
+            "start transaction receipt is missing its Run binding"
+        )
+    if (
+        run_binding.get("schema_version") != receipt.get("schema_version")
+        or str(run_binding.get("transaction_id") or "") != transaction_id
+        or str(run_binding.get("session_id") or "") != session_id
+        or str(run_binding.get("run_id") or "") != run_id
+        or not storage.start_receipt_matches_run_binding(receipt, run_binding)
+    ):
+        raise _ExpertTeamStartIntegrityError(
+            "start transaction receipt and Run binding disagree"
+        )
+
+    if receipt.get("schema_version") == 1:
+        if receipt.get("state") != "prepared" or session_evidence:
+            raise _ExpertTeamStartIntegrityError(
+                "legacy start transaction cannot prove its Session message pair"
+            )
+        # A prepared v1 receipt has no signed message bytes.  With no Session
+        # evidence it was never public, so validate and remove any private Run
+        # copy before rebuilding a new v2 transaction from the request.
+        with storage.run_file_lock(workspace, run_id):
+            if pending_exists:
+                _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+            if canonical_exists:
+                _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+            storage.delete_pending_run(workspace, run_id)
+            storage.delete_canonical_run(workspace, run_id)
+        storage.delete_start_transaction_metadata(
+            workspace,
+            transaction_id=transaction_id,
+            run_id=run_id,
+            session_id=session_id,
+        )
+        return None
+
+    if not session_indexed:
+        if (
+            receipt.get("state") != "prepared"
+            or session_evidence
+            or run_evidence
+        ):
+            raise _ExpertTeamStartIntegrityError(
+                "start transaction Session binding is missing behind later evidence"
+            )
+        try:
+            storage.repair_prepared_start_session_binding(workspace, receipt)
+        except storage.StartTransactionIntegrityError as exc:
+            raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+    try:
+        return storage.read_start_transaction(
+            workspace,
+            session_id=session_id,
+            idempotency_key=validated_body["idempotency_key"],
+        )
+    except storage.StartTransactionIntegrityError as exc:
+        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+
+def _coordinate_expert_team_start(
+    validated_body: dict,
+    *,
+    launch_profile_snapshot: dict | None = None,
+) -> dict:
+    """Commit one standalone start across receipt, Run, and Session truth."""
+    from api import expert_teams
+    from api.expert_teams import storage
+
+    session_id = validated_body["session_id"]
+    idempotency_key = validated_body["idempotency_key"]
+    # Validate all server-owned selectors before resolving mutable Session
+    # state. Portal launches pass their immutable reservation snapshot so a
+    # catalog edit cannot alter or strand same-key recovery.
+    if launch_profile_snapshot is None:
+        launch_profile_snapshot = expert_teams.get_launch_profile(
+            validated_body["launch_profile_id"]
+        )
+    elif (
+        not isinstance(launch_profile_snapshot, dict)
+        or str(launch_profile_snapshot.get("id") or "")
+        != validated_body["launch_profile_id"]
+    ):
+        raise expert_teams.ContractError(
+            "launch_profile_snapshot_invalid",
+            "launch_profile_id",
+            "启动配置快照与任务类型不匹配",
+        )
+    try:
+        session = get_session(session_id)
+    except (KeyError, FileNotFoundError) as exc:
+        raise _ExpertTeamStartSessionNotFound(session_id) from exc
+    if (
+        not session.path.exists()
+        or not session.path.is_file()
+        or session.path.is_symlink()
+    ):
+        # Phase 0 deliberately accepts only an already durable Session.  The
+        # future portal /launch transaction owns creation of both objects.
+        raise _ExpertTeamStartSessionNotPersisted(session_id)
+    raw_workspace = str(getattr(session, "workspace", "") or "").strip()
+    if not raw_workspace:
+        raise _ExpertTeamStartIntegrityError("expert team session has no workspace")
+    workspace = resolve_trusted_workspace(raw_workspace)
+    transaction_id = storage.start_transaction_id(session_id, idempotency_key)
+    request_fingerprint = _expert_team_start_fingerprint(validated_body)
+
+    with storage.start_transaction_lock(workspace, transaction_id):
+        with _expert_team_start_session_writer_lock(session_id):
+            # Read the receipt before applying the ordinary-session busy gate.
+            # A committed same-key retry is a read-only idempotent replay and
+            # must remain available while a later chat turn is active.
+            durable_session = Session.load(session_id)
+            if durable_session is None:
+                raise _ExpertTeamStartSessionNotFound(session_id)
+            locked_workspace = str(
+                getattr(durable_session, "workspace", "") or ""
+            ).strip()
+            if (
+                not locked_workspace
+                or resolve_trusted_workspace(locked_workspace) != workspace
+            ):
+                _replace_cached_expert_team_start_session(
+                    session_id,
+                    session,
+                    durable_session,
+                )
+                raise _ExpertTeamStartSessionStateConflict(
+                    "expert team session workspace changed during start"
+                )
+            receipt = _reconcile_initial_expert_team_start_metadata_locked(
+                workspace,
+                durable_session,
+                validated_body,
+                transaction_id=transaction_id,
+                request_fingerprint=request_fingerprint,
+            )
+
+            if receipt is not None and receipt["request_fingerprint"] != request_fingerprint:
+                raise _ExpertTeamStartIdempotencyConflict(
+                    "idempotency key was already used for a different start request"
+                )
+
+            if receipt is not None and receipt.get("state") in {
+                "prepared",
+                "recovery_required",
+            }:
+                run_id = str(receipt["run_id"])
+                durable_rows = _expert_team_start_session_messages(
+                    durable_session,
+                    run_id,
+                    transaction_id,
+                )
+                try:
+                    durable_markers = (
+                        storage.validate_start_session_transaction_markers(
+                            getattr(
+                                durable_session,
+                                "expert_team_start_transaction_ids",
+                                None,
+                            )
+                        )
+                    )
+                except storage.StartTransactionIntegrityError as exc:
+                    raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+                marker_present = transaction_id in durable_markers
+                if marker_present != bool(durable_rows):
+                    raise _ExpertTeamStartIntegrityError(
+                        "prepared start Session marker and message pair disagree"
+                    )
+                if marker_present:
+                    try:
+                        storage.validate_start_session_transaction_markers(
+                            durable_markers,
+                            required_transaction_id=transaction_id,
+                        )
+                    except storage.StartTransactionIntegrityError as exc:
+                        raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+
+            if receipt is not None and receipt.get("state") == "committed":
+                run_id = str(receipt["run_id"])
+                try:
+                    run = _validate_expert_team_start_run_ownership(
+                        storage.read_run(workspace, run_id),
+                        validated_body,
+                        receipt,
+                        require_initial_exact=False,
+                    )
+                    session_messages = _validate_expert_team_start_transaction_bundle(
+                        durable_session,
+                        receipt,
+                        run,
+                        allowed_states={"committed"},
+                        require_initial_exact=False,
+                    )
+                except (FileNotFoundError, storage.StartTransactionIntegrityError) as exc:
+                    raise _ExpertTeamStartIntegrityError(
+                        "committed expert team Run failed its start binding"
+                    ) from exc
+                if storage.pending_run_path(workspace, run_id).exists():
+                    with storage.run_file_lock(workspace, run_id):
+                        pending = _validate_expert_team_start_run_ownership(
+                            storage.read_pending_run(workspace, run_id),
+                            validated_body,
+                            receipt,
+                            require_initial_exact=True,
+                        )
+                        if _expert_team_start_run_digest(run) == str(
+                            receipt["initial_run_sha256"]
+                        ):
+                            storage.publish_pending_run(workspace, run_id)
+                        elif pending:
+                            storage.delete_pending_run(workspace, run_id)
+                return {
+                    "run": run,
+                    "session": _expert_team_start_public_session(durable_session),
+                    "session_messages": session_messages,
+                    "replayed": True,
+                    "workspace": workspace,
+                }
+
+            try:
+                session = _reload_expert_team_start_session(session_id)
+            except (KeyError, FileNotFoundError) as exc:
+                raise _ExpertTeamStartSessionNotFound(session_id) from exc
+            locked_workspace = str(getattr(session, "workspace", "") or "").strip()
+            if not locked_workspace or resolve_trusted_workspace(locked_workspace) != workspace:
+                raise _ExpertTeamStartIntegrityError(
+                    "expert team session workspace changed during start"
+                )
+            if receipt is None:
+                try:
+                    transaction_markers = (
+                        storage.validate_start_session_transaction_markers(
+                            getattr(
+                                session,
+                                "expert_team_start_transaction_ids",
+                                None,
+                            )
+                        )
+                    )
+                except storage.StartTransactionIntegrityError as exc:
+                    raise _ExpertTeamStartIntegrityError(str(exc)) from exc
+                durable_evidence = set(
+                    transaction_markers
+                )
+                durable_evidence.update(
+                    str(message.get("expert_team_start_transaction_id") or "")
+                    for message in (getattr(session, "messages", None) or [])
+                    if isinstance(message, dict)
+                )
+                if transaction_id in durable_evidence:
+                    raise _ExpertTeamStartIntegrityError(
+                        "start transaction receipt is missing behind durable Session evidence"
+                    )
+                now = time.time()
+                # The Run identity is derived from the idempotent transaction,
+                # so losing every receipt index still cannot create a second
+                # durable Run for the same Session/key pair.
+                run_id = "et-" + transaction_id
+                if (
+                    storage.run_path(workspace, run_id).exists()
+                    or storage.pending_run_path(workspace, run_id).exists()
+                ):
+                    raise _ExpertTeamStartIntegrityError(
+                        "start transaction receipt is missing behind durable Run evidence"
+                    )
+                initial_run = expert_teams.build_standalone_expert_team_run(
+                    validated_body,
+                    run_id=run_id,
+                    launch_profile_snapshot=launch_profile_snapshot,
+                )
+                initial_run["start_transaction_id"] = transaction_id
+                initial_session_message_pair = (
+                    _new_expert_team_start_session_messages(
+                        initial_run,
+                        transaction_id,
+                    )
+                )
+                planned_title = str(getattr(session, "title", None) or "Untitled")
+                if _is_default_or_empty_session_title(planned_title):
+                    planned_title = title_from(
+                        list(getattr(session, "messages", None) or [])
+                        + initial_session_message_pair,
+                        planned_title,
+                    )
+                compact_before_start = session.compact()
+                metadata_before_start = {
+                    key: copy.deepcopy(compact_before_start.get(key))
+                    for key in (
+                        "title",
+                        "message_count",
+                        "user_message_count",
+                        "updated_at",
+                        "last_message_at",
+                    )
+                }
+                session_updated_at_after_start = max(
+                    now,
+                    float(metadata_before_start.get("updated_at") or 0) + 0.000001,
+                )
+                receipt = {
+                    "schema_version": storage.START_TRANSACTION_SCHEMA_VERSION,
+                    "transaction_id": transaction_id,
+                    "session_id": session_id,
+                    "idempotency_key_hash": storage.start_idempotency_key_hash(
+                        idempotency_key
+                    ),
+                    "request_fingerprint": request_fingerprint,
+                    "run_id": run_id,
+                    "initial_run_snapshot": copy.deepcopy(initial_run),
+                    "initial_run_sha256": _expert_team_start_run_digest(initial_run),
+                    "initial_start_projection_sha256": (
+                        _expert_team_start_projection_digest(initial_run)
+                    ),
+                    "initial_session_message_pair_snapshot": copy.deepcopy(
+                        initial_session_message_pair
+                    ),
+                    "initial_session_message_pair_sha256": (
+                        storage.start_session_message_pair_digest(
+                            initial_session_message_pair
+                        )
+                    ),
+                    "session_metadata_before_start": metadata_before_start,
+                    "session_metadata_before_start_sha256": (
+                        storage.start_session_metadata_digest(metadata_before_start)
+                    ),
+                    "session_updated_at_after_start": session_updated_at_after_start,
+                    "session_title_after_start": planned_title,
+                    "state": "prepared",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                storage.write_start_transaction(workspace, receipt)
+
+            run_id = str(receipt["run_id"])
+            initial_run = _validate_expert_team_start_run_ownership(
+                copy.deepcopy(receipt.get("initial_run_snapshot")),
+                validated_body,
+                receipt,
+                require_initial_exact=True,
+            )
+            session_messages = _expert_team_start_session_messages(
+                session,
+                run_id,
+                transaction_id,
+            )
+            session_updated_at_after_start = receipt.get(
+                "session_updated_at_after_start"
+            )
+            if session_updated_at_after_start is None and not session_messages:
+                # Pre-marker prepared receipts are safe to upgrade only before
+                # any Session entry exists.  Once messages exist, preserving the
+                # current timestamp is safer than guessing whether later user
+                # metadata activity occurred.
+                receipt = dict(receipt)
+                session_updated_at_after_start = max(
+                    time.time(),
+                    float(
+                        (receipt.get("session_metadata_before_start") or {}).get(
+                            "updated_at"
+                        )
+                        or 0
+                    )
+                    + 0.000001,
+                )
+                receipt["session_updated_at_after_start"] = (
+                    session_updated_at_after_start
+                )
+                receipt["updated_at"] = time.time()
+                storage.write_start_transaction(workspace, receipt)
+            pending_exists = storage.pending_run_path(workspace, run_id).exists()
+            canonical_exists = storage.run_path(workspace, run_id).exists()
+
+            if receipt["state"] == "committed":
+                if not canonical_exists or not session_messages:
+                    raise _ExpertTeamStartIntegrityError(
+                        "committed start receipt is missing canonical Run or Session messages"
+                    )
+                run = _validate_expert_team_start_run_ownership(
+                    storage.read_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=False,
+                )
+                session_messages = _validate_expert_team_start_transaction_bundle(
+                    session,
+                    receipt,
+                    run,
+                    allowed_states={"committed"},
+                    require_initial_exact=False,
+                )
+                if pending_exists:
+                    _validate_expert_team_start_run_ownership(
+                        storage.read_pending_run(workspace, run_id),
+                        validated_body,
+                        receipt,
+                        require_initial_exact=True,
+                    )
+                    if _expert_team_start_run_digest(run) == str(
+                        receipt["initial_run_sha256"]
+                    ):
+                        storage.publish_pending_run(workspace, run_id)
+                    else:
+                        # A stale initial pending snapshot must never overwrite
+                        # a canonical Run that legitimately advanced.
+                        storage.delete_pending_run(workspace, run_id)
+                return {
+                    "run": run,
+                    "session": _expert_team_start_public_session(session),
+                    "session_messages": session_messages,
+                    "replayed": True,
+                    "workspace": workspace,
+                }
+
+            if receipt["state"] == "rolled_back" and session_messages:
+                raise _ExpertTeamStartIntegrityError(
+                    "rolled-back start receipt still has Session messages"
+                )
+
+            if receipt["state"] in {"prepared", "recovery_required"} and session_messages:
+                run, receipt = _finalize_prepared_expert_team_start_locked(
+                    workspace,
+                    session,
+                    receipt,
+                    validated_body,
+                )
+                return {
+                    "run": run,
+                    "session": _expert_team_start_public_session(session),
+                    "session_messages": session_messages,
+                    "replayed": True,
+                    "workspace": workspace,
+                }
+
+            # A prepared Run without a Session pair was never publicly committed.
+            # Reuse its validated immutable snapshot so a profile update between
+            # process death and retry cannot silently change this transaction.
+            run = None
+            if pending_exists:
+                run = _validate_expert_team_start_run_ownership(
+                    storage.read_pending_run(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+            if canonical_exists:
+                canonical_run = _validate_expert_team_start_run_ownership(
+                    storage.read_run_raw(workspace, run_id),
+                    validated_body,
+                    receipt,
+                    require_initial_exact=True,
+                )
+                if run is not None and canonical_run != run:
+                    raise _ExpertTeamStartIntegrityError(
+                        "pending and canonical expert team Runs disagree"
+                    )
+                run = canonical_run
+                storage.delete_canonical_run(workspace, run_id)
+                storage.write_pending_run(workspace, run)
+            receipt = dict(receipt)
+            receipt["state"] = "prepared"
+            receipt["updated_at"] = time.time()
+
+            if run is None:
+                run = copy.deepcopy(initial_run)
+                storage.write_pending_run(workspace, run)
+            receipt["pending_run_sha256"] = str(receipt["initial_run_sha256"])
+            storage.write_start_transaction(workspace, receipt)
+            try:
+                session_messages = _persist_expert_team_session_entry_locked(
+                    session,
+                    run,
+                    transaction_id,
+                    initial_session_message_pair_snapshot=copy.deepcopy(
+                        receipt.get("initial_session_message_pair_snapshot")
+                    ),
+                    session_updated_at_after_start=float(
+                        session_updated_at_after_start
+                    ),
+                )
+            except _ExpertTeamStartPersistenceError as persistence_error:
+                try:
+                    session = _reload_expert_team_start_session(session_id)
+                    durable_messages = _expert_team_start_session_messages(
+                        session,
+                        run_id,
+                        transaction_id,
+                    )
+                except Exception as recovery_error:
+                    raise _ExpertTeamStartIntegrityError(
+                        "could not determine whether the expert team Session commit completed"
+                    ) from recovery_error
+                if durable_messages:
+                    # The two authoritative Session stores already contain the
+                    # bound pair.  Treat the cleanup exception as post-commit
+                    # and finish publishing the still-prepared transaction.
+                    session_messages = durable_messages
+                else:
+                    storage.delete_pending_run(workspace, run_id)
+                    storage.delete_canonical_run(workspace, run_id)
+                    receipt["state"] = "rolled_back"
+                    receipt["updated_at"] = time.time()
+                    try:
+                        storage.write_start_transaction(workspace, receipt)
+                    except Exception:
+                        logger.critical(
+                            "failed to record rolled-back expert team start %s",
+                            transaction_id,
+                            exc_info=True,
+                        )
+                    raise persistence_error
+
+            run, receipt = _finalize_prepared_expert_team_start_locked(
+                workspace,
+                session,
+                receipt,
+                validated_body,
+            )
+            result = {
+                "run": run,
+                "session": _expert_team_start_public_session(session),
+                "session_messages": session_messages,
+                "replayed": False,
+                "workspace": workspace,
+            }
+
+    try:
+        publish_session_list_changed("session_update")
+    except Exception:
+        logger.warning(
+            "failed to publish session update after expert team start for %s",
+            session_id,
+            exc_info=True,
+        )
+    return result
+
+
+class _ExpertTeamLaunchConflict(RuntimeError):
+    pass
+
+
+class _ExpertTeamLaunchRecoveryRequired(RuntimeError):
+    def __init__(self, message: str, *, session_id: str, run_id: str = ""):
+        super().__init__(message)
+        self.session_id = str(session_id or "")
+        self.run_id = str(run_id or "")
+
+
+def _expert_team_launch_session_is_public(session_id: str, session=None) -> bool:
+    from api.expert_teams import launch_storage
+
+    normalized = str(session_id or "")
+    if not launch_storage.is_session_public(normalized):
+        return False
+    if session is None and normalized:
+        # A missing/corrupt reverse binding must not turn a Session carrying
+        # the durable launch marker public.  Load metadata only so every route
+        # can apply the same fail-closed gate without reading the transcript.
+        try:
+            session = Session.load_metadata_only(normalized)
+        except Exception:
+            return False
+    marker = ""
+    if session is not None:
+        try:
+            raw_marker = vars(session).get(
+                "expert_team_launch_transaction_id"
+            )
+        except TypeError:
+            raw_marker = getattr(
+                session,
+                "expert_team_launch_transaction_id",
+                None,
+            )
+        if raw_marker is not None:
+            # Canonical Session loading normalizes this durable field to
+            # ``str | None``.  Reject an explicitly malformed value, while an
+            # object that does not persist the field remains an ordinary
+            # pre-launch Session (important for alternate loaders and legacy
+            # duck-typed callers).
+            if not isinstance(raw_marker, str):
+                return False
+            marker = raw_marker.strip()
+    return not marker or launch_storage.is_launch_marker_committed(
+        normalized,
+        marker,
+    )
+
+
+def _expert_team_launch_run_is_public(run_id: str) -> bool:
+    from api.expert_teams import launch_storage
+
+    normalized = str(run_id or "").strip()
+    return not normalized or launch_storage.is_run_public(normalized)
+
+
+def _expert_team_launch_session_snapshot(session) -> dict:
+    """Return the exact durable semantic state owned by a new portal launch."""
+    return {
+        key: copy.deepcopy(value)
+        for key, value in session.__dict__.items()
+        if not key.startswith("_")
+    }
+
+
+def _expert_team_launch_initial_session_from_receipt(receipt: dict):
+    snapshot = copy.deepcopy(receipt.get("initial_session_snapshot"))
+    if not isinstance(snapshot, dict):
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt has no trustworthy initial Session snapshot",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        )
+    try:
+        session = Session(**snapshot)
+    except Exception as exc:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt initial Session snapshot is unreadable",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        ) from exc
+    if _expert_team_launch_session_snapshot(session) != snapshot:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt initial Session snapshot is not canonical",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        )
+    return session
+
+
+def _validate_expert_team_launch_session_before_start(
+    session,
+    receipt: dict,
+    *,
+    workspace: Path,
+    start_transaction_id: str,
+) -> None:
+    """Reject hidden-window mutation before the inner start can absorb it."""
+    from api.expert_teams import storage as start_storage
+
+    initial = receipt.get("initial_session_snapshot")
+    if not isinstance(initial, dict):
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch receipt initial Session snapshot is missing",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        )
+    try:
+        start_receipt = start_storage.read_start_transaction_by_id(
+            workspace,
+            start_transaction_id,
+        )
+    except FileNotFoundError:
+        start_receipt = None
+    except Exception as exc:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "launch start receipt is unreadable",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(receipt.get("run_id") or ""),
+        ) from exc
+    if start_receipt is None:
+        if _expert_team_launch_session_snapshot(session) != initial:
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "reserved Session changed before expert-team start",
+                session_id=str(receipt.get("session_id") or ""),
+                run_id=str(receipt.get("run_id") or ""),
+            )
+        return
+
+    compact_initial = Session(**copy.deepcopy(initial)).compact()
+    expected_metadata = {
+        key: copy.deepcopy(compact_initial.get(key))
+        for key in (
+            "title",
+            "message_count",
+            "user_message_count",
+            "updated_at",
+            "last_message_at",
+        )
+    }
+    if start_receipt.get("session_metadata_before_start") != expected_metadata:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "expert-team start absorbed a modified reserved Session",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(start_receipt.get("run_id") or ""),
+        )
+
+
+def _validate_expert_team_launch_pair_before_publish(
+    *,
+    session,
+    receipt: dict,
+    run: dict,
+    workspace: Path,
+    start_transaction_id: str,
+) -> None:
+    """Prove the portal owns exactly one pristine Session/Run pair."""
+    from api.expert_teams import storage as start_storage
+
+    try:
+        start_receipt = start_storage.read_start_transaction_by_id(
+            workspace,
+            start_transaction_id,
+        )
+        if start_receipt is None:
+            raise FileNotFoundError(start_transaction_id)
+        owned_messages = _validate_expert_team_start_transaction_bundle(
+            session,
+            start_receipt,
+            run,
+            allowed_states={"committed"},
+            require_initial_exact=False,
+        )
+    except Exception as exc:
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "expert-team launch pair failed its inner transaction proof",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(run.get("run_id") or ""),
+        ) from exc
+
+    initial = copy.deepcopy(receipt.get("initial_session_snapshot") or {})
+    current = _expert_team_launch_session_snapshot(session)
+    allowed_changes = {
+        "title",
+        "updated_at",
+        "messages",
+        "context_messages",
+        "expert_team_start_transaction_ids",
+    }
+    for key in set(initial) | set(current):
+        if key not in allowed_changes and current.get(key) != initial.get(key):
+            raise _ExpertTeamLaunchRecoveryRequired(
+                f"reserved Session field changed before publish: {key}",
+                session_id=str(receipt.get("session_id") or ""),
+                run_id=str(run.get("run_id") or ""),
+            )
+    if (
+        list(current.get("messages") or []) != owned_messages
+        or list(current.get("expert_team_start_transaction_ids") or [])
+        != [start_transaction_id]
+        or list(current.get("context_messages") or [])
+        != _completed_semantic_messages(owned_messages)
+        or current.get("title") != start_receipt.get("session_title_after_start")
+        or current.get("updated_at")
+        != start_receipt.get("session_updated_at_after_start")
+    ):
+        raise _ExpertTeamLaunchRecoveryRequired(
+            "reserved Session contains foreign state before publish",
+            session_id=str(receipt.get("session_id") or ""),
+            run_id=str(run.get("run_id") or ""),
+        )
+
+
+def _coordinate_expert_team_launch(validated_body: dict) -> dict:
+    """Create one Session and one v3 Run behind a global visibility receipt."""
+    from api import expert_teams
+    from api import models as session_models
+    from api.expert_teams import launch_storage, storage as start_storage
+    from api.expert_teams.launch import launch_request_fingerprint
+
+    requested_options = dict(validated_body.get("session_options") or {})
+    fingerprint_options = dict(requested_options)
+    if requested_options.get("workspace"):
+        try:
+            fingerprint_options["workspace"] = str(
+                resolve_trusted_workspace(requested_options["workspace"])
+            )
+        except (TypeError, ValueError) as exc:
+            raise expert_teams.ContractError(
+                "workspace_invalid",
+                "session_options.workspace",
+                str(exc),
+            ) from exc
+    normalized_request = {
+        **validated_body,
+        "session_options": fingerprint_options,
+    }
+    # Bind the key to exactly what the caller selected, not mutable server
+    # defaults. The first reserved receipt snapshots resolved defaults; retries
+    # reuse that snapshot even if config.yaml or last-workspace changes.
+    request_fingerprint = launch_request_fingerprint(normalized_request)
+    idempotency_key = str(validated_body["idempotency_key"])
+    transaction_id = launch_storage.launch_transaction_id(idempotency_key)
+    outer_replayed = False
+    run_result = None
+    reserved_session = None
+
+    with launch_storage.launch_transaction_lock(transaction_id):
+        receipt = launch_storage.read_or_repair_launch_transaction(transaction_id)
+        if receipt is None:
+            try:
+                workspace = resolve_trusted_workspace(
+                    fingerprint_options.get("workspace") or get_last_workspace()
+                )
+            except (TypeError, ValueError) as exc:
+                raise expert_teams.ContractError(
+                    "workspace_invalid",
+                    "session_options.workspace",
+                    str(exc),
+                ) from exc
+            profile = str(fingerprint_options.get("profile") or "").strip()
+            if not profile:
+                try:
+                    from api.profiles import get_active_profile_name
+
+                    profile = str(get_active_profile_name() or "default")
+                except Exception:
+                    profile = "default"
+            requested_model = fingerprint_options.get("model")
+            requested_provider = fingerprint_options.get("model_provider")
+            if requested_model:
+                model, model_provider = _session_model_state_from_request(
+                    requested_model,
+                    requested_provider,
+                )
+            else:
+                model, default_provider = session_models._profile_default_model_state(profile)
+                model_provider = _session_model_state_from_request(
+                    model,
+                    requested_provider or default_provider,
+                )[1]
+            canonical_options = {
+                "workspace": str(workspace),
+                "profile": profile,
+                "model": str(model or ""),
+                "model_provider": str(model_provider or ""),
+            }
+            project_id = str(fingerprint_options.get("project_id") or "").strip()
+            if project_id:
+                canonical_options["project_id"] = project_id
+            launch_profile_snapshot = expert_teams.get_launch_profile(
+                validated_body["launch_profile_id"]
+            )
+            session_id = "etl-" + uuid.uuid4().hex[:20]
+            reserved_session = Session(
+                session_id=session_id,
+                workspace=str(workspace),
+                model=model,
+                model_provider=model_provider,
+                profile=profile,
+                project_id=project_id or None,
+                expert_team_launch_transaction_id=transaction_id,
+            )
+            initial_session_snapshot = _expert_team_launch_session_snapshot(
+                reserved_session
+            )
+            receipt = launch_storage.new_reserved_receipt(
+                transaction_id=transaction_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                launch_profile_id=validated_body["launch_profile_id"],
+                launch_profile_snapshot=launch_profile_snapshot,
+                prompt=validated_body["prompt"],
+                session_options=canonical_options,
+                session_id=session_id,
+                workspace=str(workspace),
+                initial_session_snapshot=initial_session_snapshot,
+            )
+            launch_storage.write_launch_transaction(receipt)
+        else:
+            outer_replayed = True
+            if (
+                receipt.get("request_fingerprint") != request_fingerprint
+                or receipt.get("idempotency_key_hash")
+                != launch_storage.launch_idempotency_key_hash(idempotency_key)
+            ):
+                raise _ExpertTeamLaunchConflict(
+                    "idempotency key is already bound to another launch request"
+                )
+            if receipt.get("state") == "rolled_back":
+                raise _ExpertTeamLaunchConflict(
+                    "launch transaction was rolled back and cannot be reused"
+                )
+            canonical_options = dict(receipt.get("session_options") or {})
+            try:
+                workspace = resolve_trusted_workspace(receipt.get("workspace"))
+            except (TypeError, ValueError) as exc:
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "reserved workspace is no longer trusted",
+                    session_id=str(receipt.get("session_id") or ""),
+                    run_id=str(receipt.get("run_id") or ""),
+                ) from exc
+            profile = str(canonical_options.get("profile") or "default")
+            model = str(canonical_options.get("model") or "") or None
+            model_provider = (
+                str(canonical_options.get("model_provider") or "") or None
+            )
+            project_id = str(canonical_options.get("project_id") or "")
+            launch_profile_snapshot = copy.deepcopy(
+                receipt.get("launch_profile_snapshot")
+            )
+        session_id = str(receipt["session_id"])
+
+        try:
+            session = Session.load(session_id)
+        except Exception as exc:
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "reserved Session state is unreadable",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            ) from exc
+        if session is None:
+            session = (
+                reserved_session
+                if reserved_session is not None
+                else _expert_team_launch_initial_session_from_receipt(receipt)
+            )
+            try:
+                _persist_new_session_truth(session, touch_updated_at=False)
+            except Exception as exc:
+                failed = dict(receipt)
+                failed["state"] = "recovery_required"
+                failed["updated_at"] = time.time()
+                try:
+                    launch_storage.write_launch_transaction(failed)
+                except Exception:
+                    logger.critical(
+                        "failed to record expert-team launch Session recovery state",
+                        exc_info=True,
+                    )
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "failed to persist reserved Session",
+                    session_id=session_id,
+                ) from exc
+        if (
+            str(getattr(session, "expert_team_launch_transaction_id", "") or "")
+            != transaction_id
+            or Path(str(getattr(session, "workspace", "") or "")).resolve()
+            != Path(str(workspace)).resolve()
+            or str(getattr(session, "profile", "") or "default") != profile
+        ):
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "reserved Session no longer matches its launch receipt",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            )
+
+        start_transaction_id = start_storage.start_transaction_id(
+            session_id,
+            idempotency_key,
+        )
+        expected_run_id = "et-" + start_transaction_id
+        if receipt.get("run_id") and receipt.get("run_id") != expected_run_id:
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "launch receipt Run identity changed",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            )
+        if not receipt.get("run_id"):
+            prepared_outer = dict(receipt)
+            prepared_outer.update(
+                {
+                    "run_id": expected_run_id,
+                    "start_transaction_id": start_transaction_id,
+                    "updated_at": time.time(),
+                }
+            )
+            launch_storage.write_launch_transaction(prepared_outer)
+            receipt = prepared_outer
+        _validate_expert_team_launch_session_before_start(
+            session,
+            receipt,
+            workspace=workspace,
+            start_transaction_id=start_transaction_id,
+        )
+        start_body = {
+            "launch_profile_id": validated_body["launch_profile_id"],
+            "session_id": session_id,
+            "prompt": validated_body["prompt"],
+            "idempotency_key": idempotency_key,
+        }
+        try:
+            run_result = _coordinate_expert_team_start(
+                start_body,
+                launch_profile_snapshot=launch_profile_snapshot,
+            )
+        except Exception as exc:
+            failed = dict(receipt)
+            failed["state"] = "recovery_required"
+            failed["updated_at"] = time.time()
+            try:
+                launch_storage.write_launch_transaction(failed)
+            except Exception:
+                logger.critical(
+                    "failed to record expert-team launch Run recovery state",
+                    exc_info=True,
+                )
+            raise _ExpertTeamLaunchRecoveryRequired(
+                "failed to commit expert-team Run",
+                session_id=session_id,
+                run_id=str(receipt.get("run_id") or ""),
+            ) from exc
+
+        run = run_result["run"]
+        if receipt.get("state") == "committed":
+            if (
+                str(receipt.get("run_id") or "")
+                != str(run.get("run_id") or "")
+                or str(receipt.get("start_transaction_id") or "")
+                != start_transaction_id
+            ):
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "committed launch no longer matches its inner transaction",
+                    session_id=session_id,
+                    run_id=str(receipt.get("run_id") or ""),
+                )
+            current_session = Session.load(session_id)
+            if (
+                current_session is None
+                or not _expert_team_launch_session_is_public(
+                    session_id,
+                    current_session,
+                )
+            ):
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "committed launch Session is unavailable",
+                    session_id=session_id,
+                    run_id=str(run.get("run_id") or ""),
+                )
+            run_result = {
+                **run_result,
+                "session": _expert_team_start_public_session(current_session),
+            }
+            # A committed idempotent replay validates the original launch
+            # binding but must preserve all legitimate post-launch progress.
+            # The pristine two-message check below is only for first publish.
+        else:
+            try:
+                # Re-enter the exact inner lock order before publishing the
+                # outer visibility receipt. This closes the gap where the
+                # inner start was durable but another Session writer could
+                # alter the hidden object before the portal became public.
+                with start_storage.start_transaction_lock(
+                    workspace,
+                    start_transaction_id,
+                ):
+                    with _expert_team_start_session_writer_lock(session_id):
+                        final_session = Session.load(session_id)
+                        if final_session is None:
+                            raise _ExpertTeamLaunchRecoveryRequired(
+                                "reserved Session disappeared before publish",
+                                session_id=session_id,
+                                run_id=str(run.get("run_id") or ""),
+                            )
+                        final_run = start_storage.read_run(
+                            workspace,
+                            str(run["run_id"]),
+                        )
+                        _validate_expert_team_launch_pair_before_publish(
+                            session=final_session,
+                            receipt=receipt,
+                            run=final_run,
+                            workspace=workspace,
+                            start_transaction_id=start_transaction_id,
+                        )
+                        committed = dict(receipt)
+                        committed.update(
+                            {
+                                "state": "committed",
+                                "run_id": str(final_run["run_id"]),
+                                "start_transaction_id": start_transaction_id,
+                                "updated_at": time.time(),
+                            }
+                        )
+                        try:
+                            launch_storage.write_launch_transaction(committed)
+                        except Exception as exc:
+                            try:
+                                durable = launch_storage.read_or_repair_launch_transaction(
+                                    transaction_id
+                                )
+                            except Exception:
+                                durable = None
+                            if not (
+                                isinstance(durable, dict)
+                                and durable.get("state") == "committed"
+                                and durable.get("run_id") == committed["run_id"]
+                                and durable.get("start_transaction_id")
+                                == committed["start_transaction_id"]
+                            ):
+                                raise exc
+                        run_result = {
+                            **run_result,
+                            "run": final_run,
+                            "session": _expert_team_start_public_session(
+                                final_session
+                            ),
+                        }
+            except _ExpertTeamLaunchRecoveryRequired:
+                raise
+            except Exception as exc:
+                recovery = dict(receipt)
+                recovery.update(
+                    {
+                        "state": "recovery_required",
+                        "run_id": str(run.get("run_id") or "") or None,
+                        "start_transaction_id": start_transaction_id,
+                        "updated_at": time.time(),
+                    }
+                )
+                try:
+                    launch_storage.write_launch_transaction(recovery)
+                except Exception:
+                    logger.critical(
+                        "failed to record expert-team outer commit recovery state",
+                        exc_info=True,
+                    )
+                raise _ExpertTeamLaunchRecoveryRequired(
+                    "expert-team launch commit requires recovery",
+                    session_id=session_id,
+                    run_id=str(run.get("run_id") or ""),
+                ) from exc
+
+    try:
+        publish_session_list_changed("session_new")
+    except Exception:
+        logger.warning(
+            "failed to publish committed expert-team launch %s",
+            transaction_id,
+            exc_info=True,
+        )
+    return {
+        **run_result,
+        "replayed": outer_replayed or bool(run_result.get("replayed")),
+    }
 
 
 def _latest_expert_team_assistant_content_after_execution(session, run: dict) -> str:
@@ -1484,11 +4371,11 @@ def _latest_expert_team_assistant_content_after_execution(session, run: dict) ->
     return ""
 
 
-def _expert_team_turn_terminal_outcome(run: dict) -> str:
+def _expert_team_turn_terminal_outcome(run: dict) -> dict:
     stream_id = str(run.get("execution_stream_id") or "").strip()
     turn_id = str(run.get("execution_turn_id") or "").strip()
     if not stream_id:
-        return ""
+        return {}
     try:
         from api.turn_journal import read_turn_journal
 
@@ -1501,14 +4388,18 @@ def _expert_team_turn_terminal_outcome(run: dict) -> str:
         ]
         names = {str(event.get("event") or "") for event in events}
         if names != {"interrupted"}:
-            return ""
+            return {}
         reasons = {str(event.get("reason") or "failed") for event in events}
         if len(reasons) != 1:
-            return ""
-        return "cancelled" if reasons == {"cancelled"} else "failed"
+            return {}
+        reason = next(iter(reasons))
+        return {
+            "status": "cancelled" if reason == "cancelled" else "failed",
+            "reason": reason,
+        }
     except Exception:
         logger.debug("Failed to resolve expert team terminal turn outcome", exc_info=True)
-        return ""
+        return {}
 
 
 def _session_has_expert_team_assistant_after_execution(session, run: dict) -> bool:
@@ -2264,6 +5155,7 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                     str(run.get("run_id") or ""),
                     str(exc),
                     stream_id=str(run.get("execution_stream_id") or ""),
+                    error_code=exc.code,
                 )
             logger.warning("Rejected expert team runtime observation: %s", exc.code)
             current = exc.run or expert_teams.read_expert_team_run(
@@ -2348,19 +5240,30 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
                 from api import expert_teams
 
                 terminal_outcome = _expert_team_turn_terminal_outcome(run)
-                if terminal_outcome == "cancelled":
+                if terminal_outcome.get("status") == "cancelled":
                     return expert_teams.mark_expert_team_execution_cancelled(
                         workspace,
                         str(run.get("run_id") or ""),
                         "本轮生成已取消。",
                         stream_id=stream_id,
                     )
-                if terminal_outcome == "failed":
+                if terminal_outcome.get("status") == "failed":
+                    reason = str(terminal_outcome.get("reason") or "")
+                    error_code = (
+                        "model_configuration_required"
+                        if reason == "model_configuration_error"
+                        else "backend_unavailable"
+                    )
+                    from api.product_contract import attach_product_error
+
+                    product_error = attach_product_error({}, error_code)["product_error"]
                     return expert_teams.fail_expert_team_execution(
                         workspace,
                         str(run.get("run_id") or ""),
-                        "本轮生成未成功完成，请重新生成。",
+                        product_error["message"],
                         stream_id=stream_id,
+                        error_code=product_error["code"],
+                        incident_id=product_error["incident_id"],
                     )
 
                 return expert_teams.mark_expert_team_result_unverified(
@@ -2383,23 +5286,49 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     return run
 
 
-def _expert_team_response_with_product_state(payload: dict, run: dict | None) -> dict:
-    if not isinstance(run, dict):
-        return payload
-    candidates = [
-        run.get("validation"),
-        run.get("delivery_gate"),
-        (run.get("view") or {}).get("delivery_gate") if isinstance(run.get("view"), dict) else None,
-        (run.get("view") or {}).get("validation") if isinstance(run.get("view"), dict) else None,
-    ]
-    if any(
-        isinstance(item, dict) and str(item.get("status") or "") == "office_acceptance_required"
-        for item in candidates
+def _public_expert_team_response_payload(payload):
+    projected = public_expert_team_response_projection(payload)
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("run"), dict)
+        and isinstance(projected, dict)
     ):
-        from api.product_contract import attach_product_error
+        projected["run"] = public_expert_team_run_projection(payload["run"])
+    return projected
 
-        return attach_product_error(payload, "office_review_required")
-    return payload
+
+def _expert_team_json_response(
+    handler,
+    payload,
+    status: int = 200,
+    extra_headers: dict | None = None,
+):
+    """One serialization gate for every /api/expert-teams/* JSON response."""
+    return j(
+        handler,
+        _public_expert_team_response_payload(payload),
+        status=status,
+        extra_headers=extra_headers,
+    )
+
+
+def _expert_team_response_with_product_state(payload: dict, run: dict | None) -> dict:
+    result = payload
+    if isinstance(run, dict):
+        candidates = [
+            run.get("validation"),
+            run.get("delivery_gate"),
+            (run.get("view") or {}).get("delivery_gate") if isinstance(run.get("view"), dict) else None,
+            (run.get("view") or {}).get("validation") if isinstance(run.get("view"), dict) else None,
+        ]
+        if any(
+            isinstance(item, dict) and str(item.get("status") or "") == "office_acceptance_required"
+            for item in candidates
+        ):
+            from api.product_contract import attach_product_error
+
+            result = attach_product_error(payload, "office_review_required")
+    return result
 
 
 def _cancel_expert_team_runtime_start(adapter, *sources) -> dict:
@@ -2441,6 +5370,7 @@ def _cancel_expert_team_runtime_start(adapter, *sources) -> dict:
 
 def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict, int]:
     from api import expert_teams
+    from api.expert_teams.error_projection import attach_expert_team_product_error
     from api.expert_teams.system_stages import (
         SystemStageError,
         dispatch_system_stage,
@@ -2455,11 +5385,13 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
                 "run_id": run.get("run_id"),
                 "stage_id": pending.get("id"),
                 "canonical_sha256": canonical.get("sha256"),
+                "delivery_recovery_generation": int(run.get("delivery_recovery_generation") or 0),
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    reservation = {}
     try:
         reserved_run, descriptor, reservation, _created = expert_teams.reserve_system_stage_attempt(
             workspace,
@@ -2480,10 +5412,341 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
         )
         return {"ok": True, "run": completed, "system_stage": True}, 200
     except SystemStageError as exc:
-        current = expert_teams.read_expert_team_run(workspace, str(run.get("run_id") or ""))
-        return {"ok": False, "code": exc.code, "error": str(exc), "run": current}, 503
+        reservation_id = str(reservation.get("reservation_id") or "")
+        if reservation_id:
+            try:
+                current = expert_teams.fail_system_stage_attempt(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    reservation_id=reservation_id,
+                    error_code=exc.code,
+                    message=str(exc),
+                )
+            except expert_teams.ExpertTeamStateConflict as conflict:
+                current = conflict.run or expert_teams.read_expert_team_run(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                )
+        else:
+            current = expert_teams.read_expert_team_run(workspace, str(run.get("run_id") or ""))
+        return attach_expert_team_product_error(
+            {"ok": False, "code": exc.code, "run": current},
+            exc.code,
+            http_status=503,
+        ), 503
     except expert_teams.ExpertTeamStateConflict as exc:
-        return {"ok": False, "code": exc.code, "error": str(exc), "run": exc.run or run}, 409
+        return attach_expert_team_product_error(
+            {"ok": False, "code": exc.code, "run": exc.run or run},
+            exc.code,
+            http_status=409,
+        ), 409
+
+
+def _open_expert_team_delivery_target(path: Path, target: str) -> None:
+    """Open only a server-resolved standalone delivery document, report, or directory."""
+
+    resolved = Path(path).expanduser().resolve()
+    if target in {"document", "quality_report"}:
+        if not resolved.is_file():
+            raise FileNotFoundError(resolved)
+    elif target == "folder":
+        if not resolved.is_dir():
+            raise FileNotFoundError(resolved)
+    else:
+        raise ValueError("unsupported standalone delivery open target")
+    system = platform.system()
+    if system == "Darwin":
+        subprocess.Popen(["open", str(resolved)])
+    elif system == "Windows":  # pragma: no cover - packaged Windows runtime
+        os.startfile(str(resolved))  # type: ignore[attr-defined]
+    else:  # pragma: no cover - packaged Linux runtime
+        subprocess.Popen(["xdg-open", str(resolved)])
+
+
+def _send_expert_team_delivery_download(handler, path: Path, download_name: str) -> bool:
+    """Stream one validated DOCX with a server-derived user-facing filename."""
+
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    size = resolved.stat().st_size
+    handler.send_response(200)
+    handler.send_header(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    handler.send_header("Content-Length", str(size))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header(
+        "Content-Disposition",
+        _content_disposition_value("attachment", download_name or "最终交付文档.docx"),
+    )
+    _security_headers(handler)
+    handler.end_headers()
+    with resolved.open("rb") as source:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+    return True
+
+
+def _expert_team_standalone_execution_binding(
+    workspace: Path,
+    run: dict,
+    session,
+) -> dict:
+    """Resolve immutable runtime fields from server-owned launch truth."""
+    from api.expert_teams import launch_storage
+
+    if str(run.get("product_mode") or "") != "standalone":
+        raise ValueError("standalone runtime binding requires a standalone Run")
+    run_id = str(run.get("run_id") or "").strip()
+    session_id = str(run.get("session_id") or "").strip()
+    if not run_id or not session_id or session_id != str(getattr(session, "session_id", "") or ""):
+        raise ValueError("standalone runtime binding identity is invalid")
+
+    receipt = launch_storage.read_launch_transaction_for_run(run_id)
+    marker = str(
+        getattr(session, "expert_team_launch_transaction_id", "") or ""
+    ).strip()
+    if receipt is None:
+        # Existing-session /start is retained for internal compatibility.  It
+        # has no portal receipt, so the persisted Session (never request JSON)
+        # is the only runtime binding.  A Session carrying a portal marker may
+        # never fall back to this weaker path.
+        if marker:
+            raise ValueError("standalone launch receipt is missing")
+        resolved_workspace = Path(str(getattr(session, "workspace", "") or "")).resolve()
+        if resolved_workspace != Path(workspace).resolve():
+            raise ValueError("standalone Session workspace does not match the Run")
+        return {
+            "workspace": str(resolved_workspace),
+            "profile": str(getattr(session, "profile", None) or "default"),
+            "model": str(getattr(session, "model", None) or "") or None,
+            "model_provider": str(getattr(session, "model_provider", None) or "") or None,
+            "source": "committed_session",
+        }
+
+    if str(receipt.get("state") or "") != "committed":
+        raise ValueError("standalone launch receipt is not committed")
+    if (
+        str(receipt.get("run_id") or "") != run_id
+        or str(receipt.get("session_id") or "") != session_id
+        or (marker and marker != str(receipt.get("transaction_id") or ""))
+    ):
+        raise ValueError("standalone launch receipt identity does not match the Run")
+    if (
+        str(receipt.get("launch_profile_id") or "")
+        != str(run.get("launch_profile_id") or "")
+        or receipt.get("launch_profile_snapshot") != run.get("launch_profile_snapshot")
+    ):
+        raise ValueError("standalone launch Profile snapshot does not match the Run")
+
+    options = receipt.get("session_options")
+    initial = receipt.get("initial_session_snapshot")
+    if not isinstance(options, dict) or not isinstance(initial, dict):
+        raise ValueError("standalone launch receipt Session binding is invalid")
+    resolved_workspace = Path(str(receipt.get("workspace") or "")).resolve()
+    expected = {
+        "workspace": str(resolved_workspace),
+        "profile": str(options.get("profile") or "default"),
+        "model": str(options.get("model") or "") or None,
+        "model_provider": str(options.get("model_provider") or "") or None,
+    }
+    actual = {
+        "workspace": str(Path(str(getattr(session, "workspace", "") or "")).resolve()),
+        "profile": str(getattr(session, "profile", None) or "default"),
+        "model": str(getattr(session, "model", None) or "") or None,
+        "model_provider": str(getattr(session, "model_provider", None) or "") or None,
+    }
+    initial_binding = {
+        "workspace": str(Path(str(initial.get("workspace") or "")).resolve()),
+        "profile": str(initial.get("profile") or "default"),
+        "model": str(initial.get("model") or "") or None,
+        "model_provider": str(initial.get("model_provider") or "") or None,
+    }
+    if resolved_workspace != Path(workspace).resolve() or expected != actual or expected != initial_binding:
+        raise ValueError("standalone Session runtime binding drifted after launch")
+    return {**expected, "source": "committed_launch_receipt"}
+
+
+def _validate_standalone_runtime_provider_context(
+    context: dict,
+    *,
+    expected_provider: str | None,
+    expected_model: str | None,
+) -> None:
+    from api.runtime_adapter import validate_strict_provider_context
+
+    try:
+        validate_strict_provider_context(
+            context,
+            expected_provider=expected_provider,
+            expected_model=expected_model,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"standalone runtime cannot prove the immutable Provider contract: {exc}"
+        ) from exc
+
+
+class _ExpertTeamModelConfigurationRequired(RuntimeError):
+    """The selected runtime cannot authenticate a standalone generation."""
+
+
+def _resolve_standalone_legacy_provider_context(request) -> dict:
+    """Resolve the protocol that the in-process worker would actually use.
+
+    Resolution runs inside the Session profile's HERMES_HOME context and
+    returns no credential or endpoint material.  External-process and
+    unreleased protocol transports remain fail-closed in the binding builder.
+    """
+    from api.config import model_with_provider_context, resolve_model_provider
+    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+    from api.profiles import get_hermes_home_for_profile
+    from api.runtime_adapter import STRICT_PROVIDER_TRANSPORTS
+    from api.streaming import _resolve_custom_provider_runtime_overrides
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    profile_home = get_hermes_home_for_profile(request.profile)
+    override_token = set_hermes_home_override(profile_home)
+    try:
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+            model_with_provider_context(request.model, request.provider)
+        )
+        runtime = resolve_runtime_provider_with_anthropic_env_lock(
+            resolve_runtime_provider,
+            requested=resolved_provider,
+        )
+        if not isinstance(runtime, dict):
+            raise ValueError(
+                "standalone runtime Provider resolution returned invalid data"
+            )
+        if str(runtime.get("command") or "").strip() or runtime.get("args"):
+            raise ValueError(
+                "standalone runtime external-process transport is not released"
+            )
+        resolved_api_key = runtime.get("api_key")
+        if not resolved_provider:
+            resolved_provider = runtime.get("provider")
+        if not resolved_base_url:
+            resolved_base_url = runtime.get("base_url")
+        resolved_provider, resolved_api_key, resolved_base_url = (
+            _resolve_custom_provider_runtime_overrides(
+                resolved_provider,
+                resolved_api_key,
+                resolved_base_url,
+            )
+        )
+        provider_key = str(resolved_provider or "").strip().lower()
+        keyless_local_provider = provider_key in {"lmstudio", "ollama"}
+        keyless_custom_provider = provider_key.startswith("custom:") and bool(
+            str(resolved_base_url or "").strip()
+        )
+        if not str(resolved_api_key or "").strip() and not (
+            keyless_local_provider or keyless_custom_provider
+        ):
+            raise _ExpertTeamModelConfigurationRequired(
+                "model configuration required"
+            )
+        api_mode = str(runtime.get("api_mode") or "").strip().lower()
+        return {
+            "provider": str(resolved_provider or "").strip(),
+            "model": str(resolved_model or "").strip(),
+            "api_mode": api_mode,
+            "transport": STRICT_PROVIDER_TRANSPORTS.get(api_mode, ""),
+        }
+    finally:
+        reset_hermes_home_override(override_token)
+
+
+def _require_standalone_strict_execution_contract(
+    run: dict,
+    gateway_request: dict,
+) -> None:
+    """Reject standalone Runs that could degrade into an ordinary chat turn."""
+    if type(run.get("schema_version")) is not int or run.get("schema_version") != 3:
+        raise ValueError("standalone expert team execution requires schema_version 3")
+    if str(run.get("contract_version") or "") != "expert-team-contract/v1":
+        raise ValueError("standalone expert team execution requires contract v1")
+    if not isinstance(gateway_request, dict):
+        raise ValueError("standalone strict execution request is missing")
+    messages = gateway_request.get("messages")
+    valid_messages = bool(
+        isinstance(messages, list)
+        and len(messages) == 2
+        and [
+            item.get("role") if isinstance(item, dict) else None
+            for item in messages
+        ]
+        == ["system", "user"]
+        and all(
+            isinstance(item, dict)
+            and set(item) == {"role", "content"}
+            and isinstance(item.get("content"), str)
+            and bool(item["content"].strip())
+            for item in messages
+        )
+    )
+    if not valid_messages or gateway_request.get("tools_disabled") is not True:
+        raise ValueError(
+            "standalone expert team execution requires strict system/user messages "
+            "and tools_disabled=true"
+        )
+
+
+def _expert_team_standalone_compatibility_error(run: dict) -> str:
+    """Reject incomplete standalone Run markers without classifying enterprise v2."""
+    from api.expert_teams import EXPERT_TEAM_CONTRACT_V1, storage
+
+    document_brief = (
+        run.get("document_brief")
+        if isinstance(run.get("document_brief"), dict)
+        else {}
+    )
+    review_policy = (
+        run.get("review_policy")
+        if isinstance(run.get("review_policy"), dict)
+        else {}
+    )
+    standalone_v3_shape = (
+        storage.requires_standalone_run_integrity(run)
+        or "launch_profile_id" in run
+        or "launch_profile_snapshot" in run
+        or str(document_brief.get("product_mode") or "") == "standalone"
+        or str(review_policy.get("kind") or "") == "local_confirmation"
+    )
+    if not standalone_v3_shape:
+        return ""
+    if str(run.get("product_mode") or "") != "standalone":
+        return "standalone expert team execution requires product_mode=standalone"
+    if (
+        type(run.get("schema_version")) is not int
+        or run.get("schema_version") != 3
+        or str(run.get("contract_version") or "") != EXPERT_TEAM_CONTRACT_V1
+    ):
+        return "standalone expert team execution requires schema 3 and contract v1"
+    return ""
+
+
+def _expert_team_resume_requires_execution(run: dict) -> bool:
+    """Only a ready stage may create a new external execution side effect."""
+
+    state = str((run or {}).get("workflow_state") or "")
+    if state == "ready_to_generate":
+        return True
+    pending = (
+        (run or {}).get("pending_system_stage")
+        if isinstance((run or {}).get("pending_system_stage"), dict)
+        else {}
+    )
+    return state == "generated_invalid" and pending.get("executor") == "system"
 
 
 def _start_expert_team_execution(
@@ -2496,14 +5759,20 @@ def _start_expert_team_execution(
     from api import expert_teams
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
+        STRICT_PROVIDER_BINDING_METADATA_KEY,
         StartRunRequest,
         build_runtime_adapter,
     )
     from api.product_contract import attach_product_error
+    from api.expert_teams.error_projection import attach_expert_team_product_error
+    from api.expert_teams.source_context import SourceContextError
 
     def _execution_failure(payload: dict, status: int) -> dict:
-        code = "backend_unavailable" if int(status) >= 500 else "unknown_error"
-        return attach_product_error(payload, code)
+        return attach_expert_team_product_error(
+            payload,
+            payload.get("code") or "provider_request_failed",
+            http_status=status,
+        )
 
     def _backend_failure(payload: dict) -> dict:
         return _execution_failure(payload, 503)
@@ -2535,6 +5804,14 @@ def _start_expert_team_execution(
     if not sid:
         error = "expert team session_id is required"
         return {"ok": False, "error": error, "run": _fail_known_pre_dispatch(error)}, 400
+    standalone_product_mode = str(run.get("product_mode") or "") == "standalone"
+    if error := _expert_team_standalone_compatibility_error(run):
+        return _backend_failure({
+            "ok": False,
+            "code": "runtime_incompatible",
+            "error": error,
+            "run": _fail_known_pre_dispatch(error),
+        }), 503
     if (
         str(run.get("contract_version") or "") == "expert-team-contract/v1"
         and isinstance(run.get("pending_system_stage"), dict)
@@ -2547,24 +5824,68 @@ def _start_expert_team_execution(
         error = "Session not found"
         return {"ok": False, "error": error, "run": _fail_known_pre_dispatch(error)}, 404
     try:
-        requested_model = body.get("model") or getattr(session, "model", None)
+        standalone = standalone_product_mode
+        standalone_binding = (
+            _expert_team_standalone_execution_binding(workspace, run, session)
+            if standalone
+            else None
+        )
+        requested_model = (
+            standalone_binding.get("model")
+            if standalone_binding is not None
+            else body.get("model") or getattr(session, "model", None)
+        )
         requested_provider = (
-            body.get("model_provider")
-            if "model_provider" in body
-            else getattr(session, "model_provider", None)
+            standalone_binding.get("model_provider")
+            if standalone_binding is not None
+            else (
+                body.get("model_provider")
+                if "model_provider" in body
+                else getattr(session, "model_provider", None)
+            )
         )
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
             requested_provider,
         )
+        if standalone and (
+            normalized_model
+            or str(model or "") != str(requested_model or "")
+            or str(model_provider or "") != str(requested_provider or "")
+        ):
+            raise ValueError(
+                "standalone runtime Provider binding is no longer available exactly as launched"
+            )
         display_msg = _expert_team_execution_display_message(run)
         execution_message_start_index = len(list(getattr(session, "messages", None) or []))
         enterprise_gateway_request = None
-        if expert_teams.classify_contract_version(run) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
+        classified_contract = expert_teams.classify_contract_version(run)
+        if standalone and (
+            type(run.get("schema_version")) is not int
+            or run.get("schema_version") != 3
+            or classified_contract != expert_teams.EXPERT_TEAM_CONTRACT_V1
+        ):
+            raise ValueError(
+                "standalone expert team execution requires schema 3 and contract v1"
+            )
+        if classified_contract == expert_teams.EXPERT_TEAM_CONTRACT_V1:
             enterprise_gateway_request = _expert_team_enterprise_gateway_request(workspace, run)
+            if standalone:
+                _require_standalone_strict_execution_contract(
+                    run,
+                    enterprise_gateway_request,
+                )
             execution_prompt = ""
         else:
             execution_prompt = _expert_team_execution_prompt(run)
+    except SourceContextError:
+        error = "资料快照缺失、已变更或不符合当前任务的资料要求"
+        return _execution_failure({
+            "ok": False,
+            "code": "source_context_invalid",
+            "error": error,
+            "run": _fail_known_pre_dispatch(error),
+        }, 409), 409
     except Exception as exc:
         error = str(exc) or "当前运行时启动参数无效，请检查配置后重试。"
         return _backend_failure({
@@ -2584,6 +5905,8 @@ def _start_expert_team_execution(
             session,
             msg=request.message,
             display_msg=display_msg,
+            model_messages=request.messages,
+            tools_disabled=request.tools_disabled,
             attachments=request.attachments,
             workspace=request.workspace or str(workspace),
             model=request.model or model,
@@ -2602,6 +5925,7 @@ def _start_expert_team_execution(
         return LegacyJournalRuntimeAdapter(
             start_run_delegate=_legacy_start,
             cancel_delegate=cancel_stream,
+            provider_context_resolver=_resolve_standalone_legacy_provider_context,
             live_stream_lookup=lambda run_id: str(run_id) in _active_stream_id_set(),
         )
 
@@ -2618,6 +5942,17 @@ def _start_expert_team_execution(
         return _backend_failure({"ok": False, "code": "runtime_incompatible", "error": error, "run": failed_run}), 503
 
     planned_runtime_adapter = type(adapter).__name__
+    if standalone and planned_runtime_adapter == "RunnerRuntimeAdapter":
+        error = (
+            "当前 Runner 协议不支持单机专家团的严格 Provider 绑定，"
+            "未向 Runner 发送任何请求。"
+        )
+        return _backend_failure({
+            "ok": False,
+            "code": "runtime_incompatible",
+            "error": error,
+            "run": _fail_known_pre_dispatch(error),
+        }), 503
     if already_reserved:
         persisted_adapter = str(run.get("execution_runtime_adapter") or "").strip()
         if persisted_adapter != planned_runtime_adapter:
@@ -2658,7 +5993,13 @@ def _start_expert_team_execution(
     reservation_id = str(reserved_run.get("execution_start_id") or "")
     result = None
 
-    def _fail_reserved_start(message: str, cleanup: dict | None = None) -> dict:
+    def _fail_reserved_start(
+        message: str,
+        cleanup: dict | None = None,
+        *,
+        error_code: str = "",
+        incident_id: str = "",
+    ) -> dict:
         cleanup = cleanup or {}
         try:
             return expert_teams.mark_expert_team_execution_start_failed(
@@ -2670,6 +6011,8 @@ def _start_expert_team_execution(
                 orphan_runtime_adapter=type(adapter).__name__ if adapter is not None else "",
                 execution_cleanup_status="pending" if cleanup.get("pending_run_id") else "",
                 execution_cleanup_error=str(cleanup.get("error") or ""),
+                error_code=error_code,
+                incident_id=incident_id,
             )
         except expert_teams.ExpertTeamStateConflict as conflict:
             return conflict.run or expert_teams.read_expert_team_run(
@@ -2732,13 +6075,25 @@ def _start_expert_team_execution(
         tools_disabled=bool((enterprise_gateway_request or {}).get("tools_disabled")),
         idempotency_key=reservation_id,
         attachments=[],
-        workspace=str(workspace),
-        profile=getattr(session, "profile", None),
+        workspace=str(
+            (standalone_binding or {}).get("workspace") or workspace
+        ),
+        profile=(
+            (standalone_binding or {}).get("profile")
+            if standalone
+            else getattr(session, "profile", None)
+        ),
         provider=model_provider,
         model=model,
         source="expert-team",
         metadata={
             "route": "expert-team",
+            "expert_team_product_mode": (
+                "standalone" if standalone else "enterprise"
+            ),
+            "runtime_binding_source": str(
+                (standalone_binding or {}).get("source") or "enterprise_request"
+            ),
             "expert_team_run_id": str(run.get("run_id") or ""),
             "expert_team_stage_id": str(current_stage.get("task_id") or current_stage.get("id") or ""),
             "expert_team_version": int(run.get("version") or 0),
@@ -2752,7 +6107,54 @@ def _start_expert_team_execution(
         },
     )
 
-    if enterprise_gateway_request is not None:
+    if enterprise_gateway_request is not None and standalone:
+        try:
+            provider_context = adapter.resolve_provider_context(start_request)
+            _validate_standalone_runtime_provider_context(
+                provider_context,
+                expected_provider=None,
+                expected_model=None,
+            )
+            from dataclasses import replace
+
+            start_request = replace(
+                start_request,
+                metadata={
+                    **start_request.metadata,
+                    STRICT_PROVIDER_BINDING_METADATA_KEY: copy.deepcopy(
+                        provider_context
+                    ),
+                },
+            )
+        except _ExpertTeamModelConfigurationRequired:
+            product_error = attach_product_error(
+                {}, "model_configuration_required"
+            )["product_error"]
+            failed_run = _fail_reserved_start(
+                product_error["message"],
+                error_code=product_error["code"],
+                incident_id=product_error["incident_id"],
+            )
+            return attach_product_error(
+                {
+                    "ok": False,
+                    "code": product_error["code"],
+                    "error": product_error["message"],
+                    "run": failed_run,
+                },
+                product_error["code"],
+                incident_id=product_error["incident_id"],
+            ), 409
+        except Exception as exc:
+            error = str(exc) or "当前运行时无法证明单机专家团的严格模型合同。"
+            failed_run = _fail_reserved_start(error)
+            return {
+                "ok": False,
+                "code": "runtime_incompatible",
+                "error": error,
+                "run": failed_run,
+            }, 503
+    elif enterprise_gateway_request is not None:
         try:
             from api.expert_teams.data_egress import load_model_policy_registry
             from api.expert_teams.prompts import authorize_stage_model_call
@@ -2822,15 +6224,37 @@ def _start_expert_team_execution(
                 "error": error,
                 "run": pending_run,
             }), 202
-        failed_run = _fail_reserved_start(error, cleanup)
-        return _backend_failure({"ok": False, "error": error, "run": failed_run}), 500
+        internal_code = (
+            "provider_timeout"
+            if isinstance(exc, TimeoutError) or "timed out" in error.lower() or "timeout" in error.lower()
+            else "provider_request_failed"
+        )
+        projected = _execution_failure(
+            {"ok": False, "code": internal_code, "error": error},
+            504 if internal_code == "provider_timeout" else 500,
+        )
+        product_error = projected["product_error"]
+        projected["run"] = _fail_reserved_start(
+            product_error["message"],
+            cleanup,
+            error_code=product_error["code"],
+            incident_id=product_error["incident_id"],
+        )
+        return projected, 504 if internal_code == "provider_timeout" else 500
 
     status = int(response.pop("_status", 200) or 200)
     if status >= 400:
         cleanup = _cancel_expert_team_runtime_start(adapter, result, response)
         error = str(response.get("error") or "当前阶段启动失败，请重新尝试。")
-        failed_run = _fail_reserved_start(error, cleanup)
-        return _execution_failure({"ok": False, **response, "run": failed_run}, status), status
+        projected = _execution_failure({"ok": False, **response, "error": error}, status)
+        product_error = projected["product_error"]
+        projected["run"] = _fail_reserved_start(
+            product_error["message"],
+            cleanup,
+            error_code=product_error["code"],
+            incident_id=product_error["incident_id"],
+        )
+        return projected, status
     result_run_id = str(getattr(result, "run_id", "") or "").strip()
     result_session_id = str(getattr(result, "session_id", "") or "").strip()
     if not result_run_id or result_session_id != sid:
@@ -2867,17 +6291,66 @@ def _start_expert_team_execution(
     return response, status
 
 
-def _expert_team_conflict_response(handler, exc) -> bool:
-    status = 404 if str(getattr(exc, "code", "")) == "wrong_session" else 409
-    payload = {
+def _expert_team_product_error_response(
+    handler,
+    code: object,
+    *,
+    status: int,
+    product_code: object | None = None,
+    run: dict | None = None,
+    extra: dict | None = None,
+) -> bool:
+    from api.expert_teams.error_projection import attach_expert_team_product_error
+
+    internal_code = str(code or "unknown_error")
+    payload = attach_expert_team_product_error({
         "ok": False,
-        "code": str(getattr(exc, "code", "stale_state")),
-        "error": str(exc),
-    }
-    run = getattr(exc, "run", None)
+        "code": internal_code,
+        **(extra or {}),
+    }, product_code or internal_code, http_status=status)
     if isinstance(run, dict) and status != 404:
         payload["run"] = run
-    return j(handler, payload, status=status)
+    return _expert_team_json_response(handler, payload, status=status)
+
+
+def _expert_team_conflict_response(handler, exc) -> bool:
+    status = 404 if str(getattr(exc, "code", "")) == "wrong_session" else 409
+    code = str(getattr(exc, "code", "stale_state"))
+    run = getattr(exc, "run", None)
+    return _expert_team_product_error_response(
+        handler,
+        code,
+        status=status,
+        product_code="expert_team_not_found" if status == 404 else None,
+        run=run if isinstance(run, dict) else None,
+    )
+
+
+def _expert_team_not_found_response(handler) -> bool:
+    return _expert_team_product_error_response(
+        handler,
+        "expert_team_not_found",
+        status=404,
+        product_code="expert_team_not_found",
+    )
+
+
+def _expert_team_exception_response(
+    handler,
+    exc: Exception,
+    *,
+    fallback_code: str,
+    status: int = 400,
+    product_code: str = "unknown_error",
+) -> bool:
+    """Return a fixed public error without copying exception text into the client."""
+
+    return _expert_team_product_error_response(
+        handler,
+        getattr(exc, "code", fallback_code),
+        status=status,
+        product_code=product_code,
+    )
 
 
 def _writeflow_state_path(workspace: Path) -> Path:
@@ -6105,6 +9578,8 @@ from api.brand_privacy import (
     classify_brand_safety_prompt,
     public_approval_projection,
     public_egress_scrub,
+    public_expert_team_response_projection,
+    public_expert_team_run_projection,
     public_profile_projection,
     public_response_projection,
     public_session_search_projection,
@@ -8078,6 +11553,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    SessionWriteConflict,
     get_session,
     get_session_for_file_ops,
     new_session,
@@ -9527,6 +13003,36 @@ def _serve_manifest(handler) -> bool:
 @migration_consistent_http_routes("GET")
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    try:
+        handler._taiji_expert_team_json_request = (
+            parsed.path == "/api/expert-teams"
+            or parsed.path.startswith("/api/expert-teams/")
+        )
+    except (AttributeError, TypeError):
+        # Some isolated route-contract tests use an immutable sentinel handler.
+        # Production BaseHTTPRequestHandler exposes the current path directly.
+        pass
+
+    if parsed.path.startswith("/api/"):
+        parsed_query = parse_qs(parsed.query)
+        query_session_id = parsed_query.get("session_id", [""])[0]
+        query_session_id = str(query_session_id or "").strip()
+        if (
+            query_session_id
+            and len(query_session_id) <= 240
+            and is_safe_session_id(query_session_id)
+            and not _expert_team_launch_session_is_public(query_session_id)
+        ):
+            return bad(handler, "Session not found", 404)
+        query_run_id = str(parsed_query.get("run_id", [""])[0] or "").strip()
+        if (
+            parsed.path.startswith("/api/expert-teams/")
+            and query_run_id
+            and len(query_run_id) <= 240
+            and is_safe_session_id(query_run_id)
+            and not _expert_team_launch_run_is_public(query_run_id)
+        ):
+            return bad(handler, "expert team run not found", 404)
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
@@ -9630,7 +13136,7 @@ def handle_get(handler, parsed) -> bool:
         from api.expert_teams.trusted_identity import get_trusted_identity_resolver
 
         query = parse_qs(parsed.query or "", keep_blank_values=True)
-        return j(
+        return _expert_team_json_response(
             handler,
             get_trusted_identity_resolver().status(
                 _expert_identity_session(handler),
@@ -9650,7 +13156,9 @@ def handle_get(handler, parsed) -> bool:
         except Exception as exc:
             return bad(handler, f"Trusted identity callback failed: {_sanitize_error(exc)}", 401)
         response = json.dumps(
-            {"ok": True, "principal": result["principal"]},
+            _public_expert_team_response_payload(
+                {"ok": True, "principal": result["principal"]}
+            ),
             ensure_ascii=False,
         ).encode("utf-8")
         handler.send_response(200)
@@ -9967,6 +13475,31 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            # Apply launch visibility to the Session returned by this route's
+            # canonical loader.  A pre-load check would perform a second,
+            # different Session read and bypass alternate/test loaders.  This
+            # post-load gate still runs before any Session data is processed or
+            # returned, and the durable launch marker keeps missing reverse
+            # bindings fail closed.
+            if not _expert_team_launch_session_is_public(sid, s):
+                return bad(handler, "Session not found", 404)
+            if load_messages:
+                try:
+                    s = _reconcile_prepared_expert_team_starts_for_session(s)
+                except (
+                    _ExpertTeamStartSessionBusy,
+                    _ExpertTeamStartSessionStateConflict,
+                ):
+                    logger.debug(
+                        "deferred expert team start recovery for busy Session %s",
+                        sid,
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to reconcile prepared expert team start for Session %s",
+                        sid,
+                        exc_info=True,
+                    )
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -10120,6 +13653,7 @@ def handle_get(handler, parsed) -> bool:
                     _merged_last_message_at = 0
             raw = s.compact() | {
                 "messages": _truncated_msgs,
+                "_messages_loaded": load_messages,
                 "message_count": _merged_message_count,
                 "tool_calls": _session_tool_calls,
                 "active_stream_id": getattr(s, "active_stream_id", None),
@@ -10173,7 +13707,7 @@ def handle_get(handler, parsed) -> bool:
                 raw["model"] = effective_model
             if effective_provider:
                 raw["model_provider"] = effective_provider
-            redact = public_session_projection(redact_session_data(raw))
+            redact = redact_session_data(public_session_projection(raw))
             _t5 = _time.monotonic()
             resp = j(handler, {"session": redact})
             _t6 = _time.monotonic()
@@ -10217,7 +13751,7 @@ def handle_get(handler, parsed) -> bool:
                 }
                 sess = _merge_cli_sidebar_metadata(sess, cli_meta)
                 return j(handler, {
-                    "session": public_session_projection(redact_session_data(sess))
+                    "session": redact_session_data(public_session_projection(sess))
                 })
             return bad(handler, "Session not found", 404)
 
@@ -10279,6 +13813,23 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
+            try:
+                from api.expert_teams.launch_storage import hidden_session_ids
+
+                hidden_launch_sessions = hidden_session_ids()
+            except Exception:
+                logger.error(
+                    "expert-team launch visibility registry is unavailable",
+                    exc_info=True,
+                )
+                return j(
+                    handler,
+                    {
+                        "error": "Conversation visibility is temporarily unavailable",
+                        "code": "launch_visibility_unavailable",
+                    },
+                    status=503,
+                )
             diag.stage("all_sessions")
             webui_sessions = all_sessions(diag=diag)
             diag.stage("reconcile_stale_stream_state")
@@ -10320,6 +13871,33 @@ def handle_get(handler, parsed) -> bool:
                 deduped_cli = []
             diag.stage("sort_sessions")
             merged = webui_sessions + deduped_cli
+            # The sidebar joins WebUI sidecars with a later state.db/CLI
+            # snapshot. A portal launch may reserve and persist its hidden
+            # Session between the preflight above and that second source read.
+            # Re-snapshot the visibility registry after every source has been
+            # merged so no newly reserved row can slip through on a stale set.
+            try:
+                diag.stage("refresh_launch_visibility")
+                hidden_launch_sessions = hidden_session_ids()
+            except Exception:
+                logger.error(
+                    "expert-team launch visibility registry changed during sidebar merge",
+                    exc_info=True,
+                )
+                return j(
+                    handler,
+                    {
+                        "error": "Conversation visibility is temporarily unavailable",
+                        "code": "launch_visibility_unavailable",
+                    },
+                    status=503,
+                )
+            merged = [
+                session
+                for session in merged
+                if str(session.get("session_id") or "")
+                not in hidden_launch_sessions
+            ]
             merged.sort(
                 key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
                 reverse=True,
@@ -10815,38 +14393,105 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/expert-teams/catalog":
         from api import expert_teams
 
-        return j(handler, expert_teams.expert_team_catalog())
+        return _expert_team_json_response(
+            handler,
+            expert_teams.expert_team_catalog(),
+        )
 
     if parsed.path == "/api/expert-teams/rollout/status":
         from api import expert_teams
 
-        return j(handler, {"ok": True, "contract_rollout": expert_teams.resolve_contract_rollout()})
+        return _expert_team_json_response(
+            handler,
+            {
+                "ok": True,
+                "contract_rollout": expert_teams.resolve_contract_rollout(),
+            },
+        )
 
     if parsed.path == "/api/expert-teams/run":
         from api import expert_teams
+        from api.expert_teams import storage
 
         qs = parse_qs(parsed.query)
         session_id = qs.get("session_id", [""])[0].strip() or None
         run_id = qs.get("run_id", [""])[0].strip()
         if not run_id and not session_id:
             return bad(handler, "run_id or session_id required", 400)
+        if session_id and not _expert_team_launch_session_is_public(session_id):
+            return bad(handler, "expert team run not found", 404)
         try:
             workspace = _expert_team_workspace(session_id)
+            recovery_session_id = session_id
+            if run_id:
+                try:
+                    bound_receipt = storage.read_start_transaction_for_run(
+                        workspace,
+                        run_id,
+                    )
+                except Exception:
+                    bound_receipt = None
+                if bound_receipt and bound_receipt.get("state") in {
+                    "prepared",
+                    "recovery_required",
+                }:
+                    recovery_session_id = str(
+                        bound_receipt.get("session_id") or ""
+                    ) or recovery_session_id
+            if recovery_session_id:
+                try:
+                    _reconcile_prepared_expert_team_starts_for_session(
+                        get_session(recovery_session_id)
+                    )
+                except (
+                    _ExpertTeamStartSessionBusy,
+                    _ExpertTeamStartSessionStateConflict,
+                ):
+                    logger.debug(
+                        "deferred expert team start recovery for busy Session %s",
+                        recovery_session_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to reconcile prepared expert team start for Session %s",
+                        recovery_session_id,
+                        exc_info=True,
+                    )
             if run_id:
                 run = expert_teams.read_expert_team_run(workspace, run_id)
             else:
                 run = expert_teams.latest_expert_team_run_for_session(workspace, session_id or "")
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except Exception as exc:
             return bad(handler, f"Invalid expert team run: {_sanitize_error(exc)}", 400)
         if run and session_id:
             run_sid = str(run.get("session_id") or "").strip()
             if run_sid and run_sid != session_id:
                 return bad(handler, "expert team run does not belong to this session", 404)
+        run_session_id = str((run or {}).get("session_id") or "").strip()
+        if run_session_id and not _expert_team_launch_session_is_public(run_session_id):
+            return bad(handler, "expert team run not found", 404)
+        if (
+            run_session_id
+            and int((run or {}).get("schema_version") or 0) == 3
+            and str((run or {}).get("product_mode") or "") == "standalone"
+        ):
+            try:
+                launch_session = get_session(run_session_id, metadata_only=True)
+            except KeyError:
+                return bad(handler, "expert team run not found", 404)
+            if not _expert_team_launch_session_is_public(
+                run_session_id,
+                launch_session,
+            ):
+                return bad(handler, "expert team run not found", 404)
         run = _expert_team_run_with_execution_truth(workspace, run)
         payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
-        return j(handler, _expert_team_response_with_product_state(payload, run))
+        return _expert_team_json_response(
+            handler,
+            _expert_team_response_with_product_state(payload, run),
+        )
 
     if parsed.path == "/api/writeflow/runs":
         qs = parse_qs(parsed.query)
@@ -11254,6 +14899,7 @@ def _completed_semantic_messages(messages) -> list[dict]:
 
 def _snapshot_session_truth(session) -> dict:
     fields = {
+        "updated_at",
         "messages",
         "context_messages",
         "tool_calls",
@@ -11272,6 +14918,7 @@ def _snapshot_session_truth(session) -> dict:
         "estimated_cost",
         "cache_read_tokens",
         "cache_write_tokens",
+        "expert_team_start_transaction_ids",
         "context_length",
         "threshold_tokens",
         "last_prompt_tokens",
@@ -11314,6 +14961,7 @@ def _rewrite_existing_session_truth(
     privacy_reason: str | None,
     rollback_snapshot: dict | None = None,
     preserve_context_messages: bool = False,
+    touch_updated_at: bool = True,
 ) -> list[dict]:
     """Coordinate one sidecar rewrite with the transactional state.db rewrite.
 
@@ -11370,11 +15018,11 @@ def _rewrite_existing_session_truth(
                 # it runs while this marker is live, crash recovery recursively
                 # replays the same state.db replacement before this transaction
                 # has finished.  Publish the index only after the marker clears.
-                session.save(skip_index=True)
+                session.save(touch_updated_at=touch_updated_at, skip_index=True)
             except Exception:
                 _restore_session_truth(session, snapshot)
                 try:
-                    session.save(skip_index=True)
+                    session.save(touch_updated_at=False, skip_index=True)
                     truth_rewrite.clear_truth_rewrite_intent(session)
                 except Exception:
                     logger.critical(
@@ -11389,7 +15037,7 @@ def _rewrite_existing_session_truth(
             except Exception:
                 _restore_session_truth(session, snapshot)
                 try:
-                    session.save(skip_index=True)
+                    session.save(touch_updated_at=False, skip_index=True)
                     truth_rewrite.clear_truth_rewrite_intent(session)
                 except Exception:
                     logger.critical(
@@ -11398,8 +15046,23 @@ def _rewrite_existing_session_truth(
                         exc_info=True,
                     )
                 raise
-            truth_rewrite.discard_committed_shrink_backup(session)
-            truth_rewrite.clear_truth_rewrite_intent(session)
+            try:
+                truth_rewrite.discard_committed_shrink_backup(session)
+            except Exception:
+                logger.warning(
+                    "failed to discard committed truth backup for %s",
+                    session.session_id,
+                    exc_info=True,
+                )
+            else:
+                try:
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                except Exception:
+                    logger.warning(
+                        "failed to clear committed truth intent for %s",
+                        session.session_id,
+                        exc_info=True,
+                    )
             try:
                 _write_session_index(updates=[session])
             except Exception:
@@ -11414,7 +15077,32 @@ def _rewrite_existing_session_truth(
             return semantic_messages
 
 
-def _persist_new_session_truth(session) -> list[dict]:
+def _remove_unpublished_session_sidecar_if_owned(session) -> bool:
+    """CAS-delete only the exact sidecar bytes written by this transaction."""
+    path = session.path
+    if not path.exists():
+        return True
+    expected_digest = str(
+        getattr(session, "_loaded_sidecar_sha256", "") or ""
+    )
+    if not expected_digest:
+        return False
+    try:
+        current_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    if current_digest != expected_digest:
+        return False
+    path.unlink()
+    path.with_suffix(".json.bak").unlink(missing_ok=True)
+    return True
+
+
+def _persist_new_session_truth(
+    session,
+    *,
+    touch_updated_at: bool = True,
+) -> list[dict]:
     """Persist a new sidecar, then atomically create/replace its DB truth.
 
     The DB bridge creates the new session row and messages in one transaction.
@@ -11446,13 +15134,18 @@ def _persist_new_session_truth(session) -> list[dict]:
         try:
             # See _rewrite_existing_session_truth: indexing while the intent is
             # live can recursively invoke Session.load() and replay the DB write.
-            session.save(skip_index=True)
+            session.save(touch_updated_at=touch_updated_at, skip_index=True)
         except Exception:
             try:
-                session.path.unlink(missing_ok=True)
-                session.path.with_suffix(".json.bak").unlink(missing_ok=True)
-                prune_session_from_index(session.session_id)
-                truth_rewrite.clear_truth_rewrite_intent(session)
+                removed = _remove_unpublished_session_sidecar_if_owned(session)
+                if removed:
+                    prune_session_from_index(session.session_id)
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                else:
+                    logger.error(
+                        "refused to remove concurrently changed unpublished Session %s",
+                        session.session_id,
+                    )
             except Exception:
                 logger.critical(
                     "failed to remove unpublished session %s after sidecar failure",
@@ -11464,10 +15157,15 @@ def _persist_new_session_truth(session) -> list[dict]:
             _replace_state_db_truth(session, semantic_messages)
         except Exception:
             try:
-                session.path.unlink(missing_ok=True)
-                session.path.with_suffix(".json.bak").unlink(missing_ok=True)
-                prune_session_from_index(session.session_id)
-                truth_rewrite.clear_truth_rewrite_intent(session)
+                removed = _remove_unpublished_session_sidecar_if_owned(session)
+                if removed:
+                    prune_session_from_index(session.session_id)
+                    truth_rewrite.clear_truth_rewrite_intent(session)
+                else:
+                    logger.error(
+                        "refused to remove concurrently changed unpublished Session %s",
+                        session.session_id,
+                    )
             except Exception:
                 logger.critical(
                     "failed to remove unpublished session %s after state.db failure",
@@ -11475,8 +15173,23 @@ def _persist_new_session_truth(session) -> list[dict]:
                     exc_info=True,
                 )
             raise
-        truth_rewrite.discard_committed_shrink_backup(session)
-        truth_rewrite.clear_truth_rewrite_intent(session)
+        try:
+            truth_rewrite.discard_committed_shrink_backup(session)
+        except Exception:
+            logger.warning(
+                "failed to discard committed new-session truth backup for %s",
+                session.session_id,
+                exc_info=True,
+            )
+        else:
+            try:
+                truth_rewrite.clear_truth_rewrite_intent(session)
+            except Exception:
+                logger.warning(
+                    "failed to clear committed new-session truth intent for %s",
+                    session.session_id,
+                    exc_info=True,
+                )
         try:
             _write_session_index(updates=[session])
         except Exception:
@@ -11491,6 +15204,13 @@ def _persist_new_session_truth(session) -> list[dict]:
 @migration_consistent_http_routes("POST")
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    try:
+        handler._taiji_expert_team_json_request = (
+            parsed.path == "/api/expert-teams"
+            or parsed.path.startswith("/api/expert-teams/")
+        )
+    except (AttributeError, TypeError):
+        pass
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
     if parsed.path == "/api/csp-report":
         if diag:
@@ -11553,6 +15273,53 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+
+    if isinstance(body, dict):
+        body_session_id = str(body.get("session_id") or "").strip()
+        body_session_is_public = True
+        if (
+            body_session_id
+            and len(body_session_id) <= 240
+            and is_safe_session_id(body_session_id)
+        ):
+            if parsed.path == "/api/session/delete":
+                # DELETE is the recovery path for a corrupt or symlinked
+                # ordinary sidecar.  Its anchored authority implementation
+                # must run before any sidecar deserialization, so visibility
+                # here is decided only from the independent launch receipt
+                # registry.  Uncommitted portal Sessions remain hidden;
+                # ordinary and committed Sessions can reach the fail-closed
+                # deletion transaction.
+                from api.expert_teams import launch_storage
+
+                body_session_is_public = launch_storage.is_session_deletion_public(
+                    body_session_id
+                )
+            else:
+                body_session_is_public = (
+                    _expert_team_launch_session_is_public(body_session_id)
+                )
+        if (
+            body_session_id
+            and len(body_session_id) <= 240
+            and is_safe_session_id(body_session_id)
+            and not body_session_is_public
+        ):
+            if diag:
+                diag.finish()
+            return bad(handler, "Session not found", 404)
+        body_run_id = str(body.get("run_id") or "").strip()
+        if (
+            parsed.path.startswith("/api/expert-teams/")
+            and parsed.path != "/api/expert-teams/launch"
+            and body_run_id
+            and len(body_run_id) <= 240
+            and is_safe_session_id(body_run_id)
+            and not _expert_team_launch_run_is_public(body_run_id)
+        ):
+            if diag:
+                diag.finish()
+            return bad(handler, "expert team run not found", 404)
 
     if parsed.path == "/api/product/diagnostics/export":
         from api.product_contract import build_product_error
@@ -12298,16 +16065,17 @@ def handle_post(handler, parsed) -> bool:
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
-        worktree_retained = _worktree_retained_payload_for_session_id(sid)
+        # Do not load the sidecar before its leaf and parent are anchored below.
+        # A cold-cache DELETE of a symlinked <sid>.json must not deserialize or
+        # cache the target Session merely to compute this optional response hint.
+        worktree_retained = {}
         registry = _artifact_registry()
         # Best-effort normal cancellation first so the active agent/tool stack
         # receives its standard interrupt signal.  The writer-locked tombstone
         # below is still authoritative and closes a new-stream race between
         # this probe and lock acquisition.
-        try:
-            pre_delete_session = get_session(sid)
-        except Exception:
-            pre_delete_session = None
+        with LOCK:
+            pre_delete_session = SESSIONS.get(sid)
         pre_delete_stream_id = str(
             getattr(pre_delete_session, "active_stream_id", None) or ""
         )
@@ -12325,19 +16093,146 @@ def handle_post(handler, parsed) -> bool:
         # writers.  Keep the lock-map entry after deletion: queued stale writers
         # may still hold this Lock object, and Session.save's tombstone guard must
         # remain the final no-resurrection barrier when they wake.
-        with _get_session_agent_lock(sid):
+        from api.legacy_session_migration import legacy_migration_state_guard
+        from api.truth_rewrite import truth_rewrite_lock
+
+        # Canonical lock order: agent -> migration -> durable Session writer.
+        with (
+            _get_session_agent_lock(sid),
+            legacy_migration_state_guard(),
+            truth_rewrite_lock(sid),
+        ):
+            # Never deserialize the path before authority validation. A cached
+            # live object is sufficient for in-process stream/tombstone cleanup;
+            # cold sessions can be deleted directly from their anchored bytes.
+            with LOCK:
+                deleted_session = SESSIONS.get(sid) or pre_delete_session
+            authority = None
             try:
-                deleted_session = get_session(sid)
-            except KeyError:
-                deleted_session = pre_delete_session
-            try:
-                registry.retire_session(sid)
+                authority = _SessionDeleteAuthority(SESSION_DIR, sid)
+                authority_snapshot = authority.snapshot()
+                primary_payload = authority_snapshot["primary"]["payload"]
+                if primary_payload is not None:
+                    try:
+                        primary_data = json.loads(primary_payload.decode("utf-8"))
+                    except (UnicodeError, json.JSONDecodeError, AttributeError):
+                        primary_data = None
+                    if isinstance(primary_data, dict) and primary_data.get("worktree_path"):
+                        worktree_retained = {"worktree_retained": True}
+                        if primary_data.get("worktree_branch"):
+                            worktree_retained["worktree_branch"] = str(
+                                primary_data["worktree_branch"]
+                            )
+                elif deleted_session is not None:
+                    worktree_retained = _worktree_retained_payload(deleted_session)
             except Exception:
-                logger.exception("failed to retire artifacts before deleting session %s", sid)
-                return bad(handler, "Failed to retire session artifacts", 500)
+                if authority is not None:
+                    authority.close()
+                logger.exception(
+                    "failed to snapshot Session authority before deleting %s",
+                    sid,
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "code": "session_delete_persistence_failed",
+                        "error": "Conversation files could not be prepared for deletion.",
+                    },
+                    status=500,
+                )
+
+            previous_deleted = bool(
+                getattr(deleted_session, "_deleted", False)
+            ) if deleted_session is not None else False
+            if deleted_session is not None:
+                # This in-process tombstone closes the interval between the
+                # authority unlink and cache eviction. On any failure below it
+                # is reverted only after every removed authority file is
+                # atomically restored and byte-verified.
+                deleted_session._deleted = True
+
+            artifact_retirement_recovery_failed = False
+            try:
+                try:
+                    # Remove recovery sources first and the primary sidecar
+                    # last through directory-fd anchored operations.
+                    authority.unlink_all()
+                    # Artifacts are associated truth: do not retire them until
+                    # Session deletion itself is durably observable.
+                    registry.retire_session(sid)
+                except Exception as delete_error:
+                    from api.artifacts import (
+                        ArtifactRetirementRollbackError,
+                        ArtifactRetirementRestoreDurabilityError,
+                    )
+
+                    if isinstance(delete_error, ArtifactRetirementRollbackError):
+                        # Session authority is already durably absent and the
+                        # original artifact identity is no longer at its live
+                        # binding. It may remain isolated in .trash or be missing;
+                        # restoring the Session would expose inconsistent artifacts.
+                        # Keep the delete authoritative, finish associated cleanup,
+                        # and report the degraded artifact recovery explicitly.
+                        artifact_retirement_recovery_failed = True
+                        logger.critical(
+                            "Session %s was deleted but artifact retirement "
+                            "recovery failed; preserving degraded artifact state",
+                            sid,
+                        )
+                    else:
+                        restore_not_durable = isinstance(
+                            delete_error,
+                            ArtifactRetirementRestoreDurabilityError,
+                        )
+                        try:
+                            authority.restore()
+                            if deleted_session is not None:
+                                deleted_session._deleted = previous_deleted
+                            with LOCK:
+                                if deleted_session is not None:
+                                    SESSIONS[sid] = deleted_session
+                        except Exception:
+                            logger.critical(
+                                "failed to restore partially deleted Session authority for %s",
+                                sid,
+                                exc_info=True,
+                            )
+                            return j(
+                                handler,
+                                {
+                                    "ok": False,
+                                    "code": "session_delete_recovery_failed",
+                                    "error": "Conversation deletion failed and requires recovery.",
+                                },
+                                status=500,
+                            )
+                        logger.warning(
+                            "Session deletion was rolled back for %s: %s",
+                            sid,
+                            _sanitize_error(delete_error),
+                        )
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "code": (
+                                    "session_delete_recovery_failed"
+                                    if restore_not_durable
+                                    else "session_delete_persistence_failed"
+                                ),
+                                "error": (
+                                    "Conversation deletion was rolled back, but artifact recovery durability could not be confirmed."
+                                    if restore_not_durable
+                                    else "Conversation could not be deleted; no related data was removed."
+                                ),
+                            },
+                            status=500,
+                        )
+            finally:
+                authority.close()
 
             if deleted_session is not None:
-                deleted_session._deleted = True
                 current_stream_id = str(
                     getattr(deleted_session, "active_stream_id", None) or ""
                 )
@@ -12371,19 +16266,6 @@ def handle_post(handler, parsed) -> bool:
                     cached_session._deleted = True
 
             try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            try:
-                p.unlink(missing_ok=True)
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-                (SESSION_DIR / ".truth-rewrite-intents" / f"{sid}.json").unlink(
-                    missing_ok=True
-                )
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            try:
                 prune_session_from_index(sid)
             except Exception:
                 logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
@@ -12412,6 +16294,20 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         publish_session_list_changed("session_delete")
+        if artifact_retirement_recovery_failed:
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "code": "session_delete_artifact_recovery_failed",
+                    "error": (
+                        "Conversation was deleted, but artifact recovery requires cleanup."
+                    ),
+                    "deleted": True,
+                    **worktree_retained,
+                },
+                status=500,
+            )
         return j(handler, {"ok": True, **worktree_retained})
 
     if parsed.path == "/api/session/clear":
@@ -12755,7 +16651,7 @@ def handle_post(handler, parsed) -> bool:
                     "delivery_binding_sha256": sha256_file(binding_path),
                     "disallowed_principal_id": str((acceptance.get("reviewer") or {}).get("principal_id") or ""),
                 }
-            return j(
+            return _expert_team_json_response(
                 handler,
                 get_trusted_identity_resolver().start_login(
                     str(body.get("redirect_uri") or ""),
@@ -12788,27 +16684,175 @@ def handle_post(handler, parsed) -> bool:
         handler.wfile.write(response)
         return True
 
+    if parsed.path == "/api/expert-teams/launch":
+        from api import expert_teams
+        from api.expert_teams import launch_storage
+
+        try:
+            validated = expert_teams.validate_standalone_launch_request(body)
+            result = _coordinate_expert_team_launch(validated)
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": True,
+                    "replayed": result["replayed"],
+                    "run": result["run"],
+                    "session": result["session"],
+                    "teams": expert_teams.expert_team_catalog()["teams"],
+                    "session_messages": result["session_messages"],
+                },
+            )
+        except expert_teams.ContractError as exc:
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": exc.code,
+                    "field": exc.field,
+                    "error": str(exc),
+                },
+                status=400,
+            )
+        except _ExpertTeamLaunchConflict as exc:
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_idempotency_conflict",
+                    "error": str(exc),
+                },
+                status=409,
+            )
+        except (
+            _ExpertTeamLaunchRecoveryRequired,
+            launch_storage.LaunchTransactionLockTimeout,
+        ):
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_recovery_required",
+                    "error": "专家团发起尚未公开，请使用同一次请求重试恢复。",
+                    "retryable": True,
+                },
+                status=503,
+            )
+        except launch_storage.LaunchTransactionIntegrityError:
+            logger.warning(
+                "expert-team launch receipt failed integrity validation",
+                exc_info=True,
+            )
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_receipt_invalid",
+                    "error": "专家团发起记录需要恢复，当前未公开任何任务。",
+                },
+                status=503,
+            )
+        except Exception:
+            logger.exception("Failed to commit standalone expert-team launch")
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": False,
+                    "code": "launch_unavailable",
+                    "error": "专家团暂时无法发起，请稍后重试。",
+                },
+                status=503,
+            )
+
     if parsed.path == "/api/expert-teams/start":
         from api import expert_teams
 
         try:
-            session_id = str(body.get("session_id") or "").strip() or None
-            workspace = _expert_team_workspace(session_id)
-            run = expert_teams.start_expert_team(workspace, body)
-            session_messages = _append_expert_team_session_entry(run)
-            return j(
+            validated_body = expert_teams.validate_standalone_start_request(body)
+            result = _coordinate_expert_team_start(validated_body)
+            return _expert_team_json_response(
                 handler,
                 {
                     "ok": True,
-                    "run": run,
+                    "replayed": result["replayed"],
+                    "run": result["run"],
+                    "session": result["session"],
                     "teams": expert_teams.expert_team_catalog()["teams"],
-                    "session_messages": session_messages,
+                    "session_messages": result["session_messages"],
                 },
             )
         except expert_teams.ContractError as exc:
-            return j(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
-        except Exception as exc:
-            return bad(handler, f"Failed to start expert team: {_sanitize_error(exc)}", 400)
+            return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
+        except _ExpertTeamStartSessionNotFound:
+            return _expert_team_product_error_response(
+                handler,
+                "session_not_found",
+                status=404,
+                product_code="expert_team_not_found",
+            )
+        except _ExpertTeamStartSessionNotPersisted:
+            return _expert_team_product_error_response(
+                handler,
+                status=409,
+                code="session_not_persisted",
+                product_code="expert_team_state_conflict",
+            )
+        except _ExpertTeamStartSessionBusy:
+            return _expert_team_product_error_response(
+                handler,
+                status=409,
+                code="session_busy",
+                product_code="expert_team_in_progress",
+            )
+        except _ExpertTeamStartSessionStateConflict:
+            return _expert_team_product_error_response(
+                handler,
+                status=409,
+                code="session_state_conflict",
+                product_code="expert_team_state_conflict",
+            )
+        except _ExpertTeamStartIdempotencyConflict:
+            return _expert_team_product_error_response(
+                handler,
+                status=409,
+                code="start_idempotency_conflict",
+                product_code="expert_team_state_conflict",
+            )
+        except _ExpertTeamStartPersistenceError as exc:
+            if isinstance(exc.__cause__, SessionWriteConflict):
+                return _expert_team_product_error_response(
+                    handler,
+                    status=409,
+                    code="session_state_conflict",
+                    product_code="expert_team_state_conflict",
+                )
+            return _expert_team_product_error_response(
+                handler,
+                status=500,
+                code="start_persistence_failed",
+                product_code="backend_unavailable",
+            )
+        except _ExpertTeamStartFinalizeError:
+            return _expert_team_product_error_response(
+                handler,
+                status=503,
+                code="start_finalize_failed",
+                product_code="backend_unavailable",
+            )
+        except _ExpertTeamStartIntegrityError:
+            return _expert_team_product_error_response(
+                handler,
+                status=503,
+                code="start_receipt_invalid",
+                product_code="expert_team_state_conflict",
+            )
+        except Exception:
+            logger.warning("Standalone expert-team start failed; details intentionally withheld")
+            return _expert_team_product_error_response(
+                handler,
+                status=503,
+                code="start_unavailable",
+                product_code="backend_unavailable",
+            )
 
     if parsed.path == "/api/expert-teams/answer":
         from api import expert_teams
@@ -12817,6 +16861,14 @@ def handle_post(handler, parsed) -> bool:
             session_id = str(body.get("session_id") or "").strip() or None
             workspace = _expert_team_workspace(session_id)
             existing = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if _expert_team_standalone_compatibility_error(existing):
+                return _expert_team_product_error_response(
+                    handler,
+                    status=503,
+                    code="runtime_incompatible",
+                    product_code="backend_unavailable",
+                    run=existing,
+                )
             if expert_teams.classify_contract_version(existing) == expert_teams.EXPERT_TEAM_CONTRACT_V1:
                 run = expert_teams.answer_expert_team(workspace, body)
                 reservation_created = False
@@ -12836,16 +16888,20 @@ def handle_post(handler, parsed) -> bool:
                 )
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-                return j(handler, payload, status=status)
-            return j(handler, payload)
+                return _expert_team_json_response(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except expert_teams.ContractError as exc:
-            return j(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
+            return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "field": exc.field, "error": str(exc)}, status=400)
         except Exception as exc:
-            return bad(handler, f"Failed to update expert team: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="answer_failed",
+            )
 
     if parsed.path in {
         "/api/expert-teams/brief/update",
@@ -12865,9 +16921,9 @@ def handle_post(handler, parsed) -> bool:
                 "/api/expert-teams/brief/sources/remove": expert_teams.remove_expert_team_brief_source,
             }[parsed.path]
             run = operation(workspace, body)
-            return j(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
+            return _expert_team_json_response(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except expert_teams.ContractError as exc:
@@ -12881,9 +16937,49 @@ def handle_post(handler, parsed) -> bool:
                     payload["version"] = int(authoritative.get("version") or 0)
                 except Exception:
                     pass
-            return j(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload, status=status)
         except Exception as exc:
-            return bad(handler, f"Failed to update document brief: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="brief_update_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/stage/confirm":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
+            if session_id and str(run.get("session_id") or "") != session_id:
+                return _expert_team_not_found_response(handler)
+            run = expert_teams.confirm_standalone_expert_team_stage(
+                workspace,
+                {**body, "run_id": str(run.get("run_id") or "")},
+            )
+            payload = {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]}
+            if (
+                str(run.get("team_id") or "") in _EXPERT_TEAM_STREAM_TEAM_IDS
+                and str(run.get("workflow_state") or "") in {
+                    "ready_to_generate",
+                    "delivery_validation_required",
+                }
+            ):
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+                stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+                return _expert_team_json_response(handler, stream_payload, status=status)
+            return _expert_team_json_response(handler, payload)
+        except FileNotFoundError:
+            return _expert_team_not_found_response(handler)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_confirm_failed",
+            )
 
     if parsed.path == "/api/expert-teams/stage/approve":
         from api import expert_teams
@@ -12893,7 +16989,13 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
+            if str(run.get("product_mode") or "") == "standalone":
+                raise expert_teams.ExpertTeamStateConflict(
+                    "standalone_confirmation_required",
+                    "standalone runs must use local stage confirmation",
+                    run,
+                )
             run = expert_teams.approve_expert_team_stage(
                 workspace,
                 {
@@ -12911,14 +17013,18 @@ def handle_post(handler, parsed) -> bool:
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-                return j(handler, payload, status=status)
-            return j(handler, payload)
+                return _expert_team_json_response(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to approve expert team stage: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_approve_failed",
+            )
 
     if parsed.path == "/api/expert-teams/stage/revise":
         from api import expert_teams
@@ -12928,20 +17034,229 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             run = expert_teams.request_expert_team_stage_revision(
                 workspace,
                 {**body, "run_id": str(run.get("run_id") or ""), "feedback": str(body.get("feedback") or "")},
             )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-            return j(handler, stream_payload, status=status)
+            return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to revise expert team stage: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_revision_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/open":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            resolved = expert_teams.resolve_standalone_expert_team_delivery_open(
+                workspace,
+                body,
+            )
+            _open_expert_team_delivery_target(
+                Path(resolved["path"]),
+                str(resolved["target"]),
+            )
+            return _expert_team_json_response(
+                handler,
+                {"ok": True, "target": str(resolved["target"])},
+            )
+        except FileNotFoundError:
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_document_missing",
+                status=404,
+                product_code="document_render_failed",
+            )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_product_error_response(
+                handler,
+                getattr(exc, "code", "delivery_open_failed"),
+                status=400,
+                product_code="document_open_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/download":
+        from api import expert_teams
+
+        if {"target", "path", "filename", "document_path", "source_path"}.intersection(body):
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_download_target_forbidden",
+                status=400,
+                product_code="document_open_failed",
+            )
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            resolved = expert_teams.resolve_standalone_expert_team_delivery_open(
+                workspace,
+                {**body, "target": "document"},
+            )
+            return _send_expert_team_delivery_download(
+                handler,
+                Path(resolved["path"]),
+                str(resolved.get("download_name") or ""),
+            )
+        except FileNotFoundError:
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_document_missing",
+                status=404,
+                product_code="document_render_failed",
+            )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_product_error_response(
+                handler,
+                getattr(exc, "code", "delivery_download_failed"),
+                status=400,
+                product_code="document_open_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/save-copy":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            result = expert_teams.save_standalone_expert_team_delivery_copy(
+                workspace,
+                body,
+            )
+            return _expert_team_json_response(handler, result)
+        except FileNotFoundError:
+            return _expert_team_product_error_response(
+                handler,
+                "delivery_document_missing",
+                status=404,
+                product_code="document_render_failed",
+            )
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_product_error_response(
+                handler,
+                getattr(exc, "code", "delivery_copy_failed"),
+                status=400,
+                product_code="delivery_copy_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/revise":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.request_standalone_expert_team_delivery_revision(
+                workspace,
+                {**body, "feedback": str(body.get("feedback") or "")},
+            )
+            stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return _expert_team_json_response(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return _expert_team_not_found_response(handler)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_revision_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/rerender":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.rerender_standalone_expert_team_delivery(
+                workspace,
+                body,
+            )
+            if str(run.get("workflow_state") or "") == "delivery_validation_required":
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            else:
+                stream_payload, status = {"ok": True, "run": run}, 200
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return _expert_team_json_response(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return _expert_team_not_found_response(handler)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_rerender_failed",
+                product_code="document_render_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/recover":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.recover_standalone_expert_team_delivery(workspace, body)
+            if str(run.get("workflow_state") or "") == "delivery_validation_required":
+                stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            else:
+                stream_payload, status = {"ok": True, "run": run}, 200
+            stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
+            return _expert_team_json_response(handler, stream_payload, status=status)
+        except FileNotFoundError:
+            return _expert_team_not_found_response(handler)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_recovery_failed",
+                product_code="document_render_failed",
+            )
+
+    if parsed.path == "/api/expert-teams/delivery/confirm":
+        from api import expert_teams
+
+        try:
+            session_id = str(body.get("session_id") or "").strip() or None
+            workspace = _expert_team_workspace(session_id)
+            run = expert_teams.confirm_standalone_expert_team_delivery(workspace, body)
+            return _expert_team_json_response(
+                handler,
+                {
+                    "ok": True,
+                    "run": run,
+                    "teams": expert_teams.expert_team_catalog()["teams"],
+                },
+            )
+        except FileNotFoundError:
+            return _expert_team_not_found_response(handler)
+        except expert_teams.ExpertTeamStateConflict as exc:
+            return _expert_team_conflict_response(handler, exc)
+        except Exception as exc:
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="delivery_confirmation_failed",
+            )
 
     if parsed.path == "/api/expert-teams/stage/input":
         from api import expert_teams
@@ -12951,7 +17266,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             run = expert_teams.submit_expert_team_stage_input(
                 workspace,
                 {
@@ -12967,14 +17282,18 @@ def handle_post(handler, parsed) -> bool:
                 stream_payload, status = _start_expert_team_execution(workspace, run, body)
                 payload.update(stream_payload)
                 payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-                return j(handler, payload, status=status)
-            return j(handler, payload)
+                return _expert_team_json_response(handler, payload, status=status)
+            return _expert_team_json_response(handler, payload)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to submit expert team stage input: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="stage_input_failed",
+            )
 
     if parsed.path == "/api/expert-teams/resume":
         from api import expert_teams
@@ -12984,21 +17303,34 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             display_run = _expert_team_run_with_execution_truth(workspace, run)
             run = expert_teams.resume_expert_team(
                 workspace,
                 {**body, "run_id": str((display_run or run).get("run_id") or "")},
             )
+            if not _expert_team_resume_requires_execution(run):
+                return _expert_team_json_response(
+                    handler,
+                    {
+                        "ok": True,
+                        "run": run,
+                        "teams": expert_teams.expert_team_catalog()["teams"],
+                    },
+                )
             stream_payload, status = _start_expert_team_execution(workspace, run, body)
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
-            return j(handler, stream_payload, status=status)
+            return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to resume expert team: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="resume_failed",
+            )
 
     if parsed.path == "/api/expert-teams/cancel":
         from api import expert_teams
@@ -13008,7 +17340,7 @@ def handle_post(handler, parsed) -> bool:
             workspace = _expert_team_workspace(session_id)
             existing_run = expert_teams.read_expert_team_run(workspace, str(body.get("run_id") or ""))
             if session_id and str(existing_run.get("session_id") or "") != session_id:
-                return bad(handler, "expert team run does not belong to this session", 404)
+                return _expert_team_not_found_response(handler)
             adapter = _expert_team_runtime_adapter_for_run(existing_run)
             runtime_run_id = str(
                 existing_run.get("execution_runtime_run_id")
@@ -13053,7 +17385,7 @@ def handle_post(handler, parsed) -> bool:
                                 "execution_start_id": start_id,
                             },
                         )
-                        return j(
+                        return _expert_team_json_response(
                             handler,
                             {
                                 "ok": True,
@@ -13082,7 +17414,7 @@ def handle_post(handler, parsed) -> bool:
                 cancel_callback=_cancel_runtime,
             )
             pending_cancel = str(run.get("workflow_state") or "") == "cancelling"
-            return j(
+            return _expert_team_json_response(
                 handler,
                 {
                     "ok": True,
@@ -13094,11 +17426,15 @@ def handle_post(handler, parsed) -> bool:
                 status=202 if pending_cancel else 200,
             )
         except FileNotFoundError:
-            return bad(handler, "expert team run not found", 404)
+            return _expert_team_not_found_response(handler)
         except expert_teams.ExpertTeamStateConflict as exc:
             return _expert_team_conflict_response(handler, exc)
         except Exception as exc:
-            return bad(handler, f"Failed to cancel expert team: {_sanitize_error(exc)}", 400)
+            return _expert_team_exception_response(
+                handler,
+                exc,
+                fallback_code="cancel_failed",
+            )
 
     if parsed.path == "/api/writeflow/compose":
         return j(
@@ -14422,7 +18758,7 @@ def _handle_session_bundle_import(handler):
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
     publish_session_list_changed("session_bundle_import")
-    public_session = public_session_projection(redact_session_data(
+    public_session = redact_session_data(public_session_projection(
         session.compact() | {
             "messages": session.messages,
             "tool_calls": session.tool_calls,
@@ -17899,6 +22235,8 @@ def _start_chat_stream_for_session(
     *,
     msg: str,
     display_msg: str | None = None,
+    model_messages=None,
+    tools_disabled: bool = False,
     attachments=None,
     workspace: str,
     model: str,
@@ -17916,6 +22254,23 @@ def _start_chat_stream_for_session(
     from api.turn_journal import new_turn_id
     reserved_turn_id = new_turn_id()
     persisted_msg = display_msg if display_msg is not None else msg
+    from api.turn_envelope import TurnEnvelope
+
+    strict_model_messages = bool(model_messages)
+    turn_envelope = TurnEnvelope.create(
+        turn_id=reserved_turn_id,
+        session_id=s.session_id,
+        submitted_at=time.time(),
+        display_user_message=persisted_msg,
+        model_messages=(
+            copy.deepcopy(model_messages)
+            if strict_model_messages
+            else [{"role": "user", "content": msg}]
+        ),
+        attachments=attachments,
+        strict_model_messages=strict_model_messages,
+        tools_disabled=bool(tools_disabled),
+    )
     session_lock = _get_session_agent_lock(s.session_id)
     privacy_decision = None
     diag.stage("session_lock_wait") if diag else None
@@ -18008,7 +22363,6 @@ def _start_chat_stream_for_session(
                 logger.exception("Failed to roll back unstarted stream claim %s", stream_id)
 
     journal_event = {}
-    from api.turn_envelope import TurnEnvelope
     try:
         if was_hidden_empty_session:
             publish_session_list_changed("session_new")
@@ -18076,14 +22430,6 @@ def _start_chat_stream_for_session(
         diag.stage("worker_thread_start") if diag else None
         backend_is_gateway = webui_gateway_chat_enabled(get_config())
         worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-        turn_envelope = TurnEnvelope.create(
-            turn_id=reserved_turn_id,
-            session_id=s.session_id,
-            submitted_at=s.pending_started_at or time.time(),
-            display_user_message=persisted_msg,
-            model_messages=[{"role": "user", "content": msg}],
-            attachments=attachments,
-        )
         worker_kwargs = {
             "model_provider": model_provider,
             "display_msg": persisted_msg,
@@ -19998,14 +24344,18 @@ def _handle_expert_team_waiver_create(handler, body):
             release_authorizer_handoff=lambda claim_id: identity_resolver.release_authorizer_handoff(
                 identity_session_id, claim_id),
         )
-        return j(handler, {"ok": True, "waiver": waiver, "run": run}, status=201)
+        return _expert_team_json_response(
+            handler,
+            {"ok": True, "waiver": waiver, "run": run},
+            status=201,
+        )
     except TrustedIdentityError as exc:
-        return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=403)
+        return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=403)
     except WaiverError as exc:
         status = 409 if exc.code in {
             "version_conflict", "waiver_binding_changed", "waiver_idempotency_conflict"
         } else 400
-        return j(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=status)
+        return _expert_team_json_response(handler, {"ok": False, "code": exc.code, "error": str(exc)}, status=status)
     except (FileNotFoundError, OSError, ValueError) as exc:
         return bad(handler, _sanitize_error(exc), 400)
 
@@ -20023,10 +24373,14 @@ def _handle_expert_team_office_revision_create(handler, body):
             body,
             now=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         )
-        return j(handler, {"ok": True, "revision_request": request, "run": run}, status=201)
+        return _expert_team_json_response(
+            handler,
+            {"ok": True, "revision_request": request, "run": run},
+            status=201,
+        )
     except DeliveryIntegrityError as exc:
         status = 409 if "version conflict" in str(exc) else 400
-        return j(handler, {"ok": False, "code": "office_revision_invalid", "error": str(exc)}, status=status)
+        return _expert_team_json_response(handler, {"ok": False, "code": "office_revision_invalid", "error": str(exc)}, status=status)
     except (FileNotFoundError, OSError, ValueError) as exc:
         return bad(handler, _sanitize_error(exc), 400)
 
@@ -20938,7 +25292,7 @@ def _handle_session_compress(handler, body):
                 privacy_reason=None,
             )
 
-        session_payload = public_session_projection(redact_session_data(
+        session_payload = redact_session_data(public_session_projection(
             s.compact() | {
                 "messages": s.messages,
                 "tool_calls": s.tool_calls,
@@ -22221,9 +26575,9 @@ def _handle_session_import(handler, body):
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
     publish_session_list_changed("session_import")
-    public_session = public_session_projection(
-        redact_session_data(s.compact() | {"messages": s.messages, "tool_calls": s.tool_calls})
-    )
+    public_session = redact_session_data(public_session_projection(
+        s.compact() | {"messages": s.messages, "tool_calls": s.tool_calls}
+    ))
     return j(handler, public_response_projection(
         {"ok": True, "session": public_session}, surface="session_json_import"
     ))

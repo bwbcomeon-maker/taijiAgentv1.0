@@ -411,6 +411,8 @@ class AIAgent:
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
+        exact_system_prompt: bool = False,
+        tools_disabled: bool = False,
         session_db=None,
         parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None,
@@ -481,6 +483,8 @@ class AIAgent:
             skip_context_files=skip_context_files,
             load_soul_identity=load_soul_identity,
             skip_memory=skip_memory,
+            exact_system_prompt=exact_system_prompt,
+            tools_disabled=tools_disabled,
             session_db=session_db,
             parent_session_id=parent_session_id,
             iteration_budget=iteration_budget,
@@ -4421,41 +4425,49 @@ class AIAgent:
             raise taiji_license.LicenseExecutionBlocked(status) from None
         if blocked is not None:
             raise taiji_license.LicenseExecutionBlocked(blocked)
-        try:
-            from agent.image_runtime import refresh_agent_capability_runtime
+        if getattr(self, "strict_execution_contract", False):
+            # ``refresh_agent_capability_runtime`` is deliberately dynamic and
+            # can republish tools from environment-driven capabilities.  A
+            # strict expert turn instead seals an immutable zero-tool surface.
+            self.tools = []
+            self.valid_tool_names = set()
+            self._registry_tool_names = set()
+        else:
+            try:
+                from agent.image_runtime import refresh_agent_capability_runtime
 
-            construction_loader = getattr(
-                self,
-                "_tool_definitions_loader",
-                None,
-            )
-            default_loader = getattr(
-                self,
-                "_tool_definitions_default_loader",
-                _DEFAULT_TOOL_DEFINITIONS_LOADER,
-            )
-            current_loader = get_tool_definitions
-            definitions_loader = (
-                construction_loader
-                if (
-                    callable(construction_loader)
-                    and current_loader is default_loader
-                    and construction_loader is not default_loader
+                construction_loader = getattr(
+                    self,
+                    "_tool_definitions_loader",
+                    None,
                 )
-                else current_loader
-            )
-            refresh_agent_capability_runtime(
-                self,
-                definitions_loader=(
-                    definitions_loader
-                    if callable(definitions_loader)
-                    else None
-                ),
-            )
-        except Exception:
-            # Capability refresh is fail-closed inside its builder. A transient
-            # refresh error must not abort an unrelated user turn.
-            pass
+                default_loader = getattr(
+                    self,
+                    "_tool_definitions_default_loader",
+                    _DEFAULT_TOOL_DEFINITIONS_LOADER,
+                )
+                current_loader = get_tool_definitions
+                definitions_loader = (
+                    construction_loader
+                    if (
+                        callable(construction_loader)
+                        and current_loader is default_loader
+                        and construction_loader is not default_loader
+                    )
+                    else current_loader
+                )
+                refresh_agent_capability_runtime(
+                    self,
+                    definitions_loader=(
+                        definitions_loader
+                        if callable(definitions_loader)
+                        else None
+                    ),
+                )
+            except Exception:
+                # Capability refresh is fail-closed inside its builder. A transient
+                # refresh error must not abort an unrelated user turn.
+                pass
         from agent.conversation_loop import run_conversation
         return run_conversation(
             self,

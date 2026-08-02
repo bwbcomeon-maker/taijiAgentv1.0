@@ -5,6 +5,8 @@
 
 ### Added
 
+- Added server-owned standalone expert-team contracts for work reports, meeting minutes, notices, plans, summary plans, polishing, and research reports, including frozen source requirements, required sections, stage review, and four isolated DOCX templates.
+- Added safe expert-team product-error and diagnostic projections with Chinese recovery actions, preserved invalid-stage results, evidence-specific relaunch guidance, and final DOCX open/copy/folder/quality-report actions.
 - Added a structured expert-team Office review drawer with a compact non-secret delivery summary, nine-item checklist, condition-only authorizer handoff, issue-scoped waivers, and server-derived revision requests.
 - Added a real image-understanding verification flow in Settings: configured credentials now remain "configured, unverified" until a fixed safe image probe succeeds against the exact selected Provider and model. Verification evidence is isolated per profile, invalidated by model/key/config changes, and never stores model output, raw errors, paths, or credentials.
 - Added dedicated image-analysis recovery cards with visible "Retry image analysis" and "Open image configuration" actions. Retries reuse the already uploaded image descriptors in memory without re-uploading files or persisting local paths in browser storage.
@@ -20,6 +22,8 @@
 
 ### Changed
 
+- Standalone expert-team availability now comes only from a complete server capability and launch profile. All seven supported tasks are selectable, while configuration conflicts fail closed as a task-configuration error instead of appearing as an unreleased document type.
+- Standalone expert-team stages now use server-owned allowed actions, idempotency keys, version checks, and authoritative attempt reservations so duplicate clicks, delayed responses, restarts, and recovery cannot create a second successful stage attempt.
 - Redesigned approval prompts for office users with plain-language Chinese summaries, explicit permission and impact fields, collapsed technical details, three primary decisions, and confirmed advanced authorization options. High-risk scanner findings no longer offer permanent authorization, and Enter no longer approves a visible card globally.
 - User-facing app identity now uses `taiji Agent` across title, manifest, shell UI, offline/service-worker copy, settings, onboarding, dialogs, toasts, and main English/Chinese UI strings while retaining internal Hermes protocol/env/cache identifiers.
 - The default WebUI appearance is now `light + taiji-light-glass`; existing theme and skin choices remain available.
@@ -41,6 +45,14 @@
 
 ### Fixed
 
+- Fixed standalone expert-team warnings being counted as blocking failures. Warnings now enter human review, while only blocking/error issues stop a stage; legacy warning-only results can resume without another Provider call.
+- Fixed ordinary and legacy sessions being hidden by the expert-team launch visibility gate. Session reads now apply the gate to the route's canonical loaded Session, while malformed launch markers and missing expert-team reverse bindings still fail closed.
+- Fixed context-compression snapshot persistence carrying one session sidecar's CAS digest across a rotated session id. The old snapshot is now bound to its exact durable revision before the continuation id is adopted, preserving concurrent writes and allowing the continuation's first save.
+- Replaced the expert-team source-removal browser confirmation with the shared accessible app dialog. Cancellation receives the initial focus, keyboard focus returns to the triggering control, and dialog failures leave the source untouched.
+- Fixed browser expert-team delivery showing desktop-only file actions. Browser sessions now label both document actions as downloads and hide “open folder”, while the desktop shell keeps native open, copy, and folder actions.
+- Fixed expert-team protocol JSON appearing in live chat, preserved invalid-stage content being hidden behind generic errors, and evidence failures offering a blind retry that could not add sources.
+- Fixed expert-team polling interrupting active IME composition and losing focus, selection, or scroll state while users edit long Chinese forms.
+- Fixed standalone DOCX delivery losing required sections or carrying enterprise/template residue by binding required sections through capability, Brief, prompt, artifact, Markdown, template, manifest, and final package validation.
 - Added a server-owned multipart evidence upload for structured Office review, requiring fresh evidence before acceptance while keeping tokens, paths, and reviewer identity off the client; prepared acceptances now reconcile token consumption and completion idempotently after partial failure.
 - Hardened the enterprise Office review lifecycle with an expiring bounded review-session registry, safe first-review begin flow, idempotent acceptance and revision mutations, authoritative delivery-manifest validation, cancellable authorizer handoff, and stale-poll submission guards.
 - Fixed the structured Office drawer's primary submission so it validates all three decisions, posts only safe fields to the existing WPS visual endpoint, prevents duplicate clicks, and preserves dirty drafts on token expiry.

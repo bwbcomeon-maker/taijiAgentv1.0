@@ -11,6 +11,7 @@ This test drives the real resolver with a monkeypatched
 `config_context_length` it receives, so we assert the gating without needing
 the real agent metadata catalog.
 """
+import ast
 import sys
 import types
 from pathlib import Path as _Path
@@ -172,13 +173,23 @@ def test_prefixed_default_still_receives_cap(monkeypatch):
 # (the live-snapshot path already had behavioral coverage; these guard the two
 # sibling paths from silently regressing back to the stale value).
 _STREAMING_SRC = (_Path(__file__).resolve().parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+_STREAMING_IF_GUARDS = [
+    ast.unparse(node.test)
+    for node in ast.walk(ast.parse(_STREAMING_SRC))
+    if isinstance(node, ast.If)
+]
 
 
 def test_persistence_fallback_also_runs_when_skip_cc_cl():
     """The per-turn persistence fallback must recompute the real cap when the
     stale compressor cap was skipped — not only when context_length is falsy.
     Otherwise a previously-persisted stale 232K survives forever."""
-    assert "(not getattr(s, 'context_length', 0)) or _skip_cc_cl:" in _STREAMING_SRC, (
+    assert any(
+        "not strict_turn" in guard
+        and "not getattr(s, 'context_length', 0)" in guard
+        and "_skip_cc_cl" in guard
+        for guard in _STREAMING_IF_GUARDS
+    ), (
         "persistence fallback gate must also fire on _skip_cc_cl (#3263 MUST-FIX 1)"
     )
 
@@ -187,7 +198,10 @@ def test_persistence_rescales_threshold_when_cap_skipped():
     """When the stale cap is skipped and the real cap recomputed, the persisted
     threshold_tokens must be rescaled to the real cap (or cleared), so a reload
     matches the live snapshot."""
-    assert "if _skip_cc_cl:" in _STREAMING_SRC
+    assert any(
+        "not strict_turn" in guard and "_skip_cc_cl" in guard
+        for guard in _STREAMING_IF_GUARDS
+    )
     assert "s.threshold_tokens = int(_orig_thresh * _real_cap / _orig_cap)" in _STREAMING_SRC, (
         "persistence path must rescale threshold_tokens to the real cap (#3263 MUST-FIX 2)"
     )

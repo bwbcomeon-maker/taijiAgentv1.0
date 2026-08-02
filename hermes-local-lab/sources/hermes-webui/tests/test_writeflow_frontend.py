@@ -11,6 +11,7 @@ MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 TAIJI_HOME_JS = (REPO_ROOT / "static" / "taiji-home.js").read_text(encoding="utf-8")
+EXPERT_V3_JS = (REPO_ROOT / "static" / "expert-team-v3.js").read_text(encoding="utf-8")
 
 
 def test_writeflow_slash_command_and_autocomplete_are_registered():
@@ -52,13 +53,12 @@ def test_writing_expert_center_is_wired_to_rail_and_loader():
     assert 'data-panel="writing"' in INDEX_HTML
     assert 'id="panelWriting"' in INDEX_HTML
     assert 'id="mainWriting"' in INDEX_HTML
-    assert 'id="writeflowTeamGrid"' in INDEX_HTML
-    assert 'id="writeflowTeamSearch"' in INDEX_HTML
-    assert 'id="writeflowCatalogStatus"' in INDEX_HTML
+    assert 'id="expertTeamV3PortalRoot"' in INDEX_HTML
+    assert 'static/expert-team-v3.js?v=__WEBUI_VERSION__' in INDEX_HTML
     assert 'id="writeflowTeamModal"' in INDEX_HTML
     assert 'id="writeflowRuns"' not in INDEX_HTML
     assert 'id="writeflowProjects"' not in INDEX_HTML
-    assert "写作专家中心" in INDEX_HTML
+    assert "专家团中心" in EXPERT_V3_JS
     assert "新的聊天任务" in INDEX_HTML
     assert "召唤" in PANELS_JS
     assert "确定方向" in PANELS_JS
@@ -83,8 +83,9 @@ def test_writing_expert_center_primary_copy_is_chinese_and_clean():
     visible_markup = visible_panel + main
     for text in (">Writing<", ">Project name<", ">Ask mode<", ">Start<", ">Next<", ">Redo<", ">Skip<", ">Export<", ">Style<", ">Extract<"):
         assert text not in visible_markup
-    for text in ("写作专家中心", "选择一个写作专家团", "搜索专家团", "聊天任务"):
-        assert text in visible_panel + main
+    product_copy = visible_panel + main + EXPERT_V3_JS
+    for text in ("专家团中心", "选择团队", "查找专家团", "聊天任务"):
+        assert text in product_copy
     for removed in ("项目名", "轻量写作", "基于当前需求开始", "继续", "调整要求", "查看状态", "更多操作", "专家团运行中"):
         assert removed not in visible_panel + main
 
@@ -104,11 +105,12 @@ def test_writeflow_expert_center_interactions_are_chat_first():
     assert "hardRefreshWebUIClient" in fn_body
     assert "window.sendExpertTeamAction(_writeflowExpertTeamStartPayload(" in fn_body
     assert "sendWriteflowAction({" not in fn_body
-    assert "team_id:team.id" in payload_body
-    assert "new_session: true" in fn_body
+    assert "launch_profile_id" in payload_body
+    assert "team_id:team.id" not in payload_body
+    assert "new_session: true" not in fn_body
     assert "open_new_window" not in fn_body
     assert "new_window" not in fn_body
-    assert "summon_only: false" in fn_body
+    assert "summon_only" not in fn_body
 
 
 def test_writeflow_team_modal_uses_guided_studio_layout_without_new_actions():
@@ -194,7 +196,7 @@ def test_taiji_recent_sessions_use_display_titles_for_rows_and_search():
     assert 'class="taiji-session-title"' in TAIJI_HOME_JS
     assert "title=\"${fullTitle}\" aria-label=\"${fullTitle}\"" in TAIJI_HOME_JS
     assert "请【[^】]+】接手这个写作任务" in TAIJI_HOME_JS
-    assert r"/^召唤[^：:\n]{0,64}专家团[：:]\s*/" in TAIJI_HOME_JS
+    assert r"/^召唤[^：:\n]{0,64}(?:专家团|研究团)[：:]\s*/" in TAIJI_HOME_JS
     assert "taijiCompactTopic(displayTitle)" in TAIJI_HOME_JS
     display_start = TAIJI_HOME_JS.index("function taijiSessionDisplayTitle(session)")
     display_body = TAIJI_HOME_JS[display_start : TAIJI_HOME_JS.index("function taijiSessionFullTitle", display_start)]

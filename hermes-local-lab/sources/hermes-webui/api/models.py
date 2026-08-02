@@ -31,14 +31,29 @@ from api.agent_sessions import (
 logger = logging.getLogger(__name__)
 
 
+class SessionWriteConflict(RuntimeError):
+    """A stale Session object attempted to replace newer durable truth."""
+
+
 def _migration_guarded_session_write(func):
     """Keep every sidecar/index commit outside an exclusive migration window."""
     @wraps(func)
     def guarded(*args, **kwargs):
         from api.legacy_session_migration import legacy_migration_state_guard
+        from api.truth_rewrite import truth_rewrite_lock
 
         with legacy_migration_state_guard():
-            return func(*args, **kwargs)
+            session = args[0] if args else None
+            session_id = getattr(session, "session_id", None)
+            if not session_id:
+                return func(*args, **kwargs)
+            # Preserve Session.save()'s established public validation contract.
+            # The cross-process lock must not replace its ValueError with an
+            # internal truth-rewrite exception for an unsafe identifier.
+            if not is_safe_session_id(session_id):
+                return func(*args, **kwargs)
+            with truth_rewrite_lock(session_id):
+                return func(*args, **kwargs)
     return guarded
 CLI_VISIBLE_SESSION_LIMIT = 20
 # How many messageful cron sessions to surface in the project-chip layer.
@@ -670,6 +685,8 @@ class Session:
                  enabled_toolsets=None,
                  composer_draft=None,
                 privacy_context=None,
+                expert_team_start_transaction_ids=None,
+                expert_team_launch_transaction_id=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -729,6 +746,20 @@ class Session:
         # had no source turn or expiry, so carrying them forward would recreate
         # the indefinite cross-turn pollution this field replaces.
         self.privacy_context = normalize_session_privacy_context(privacy_context)
+        # This list is durable transaction evidence, not user-facing metadata.
+        # Preserve its raw shape, values, order and cardinality so the atomic
+        # start validator can detect malformed or duplicated markers instead of
+        # silently normalizing corruption into an apparently valid singleton.
+        self.expert_team_start_transaction_ids = copy.deepcopy(
+            []
+            if expert_team_start_transaction_ids is None
+            else expert_team_start_transaction_ids
+        )
+        self.expert_team_launch_transaction_id = (
+            str(expert_team_launch_transaction_id)
+            if expert_team_launch_transaction_id is not None
+            else None
+        )
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -772,6 +803,25 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # Compare the durable sidecar before mutating any in-memory field.  A
+        # stale writer must fail without changing either disk truth or the
+        # caller's timestamp, so the caller can safely reload and retry.
+        existing_text = None
+        expected_digest = getattr(self, '_loaded_sidecar_sha256', None)
+        if self.path.exists():
+            existing_text = self.path.read_text(encoding='utf-8')
+            current_digest = hashlib.sha256(existing_text.encode('utf-8')).hexdigest()
+            if expected_digest is None or current_digest != expected_digest:
+                raise SessionWriteConflict(
+                    f"Session {self.session_id!r} changed on disk; reload before saving"
+                )
+        elif expected_digest is not None:
+            # This object previously observed a durable sidecar.  Its absence
+            # is itself a newer state (normally DELETE), never permission for a
+            # delayed worker in this or another process to recreate the sid.
+            raise SessionWriteConflict(
+                f"Session {self.session_id!r} was deleted; refusing stale resurrection"
+            )
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -796,6 +846,8 @@ class Session:
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'privacy_context',
+            'expert_team_start_transaction_ids',
+            'expert_team_launch_transaction_id',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -821,8 +873,7 @@ class Session:
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
         try:
-            if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
+            if existing_text is not None:
                 try:
                     existing = json.loads(existing_text)
                     existing_msg_count = len(existing.get('messages') or [])
@@ -864,6 +915,14 @@ class Session:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
+            self._loaded_sidecar_sha256 = hashlib.sha256(
+                payload.encode('utf-8')
+            ).hexdigest()
+            # A full Session instance is now the source of the committed
+            # transcript. Keep its compact/index hint in sync with the payload
+            # just written; otherwise a cold-loaded zero-message Session that
+            # appends rows can publish a stale sidebar count.
+            self._metadata_message_count = len(self.messages or [])
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -880,27 +939,48 @@ class Session:
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
         if not is_safe_session_id(sid):
             return None
-        p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
-            return None
-        data = json.loads(p.read_text(encoding='utf-8'))
-        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
-        session = cls(**data)
-        # A coordinated sidecar/state.db transcript rewrite may be interrupted
-        # by process death after only one store commits.  This is transaction
-        # crash recovery (not legacy-history migration): the durable marker
-        # contains only before/target hashes, and recovery proceeds solely when
-        # the two stores prove an unambiguous roll-forward/complete/abort state.
-        _recover_truth_rewrite_on_full_read(session)
-        if _collapsed_partials:
-            try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
-                session.save(touch_updated_at=False, skip_index=True)
-            except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
-        return session
+        from api.legacy_session_migration import legacy_migration_state_guard
+        from api.truth_rewrite import truth_rewrite_lock
+
+        # Bind the returned object and its CAS digest to one coherent sidecar
+        # snapshot.  Recovery and duplicate-partial self-healing can re-enter
+        # these guards, but no concurrent writer may publish B between reading
+        # A and returning an object that still represents A.
+        with legacy_migration_state_guard(), truth_rewrite_lock(sid):
+            p = SESSION_DIR / f'{sid}.json'
+            if not p.exists():
+                return None
+            source_text = p.read_text(encoding='utf-8')
+            data = json.loads(source_text)
+            # Preserve the raw durable sequence shapes before Session.__init__
+            # normalizes legacy/corrupt values.  Destructive recovery paths
+            # need to distinguish a proven empty list from an object that the
+            # in-memory model would otherwise turn into ``[]``.
+            raw_sequence_shapes = {
+                field: isinstance(data.get(field), list)
+                for field in ('messages', 'context_messages')
+            }
+            data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+            session = cls(**data)
+            session._loaded_raw_sequence_shapes = raw_sequence_shapes
+            session._loaded_sidecar_sha256 = hashlib.sha256(
+                source_text.encode('utf-8')
+            ).hexdigest()
+            # A coordinated sidecar/state.db transcript rewrite may be interrupted
+            # by process death after only one store commits.  This is transaction
+            # crash recovery (not legacy-history migration): the durable marker
+            # contains only before/target hashes, and recovery proceeds solely when
+            # the two stores prove an unambiguous roll-forward/complete/abort state.
+            _recover_truth_rewrite_on_full_read(session)
+            if _collapsed_partials:
+                try:
+                    # Self-heal bloated sessions on first full load without touching
+                    # recency/index ordering; save() creates a .bak because this
+                    # intentionally shrinks the transcript (#2592).
+                    session.save(touch_updated_at=False, skip_index=True)
+                except Exception:
+                    logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+            return session
 
     @classmethod
     def load_metadata_only(cls, sid):
@@ -951,6 +1031,10 @@ class Session:
             # session must reload it with metadata_only=False first.
             # See #1558 — v0.50.279 _clear_stale_stream_state() data-loss bug.
             session._loaded_metadata_only = True
+            try:
+                session._loaded_sidecar_sha256 = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                pass
             return session
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
@@ -983,6 +1067,10 @@ class Session:
             'archived': self.archived,
             'project_id': self.project_id,
             'profile': self.profile,
+            'expert_team_start_transaction_ids': copy.deepcopy(
+                self.expert_team_start_transaction_ids
+            ),
+            'expert_team_launch_transaction_id': self.expert_team_launch_transaction_id,
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
@@ -2422,7 +2510,17 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None):
+def new_session(
+    workspace=None,
+    model=None,
+    profile=None,
+    model_provider=None,
+    project_id=None,
+    worktree_info=None,
+    *,
+    session_id=None,
+    expert_team_launch_transaction_id=None,
+):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -2465,6 +2563,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
+        session_id=session_id,
         workspace=workspace_path or get_last_workspace(),
         model=effective_model,
         model_provider=effective_model_provider,
@@ -2475,6 +2574,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
+        expert_team_launch_transaction_id=expert_team_launch_transaction_id,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
@@ -2697,6 +2797,7 @@ def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
 def _strip_sidebar_internal_flags(sessions: list[dict]) -> None:
     for session in sessions:
         session.pop('_show_pre_compression_snapshot', None)
+        session.pop('expert_team_launch_transaction_id', None)
 
 
 def _row_may_need_sidecar_metadata_refresh(session: dict) -> bool:
@@ -2896,6 +2997,43 @@ def _diag_stage(diag, name: str) -> None:
             pass
 
 
+def _filter_uncommitted_expert_team_launches(rows: list[dict]) -> list[dict]:
+    """Keep globally reserved portal launches out of every sidebar source.
+
+    The reverse binding is authoritative instead of a compact Session field so
+    the same gate also covers rows reintroduced from state.db/CLI metadata.
+    Ordinary Sessions have no binding and preserve their historical behavior.
+    """
+    try:
+        from api.expert_teams.launch_storage import (
+            hidden_session_ids,
+            is_launch_marker_committed,
+        )
+
+        hidden = hidden_session_ids()
+    except Exception:
+        logger.warning(
+            "failed to load expert-team launch visibility bindings",
+            exc_info=True,
+        )
+        # The sidebar merges sidecars with state.db/CLI rows.  A state.db row
+        # does not necessarily carry the private launch marker, so retaining
+        # "ordinary-looking" rows here would make a broken registry a public
+        # visibility bypass.  Fail closed for this projection; the HTTP route
+        # returns a diagnosable 503 instead of an incomplete/unsafe list.
+        return []
+    visible = []
+    for row in rows:
+        session_id = str(row.get("session_id") or "")
+        if session_id in hidden:
+            continue
+        marker = str(row.get("expert_team_launch_transaction_id") or "")
+        if marker and not is_launch_marker_committed(session_id, marker):
+            continue
+        visible.append(row)
+    return visible
+
+
 def all_sessions(diag=None):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
@@ -2927,6 +3065,26 @@ def all_sessions(diag=None):
                 )
             ]
             backfilled = []
+            # `_index.json` is a rebuildable projection, not durable Session
+            # truth.  Writers in separate desktop/server processes do not
+            # share `_INDEX_WRITE_LOCK`; a stale incremental writer can replace
+            # the file after another process commits a new sidecar.  Discover
+            # any canonical sidecars missing from the projection so a
+            # successful launch cannot disappear from a sibling process'
+            # sidebar.  Only missing rows are parsed, keeping the normal O(1)
+            # index path unchanged.
+            indexed_ids = {
+                str(row.get('session_id') or '')
+                for row in index
+                if isinstance(row, dict)
+            }
+            for missing_sid in sorted(persisted_ids - indexed_ids - in_memory_ids):
+                _diag_stage(diag, "all_sessions.repair_missing_index_row")
+                sidecar = Session.load_metadata_only(missing_sid)
+                if sidecar is None:
+                    continue
+                index.append(sidecar.compact())
+                backfilled.append(sidecar)
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:
                     _diag_stage(diag, "all_sessions.backfill_load")
@@ -2987,6 +3145,7 @@ def all_sessions(diag=None):
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
             result = _preserve_messageful_sidebar_discoverability(sidebar_candidates, visible_result)
             result = _include_project_hidden_background_sidebar_sessions(sidebar_candidates, result)
+            result = _filter_uncommitted_expert_team_launches(result)
             _strip_sidebar_internal_flags(result)
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
@@ -3028,6 +3187,7 @@ def all_sessions(diag=None):
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
     result = _preserve_messageful_sidebar_discoverability(sidebar_candidates, visible_result)
     result = _include_project_hidden_background_sidebar_sessions(sidebar_candidates, result)
+    result = _filter_uncommitted_expert_team_launches(result)
     _strip_sidebar_internal_flags(result)
     for s in result:
         if not s.get('profile'):

@@ -87,30 +87,15 @@ def test_off_keeps_legacy_start_and_rejects_forged_v1_without_writing(monkeypatc
     assert sorted(tmp_path.rglob("*.json")) == before
 
 
-def test_pilot_allows_only_exact_team_document_pairs_and_catalog_capabilities(monkeypatch, tmp_path):
+def test_pilot_keeps_explicit_v1_compatibility_without_leaking_into_standalone_catalog(monkeypatch, tmp_path):
     from api import expert_teams
     from api.expert_teams.contracts import ContractError
 
     monkeypatch.setenv("TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT", "pilot")
     catalog = expert_teams.expert_team_catalog()
-    rollout = catalog["contract_rollout"]
-    assert (rollout["effective_mode"], rollout["effective_source"]) == ("pilot", "environment")
-    assert rollout["allowed_combinations"] == [
-        {
-            "team_id": "content-creator-team",
-            "document_type": "work_report",
-            "intake_example_id": "work_report",
-            "capability": "enterprise_contract_pilot",
-            "label": "企业合同试点",
-        },
-        {
-            "team_id": "deep-research-team",
-            "document_type": "research_report",
-            "intake_example_id": "research_report",
-            "capability": "enterprise_contract_pilot",
-            "label": "企业合同试点",
-        },
-    ]
+    assert catalog["product_mode"] == "standalone"
+    assert "contract_rollout" not in catalog
+    assert "企业合同试点" not in json.dumps(catalog, ensure_ascii=False)
 
     work = expert_teams.start_expert_team(tmp_path, _v1_payload())
     research = expert_teams.start_expert_team(

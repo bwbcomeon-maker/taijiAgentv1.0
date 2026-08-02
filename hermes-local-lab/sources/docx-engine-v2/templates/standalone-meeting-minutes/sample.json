@@ -1,0 +1,18 @@
+{
+  "document": {
+    "title": "专题会议纪要",
+    "subtitle": "会议纪要",
+    "versionLabel": "",
+    "documentDate": ""
+  },
+  "sections": [
+    {
+      "sectionId": "sec-1",
+      "title": "会议基本情况",
+      "paragraphs": [{"text": "会议基本信息需以用户确认内容为准。"}]
+    }
+  ],
+  "tables": [],
+  "figures": [],
+  "images": []
+}

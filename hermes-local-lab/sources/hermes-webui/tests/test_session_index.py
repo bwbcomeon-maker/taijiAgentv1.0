@@ -11,9 +11,11 @@ Validates:
   - Deadlock guard on fallback path
 """
 import json
+import multiprocessing
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -738,8 +740,12 @@ def test_concurrent_saves_dont_lose_data():
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
     sB = _make_session("sess_b", "Bravo", updated_at=200.0)
 
+    # Seed both sidecars through the production writer so the in-memory
+    # instances carry the source digest required by Session.save() CAS.
+    # Writing ``__dict__`` directly would create files the instances never
+    # observed and correctly makes them stale writers.
     for s in (sA, sB):
-        s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+        s.save(touch_updated_at=False, skip_index=True)
 
     # Build initial index
     _write_session_index(updates=None)
@@ -784,6 +790,162 @@ def test_concurrent_saves_dont_lose_data():
     assert "sess_b" in index_map, "Session B should be in index"
     assert index_map["sess_a"]["title"] == "Alpha V2", "Session A title should be updated"
     assert index_map["sess_b"]["title"] == "Bravo V2", "Session B title should be updated"
+
+
+def test_full_load_never_binds_stale_object_to_newer_sidecar_digest(monkeypatch):
+    """A load racing a writer must return one coherent object/digest pair.
+
+    Reproduces the dangerous A-read -> B-write -> B-digest window.  The
+    scheduler adapts only to whether the loader already owns the shared writer
+    lock, then always proves that the returned object cannot overwrite B.
+    """
+    import api.config as config
+    import api.truth_rewrite as truth_rewrite
+
+    monkeypatch.setattr(config, "SESSION_DIR", models.SESSION_DIR)
+    original = _make_session("load_cas_race", "Version A", updated_at=100.0)
+    original.save(touch_updated_at=False, skip_index=True)
+    writer = Session.load(original.session_id)
+    assert writer is not None
+
+    first_read = threading.Event()
+    release_first_read = threading.Event()
+    loader_lock_acquired = threading.Event()
+    writer_lock_acquired = threading.Event()
+    allow_writer_body = threading.Event()
+    writer_done = threading.Event()
+    loader_result = []
+    errors = []
+    target_path = original.path
+    original_read_text = Path.read_text
+    original_lock = truth_rewrite.truth_rewrite_lock
+    intercepted = False
+
+    def delayed_read_text(path, *args, **kwargs):
+        nonlocal intercepted
+        value = original_read_text(path, *args, **kwargs)
+        if (
+            Path(path) == target_path
+            and threading.current_thread().name == "stale-loader"
+            and not intercepted
+        ):
+            intercepted = True
+            first_read.set()
+            assert release_first_read.wait(5)
+        return value
+
+    @contextmanager
+    def observed_lock(session_id, **kwargs):
+        with original_lock(session_id, **kwargs):
+            thread_name = threading.current_thread().name
+            if thread_name == "stale-loader":
+                loader_lock_acquired.set()
+            elif thread_name == "newer-writer":
+                writer_lock_acquired.set()
+                assert allow_writer_body.wait(5)
+            yield
+
+    monkeypatch.setattr(Path, "read_text", delayed_read_text)
+    monkeypatch.setattr(truth_rewrite, "truth_rewrite_lock", observed_lock)
+
+    def load_stale_candidate():
+        try:
+            loader_result.append(Session.load(original.session_id))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def write_newer_version():
+        try:
+            writer.title = "Version B"
+            writer.updated_at = 200.0
+            writer.save(touch_updated_at=False, skip_index=True)
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            writer_done.set()
+
+    loader_thread = threading.Thread(
+        target=load_stale_candidate,
+        name="stale-loader",
+        daemon=True,
+    )
+    loader_thread.start()
+    assert first_read.wait(5)
+
+    writer_thread = threading.Thread(
+        target=write_newer_version,
+        name="newer-writer",
+        daemon=True,
+    )
+    writer_thread.start()
+    if loader_lock_acquired.is_set():
+        # Fixed implementation: let the coherent A load release its lock, then
+        # commit B before attempting to save the returned A object.
+        release_first_read.set()
+        assert writer_lock_acquired.wait(5)
+        allow_writer_body.set()
+    else:
+        # Vulnerable implementation: commit B while the loader still holds A.
+        assert writer_lock_acquired.wait(5)
+        allow_writer_body.set()
+        assert writer_done.wait(5)
+        release_first_read.set()
+
+    loader_thread.join(timeout=5)
+    writer_thread.join(timeout=5)
+    assert not loader_thread.is_alive()
+    assert not writer_thread.is_alive()
+    assert not errors
+    assert len(loader_result) == 1 and loader_result[0] is not None
+
+    stale_candidate = loader_result[0]
+    stale_candidate.title = "Version C"
+    with pytest.raises(models.SessionWriteConflict):
+        stale_candidate.save(touch_updated_at=False, skip_index=True)
+    assert json.loads(target_path.read_text(encoding="utf-8"))["title"] == "Version B"
+
+
+def test_writer_reentrancy_identity_includes_resolved_session_store(monkeypatch, tmp_path):
+    """The same sid in two storage roots must acquire two distinct OS locks."""
+    import api.config as config
+    import api.truth_rewrite as truth_rewrite
+
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    acquired = []
+    original_acquire = truth_rewrite._acquire_process_file_lock
+
+    def observed_acquire(fd, deadline):
+        acquired.append(fd)
+        return original_acquire(fd, deadline)
+
+    monkeypatch.setattr(truth_rewrite, "_acquire_process_file_lock", observed_acquire)
+    monkeypatch.setattr(config, "SESSION_DIR", first_root)
+    with truth_rewrite.truth_rewrite_lock("same-session-id"):
+        monkeypatch.setattr(config, "SESSION_DIR", second_root)
+        with truth_rewrite.truth_rewrite_lock("same-session-id"):
+            pass
+
+    assert len(acquired) == 2
+
+
+def test_stale_loaded_session_cannot_resurrect_deleted_sidecar():
+    """A durable delete is a CAS conflict, not permission to recreate a sid."""
+    original = _make_session("deleted_cas_session", "Before delete", updated_at=100.0)
+    original.save(touch_updated_at=False, skip_index=True)
+    stale = Session.load(original.session_id)
+    assert stale is not None
+    assert stale._loaded_sidecar_sha256
+
+    original.path.unlink()
+    stale.title = "Resurrected by stale worker"
+
+    with pytest.raises(models.SessionWriteConflict):
+        stale.save(touch_updated_at=False, skip_index=True)
+
+    assert original.path.exists() is False
 
 
 # ── 11. test_atomic_write_no_tmp_remains ─────────────────────────────────
@@ -953,3 +1115,72 @@ def test_all_sessions_ignores_stale_index_entries():
     ids = {e["session_id"] for e in rows}
     assert "sess_a" in ids
     assert "ghost_sid" not in ids
+
+
+def test_all_sessions_repairs_distinct_cross_process_index_updates(
+    monkeypatch,
+):
+    """Canonical sidecars remain discoverable after sibling index writers race.
+
+    The index is explicitly a rebuildable projection.  Separate processes do
+    not share the module's thread lock, so two stale read-modify-replace writes
+    can temporarily leave one row out.  A fresh reader must reconcile the
+    missing canonical sidecar and repair the projection in the same pass.
+    """
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("deterministic cross-process index race requires POSIX fork")
+
+    index_file = models.SESSION_INDEX_FILE
+    sessions = [
+        _make_session("cross_process_a", "Cross process A", updated_at=100.0),
+        _make_session("cross_process_b", "Cross process B", updated_at=200.0),
+    ]
+    for session in sessions:
+        session.path.write_text(
+            json.dumps(session.__dict__, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    _write_index_file(index_file, [])
+
+    ctx = multiprocessing.get_context("fork")
+    both_read_empty_index = ctx.Barrier(2)
+    original_json_loads = models.json.loads
+
+    def synchronized_first_index_parse(value, *args, **kwargs):
+        parsed = original_json_loads(value, *args, **kwargs)
+        both_read_empty_index.wait(timeout=10)
+        return parsed
+
+    monkeypatch.setattr(models.json, "loads", synchronized_first_index_parse)
+
+    def write_one(session_id, title, updated_at):
+        _write_session_index(
+            updates=[_make_session(session_id, title, updated_at=updated_at)]
+        )
+
+    processes = [
+        ctx.Process(
+            target=write_one,
+            args=(session.session_id, session.title, session.updated_at),
+        )
+        for session in sessions
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+
+    # Both canonical sidecars exist, while the stale projection race leaves a
+    # single row. Restore the parser before exercising normal read recovery.
+    monkeypatch.setattr(models.json, "loads", original_json_loads)
+    raw_ids = {row["session_id"] for row in _read_index(index_file)}
+    assert len(raw_ids) == 1
+    models.SESSIONS.clear()
+    models._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
+
+    visible_ids = {row["session_id"] for row in models.all_sessions()}
+    repaired_ids = {row["session_id"] for row in _read_index(index_file)}
+
+    assert visible_ids == {"cross_process_a", "cross_process_b"}
+    assert repaired_ids == {"cross_process_a", "cross_process_b"}

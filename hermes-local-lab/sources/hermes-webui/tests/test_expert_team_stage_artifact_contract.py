@@ -61,7 +61,7 @@ def _brief():
             "document_date": "2026-07-15",
         },
         "content_constraints": {
-            "required_sections": ["工作开展情况", "存在问题", "下一步工安排"],
+            "required_sections": ["工作开展情况", "存在问题", "下一步工作安排"],
             "must_include": [],
             "must_avoid": [],
         },
@@ -77,6 +77,11 @@ def _research_brief():
             "purpose": "支撑企业内部技术路线决策",
             "source_policy": {"mode": "provided_only", "as_of_date": "2026-07-15", "citation_style": "source_id"},
             "details": {"core_question": "如何落地", "time_range": {"start": "2025-01-01", "end": "2026-07-15"}},
+            "content_constraints": {
+                "required_sections": ["研究问题", "证据", "分析", "结论边界", "引用"],
+                "must_include": [],
+                "must_avoid": [],
+            },
         }
     )
     return brief
@@ -101,7 +106,7 @@ def _writing_plan_payload():
             },
             {
                 "section_id": "SEC-3",
-                "heading": "下一步工安排",
+                "heading": "下一步工作安排",
                 "purpose": "明确后续安排",
                 "required_fact_ids": [],
             },
@@ -192,7 +197,10 @@ def test_parser_rejects_duplicate_missing_or_extraneous_blocks(raw):
         parse_stage_response(raw, artifact_type=artifact_type, requires_document=requires_document)
 
 
-@pytest.mark.parametrize("phrase", ["负责专家", "Stage 4", "复核交付", "本阶段", "可直接生成 DOCX"])
+@pytest.mark.parametrize(
+    "phrase",
+    ["负责专家", "Stage 4", "复核交付", "本阶段", "可直接生成 DOCX", "事实编号 fact_001"],
+)
 def test_document_purity_rejects_internal_workflow_language(phrase):
     from api.expert_teams.stage_artifacts import document_purity_issues
 
@@ -319,12 +327,76 @@ def test_research_charter_and_outline_use_exact_nested_schemas():
     assert artifact["validation_status"] == "valid"
 
     outline = {
-        "sections": [{"section_id": "SEC-1", "heading": "研究结论", "thesis": "先建受控数据边界", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []}],
+        "sections": [
+            {"section_id": "SEC-1", "heading": "研究问题", "thesis": "明确研究问题", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-2", "heading": "证据", "thesis": "列明证据基础", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-3", "heading": "分析", "thesis": "分析落地边界", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-4", "heading": "结论边界", "thesis": "限定结论适用范围", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+            {"section_id": "SEC-5", "heading": "引用", "thesis": "保留来源引用", "claim_ids": ["CLM-1"], "source_ids": ["SRC-001"], "open_questions": []},
+        ],
         "conclusion_boundaries": ["仅基于已提供资料"],
     }
     parsed = parse_stage_response(_raw("research_outline", outline), artifact_type="research_outline", requires_document=False)
     artifact = build_stage_artifact(parsed, stage_id="outline", stage_attempt=1, brief=_research_brief(), input_refs=[{"ref_type": "stage_artifact", "artifact_id": "evidence:1", "sha256": "d" * 64}], now="2026-07-15T10:00:00+08:00")
     assert artifact["payload"]["sections"][0]["claim_ids"] == ["CLM-1"]
+
+
+def test_research_document_rejects_duplicate_claim_usage_before_review():
+    from api.expert_teams.stage_artifacts import (
+        StageArtifactError,
+        build_stage_artifact,
+        parse_stage_response,
+    )
+
+    payload = {
+        "title": _research_brief()["exact_title"],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "研究问题"},
+            {"section_id": "SEC-2", "heading": "证据"},
+            {"section_id": "SEC-3", "heading": "分析"},
+            {"section_id": "SEC-4", "heading": "结论边界"},
+            {"section_id": "SEC-5", "heading": "引用"},
+        ],
+        "claim_usage": [
+            {
+                "claim_id": "CLM-1",
+                "section_id": "SEC-2",
+                "citation_marker": "[SRC-001]",
+            },
+            {
+                "claim_id": "CLM-1",
+                "section_id": "SEC-4",
+                "citation_marker": "[SRC-001]",
+            },
+        ],
+        "open_issues": [],
+    }
+    document = (
+        f"# {_research_brief()['exact_title']}\n\n"
+        "## 研究问题\n\n如何落地。\n\n"
+        "## 证据\n\n已核对来源。[SRC-001]\n\n"
+        "## 分析\n\n在来源边界内分析。\n\n"
+        "## 结论边界\n\n不外推。\n\n"
+        "## 引用\n\n[SRC-001]"
+    )
+    parsed = parse_stage_response(
+        _raw("research_document_draft", payload, document=document),
+        artifact_type="research_document_draft",
+        requires_document=True,
+    )
+
+    with pytest.raises(StageArtifactError) as duplicate:
+        build_stage_artifact(
+            parsed,
+            stage_id="draft",
+            stage_attempt=1,
+            brief=_research_brief(),
+            input_refs=[],
+            now="2026-07-15T10:00:00+08:00",
+        )
+
+    assert duplicate.value.code == "claim_usage_duplicate"
+    assert duplicate.value.field == "payload.claim_usage.1.claim_id"
 
 
 def test_source_register_and_evidence_matrix_are_enriched_from_snapshot():
@@ -357,7 +429,11 @@ def test_review_report_requires_exact_check_keys_and_open_issue_ids():
     payload = {
         "title": _brief()["exact_title"],
         "document_type": "work_report",
-        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
         "fact_usage": [],
         "asset_requests": [],
         "review_report": {
@@ -369,10 +445,99 @@ def test_review_report_requires_exact_check_keys_and_open_issue_ids():
         },
         "open_issues": [],
     }
-    parsed = parse_stage_response(_raw("reviewed_document", payload, document=f"# {_brief()['exact_title']}\n\n正文"), artifact_type="reviewed_document", requires_document=True)
+    parsed = parse_stage_response(
+        _raw(
+            "reviewed_document",
+            payload,
+            document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文\n\n## 存在问题\n\n当前资料未记录具体问题。\n\n## 下一步工作安排\n\n持续推进。",
+        ),
+        artifact_type="reviewed_document",
+        requires_document=True,
+    )
     with pytest.raises(StageArtifactError) as error:
         build_stage_artifact(parsed, stage_id="polish", stage_attempt=1, brief=_brief(), input_refs=[], now="2026-07-15T10:00:00+08:00")
     assert error.value.code == "review_checks_mismatch"
+
+
+def test_review_report_requires_exact_open_issue_projection():
+    from api.expert_teams.stage_artifacts import StageArtifactError, build_stage_artifact, parse_stage_response
+
+    open_issue = {
+        "issue_id": "G-001",
+        "severity": "warning",
+        "category": "evidence",
+        "section_id": "SEC-2",
+        "description": "问题数据仍需人工确认",
+        "resolution": None,
+        "status": "open",
+    }
+    payload = {
+        "title": _brief()["exact_title"],
+        "document_type": "work_report",
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
+        "fact_usage": [],
+        "asset_requests": [],
+        "review_report": {
+            "schema_version": "content-review-report/v1",
+            "checks": {
+                key: "passed"
+                for key in (
+                    "brief_alignment",
+                    "fact_traceability",
+                    "document_purity",
+                    "confidentiality",
+                    "document_structure",
+                )
+            },
+            "issues": [],
+            "change_summary": ["完成审稿"],
+            "unresolved_issue_ids": [],
+        },
+        "open_issues": [open_issue],
+    }
+    document = (
+        f"# {_brief()['exact_title']}\n\n"
+        "## 工作开展情况\n\n重点工作按计划推进。\n\n"
+        "## 存在问题\n\n问题数据需人工确认。\n\n"
+        "## 下一步工作安排\n\n持续推进重点任务。"
+    )
+
+    parsed = parse_stage_response(
+        _raw("reviewed_document", payload, document=document),
+        artifact_type="reviewed_document",
+        requires_document=True,
+    )
+    with pytest.raises(StageArtifactError) as missing_projection:
+        build_stage_artifact(
+            parsed,
+            stage_id="polish",
+            stage_attempt=1,
+            brief=_brief(),
+            input_refs=[],
+            now="2026-07-15T10:00:00+08:00",
+        )
+    assert missing_projection.value.code == "open_issue_projection_mismatch"
+
+    payload["review_report"]["issues"] = [dict(open_issue)]
+    payload["review_report"]["unresolved_issue_ids"] = [open_issue["issue_id"]]
+    parsed = parse_stage_response(
+        _raw("reviewed_document", payload, document=document),
+        artifact_type="reviewed_document",
+        requires_document=True,
+    )
+    artifact = build_stage_artifact(
+        parsed,
+        stage_id="polish",
+        stage_attempt=1,
+        brief=_brief(),
+        input_refs=[],
+        now="2026-07-15T10:00:00+08:00",
+    )
+    assert artifact["payload"]["review_report"]["issues"] == [open_issue]
 
 
 def test_delivery_manifest_rejects_unknown_fields_and_path_escape():
@@ -603,6 +768,177 @@ def test_contract_model_result_persists_raw_and_immutable_structured_artifact(tm
     assert reviewed["view"]["stage_result"]["artifact_type"] == "writing_plan"
 
 
+@pytest.mark.parametrize(
+    ("artifact_type", "payload", "expected_texts"),
+    [
+        (
+            "writing_plan",
+            _writing_plan_payload(),
+            ("形成面向管理层的月度汇报", "工作开展情况", "重点指标完成情况", "标题与规格一致"),
+        ),
+        (
+            "material_ledger",
+            {
+                "source_assessments": [
+                    {
+                        "source_id": "SRC-001",
+                        "evidence_grade": "A",
+                        "applicability": "包含本月完成率",
+                        "status": "included",
+                        "exclusion_reason": None,
+                    }
+                ],
+                "facts": [
+                    {
+                        "fact_id": "FACT-1",
+                        "statement": "重点指标完成率为98.7%",
+                        "evidence_refs": [],
+                        "status": "verified",
+                    }
+                ],
+                "gaps": [
+                    {
+                        "gap_id": "GAP-1",
+                        "question": "缺少问题原因分析",
+                        "required": True,
+                        "blocks_final": False,
+                        "reason": "当前资料未覆盖",
+                        "resolution_status": "open",
+                        "source_ids": [],
+                    }
+                ],
+            },
+            ("包含本月完成率", "重点指标完成率为98.7%", "缺少问题原因分析"),
+        ),
+        (
+            "research_charter",
+            {
+                "core_question": "本地优先 AI 助理如何落地",
+                "decision_to_support": "是否进入试点",
+                "scope_in": ["企业办公"],
+                "scope_out": ["消费娱乐"],
+                "time_range": {"start": "2025-01-01", "end": "2026-07-27"},
+                "source_policy": {"mode": "provided_only", "as_of_date": "2026-07-27", "citation_style": "footnote"},
+                "subquestions": ["部署成本如何"],
+                "evaluation_criteria": ["数据安全"],
+                "stop_conditions": ["证据不足时停止下结论"],
+            },
+            ("本地优先 AI 助理如何落地", "是否进入试点", "企业办公", "数据安全"),
+        ),
+        (
+            "source_register",
+            {
+                "source_assessments": [
+                    {
+                        "source_id": "SRC-001",
+                        "evidence_grade": "A",
+                        "applicability": "属于权威一手资料",
+                        "status": "included",
+                        "exclusion_reason": None,
+                    }
+                ],
+                "search_gaps": [
+                    {
+                        "gap_id": "GAP-1",
+                        "question": "缺少成本对比资料",
+                        "required": True,
+                        "blocks_final": False,
+                        "reason": "现有资料范围不足",
+                        "resolution_status": "open",
+                        "source_ids": [],
+                    }
+                ],
+            },
+            ("属于权威一手资料", "缺少成本对比资料"),
+        ),
+        (
+            "evidence_matrix",
+            {
+                "claims": [
+                    {
+                        "claim_id": "CLAIM-1",
+                        "statement": "本地部署可降低敏感数据外传风险",
+                        "claim_type": "judgment",
+                        "evidence": [],
+                        "status": "insufficient",
+                    }
+                ],
+                "contradictions": [
+                    {
+                        "contradiction_id": "CONTRA-1",
+                        "claim_id": "CLAIM-1",
+                        "source_ids": ["SRC-001", "SRC-002"],
+                        "description": "不同资料对总体成本判断不一致",
+                        "resolution_status": "open",
+                        "resolution": None,
+                        "chosen_source_ids": [],
+                    }
+                ],
+                "gaps": [
+                    {
+                        "gap_id": "GAP-1",
+                        "question": "缺少三年运维成本数据",
+                        "required": True,
+                        "blocks_final": False,
+                        "reason": "当前证据不足",
+                        "resolution_status": "open",
+                        "source_ids": [],
+                    }
+                ],
+            },
+            ("本地部署可降低敏感数据外传风险", "不同资料对总体成本判断不一致", "缺少三年运维成本数据"),
+        ),
+        (
+            "research_outline",
+            {
+                "sections": [
+                    {
+                        "section_id": "SEC-1",
+                        "heading": "技术路线比较",
+                        "thesis": "本地优先更适合敏感办公场景",
+                        "claim_ids": ["CLAIM-1"],
+                        "source_ids": ["SRC-001"],
+                        "open_questions": ["推理成本仍需核实"],
+                    }
+                ],
+                "conclusion_boundaries": ["不推断未获证据支持的节省比例"],
+            },
+            ("技术路线比较", "本地优先更适合敏感办公场景", "推理成本仍需核实", "不推断未获证据支持的节省比例"),
+        ),
+    ],
+)
+def test_structured_stage_artifacts_project_user_readable_review_content(
+    artifact_type,
+    payload,
+    expected_texts,
+):
+    from api.expert_teams.view import _enterprise_stage_result
+
+    artifact = {
+        "artifact_id": "stage:1",
+        "sha256": "a" * 64,
+        "stage_id": "stage",
+        "artifact_type": artifact_type,
+        "stage_attempt": 1,
+        "summary": "阶段产物已生成。",
+        "payload": payload,
+        "deliverable_markdown": None,
+        "validation_status": "valid",
+        "blocking_issues": [],
+    }
+    result = _enterprise_stage_result(
+        {
+            "stage_artifacts": [artifact],
+            "current_stage_artifact_ref": {"artifact_id": "stage:1", "sha256": "a" * 64},
+        }
+    )
+
+    for expected in expected_texts:
+        assert expected in result["content"]
+    for forbidden in ("section_plan", "fact_requirements", "source_assessments", "<<<TAIJI_META_V1>>>"):
+        assert forbidden not in result["content"]
+
+
 def test_contract_approval_requires_trusted_identity_and_records_safe_snapshot(monkeypatch, tmp_path):
     from api import expert_teams
     from api.expert_teams import trusted_identity
@@ -717,7 +1053,11 @@ def test_approved_reviewed_document_alone_sets_canonical_pointer_and_waits_for_d
     payload = {
         "title": _brief()["exact_title"],
         "document_type": "work_report",
-        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
         "fact_usage": [],
         "asset_requests": [],
         "review_report": {
@@ -732,7 +1072,7 @@ def test_approved_reviewed_document_alone_sets_canonical_pointer_and_waits_for_d
     raw = _raw(
         "reviewed_document",
         payload,
-        document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n重点任务按计划推进。",
+        document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n重点任务按计划推进。\n\n## 存在问题\n\n当前资料未记录具体问题。\n\n## 下一步工作安排\n\n持续推进重点任务。",
     )
     reviewed = expert_teams.mark_expert_team_execution_complete(
         tmp_path,
@@ -810,7 +1150,11 @@ def test_system_delivery_dispatch_never_uses_gateway_and_production_adapter_is_c
     )
     payload = {
         "title": _brief()["exact_title"], "document_type": "work_report",
-        "section_map": [{"section_id": "SEC-1", "heading": "工作开展情况"}],
+        "section_map": [
+            {"section_id": "SEC-1", "heading": "工作开展情况"},
+            {"section_id": "SEC-2", "heading": "存在问题"},
+            {"section_id": "SEC-3", "heading": "下一步工作安排"},
+        ],
         "fact_usage": [], "asset_requests": [],
         "review_report": {
             "schema_version": "content-review-report/v1",
@@ -821,7 +1165,7 @@ def test_system_delivery_dispatch_never_uses_gateway_and_production_adapter_is_c
     }
     reviewed = expert_teams.mark_expert_team_execution_complete(
         tmp_path, run["run_id"],
-        {"stream_id": generating["execution_stream_id"], "stage_id": "polish", "attempt": generating["execution_attempt"], "id": "review-system", "kind": "chat", "content": _raw("reviewed_document", payload, document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文。")},
+        {"stream_id": generating["execution_stream_id"], "stage_id": "polish", "attempt": generating["execution_attempt"], "id": "review-system", "kind": "chat", "content": _raw("reviewed_document", payload, document=f"# {_brief()['exact_title']}\n\n## 工作开展情况\n\n正文。\n\n## 存在问题\n\n当前资料未记录具体问题。\n\n## 下一步工作安排\n\n持续推进。")},
     )
     resolver = trusted_identity.TrustedIdentityResolver({"enabled": False}, production=False)
     resolver._config = {"enabled": True}
@@ -926,7 +1270,13 @@ def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_cha
         "summary": "研究报告已复核",
         "payload": {
             "title": brief["exact_title"],
-            "section_map": [{"section_id": "SEC-1", "heading": "研究结论"}],
+            "section_map": [
+                {"section_id": "SEC-1", "heading": "研究问题"},
+                {"section_id": "SEC-2", "heading": "证据"},
+                {"section_id": "SEC-3", "heading": "分析"},
+                {"section_id": "SEC-4", "heading": "结论边界"},
+                {"section_id": "SEC-5", "heading": "引用"},
+            ],
             "claim_usage": [],
             "review_report": {
                 "schema_version": "research-review-report/v1",
@@ -939,7 +1289,7 @@ def test_research_hidden_delivery_descriptor_reserves_system_attempt_without_cha
             },
             "open_issues": [],
         },
-        "deliverable_markdown": f"# {brief['exact_title']}\n\n## 研究结论\n\n本报告形成受控研究结论。",
+        "deliverable_markdown": f"# {brief['exact_title']}\n\n## 研究问题\n\n研究企业 AI 办公落地。\n\n## 证据\n\n基于已提供资料。\n\n## 分析\n\n分析受控数据边界。\n\n## 结论边界\n\n结论仅适用于已核对资料。\n\n## 引用\n\n[SRC-001]。",
         "blocking_issues": [],
         "created_at": "2026-07-15T10:00:00+08:00",
         "validation_status": "valid",

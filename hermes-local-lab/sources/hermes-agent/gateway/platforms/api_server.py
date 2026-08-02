@@ -79,6 +79,79 @@ CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 PUBLIC_SESSION_STREAM_ERROR_MESSAGE = "太极 Agent 处理本次会话时出现错误，请稍后重试或导出诊断报告。"
+STRICT_EXPERT_EXECUTION_FIELD = "taiji_expert_execution"
+STRICT_EXPERT_EXECUTION_CONTRACT_VERSION = "taiji.expert-team-execution/v1"
+_STRICT_EXPERT_EXECUTION_BOUND_FIELDS = (
+    "model",
+    "provider",
+    "messages",
+    "platform_message_id",
+    "tools",
+    "tool_choice",
+    "stream",
+)
+
+
+def build_strict_expert_execution_binding(body: Dict[str, Any]) -> Dict[str, str]:
+    """Bind an explicit expert-team strict request to its exact model payload.
+
+    Standard OpenAI ``tools=[]`` / ``tool_choice='none'`` fields only disable
+    tools.  They are deliberately insufficient to opt an ordinary client into
+    the isolated, single-call expert-team execution contract.
+    """
+    payload = {
+        key: body[key]
+        for key in _STRICT_EXPERT_EXECUTION_BOUND_FIELDS
+        if key in body
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return {
+        "contract_version": STRICT_EXPERT_EXECUTION_CONTRACT_VERSION,
+        "request_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _validate_strict_expert_execution_binding(
+    body: Dict[str, Any],
+) -> tuple[bool, Optional["web.Response"]]:
+    marker = body.get(STRICT_EXPERT_EXECUTION_FIELD)
+    if marker is None:
+        return False, None
+    if not isinstance(marker, dict) or set(marker) != {
+        "contract_version",
+        "request_sha256",
+    }:
+        return False, web.json_response(
+            _openai_error(
+                "Expert-team strict execution binding is invalid",
+                err_type="invalid_request_error",
+                code="invalid_expert_execution_binding",
+            ),
+            status=400,
+        )
+    try:
+        expected = build_strict_expert_execution_binding(body)
+    except (TypeError, ValueError):
+        expected = {}
+    if not expected or not hmac.compare_digest(
+        json.dumps(marker, sort_keys=True, separators=(",", ":")),
+        json.dumps(expected, sort_keys=True, separators=(",", ":")),
+    ):
+        return False, web.json_response(
+            _openai_error(
+                "Expert-team strict execution binding does not match the request",
+                err_type="invalid_request_error",
+                code="expert_execution_binding_mismatch",
+            ),
+            status=400,
+        )
+    return True, None
 
 
 def _structured_tool_result_for_gateway(tool_name: str, result: Any) -> Dict[str, Any] | None:
@@ -735,6 +808,23 @@ def _public_agent_stream_error(raw_message: str) -> Dict[str, str]:
     }
 
 
+def _strict_agent_result_is_authoritative(result: Any) -> bool:
+    """Return True only for one complete strict Provider response."""
+    if not isinstance(result, dict):
+        return False
+    final_response = result.get("final_response")
+    return bool(
+        result.get("completed") is True
+        and result.get("failed") is not True
+        and result.get("partial") is not True
+        and result.get("interrupted") is not True
+        and not result.get("error")
+        and result.get("api_calls") == 1
+        and isinstance(final_response, str)
+        and final_response.strip()
+    )
+
+
 if AIOHTTP_AVAILABLE:
     @web.middleware
     async def body_limit_middleware(request, handler):
@@ -1320,6 +1410,8 @@ class APIServerAdapter(BasePlatformAdapter):
         requested_model: Optional[str] = None,
         requested_provider: Optional[str] = None,
         resolved_route: Optional[Dict[str, Any]] = None,
+        tools_disabled: bool = False,
+        strict_execution: bool = False,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1349,17 +1441,23 @@ class APIServerAdapter(BasePlatformAdapter):
         model = route["model"]
 
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        if strict_execution and not tools_disabled:
+            raise ValueError("strict expert execution requires tools to be disabled")
+        enabled_toolsets = [] if tools_disabled else sorted(
+            _get_platform_tools(user_config, "api_server")
+        )
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
         agent = AIAgent(
             model=model,
             **runtime_kwargs,
-            max_iterations=max_iterations,
+            max_iterations=1 if strict_execution else max_iterations,
             quiet_mode=True,
             verbose_logging=False,
-            ephemeral_system_prompt=ephemeral_system_prompt or None,
+            ephemeral_system_prompt=(
+                None if strict_execution else ephemeral_system_prompt or None
+            ),
             enabled_toolsets=enabled_toolsets,
             session_id=session_id,
             platform="api_server",
@@ -1367,10 +1465,14 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
-            session_db=self._ensure_session_db(),
-            fallback_model=route["fallback_model"],
+            session_db=None if strict_execution else self._ensure_session_db(),
+            fallback_model=None if strict_execution else route["fallback_model"],
             reasoning_config=reasoning_config,
-            gateway_session_key=gateway_session_key,
+            gateway_session_key=None if strict_execution else gateway_session_key,
+            exact_system_prompt=strict_execution,
+            tools_disabled=tools_disabled,
+            skip_context_files=strict_execution,
+            skip_memory=strict_execution,
         )
         return agent
 
@@ -2157,6 +2259,64 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
+        strict_execution, strict_binding_err = (
+            _validate_strict_expert_execution_binding(body)
+        )
+        if strict_binding_err is not None:
+            return strict_binding_err
+
+        tools_declared = "tools" in body
+        tool_choice_declared = "tool_choice" in body
+        tools_disabled = body.get("tools") == [] and body.get("tool_choice") == "none"
+        if (tools_declared or tool_choice_declared) and not tools_disabled:
+            # This API server does not implement caller-defined tools.  A strict
+            # zero-tools turn is accepted only when both OpenAI fields agree;
+            # partial/ambiguous disable requests fail before provider work.
+            if body.get("tools") == [] or body.get("tool_choice") == "none":
+                return web.json_response(
+                    _openai_error(
+                        "Disabling tools requires tools=[] and tool_choice='none' together",
+                        err_type="invalid_request_error",
+                        code="invalid_tools_disabled_contract",
+                    ),
+                    status=400,
+                )
+        if strict_execution and not tools_disabled:
+            return web.json_response(
+                _openai_error(
+                    "Expert-team strict execution requires tools=[] and tool_choice='none'",
+                    err_type="invalid_request_error",
+                    code="invalid_expert_execution_tools_contract",
+                ),
+                status=400,
+            )
+        if strict_execution:
+            strict_messages_valid = (
+                len(messages) == 2
+                and [
+                    item.get("role") if isinstance(item, dict) else None
+                    for item in messages
+                ]
+                == ["system", "user"]
+                and all(
+                    isinstance(item, dict)
+                    and set(item) == {"role", "content"}
+                    and isinstance(item.get("content"), str)
+                    and bool(item["content"].strip())
+                    for item in messages
+                )
+            )
+            if not strict_messages_valid:
+                return web.json_response(
+                    _openai_error(
+                        "Zero-tools requests require exactly one non-empty system "
+                        "message followed by one non-empty user message",
+                        err_type="invalid_request_error",
+                        code="invalid_strict_message_contract",
+                    ),
+                    status=400,
+                )
+
         stream = _coerce_request_bool(body.get("stream"), default=False)
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
@@ -2208,6 +2368,10 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        if strict_execution:
+            # A strict expert execution is isolated from ordinary conversation
+            # memory even if a caller tries to smuggle continuation headers.
+            gateway_session_key = None
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
@@ -2217,7 +2381,14 @@ class APIServerAdapter(BasePlatformAdapter):
         # authenticated.  Without this gate, any unauthenticated client could
         # read arbitrary session history by guessing/enumerating session IDs.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
-        if provided_session_id:
+        if strict_execution:
+            execution_identity = platform_message_id or uuid.uuid4().hex
+            strict_digest = hashlib.sha256(
+                f"strict-chat-completion-v1\0{execution_identity}".encode("utf-8")
+            ).hexdigest()[:32]
+            session_id = f"api-strict-{strict_digest}"
+            history = []
+        elif provided_session_id:
             if not self._api_key:
                 logger.warning(
                     "Session continuation via X-Hermes-Session-Id rejected: "
@@ -2355,6 +2526,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                requested_model=str(body.get("model") or "").strip() or None,
+                requested_provider=str(body.get("provider") or "").strip() or None,
+                tools_disabled=tools_disabled,
+                strict_execution=strict_execution,
                 **persist_kwargs,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
@@ -2365,6 +2540,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                strict_result_required=strict_execution,
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
@@ -2380,12 +2556,26 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                requested_model=str(body.get("model") or "").strip() or None,
+                requested_provider=str(body.get("provider") or "").strip() or None,
+                tools_disabled=tools_disabled,
+                strict_execution=strict_execution,
                 **persist_kwargs,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
         if idempotency_key:
-            fp = _make_request_fingerprint(body, keys=["model", "messages", "tools", "tool_choice", "stream"])
+            fp = _make_request_fingerprint(
+                body,
+                keys=[
+                    "model",
+                    "messages",
+                    "tools",
+                    "tool_choice",
+                    "stream",
+                    STRICT_EXPERT_EXECUTION_FIELD,
+                ],
+            )
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
@@ -2407,8 +2597,10 @@ class APIServerAdapter(BasePlatformAdapter):
         final_response = result.get("final_response") or ""
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
+        is_interrupted = bool(result.get("interrupted"))
         completed = bool(result.get("completed", True))
         err_msg = result.get("error")
+        api_calls = result.get("api_calls")
 
         # Decide finish_reason. OpenAI uses "length" for truncation, "stop"
         # for normal completion, and downstream SDKs accept "error" / custom
@@ -2425,6 +2617,25 @@ class APIServerAdapter(BasePlatformAdapter):
         }
         if gateway_session_key:
             response_headers["X-Hermes-Session-Key"] = gateway_session_key
+
+        strict_result_authoritative = _strict_agent_result_is_authoritative(result)
+        if strict_execution and not strict_result_authoritative:
+            err_body = _openai_error(
+                err_msg or "Strict expert execution did not complete authoritatively.",
+                err_type="server_error",
+                code="strict_execution_incomplete",
+            )
+            err_body["error"]["hermes"] = {
+                "authoritative": False,
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+                "interrupted": is_interrupted,
+                "api_calls": api_calls,
+            }
+            response_headers["X-Hermes-Completed"] = "false"
+            response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            return web.json_response(err_body, status=502, headers=response_headers)
 
         # Hard-fail path: no usable assistant text AND a real failure → 5xx
         # with OpenAI-style error envelope so SDK clients raise instead of
@@ -2487,6 +2698,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self, request: "web.Request", completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
         gateway_session_key: str = None,
+        strict_result_required: bool = False,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
 
@@ -2584,6 +2796,18 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
+                if (
+                    strict_result_required
+                    and not _strict_agent_result_is_authoritative(result)
+                ):
+                    error_payload = {
+                        "message": (
+                            str(result.get("error") or "").strip()
+                            or "Strict expert execution did not complete authoritatively."
+                        ),
+                        "type": "server_error",
+                        "code": "strict_execution_incomplete",
+                    }
             except Exception as exc:
                 error_payload = _public_agent_stream_error(str(exc))
                 logger.warning(
@@ -3906,6 +4130,10 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         persist_user_platform_message_id: Optional[str] = None,
+        requested_model: Optional[str] = None,
+        requested_provider: Optional[str] = None,
+        tools_disabled: bool = False,
+        strict_execution: bool = False,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3929,6 +4157,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
+                requested_model=requested_model,
+                requested_provider=requested_provider,
+                tools_disabled=tools_disabled,
+                strict_execution=strict_execution,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
@@ -3938,6 +4170,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "conversation_history": conversation_history,
                 "task_id": effective_task_id,
             }
+            if strict_execution:
+                conversation_kwargs["system_message"] = ephemeral_system_prompt
             if persist_user_platform_message_id:
                 conversation_kwargs["persist_user_platform_message_id"] = (
                     persist_user_platform_message_id

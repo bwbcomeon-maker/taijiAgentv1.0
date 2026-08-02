@@ -96,6 +96,31 @@ test('normalizeMarkdownSource gives markdownText precedence over legacy markdown
   assert.equal(source.title, '正式参数标题');
 });
 
+test('normalizeMarkdownSource keeps raw markdown trace while exposing clean document text', async () => {
+  const source = await normalizeMarkdownSource({
+    sourcePath: 'inline-markdown.md',
+    markdownText: `# **强调标题**
+
+## **工作开展情况**
+
+- **稳定性验证**：候选内容保留十秒。
+
+| **指标** | **状态** |
+| --- | --- |
+| **兼容性** | \`已验证\` |
+`,
+  });
+
+  assertSourcePackage(source);
+  assert.equal(source.title, '强调标题');
+  assert.equal(source.sections[0].title, '工作开展情况');
+  const paragraph = source.blocks.find((block) => block.type === 'paragraph');
+  assert.equal(paragraph?.text, '- 稳定性验证：候选内容保留十秒。');
+  assert.equal(paragraph?.content?.markdown, '- **稳定性验证**：候选内容保留十秒。');
+  assert.deepEqual(source.tables[0].headers, ['指标', '状态']);
+  assert.deepEqual(source.tables[0].rows, [['兼容性', '已验证']]);
+});
+
 test('normalizeMarkdownSource keeps rich content placeable for generic H1-only documents and trims empty table tails', async () => {
   const source = await normalizeMarkdownSource({
     sourcePath: 'generic.md',

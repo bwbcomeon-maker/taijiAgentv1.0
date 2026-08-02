@@ -4,8 +4,25 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-CONTENT_CREATOR_TEAM_ID = "content-creator-team"
-DEEP_RESEARCH_TEAM_ID = "deep-research-team"
+if __package__:
+    from .launch_profiles import (
+        CONTENT_CREATOR_TEAM_ID,
+        CONTENT_PHASES,
+        DEEP_RESEARCH_PHASES,
+        DEEP_RESEARCH_TEAM_ID,
+        list_launch_profiles,
+        validate_launch_profiles,
+    )
+else:  # Compatibility for source-contract tests that load this file directly.
+    from api.expert_teams.launch_profiles import (
+        CONTENT_CREATOR_TEAM_ID,
+        CONTENT_PHASES,
+        DEEP_RESEARCH_PHASES,
+        DEEP_RESEARCH_TEAM_ID,
+        list_launch_profiles,
+        validate_launch_profiles,
+    )
+
 PUBLIC_EXPERT_TEAM_IDS = (CONTENT_CREATOR_TEAM_ID, DEEP_RESEARCH_TEAM_ID)
 
 CONTENT_MATERIAL_TEMPLATES = [
@@ -14,7 +31,7 @@ CONTENT_MATERIAL_TEMPLATES = [
         "intake_example_id": "work_report",
         "document_type": "work_report",
         "task_mode": "create",
-        "document_brief_seed": {"document_control": {"render_template_id": "enterprise-work-report"}},
+        "document_brief_seed": {"document_control": {"render_template_id": "standalone-work-report"}},
         "label": "工作汇报",
         "summary": "围绕完成情况、存在问题和下一步安排起草正式汇报。",
         "prompt": "帮我起草一份部门月度工作汇报，主题是迎峰度夏保供电重点工作推进情况。",
@@ -66,23 +83,6 @@ CONTENT_MATERIAL_TEMPLATES = [
     },
 ]
 
-CONTENT_PHASES = [
-    {"id": "plan", "title": "专家团计划", "phase": "流程安排", "worker_id": "director", "worker_name": "写作总导演", "executor": "model", "artifact_type": "writing_plan", "depends_on": []},
-    {"id": "materials", "title": "素材整理", "phase": "素材整理", "worker_id": "material", "worker_name": "资料整理专家", "executor": "model", "artifact_type": "material_ledger", "depends_on": ["plan"]},
-    {"id": "draft", "title": "起草富内容初稿", "phase": "富内容初稿", "worker_id": "writer", "worker_name": "文案创作专家", "executor": "model", "artifact_type": "document_draft", "depends_on": ["plan", "materials"]},
-    {"id": "polish", "title": "审稿打磨", "phase": "审稿打磨", "worker_id": "reviewer", "worker_name": "审稿专家", "executor": "model", "artifact_type": "reviewed_document", "depends_on": ["materials", "draft"]},
-    {"id": "delivery", "title": "交付确认", "phase": "交付确认", "worker_id": "delivery", "worker_name": "交付复核专家", "executor": "system", "artifact_type": "delivery_manifest", "depends_on": ["polish"]},
-]
-
-DEEP_RESEARCH_PHASES = [
-    {"id": "direction", "title": "确定研究方向", "phase": "研究方向", "worker_id": "director", "worker_name": "研究总导演", "executor": "model", "artifact_type": "research_charter", "depends_on": []},
-    {"id": "research", "title": "补充案例素材", "phase": "资料调研", "worker_id": "researcher", "worker_name": "资料研究员", "executor": "model", "artifact_type": "source_register", "depends_on": ["direction"]},
-    {"id": "evidence", "title": "事实核验", "phase": "事实核验", "worker_id": "evidence", "worker_name": "事实核验专家", "executor": "model", "artifact_type": "evidence_matrix", "depends_on": ["research"]},
-    {"id": "outline", "title": "结构提纲", "phase": "结构提纲", "worker_id": "architect", "worker_name": "结构架构师", "executor": "model", "artifact_type": "research_outline", "depends_on": ["evidence"]},
-    {"id": "draft", "title": "研究富内容初稿", "phase": "富内容初稿", "worker_id": "writer", "worker_name": "材料起草专家", "executor": "model", "artifact_type": "research_document_draft", "depends_on": ["outline", "evidence"]},
-    {"id": "review", "title": "复核交付", "phase": "复核交付", "worker_id": "reviewer", "worker_name": "复核专家", "executor": "model", "artifact_type": "reviewed_research_document", "depends_on": ["evidence", "outline", "draft"]},
-]
-
 _CATALOG = {
     CONTENT_CREATOR_TEAM_ID: {
         "id": CONTENT_CREATOR_TEAM_ID,
@@ -92,7 +92,8 @@ _CATALOG = {
             "方案说明、总结计划、材料润色等内容，从需求确认、初稿起草、材料打磨到交付确认分阶段协作。"
         ),
         "category": "内容创作",
-        "image": "static/assets/writeflow/team-content-creator.png",
+        "image": "static/assets/taiji/expert-teams/team-content-cover.png",
+        "image_alt": "内容创作专家团五位专家协作插画",
         "tags": ["工作汇报", "通知通报", "会议纪要", "方案说明", "总结计划", "材料润色"],
         "examples": CONTENT_MATERIAL_TEMPLATES,
         "questions": [
@@ -126,31 +127,36 @@ _CATALOG = {
                 "id": "director",
                 "name": "写作总导演",
                 "role": "流程编排",
-                "image": "static/assets/writeflow/member-workflow-producer.png",
+                "image": "static/assets/taiji/expert-teams/content-director.png",
+                "image_alt": "写作总导演头像",
             },
             {
                 "id": "material",
                 "name": "资料整理专家",
                 "role": "素材整理",
-                "image": "static/assets/writeflow/member-research-expert.png",
+                "image": "static/assets/taiji/expert-teams/content-material-organizer.png",
+                "image_alt": "资料整理专家头像",
             },
             {
                 "id": "writer",
                 "name": "文案创作专家",
                 "role": "正文写作",
-                "image": "static/assets/writeflow/member-writing-executor.png",
+                "image": "static/assets/taiji/expert-teams/content-writer.png",
+                "image_alt": "文案创作专家头像",
             },
             {
                 "id": "reviewer",
                 "name": "审稿专家",
                 "role": "审稿润色",
-                "image": "static/assets/writeflow/member-editor-review.png",
+                "image": "static/assets/taiji/expert-teams/content-reviewer.png",
+                "image_alt": "审稿专家头像",
             },
             {
                 "id": "delivery",
                 "name": "交付复核专家",
                 "role": "交付确认",
-                "image": "static/assets/writeflow/member-outline-architect.png",
+                "image": "static/assets/taiji/expert-teams/content-delivery-reviewer.png",
+                "image_alt": "交付复核专家头像",
             },
         ],
         "tasks": CONTENT_PHASES,
@@ -160,7 +166,8 @@ _CATALOG = {
         "title": "深度材料研究团",
         "description": "面向调研材料、专题报告、案例素材和结构提纲，帮助用户完成资料边界、研究主线和材料初稿。",
         "category": "材料研究",
-        "image": "static/assets/writeflow/team-research.png",
+        "image": "static/assets/taiji/expert-teams/team-research-cover.png",
+        "image_alt": "深度材料研究团六位专家协作插画",
         "tags": ["调研材料", "专题报告", "案例素材", "结构提纲"],
         "examples": [
             {
@@ -168,8 +175,8 @@ _CATALOG = {
                 "intake_example_id": "research_report",
                 "document_type": "research_report",
                 "task_mode": "create",
-                "document_brief_seed": {"document_control": {"render_template_id": "enterprise-research-report"}},
-                "label": "专题报告",
+                "document_brief_seed": {"document_control": {"render_template_id": "standalone-research-report"}},
+                "label": "研究报告",
                 "summary": "围绕主题做材料研究、结构提纲和初稿建议。",
                 "prompt": "帮我研究本地优先 AI 助理在企业内部办公场景的落地趋势。",
             }
@@ -185,37 +192,43 @@ _CATALOG = {
                 "id": "director",
                 "name": "研究总导演",
                 "role": "流程编排",
-                "image": "static/assets/writeflow/member-workflow-producer.png",
+                "image": "static/assets/taiji/expert-teams/research-director.png",
+                "image_alt": "研究总导演头像",
             },
             {
                 "id": "researcher",
                 "name": "资料研究员",
                 "role": "资料整理",
-                "image": "static/assets/writeflow/member-research-expert.png",
+                "image": "static/assets/taiji/expert-teams/research-planner.png",
+                "image_alt": "资料研究员头像",
             },
             {
                 "id": "evidence",
                 "name": "事实核验专家",
                 "role": "事实核验",
-                "image": "static/assets/writeflow/member-editor-review.png",
+                "image": "static/assets/taiji/expert-teams/research-evidence-verifier.png",
+                "image_alt": "事实核验专家头像",
             },
             {
                 "id": "architect",
                 "name": "结构架构师",
                 "role": "结构提纲",
-                "image": "static/assets/writeflow/member-outline-architect.png",
+                "image": "static/assets/taiji/expert-teams/research-structure-analyst.png",
+                "image_alt": "结构架构师头像",
             },
             {
                 "id": "writer",
                 "name": "材料起草专家",
                 "role": "材料初稿",
-                "image": "static/assets/writeflow/member-writing-executor.png",
+                "image": "static/assets/taiji/expert-teams/research-writer.png",
+                "image_alt": "材料起草专家头像",
             },
             {
                 "id": "reviewer",
                 "name": "复核专家",
                 "role": "复核交付",
-                "image": "static/assets/writeflow/member-editor-review.png",
+                "image": "static/assets/taiji/expert-teams/research-final-reviewer.png",
+                "image_alt": "复核专家头像",
             },
         ],
         "tasks": DEEP_RESEARCH_PHASES,
@@ -241,29 +254,43 @@ def get_template(team_id: str | None) -> dict:
 
 
 def expert_team_catalog() -> dict:
-    from .rollout import resolve_contract_rollout
-
-    rollout = resolve_contract_rollout()
-    allowed = {
-        (item["team_id"], item["document_type"], item["intake_example_id"]): item
-        for item in rollout["allowed_combinations"]
+    try:
+        validated_profiles = validate_launch_profiles(
+            list_launch_profiles(),
+            product_mode="standalone",
+        )
+    except (TypeError, ValueError):
+        validated_profiles = []
+    profiles = {
+        (profile["team_id"], profile["intake_example_id"]): profile
+        for profile in validated_profiles
     }
     teams = [get_template(team_id) for team_id in PUBLIC_EXPERT_TEAM_IDS]
     for team in teams:
+        public_examples = []
         for example in team.get("examples") or []:
-            capability = allowed.get(
-                (
-                    str(team.get("id") or ""),
-                    str(example.get("document_type") or ""),
-                    str(example.get("intake_example_id") or ""),
-                )
+            profile = profiles.get(
+                (str(team.get("id") or ""), str(example.get("intake_example_id") or ""))
             )
-            example["capability"] = {
-                "kind": capability["capability"] if capability else "draft",
-                "label": capability["label"] if capability else "AI 草稿能力",
-                "contract_version": rollout["contract_version"] if capability else "",
+            if profile is not None and (
+                str(example.get("document_type") or "") != str(profile.get("document_type") or "")
+                or str(example.get("task_mode") or "") != str(profile.get("task_mode") or "")
+            ):
+                profile = None
+            public_example = {
+                key: deepcopy(example.get(key))
+                for key in ("id", "label", "summary", "prompt")
             }
-    return {
-        "teams": teams,
-        "contract_rollout": rollout,
-    }
+            if profile is None:
+                public_example["available"] = False
+                public_example["capability"] = {"kind": "unavailable", "label": "任务配置异常"}
+                public_example["disabled_reason"] = (
+                    "当前任务配置异常，请刷新后重试；若仍存在，请联系管理员。"
+                )
+            else:
+                public_example["available"] = True
+                public_example["launch_profile_id"] = profile["id"]
+                public_example["capability"] = {"kind": "standalone", "label": "本机协作"}
+            public_examples.append(public_example)
+        team["examples"] = public_examples
+    return {"product_mode": "standalone", "teams": teams}

@@ -884,8 +884,18 @@ async function run(){
  await refreshProviderImageGenStatus();
  const providerRefresh={draft:elements.modelConfigModel.value,baseline:_modelConfigData.main.model,baselineBefore,
   modelRenderDelta:renderCount-renderBefore,providerRenderCount};
+ _modelConfigData=null;
+ elements.modelConfigModel.value='startup-placeholder';
+ let resolveFirstLoad;
+ pendingLoad=new Promise(resolve=>{resolveFirstLoad=resolve;});
+ const firstLoad=loadModelConfigPanel(false);
+ await Promise.resolve();
+ elements.modelConfigModel.value='startup-control-sync';
+ resolveFirstLoad({profile:'default',main:{provider:'openai',model:'server-first-load'},vision:{provider:'zai',model:'vision-first-load'},image_gen:{provider:'doubao',model:'image-first-load'}});
+ await firstLoad;
+ const initialLoadGuard={renderCount,model:elements.modelConfigModel.value,baseline:_modelConfigData&&_modelConfigData.main&&_modelConfigData.main.model};
  return {cancelSecretCleared,unsupported,alibabaVisible,dashscopeVisible,providerDrafts,initialDirty,lateDirty,
-  lateGuard,returnGuard,cancelled,accepted,scopeMatrix,cleared,closeCancel,closeConfirm,providerRefresh};
+  lateGuard,returnGuard,cancelled,accepted,scopeMatrix,cleared,closeCancel,closeConfirm,providerRefresh,initialLoadGuard};
 }
 run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{console.error(err);process.exit(1);});
 """
@@ -1841,6 +1851,8 @@ def test_provider_scope_load_generation_and_secret_cleanup_are_state_safe(tmp_pa
         "modelRenderDelta": 0,
         "providerRenderCount": 1,
     }
+    assert result["initialLoadGuard"]["model"] == "startup-control-sync"
+    assert result["initialLoadGuard"]["baseline"] == "server-first-load"
 
 
 def test_both_image_capability_cards_use_consistent_endpoint_and_test_controls():

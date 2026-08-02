@@ -2081,6 +2081,7 @@ def build_anthropic_kwargs(
     base_url: str | None = None,
     fast_mode: bool = False,
     drop_context_1m_beta: bool = False,
+    exact_system_prompt: bool = False,
 ) -> Dict[str, Any]:
     """Build kwargs for anthropic.messages.create().
 
@@ -2145,24 +2146,25 @@ def build_anthropic_kwargs(
     # ── OAuth: Claude Code identity ──────────────────────────────────
     if is_oauth:
         # 1. Prepend Claude Code system prompt identity
-        cc_block = {"type": "text", "text": _CLAUDE_CODE_SYSTEM_PREFIX}
-        if isinstance(system, list):
-            system = [cc_block] + system
-        elif isinstance(system, str) and system:
-            system = [cc_block, {"type": "text", "text": system}]
-        else:
-            system = [cc_block]
+        if not exact_system_prompt:
+            cc_block = {"type": "text", "text": _CLAUDE_CODE_SYSTEM_PREFIX}
+            if isinstance(system, list):
+                system = [cc_block] + system
+            elif isinstance(system, str) and system:
+                system = [cc_block, {"type": "text", "text": system}]
+            else:
+                system = [cc_block]
 
-        # 2. Sanitize system prompt — replace product name references
-        #    to avoid Anthropic's server-side content filters.
-        for block in system:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text", "")
-                text = text.replace("Hermes Agent", "Claude Code")
-                text = text.replace("Hermes agent", "Claude Code")
-                text = text.replace("hermes-agent", "claude-code")
-                text = text.replace("Nous Research", "Anthropic")
-                block["text"] = text
+            # 2. Sanitize system prompt — replace product name references
+            #    to avoid Anthropic's server-side content filters.
+            for block in system:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    text = text.replace("Hermes Agent", "Claude Code")
+                    text = text.replace("Hermes agent", "Claude Code")
+                    text = text.replace("hermes-agent", "claude-code")
+                    text = text.replace("Nous Research", "Anthropic")
+                    block["text"] = text
 
         # 3. Prefix tool names with mcp_ (Claude Code convention)
         #    Skip names that already begin with the marker — native MCP server

@@ -1,0 +1,92 @@
+{
+  "idempotency_key": "early-v1-key",
+  "fixture_kind": "minimal_historical_shape",
+  "pending_run": {
+    "_tasks_template": [],
+    "contract_version": "expert-team-contract/v1",
+    "created_at": 1000.0,
+    "launch_profile_id": "content-work-report",
+    "launch_profile_snapshot": {
+      "document_type": "work_report",
+      "id": "content-work-report",
+      "task_mode": "create",
+      "team_id": "content-creator-team"
+    },
+    "product_mode": "standalone",
+    "prompt": "起草迎峰度夏保供电重点工作月度汇报",
+    "review_policy": {
+      "kind": "local_confirmation"
+    },
+    "run_id": "et-0123456789abcdef",
+    "schema_version": 3,
+    "session_id": "early-v1-session",
+    "status": "briefing",
+    "tasks": [],
+    "team_id": "content-creator-team",
+    "team_image": "static/assets/taiji/expert-teams/content-team.png",
+    "team_title": "内容创作专家团",
+    "title": "起草工作汇报初稿"
+  },
+  "receipt": {
+    "created_at": 1000.0,
+    "idempotency_key_hash": "ad1ba5d5e097bbac1ca10fd390b21228e596981563de0763b7faddf67686abfd",
+    "initial_run_sha256": "8dd38e3cfd4446e7f47eb9de9c0bb9a35bde754bbd52d74aa7e7a153597d02ed",
+    "initial_run_snapshot": {
+      "_tasks_template": [],
+      "contract_version": "expert-team-contract/v1",
+      "created_at": 1000.0,
+      "launch_profile_id": "content-work-report",
+      "launch_profile_snapshot": {
+        "document_type": "work_report",
+        "id": "content-work-report",
+        "task_mode": "create",
+        "team_id": "content-creator-team"
+      },
+      "product_mode": "standalone",
+      "prompt": "起草迎峰度夏保供电重点工作月度汇报",
+      "review_policy": {
+        "kind": "local_confirmation"
+      },
+      "run_id": "et-0123456789abcdef",
+      "schema_version": 3,
+      "session_id": "early-v1-session",
+      "status": "briefing",
+      "tasks": [],
+      "team_id": "content-creator-team",
+      "team_image": "static/assets/taiji/expert-teams/content-team.png",
+      "team_title": "内容创作专家团",
+      "title": "起草工作汇报初稿"
+    },
+    "initial_start_projection_sha256": "400d9ce922bf83db43768167b5a523e0b4f2729ef3e3bbec002f157575d920ba",
+    "request_fingerprint": "eb7ec3227335f2d0bf40188d06a694b67721dc52158750e02767d169a1fe1ae4",
+    "run_id": "et-0123456789abcdef",
+    "schema_version": 1,
+    "session_id": "early-v1-session",
+    "session_metadata_before_start": {
+      "last_message_at": 0.0,
+      "message_count": 0,
+      "title": "Untitled",
+      "updated_at": 900.0,
+      "user_message_count": 0
+    },
+    "session_metadata_before_start_sha256": "5feaa56554753dfb62dd8ae65d6a54c48bde455846178c30f3de789b61f1c053",
+    "session_updated_at_after_start": 1000.0,
+    "state": "prepared",
+    "transaction_id": "5e645a54dbe00c4766864c3cee5410eaea4bff3c7b24293b3f8764f7ed188f00",
+    "updated_at": 1000.0
+  },
+  "run_binding": {
+    "run_id": "et-0123456789abcdef",
+    "schema_version": 1,
+    "session_id": "early-v1-session",
+    "transaction_id": "5e645a54dbe00c4766864c3cee5410eaea4bff3c7b24293b3f8764f7ed188f00"
+  },
+  "session_binding": {
+    "schema_version": 1,
+    "session_id": "early-v1-session",
+    "transaction_ids": [
+      "5e645a54dbe00c4766864c3cee5410eaea4bff3c7b24293b3f8764f7ed188f00"
+    ]
+  },
+  "source_commit": "1c3a8349febf10f6daafa6c173540d1b366bbe9b"
+}

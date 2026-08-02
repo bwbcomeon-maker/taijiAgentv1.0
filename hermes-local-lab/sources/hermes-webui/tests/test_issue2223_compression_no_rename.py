@@ -125,6 +125,97 @@ class TestNoRenameDuringCompression:
         assert continuation.parent_session_id == "fork_parent"
         assert not continuation.pre_compression_snapshot
 
+    def test_preservation_rebinds_cas_before_first_continuation_save(self, tmp_path, monkeypatch):
+        """The old sidecar digest must not block first persistence of the rotated SID."""
+        import api.models as models
+        import api.streaming as streaming
+        from api.models import Session
+
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+        monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+        monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+        models.SESSIONS.clear()
+
+        origin = Session(
+            session_id="old_sid",
+            title="Long Chat",
+            parent_session_id="fork_parent",
+            messages=[{"role": "user", "content": "before"}],
+        )
+        origin.save()
+        continuation = Session.load("old_sid")
+        assert continuation is not None
+        continuation.session_id = "new_sid"
+        continuation.messages.append({"role": "assistant", "content": "after"})
+
+        streaming._preserve_pre_compression_snapshot(continuation, "old_sid")
+        continuation.pre_compression_snapshot = False
+        continuation.parent_session_id = "old_sid"
+        continuation.save(touch_updated_at=False)
+
+        old_payload = json.loads((session_dir / "old_sid.json").read_text(encoding="utf-8"))
+        new_payload = json.loads((session_dir / "new_sid.json").read_text(encoding="utf-8"))
+        assert old_payload["pre_compression_snapshot"] is True
+        assert len(old_payload["messages"]) == 2
+        assert new_payload["pre_compression_snapshot"] is False
+        assert new_payload["parent_session_id"] == "old_sid"
+        assert len(new_payload["messages"]) == 2
+
+    def test_preservation_does_not_overwrite_a_concurrent_old_snapshot(self, tmp_path, monkeypatch):
+        """A newer old_sid write must win while continuation runtime state is restored."""
+        import api.models as models
+        import api.streaming as streaming
+        from api.models import Session
+
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+        monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+        monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+        models.SESSIONS.clear()
+
+        origin = Session(
+            session_id="old_sid",
+            title="Long Chat",
+            parent_session_id="fork_parent",
+            messages=[{"role": "user", "content": "before"}],
+        )
+        origin.save()
+        continuation = Session.load("old_sid")
+        assert continuation is not None
+        continuation.session_id = "new_sid"
+        continuation.messages.append({"role": "assistant", "content": "local"})
+        continuation.active_stream_id = "stream-new"
+        continuation.pending_user_message = "pending-new"
+        continuation.pending_attachments = [{"name": "pending.txt"}]
+        continuation.pending_started_at = 123.0
+
+        original_save = Session.save
+        injected = {"value": False}
+
+        def save_after_competing_writer(session, *args, **kwargs):
+            if session is continuation and session.session_id == "old_sid" and not injected["value"]:
+                injected["value"] = True
+                competing = Session.load("old_sid")
+                assert competing is not None
+                competing.messages.append({"role": "assistant", "content": "newer durable"})
+                original_save(competing, touch_updated_at=False, skip_index=True)
+            return original_save(session, *args, **kwargs)
+
+        monkeypatch.setattr(Session, "save", save_after_competing_writer)
+
+        streaming._preserve_pre_compression_snapshot(continuation, "old_sid")
+
+        old_payload = json.loads((session_dir / "old_sid.json").read_text(encoding="utf-8"))
+        assert old_payload["messages"][-1]["content"] == "newer durable"
+        assert continuation.session_id == "new_sid"
+        assert continuation.active_stream_id == "stream-new"
+        assert continuation.pending_user_message == "pending-new"
+        assert continuation.pending_attachments == [{"name": "pending.txt"}]
+        assert continuation.pending_started_at == 123.0
+
 
 class TestMergePreservesHistory:
     """_merge_display_messages_after_agent_result must preserve all previous

@@ -241,7 +241,7 @@ def test_contract_answer_route_never_auto_starts_before_brief_confirmation(monke
     assert handler.json_body()["run"]["view"]["brief"]["gate"] == "needs_confirmation"
 
 
-def test_start_route_returns_stable_contract_error_code(monkeypatch, tmp_path):
+def test_start_route_rejects_legacy_contract_selector_with_profile_error(monkeypatch, tmp_path):
     from api import routes
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -258,7 +258,8 @@ def test_start_route_returns_stable_contract_error_code(monkeypatch, tmp_path):
         },
     )
     assert handler.status == 400
-    assert handler.json_body()["code"] == "unsupported_contract_version"
+    assert handler.json_body()["code"] == "launch_profile_required"
+    assert handler.json_body()["field"] == "launch_profile_id"
 
 
 def test_approve_route_starts_next_stage_in_the_same_request(monkeypatch, tmp_path):
@@ -341,7 +342,9 @@ def test_failed_start_stays_recoverable_and_never_reports_generating(monkeypatch
     assert payload["run"]["workflow_state"] == "start_failed"
     assert stored["workflow_state"] == "start_failed"
     assert stored["execution_status"] != "running"
-    assert stored["last_execution_error"] == "provider unavailable"
+    assert payload["product_error"]["code"] == "backend_unavailable"
+    assert stored["last_execution_error"] == payload["product_error"]["message"]
+    assert "provider unavailable" not in json.dumps(payload, ensure_ascii=False)
 
 
 def test_answer_rejects_a_different_session_owner(monkeypatch, tmp_path):
@@ -374,7 +377,10 @@ def test_answer_rejects_a_different_session_owner(monkeypatch, tmp_path):
 
     stored = expert_teams.read_expert_team_run(tmp_path, run["run_id"])
     assert handler.status == 404
-    assert handler.json_body()["error"] == "expert team run does not belong to this session"
+    payload = handler.json_body()
+    assert payload["product_error"]["code"] == "expert_team_not_found"
+    assert payload["error"] == payload["product_error"]["message"]
+    assert "does not belong" not in json.dumps(payload, ensure_ascii=False)
     assert all(question.get("status") == "pending" for question in stored["questions"])
 
 
@@ -1969,7 +1975,11 @@ def test_start_route_rejects_missing_session_id(monkeypatch, tmp_path):
     handler = _post(
         routes,
         "/api/expert-teams/start",
-        {"team_id": "content-creator-team", "prompt": "起草工作汇报"},
+        {
+            "launch_profile_id": "content-work-report",
+            "prompt": "起草工作汇报",
+            "idempotency_key": "start-missing-session",
+        },
     )
     assert handler.status == 400
     assert "session_id" in handler.json_body()["error"]
@@ -2030,6 +2040,9 @@ def test_local_stream_terminal_gateway_error_enters_generation_failed(monkeypatc
     failed = routes._expert_team_run_with_execution_truth(tmp_path, generating)
 
     assert failed["workflow_state"] == "generation_failed"
+    assert failed["last_execution_error_code"] == "model_configuration_required"
+    assert failed["view"]["product_error"]["code"] == "model_configuration_required"
+    assert failed["view"]["product_error"]["schema"] == "taiji.product.error.v1"
     assert failed["view"]["presentation"]["title"] == "生成失败"
     assert failed["view"]["presentation"]["primary_action"]["id"] == "regenerate"
 

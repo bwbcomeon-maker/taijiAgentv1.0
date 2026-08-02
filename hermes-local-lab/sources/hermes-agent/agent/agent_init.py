@@ -223,6 +223,8 @@ def init_agent(
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
+    exact_system_prompt: bool = False,
+    tools_disabled: bool = False,
     session_db=None,
     parent_session_id: str = None,
     iteration_budget: "IterationBudget" = None,
@@ -278,6 +280,12 @@ def init_agent(
         skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
             into the system prompt. Use this for batch processing and data generation to avoid
             polluting trajectories with user-specific persona or project instructions.
+        exact_system_prompt (bool): If True, the caller-provided system message is
+            the complete system contract. Hermes identity, context, memory, profile,
+            and timestamp layers are not added. Intended for isolated, zero-tool
+            execution flows only.
+        tools_disabled (bool): If True, do not load registry, kanban, MCP,
+            memory, context-engine, or capability-refresh tools.
         load_soul_identity (bool): If True, still use ~/.hermes/SOUL.md as the primary
             identity even when skip_context_files=True. Project context files from the cwd
             remain skipped.
@@ -290,7 +298,20 @@ def init_agent(
     # Consumed by every LLM turn across parent + all subagents.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)
     agent.tool_delay = tool_delay
-    agent.save_trajectories = save_trajectories
+    agent.exact_system_prompt = bool(exact_system_prompt)
+    agent.tools_disabled = bool(tools_disabled)
+    if agent.exact_system_prompt and not agent.tools_disabled:
+        raise ValueError(
+            "exact system prompt mode requires tools_disabled=True"
+        )
+    agent.strict_execution_contract = (
+        agent.exact_system_prompt and agent.tools_disabled
+    )
+    agent._strict_provider_call_lock = threading.Lock()
+    agent._strict_provider_call_consumed = False
+    agent.save_trajectories = (
+        bool(save_trajectories) and not agent.strict_execution_contract
+    )
     agent.verbose_logging = verbose_logging
     agent.quiet_mode = quiet_mode
     agent.ephemeral_system_prompt = ephemeral_system_prompt
@@ -503,6 +524,10 @@ def init_agent(
     agent._use_prompt_caching, agent._use_native_cache_layout = (
         agent._anthropic_prompt_cache_policy()
     )
+    if agent.strict_execution_contract:
+        agent._use_prompt_caching = False
+        agent._use_native_cache_layout = False
+        agent.prefill_messages = []
     # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from
     # config.yaml under prompt_caching.cache_ttl; unknown values keep "5m".
     # 1h tier costs 2x on write vs 1.25x for 5m, but amortizes across long
@@ -934,6 +959,8 @@ def init_agent(
         agent._fallback_chain = [fallback_model]
     else:
         agent._fallback_chain = []
+    if agent.strict_execution_contract:
+        agent._fallback_chain = []
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
@@ -957,10 +984,14 @@ def init_agent(
         "_DEFAULT_TOOL_DEFINITIONS_LOADER",
         agent._tool_definitions_loader,
     )
-    agent.tools = agent._tool_definitions_loader(
-        enabled_toolsets=enabled_toolsets,
-        disabled_toolsets=disabled_toolsets,
-        quiet_mode=agent.quiet_mode,
+    agent.tools = (
+        []
+        if agent.tools_disabled
+        else agent._tool_definitions_loader(
+            enabled_toolsets=enabled_toolsets,
+            disabled_toolsets=disabled_toolsets,
+            quiet_mode=agent.quiet_mode,
+        )
     )
     
     # Show tool configuration and store valid tool names for validation
@@ -1092,6 +1123,8 @@ def init_agent(
         agent._session_json_enabled = bool(_sess_cfg.get("write_json_snapshots", False))
     except Exception:
         pass
+    if agent.strict_execution_contract:
+        agent._session_json_enabled = False
     # logs_dir is retained unconditionally for request_dump_*.json (debug
     # breadcrumb path written by agent_runtime_helpers.dump_api_request_debug).
     
@@ -1121,7 +1154,9 @@ def init_agent(
     )
     
     # SQLite session store (optional -- provided by CLI or gateway)
-    agent._session_db = session_db
+    # A strict execution attempt is stateless by contract.  The caller owns
+    # any supplied DB handle, so detach it without closing it.
+    agent._session_db = None if agent.strict_execution_contract else session_db
     agent._parent_session_id = parent_session_id
     agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
     agent._session_db_created = False  # DB row deferred to run_conversation()
@@ -1300,7 +1335,9 @@ def init_agent(
         _api_retries = max(_api_retries, 1)  # 1 = no retry (single attempt)
     except (TypeError, ValueError):
         _api_retries = 3
-    agent._api_max_retries = _api_retries
+    agent._api_max_retries = (
+        1 if agent.strict_execution_contract else _api_retries
+    )
 
     # Initialize context compressor for automatic context management
     # Compresses conversation when approaching model's context limit
@@ -1485,6 +1522,8 @@ def init_agent(
         _engine_name = _ctx_cfg.get("engine", "compressor") or "compressor"
     except Exception:
         pass
+    if agent.strict_execution_contract:
+        _engine_name = "compressor"
 
     if _engine_name != "compressor":
         # Try loading from plugins/context_engine/<name>/
@@ -1549,7 +1588,9 @@ def init_agent(
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
         )
-    agent.compression_enabled = compression_enabled
+    agent.compression_enabled = (
+        False if agent.strict_execution_contract else compression_enabled
+    )
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).
@@ -1740,15 +1781,25 @@ def init_agent(
     # when its before/after capability identity is stable. If this best-effort
     # pass fails, the None sentinel forces the next turn to retry before the
     # model sees a tool surface.
-    try:
-        from agent.image_runtime import refresh_agent_capability_runtime
+    if agent.strict_execution_contract:
+        # Defense in depth for isolated expert-team turns.  An empty
+        # ``enabled_toolsets`` value is fail-open in the ordinary Hermes
+        # runtime (for example HERMES_KANBAN_TASK can add tools later), so a
+        # strict turn must seal the public tool surface after all optional
+        # runtime initialisation has finished.
+        agent.tools = []
+        agent.valid_tool_names = set()
+        agent._registry_tool_names = set()
+    else:
+        try:
+            from agent.image_runtime import refresh_agent_capability_runtime
 
-        refresh_agent_capability_runtime(
-            agent,
-            definitions_loader=agent._tool_definitions_loader,
-        )
-    except Exception:
-        pass
+            refresh_agent_capability_runtime(
+                agent,
+                definitions_loader=agent._tool_definitions_loader,
+            )
+        except Exception:
+            pass
 
 
 

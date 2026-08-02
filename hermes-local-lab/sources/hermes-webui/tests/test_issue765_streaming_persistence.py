@@ -278,27 +278,68 @@ class TestIssue765FollowupHardening:
     """
 
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
-        """Two concurrent saves of the same session must not collide on one tmp path.
+        """Same-session saves serialize without reusing one temporary path.
 
-        The key regression guard here is that each save call should reach os.replace()
-        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        Atomic expert-team start now serializes every durable rewrite for one
+        session.  The second writer must wait outside ``os.replace`` while the
+        first owns that lock, then use its own temporary file after the first
+        commit.  Requiring both writers to meet inside ``os.replace`` would
+        deadlock the intended serialization and no longer models production.
         """
-        s = _make_session("same_sid")
-        s.save(skip_index=True)  # seed the file on disk
+        import api.truth_rewrite as truth_rewrite
 
+        lock_key = str(
+            truth_rewrite._truth_rewrite_lock_path("same_sid").resolve(strict=False)
+        )
+        with truth_rewrite._LOCKS_GUARD:
+            lock_existed_before = lock_key in truth_rewrite._LOCKS
+            lock_before = truth_rewrite._LOCKS.get(lock_key)
+
+        s = _make_session("same_sid")
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        first_replace_entered = threading.Event()
+        release_first_replace = threading.Event()
+        second_lock_acquire_started = threading.Event()
+        second_lock_acquired = threading.Event()
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
-            return original_replace(src, dst)
+        class _AcquireProbe:
+            """Instrument the lock that production must actually acquire.
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+            Probing the context-manager wrapper is insufficient: a scheduler
+            can pause the second writer after an "attempted" signal but before
+            it reaches the real lock, allowing a no-op lock mutation to pass.
+            This wrapper records entry into, and return from, the underlying
+            per-session RLock.acquire() call itself.
+            """
+
+            def __init__(self):
+                self._lock = threading.RLock()
+                self._attempt_count = 0
+                self._guard = threading.Lock()
+
+            def acquire(self, *args, **kwargs):
+                with self._guard:
+                    self._attempt_count += 1
+                    attempt = self._attempt_count
+                    if attempt == 2:
+                        second_lock_acquire_started.set()
+                acquired = self._lock.acquire(*args, **kwargs)
+                if attempt == 2 and acquired:
+                    second_lock_acquired.set()
+                return acquired
+
+            def release(self):
+                self._lock.release()
+
+        def _replace_with_serialization_probe(src, dst):
+            replace_sources.append(str(src))
+            if len(replace_sources) == 1:
+                first_replace_entered.set()
+                if not release_first_replace.wait(timeout=5):
+                    raise TimeoutError("first save release signal timed out")
+            return original_replace(src, dst)
 
         def _save_worker():
             try:
@@ -306,21 +347,55 @@ class TestIssue765FollowupHardening:
             except Exception as e:
                 errors.append(e)
 
-        t1 = threading.Thread(target=_save_worker)
-        t2 = threading.Thread(target=_save_worker)
-        t1.start()
-        t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
+        t1 = None
+        t2 = None
+        try:
+            s.save(skip_index=True)  # seed the file on disk
+            with truth_rewrite._LOCKS_GUARD:
+                truth_rewrite._LOCKS[lock_key] = _AcquireProbe()
+            monkeypatch.setattr(models.os, "replace", _replace_with_serialization_probe)
 
-        assert not errors, f"Concurrent same-session saves should not fail: {errors}"
-        assert len(replace_sources) == 2, f"Expected 2 replace calls, got {replace_sources}"
-        assert len(set(replace_sources)) == 2, (
-            "Concurrent same-session saves must use distinct temp files; "
-            f"got {replace_sources}"
-        )
-        data = json.loads(s.path.read_text(encoding="utf-8"))
-        assert data["session_id"] == "same_sid"
+            t1 = threading.Thread(target=_save_worker)
+            t1.start()
+            assert first_replace_entered.wait(timeout=5), "first save never reached replace"
+            t2 = threading.Thread(target=_save_worker)
+            t2.start()
+            assert second_lock_acquire_started.wait(timeout=5), (
+                "second save never entered the real per-session lock acquire"
+            )
+            assert not second_lock_acquired.is_set(), (
+                "second save acquired the per-session writer lock before the first commit"
+            )
+            assert t2.is_alive(), "second save did not wait for the same-session writer lock"
+            assert len(replace_sources) == 1, (
+                "second same-session save entered os.replace before the first commit"
+            )
+            release_first_replace.set()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+
+            assert not t1.is_alive() and not t2.is_alive()
+            assert not errors, f"Concurrent same-session saves should not fail: {errors}"
+            assert len(replace_sources) == 2, f"Expected 2 replace calls, got {replace_sources}"
+            assert len(set(replace_sources)) == 2, (
+                "Concurrent same-session saves must use distinct temp files; "
+                f"got {replace_sources}"
+            )
+            data = json.loads(s.path.read_text(encoding="utf-8"))
+            assert data["session_id"] == "same_sid"
+        finally:
+            # Assertions and mutation tests may fail while writer 1 is paused.
+            # Always release and join both workers before restoring the shared
+            # lock registry to its exact pre-test identity.
+            release_first_replace.set()
+            for worker in (t1, t2):
+                if worker is not None:
+                    worker.join(timeout=6)
+            with truth_rewrite._LOCKS_GUARD:
+                if lock_existed_before:
+                    truth_rewrite._LOCKS[lock_key] = lock_before
+                else:
+                    truth_rewrite._LOCKS.pop(lock_key, None)
 
     def test_success_path_joins_checkpoint_before_session_mutation(self):
         """Static guard: success path must stop/join checkpoint thread before mutating.

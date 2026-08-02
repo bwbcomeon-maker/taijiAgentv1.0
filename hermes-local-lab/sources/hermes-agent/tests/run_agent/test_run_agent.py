@@ -4879,6 +4879,312 @@ def _make_chunk(content=None, tool_calls=None, finish_reason=None, model="test/m
     return SimpleNamespace(model=model, choices=[choice])
 
 
+class TestStrictExecutionContract:
+    @staticmethod
+    def _make_agent(*, api_mode="chat_completions", provider="openrouter"):
+        with patch("run_agent.OpenAI"):
+            strict_agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                provider=provider,
+                api_mode=api_mode,
+                model="strict-test-model",
+                max_iterations=1,
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                exact_system_prompt=True,
+                tools_disabled=True,
+                session_db=None,
+                fallback_model={
+                    "provider": "fallback-provider",
+                    "model": "fallback-model",
+                },
+                save_trajectories=True,
+                prefill_messages=[
+                    {"role": "assistant", "content": "configured prefill"}
+                ],
+            )
+        strict_agent.client = MagicMock()
+        return strict_agent
+
+    def test_init_seals_tools_cache_prefill_fallback_and_persistence(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "must-not-add-tools")
+        with (
+            patch("run_agent.get_tool_definitions") as definitions,
+            patch("run_agent.OpenAI"),
+        ):
+            strict_agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+                api_mode="chat_completions",
+                model="strict-test-model",
+                max_iterations=1,
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                exact_system_prompt=True,
+                tools_disabled=True,
+                session_db=None,
+                save_trajectories=True,
+            )
+
+        definitions.assert_not_called()
+        assert strict_agent.strict_execution_contract is True
+        assert strict_agent.tools == []
+        assert strict_agent.valid_tool_names == set()
+        assert strict_agent._registry_tool_names == set()
+        assert strict_agent._fallback_chain == []
+        assert strict_agent.prefill_messages == []
+        assert strict_agent._use_prompt_caching is False
+        assert strict_agent.compression_enabled is False
+        assert strict_agent._session_json_enabled is False
+        assert strict_agent.save_trajectories is False
+        assert strict_agent._api_max_retries == 1
+
+    def test_strict_init_detaches_caller_owned_session_db_without_io(self):
+        supplied_db = MagicMock()
+        with patch("run_agent.OpenAI"):
+            strict_agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+                api_mode="chat_completions",
+                model="strict-test-model",
+                max_iterations=1,
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                exact_system_prompt=True,
+                tools_disabled=True,
+                session_db=supplied_db,
+            )
+        strict_agent.client = MagicMock()
+        strict_agent.client.chat.completions.create.return_value = _mock_response(
+            content="严格阶段结果",
+            finish_reason="stop",
+        )
+
+        result = strict_agent.run_conversation(
+            "strict user",
+            system_message="strict system",
+        )
+
+        assert result["completed"] is True
+        assert strict_agent._session_db is None
+        supplied_db.get_session.assert_not_called()
+        supplied_db.update_system_prompt.assert_not_called()
+        supplied_db.append_message.assert_not_called()
+        supplied_db.close.assert_not_called()
+
+    def test_single_call_preserves_exact_messages_and_skips_all_hooks(self):
+        strict_agent = self._make_agent()
+        strict_agent.client.chat.completions.create.return_value = _mock_response(
+            content="严格阶段结果",
+            finish_reason="stop",
+        )
+        system = "  严格系统合同\n不得修改。  "
+        user = "  {\"stage\":\"draft\"}\n  "
+
+        with (
+            patch("hermes_cli.plugins.invoke_hook") as invoke_hook,
+            patch.object(strict_agent, "_persist_session") as persist,
+            patch.object(strict_agent, "_save_trajectory") as trajectory,
+            patch.object(strict_agent, "_dump_api_request_debug") as dump,
+        ):
+            result = strict_agent.run_conversation(
+                user,
+                system_message=system,
+            )
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert result["api_calls"] == 1
+        assert result["final_response"] == "严格阶段结果"
+        kwargs = strict_agent.client.chat.completions.create.call_args.kwargs
+        assert kwargs["messages"] == [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        assert "tools" not in kwargs
+        invoke_hook.assert_not_called()
+        persist.assert_not_called()
+        trajectory.assert_not_called()
+        dump.assert_not_called()
+
+    def test_strict_payload_is_redacted_from_turn_log(self, caplog):
+        strict_agent = self._make_agent()
+        strict_agent.client.chat.completions.create.return_value = _mock_response(
+            content="严格阶段结果",
+            finish_reason="stop",
+        )
+        secret_payload = "机密企业材料-不得写入日志-7349"
+
+        with caplog.at_level(logging.INFO, logger="agent.conversation_loop"):
+            result = strict_agent.run_conversation(
+                secret_payload,
+                system_message="strict system",
+            )
+
+        assert result["completed"] is True
+        assert secret_payload not in caplog.text
+        assert "strict payload redacted" in caplog.text
+
+    def test_strict_agent_instance_cannot_be_reused_for_second_provider_call(self):
+        strict_agent = self._make_agent()
+        strict_agent.client.chat.completions.create.return_value = _mock_response(
+            content="严格阶段结果",
+            finish_reason="stop",
+        )
+
+        first = strict_agent.run_conversation(
+            "first strict user",
+            system_message="strict system",
+        )
+        second = strict_agent.run_conversation(
+            "second strict user",
+            system_message="strict system",
+        )
+
+        assert first["completed"] is True
+        assert strict_agent.client.chat.completions.create.call_count == 1
+        assert second["completed"] is False
+        assert second["failed"] is True
+        assert "already consumed" in second["error"]
+
+    def test_truncated_response_is_partial_failure_without_continuation(self):
+        strict_agent = self._make_agent()
+        strict_agent.client.chat.completions.create.return_value = _mock_response(
+            content="未完成的阶段结果",
+            finish_reason="length",
+        )
+
+        result = strict_agent.run_conversation(
+            "strict user",
+            system_message="strict system",
+        )
+
+        assert strict_agent.client.chat.completions.create.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["api_calls"] == 1
+        assert result["turn_exit_reason"] == "strict_provider_response_incomplete"
+        assert "truncated" in result["error"]
+
+    def test_interrupted_after_partial_stream_is_non_authoritative_and_preserves_partial(
+        self,
+    ):
+        strict_agent = self._make_agent()
+        streamed = []
+        strict_agent.stream_delta_callback = streamed.append
+
+        def interrupt_after_partial(_api_kwargs, *, on_first_delta=None):
+            if on_first_delta is not None:
+                on_first_delta()
+            strict_agent._fire_stream_delta("已生成的部分阶段结果")
+            raise InterruptedError("strict stream interrupted")
+
+        with patch.object(
+            strict_agent,
+            "_interruptible_streaming_api_call",
+            side_effect=interrupt_after_partial,
+        ):
+            result = strict_agent.run_conversation(
+                "strict user",
+                system_message="strict system",
+            )
+
+        assert streamed == ["已生成的部分阶段结果"]
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["interrupted"] is True
+        assert result["final_response"] == "已生成的部分阶段结果"
+        assert result["api_calls"] == 1
+        assert result["turn_exit_reason"] == "strict_provider_call_interrupted"
+        assert "strict stream interrupted" in result["error"]
+
+    def test_tool_call_response_is_rejected_without_tool_execution(self):
+        strict_agent = self._make_agent()
+        strict_agent.client.chat.completions.create.return_value = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call(name="web_search")],
+        )
+
+        with patch("run_agent.handle_function_call") as handle:
+            result = strict_agent.run_conversation(
+                "strict user",
+                system_message="strict system",
+            )
+
+        assert strict_agent.client.chat.completions.create.call_count == 1
+        handle.assert_not_called()
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["turn_exit_reason"] == "strict_provider_returned_tool_calls"
+
+    def test_provider_error_is_fail_closed_without_retry_or_fake_answer(self):
+        strict_agent = self._make_agent()
+        strict_agent.client.chat.completions.create.side_effect = RuntimeError(
+            "provider unavailable"
+        )
+
+        result = strict_agent.run_conversation(
+            "strict user",
+            system_message="strict system",
+        )
+
+        assert strict_agent.client.chat.completions.create.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["final_response"] is None
+        assert "provider unavailable" in result["error"]
+
+    def test_anthropic_strict_call_skips_prompt_cache_mutation(self):
+        strict_agent = self._make_agent(
+            api_mode="anthropic_messages",
+            provider="anthropic",
+        )
+        strict_agent._anthropic_client = MagicMock()
+        strict_agent._anthropic_api_key = "test-anthropic-key"
+        strict_agent._is_anthropic_oauth = True
+        # Defense-in-depth: even if a caller corrupts the init invariant,
+        # the strict loop must still skip cache-control message rewriting.
+        strict_agent._use_prompt_caching = True
+        strict_agent._anthropic_client.messages.create.return_value = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="严格 Claude 结果")],
+            stop_reason="end_turn",
+            model="claude-test",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        system = "  Claude 严格系统合同  "
+        user = "  Claude 严格数据包  "
+
+        with patch.object(
+            strict_agent,
+            "_try_refresh_anthropic_client_credentials",
+            return_value=False,
+        ):
+            result = strict_agent.run_conversation(
+                user,
+                system_message=system,
+            )
+
+        assert result["completed"] is True
+        assert result["api_calls"] == 1
+        kwargs = strict_agent._anthropic_client.messages.create.call_args.kwargs
+        assert kwargs["system"] == system
+        assert kwargs["messages"] == [{"role": "user", "content": user}]
+        assert "tools" not in kwargs
+
+
 def _make_tc_delta(index=0, tc_id=None, name=None, arguments=None):
     """Build a SimpleNamespace mimicking a streaming tool_call delta."""
     func = SimpleNamespace(name=name, arguments=arguments)

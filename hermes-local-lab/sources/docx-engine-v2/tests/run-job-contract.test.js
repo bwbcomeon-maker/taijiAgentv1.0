@@ -184,7 +184,16 @@ test('run-job requires explicit template selection and does not create delivery 
   assert.ok(payload.templates.every((item) => item && typeof item === 'object'));
   assert.deepEqual(
     payload.templates.map((item) => item.id),
-    ['general-proposal', 'meeting-minutes', 'enterprise-work-report', 'enterprise-research-report']
+    [
+      'general-proposal',
+      'meeting-minutes',
+      'enterprise-work-report',
+      'enterprise-research-report',
+      'standalone-work-report',
+      'standalone-research-report',
+      'standalone-meeting-minutes',
+      'standalone-office-material',
+    ]
   );
   const listResult = listTemplates();
   assertExitCode(listResult, 0);

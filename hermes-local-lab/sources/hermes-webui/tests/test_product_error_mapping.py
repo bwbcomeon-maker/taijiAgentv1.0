@@ -71,13 +71,15 @@ def test_docx_failure_keeps_recovery_evidence_and_adds_artifact_mapping():
     _assert_safe_envelope(mapped, "artifact_generation_failed")
 
 
-def test_routes_map_permission_license_backend_and_office_without_replacing_legacy_fields():
+def test_routes_map_permission_license_expert_failures_and_office_without_replacing_legacy_fields():
     source = (ROOT / "api/routes.py").read_text(encoding="utf-8")
 
     assert 'attach_product_error({"error": str(e)}, "permission_denied")' in source
     assert 'response = attach_product_error(response, "license_blocked")' in source
     assert '}, "license_blocked"), 403' in source
-    assert 'code = "backend_unavailable" if int(status) >= 500 else "unknown_error"' in source
+    assert "from api.expert_teams.error_projection import attach_expert_team_product_error" in source
+    assert 'payload.get("code") or "provider_request_failed"' in source
+    assert "http_status=status" in source
     assert '_expert_team_response_with_product_state(payload, run)' in source
     assert 'attach_product_error(payload, "office_review_required")' in source
 
@@ -143,9 +145,11 @@ def test_expert_runtime_dispatch_failures_use_backend_product_mapping():
     source = (ROOT / "api/routes.py").read_text(encoding="utf-8")
     block = source[source.index("result = adapter.start_run(") : source.index("response[\"run\"] = updated_run")]
 
-    assert block.count("_backend_failure(") >= 4
-    assert block.count("_execution_failure(") >= 2
-    assert 'code = "backend_unavailable" if int(status) >= 500 else "unknown_error"' in source
+    assert block.count("_backend_failure(") >= 3
+    assert block.count("_execution_failure(") >= 3
+    assert "attach_expert_team_product_error(" in source
+    assert 'payload.get("code") or "provider_request_failed"' in source
+    assert "http_status=status" in source
     assert '"code": "start_pending"' in block
     assert 'getattr(exc, "code", "start_commit_failed")' in block
 

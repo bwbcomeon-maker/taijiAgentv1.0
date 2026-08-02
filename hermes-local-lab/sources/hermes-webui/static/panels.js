@@ -3658,7 +3658,7 @@ function _writeflowApplyServerTeams(teams) {
 }
 
 function _writeflowTeamById(teamId) {
-  return WRITEFLOW_TEAMS.find(team => team.id === teamId) || WRITEFLOW_TEAMS[0] || WRITEFLOW_FALLBACK_TEAM;
+  return WRITEFLOW_TEAMS.find(team => team.id === teamId) || WRITEFLOW_TEAMS[0] || null;
 }
 
 function _writeflowAvatarHtml(src, label, cls) {
@@ -3796,29 +3796,37 @@ function sendWriteflowPanelAction(action) {
 
 function openWriteflowTeamModal(teamId) {
   const team = _writeflowTeamById(teamId);
+  if (!team) {
+    showToast('专家团目录尚未就绪，请刷新后重试。');
+    void loadWriteflow(true);
+    return;
+  }
+  const firstAvailableExample=team.examples.find(example=>example.available===true&&String(example.launch_profile_id||'').trim())||null;
   _writeflowSelectedTeamId = team.id;
   _writeflowModalTeamId = team.id;
-  _writeflowSelectedTemplateId = team.examples[0] ? team.examples[0].id : '';
+  _writeflowSelectedTemplateId = firstAvailableExample ? firstAvailableExample.id : '';
   renderWriteflowTeams();
   const modal = $('writeflowTeamModal');
   const body = $('writeflowTeamModalBody');
   const footer = $('writeflowTeamModalFooter');
   if (!modal || !body || !footer) return;
-  const seedPrompt = (team.examples[0] && team.examples[0].prompt) || '';
+  const seedPrompt = (firstAvailableExample && firstAvailableExample.prompt) || '';
   const tags = team.tags.map(tag => `<span>${esc(tag)}</span>`).join('');
   const members = team.members.map(member => `
     <div class="writeflow-modal-member">
       ${_writeflowAvatarHtml(member.image, member.name, 'writeflow-member-avatar')}
       <span><strong>${esc(member.name)}</strong><em>${esc(member.role)}</em></span>
     </div>`).join('');
-  const examples = team.examples.map((example, idx) => {
+  const examples = team.examples.map(example => {
     const prompt = String(example.prompt || '').replace(/\s+/g, ' ').trim();
     const summary = prompt.split(/[。；;.!?？]/).find(Boolean) || prompt;
     const capability = example.capability && typeof example.capability === 'object' ? example.capability : {};
     const capabilityLabel = String(capability.label || 'AI 草稿能力');
+    const unavailable = example.available !== true || !String(example.launch_profile_id || '').trim();
+    const disabledReason = String(example.disabled_reason || '该任务尚未完成交付验证');
     return `
-    <button type="button" class="writeflow-example ${idx === 0 ? 'selected' : ''}" data-template-id="${esc(example.id)}" data-example-prompt="${esc(example.prompt)}" aria-label="选择${esc(example.label)}模板">
-      <span class="writeflow-example-label">${esc(example.label)} · ${capabilityLabel}</span>
+    <button type="button" class="writeflow-example ${example.id === _writeflowSelectedTemplateId ? 'selected' : ''}${unavailable ? ' is-disabled' : ''}" data-template-id="${esc(example.id)}" data-example-prompt="${esc(example.prompt)}" aria-label="${unavailable ? esc(`${example.label}暂不可用：${disabledReason}`) : esc(`选择${example.label}模板`)}" aria-disabled="${String(unavailable)}" ${unavailable ? 'disabled' : ''}>
+      <span class="writeflow-example-label">${esc(example.label)} · ${esc(unavailable ? disabledReason : capabilityLabel)}</span>
       <strong class="writeflow-example-summary">${esc(summary)}</strong>
       <em class="writeflow-example-prompt-preview">${esc(prompt)}</em>
     </button>`;
@@ -3865,7 +3873,7 @@ function openWriteflowTeamModal(teamId) {
   footer.innerHTML = `
     <div class="writeflow-modal-footer-main">
       <span>进入新的聊天任务后，可继续确认阶段、查看运行状态和产物入口。</span>
-      <button type="button" class="btn primary writeflow-summon-btn" onclick="summonWriteflowTeam()">召唤 ${esc(team.title)}</button>
+      <button type="button" class="btn primary writeflow-summon-btn" onclick="summonWriteflowTeam()" ${team.examples.some(example => example.available === true && String(example.launch_profile_id || '').trim()) ? '' : 'disabled aria-disabled="true" title="当前没有已通过交付验证的文档任务"'}>召唤 ${esc(team.title)}</button>
     </div>`;
   _getWriteflowTeamDialog().open();
   body.querySelectorAll('.writeflow-example').forEach(btn => {
@@ -3887,30 +3895,19 @@ function closeWriteflowTeamModal() {
 }
 
 function _writeflowExpertTeamStartPayload(team,example,base){
-  const payload={
-    ...(base||{}),
-    team_id:team.id,
-    template_id:example.id,
-    example_prompt:example.prompt||'',
+  const source=base&&typeof base==='object'?base:{};
+  return {
+    launch_profile_id:String(example&&example.launch_profile_id||'').trim(),
+    prompt:String(source.prompt||example&&example.prompt||'').trim(),
   };
-  const capability=example.capability&&typeof example.capability==='object'?example.capability:{};
-  const pilotEligible=capability.kind==='enterprise_contract_pilot'
-    && capability.contract_version==='expert-team-contract/v1';
-  if(pilotEligible){
-    payload.contract_version=capability.contract_version;
-    payload.intake_example_id=String(example.intake_example_id||example.id||'');
-    payload.document_type=String(example.document_type||'');
-    payload.document_brief_seed={
-      ...(example.document_brief_seed||{}),
-      task_mode:String(example.task_mode||'create'),
-    };
-    delete payload.template_id;
-  }
-  return payload;
 }
 
 async function summonWriteflowTeam() {
   const team = _writeflowTeamById(_writeflowModalTeamId || _writeflowSelectedTeamId);
+  if (!team) {
+    showToast('专家团目录尚未就绪，请刷新后重试。');
+    return;
+  }
   const modalPrompt = (($('writeflowTeamPrompt') || {}).value || '').trim();
   const panelPrompt = (($('writeflowPrompt') || {}).value || '').trim();
   const prompt = modalPrompt || panelPrompt;
@@ -3920,9 +3917,6 @@ async function summonWriteflowTeam() {
   }
   const panelPromptEl = $('writeflowPrompt');
   if (panelPromptEl) panelPromptEl.value = prompt;
-  const projectInput = $('writeflowProject');
-  const project = ((projectInput || {}).value || '').trim() || _writeflowProjectTitleFromPrompt(prompt, team);
-  if (projectInput && !projectInput.value.trim()) projectInput.value = project;
   if(typeof window==='undefined'||typeof window.sendExpertTeamAction!=='function'){
     showToast('页面资源版本不一致，正在刷新。');
     if(typeof hardRefreshWebUIClient==='function'){
@@ -3933,13 +3927,12 @@ async function summonWriteflowTeam() {
     return;
   }
   const example=team.examples.find(item=>item.id===_writeflowSelectedTemplateId)||team.examples[0]||{};
+  if(example.available!==true||!String(example.launch_profile_id||'').trim()){
+    showToast(example.disabled_reason||'当前文档任务尚未开放，请选择可用任务。');
+    return;
+  }
   const started=await window.sendExpertTeamAction(_writeflowExpertTeamStartPayload(team,example,{
-    action: team.defaultAction || 'start',
-    project,
-    mode: (($('writeflowMode') || {}).value || '').trim() || team.defaultMode || '',
     prompt,
-    new_session: true,
-    summon_only: false,
   }));
   if(started)closeWriteflowTeamModal();
 }
@@ -10646,6 +10639,7 @@ let _taijiLicenseData=null;
 function _taijiLicenseStatusLabel(status){
  const s=String(status&&status.status||'').toLowerCase();
  if(s==='valid') return '授权有效';
+ if(s==='not_required') return '开发环境无需授权';
  if(s==='expired') return '授权已到期';
  if(s==='missing') return '未安装授权';
  if(s==='invalid') return '授权无效';
@@ -10680,7 +10674,7 @@ function _renderTaijiLicenseStatus(data){
  const panel=$('taijiLicensePanel');
  const label=_taijiLicenseStatusLabel(_taijiLicenseData);
  const status=String(_taijiLicenseData.status||'unknown').toLowerCase();
- const state=status==='valid'?'ok':(status==='expired'||status==='missing'||status==='invalid')?'danger':'warn';
+ const state=status==='valid'||status==='not_required'?'ok':(status==='expired'||status==='missing'||status==='invalid')?'danger':'warn';
  if(statusEl) statusEl.textContent=label;
  if(customerEl) customerEl.textContent=_taijiLicenseData.customer||'—';
  if(expiresEl) expiresEl.textContent=_formatTaijiLicenseDate(_taijiLicenseData.expires_at);
@@ -10706,11 +10700,15 @@ function _renderTaijiLicenseStatus(data){
   }
  }
  if(sourceEl) sourceEl.textContent=_taijiLicenseSourceLabel(_taijiLicenseData);
- if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(_taijiLicenseData.status==='valid'?'授权可用':'授权状态不可用');
+ if(summaryEl) summaryEl.textContent=_taijiLicenseData.message||(
+  status==='valid'?'授权可用':
+  status==='not_required'?'开发源码模式无需授权，不影响本机验证。':
+  '授权状态不可用'
+ );
  if(panel){
   panel.dataset.licenseStatus=_taijiLicenseData.status||'unknown';
   const icon=panel.querySelector('.model-config-state-icon');
-  if(icon) icon.textContent=status==='valid'?'✓':'!';
+  if(icon) icon.textContent=(status==='valid'||status==='not_required')?'✓':'!';
  }
 }
 
@@ -11155,6 +11153,7 @@ function _setModelConfigDraftStatus(message){
 async function loadModelConfigPanel(force,options){
  const opts=options||{};
  const status=$('modelConfigStatus');
+ const hadLoadedConfig=!!_modelConfigData;
  _bindTaijiLicenseControls();
  loadTaijiLicenseStatus(force).catch(()=>{});
  if(_modelConfigData&&!force){
@@ -11179,7 +11178,7 @@ async function loadModelConfigPanel(force,options){
  try{
   const data=await api('/api/model-config');
   if(generation!==_modelConfigLoadGeneration) return _modelConfigData;
-  if(!opts.skipDirtyGuard&&_modelConfigDraftIdentity()!==draftIdentityAtStart){
+  if(hadLoadedConfig&&!opts.skipDirtyGuard&&_modelConfigDraftIdentity()!==draftIdentityAtStart){
    _setModelConfigDraftStatus('检测到未保存草稿，已保留当前编辑内容；服务器状态未覆盖页面。');
    return _modelConfigData;
   }

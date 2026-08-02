@@ -197,11 +197,24 @@ def test_taiji_recent_sessions_render_only_expert_or_qa_kind_labels():
 
 
 def test_taiji_recent_sessions_classify_expert_team_start_titles():
-    assert r"/^召唤[^：:\n]{0,64}专家团[：:]/.test(rawTitle)" in HOME_JS
+    assert r"/^召唤[^：:\n]{0,64}(?:专家团|研究团)[：:]/.test(rawTitle)" in HOME_JS
     kind_start = HOME_JS.index("function taijiSessionKind(session)")
     kind_body = HOME_JS[kind_start : HOME_JS.index("function taijiSessionFullTitle", kind_start)]
     assert "rawLooksExpertTeam" in kind_body
     assert "rawLooksWriteflow||rawLooksExpertTeam||displayLooksWriteflow" in kind_body
+
+
+def test_taiji_recent_sessions_prefer_durable_expert_team_launch_marker():
+    kind_start = HOME_JS.index("function taijiSessionKind(session)")
+    kind_body = HOME_JS[kind_start : HOME_JS.index("function taijiSessionFullTitle", kind_start)]
+
+    assert "session.expert_team_launch_transaction_id" in kind_body
+    assert "deep-research-team" in HOME_JS
+
+
+def test_taiji_recent_sessions_recognize_research_team_product_title():
+    assert r"(?:专家团|研究团)" in HOME_JS
+    assert "深度材料研究团" in HOME_JS
 
 
 def test_taiji_new_chat_inherits_active_project_filter():

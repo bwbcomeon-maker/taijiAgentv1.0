@@ -49,6 +49,14 @@ def test_chat_start_handles_license_blocked_without_stream():
     assert "startData.license_blocked" in messages_js
 
 
+def test_development_license_not_required_is_presented_as_non_error_state():
+    panels_js = _read("static/panels.js")
+
+    assert "if(s==='not_required') return '开发环境无需授权';" in panels_js
+    assert "status==='valid'||status==='not_required'" in panels_js
+    assert "开发源码模式无需授权，不影响本机验证。" in panels_js
+
+
 def test_backend_exposes_license_status_and_import_routes():
     routes_py = _read("api/routes.py")
 

@@ -78,9 +78,13 @@ async function runDocumentJob({
 
     const templatePackage = getTemplatePackage(templateId, { rootDir: path.resolve(engineRoot) });
     assertTemplatePackageValid(templatePackage);
-    const enterpriseContract = { documentMetadata, canonicalBinding, rendererIdentity, renderInputBinding, renderInputFingerprint };
-    if (Object.values(enterpriseContract).some(Boolean)) {
-      validateEnterpriseJobContract(enterpriseContract, templatePackage, {
+    const documentContract = { documentMetadata, canonicalBinding, rendererIdentity, renderInputBinding, renderInputFingerprint };
+    const standaloneContractRequired = templatePackage?.manifest?.contractProfile === 'standalone';
+    if (standaloneContractRequired || Object.values(documentContract).some(Boolean)) {
+      const validateJobContract = standaloneContractRequired
+        ? validateStandaloneJobContract
+        : validateEnterpriseJobContract;
+      validateJobContract(documentContract, templatePackage, {
         sourceSha256: sourcePackage.sourceRef.sha256,
         assetManifestSha256: assetManifestPath && fs.existsSync(assetManifestPath)
           ? crypto.createHash('sha256').update(fs.readFileSync(assetManifestPath)).digest('hex')
@@ -278,6 +282,33 @@ function validateEnterpriseJobContract(contract, templatePackage, observed = {})
       throw new ContractFailure(code, `${schemaName} validation failed: ${JSON.stringify(validation.errors)}`);
     }
   }
+  return validateBoundJobContract(contract, templatePackage, observed);
+}
+
+function validateStandaloneJobContract(contract, templatePackage, observed = {}) {
+  const required = [
+    ['StandaloneDocumentMetadataV1', contract.documentMetadata, 'brief_incomplete'],
+    ['CanonicalBindingV1', contract.canonicalBinding, 'canonical_binding_invalid'],
+    ['RendererIdentityV1', contract.rendererIdentity, 'renderer_identity_invalid'],
+    ['RenderInputBindingV1', contract.renderInputBinding, 'render_input_binding_invalid'],
+  ];
+  for (const [schemaName, value, code] of required) {
+    const validation = validateDomainObject(schemaName, value || {});
+    if (!validation.ok) {
+      throw new ContractFailure(code, `${schemaName} validation failed: ${JSON.stringify(validation.errors)}`);
+    }
+  }
+  const rendererProfile = String(templatePackage?.manifest?.rendererProfile || 'standalone-default');
+  if (contract.rendererIdentity.profileId !== rendererProfile) {
+    throw new ContractFailure(
+      'renderer_identity_invalid',
+      `Standalone renderer profile must be ${rendererProfile}.`
+    );
+  }
+  return validateBoundJobContract(contract, templatePackage, observed);
+}
+
+function validateBoundJobContract(contract, templatePackage, observed = {}) {
   if (!(templatePackage?.manifest?.documentTypes || []).includes(contract.documentMetadata.documentType)) {
     throw new ContractFailure('template_selection_required', 'Template is incompatible with document type.');
   }
@@ -639,6 +670,7 @@ module.exports = {
   runDocumentJob,
   describeRendererIdentity,
   validateEnterpriseJobContract,
+  validateStandaloneJobContract,
   inferSourceType,
   assertSourceMeetsTemplateRequirements,
   initialQualityReport,

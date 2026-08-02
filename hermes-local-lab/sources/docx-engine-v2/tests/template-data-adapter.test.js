@@ -18,7 +18,16 @@ function makeTempDir(t) {
 }
 
 test('template packages declare a package-local data adapter', () => {
-  for (const templateId of ['general-proposal', 'meeting-minutes', 'enterprise-work-report', 'enterprise-research-report']) {
+  for (const templateId of [
+    'general-proposal',
+    'meeting-minutes',
+    'enterprise-work-report',
+    'enterprise-research-report',
+    'standalone-work-report',
+    'standalone-research-report',
+    'standalone-meeting-minutes',
+    'standalone-office-material',
+  ]) {
     const template = getTemplatePackage(templateId, { rootDir: ENGINE_ROOT });
 
     assert.equal(template.files.dataAdapter, 'data-adapter.js');

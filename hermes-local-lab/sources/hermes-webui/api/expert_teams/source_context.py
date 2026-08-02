@@ -75,7 +75,42 @@ def _path_contains_symlink(root: Path, target: Path) -> bool:
     return False
 
 
-def build_source_context_snapshot(
+def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool:
+    """Return whether this immutable standalone launch contract permits no sources.
+
+    Empty source snapshots are intentionally exceptional.  Authorization comes
+    from the server-owned launch profile snapshot and the confirmed Brief
+    together, never from a caller-provided ``allow_empty`` flag alone.
+    """
+    if not isinstance(run, dict):
+        return False
+    candidate = brief if isinstance(brief, dict) else run.get("document_brief")
+    profile = run.get("launch_profile_snapshot")
+    if not isinstance(candidate, dict) or not isinstance(profile, dict):
+        return False
+    requirement = profile.get("source_requirement")
+    minimum_ready = requirement.get("minimum_ready") if isinstance(requirement, dict) else None
+    source_policy = candidate.get("source_policy")
+    profile_review = profile.get("review_policy")
+    return bool(
+        type(run.get("schema_version")) is int
+        and run.get("schema_version") == 3
+        and str(run.get("product_mode") or "") == "standalone"
+        and str(candidate.get("product_mode") or "") == "standalone"
+        and str(candidate.get("status") or "") == "confirmed"
+        and str(profile.get("id") or "") == str(run.get("launch_profile_id") or "")
+        and str(profile.get("team_id") or "") == str(run.get("team_id") or "")
+        and str(profile.get("document_type") or "") == str(candidate.get("document_type") or "")
+        and isinstance(profile_review, dict)
+        and profile_review.get("kind") == "local_confirmation"
+        and type(minimum_ready) is int
+        and minimum_ready == 0
+        and isinstance(source_policy, dict)
+        and source_policy.get("unknown_fact_action") == "allow_labeled_placeholder"
+    )
+
+
+def _build_source_context_snapshot(
     workspace: Path,
     run_id: str,
     brief: dict,
@@ -84,6 +119,7 @@ def build_source_context_snapshot(
     brief_sha256: str,
     brief_revision: int,
     extractor_identity: dict | None = None,
+    allow_empty: bool = False,
 ) -> dict:
     root = Path(workspace).expanduser().resolve()
     safe_run_id = _safe_id(run_id, "run id")
@@ -131,7 +167,7 @@ def build_source_context_snapshot(
                 "segments": _segments(source_id, locator, text),
             }
         )
-    if not sources:
+    if not sources and not allow_empty:
         raise SourceContextError("source snapshot has no sources")
 
     snapshot_id = f"source-context-{int(brief_revision):04d}"
@@ -175,6 +211,35 @@ def build_source_context_snapshot(
         "brief_revision": int(brief_revision),
         "brief_sha256": str(brief_sha256),
     }
+
+
+def build_source_context_snapshot(
+    workspace: Path,
+    run_id: str,
+    brief: dict,
+    source_registry: dict,
+    *,
+    brief_sha256: str,
+    brief_revision: int,
+    extractor_identity: dict | None = None,
+    allow_empty: bool = False,
+) -> dict:
+    """Build a snapshot while projecting filesystem failures as contract errors."""
+    try:
+        return _build_source_context_snapshot(
+            workspace,
+            run_id,
+            brief,
+            source_registry,
+            brief_sha256=brief_sha256,
+            brief_revision=brief_revision,
+            extractor_identity=extractor_identity,
+            allow_empty=allow_empty,
+        )
+    except SourceContextError:
+        raise
+    except OSError as exc:
+        raise SourceContextError("source snapshot I/O failed") from exc
 
 
 def read_source_context_snapshot(workspace: Path, run_id: str, snapshot_ref: dict) -> dict:
@@ -221,7 +286,12 @@ def verify_source_context_snapshot(
     )
     if not all(checks):
         raise SourceContextError("source snapshot binding changed; create a new run")
-    for source in payload.get("sources") or []:
+    sources = payload.get("sources")
+    if not isinstance(sources, list):
+        raise SourceContextError("source snapshot sources are invalid")
+    if not sources and not allows_empty_source_context(run, brief=brief):
+        raise SourceContextError("empty source snapshot is not authorized for this run")
+    for source in sources:
         text = source.get("content_text")
         if not isinstance(text, str) or hashlib.sha256(text.encode("utf-8")).hexdigest() != source.get("content_sha256"):
             raise SourceContextError("source snapshot content hash changed")

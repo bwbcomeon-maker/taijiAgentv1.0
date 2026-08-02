@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import copy
+import shutil
 import sqlite3
 import subprocess
 import sys
 from collections import OrderedDict
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -267,15 +269,39 @@ def test_delete_tombstones_stale_worker_and_cancels_live_stream(
     session.pending_user_message = "running"
     session.save(skip_index=True)
     stale_worker_session = session
+    external_stale_session = models.Session.load(session.session_id)
+    assert external_stale_session is not None
     cancel_flag = threading.Event()
     monkeypatch.setattr(routes, "STREAMS", {"delete-live-stream": object()})
     monkeypatch.setattr(routes, "CANCEL_FLAGS", {"delete-live-stream": cancel_flag})
     monkeypatch.setattr(config, "AGENT_INSTANCES", {})
     deleted_state_rows = []
+    writer_lock_depth = 0
+    import api.truth_rewrite as truth_rewrite
+
+    original_writer_lock = truth_rewrite.truth_rewrite_lock
+
+    @contextmanager
+    def observed_writer_lock(session_id, **kwargs):
+        nonlocal writer_lock_depth
+        with original_writer_lock(session_id, **kwargs):
+            writer_lock_depth += 1
+            try:
+                yield
+            finally:
+                writer_lock_depth -= 1
+
+    monkeypatch.setattr(truth_rewrite, "truth_rewrite_lock", observed_writer_lock)
+
+    def delete_cli_session(sid):
+        assert writer_lock_depth > 0
+        deleted_state_rows.append(sid)
+        return True
+
     monkeypatch.setattr(
         models,
         "delete_cli_session",
-        lambda sid: deleted_state_rows.append(sid) or True,
+        delete_cli_session,
     )
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
     monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
@@ -305,7 +331,1213 @@ def test_delete_tombstones_stale_worker_and_cancels_live_stream(
     )
     with pytest.raises(RuntimeError, match="deleted session"):
         stale_worker_session.save(skip_index=True)
+    external_stale_session.messages.append(
+        {"role": "assistant", "content": "late cross-process completion"}
+    )
+    with pytest.raises(models.SessionWriteConflict, match="deleted"):
+        external_stale_session.save(skip_index=True)
     assert session.path.exists() is False
+
+
+@pytest.mark.parametrize("failed_authority", ["sidecar", "backup"])
+def test_delete_authority_unlink_failure_is_reported_without_related_cleanup(
+    failed_authority,
+    monkeypatch,
+    isolated_sessions,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id=f"delete-unlink-failure-{failed_authority}",
+    )
+    sidecar = session.path.resolve()
+    backup = sidecar.with_suffix(".json.bak")
+    original_sidecar = sidecar.read_bytes()
+    backup.write_bytes(original_sidecar)
+    cleanup_calls = {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    monkeypatch.setattr(
+        routes.shutil,
+        "rmtree",
+        lambda path, **_kwargs: cleanup_calls["attachments"].append(str(path)),
+    )
+    failed_leaf = sidecar.name if failed_authority == "sidecar" else backup.name
+    real_unlink = routes.os.unlink
+    failed = False
+
+    def fail_selected_unlink(path, *args, **kwargs):
+        nonlocal failed
+        candidate = Path(path).name
+        if (
+            not failed
+            and candidate.startswith(f".{failed_leaf}.")
+            and candidate.endswith(".delete-quarantine")
+        ):
+            failed = True
+            raise OSError(f"injected {failed_authority} unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as delete_patch:
+        delete_patch.setattr(routes.os, "unlink", fail_selected_unlink)
+        response = _call_post(
+            delete_patch,
+            routes,
+            "/api/session/delete",
+            {"session_id": session.session_id},
+        )
+
+    assert failed is True
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_persistence_failed"
+    assert cleanup_calls == {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+    assert sidecar.read_bytes() == original_sidecar
+    assert backup.read_bytes() == original_sidecar
+    assert sessions[session.session_id] is session
+    assert getattr(session, "_deleted", False) is False
+
+    # A wholly new interpreter must observe a retained session, not a falsely
+    # successful deletion followed by resurrection from the surviving sidecar.
+    script = """
+import sys
+from collections import OrderedDict
+from pathlib import Path
+import api.config as config
+import api.models as models
+
+session_dir = Path(sys.argv[1])
+session_id = sys.argv[2]
+sessions = OrderedDict()
+for module in (config, models):
+    module.SESSION_DIR = session_dir
+    module.SESSION_INDEX_FILE = session_dir / "_index.json"
+    module.SESSIONS = sessions
+session = models.Session.load(session_id)
+if session is None:
+    raise SystemExit(71)
+session.messages.append({"role": "assistant", "content": "fresh process save"})
+session.context_messages = list(session.messages)
+session.save(touch_updated_at=False, skip_index=True)
+reloaded = models.Session.load(session_id)
+if reloaded is None or reloaded.messages[-1].get("content") != "fresh process save":
+    raise SystemExit(72)
+"""
+    fresh = subprocess.run(
+        [sys.executable, "-c", script, str(sidecar.parent), session.session_id],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert fresh.returncode == 0, fresh.stderr or fresh.stdout
+
+
+def test_delete_rollback_fsyncs_each_restored_authority_directory(
+    monkeypatch,
+    isolated_sessions,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-rollback-directory-fsync",
+    )
+    sidecar = session.path
+    sidecar_bytes = sidecar.read_bytes()
+    backup = sidecar.with_suffix(".json.bak")
+    backup.write_bytes(sidecar_bytes)
+    intent_dir = sidecar.parent / ".truth-rewrite-intents"
+    intent_dir.mkdir()
+    intent = intent_dir / sidecar.name
+    intent.write_bytes(b"delete intent")
+    cleanup_calls = {"artifacts": [], "index": [], "state": []}
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    root_metadata = sidecar.parent.stat()
+    intent_metadata = intent_dir.stat()
+    root_identity = (int(root_metadata.st_dev), int(root_metadata.st_ino))
+    intent_identity = (int(intent_metadata.st_dev), int(intent_metadata.st_ino))
+    fsync_counts = {root_identity: 0, intent_identity: 0}
+    real_fsync = routes.os.fsync
+    real_unlink = routes.os.unlink
+    unlink_failed = False
+
+    def observe_fsync(fd):
+        metadata = routes.os.fstat(fd)
+        identity = (int(metadata.st_dev), int(metadata.st_ino))
+        if identity in fsync_counts:
+            fsync_counts[identity] += 1
+        return real_fsync(fd)
+
+    def fail_backup_quarantine_unlink(path, *args, **kwargs):
+        nonlocal unlink_failed
+        name = Path(path).name
+        if (
+            not unlink_failed
+            and name.startswith(f".{backup.name}.")
+            and name.endswith(".delete-quarantine")
+        ):
+            unlink_failed = True
+            raise OSError("injected backup quarantine unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(routes.os, "fsync", observe_fsync)
+    monkeypatch.setattr(routes.os, "unlink", fail_backup_quarantine_unlink)
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert unlink_failed is True
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_persistence_failed"
+    assert fsync_counts[root_identity] >= 2
+    assert fsync_counts[intent_identity] >= 2
+    assert sidecar.read_bytes() == sidecar_bytes
+    assert backup.read_bytes() == sidecar_bytes
+    assert intent.read_bytes() == b"delete intent"
+    assert cleanup_calls == {"artifacts": [], "index": [], "state": []}
+    assert sessions[session.session_id] is session
+    assert getattr(session, "_deleted", False) is False
+
+
+def test_delete_rollback_fsync_failure_is_reported_as_recovery_failure(
+    monkeypatch,
+    isolated_sessions,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-rollback-fsync-failure",
+    )
+    sidecar = session.path
+    sidecar_bytes = sidecar.read_bytes()
+    backup = sidecar.with_suffix(".json.bak")
+    backup.write_bytes(sidecar_bytes)
+    intent_dir = sidecar.parent / ".truth-rewrite-intents"
+    intent_dir.mkdir()
+    intent = intent_dir / sidecar.name
+    intent.write_bytes(b"delete intent")
+    cleanup_calls = {"artifacts": [], "index": [], "state": []}
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    root_metadata = sidecar.parent.stat()
+    root_identity = (int(root_metadata.st_dev), int(root_metadata.st_ino))
+    root_fsync_count = 0
+    real_fsync = routes.os.fsync
+    real_unlink = routes.os.unlink
+    unlink_failed = False
+    rollback_fsync_failed = False
+
+    def fail_rollback_root_fsync(fd):
+        nonlocal root_fsync_count, rollback_fsync_failed
+        metadata = routes.os.fstat(fd)
+        identity = (int(metadata.st_dev), int(metadata.st_ino))
+        if identity == root_identity:
+            root_fsync_count += 1
+            if root_fsync_count == 2:
+                rollback_fsync_failed = True
+                raise OSError("injected rollback root fsync failure")
+        return real_fsync(fd)
+
+    def fail_backup_quarantine_unlink(path, *args, **kwargs):
+        nonlocal unlink_failed
+        name = Path(path).name
+        if (
+            not unlink_failed
+            and name.startswith(f".{backup.name}.")
+            and name.endswith(".delete-quarantine")
+        ):
+            unlink_failed = True
+            raise OSError("injected backup quarantine unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(routes.os, "fsync", fail_rollback_root_fsync)
+    monkeypatch.setattr(routes.os, "unlink", fail_backup_quarantine_unlink)
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert unlink_failed is True
+    assert rollback_fsync_failed is True
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_recovery_failed"
+    assert sidecar.read_bytes() == sidecar_bytes
+    assert backup.read_bytes() == sidecar_bytes
+    assert intent.read_bytes() == b"delete intent"
+    assert cleanup_calls == {"artifacts": [], "index": [], "state": []}
+    assert sessions[session.session_id] is session
+    assert getattr(session, "_deleted", False) is True
+
+
+@pytest.mark.parametrize(
+    "authority_target",
+    [
+        "sidecar_same_root",
+        "sidecar_outside",
+        "backup_symlink",
+        "intent_leaf_symlink",
+    ],
+)
+def test_delete_rejects_session_authority_symlink_without_touching_target(
+    authority_target,
+    monkeypatch,
+    isolated_sessions,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id=f"delete-authority-symlink-{authority_target}",
+    )
+    if authority_target == "sidecar_same_root":
+        victim = _seed_session(
+            models,
+            sessions,
+            tmp_path,
+            session_id="delete-authority-symlink-victim",
+        )
+        victim_path = victim.path
+    else:
+        victim_path = tmp_path / f"{authority_target}-outside-victim.json"
+        victim_path.write_bytes(b"outside authority victim")
+    victim_bytes = victim_path.read_bytes()
+    if authority_target.startswith("sidecar"):
+        authority_path = session.path
+        authority_path.unlink()
+    elif authority_target == "backup_symlink":
+        authority_path = session.path.with_suffix(".json.bak")
+    else:
+        intent_dir = session.path.parent / ".truth-rewrite-intents"
+        intent_dir.mkdir()
+        authority_path = intent_dir / f"{session.session_id}.json"
+    authority_path.symlink_to(victim_path)
+    cleanup_calls = {"artifacts": [], "index": [], "state": []}
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_persistence_failed"
+    assert cleanup_calls == {"artifacts": [], "index": [], "state": []}
+    assert authority_path.is_symlink()
+    assert victim_path.read_bytes() == victim_bytes
+    assert sessions[session.session_id] is session
+    assert getattr(session, "_deleted", False) is False
+
+
+def test_delete_cold_cache_rejects_sidecar_symlink_without_loading_target(
+    monkeypatch,
+    isolated_sessions,
+):
+    """DELETE must anchor authority before any Session deserialization."""
+    routes, models, sessions, tmp_path = isolated_sessions
+    victim = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-cold-symlink-victim",
+    )
+    requested = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-cold-symlink-requested",
+    )
+    victim_bytes = victim.path.read_bytes()
+    requested.path.unlink()
+    requested.path.symlink_to(victim.path)
+    sessions.clear()
+    cleanup_calls = {"artifacts": [], "index": [], "state": []}
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": requested.session_id},
+    )
+
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_persistence_failed"
+    assert cleanup_calls == {"artifacts": [], "index": [], "state": []}
+    assert requested.path.is_symlink()
+    assert victim.path.read_bytes() == victim_bytes
+    assert sessions == {}
+
+
+def test_delete_fails_closed_when_intent_parent_is_swapped_after_snapshot(
+    monkeypatch,
+    isolated_sessions,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-intent-parent-swap",
+    )
+    sidecar_bytes = session.path.read_bytes()
+    backup = session.path.with_suffix(".json.bak")
+    backup.write_bytes(sidecar_bytes)
+    intent_dir = session.path.parent / ".truth-rewrite-intents"
+    intent_dir.mkdir()
+    intent = intent_dir / f"{session.session_id}.json"
+    intent.write_bytes(b"original intent")
+    held_intent_dir = session.path.parent / ".truth-rewrite-intents-held"
+    outside_dir = tmp_path / "outside-intents"
+    outside_dir.mkdir()
+    outside_victim = outside_dir / f"{session.session_id}.json"
+    outside_victim.write_bytes(b"outside intent victim")
+    cleanup_calls = {"artifacts": [], "index": [], "state": []}
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    real_rename = routes.os.rename
+    swapped = False
+
+    def swap_parent_before_backup_quarantine(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if (
+            not swapped
+            and Path(source).name == backup.name
+            and Path(destination).name.endswith(".delete-quarantine")
+        ):
+            swapped = True
+            intent_dir.rename(held_intent_dir)
+            intent_dir.symlink_to(outside_dir, target_is_directory=True)
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(routes.os, "rename", swap_parent_before_backup_quarantine)
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert swapped is True
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_recovery_failed"
+    assert cleanup_calls == {"artifacts": [], "index": [], "state": []}
+    assert session.path.read_bytes() == sidecar_bytes
+    assert backup.read_bytes() == sidecar_bytes
+    assert (held_intent_dir / intent.name).read_bytes() == b"original intent"
+    assert outside_victim.read_bytes() == b"outside intent victim"
+    assert sessions[session.session_id] is session
+    assert getattr(session, "_deleted", False) is True
+
+
+def test_delete_preserves_authority_leaf_replaced_after_validation(
+    monkeypatch,
+    isolated_sessions,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-leaf-validation-race",
+    )
+    sidecar = session.path
+    original_bytes = sidecar.read_bytes()
+    sidecar.with_suffix(".json.bak").write_bytes(original_bytes)
+    replacement_payload = json.loads(original_bytes.decode("utf-8"))
+    replacement_payload["title"] = "newer durable Session"
+    replacement_bytes = json.dumps(
+        replacement_payload,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    cleanup_calls = {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    monkeypatch.setattr(
+        routes.shutil,
+        "rmtree",
+        lambda path, **_kwargs: cleanup_calls["attachments"].append(str(path)),
+    )
+    real_assert_unchanged = routes._SessionDeleteAuthority._assert_entry_unchanged
+    replaced = False
+
+    def replace_primary_after_validation(authority, label):
+        nonlocal replaced
+        present = real_assert_unchanged(authority, label)
+        if label == "primary" and present and not replaced:
+            replaced = True
+            replacement = sidecar.parent / ".newer-session.json"
+            replacement.write_bytes(replacement_bytes)
+            replacement.replace(sidecar)
+        return present
+
+    monkeypatch.setattr(
+        routes._SessionDeleteAuthority,
+        "_assert_entry_unchanged",
+        replace_primary_after_validation,
+    )
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert replaced is True
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_persistence_failed"
+    assert sidecar.read_bytes() == replacement_bytes
+    assert cleanup_calls == {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+
+
+def test_delete_rejects_session_root_replaced_after_snapshot(
+    monkeypatch,
+    isolated_sessions,
+):
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-root-binding-race",
+    )
+    session_root = session.path.parent
+    held_root = tmp_path / "sessions-held-after-snapshot"
+    sidecar_name = session.path.name
+    original_bytes = session.path.read_bytes()
+    session.path.with_suffix(".json.bak").write_bytes(original_bytes)
+    replacement_payload = json.loads(original_bytes.decode("utf-8"))
+    replacement_payload["title"] = "current configured root Session"
+    replacement_bytes = json.dumps(
+        replacement_payload,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    cleanup_calls = {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    monkeypatch.setattr(
+        routes.shutil,
+        "rmtree",
+        lambda path, **_kwargs: cleanup_calls["attachments"].append(str(path)),
+    )
+    real_assert_unchanged = routes._SessionDeleteAuthority._assert_entry_unchanged
+    replaced = False
+
+    def replace_root_after_validation(authority, label):
+        nonlocal replaced
+        present = real_assert_unchanged(authority, label)
+        if label == "backup" and present and not replaced:
+            replaced = True
+            session_root.rename(held_root)
+            session_root.mkdir()
+            (session_root / sidecar_name).write_bytes(replacement_bytes)
+        return present
+
+    monkeypatch.setattr(
+        routes._SessionDeleteAuthority,
+        "_assert_entry_unchanged",
+        replace_root_after_validation,
+    )
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert replaced is True
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_recovery_failed"
+    assert (session_root / sidecar_name).read_bytes() == replacement_bytes
+    assert (held_root / sidecar_name).read_bytes() == original_bytes
+    assert cleanup_calls == {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+
+
+def test_delete_rejects_root_parent_rebound_through_symlink_after_snapshot(
+    monkeypatch,
+    isolated_sessions,
+):
+    """An ancestor symlink cannot disguise a changed lexical root binding."""
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-root-parent-binding-race",
+    )
+    sidecar = session.path
+    original_bytes = sidecar.read_bytes()
+    sidecar.with_suffix(".json.bak").write_bytes(original_bytes)
+    held_parent = tmp_path.with_name(f"{tmp_path.name}-held")
+    cleanup_calls = {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(
+        routes,
+        "_artifact_registry",
+        lambda: SimpleNamespace(
+            retire_session=lambda sid: cleanup_calls["artifacts"].append(sid)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    monkeypatch.setattr(
+        routes.shutil,
+        "rmtree",
+        lambda path, **_kwargs: cleanup_calls["attachments"].append(str(path)),
+    )
+    real_assert_unchanged = routes._SessionDeleteAuthority._assert_entry_unchanged
+    rebound = False
+
+    def rebind_parent_after_validation(authority, label):
+        nonlocal rebound
+        present = real_assert_unchanged(authority, label)
+        if label == "backup" and present and not rebound:
+            rebound = True
+            tmp_path.rename(held_parent)
+            tmp_path.symlink_to(held_parent, target_is_directory=True)
+        return present
+
+    monkeypatch.setattr(
+        routes._SessionDeleteAuthority,
+        "_assert_entry_unchanged",
+        rebind_parent_after_validation,
+    )
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert rebound is True
+    assert response["status"] == 500
+    assert response["payload"]["code"] == "session_delete_recovery_failed"
+    assert (held_parent / "sessions" / sidecar.name).read_bytes() == original_bytes
+    assert tmp_path.is_symlink()
+    assert cleanup_calls == {
+        "artifacts": [],
+        "index": [],
+        "state": [],
+        "attachments": [],
+    }
+
+
+@pytest.mark.parametrize("rollback_outcome", ["retired", "both_missing"])
+def test_delete_remains_durable_when_artifact_retirement_rollback_fails(
+    rollback_outcome,
+    monkeypatch,
+    isolated_sessions,
+):
+    import api.artifacts as artifacts
+
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id=f"delete-artifact-rollback-failure-{rollback_outcome}",
+    )
+    registry = artifacts.ArtifactRegistry(tmp_path / "artifacts")
+    artifact_session = registry.root / session.session_id
+    artifact_session.mkdir(parents=True)
+    (artifact_session / "payload.bin").write_bytes(b"artifact")
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(routes, "_artifact_registry", lambda: registry)
+    cleaned = {"index": [], "state": [], "attachments": []}
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleaned["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleaned["state"].append(sid),
+    )
+    real_rmtree = shutil.rmtree
+    monkeypatch.setattr(
+        routes.shutil,
+        "rmtree",
+        lambda path, **_kwargs: cleaned["attachments"].append(str(path)),
+    )
+    real_atomic_write = artifacts._atomic_write
+    real_replace = artifacts.os.replace
+
+    def fail_retired_metadata(path, data):
+        if Path(path).name == ".retired.json":
+            raise OSError("injected retired metadata failure")
+        return real_atomic_write(path, data)
+
+    def fail_artifact_rollback(source, destination, *args, **kwargs):
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            source_path.parent.name == ".trash"
+            and destination_path == artifact_session
+        ):
+            if rollback_outcome == "both_missing":
+                real_rmtree(source_path)
+            raise OSError("injected artifact rollback failure")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "_atomic_write", fail_retired_metadata)
+    monkeypatch.setattr(artifacts.os, "replace", fail_artifact_rollback)
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert response["status"] == 500
+    assert response["payload"]["ok"] is False
+    assert response["payload"]["code"] == "session_delete_artifact_recovery_failed"
+    assert response["payload"]["deleted"] is True
+    assert session.path.exists() is False
+    assert session.path.with_suffix(".json.bak").exists() is False
+    assert session.session_id not in sessions
+    assert artifact_session.exists() is False
+    expected_retired = 1 if rollback_outcome == "retired" else 0
+    assert (
+        len(list((registry.root / ".trash").glob(f"{session.session_id}--*")))
+        == expected_retired
+    )
+    assert cleaned["index"] == [session.session_id]
+    assert cleaned["state"] == [session.session_id]
+    assert len(cleaned["attachments"]) == 1
+
+    # A new process must observe the Session deletion as authoritative. The
+    # retained artifact trash is diagnostic/recovery material only; it cannot
+    # make the conversation loadable (and therefore cannot be saved again).
+    script = """
+import sys
+from collections import OrderedDict
+from pathlib import Path
+import api.config as config
+import api.models as models
+
+session_dir = Path(sys.argv[1])
+session_id = sys.argv[2]
+sessions = OrderedDict()
+for module in (config, models):
+    module.SESSION_DIR = session_dir
+    module.SESSION_INDEX_FILE = session_dir / "_index.json"
+    module.SESSIONS = sessions
+if models.Session.load(session_id) is not None:
+    raise SystemExit(73)
+if session_id in sessions:
+    raise SystemExit(74)
+"""
+    fresh = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(session.path.parent),
+            session.session_id,
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert fresh.returncode == 0, fresh.stderr or fresh.stdout
+
+
+def test_delete_restores_session_when_artifact_rollback_is_live_but_not_durable(
+    monkeypatch,
+    isolated_sessions,
+):
+    import api.artifacts as artifacts
+
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-artifact-rollback-durability-failure",
+    )
+    original_sidecar = session.path.read_bytes()
+    registry = artifacts.ArtifactRegistry(tmp_path / "artifacts")
+    artifact_session = registry.root / session.session_id
+    artifact_session.mkdir(parents=True)
+    artifact_payload = artifact_session / "original.bin"
+    artifact_payload.write_bytes(b"original artifact")
+    original_artifact_identity = (
+        int(artifact_session.stat().st_dev),
+        int(artifact_session.stat().st_ino),
+    )
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_artifact_registry", lambda: registry)
+    cleanup_calls = {"index": [], "state": [], "attachments": []}
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleanup_calls["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleanup_calls["state"].append(sid),
+    )
+    monkeypatch.setattr(
+        routes.shutil,
+        "rmtree",
+        lambda path, **_kwargs: cleanup_calls["attachments"].append(str(path)),
+    )
+    real_atomic_write = artifacts._atomic_write
+    real_fsync_directory = artifacts._fsync_directory
+    root_fsync_count = 0
+
+    def fail_retired_metadata(path, data):
+        if Path(path).name == ".retired.json":
+            raise OSError("injected retired metadata failure")
+        return real_atomic_write(path, data)
+
+    def fail_restored_parent_fsync(path):
+        nonlocal root_fsync_count
+        if Path(path) == registry.root:
+            root_fsync_count += 1
+            if root_fsync_count >= 2:
+                raise OSError("injected persistent artifact rollback fsync failure")
+        return real_fsync_directory(path)
+
+    monkeypatch.setattr(artifacts, "_atomic_write", fail_retired_metadata)
+    monkeypatch.setattr(artifacts, "_fsync_directory", fail_restored_parent_fsync)
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert root_fsync_count == 2
+    assert response["status"] == 500
+    assert response["payload"]["ok"] is False
+    assert response["payload"]["code"] == "session_delete_recovery_failed"
+    assert response["payload"].get("deleted") is not True
+    assert session.path.read_bytes() == original_sidecar
+    restored_artifact_identity = (
+        int(artifact_session.stat().st_dev),
+        int(artifact_session.stat().st_ino),
+    )
+    assert restored_artifact_identity == original_artifact_identity
+    assert artifact_payload.read_bytes() == b"original artifact"
+    assert list((registry.root / ".trash").glob(f"{session.session_id}--*")) == []
+    assert cleanup_calls == {"index": [], "state": [], "attachments": []}
+    assert sessions[session.session_id] is session
+    assert getattr(session, "_deleted", False) is False
+
+
+def test_delete_does_not_restore_session_over_rebound_artifact_authority(
+    monkeypatch,
+    isolated_sessions,
+):
+    import api.artifacts as artifacts
+
+    routes, models, sessions, tmp_path = isolated_sessions
+    session = _seed_session(
+        models,
+        sessions,
+        tmp_path,
+        session_id="delete-artifact-rollback-rebound",
+    )
+    registry = artifacts.ArtifactRegistry(tmp_path / "artifacts")
+    artifact_session = registry.root / session.session_id
+    artifact_session.mkdir(parents=True)
+    original_payload = artifact_session / "original.bin"
+    original_payload.write_bytes(b"original artifact")
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(routes, "_artifact_registry", lambda: registry)
+    cleaned = {"index": [], "state": [], "attachments": []}
+    monkeypatch.setattr(
+        routes,
+        "prune_session_from_index",
+        lambda sid: cleaned["index"].append(sid),
+    )
+    monkeypatch.setattr(
+        models,
+        "delete_cli_session",
+        lambda sid: cleaned["state"].append(sid),
+    )
+    monkeypatch.setattr(
+        routes.shutil,
+        "rmtree",
+        lambda path, **_kwargs: cleaned["attachments"].append(str(path)),
+    )
+    real_atomic_write = artifacts._atomic_write
+    real_replace = artifacts.os.replace
+    retired_path = None
+
+    def fail_retired_metadata(path, data):
+        if Path(path).name == ".retired.json":
+            raise OSError("injected retired metadata failure")
+        return real_atomic_write(path, data)
+
+    def fail_rollback_after_foreign_directory_appears(
+        source,
+        destination,
+        *args,
+        **kwargs,
+    ):
+        nonlocal retired_path
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            source_path.parent.name == ".trash"
+            and destination_path == artifact_session
+        ):
+            retired_path = source_path
+            artifact_session.mkdir()
+            (artifact_session / "foreign.bin").write_bytes(b"foreign artifact")
+            raise OSError("injected artifact rollback identity conflict")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "_atomic_write", fail_retired_metadata)
+    monkeypatch.setattr(
+        artifacts.os,
+        "replace",
+        fail_rollback_after_foreign_directory_appears,
+    )
+
+    response = _call_post(
+        monkeypatch,
+        routes,
+        "/api/session/delete",
+        {"session_id": session.session_id},
+    )
+
+    assert response["status"] == 500
+    assert response["payload"]["ok"] is False
+    assert response["payload"]["code"] == "session_delete_artifact_recovery_failed"
+    assert response["payload"]["deleted"] is True
+    assert session.path.exists() is False
+    assert session.path.with_suffix(".json.bak").exists() is False
+    assert session.session_id not in sessions
+    assert (artifact_session / "foreign.bin").read_bytes() == b"foreign artifact"
+    assert (artifact_session / "original.bin").exists() is False
+    assert retired_path is not None
+    assert retired_path.parent == registry.root / ".trash"
+    assert (retired_path / "original.bin").read_bytes() == b"original artifact"
+    assert (retired_path / ".retired.json").exists() is False
+    assert cleaned["index"] == [session.session_id]
+    assert cleaned["state"] == [session.session_id]
+    assert len(cleaned["attachments"]) == 1
+
+
+def test_artifact_retirement_fsyncs_source_and_trash_parents(
+    monkeypatch,
+    tmp_path,
+):
+    import api.artifacts as artifacts
+
+    if artifacts.os.name != "posix":
+        pytest.skip("directory fsync durability is POSIX-specific")
+    registry = artifacts.ArtifactRegistry(tmp_path / "artifacts")
+    session_id = "artifact-retirement-parent-fsync"
+    artifact_session = registry.root / session_id
+    artifact_session.mkdir(parents=True)
+    (artifact_session / "payload.bin").write_bytes(b"artifact")
+    synced_identities = []
+    real_fsync = artifacts.os.fsync
+
+    def record_fsync(fd):
+        metadata = artifacts.os.fstat(fd)
+        synced_identities.append((int(metadata.st_dev), int(metadata.st_ino)))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(artifacts.os, "fsync", record_fsync)
+
+    retired = registry.retire_session(session_id, now=1234.5)
+
+    assert retired is not None
+    root_metadata = registry.root.stat()
+    trash_metadata = (registry.root / ".trash").stat()
+    assert (int(root_metadata.st_dev), int(root_metadata.st_ino)) in synced_identities
+    assert (int(trash_metadata.st_dev), int(trash_metadata.st_ino)) in synced_identities
+
+
+def test_artifact_retirement_rollback_fsyncs_both_parent_updates(
+    monkeypatch,
+    tmp_path,
+):
+    import api.artifacts as artifacts
+
+    if artifacts.os.name != "posix":
+        pytest.skip("directory fsync durability is POSIX-specific")
+    registry = artifacts.ArtifactRegistry(tmp_path / "artifacts")
+    session_id = "artifact-retirement-rollback-parent-fsync"
+    artifact_session = registry.root / session_id
+    artifact_session.mkdir(parents=True)
+    (artifact_session / "payload.bin").write_bytes(b"artifact")
+    synced_identities = []
+    real_fsync = artifacts.os.fsync
+
+    def record_fsync(fd):
+        metadata = artifacts.os.fstat(fd)
+        synced_identities.append((int(metadata.st_dev), int(metadata.st_ino)))
+        return real_fsync(fd)
+
+    def fail_retired_metadata(path, _data):
+        if Path(path).name == ".retired.json":
+            raise OSError("injected retired metadata failure")
+        raise AssertionError(f"unexpected artifact write: {path}")
+
+    monkeypatch.setattr(artifacts.os, "fsync", record_fsync)
+    monkeypatch.setattr(artifacts, "_atomic_write", fail_retired_metadata)
+
+    with pytest.raises(OSError, match="injected retired metadata failure"):
+        registry.retire_session(session_id, now=1234.5)
+
+    root_metadata = registry.root.stat()
+    trash_metadata = (registry.root / ".trash").stat()
+    root_identity = (int(root_metadata.st_dev), int(root_metadata.st_ino))
+    trash_identity = (int(trash_metadata.st_dev), int(trash_metadata.st_ino))
+    assert synced_identities.count(root_identity) >= 2
+    assert synced_identities.count(trash_identity) >= 2
+    assert (artifact_session / "payload.bin").read_bytes() == b"artifact"
+
+
+def test_artifact_restore_fsyncs_move_parents_and_restored_directory(
+    monkeypatch,
+    tmp_path,
+):
+    import api.artifacts as artifacts
+
+    if artifacts.os.name != "posix":
+        pytest.skip("directory fsync durability is POSIX-specific")
+    registry = artifacts.ArtifactRegistry(tmp_path / "artifacts")
+    session_id = "artifact-restore-parent-fsync"
+    artifact_session = registry.root / session_id
+    artifact_session.mkdir(parents=True)
+    (artifact_session / "payload.bin").write_bytes(b"artifact")
+    retired = registry.retire_session(session_id, now=1234.5)
+    assert retired is not None
+    synced_identities = []
+    real_fsync = artifacts.os.fsync
+
+    def record_fsync(fd):
+        metadata = artifacts.os.fstat(fd)
+        synced_identities.append((int(metadata.st_dev), int(metadata.st_ino)))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(artifacts.os, "fsync", record_fsync)
+
+    registry.restore_session(retired)
+
+    root_metadata = registry.root.stat()
+    trash_metadata = (registry.root / ".trash").stat()
+    restored_metadata = artifact_session.stat()
+    assert (int(root_metadata.st_dev), int(root_metadata.st_ino)) in synced_identities
+    assert (int(trash_metadata.st_dev), int(trash_metadata.st_ino)) in synced_identities
+    assert (
+        int(restored_metadata.st_dev),
+        int(restored_metadata.st_ino),
+    ) in synced_identities
+    assert (artifact_session / "payload.bin").read_bytes() == b"artifact"
+    assert (artifact_session / ".retired.json").exists() is False
 
 
 @pytest.mark.parametrize("path", ["/api/session/clear", "/api/session/truncate"])

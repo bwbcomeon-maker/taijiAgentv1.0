@@ -1,0 +1,18 @@
+{
+  "document": {
+    "title": "部门月度工作汇报",
+    "subtitle": "工作汇报",
+    "versionLabel": "",
+    "documentDate": ""
+  },
+  "sections": [
+    {
+      "sectionId": "sec-1",
+      "title": "工作进展",
+      "paragraphs": [{"text": "本月重点工作已按计划推进。"}]
+    }
+  ],
+  "tables": [],
+  "figures": [],
+  "images": []
+}

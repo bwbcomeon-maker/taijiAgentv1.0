@@ -839,7 +839,7 @@
       const card=activeExpertTeamCard(btn);
       const teamId=String(card&&card.team&&card.team.id||'').trim();
       if(teamId&&typeof openWriteflowTeamModal==='function'){
-        openWriteflowTeamModal(teamId);
+        await Promise.resolve(openWriteflowTeamModal(teamId));
         return true;
       }
       if(typeof showToast==='function')showToast('无法重新发起：专家团中心尚未就绪。');

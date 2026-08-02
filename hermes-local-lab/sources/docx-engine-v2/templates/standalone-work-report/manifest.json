@@ -1,0 +1,34 @@
+{
+  "id": "standalone-work-report",
+  "name": "单机版工作汇报模板",
+  "version": "1.0.0",
+  "description": "面向本机用户的正式工作汇报，不需要企业签发、密级或审批元数据。",
+  "template": "template.docx",
+  "schema": "schema.json",
+  "prompt": "prompt.md",
+  "sample": "sample.json",
+  "dataAdapter": "data-adapter.js",
+  "adapterSample": "adapter-sample.render-plan.json",
+  "outputFormat": "docx",
+  "documentTypes": ["work_report"],
+  "contractProfile": "standalone",
+  "rendererProfile": "standalone-default",
+  "requiredMetadata": ["title", "documentType"],
+  "contentPolicy": {
+    "allowAdapterGeneratedBusinessContent": false,
+    "allowPlaceholders": false
+  },
+  "missingDataPolicy": {
+    "markers": ["待补充", "需人工确认"],
+    "forbidFabrication": true
+  },
+  "capabilities": ["sections", "tables", "images", "toc", "headers", "footers", "page_numbers"],
+  "requiredAssets": [],
+  "qualityGates": ["schema_valid", "docx_zip", "docx_xml", "missing_data_markers", "file_integrity"],
+  "compatibility": {
+    "engine": "docx-engine-v2",
+    "minVersion": "0.1.0",
+    "format": "docx",
+    "paper": "A4"
+  }
+}
