@@ -687,6 +687,8 @@ build_runtime_and_deb() {
   info "准备 DOCX Engine V2 生产依赖并执行源码测试"
   cd "$(source_lab_dir)/sources/docx-engine-v2"
   npm_ci_with_network_fallback --omit=dev
+  npm audit --omit=dev --audit-level=high \
+    || fail "DOCX Engine 生产依赖包含 high/critical 漏洞或 npm audit 不可用，拒绝生成正式安装包"
   node scripts/materialize-portable-resvg-dependencies.js
   npm test
 
