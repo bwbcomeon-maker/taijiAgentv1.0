@@ -2924,6 +2924,30 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertIn("npm_ci_with_network_fallback --omit=dev", builder[start:end])
 
+    def test_docx_engine_lock_uses_patched_fast_uri(self):
+        lock = json.loads(
+            read_text("hermes-local-lab/sources/docx-engine-v2/package-lock.json")
+        )
+        version = tuple(
+            int(part)
+            for part in lock["packages"]["node_modules/fast-uri"]["version"].split(".")
+        )
+
+        self.assertGreaterEqual(version, (3, 1, 4))
+        self.assertLess(version, (4, 0, 0))
+
+    def test_offline_builder_blocks_high_severity_docx_dependencies(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        start = builder.index('info "准备 DOCX Engine V2 生产依赖并执行源码测试"')
+        end = builder.index('info "构建 DEB 安装包"', start)
+        docx_build = builder[start:end]
+
+        install = "npm_ci_with_network_fallback --omit=dev"
+        audit = "npm audit --omit=dev --audit-level=high"
+        self.assertIn(audit, docx_build)
+        self.assertLess(docx_build.index(install), docx_build.index(audit))
+        self.assertLess(docx_build.index(audit), docx_build.index("npm test"))
+
     def test_webui_runtime_assets_are_local_for_offline_target(self):
         static_root = ROOT / "hermes-local-lab/sources/hermes-webui/static"
         checked = {}
