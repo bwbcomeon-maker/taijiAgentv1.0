@@ -2,10 +2,12 @@ import gzip
 import hashlib
 import json
 import os
+import py_compile
 import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import zlib
@@ -66,6 +68,74 @@ def delivery_inventory_fixture_sha256(delivery_dir: Path) -> str:
 
 
 class LinuxDesktopPackagingStaticTest(unittest.TestCase):
+    def test_sync_packaged_config_loads_sourceless_packaged_agent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            packaged_lab = temp_root / "taiji-lab"
+            scripts_dir = packaged_lab / "scripts"
+            scripts_dir.mkdir(parents=True)
+            sync_script = scripts_dir / "sync-packaged-config.py"
+            shutil.copy2(
+                ROOT / "hermes-local-lab/scripts/sync-packaged-config.py",
+                sync_script,
+            )
+            (scripts_dir / "yaml.py").write_text(
+                "def safe_load(text):\n"
+                "    if 'template' in text:\n"
+                "        return {'model': {'provider': 'deepseek'}}\n"
+                "    return {}\n",
+                encoding="utf-8",
+            )
+
+            package_dir = packaged_lab / "runtime" / "agent" / "agent"
+            package_dir.mkdir(parents=True)
+            module_sources = {
+                "__init__.py": "",
+                "image_gen_verification.py": (
+                    "def reconcile_capability_config_epochs(current, target):\n"
+                    "    return None\n"
+                ),
+                "provider_credentials.py": (
+                    "from pathlib import Path\n"
+                    "def seed_config_payload_strict(payload, *, config_path):\n"
+                    "    Path(config_path).write_bytes(payload)\n"
+                    "def mutate_config_strict(mutator, *, config_path):\n"
+                    "    current = {}\n"
+                    "    mutator(current)\n"
+                    "    Path(config_path).write_text('mutated\\n', encoding='utf-8')\n"
+                ),
+            }
+            for basename, source in module_sources.items():
+                source_path = package_dir / basename
+                source_path.write_text(source, encoding="utf-8")
+                py_compile.compile(
+                    str(source_path),
+                    cfile=str(source_path.with_suffix(".pyc")),
+                    doraise=True,
+                )
+                source_path.unlink()
+
+            template = temp_root / "template.yaml"
+            target = temp_root / "user" / "config.yaml"
+            template.write_text("template\n", encoding="utf-8")
+            target.parent.mkdir(parents=True)
+            target.write_text("existing\n", encoding="utf-8")
+            clean_env = os.environ.copy()
+            clean_env.pop("PYTHONPATH", None)
+            clean_env.pop("TAIJI_AGENT_AGENT_DIR", None)
+
+            result = subprocess.run(
+                [sys.executable, "-S", str(sync_script), str(template), str(target)],
+                text=True,
+                capture_output=True,
+                check=False,
+                cwd=temp_root,
+                env=clean_env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(target.read_text(encoding="utf-8"), "mutated\n")
+
     def test_build_script_has_release_gates_for_electron_deb_and_desktop_entry(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
 
