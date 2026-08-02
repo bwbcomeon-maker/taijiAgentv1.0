@@ -211,6 +211,10 @@ rename_internal_agent_modules() {
     mv "$AGENT_RUNTIME/agent/transports/hermes_tools_mcp_server.py" \
       "$AGENT_RUNTIME/agent/transports/taiji_tools_mcp_server.py"
   fi
+  if [ -f "$AGENT_RUNTIME/agent/transports/hermes_tools_profile_env.py" ]; then
+    mv "$AGENT_RUNTIME/agent/transports/hermes_tools_profile_env.py" \
+      "$AGENT_RUNTIME/agent/transports/taiji_tools_profile_env.py"
+  fi
 
   rm -rf \
     "$AGENT_RUNTIME/hermes" \
@@ -579,6 +583,7 @@ install -m 0755 "$LAB_DIR/scripts/health-check.sh" "$INSTALL_ROOT/scripts/health
 install -m 0755 "$LAB_DIR/scripts/taiji-native-verify" "$INSTALL_ROOT/scripts/taiji-native-verify"
 install -m 0755 "$LAB_DIR/scripts/taiji-agent-diagnose" "$INSTALL_ROOT/scripts/taiji-agent-diagnose"
 install -m 0644 "$LAB_DIR/scripts/sync-packaged-config.py" "$INSTALL_ROOT/scripts/sync-packaged-config.py"
+rewrite_product_text_tokens "$INSTALL_ROOT/scripts"
 
 if [ -f "$SOURCE_AGENT_DIR/LICENSE" ]; then
   install -m 0644 "$SOURCE_AGENT_DIR/LICENSE" "$INSTALL_ROOT/licenses/agent-runtime.LICENSE"
