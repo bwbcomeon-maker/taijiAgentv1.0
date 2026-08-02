@@ -286,7 +286,16 @@ def validate_docx_source(repo_root: Path) -> tuple[Path, dict[str, Any]]:
     if registry.get("version") != 1 or registry.get("installed") != []:
         raise StageError("DOCX Engine template registry must be version 1 with an empty installed array")
     builtin_ids = {item.get("templateId") for item in registry.get("builtin", []) if isinstance(item, dict)}
-    if builtin_ids != {"general-proposal", "meeting-minutes"}:
+    if builtin_ids != {
+        "enterprise-research-report",
+        "enterprise-work-report",
+        "general-proposal",
+        "meeting-minutes",
+        "standalone-meeting-minutes",
+        "standalone-office-material",
+        "standalone-research-report",
+        "standalone-work-report",
+    }:
         raise StageError(f"DOCX Engine builtin template seed mismatch: {sorted(builtin_ids)}")
     return source, registry
 

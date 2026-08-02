@@ -113,25 +113,21 @@ class LinuxRuntimeStagingTest(unittest.TestCase):
 
     def _make_docx_engine(self) -> None:
         root = "hermes-local-lab/sources/docx-engine-v2"
+        production_registry = json.loads(
+            (ROOT / f"{root}/template-registry.json").read_text(encoding="utf-8")
+        )
         self._write(f"{root}/package.json", json.dumps({"name": "docx-engine-v2", "version": "0.1.0"}))
         self._write(f"{root}/package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {}}))
         self._write(
             f"{root}/template-registry.json",
-            json.dumps(
-                {
-                    "version": 1,
-                    "builtin": [
-                        {"templateId": "general-proposal", "path": "templates/general-proposal"},
-                        {"templateId": "meeting-minutes", "path": "templates/meeting-minutes"},
-                    ],
-                    "installed": [],
-                }
-            ),
+            json.dumps(production_registry),
         )
         self._write(f"{root}/src/cli/list-templates.js", "process.stdout.write('ok\\n');\n")
-        for template_id in ("general-proposal", "meeting-minutes"):
-            self._write(f"{root}/templates/{template_id}/manifest.json", json.dumps({"id": template_id}))
-            self._write(f"{root}/templates/{template_id}/template.docx", "PK fixture")
+        for entry in production_registry["builtin"]:
+            template_path = entry["path"]
+            template_id = entry["templateId"]
+            self._write(f"{root}/{template_path}/manifest.json", json.dumps({"id": template_id}))
+            self._write(f"{root}/{template_path}/template.docx", "PK fixture")
         self._write(f"{root}/node_modules/runtime-dep/index.js", "module.exports = true;\n")
         self._write(f"{root}/node_modules/runtime-dep/tests/leak.js")
         self._write(f"{root}/node_modules/runtime-dep/__tests__/leak.js")
@@ -393,6 +389,23 @@ class LinuxRuntimeStagingTest(unittest.TestCase):
         self.assertEqual(json.loads(registry.read_text(encoding="utf-8"))["installed"], [])
         for path in (engine / "templates").rglob("*"):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode) & 0o222, 0, path)
+
+    def test_stage_accepts_the_production_builtin_template_registry(self) -> None:
+        production_registry = json.loads(
+            (ROOT / "hermes-local-lab/sources/docx-engine-v2/template-registry.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        completed = self._run_stage()
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        staged_registry = json.loads(
+            (self.install_root / "runtime/docx-engine-v2/template-registry.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(staged_registry["builtin"], production_registry["builtin"])
 
     def test_allowlist_is_explicit_and_contains_no_glob_sources(self) -> None:
         self.assertTrue(ALLOWLIST.is_file(), ALLOWLIST)

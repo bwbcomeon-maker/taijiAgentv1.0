@@ -1565,6 +1565,49 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("scan_product_privacy", build)
         self.assertNotIn('"$LAB_DIR"/ "$INSTALL_ROOT"/', build)
 
+    def test_packaged_runtime_renames_both_legacy_transport_modules(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        start = build.index("rename_internal_agent_modules() {")
+        end = build.index("\n}\n\nrewrite_product_text_tokens()", start) + len("\n}")
+        rename_function = build[start:end]
+
+        with tempfile.TemporaryDirectory(prefix="taiji-transport-rename.") as temp_dir:
+            agent_runtime = Path(temp_dir)
+            transports = agent_runtime / "agent/transports"
+            transports.mkdir(parents=True)
+            for name in ("mcp_server", "profile_env"):
+                (transports / f"hermes_tools_{name}.py").write_text(name, encoding="utf-8")
+
+            result = subprocess.run(
+                ["bash", "-c", f"set -euo pipefail\n{rename_function}\nrename_internal_agent_modules"],
+                env={**os.environ, "AGENT_RUNTIME": str(agent_runtime)},
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name in ("mcp_server", "profile_env"):
+                self.assertFalse((transports / f"hermes_tools_{name}.py").exists())
+                self.assertEqual(
+                    (transports / f"taiji_tools_{name}.py").read_text(encoding="utf-8"),
+                    name,
+                )
+
+    def test_packaged_support_scripts_are_rewritten_before_privacy_scan(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        install_sync = build.index(
+            'install -m 0644 "$LAB_DIR/scripts/sync-packaged-config.py" '
+            '"$INSTALL_ROOT/scripts/sync-packaged-config.py"'
+        )
+        rewrite_scripts = build.index(
+            'rewrite_product_text_tokens "$INSTALL_ROOT/scripts"',
+            install_sync,
+        )
+        privacy_scan = build.index("scan_package_tree", rewrite_scripts)
+
+        self.assertLess(install_sync, rewrite_scripts)
+        self.assertLess(rewrite_scripts, privacy_scan)
+
     def test_packaged_agent_runtime_keeps_importable_plugin_package(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
         stage_start = build.index("stage_python_runtime()")
