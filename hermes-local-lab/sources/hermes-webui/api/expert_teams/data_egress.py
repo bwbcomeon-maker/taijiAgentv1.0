@@ -141,6 +141,7 @@ _RESEARCH_EN_CONNECTORS = {
     "from",
     "in",
     "of",
+    "s",
     "the",
     "to",
 }
@@ -195,7 +196,8 @@ def _semantic_forms(value: str) -> tuple[str, list[str], str]:
     a private/public transaction decision.
     """
     normalized = unicodedata.normalize("NFKC", str(value or ""))
-    english_tokens = re.findall(r"[a-z0-9]+", normalized.casefold())
+    lowered = re.sub(r"\b(?:is|are|was|were|do|does|did|has|have|had)n['’]?t\b", "not", normalized.casefold())
+    english_tokens = re.findall(r"[a-z0-9]+", lowered)
     semantic_english = [
         token for token in english_tokens if token not in _RESEARCH_EN_CONNECTORS
     ]
@@ -212,37 +214,55 @@ def _has_token_sequence(tokens: list[str], *sequence: str) -> bool:
     )
 
 
+def _concepts_within(tokens: list[str], left: set[str], right: set[str], *, window: int = 5) -> bool:
+    left_positions = [index for index, token in enumerate(tokens) if token in left]
+    right_positions = [index for index, token in enumerate(tokens) if token in right]
+    return any(abs(left_index - right_index) <= window for left_index in left_positions for right_index in right_positions)
+
+
 def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
-    english_sequences = (
-        ("contract", "pricing"),
-        ("contract", "price"),
-        ("contract", "value"),
-        ("contract", "values"),
-        ("procurement", "pricing"),
-        ("procurement", "price"),
-        ("procurement", "cost"),
-        ("purchase", "price"),
-        ("payment", "terms"),
-        ("renewal", "terms"),
-        ("renewal", "risk"),
-        ("account", "period"),
-        ("credit", "terms"),
-        ("accounts", "receivable"),
-        ("accounts", "payable"),
+    english_private = bool(
+        _concepts_within(
+            tokens,
+            {"contract"},
+            {"pricing", "price", "value", "values", "quote", "quotation", "amount"},
+        )
+        or _concepts_within(
+            tokens,
+            {"procurement", "purchase"},
+            {"pricing", "price", "cost", "value", "values", "amount"},
+        )
+        or _concepts_within(tokens, {"payment", "credit"}, {"term", "terms", "period"})
+        or _concepts_within(tokens, {"renewal"}, {"term", "terms", "risk"})
+        or _concepts_within(tokens, {"accounts"}, {"receivable", "payable"})
     )
-    return any(_has_token_sequence(tokens, *sequence) for sequence in english_sequences) or any(
-        term in chinese for term in _RESEARCH_PRIVATE_TRANSACTION_CN
+    chinese_private = bool(
+        re.search(r"(?:合同|采购).{0,6}(?:报价|定价|价格|金额|账期)", chinese)
+        or re.search(r"(?:报价|定价|价格|金额|账期).{0,6}(?:合同|采购)", chinese)
+        or any(term in chinese for term in ("付款条款", "支付条款", "回款", "续约", "应收账款", "应付账款"))
     )
+    return english_private or chinese_private
 
 
 def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool, bool]:
-    english_markers = bool(
-        _has_token_sequence(tokens, "public", "market")
-        or "retail" in tokens
-        or _has_token_sequence(tokens, "annual", "report")
-        or _has_token_sequence(tokens, "official", "filing")
-        or _has_token_sequence(tokens, "official", "disclosure")
-    )
+    marker_positions = []
+    marker_positions.extend(index for index, token in enumerate(tokens) if token == "retail")
+    for left, right in (
+        ("public", "market"),
+        ("annual", "report"),
+        ("official", "filing"),
+        ("official", "disclosure"),
+        ("public", "benchmark"),
+        ("public", "benchmarks"),
+    ):
+        for left_index, token in enumerate(tokens):
+            if token != left:
+                continue
+            for right_index in range(left_index, min(len(tokens), left_index + 5)):
+                if tokens[right_index] == right:
+                    marker_positions.append(left_index)
+                    break
+    english_markers = bool(marker_positions)
     chinese_markers = any(
         term in chinese
         for term in (
@@ -255,12 +275,14 @@ def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool
             "官方披露",
         )
     )
-    english_negated = bool(
-        {"not", "non", "no"}.intersection(tokens) and english_markers
+    negators = {"not", "non", "no", "without", "excluding", "exclude"}
+    english_negated = any(
+        any(token in negators for token in tokens[max(0, marker - 4) : marker])
+        for marker in marker_positions
     )
     chinese_negated = bool(
         re.search(
-            r"(?:不(?:是|属于|来自)?|非).{0,8}(?:公开市场|零售|年报|年度报告|官方公告|官方披露)",
+            r"(?:不(?:是|属于|来自)?|非|排除).{0,8}(?:公开市场|零售|年报|年度报告|官方公告|官方披露)",
             chinese,
         )
     )

@@ -1023,6 +1023,96 @@ def test_normalized_public_transaction_context_remains_authorized(
     assert decision["safe_query"] == expected_query
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "acme contract's pricing",
+        "pricing for acme contract",
+        "acme procurement unit price",
+        "acme 合同相关报价",
+    ],
+)
+def test_private_transaction_uses_concept_windows_in_original_and_direction(
+    tmp_path, sensitive
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+    assert authorize_research_public_query(original_run, sensitive)["authorized"] is False
+
+    safe = "Analyze global renewable energy market trends"
+    (tmp_path / "direction-window").mkdir()
+    direction_run = _research_run(
+        expert_teams,
+        tmp_path / "direction-window",
+        original_request=safe,
+        core_question=safe,
+    )
+    assert authorize_research_public_query(direction_run, sensitive)["authorized"] is False
+
+
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "Acme isn't retail contract pricing",
+        "Acme without retail contract pricing",
+        "Acme excluding annual report contract values",
+        "苹果公司排除年报的合同价格",
+    ],
+)
+def test_local_negation_blocks_only_its_public_transaction_marker(tmp_path, sensitive):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+    assert authorize_research_public_query(run, sensitive)["authorized"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_request", "expected_query"),
+    [
+        (
+            "Analyze Apple annual report contract values, not revenue",
+            "Apple annual report contract values not revenue",
+        ),
+        (
+            "Analyze Apple annual financial report contract values",
+            "Apple annual financial report contract values",
+        ),
+        (
+            "Analyze public SaaS contract pricing benchmarks",
+            "public SaaS contract pricing benchmarks",
+        ),
+    ],
+)
+def test_public_context_uses_local_concept_windows(
+    tmp_path, original_request, expected_query
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+    decision = authorize_research_public_query(run, original_request)
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == expected_query
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
