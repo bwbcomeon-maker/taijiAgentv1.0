@@ -345,6 +345,11 @@
     }).join('');
   }
 
+  function isResearchV2Launch(team, example) {
+    const selected = example || list(team?.examples).find(item => item.available === true) || {};
+    return selected.available === true && String(selected.launch_profile_id || '') === 'research-report';
+  }
+
   function handlePortalInput(event) {
     if (event.target.id !== 'expertTeamV3Search') return;
     const query = event.target.value.trim().toLowerCase();
@@ -366,7 +371,7 @@
       else closeDialog();
     }
     if (kind === 'select-template') selectTemplate(action.dataset.exampleId);
-    if (kind === 'summon') summon(action);
+    if (kind === 'summon') { event.preventDefault?.(); summon(action); }
     if (kind === 'continue-regular-chat') continueRegularChat();
     if (kind === 'retry-catalog') loadCatalog(true);
   }
@@ -410,12 +415,36 @@
       ? state.suggestedPrompt
       : ((state.selectedExample && state.selectedExample.prompt) || '');
     const hasAvailableTask = examples.some(example => example.available === true);
+    const researchV2 = isResearchV2Launch(team, state.selectedExample);
     const suggestion = state.suggestionMode
       ? `<aside class="et3-suggestion" role="status"><strong>已识别为“${esc(state.selectedExample?.label || '文档任务')}”</strong><p>请确认任务类型；如识别不准确，可以在下方更换文档任务。系统不会未经确认自动发起。</p></aside>`
       : '';
-    const footerActions = state.suggestionMode
+    const footerActions = researchV2
+      ? `<button type="button" class="et3-button" data-et3-action="close-dialog">取消</button><button type="submit" form="expertTeamV3ResearchLaunchForm" class="et3-button et3-button--primary" data-et3-action="summon" ${hasAvailableTask ? '' : 'disabled aria-disabled="true" title="当前任务配置异常，请刷新后重试"'}>开始研究</button>`
+      : state.suggestionMode
       ? `<button type="button" class="et3-button" data-et3-action="close-dialog">返回修改</button><button type="button" class="et3-button" data-et3-action="continue-regular-chat">继续普通对话</button><button type="button" class="et3-button et3-button--primary" data-et3-action="summon" ${hasAvailableTask ? '' : 'disabled aria-disabled="true" title="当前任务配置异常，请刷新后重试"'}>使用专家团</button>`
       : `<button type="button" class="et3-button" data-et3-action="close-dialog">取消</button><button type="button" class="et3-button et3-button--primary" data-et3-action="summon" ${hasAvailableTask ? '' : 'disabled aria-disabled="true" title="当前任务配置异常，请刷新后重试"'}>发起专家团任务</button>`;
+    if (researchV2) {
+      dialog.innerHTML = `
+        <header class="et3-dialog-head">
+          <div><p class="et3-eyebrow">开始深度研究</p><h2 id="expertTeamV3DialogTitle" tabindex="-1">${esc(team.title)}</h2><p class="et3-subtitle">${esc(team.category || '')}</p></div>
+          <button type="button" class="et3-icon-button" data-et3-action="close-dialog" aria-label="关闭深度研究任务">×</button>
+        </header>
+        <div class="et3-dialog-body et3-dialog-body--research">
+          <form data-et3-research-launch-form id="expertTeamV3ResearchLaunchForm" class="et3-research-launch">
+            <p class="et3-research-capability">${esc(team.description || '基于原始诉求自动检索资料并形成深度研究报告。')}</p>
+            <label class="et3-form-field" for="expertTeamV3Prompt"><span>原始诉求</span><textarea id="expertTeamV3Prompt" name="original_request" rows="8" required aria-required="true" aria-describedby="expertTeamV3PromptHelp">${esc(prompt)}</textarea></label>
+            <p id="expertTeamV3PromptHelp" class="et3-help">说清想研究的问题即可。系统会自动检索、核验并在必要时只追问一个关键问题。</p>
+            <p class="et3-live" data-et3-dialog-live aria-live="polite"></p>
+          </form>
+        </div>
+        <footer class="et3-dialog-actions">${footerActions}</footer>`;
+      backdrop.hidden = false;
+      const portal = root.querySelector('.et3-portal');
+      if (portal) portal.inert = true;
+      document.getElementById('expertTeamV3DialogTitle').focus();
+      return;
+    }
     dialog.innerHTML = `
       <header class="et3-dialog-head">
         <div><p class="et3-eyebrow">选择专家团</p><h2 id="expertTeamV3DialogTitle" tabindex="-1">${esc(team.title)}</h2><p class="et3-subtitle">${esc(team.category || '')}</p></div>
@@ -592,6 +621,11 @@
   }
 
   function progressHtml(card) {
+    if (card.researchV2) {
+      const progress = card.researchProgress || {};
+      const statusText = String(progress.statusText || '正在形成研究报告').trim();
+      return `<section class="et3-research-progress" data-et3-research-progress role="status" aria-live="polite" aria-atomic="true"><span class="et3-research-progress-dot" aria-hidden="true"></span><strong>${esc(statusText)}</strong></section>`;
+    }
     const progress = card.progress || {};
     const total = Math.max(0, Number(progress.total || 0));
     const done = Math.max(0, Math.min(total, Number(progress.done || 0)));
@@ -886,13 +920,16 @@
 
   function workbenchHtml(card) {
     const current = effectiveState(card);
-    const copy = stateCopyFor(card, current);
+    const copy = card.researchV2
+      ? [String(card.researchProgress?.statusText || '正在形成研究报告'), '研究会自动检索、核验和整理，只在核心结论存在歧义时请你确认。']
+      : stateCopyFor(card, current);
     const statusLabel = copy[0];
     return `<div class="et3-workbench-shell">
-      <header class="et3-workbench-head"><div class="et3-workbench-head-row"><div><p class="et3-eyebrow">专家团工作台</p><h2>${esc(card.presentation?.visibleTitle || card.subtitle || '专家团任务')}</h2><p>${esc(card.team?.title || '专家团')} · ${esc(card.phase || '需求确认')}</p></div><button type="button" class="et3-icon-button" data-et3-action="close-workbench" aria-label="收起专家团工作台">×</button></div></header>
+      <header class="et3-workbench-head"><div class="et3-workbench-head-row"><div><p class="et3-eyebrow">专家团工作台</p><h2>${esc(card.researchV2 ? '深度研究报告' : (card.presentation?.visibleTitle || card.subtitle || '专家团任务'))}</h2><p>${esc(card.team?.title || '专家团')}${card.researchV2 ? ' · 深度研究' : ` · ${esc(card.phase || '需求确认')}`}</p></div><button type="button" class="et3-icon-button" data-et3-action="close-workbench" aria-label="收起专家团工作台">×</button></div></header>
       ${progressHtml(card)}
       <div class="et3-workbench-scroll">
         <section class="et3-state-banner"><div><strong>${esc(copy[0])}</strong><p>${esc(copy[1])}</p></div><span class="et3-state-pill">${esc(statusLabel)}</span></section>
+        ${card.researchV2 ? researchRequestPanel(card) : ''}
         ${staleConflictRevisionHtml(card)}
         ${staleConflictDeliveryHtml(card)}
         ${statePanel(card, current)}
@@ -903,6 +940,7 @@
 
   function statePanel(card, current) {
     if (current === 'legacy_read_only') return legacyPanel(card);
+    if (card.researchV2) return researchStatePanel(card, current);
     if (current === 'intake') return briefPanel(card);
     if (card.productError?.schema === 'taiji.product.error.v1') return failurePanel(card, current);
     if (current === 'ready' && actionAllowed(card, 'submit_stage_input')) return stageInputPanel(card);
@@ -916,6 +954,47 @@
     if (current === 'awaiting_delivery_confirmation') return deliveryConfirmationPanel(card);
     if (current === 'completed') return completedPanel(card);
     return failurePanel(card, current);
+  }
+
+  function researchRequestPanel(card) {
+    const request = String(card.brief?.originalRequest || card.brief?.originalRequestSummary || '').trim();
+    if (!request) return '';
+    return `<section class="et3-panel et3-research-request"><h3>原始诉求</h3><p>${esc(request)}</p></section>`;
+  }
+
+  function researchEvidencePanel(card) {
+    const progress = card.researchProgress || {};
+    const evidence = card.evidenceSummary || {};
+    const basis = evidence.sourceBasis || {};
+    const counts = [
+      `公网来源 ${Number(evidence.publicSourceCount || 0)}`,
+      `本地资料 ${Number(evidence.localSourceCount || 0)}`,
+      `模型知识未核验项 ${Number(evidence.unverifiedModelClaimCount || 0)}`,
+    ];
+    return `<section class="et3-panel et3-research-summary"><div class="et3-research-summary-head"><h3>资料基础</h3><span class="et3-source-basis" data-basis-id="${esc(basis.id || 'none')}">${esc(basis.text || '尚无可用证据')}</span></div><ul class="et3-evidence-counts" aria-label="证据摘要">${counts.map(item => `<li>${esc(item)}</li>`).join('')}</ul>${progress.safeFallbackReason ? `<p class="et3-fallback-note">${esc(progress.safeFallbackReason)}</p>` : ''}</section>`;
+  }
+
+  function researchQuestionPanel(card) {
+    const input = card.pendingInput || {};
+    if (String(input.scope || '') !== 'conclusion' || input.blocking !== true) {
+      return `<section class="et3-panel" role="alert"><h3>研究状态需要刷新</h3><p>当前确认项不符合深度研究合同，系统未将其作为用户问题展示。</p><button type="button" class="et3-button" data-et3-action="refresh-run">刷新任务状态</button></section>`;
+    }
+    const options = list(input.options).map(option => String(option || '').trim()).filter(Boolean);
+    const impactId = 'expertTeamV3ResearchQuestionImpact';
+    const choices = options.length
+      ? `<fieldset class="et3-research-choices" aria-describedby="${impactId}"><legend class="et3-visually-hidden">请选择一个答案</legend>${options.map((option, index) => `<label><input type="radio" name="research-answer" value="${esc(option)}" ${index === 0 ? 'required' : ''}><span>${esc(option)}</span></label>`).join('')}</fieldset>`
+      : `<label class="et3-form-field" for="expertTeamV3ResearchAnswer"><span>你的回答</span><textarea id="expertTeamV3ResearchAnswer" name="research-answer" data-et3-stage-input required aria-required="true" aria-describedby="${impactId}"></textarea></label>`;
+    return `<form data-et3-research-question-form class="et3-panel et3-research-question"><h3>${esc(input.question || '请确认一项会改变核心结论的信息')}</h3><p id="${impactId}" class="et3-help">${esc(input.impact || '不同答案会改变报告的核心结论。')}</p>${choices}<div class="et3-primary-actions"><button type="submit" class="et3-button et3-button--primary" data-et3-action="submit-stage-input">确认并继续研究</button></div></form>`;
+  }
+
+  function researchStatePanel(card, current) {
+    if (card.productError?.schema === 'taiji.product.error.v1') return failurePanel(card, current);
+    if (current === 'ready' && actionAllowed(card, 'submit_stage_input')) return researchQuestionPanel(card);
+    if (actionAllowed(card, 'delivery_recover')) return deliveryRecoveryPanel(card);
+    if (current === 'awaiting_delivery_confirmation') return `${researchEvidencePanel(card)}${deliveryConfirmationPanel(card)}`;
+    if (current === 'completed') return `${researchEvidencePanel(card)}${completedPanel(card)}`;
+    if (current === 'generating_document') return `${researchEvidencePanel(card)}${documentValidationPanel()}`;
+    return researchEvidencePanel(card);
   }
 
   function briefFieldSchema(brief) {
@@ -1238,6 +1317,7 @@
   async function handleWorkbenchClick(event) {
     const button = event.target.closest('[data-et3-action]');
     if (!button || state.busy) return;
+    if (button.type === 'submit') event.preventDefault?.();
     const action = button.dataset.et3Action;
     if (action === 'open-model-settings') {
       if (typeof window.switchSettingsSection === 'function') window.switchSettingsSection('models');
@@ -1674,7 +1754,12 @@
   }
 
   function submitStageInput(button) {
-    const answer = String(workbenchRoot().querySelector('[data-et3-stage-input]')?.value || '').trim();
+    const root = workbenchRoot();
+    const answer = String(
+      root.querySelector('input[name="research-answer"]:checked')?.value
+      || root.querySelector('[data-et3-stage-input]')?.value
+      || ''
+    ).trim();
     if (!answer) return setLive('请先填写当前阶段需要的信息。', true);
     return mutate('/api/expert-teams/stage/input', { input_id: state.card.pendingInputId || '', answer }, button, 'stage-input');
   }
