@@ -5028,6 +5028,15 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     if str(run.get("workflow_state") or "") == "awaiting_stage_input":
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
+    from api.expert_teams.runtime import _research_v2_run
+
+    if _research_v2_run(run) and str(run.get("workflow_state") or "") in {
+        "ready_to_generate",
+        "delivery_validation_required",
+    }:
+        payload, _status = _start_expert_team_execution(workspace, run, {})
+        continued = payload.get("run") if isinstance(payload, dict) else None
+        return continued if isinstance(continued, dict) else run
     if str(run.get("workflow_state") or "") not in {"generating", "result_unverified", "cancelling"}:
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
@@ -5397,11 +5406,16 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
     ).hexdigest()
     reservation = {}
     try:
-        reserved_run, descriptor, reservation, _created = expert_teams.reserve_system_stage_attempt(
+        reserved_run, descriptor, reservation, created = expert_teams.reserve_system_stage_attempt(
             workspace,
             str(run.get("run_id") or ""),
             idempotency_key=f"system-stage-{lineage}",
         )
+        if not created and str(reservation.get("status") or "") in {
+            "generated_valid",
+            "confirmed",
+        }:
+            return {"ok": True, "run": reserved_run, "system_stage": True}, 200
         result = dispatch_system_stage(
             reserved_run,
             descriptor,

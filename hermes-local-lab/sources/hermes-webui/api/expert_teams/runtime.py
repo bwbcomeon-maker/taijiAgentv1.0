@@ -4077,6 +4077,8 @@ def _complete_enterprise_stage_artifact(
         )
     stage_attempt = int(reservation.get("stage_attempt") or 0)
     raw_content = str(output.get("content") or "")
+    output["task_id"] = str(output.get("task_id") or task_id)
+    output["stage_id"] = str(output.get("stage_id") or task_id)
     output["stage_attempt"] = stage_attempt
     output["status"] = "generated"
     run.setdefault("stage_outputs", []).append(output)
@@ -4164,10 +4166,112 @@ def _complete_enterprise_stage_artifact(
         "message": validation_message,
     }
     run["last_validation_error"] = run["validation"]["message"] if blocking_count else ""
+    if not blocking_count and _research_v2_run(run):
+        return _auto_approve_research_v2_stage(
+            workspace,
+            run,
+            artifact,
+        )
     status = "generated_invalid" if blocking_count else "generated_valid"
     state = "generated_invalid" if blocking_count else "awaiting_review"
     event = "generation_invalid" if blocking_count else "generation_completed"
     return _transition(workspace, run, state, event, _stage_reservation_status_patch(run, status))
+
+
+def _auto_approve_research_v2_stage(
+    workspace: Path,
+    run: dict,
+    artifact: dict,
+) -> dict:
+    """Advance one contract-valid research/v2 model stage without user review."""
+
+    stage_id = str(artifact.get("stage_id") or "")
+    approved_at = _now()
+    approval = {
+        "schema_version": "automatic-stage-approval/v1",
+        "stage_id": stage_id,
+        "stage_attempt": int(artifact.get("stage_attempt") or 0),
+        "artifact_id": str(artifact.get("artifact_id") or ""),
+        "artifact_sha256": str(artifact.get("sha256") or ""),
+        "execution_stream_id": str(run.get("execution_stream_id") or ""),
+        "approved_at": approved_at,
+    }
+    approvals = [
+        deepcopy(item)
+        for item in run.get("automatic_stage_approvals") or []
+        if isinstance(item, dict)
+    ]
+    approvals.append(approval)
+    run["automatic_stage_approvals"] = approvals
+    outputs = [
+        deepcopy(item)
+        for item in run.get("stage_outputs") or []
+        if isinstance(item, dict)
+    ]
+    for output in reversed(outputs):
+        if str(output.get("task_id") or output.get("stage_id") or "") == stage_id:
+            output["status"] = "approved"
+            output["approved_at"] = approved_at
+            output["approval_kind"] = "automatic_contract_validation"
+            break
+    run["stage_outputs"] = outputs
+    run["approved_stage_artifact_refs"] = {
+        **(
+            deepcopy(run.get("approved_stage_artifact_refs"))
+            if isinstance(run.get("approved_stage_artifact_refs"), dict)
+            else {}
+        ),
+        stage_id: {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+        },
+    }
+    final_review = artifact.get("artifact_type") == "reviewed_research_document"
+    if final_review:
+        brief = run.get("document_brief") or {}
+        run["canonical_document_ref"] = {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+            "brief_revision": int(brief.get("confirmed_revision") or 0),
+            "brief_sha256": str(brief.get("confirmed_sha256") or ""),
+        }
+        profile = run.get("launch_profile_snapshot")
+        if not isinstance(profile, dict):
+            raise ExpertTeamStateConflict(
+                "launch_profile_snapshot_missing",
+                "research auto approval requires its frozen launch profile",
+                run,
+            )
+        system_descriptors = [
+            item
+            for item in (profile.get("stages") or [])
+            + (profile.get("post_approval_system_steps") or [])
+            if isinstance(item, dict)
+            and item.get("executor") == "system"
+            and stage_id in (item.get("depends_on") or [])
+        ]
+        if len(system_descriptors) != 1:
+            raise ExpertTeamStateConflict(
+                "system_step_contract_missing",
+                "approved research document has no unique declared delivery stage",
+                run,
+            )
+        run["pending_system_stage"] = deepcopy(system_descriptors[0])
+    run["current_stage_index"] = int(run.get("current_stage_index") or 0) + 1
+    reservation_patch = _stage_reservation_status_patch(run, "approved")
+    patch = {
+        **_clear_execution_patch(),
+        **reservation_patch,
+    }
+    if not final_review:
+        patch["current_stage_artifact_ref"] = None
+    return _transition(
+        workspace,
+        run,
+        "delivery_validation_required" if final_review else "ready_to_generate",
+        "research_stage_auto_approved",
+        patch,
+    )
 
 
 @_serialized_run_mutation
@@ -4186,6 +4290,14 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         delivered_attempt = int((delivery or {}).get("attempt"))
     except (TypeError, ValueError):
         delivered_attempt = -1
+    if _research_v2_run(run) and any(
+        str(item.get("stage_id") or "") == delivered_stage_id
+        and int(item.get("stage_attempt") or 0) == delivered_attempt
+        and str(item.get("execution_stream_id") or "") == delivered_stream_id
+        for item in run.get("automatic_stage_approvals") or []
+        if isinstance(item, dict)
+    ):
+        return _sync_derived(run)
     if state not in {"generating", "result_unverified"}:
         code = "missing_stream" if state == "ready_to_generate" and not expected_stream_id else "stale_state"
         raise ExpertTeamStateConflict(code, "expert team execution is not generating", run)
