@@ -128,15 +128,31 @@ def _read_trusted_bytes(root: Path, relative: Path) -> bytes:
     directory_fd = _open_trusted_directory(root, relative.parts[:-1], create=False)
     try:
         _assert_trusted_directory(root, relative.parts[:-1], directory_fd)
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        before = os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise SourceRegistryError("source_unresolved", "", "固化资料不是普通文件")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         file_fd = os.open(relative.name, flags, dir_fd=directory_fd)
         try:
-            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            after = os.fstat(file_fd)
+            if not stat.S_ISREG(after.st_mode) or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                 raise SourceRegistryError("source_unresolved", "", "固化资料不是普通文件")
             with os.fdopen(file_fd, "rb", closefd=False) as handle:
                 return handle.read()
         finally:
             os.close(file_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _remove_trusted_file(root: Path, relative: Path, expected_data: bytes) -> None:
+    directory_fd = _open_trusted_directory(root, relative.parts[:-1], create=False)
+    try:
+        _assert_trusted_directory(root, relative.parts[:-1], directory_fd)
+        if _read_trusted_bytes(root, relative) != expected_data:
+            raise SourceRegistryError("source_conflict", relative.stem, "拒绝删除已变化的固化资料")
+        os.unlink(relative.name, dir_fd=directory_fd)
+        _assert_trusted_directory(root, relative.parts[:-1], directory_fd)
     finally:
         os.close(directory_fd)
 
@@ -316,38 +332,43 @@ def materialize_approved_source(
     source_relative = Path(".taiji") / "expert-teams" / "sources" / trusted_run_id
     target_relative = source_relative / f"{source_id}.txt"
     manifest_relative = source_relative / f"{source_id}.source.json"
-    _write_trusted_immutable_bytes(root, target_relative, data, source_id=source_id)
+    body_created = _write_trusted_immutable_bytes(root, target_relative, data, source_id=source_id)
 
-    proposed_manifest = {
-        "schema_version": _MATERIALIZED_SOURCE_SCHEMA,
-        "source_id": source_id,
-        "kind": kind,
-        "label": str(label or source_id).strip()[:200] or source_id,
-        "origin_locator": canonical_origin,
-        "retrieved_at": trusted_retrieved_at,
-        "content_sha256": digest,
-    }
-    manifest_data = json.dumps(proposed_manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    _write_trusted_immutable_bytes(
-        root,
-        manifest_relative,
-        manifest_data,
-        source_id=source_id,
-        allow_existing_metadata=True,
-    )
     try:
-        manifest = json.loads(_read_trusted_bytes(root, manifest_relative).decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
-        raise SourceRegistryError("source_conflict", source_id, "固化资料清单损坏") from exc
-    expected_identity = (kind, source_id, digest, canonical_origin)
-    actual_identity = (
-        manifest.get("kind"),
-        manifest.get("source_id"),
-        manifest.get("content_sha256"),
-        manifest.get("origin_locator"),
-    )
-    if actual_identity != expected_identity or manifest.get("schema_version") != _MATERIALIZED_SOURCE_SCHEMA:
-        raise SourceRegistryError("source_conflict", source_id, "固化资料身份发生冲突")
+        proposed_manifest = {
+            "schema_version": _MATERIALIZED_SOURCE_SCHEMA,
+            "source_id": source_id,
+            "kind": kind,
+            "label": str(label or source_id).strip()[:200] or source_id,
+            "origin_locator": canonical_origin,
+            "retrieved_at": trusted_retrieved_at,
+            "content_sha256": digest,
+        }
+        manifest_data = json.dumps(proposed_manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        _write_trusted_immutable_bytes(
+            root,
+            manifest_relative,
+            manifest_data,
+            source_id=source_id,
+            allow_existing_metadata=True,
+        )
+        try:
+            manifest = json.loads(_read_trusted_bytes(root, manifest_relative).decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise SourceRegistryError("source_conflict", source_id, "固化资料清单损坏") from exc
+        expected_identity = (kind, source_id, digest, canonical_origin)
+        actual_identity = (
+            manifest.get("kind"),
+            manifest.get("source_id"),
+            manifest.get("content_sha256"),
+            manifest.get("origin_locator"),
+        )
+        if actual_identity != expected_identity or manifest.get("schema_version") != _MATERIALIZED_SOURCE_SCHEMA:
+            raise SourceRegistryError("source_conflict", source_id, "固化资料身份发生冲突")
+    except Exception:
+        if body_created:
+            _remove_trusted_file(root, target_relative, data)
+        raise
 
     return {
         "source_id": source_id,

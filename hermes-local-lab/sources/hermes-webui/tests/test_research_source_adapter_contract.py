@@ -2,11 +2,14 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import os
 import ssl
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
-
 
 def _module():
     return importlib.import_module("api.expert_teams.research_sources")
@@ -467,6 +470,103 @@ def test_materialization_rejects_symlinked_taiji_storage_before_writing(tmp_path
         _run(adapter.materialize(hit, workspace=workspace, run_id="run-1"))
 
     assert list(outside.rglob("*")) == []
+
+
+def test_fifo_manifest_is_rejected_with_bounded_time_without_hanging_pytest(tmp_path):
+    module = _module()
+    adapter = module.HermesWebResearchSourceAdapter(search_callable=lambda *_a, **_k: {}, extract_callable=None)
+    hit = _hit(module, "approved_public", "A", "https://a.example/report", "body")
+    ref = _run(adapter.materialize(hit, workspace=tmp_path, run_id="run-1"))
+    manifest = (tmp_path / ref["locator"]).with_suffix(".source.json")
+    manifest.chmod(0o600)
+    manifest.unlink()
+    os.mkfifo(manifest)
+
+    webui_root = Path(__file__).resolve().parents[1]
+    agent_root = webui_root.parent / "hermes-agent"
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    pythonpath = os.pathsep.join(filter(None, (str(webui_root), str(agent_root), existing_pythonpath)))
+    script = """
+import sys
+from pathlib import Path
+from api.expert_teams.source_registry import materialize_approved_source
+
+try:
+    materialize_approved_source(
+        Path(sys.argv[1]),
+        "run-1",
+        kind="approved_public",
+        label="A",
+        origin_locator="https://a.example/report",
+        content="body",
+        retrieved_at="2026-08-03T10:00:00+00:00",
+        content_sha256="230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5",
+    )
+except Exception as exc:
+    print(type(exc).__name__)
+else:
+    print("unexpected-success")
+"""
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            cwd=webui_root,
+            env={
+                **os.environ,
+                "HERMES_WEBUI_AGENT_DIR": str(agent_root),
+                "PYTHONPATH": pythonpath,
+            },
+            capture_output=True,
+            text=True,
+            timeout=0.75,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("FIFO 清单读取超时，回归路径仍会阻塞")
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "SourceRegistryError"
+
+
+def test_manifest_publish_failure_rolls_back_only_newly_created_body(tmp_path):
+    module = _module()
+    from api.expert_teams.source_registry import SourceRegistryError
+
+    adapter = module.HermesWebResearchSourceAdapter(search_callable=lambda *_a, **_k: {}, extract_callable=None)
+    hit = _hit(module, "approved_public", "A", "https://a.example/report", "body")
+    ref = _run(adapter.materialize(hit, workspace=tmp_path, run_id="run-1"))
+    body = tmp_path / ref["locator"]
+    manifest = body.with_suffix(".source.json")
+    body.chmod(0o600)
+    body.unlink()
+    manifest.chmod(0o600)
+    manifest.unlink()
+    manifest.mkdir()
+
+    with pytest.raises(SourceRegistryError):
+        _run(adapter.materialize(hit, workspace=tmp_path, run_id="run-1"))
+
+    assert body.exists() is False
+    assert manifest.is_dir()
+
+
+def test_manifest_publish_failure_never_deletes_preexisting_body(tmp_path):
+    module = _module()
+    from api.expert_teams.source_registry import SourceRegistryError
+
+    adapter = module.HermesWebResearchSourceAdapter(search_callable=lambda *_a, **_k: {}, extract_callable=None)
+    hit = _hit(module, "approved_public", "A", "https://a.example/report", "body")
+    ref = _run(adapter.materialize(hit, workspace=tmp_path, run_id="run-1"))
+    body = tmp_path / ref["locator"]
+    manifest = body.with_suffix(".source.json")
+    manifest.chmod(0o600)
+    manifest.unlink()
+    manifest.mkdir()
+
+    with pytest.raises(SourceRegistryError):
+        _run(adapter.materialize(hit, workspace=tmp_path, run_id="run-1"))
+
+    assert body.read_bytes() == b"body"
 
 
 def test_sync_web_search_runs_off_event_loop_thread():
