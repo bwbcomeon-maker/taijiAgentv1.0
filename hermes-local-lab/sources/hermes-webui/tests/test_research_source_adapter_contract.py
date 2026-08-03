@@ -34,7 +34,7 @@ class _FakeAdapter:
             safe_reason="当前资料源不可用" if not self.available else "",
         )
 
-    async def search(self, query, *, limit=5):
+    async def search(self, query, *, limit=5, policy_decision=None):
         self.calls.append((query, limit))
         return self.result
 
@@ -62,6 +62,17 @@ def _result(module, hits=(), *, coverage="none", status="empty", reason_code="no
     )
 
 
+def _allow_query(module):
+    return lambda query: module.QueryAuthorizationDecision(True, query, "test-public-v1", "public-web")
+
+
+def _coverage_when(module, predicate):
+    return lambda subquestions, hits: module.CoverageEvaluation(
+        "sufficient" if predicate(hits) else ("insufficient" if hits else "none"),
+        subquestions if predicate(hits) else (),
+    )
+
+
 def test_web_sufficient_skips_local_and_model():
     module = _module()
     web_hits = (
@@ -71,7 +82,16 @@ def test_web_sufficient_skips_local_and_model():
     web = _FakeAdapter(module, _result(module, web_hits, coverage="sufficient", status="success", reason_code=""))
     local = _FakeAdapter(module, _result(module))
 
-    outcome = _run(module.orchestrate_research_sources("alpha", web_adapter=web, local_adapter=local))
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "alpha",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=_allow_query(module),
+            research_subquestions=("test-scope",),
+            coverage_evaluator=_coverage_when(module, lambda hits: len(hits) >= 2),
+        )
+    )
 
     assert (outcome.public_count, outcome.local_count, outcome.model_count) == (2, 0, 0)
     assert outcome.coverage == "sufficient"
@@ -88,7 +108,16 @@ def test_partial_but_sufficient_web_retains_hits_and_skips_local():
     )
     local = _FakeAdapter(module, _result(module))
 
-    outcome = _run(module.orchestrate_research_sources("alpha", web_adapter=web, local_adapter=local))
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "alpha",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=_allow_query(module),
+            research_subquestions=("test-scope",),
+            coverage_evaluator=_coverage_when(module, lambda hits: len(hits) >= 1),
+        )
+    )
 
     assert outcome.public_count == 1
     assert outcome.reason_code == "partial_success"
@@ -109,7 +138,16 @@ def test_partial_insufficient_web_adds_local_sources():
         _result(module, (internal,), coverage="sufficient", status="success", reason_code=""),
     )
 
-    outcome = _run(module.orchestrate_research_sources("evidence", web_adapter=web, local_adapter=local))
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "evidence",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=_allow_query(module),
+            research_subquestions=("test-scope",),
+            coverage_evaluator=_coverage_when(module, lambda hits: len(hits) >= 2),
+        )
+    )
 
     assert (outcome.public_count, outcome.local_count, outcome.model_count) == (1, 1, 0)
     assert outcome.coverage == "sufficient"
@@ -128,7 +166,19 @@ def test_total_web_failure_can_be_recovered_by_local_sources():
         _result(module, (internal,), coverage="sufficient", status="success", reason_code=""),
     )
 
-    outcome = _run(module.orchestrate_research_sources("evidence", web_adapter=web, local_adapter=local))
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "evidence",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=_allow_query(module),
+            research_subquestions=("test-scope",),
+            coverage_evaluator=_coverage_when(
+                module,
+                lambda hits: any(hit.source_kind == "approved_internal" for hit in hits),
+            ),
+        )
+    )
 
     assert (outcome.public_count, outcome.local_count, outcome.model_count) == (0, 1, 0)
     assert outcome.coverage == "sufficient"
@@ -145,7 +195,14 @@ def test_empty_or_unavailable_local_falls_back_to_unattributed_model_knowledge(l
         reason_code="network_unreachable" if not local_available else "",
     )
 
-    outcome = _run(module.orchestrate_research_sources("unknown", web_adapter=web, local_adapter=local))
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "unknown",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=_allow_query(module),
+        )
+    )
 
     assert (outcome.public_count, outcome.local_count, outcome.model_count) == (0, 0, 1)
     assert outcome.status == "model_fallback"
@@ -178,7 +235,7 @@ def test_web_adapter_deduplicates_urls_rejects_non_http_and_disables_llm_process
     adapter = module.HermesWebResearchSourceAdapter(
         search_callable=search,
         extract_callable=extract,
-        minimum_usable_hits=1,
+        query_authorizer=_allow_query(module),
         clock=lambda: "2026-08-03T10:00:00+00:00",
     )
     result = _run(adapter.search("topic", limit=5))
@@ -211,14 +268,14 @@ def test_web_page_failures_retain_successes_and_report_partial_success():
     adapter = module.HermesWebResearchSourceAdapter(
         search_callable=search,
         extract_callable=extract,
-        minimum_usable_hits=1,
+        query_authorizer=_allow_query(module),
     )
     result = _run(adapter.search("topic", limit=5))
 
     assert len(result.hits) == 1
     assert result.status == "partial"
     assert result.reason_code == "partial_success"
-    assert result.coverage == "sufficient"
+    assert result.coverage == "unassessed"
 
 
 def test_web_extract_timeout_is_not_flattened_into_generic_fetch_failure():
@@ -229,6 +286,7 @@ def test_web_extract_timeout_is_not_flattened_into_generic_fetch_failure():
             "data": {"web": [{"title": "A", "url": "https://a.example/"}]},
         },
         extract_callable=lambda *_a, **_k: {"results": [{"error": "request timed out"}]},
+        query_authorizer=_allow_query(module),
     )
 
     result = _run(adapter.search("topic"))
@@ -251,7 +309,11 @@ def test_web_search_exception_classification(failure, expected):
     def search(_query, limit=5):
         raise failure
 
-    adapter = module.HermesWebResearchSourceAdapter(search_callable=search, extract_callable=lambda *_a, **_k: None)
+    adapter = module.HermesWebResearchSourceAdapter(
+        search_callable=search,
+        extract_callable=lambda *_a, **_k: None,
+        query_authorizer=_allow_query(module),
+    )
     result = _run(adapter.search("topic"))
     assert result.reason_code == expected
 
@@ -270,6 +332,7 @@ def test_web_search_response_classification(payload, expected):
     adapter = module.HermesWebResearchSourceAdapter(
         search_callable=lambda *_a, **_k: payload,
         extract_callable=lambda *_a, **_k: None,
+        query_authorizer=_allow_query(module),
     )
     result = _run(adapter.search("topic"))
     assert result.reason_code == expected
@@ -383,3 +446,188 @@ def test_source_snapshot_preserves_server_manifest_origin_and_retrieval_time(tmp
     assert source["retrieved_at"] == "2026-08-03T10:00:00+00:00"
     assert source["locator"].startswith(".taiji/expert-teams/sources/")
     assert source["segments"][0]["locator"].startswith("https://example.com/report#chars=")
+
+
+def test_web_egress_is_fail_closed_without_authorizer_and_never_calls_search():
+    module = _module()
+    observed = []
+    adapter = module.HermesWebResearchSourceAdapter(
+        search_callable=lambda query, **_kwargs: observed.append(query) or {"success": True, "data": {"web": []}},
+        extract_callable=lambda *_a, **_k: None,
+    )
+
+    result = _run(adapter.search("secret customer acquisition plan"))
+
+    assert observed == []
+    assert result.reason_code == "data_egress_not_authorized"
+
+
+def test_orchestrator_only_sends_authorized_safe_query_and_records_safe_policy_metadata():
+    module = _module()
+    searched = []
+    raw_query = "研究客户 secret-token-123 的市场"
+
+    def authorize(value):
+        assert value == raw_query
+        return module.QueryAuthorizationDecision(
+            authorized=True,
+            safe_query="研究目标客户市场",
+            policy_id="research-public-v1",
+            trust_zone="public-web",
+        )
+
+    adapter = module.HermesWebResearchSourceAdapter(
+        search_callable=lambda query, **_kwargs: searched.append(query) or {"success": True, "data": {"web": []}},
+        extract_callable=lambda *_a, **_k: None,
+    )
+    local = _FakeAdapter(module, _result(module))
+    outcome = _run(
+        module.orchestrate_research_sources(
+            raw_query,
+            web_adapter=adapter,
+            local_adapter=local,
+            query_authorizer=authorize,
+        )
+    )
+
+    assert searched == ["研究目标客户市场"]
+    assert outcome.public_status["policy_id"] == "research-public-v1"
+    assert outcome.public_status["trust_zone"] == "public-web"
+    assert "secret-token-123" not in json.dumps(outcome.tier_decisions, ensure_ascii=False)
+
+
+def test_two_unrelated_web_pages_are_not_sufficient_without_positive_coverage_evaluation():
+    module = _module()
+    hits = (
+        _hit(module, "approved_public", "Weather", "https://a.example", "today is sunny"),
+        _hit(module, "approved_public", "Sports", "https://b.example", "team won match"),
+    )
+    web = _FakeAdapter(module, _result(module, hits, coverage="sufficient", status="success", reason_code=""))
+    local = _FakeAdapter(module, _result(module), available=False, reason_code="no_results")
+    authorize = lambda query: module.QueryAuthorizationDecision(True, query, "public-v1", "public-web")
+
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "AI 办公落地与风险",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=authorize,
+        )
+    )
+
+    assert outcome.coverage == "insufficient"
+    assert outcome.model_count == 1
+
+
+def test_explicit_subquestion_coverage_evaluator_can_mark_relevant_sources_sufficient():
+    module = _module()
+    hits = (
+        _hit(module, "approved_public", "Adoption", "https://a.example", "AI office adoption cases"),
+        _hit(module, "approved_public", "Risks", "https://b.example", "AI office security risks"),
+    )
+    web = _FakeAdapter(module, _result(module, hits, coverage="insufficient", status="success", reason_code=""))
+    local = _FakeAdapter(module, _result(module))
+    authorize = lambda query: module.QueryAuthorizationDecision(True, query, "public-v1", "public-web")
+
+    def evaluate(subquestions, candidate_hits):
+        contents = " ".join(hit.content for hit in candidate_hits)
+        covered = tuple(item for item in subquestions if item in contents)
+        return module.CoverageEvaluation("sufficient", covered)
+
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "AI office adoption and risks",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=authorize,
+            research_subquestions=("adoption", "risks"),
+            coverage_evaluator=evaluate,
+        )
+    )
+
+    assert outcome.coverage == "sufficient"
+    assert outcome.model_count == 0
+    assert local.calls == []
+
+
+def test_evaluator_self_report_cannot_bypass_missing_subquestion_coverage():
+    module = _module()
+    hit = _hit(module, "approved_public", "Adoption", "https://a.example", "AI office adoption cases")
+    web = _FakeAdapter(module, _result(module, (hit,), status="success", reason_code=""))
+    local = _FakeAdapter(module, _result(module), available=False, reason_code="no_results")
+
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "AI office adoption and risks",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=_allow_query(module),
+            research_subquestions=("adoption", "risks"),
+            coverage_evaluator=lambda _required, _hits: module.CoverageEvaluation(
+                "sufficient",
+                ("adoption",),
+            ),
+        )
+    )
+
+    assert outcome.coverage == "insufficient"
+    assert outcome.model_count == 1
+
+
+def test_layered_status_preserves_public_and_local_failures_for_recovery():
+    module = _module()
+    web = _FakeAdapter(
+        module,
+        _result(module, coverage="none", status="failed", reason_code="network_unreachable"),
+    )
+    local = _FakeAdapter(module, available=False, reason_code="no_results")
+    authorize = lambda query: module.QueryAuthorizationDecision(True, query, "public-v1", "public-web")
+
+    outcome = _run(
+        module.orchestrate_research_sources(
+            "topic",
+            web_adapter=web,
+            local_adapter=local,
+            query_authorizer=authorize,
+        )
+    )
+
+    assert outcome.public_status == {
+        "status": "failed",
+        "reason": "network_unreachable",
+        "safe_reason": "未找到可核验资料",
+        "count": 0,
+        "coverage": "none",
+        "policy_id": "public-v1",
+        "trust_zone": "public-web",
+    }
+    assert outcome.local_status["status"] == "unavailable"
+    assert outcome.local_status["reason"] == "no_results"
+    assert [decision["tier"] for decision in outcome.tier_decisions] == ["public", "local", "model"]
+    assert outcome.status == "model_fallback"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("Blocked by website policy", "policy_blocked"),
+        ("request timed out", "timeout"),
+        ("TLS certificate failed", "tls_error"),
+        ("extract provider failed", "search_service_error"),
+    ],
+)
+def test_web_extract_top_level_error_is_classified_from_actual_response(error, expected):
+    module = _module()
+    authorize = lambda query: module.QueryAuthorizationDecision(True, query, "public-v1", "public-web")
+    adapter = module.HermesWebResearchSourceAdapter(
+        search_callable=lambda *_a, **_k: {
+            "success": True,
+            "data": {"web": [{"title": "A", "url": "https://a.example/"}]},
+        },
+        extract_callable=lambda *_a, **_k: {"success": False, "error": error},
+        query_authorizer=authorize,
+    )
+
+    result = _run(adapter.search("topic"))
+
+    assert result.reason_code == expected

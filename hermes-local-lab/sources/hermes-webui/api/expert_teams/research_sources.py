@@ -22,6 +22,7 @@ from .source_registry import materialize_approved_source
 _ALLOWED_LOCAL_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json"}
 _ALLOWED_SOURCE_KINDS = {"approved_public", "approved_internal"}
 _SAFE_REASONS = {
+    "data_egress_not_authorized": "当前研究请求未获准发送到公共检索服务",
     "policy_blocked": "目标站点的访问策略阻止了资料获取",
     "network_unreachable": "当前网络不可达，无法获取公共资料",
     "tls_error": "目标站点的安全连接校验失败",
@@ -83,6 +84,24 @@ class ProbeResult:
 
 
 @dataclass(frozen=True)
+class QueryAuthorizationDecision:
+    authorized: bool
+    safe_query: str = ""
+    policy_id: str = ""
+    trust_zone: str = ""
+    reason_code: str = "data_egress_not_authorized"
+    safe_reason: str = _SAFE_REASONS["data_egress_not_authorized"]
+
+
+@dataclass(frozen=True)
+class CoverageEvaluation:
+    coverage: str
+    covered_subquestions: tuple[str, ...] = ()
+    reason_code: str = ""
+    safe_reason: str = ""
+
+
+@dataclass(frozen=True)
 class ResearchSourceHit:
     source_kind: str
     safe_title: str
@@ -135,12 +154,21 @@ class ResearchFallbackResult:
     safe_reason: str
     reason_code: str
     status: str
+    public_status: dict
+    local_status: dict
+    tier_decisions: tuple[dict, ...]
 
 
 class ResearchSourceAdapter(Protocol):
     async def probe(self) -> ProbeResult: ...
 
-    async def search(self, query: str, *, limit: int = 5) -> AdapterSearchResult: ...
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        policy_decision: QueryAuthorizationDecision | None = None,
+    ) -> AdapterSearchResult: ...
 
     async def materialize(self, hit: ResearchSourceHit, *, workspace: Path, run_id: str) -> dict: ...
 
@@ -149,6 +177,71 @@ async def _maybe_await(value: object) -> object:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _normalize_authorization(value: object) -> QueryAuthorizationDecision:
+    if isinstance(value, QueryAuthorizationDecision):
+        decision = value
+    elif isinstance(value, dict):
+        decision = QueryAuthorizationDecision(
+            authorized=value.get("authorized") is True,
+            safe_query=str(value.get("safe_query") or ""),
+            policy_id=str(value.get("policy_id") or ""),
+            trust_zone=str(value.get("trust_zone") or ""),
+            reason_code=str(value.get("reason_code") or "data_egress_not_authorized"),
+            safe_reason=str(value.get("safe_reason") or _SAFE_REASONS["data_egress_not_authorized"]),
+        )
+    else:
+        decision = QueryAuthorizationDecision(False)
+    safe_query = _safe_text(decision.safe_query, maximum=2000)
+    policy_id = _safe_text(decision.policy_id, maximum=128)
+    trust_zone = _safe_text(decision.trust_zone, maximum=128)
+    if not decision.authorized or not safe_query or not policy_id or not trust_zone:
+        return QueryAuthorizationDecision(False)
+    return QueryAuthorizationDecision(True, safe_query, policy_id, trust_zone, "", "")
+
+
+async def _authorize_query(authorizer: Callable[[str], object] | None, query: str) -> QueryAuthorizationDecision:
+    if authorizer is None:
+        return QueryAuthorizationDecision(False)
+    try:
+        return _normalize_authorization(await _maybe_await(authorizer(str(query))))
+    except Exception:
+        return QueryAuthorizationDecision(False)
+
+
+async def _evaluate_coverage(
+    evaluator: Callable[[tuple[str, ...], tuple[ResearchSourceHit, ...]], object] | None,
+    research_subquestions: tuple[str, ...],
+    hits: tuple[ResearchSourceHit, ...],
+) -> CoverageEvaluation:
+    if evaluator is None or not research_subquestions:
+        return CoverageEvaluation("insufficient" if hits else "none", reason_code="insufficient_evidence")
+    try:
+        value = await _maybe_await(evaluator(research_subquestions, hits))
+    except Exception:
+        return CoverageEvaluation("insufficient" if hits else "none", reason_code="insufficient_evidence")
+    if isinstance(value, CoverageEvaluation):
+        evaluation = value
+    elif isinstance(value, dict):
+        evaluation = CoverageEvaluation(
+            coverage=str(value.get("coverage") or "insufficient"),
+            covered_subquestions=tuple(str(item) for item in value.get("covered_subquestions") or ()),
+            reason_code=str(value.get("reason_code") or ""),
+            safe_reason=str(value.get("safe_reason") or ""),
+        )
+    else:
+        evaluation = CoverageEvaluation("insufficient" if hits else "none")
+    covered = tuple(dict.fromkeys(_safe_text(item, maximum=500) for item in evaluation.covered_subquestions if item))
+    if evaluation.coverage == "sufficient" and hits and set(research_subquestions).issubset(set(covered)):
+        return CoverageEvaluation("sufficient", covered, evaluation.reason_code, evaluation.safe_reason)
+    coverage = "insufficient" if hits else "none"
+    return CoverageEvaluation(
+        coverage,
+        covered,
+        evaluation.reason_code or "insufficient_evidence",
+        evaluation.safe_reason or _SAFE_REASONS["insufficient_evidence"],
+    )
 
 
 def _canonical_http_url(value: object) -> str | None:
@@ -198,20 +291,38 @@ class HermesWebResearchSourceAdapter:
         *,
         search_callable: Callable[..., object] | None = None,
         extract_callable: Callable[..., object] | None = None,
-        minimum_usable_hits: int = 2,
+        query_authorizer: Callable[[str], object] | None = None,
         clock: Callable[[], str] | None = None,
     ):
         self._search = search_callable or _default_web_search
         self._extract = extract_callable or _default_web_extract
-        self._minimum_usable_hits = max(1, int(minimum_usable_hits))
+        self._query_authorizer = query_authorizer
         self._clock = clock or _now_iso
 
     async def probe(self) -> ProbeResult:
         return ProbeResult(available=callable(self._search) and callable(self._extract))
 
-    async def search(self, query: str, *, limit: int = 5) -> AdapterSearchResult:
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        policy_decision: QueryAuthorizationDecision | None = None,
+    ) -> AdapterSearchResult:
+        decision = _normalize_authorization(policy_decision) if policy_decision else await _authorize_query(
+            self._query_authorizer,
+            query,
+        )
+        if not decision.authorized:
+            return AdapterSearchResult(
+                status="denied",
+                reason_code="data_egress_not_authorized",
+                safe_reason=_SAFE_REASONS["data_egress_not_authorized"],
+            )
         try:
-            payload = _decode_payload(await _maybe_await(self._search(str(query), limit=max(1, int(limit)))))
+            payload = _decode_payload(
+                await _maybe_await(self._search(decision.safe_query, limit=max(1, int(limit))))
+            )
         except Exception as exc:
             code = classify_adapter_exception(exc)
             return AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
@@ -251,6 +362,11 @@ class HermesWebResearchSourceAdapter:
                         self._extract([url], format="markdown", use_llm_processing=False)
                     )
                 )
+                if extracted.get("success") is False or extracted.get("error"):
+                    failures.append(
+                        _classify_message(extracted.get("error"), default="search_service_error")
+                    )
+                    continue
                 results = extracted.get("results", [])
                 entry = results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else {}
                 if entry.get("error") or entry.get("blocked_by_policy"):
@@ -277,7 +393,7 @@ class HermesWebResearchSourceAdapter:
             except Exception as exc:
                 failures.append(classify_adapter_exception(exc, default="fetch_failed"))
 
-        coverage = "sufficient" if len(hits) >= self._minimum_usable_hits else ("insufficient" if hits else "none")
+        coverage = "unassessed" if hits else "none"
         if hits and failures:
             return AdapterSearchResult(
                 hits=tuple(hits),
@@ -287,13 +403,12 @@ class HermesWebResearchSourceAdapter:
                 safe_reason=_SAFE_REASONS["partial_success"],
             )
         if hits:
-            code = "" if coverage == "sufficient" else "insufficient_evidence"
             return AdapterSearchResult(
                 hits=tuple(hits),
                 coverage=coverage,
                 status="success",
-                reason_code=code,
-                safe_reason=_SAFE_REASONS.get(code, ""),
+                reason_code="",
+                safe_reason="",
             )
         code = failures[0] if failures and len(set(failures)) == 1 else "fetch_failed"
         return AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
@@ -319,7 +434,6 @@ class LocalTextResearchSourceAdapter:
         *,
         roots: Sequence[Path],
         workspace_root: Path | None = None,
-        minimum_usable_hits: int = 1,
         max_results: int = 20,
         max_files_scanned: int = 500,
         max_file_bytes: int = 2 * 1024 * 1024,
@@ -327,7 +441,6 @@ class LocalTextResearchSourceAdapter:
     ):
         self._roots = tuple(Path(root).expanduser() for root in roots)
         self._workspace_root = Path(workspace_root).expanduser().resolve() if workspace_root else None
-        self._minimum_usable_hits = max(1, int(minimum_usable_hits))
         self._max_results = max(1, int(max_results))
         self._max_files_scanned = max(1, int(max_files_scanned))
         self._max_file_bytes = max(1, int(max_file_bytes))
@@ -353,7 +466,13 @@ class LocalTextResearchSourceAdapter:
             safe_reason="" if available else "未配置可访问的内部资料目录",
         )
 
-    async def search(self, query: str, *, limit: int = 5) -> AdapterSearchResult:
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        policy_decision: QueryAuthorizationDecision | None = None,
+    ) -> AdapterSearchResult:
         roots = self._approved_roots()
         if not roots:
             return AdapterSearchResult(
@@ -416,14 +535,12 @@ class LocalTextResearchSourceAdapter:
 
         if not hits:
             return AdapterSearchResult()
-        coverage = "sufficient" if len(hits) >= self._minimum_usable_hits else "insufficient"
-        code = "" if coverage == "sufficient" else "insufficient_evidence"
         return AdapterSearchResult(
             hits=tuple(hits),
-            coverage=coverage,
+            coverage="unassessed",
             status="success",
-            reason_code=code,
-            safe_reason=_SAFE_REASONS.get(code, ""),
+            reason_code="",
+            safe_reason="",
         )
 
     async def materialize(self, hit: ResearchSourceHit, *, workspace: Path, run_id: str) -> dict:
@@ -465,60 +582,123 @@ async def orchestrate_research_sources(
     *,
     web_adapter: ResearchSourceAdapter,
     local_adapter: ResearchSourceAdapter,
+    query_authorizer: Callable[[str], object] | None = None,
+    research_subquestions: Sequence[str] = (),
+    coverage_evaluator: Callable[[tuple[str, ...], tuple[ResearchSourceHit, ...]], object] | None = None,
     limit: int = 5,
 ) -> ResearchFallbackResult:
-    web_probe = await _safe_probe(web_adapter)
-    if web_probe.available:
-        try:
-            web = await web_adapter.search(query, limit=limit)
-        except Exception as exc:
-            code = classify_adapter_exception(exc)
-            web = AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
+    decision = await _authorize_query(query_authorizer, query)
+    if not decision.authorized:
+        web = AdapterSearchResult(
+            status="denied",
+            reason_code="data_egress_not_authorized",
+            safe_reason=_SAFE_REASONS["data_egress_not_authorized"],
+        )
     else:
-        code = web_probe.reason_code or "search_service_error"
-        web = AdapterSearchResult(status="unavailable", reason_code=code, safe_reason=web_probe.safe_reason)
+        web_probe = await _safe_probe(web_adapter)
+        if not web_probe.available:
+            code = web_probe.reason_code or "search_service_error"
+            web = AdapterSearchResult(status="unavailable", reason_code=code, safe_reason=web_probe.safe_reason)
+        else:
+            try:
+                web = await web_adapter.search(
+                    decision.safe_query,
+                    limit=limit,
+                    policy_decision=decision,
+                )
+            except Exception as exc:
+                code = classify_adapter_exception(exc)
+                web = AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
 
+    required_subquestions = tuple(
+        dict.fromkeys(_safe_text(item, maximum=500) for item in research_subquestions if _safe_text(item, maximum=500))
+    )
     public_hits = tuple(hit for hit in web.hits if hit.source_kind == "approved_public")
+    public_evaluation = await _evaluate_coverage(coverage_evaluator, required_subquestions, public_hits)
     local_hits: tuple[ResearchSourceHit, ...] = ()
-    local = None
-    if web.coverage != "sufficient":
+    local_evaluation = CoverageEvaluation("none")
+    local = AdapterSearchResult(
+        status="skipped",
+        reason_code="not_needed",
+        safe_reason="公共资料已覆盖研究问题，无需查询内部资料",
+    )
+    if public_evaluation.coverage != "sufficient":
         local_probe = await _safe_probe(local_adapter)
-        if local_probe.available:
+        if not local_probe.available:
+            local = AdapterSearchResult(
+                status="unavailable",
+                reason_code=local_probe.reason_code or "no_results",
+                safe_reason=local_probe.safe_reason or "未配置可访问的内部资料目录",
+            )
+        else:
             try:
                 local = await local_adapter.search(query, limit=limit)
                 local_hits = tuple(hit for hit in local.hits if hit.source_kind == "approved_internal")
+                local_evaluation = await _evaluate_coverage(coverage_evaluator, required_subquestions, local_hits)
             except Exception as exc:
                 code = classify_adapter_exception(exc)
                 local = AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
 
     combined = _deduplicate_hits((*public_hits, *local_hits))
+    final_evaluation = (
+        public_evaluation
+        if public_evaluation.coverage == "sufficient"
+        else await _evaluate_coverage(coverage_evaluator, required_subquestions, combined)
+    )
     public_count = sum(hit.source_kind == "approved_public" for hit in combined)
     local_count = sum(hit.source_kind == "approved_internal" for hit in combined)
-    sufficient = web.coverage == "sufficient" or (local is not None and local.coverage == "sufficient")
+    sufficient = final_evaluation.coverage == "sufficient"
     model_count = 0 if sufficient else 1
-    coverage = "sufficient" if sufficient else ("insufficient" if combined else "none")
+    coverage = final_evaluation.coverage
 
+    public_status = {
+        "status": web.status,
+        "reason": web.reason_code,
+        "safe_reason": web.safe_reason,
+        "count": public_count,
+        "coverage": public_evaluation.coverage,
+        "policy_id": decision.policy_id,
+        "trust_zone": decision.trust_zone,
+    }
+    local_status = {
+        "status": local.status,
+        "reason": local.reason_code,
+        "safe_reason": local.safe_reason,
+        "count": local_count,
+        "coverage": local_evaluation.coverage,
+    }
+    tier_decisions = [
+        {"tier": "public", **public_status},
+        {"tier": "local", **local_status},
+    ]
     if model_count:
-        reason_code = "insufficient_evidence" if combined else (web.reason_code or "no_results")
-        return ResearchFallbackResult(
-            hits=combined,
-            public_count=public_count,
-            local_count=local_count,
-            model_count=1,
-            coverage=coverage,
-            safe_reason=_SAFE_REASONS.get(reason_code, _SAFE_REASONS["insufficient_evidence"]),
-            reason_code=reason_code,
-            status="model_fallback",
+        tier_decisions.append(
+            {
+                "tier": "model",
+                "status": "used",
+                "reason": "insufficient_evidence",
+                "safe_reason": _SAFE_REASONS["insufficient_evidence"],
+                "count": 1,
+                "coverage": coverage,
+            }
         )
 
-    reason_code = web.reason_code
+    if model_count:
+        reason_code = "insufficient_evidence" if combined else (web.reason_code or local.reason_code or "no_results")
+        status = "model_fallback"
+    else:
+        reason_code = web.reason_code
+        status = "ready"
     return ResearchFallbackResult(
         hits=combined,
         public_count=public_count,
         local_count=local_count,
-        model_count=0,
-        coverage="sufficient",
-        safe_reason=_SAFE_REASONS.get(reason_code, ""),
+        model_count=model_count,
+        coverage=coverage,
+        safe_reason=_SAFE_REASONS.get(reason_code, web.safe_reason or local.safe_reason),
         reason_code=reason_code,
-        status="ready",
+        status=status,
+        public_status=public_status,
+        local_status=local_status,
+        tier_decisions=tuple(tier_decisions),
     )
