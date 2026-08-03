@@ -103,6 +103,57 @@ _RESEARCH_PUBLIC_CONTEXT_EN = (
     "filing",
     "published",
 )
+_RESEARCH_PUBLIC_TRANSACTION_CN = (
+    "公开市场",
+    "零售",
+    "公开年报",
+    "年报",
+    "官方公告",
+    "官方披露",
+)
+_RESEARCH_PUBLIC_TRANSACTION_EN = (
+    "public market",
+    "retail",
+    "annual report",
+    "official filing",
+    "official disclosure",
+)
+_RESEARCH_LATIN_FUNCTION_WORDS = {
+    "a",
+    "an",
+    "analyze",
+    "and",
+    "annual",
+    "contract",
+    "credit",
+    "discount",
+    "for",
+    "global",
+    "investigate",
+    "market",
+    "not",
+    "of",
+    "order",
+    "payment",
+    "please",
+    "price",
+    "pricing",
+    "procurement",
+    "public",
+    "purchase",
+    "quote",
+    "quotation",
+    "renewal",
+    "report",
+    "research",
+    "retail",
+    "study",
+    "terms",
+    "the",
+    "trends",
+    "value",
+    "values",
+}
 
 
 def _contains_english_phrase(value: str, phrases: tuple[str, ...]) -> bool:
@@ -120,42 +171,22 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
         for token in re.findall(r"\b[A-Z][A-Za-z0-9&.-]{1,}\b", normalized)
         if token.casefold() not in {"analyze", "research", "study", "investigate", "please", "global"}
     ]
-    unknown_latin_before_transaction = False
-    if private_transaction:
-        transaction_terms = sorted(
-            (*_RESEARCH_PRIVATE_TRANSACTION_CN, *_RESEARCH_PRIVATE_TRANSACTION_EN),
-            key=len,
-            reverse=True,
+    latin_tokens = re.findall(r"[A-Za-z][A-Za-z0-9&.-]*", normalized)
+    unknown_latin_entity = bool(
+        private_transaction
+        and re.search(r"[一-鿿]", normalized)
+        and any(
+            len(token) >= 2 and token.casefold() not in _RESEARCH_LATIN_FUNCTION_WORDS
+            for token in latin_tokens
         )
-        transaction_pattern = "|".join(re.escape(term) for term in transaction_terms)
-        unknown_latin_before_transaction = any(
-            match.group(1).casefold()
-            not in {
-                "analyze",
-                "research",
-                "study",
-                "investigate",
-                "please",
-                "global",
-                "public",
-                "not",
-                "the",
-                "a",
-                "an",
-            }
-            for match in re.finditer(
-                rf"\b([A-Za-z][A-Za-z0-9&.-]{{1,}})\b\s+(?:{transaction_pattern})",
-                normalized,
-                flags=re.IGNORECASE,
-            )
-        )
+    )
     organization = bool(
         re.search(
             r"[一-鿿A-Za-z0-9·]{2,}(?:公司|集团|研究院|研究所|大学|医院|银行|基金会|协会|委员会|中心|机构|工厂|局)",
             normalized,
         )
         or bool(capitalized_tokens)
-        or unknown_latin_before_transaction
+        or unknown_latin_entity
     )
     return {
         "confidential": any(term in normalized for term in _RESEARCH_CONFIDENTIAL_CN)
@@ -172,6 +203,10 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
         "organization": organization,
         "public_context": any(term in normalized for term in _RESEARCH_PUBLIC_CONTEXT_CN)
         or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_CONTEXT_EN),
+        "public_transaction_context": any(
+            term in normalized for term in _RESEARCH_PUBLIC_TRANSACTION_CN
+        )
+        or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_TRANSACTION_EN),
     }
 
 
@@ -189,7 +224,11 @@ def _blocked_by_research_semantics(value: str) -> bool:
         classes["private_transaction"] or classes["organization"]
     ):
         return True
-    return bool(classes["organization"] and classes["private_transaction"])
+    return bool(
+        classes["organization"]
+        and classes["private_transaction"]
+        and not classes["public_transaction_context"]
+    )
 
 
 def _project_public_research_query(original_request: str) -> str:

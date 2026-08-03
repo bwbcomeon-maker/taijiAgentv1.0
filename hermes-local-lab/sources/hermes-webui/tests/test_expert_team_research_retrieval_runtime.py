@@ -716,6 +716,89 @@ def test_public_query_semantics_allows_public_financial_metrics(
     assert decision["safe_query"] == expected_query
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "acme 的采购价格与账期",
+        "acme采购价格与账期",
+        "采购价格 for acme",
+    ],
+)
+def test_private_transaction_detection_is_entity_order_and_spacing_independent(
+    tmp_path, sensitive
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    decision = authorize_research_public_query(run, sensitive)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    "sensitive_direction",
+    [
+        "acme 的采购价格与账期",
+        "acme采购价格与账期",
+        "采购价格 for acme",
+    ],
+)
+def test_private_transaction_direction_uses_same_order_independent_gate(
+    tmp_path, sensitive_direction
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "Analyze global renewable energy market trends"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, sensitive_direction)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    ("original_request", "expected_query"),
+    [
+        ("Apple iPhone 公开市场价格趋势", "Apple iPhone 公开市场价格趋势"),
+        ("Apple public retail price trends", "Apple public retail price trends"),
+        ("苹果公司公开年报合同金额", "苹果公司公开年报合同金额"),
+        ("Apple annual report contract values", "Apple annual report contract values"),
+    ],
+)
+def test_explicit_public_market_retail_and_annual_report_contexts_are_allowed(
+    tmp_path, original_request, expected_query
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == expected_query
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
