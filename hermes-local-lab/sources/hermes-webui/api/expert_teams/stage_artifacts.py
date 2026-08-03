@@ -45,6 +45,8 @@ _SECTION_HEADING_PATTERN = re.compile(
 _FRESHNESS_SENSITIVE_MODEL_CLAIM = re.compile(
     r"(?:最新|近期|实时|当前|现行|今日|今天).{0,12}(?:政策|法规|规定|价格|统计|状态|数据)"
     r"|(?:政策|法规|规定|价格|统计|状态|数据).{0,12}(?:最新|近期|实时|当前|现行|今日|今天)"
+    r"|目前|本月|本季度|今年"
+    r"|as\s+of\s+(?:19|20)\d{2}\b|this\s+year|current\s+year|this\s+month|this\s+quarter"
     r"|(?:current|latest|today(?:'s)?|recent|real[- ]time).{0,40}(?:policy|regulation|price|statistics?|status|data)"
     r"|(?:policy|regulation|price|statistics?|status|data).{0,40}(?:current|latest|today(?:'s)?|recent|real[- ]time)",
     re.I,

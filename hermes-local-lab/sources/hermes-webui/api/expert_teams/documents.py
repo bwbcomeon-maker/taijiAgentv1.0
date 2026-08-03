@@ -536,6 +536,52 @@ def _research_citation_result(
             )
         )
     validated_claim_ids = set()
+    model_usage_by_section = {}
+    non_model_usage_sections = set()
+    if v2:
+        for claim_id, usage in usage_by_claim.items():
+            claim = evidence_claims.get(claim_id)
+            if not isinstance(claim, dict):
+                continue
+            section_id = str(usage.get("section_id") or "").strip()
+            if claim.get("origin_tier") == "model_knowledge":
+                model_usage_by_section.setdefault(section_id, []).append(claim_id)
+            else:
+                non_model_usage_sections.add(section_id)
+        for section_id, model_claim_ids in model_usage_by_section.items():
+            heading = outline_headings.get(section_id, "")
+            body = _markdown_section_body(markdown, heading) if heading else ""
+            if body.count("模型知识·未核验") != len(model_claim_ids):
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_label_count_mismatch",
+                        f"section:{section_id}",
+                        "每个模型知识 claim 都必须在所属章节独立标注为未核验",
+                    )
+                )
+            if section_id in non_model_usage_sections:
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_section_not_isolated",
+                        f"section:{section_id}",
+                        "模型知识 claim 不得与可引用的公网或本地 claim 共用章节",
+                    )
+                )
+            if re.search(
+                r"https?://|\bwww\.\S+|\[\^[^\]]+\]"
+                r"|\[[A-Za-z][A-Za-z0-9._:-]*\]"
+                r"|(?:\[|【|（)[^\]】）]*(?:来源|资料|参考|source|ref)[^\]】）]*(?:\]|】|）)"
+                r"|脚注\s*[0-9一二三四五六七八九十]+",
+                body,
+                re.I,
+            ):
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_citation_forbidden",
+                        f"section:{section_id}",
+                        "含模型知识 claim 的章节不得包含来源标记、URL 或脚注",
+                    )
+                )
     for claim_id, usage in usage_by_claim.items():
         claim = evidence_claims.get(claim_id)
         if claim is None:
@@ -550,7 +596,11 @@ def _research_citation_result(
         marker = str(usage.get("citation_marker") or "").strip()
         origin_tier = str(claim.get("origin_tier") or "").strip()
         if v2 and origin_tier == "model_knowledge":
-            if marker or claim.get("evidence") or claim.get("status") == "verified":
+            if (
+                marker not in {"", "模型知识·未核验"}
+                or claim.get("evidence")
+                or claim.get("status") == "verified"
+            ):
                 issues.append(
                     _semantic_issue(
                         "model_knowledge_citation_forbidden",
@@ -567,20 +617,6 @@ def _research_citation_result(
                         "model_knowledge_label_missing",
                         f"claim:{claim_id}",
                         "模型知识内容未在正文明示为未核验",
-                    )
-                )
-                continue
-            if re.search(
-                r"(?:\[[^\]]+\]|【[^】]+】)\s{0,24}模型知识·未核验"
-                r"|模型知识·未核验.{0,24}(?:\[[^\]]+\]|【[^】]+】)",
-                section_body,
-                re.S,
-            ):
-                issues.append(
-                    _semantic_issue(
-                        "model_knowledge_citation_forbidden",
-                        f"claim:{claim_id}",
-                        "模型知识 claim 不得借用相邻引用标记",
                     )
                 )
                 continue

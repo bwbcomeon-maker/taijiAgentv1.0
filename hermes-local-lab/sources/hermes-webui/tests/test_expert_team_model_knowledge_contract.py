@@ -398,6 +398,35 @@ def test_bilingual_freshness_sensitive_model_claims_fail_closed(statement):
     assert error.value.code == "time_sensitive_model_claim_unverifiable"
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "As of 2026, market share is 42 percent.",
+        "This year's statistics show rapid growth.",
+        "The current year price is 99 dollars.",
+        "目前市场份额已达到 42%。",
+        "本月价格已上涨至 99 元。",
+        "本季度统计数据显示需求增长。",
+        "今年现行法规要求立即完成整改。",
+    ],
+)
+def test_extended_freshness_phrases_fail_closed_for_model_knowledge(statement):
+    from api.expert_teams.stage_artifacts import StageArtifactError
+
+    with pytest.raises(StageArtifactError) as error:
+        _build_evidence(
+            [
+                _claim(
+                    origin_tier="model_knowledge",
+                    source_id=None,
+                    status="insufficient",
+                    statement=statement,
+                )
+            ]
+        )
+    assert error.value.code == "time_sensitive_model_claim_unverifiable"
+
+
 @pytest.mark.parametrize("origin_tier", ["public_web", "local_knowledge"])
 def test_source_backed_claims_require_evidence_even_when_not_verified(origin_tier):
     from api.expert_teams.stage_artifacts import StageArtifactError
@@ -505,7 +534,9 @@ def _review_checks() -> dict:
     }
 
 
-def _approved_research_inputs(claims: list[dict]) -> list[dict]:
+def _approved_research_inputs(
+    claims: list[dict], *, outline_sections: list[dict] | None = None
+) -> list[dict]:
     return [
         {
             "artifact_id": "evidence:1",
@@ -525,7 +556,8 @@ def _approved_research_inputs(claims: list[dict]) -> list[dict]:
             "sha256": "2" * 64,
             "artifact_type": "research_outline",
             "payload": {
-                "sections": [
+                "sections": outline_sections
+                or [
                     {
                         "section_id": "SEC-EVIDENCE",
                         "heading": "证据",
@@ -569,14 +601,22 @@ def _research_artifact(usages: list[dict], *, evidence_text: str, references: st
     }
 
 
-def _semantic_report(artifact: dict, claims: list[dict], *, sources: list[dict]) -> dict:
+def _semantic_report(
+    artifact: dict,
+    claims: list[dict],
+    *,
+    sources: list[dict],
+    outline_sections: list[dict] | None = None,
+) -> dict:
     from api.expert_teams.documents import evaluate_semantic_gates
 
     return evaluate_semantic_gates(
         brief=_v2_brief(),
         artifact=artifact,
         approved_inputs=artifact["input_refs"],
-        approved_artifacts=_approved_research_inputs(claims),
+        approved_artifacts=_approved_research_inputs(
+            claims, outline_sections=outline_sections
+        ),
         source_context={
             "snapshot_id": "source-context:model-knowledge",
             "snapshot_sha256": "c" * 64,
@@ -598,18 +638,38 @@ def test_mixed_report_keeps_public_citations_and_model_claims_isolated():
     ]
     usages = [
         {"claim_id": "CLAIM-PUB", "section_id": "SEC-EVIDENCE", "citation_marker": "[PUB-001]"},
-        {"claim_id": "CLAIM-MODEL", "section_id": "SEC-EVIDENCE", "citation_marker": ""},
+        {"claim_id": "CLAIM-MODEL", "section_id": "SEC-ANALYSIS", "citation_marker": "模型知识·未核验"},
     ]
     artifact = _research_artifact(
         usages,
         evidence_text=(
             "公开资料结论 [PUB-001]。"
-            "模型知识·未核验：仅作分析补充。模型知识时效未知。"
         ),
         references="[PUB-001] 公开资料。",
     )
+    artifact["deliverable_markdown"] = artifact["deliverable_markdown"].replace(
+        "在证据边界内进行分析。",
+        "模型知识·未核验：仅作分析补充。模型知识时效未知。",
+    )
     sources = [{"source_id": "PUB-001", "kind": "approved_public"}]
-    report = _semantic_report(artifact, claims, sources=sources)
+    outline_sections = [
+        {
+            "section_id": "SEC-EVIDENCE",
+            "heading": "证据",
+            "claim_ids": ["CLAIM-PUB"],
+        },
+        {
+            "section_id": "SEC-ANALYSIS",
+            "heading": "分析",
+            "claim_ids": ["CLAIM-MODEL"],
+        },
+    ]
+    report = _semantic_report(
+        artifact,
+        claims,
+        sources=sources,
+        outline_sections=outline_sections,
+    )
     assert report["status"] == "passed"
     assert report["citation_validation"] == {
         "status": "passed",
@@ -619,7 +679,12 @@ def test_mixed_report_keeps_public_citations_and_model_claims_isolated():
 
     borrowed = deepcopy(artifact)
     borrowed["payload"]["claim_usage"][1]["citation_marker"] = "[PUB-001]"
-    borrowed_report = _semantic_report(borrowed, claims, sources=sources)
+    borrowed_report = _semantic_report(
+        borrowed,
+        claims,
+        sources=sources,
+        outline_sections=outline_sections,
+    )
     assert "model_knowledge_citation_forbidden" in {
         issue["code"] for issue in borrowed_report["issues"]
     }
@@ -661,6 +726,115 @@ def test_each_model_claim_requires_label_at_its_own_usage_section():
     assert "model_knowledge_label_missing" in {
         issue["code"] for issue in report["issues"]
         if issue["target_id"] == "claim:CLAIM-MODEL-2"
+    }
+
+
+def test_each_model_claim_requires_one_label_occurrence_in_the_same_section():
+    claims = [
+        _claim(
+            claim_id="CLAIM-MODEL-1",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+            statement="方案一仅作方法分析。",
+        ),
+        _claim(
+            claim_id="CLAIM-MODEL-2",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+            statement="方案二仅作方法分析。",
+        ),
+    ]
+    artifact = _research_artifact(
+        [
+            {"claim_id": claim["claim_id"], "section_id": "SEC-EVIDENCE", "citation_marker": "模型知识·未核验"}
+            for claim in claims
+        ],
+        evidence_text=(
+            "模型知识·未核验：方案一仅作方法分析。"
+            "方案二仅作方法分析。模型知识时效未知。"
+        ),
+        references="无可核验外部来源。",
+    )
+
+    report = _semantic_report(artifact, claims, sources=[])
+
+    assert "model_knowledge_label_count_mismatch" in {
+        issue["code"] for issue in report["issues"]
+    }
+
+
+@pytest.mark.parametrize(
+    "forbidden_text",
+    [
+        "https://example.test/research",
+        "www.example.test/research",
+        "[^12]",
+        "[资料一]",
+        "【参考一】",
+        "（来源一）",
+        "[PUB-001]",
+    ],
+)
+def test_model_claim_section_blocks_long_distance_and_fake_source_markers(
+    forbidden_text,
+):
+    claims = [
+        _claim(
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+        )
+    ]
+    spacer = "仅作方法分析。" * 80
+    artifact = _research_artifact(
+        [{"claim_id": "CLAIM-001", "section_id": "SEC-EVIDENCE", "citation_marker": "模型知识·未核验"}],
+        evidence_text=(
+            f"模型知识·未核验：{spacer}{forbidden_text}"
+            "模型知识时效未知。"
+        ),
+        references="无可核验外部来源。",
+    )
+
+    report = _semantic_report(artifact, claims, sources=[])
+
+    assert "model_knowledge_citation_forbidden" in {
+        issue["code"] for issue in report["issues"]
+    }
+
+
+def test_mixed_public_and_model_claims_cannot_share_one_citation_section():
+    claims = [
+        _claim(claim_id="CLAIM-PUB", origin_tier="public_web"),
+        _claim(
+            claim_id="CLAIM-MODEL",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+        ),
+    ]
+    artifact = _research_artifact(
+        [
+            {"claim_id": "CLAIM-PUB", "section_id": "SEC-EVIDENCE", "citation_marker": "[PUB-001]"},
+            {"claim_id": "CLAIM-MODEL", "section_id": "SEC-EVIDENCE", "citation_marker": "模型知识·未核验"},
+        ],
+        evidence_text=(
+            "公开资料结论 [PUB-001]。"
+            + "边界说明。" * 80
+            + "模型知识·未核验：仅作方法分析。模型知识时效未知。"
+        ),
+        references="[PUB-001] 公开资料。",
+    )
+
+    report = _semantic_report(
+        artifact,
+        claims,
+        sources=[{"source_id": "PUB-001", "kind": "approved_public"}],
+    )
+
+    assert "model_knowledge_section_not_isolated" in {
+        issue["code"] for issue in report["issues"]
     }
 
 

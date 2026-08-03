@@ -202,6 +202,86 @@ def test_v2_forbidden_dynamic_input_category_is_rejected_at_every_stage(
     assert rejected.value.code == "research_stage_input_not_allowed"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("question", "断网了，请选择要使用哪个本地资料来源？"),
+        ("question", "The network failed; which source should be selected?"),
+        ("impact", "证据不足，需要用户确定引用格式和报告日期。"),
+        ("impact", "Evidence is insufficient and local knowledge selection is required."),
+        ("conservative_assumption", "假设当前标题、日期和引用格式已由用户确认。"),
+        ("conservative_assumption", "Assume today's citation format after a network failure."),
+    ],
+)
+def test_v2_dynamic_input_rejects_forbidden_semantics_in_all_server_owned_text_fields(
+    tmp_path, monkeypatch, field, value
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _at_stage(runtime, _research_run(expert_teams, tmp_path), "outline")
+    if field == "conservative_assumption":
+        run["research_dynamic_input_count"] = 2
+    _memory_storage(monkeypatch, runtime, run)
+    body = _control(
+        run,
+        f"semantic-reject-{field}",
+        input_id=f"semantic-{field}",
+        scope="conclusion",
+        blocking=True,
+        category="scope",
+        reason="core_conclusion_ambiguity",
+        question="核心结论的对象范围如何确定？",
+        impact="对象范围会改变核心结论。",
+        conservative_assumption="按单一部门试点口径作保守结论。",
+        options=["单一部门", "全公司"],
+    )
+    body[field] = value
+
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as rejected:
+        expert_teams.request_expert_team_stage_input(tmp_path, body)
+
+    assert rejected.value.code == "research_stage_input_not_allowed"
+
+
+@pytest.mark.parametrize("existing_kind", ["pending", "answered"])
+def test_v2_stage_input_id_is_globally_unique_at_request_time(
+    tmp_path, monkeypatch, existing_kind
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(expert_teams, tmp_path)
+    duplicate_id = "global-stage-input-id"
+    if existing_kind == "pending":
+        run["pending_input"] = {
+            "id": duplicate_id,
+            "stage_id": "direction",
+            "question": "历史待回答问题",
+        }
+    else:
+        run["stage_inputs"] = [
+            {
+                "input_id": duplicate_id,
+                "stage_id": "direction",
+                "question": "历史已回答问题",
+                "answer": "单一部门",
+            }
+        ]
+    _memory_storage(monkeypatch, runtime, run)
+
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as rejected:
+        _request(
+            expert_teams,
+            tmp_path,
+            run,
+            f"duplicate-{existing_kind}",
+            input_id=duplicate_id,
+        )
+
+    assert rejected.value.code == "stage_input_id_conflict"
+
+
 def test_v2_research_pending_input_persists_and_projects_conclusion_contract(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime

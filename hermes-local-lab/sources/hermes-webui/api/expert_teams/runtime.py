@@ -108,6 +108,16 @@ _STANDALONE_START_MAX_LENGTHS = {
     "idempotency_key": 240,
 }
 _STANDALONE_IDEMPOTENCY_PATTERN = re.compile(r"[A-Za-z0-9:._-]+")
+_RESEARCH_INPUT_FORBIDDEN_SEMANTICS = re.compile(
+    r"网络(?:失败|异常|不可用)|断网|离线"
+    r"|本地(?:资料|知识|来源)|(?:资料|来源)选择|选择(?:资料|来源)"
+    r"|证据(?:不足|缺失|缺口)|标题|日期|引用(?:格式|样式)"
+    r"|network\s+(?:failure|failed|unavailable)|offline"
+    r"|local\s+(?:material|knowledge|source)s?|source\s+selection|select(?:ing)?\s+(?:a\s+)?source"
+    r"|insufficient\s+evidence|evidence\s+(?:gap|missing)"
+    r"|\btitle\b|\bdate\b|citation\s+(?:format|style)",
+    re.I,
+)
 
 
 class ExpertTeamStateConflict(ValueError):
@@ -3868,10 +3878,34 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
     synced = _sync_derived(deepcopy(run))
     current = synced.get("current_stage") if isinstance(synced.get("current_stage"), dict) else {}
     research_v2 = _research_v2_run(synced)
+    requested_input_id = str(body.get("input_id") or "").strip()
+    existing_input_ids = {
+        str(item.get("input_id") or item.get("id") or "").strip()
+        for item in run.get("stage_inputs") or []
+        if isinstance(item, dict)
+    }
+    pending = run.get("pending_input")
+    if isinstance(pending, dict):
+        existing_input_ids.add(str(pending.get("id") or "").strip())
+    existing_input_ids.discard("")
+    if requested_input_id and requested_input_id in existing_input_ids:
+        raise ExpertTeamStateConflict(
+            "stage_input_id_conflict",
+            "stage input id was already used by this run",
+            run,
+        )
     if research_v2:
         category = str(body.get("category") or "").strip()
         reason = str(body.get("reason") or "").strip()
-        if category not in {"scope", "object", "caliber"} or reason != "core_conclusion_ambiguity":
+        semantic_text = "\n".join(
+            str(body.get(field) or "").strip()
+            for field in ("question", "impact", "conservative_assumption")
+        )
+        if (
+            category not in {"scope", "object", "caliber"}
+            or reason != "core_conclusion_ambiguity"
+            or _RESEARCH_INPUT_FORBIDDEN_SEMANTICS.search(semantic_text)
+        ):
             raise ExpertTeamStateConflict(
                 "research_stage_input_not_allowed",
                 "research v2 only permits blocking questions about the core conclusion boundary",
@@ -3909,8 +3943,12 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
                     "research_boundary_assumptions": assumptions,
                 },
             )
+    if not requested_input_id:
+        requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
+        while requested_input_id in existing_input_ids:
+            requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
     pending_input = {
-        "id": str(body.get("input_id") or ("stage-input-" + uuid.uuid4().hex[:8])),
+        "id": requested_input_id,
         "question": str(body.get("question") or "当前阶段需要你确认后继续生成。").strip(),
         "description": str(body.get("description") or "").strip(),
         "options": [str(option) for option in body.get("options") or []],
