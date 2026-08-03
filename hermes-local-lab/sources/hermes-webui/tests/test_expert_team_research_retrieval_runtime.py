@@ -77,7 +77,7 @@ class _Web:
 
         self.search_calls += 1
         self.queries.append(query)
-        assert query == "本地优先 AI 助理 部署成本"
+        assert query == "本地优先 AI 助理 如何落地"
         assert policy_decision.policy_id == "research-public-query/v1"
         hit = ResearchSourceHit.create(
             source_kind="approved_public",
@@ -497,9 +497,60 @@ def test_safe_public_topic_uses_deidentified_server_projection(tmp_path, monkeyp
         tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
     )
 
-    assert web.queries == ["本地优先 AI 助理 部署成本"]
-    assert "如何落地" not in web.queries[0]
+    assert web.queries == ["本地优先 AI 助理 如何落地"]
+    assert "部署成本" not in web.queries[0]
     assert "客户" not in web.queries[0]
+
+
+@pytest.mark.parametrize(
+    ("original_request", "expected_query"),
+    [
+        ("请研究中国人口老龄化与养老服务并形成报告", "中国人口老龄化 养老服务"),
+        ("帮我分析新能源汽车市场", "新能源汽车市场"),
+    ],
+)
+def test_public_query_projection_preserves_arbitrary_safe_topics(
+    tmp_path, original_request, expected_query
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+        subquestions=[original_request],
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == expected_query
+
+
+def test_public_query_projection_never_imports_direction_only_entities(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "请研究新能源汽车市场"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question="新能源汽车市场与光明研究院的发展方向",
+        subquestions=["光明研究院的采购路径"],
+    )
+
+    decision = authorize_research_public_query(
+        run,
+        "新能源汽车市场 光明研究院 采购路径",
+    )
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == "新能源汽车市场"
+    assert "光明研究院" not in decision["safe_query"]
+    assert "采购路径" not in decision["safe_query"]
 
 
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):

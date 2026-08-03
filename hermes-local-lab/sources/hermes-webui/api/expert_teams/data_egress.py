@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime
 
 
@@ -28,22 +29,33 @@ _RESEARCH_INTERNAL_TERMS = (
     "报价",
     "回款",
     "商业关系",
+    "内部关系",
 )
-_RESEARCH_PUBLIC_TOPIC_TERMS = (
-    "本地优先",
-    "AI 助理",
-    "人工智能",
-    "企业办公",
-    "部署成本",
-    "行业趋势",
-    "技术架构",
-    "数据安全",
-    "开源软件",
-    "大语言模型",
-    "生成式人工智能",
-    "知识管理",
-    "办公自动化",
+_RESEARCH_QUERY_NOISE = (
+    "请帮我",
+    "帮我",
+    "并形成报告",
+    "形成报告",
+    "撰写报告",
+    "生成报告",
+    "研究一下",
+    "分析一下",
+    "调研一下",
+    "请",
+    "研究",
+    "分析",
+    "调研",
 )
+
+
+def _project_public_research_query(original_request: str) -> str:
+    """Build a topic query only from the immutable user request."""
+    projected = unicodedata.normalize("NFKC", str(original_request or ""))
+    for noise in _RESEARCH_QUERY_NOISE:
+        projected = projected.replace(noise, " ")
+    projected = re.sub(r"(?<=\S)(?=如何)", " ", projected)
+    projected = re.sub(r"[与及、，,。.!！?？；;:：“”‘’()（）\[\]{}《》<>/\\|]+", " ", projected)
+    return " ".join(projected.split())
 
 
 def load_model_policy_registry() -> dict:
@@ -95,16 +107,13 @@ def authorize_research_public_query(run: dict, query: str) -> dict:
             or any(term in value for term in _RESEARCH_INTERNAL_TERMS)
         )
 
-    original_topics = tuple(term for term in _RESEARCH_PUBLIC_TOPIC_TERMS if term in original_request)
-    direction_topics = tuple(term for term in _RESEARCH_PUBLIC_TOPIC_TERMS if term in text)
     blocked = bool(
         classification in {"restricted", "custom", "private", "confidential"}
         or blocked_by_dlp(original_request)
         or blocked_by_dlp(text)
-        or not original_topics
-        or not direction_topics
-        or not set(original_topics).intersection(direction_topics)
     )
+    safe_query = _project_public_research_query(original_request)
+    blocked = blocked or not safe_query
     if blocked:
         return {
             "authorized": False,
@@ -113,7 +122,7 @@ def authorize_research_public_query(run: dict, query: str) -> dict:
         }
     return {
         "authorized": True,
-        "safe_query": " ".join(direction_topics),
+        "safe_query": safe_query,
         **RESEARCH_PUBLIC_QUERY_POLICY,
         "reason_code": "",
         "safe_reason": "",
