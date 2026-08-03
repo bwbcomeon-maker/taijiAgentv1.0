@@ -664,6 +664,58 @@ def test_public_query_instruction_cleanup_preserves_research_institute_name(tmp_
     assert decision["safe_query"] == "光明研究院公开成果"
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "研究光明研究院不公开采购价格与账期",
+        "Analyze Acme not public contract pricing",
+        "研究 acme 采购价格",
+        "Analyze GE contract pricing",
+    ],
+)
+def test_public_query_semantics_blocks_private_transaction_variants(tmp_path, sensitive):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    decision = authorize_research_public_query(run, sensitive)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    ("original_request", "expected_query"),
+    [
+        ("研究苹果公司营收趋势", "苹果公司营收趋势"),
+        ("Analyze Apple revenue trends", "Apple revenue trends"),
+    ],
+)
+def test_public_query_semantics_allows_public_financial_metrics(
+    tmp_path, original_request, expected_query
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == expected_query
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime

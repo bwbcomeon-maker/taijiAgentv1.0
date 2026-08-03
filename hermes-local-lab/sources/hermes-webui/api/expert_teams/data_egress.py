@@ -17,10 +17,11 @@ RESEARCH_PUBLIC_QUERY_POLICY = {
 _RESEARCH_HARD_INTERNAL_TERMS = (
     "项目代号",
 )
-_RESEARCH_CONFIDENTIAL_CN = ("机密", "秘密", "保密", "未公开", "非公开", "私有", "敏感")
+_RESEARCH_CONFIDENTIAL_CN = ("机密", "秘密", "保密", "不公开", "未公开", "非公开", "私有", "敏感")
 _RESEARCH_CONFIDENTIAL_EN = (
     "confidential",
     "private",
+    "not public",
     "non-public",
     "nonpublic",
     "unpublished",
@@ -39,7 +40,7 @@ _RESEARCH_RELATION_EN = (
     "counterparty",
     "business relationship",
 )
-_RESEARCH_COMMERCIAL_CN = (
+_RESEARCH_PRIVATE_TRANSACTION_CN = (
     "合同",
     "报价",
     "定价",
@@ -54,9 +55,8 @@ _RESEARCH_COMMERCIAL_CN = (
     "折扣",
     "应收",
     "应付",
-    "营收",
 )
-_RESEARCH_COMMERCIAL_EN = (
+_RESEARCH_PRIVATE_TRANSACTION_EN = (
     "contract",
     "pricing",
     "price",
@@ -72,7 +72,27 @@ _RESEARCH_COMMERCIAL_EN = (
     "quotation",
     "discount",
     "order",
+)
+_RESEARCH_PUBLIC_FINANCIAL_CN = (
+    "营收",
+    "收入",
+    "利润",
+    "净利润",
+    "毛利",
+    "市值",
+    "销量",
+    "市场份额",
+)
+_RESEARCH_PUBLIC_FINANCIAL_EN = (
     "revenue",
+    "income",
+    "profit",
+    "earnings",
+    "gross margin",
+    "market cap",
+    "market capitalization",
+    "sales volume",
+    "market share",
 )
 _RESEARCH_PUBLIC_CONTEXT_CN = ("公开", "年报", "官网", "官方", "上市", "公告", "财报")
 _RESEARCH_PUBLIC_CONTEXT_EN = (
@@ -92,17 +112,50 @@ def _contains_english_phrase(value: str, phrases: tuple[str, ...]) -> bool:
 
 def _research_semantic_classes(value: str) -> dict[str, bool]:
     normalized = unicodedata.normalize("NFKC", str(value or ""))
+    private_transaction = any(
+        term in normalized for term in _RESEARCH_PRIVATE_TRANSACTION_CN
+    ) or _contains_english_phrase(normalized, _RESEARCH_PRIVATE_TRANSACTION_EN)
     capitalized_tokens = [
         token
-        for token in re.findall(r"\b[A-Z][A-Za-z0-9&.-]{2,}\b", normalized)
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9&.-]{1,}\b", normalized)
         if token.casefold() not in {"analyze", "research", "study", "investigate", "please", "global"}
     ]
+    unknown_latin_before_transaction = False
+    if private_transaction:
+        transaction_terms = sorted(
+            (*_RESEARCH_PRIVATE_TRANSACTION_CN, *_RESEARCH_PRIVATE_TRANSACTION_EN),
+            key=len,
+            reverse=True,
+        )
+        transaction_pattern = "|".join(re.escape(term) for term in transaction_terms)
+        unknown_latin_before_transaction = any(
+            match.group(1).casefold()
+            not in {
+                "analyze",
+                "research",
+                "study",
+                "investigate",
+                "please",
+                "global",
+                "public",
+                "not",
+                "the",
+                "a",
+                "an",
+            }
+            for match in re.finditer(
+                rf"\b([A-Za-z][A-Za-z0-9&.-]{{1,}})\b\s+(?:{transaction_pattern})",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        )
     organization = bool(
         re.search(
             r"[一-鿿A-Za-z0-9·]{2,}(?:公司|集团|研究院|研究所|大学|医院|银行|基金会|协会|委员会|中心|机构|工厂|局)",
             normalized,
         )
         or bool(capitalized_tokens)
+        or unknown_latin_before_transaction
     )
     return {
         "confidential": any(term in normalized for term in _RESEARCH_CONFIDENTIAL_CN)
@@ -111,8 +164,11 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
         or _contains_english_phrase(normalized, _RESEARCH_INTERNAL_CONTEXT_EN),
         "private_relation": any(term in normalized for term in _RESEARCH_RELATION_CN)
         or _contains_english_phrase(normalized, _RESEARCH_RELATION_EN),
-        "commercial": any(term in normalized for term in _RESEARCH_COMMERCIAL_CN)
-        or _contains_english_phrase(normalized, _RESEARCH_COMMERCIAL_EN),
+        "private_transaction": private_transaction,
+        "public_financial_metric": any(
+            term in normalized for term in _RESEARCH_PUBLIC_FINANCIAL_CN
+        )
+        or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_FINANCIAL_EN),
         "organization": organization,
         "public_context": any(term in normalized for term in _RESEARCH_PUBLIC_CONTEXT_CN)
         or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_CONTEXT_EN),
@@ -124,16 +180,16 @@ def _blocked_by_research_semantics(value: str) -> bool:
     if classes["confidential"]:
         return True
     if classes["internal_context"] and (
-        classes["private_relation"] or classes["commercial"] or classes["organization"]
+        classes["private_relation"]
+        or classes["private_transaction"]
+        or classes["organization"]
     ):
         return True
-    if classes["private_relation"] and (classes["commercial"] or classes["organization"]):
+    if classes["private_relation"] and (
+        classes["private_transaction"] or classes["organization"]
+    ):
         return True
-    return bool(
-        classes["organization"]
-        and classes["commercial"]
-        and not classes["public_context"]
-    )
+    return bool(classes["organization"] and classes["private_transaction"])
 
 
 def _project_public_research_query(original_request: str) -> str:
