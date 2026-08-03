@@ -539,18 +539,129 @@ def test_public_query_projection_never_imports_direction_only_entities(tmp_path)
         tmp_path,
         original_request=original_request,
         core_question="新能源汽车市场与光明研究院的发展方向",
-        subquestions=["光明研究院的采购路径"],
+        subquestions=["光明研究院的发展路径"],
     )
 
     decision = authorize_research_public_query(
         run,
-        "新能源汽车市场 光明研究院 采购路径",
+        "新能源汽车市场 光明研究院 发展路径",
     )
 
     assert decision["authorized"] is True
     assert decision["safe_query"] == "新能源汽车市场"
     assert "光明研究院" not in decision["safe_query"]
-    assert "采购路径" not in decision["safe_query"]
+    assert "发展路径" not in decision["safe_query"]
+
+
+def test_public_query_semantics_blocks_english_confidential_customer_contract(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    sensitive = "Analyze confidential customer Acme contract pricing and renewal risk"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    decision = authorize_research_public_query(run, sensitive)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+def test_public_query_semantics_blocks_chinese_confidential_procurement_terms(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    sensitive = "研究光明研究院机密采购价格与账期"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    decision = authorize_research_public_query(run, sensitive)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+def test_public_query_semantics_blocks_sensitive_english_direction(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "Analyze global renewable energy market trends"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(
+        run,
+        "Analyze confidential customer Acme contract pricing",
+    )
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+def test_public_query_projection_allows_safe_english_public_topic(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "Analyze global renewable energy market trends"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == "global renewable energy market trends"
+
+
+def test_public_query_semantics_allows_explicit_public_annual_report(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "研究苹果公司公开年报营收趋势"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == "苹果公司公开年报营收趋势"
+
+
+def test_public_query_instruction_cleanup_preserves_research_institute_name(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "研究光明研究院公开成果"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == "光明研究院公开成果"
 
 
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):

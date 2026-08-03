@@ -14,45 +14,149 @@ RESEARCH_PUBLIC_QUERY_POLICY = {
     "trust_zone": "public_web",
     "projection_version": "research-public-topic/v1",
 }
-_RESEARCH_INTERNAL_TERMS = (
-    "我司",
-    "本公司",
-    "内部合同",
-    "客户报价",
-    "续约风险",
-    "未公开",
-    "保密",
-    "敏感",
+_RESEARCH_HARD_INTERNAL_TERMS = (
     "项目代号",
-    "客户",
+)
+_RESEARCH_CONFIDENTIAL_CN = ("机密", "秘密", "保密", "未公开", "非公开", "私有", "敏感")
+_RESEARCH_CONFIDENTIAL_EN = (
+    "confidential",
+    "private",
+    "non-public",
+    "nonpublic",
+    "unpublished",
+    "secret",
+    "sensitive",
+    "proprietary",
+)
+_RESEARCH_INTERNAL_CONTEXT_CN = ("内部", "我司", "本公司")
+_RESEARCH_INTERNAL_CONTEXT_EN = ("internal", "our company", "our firm")
+_RESEARCH_RELATION_CN = ("客户", "供应商", "合作方", "甲方", "乙方", "商业关系", "内部关系")
+_RESEARCH_RELATION_EN = (
+    "customer",
+    "client",
+    "supplier",
+    "vendor",
+    "counterparty",
+    "business relationship",
+)
+_RESEARCH_COMMERCIAL_CN = (
     "合同",
     "报价",
+    "定价",
+    "价格",
+    "采购",
+    "付款",
+    "支付",
     "回款",
-    "商业关系",
-    "内部关系",
+    "账期",
+    "续约",
+    "订单",
+    "折扣",
+    "应收",
+    "应付",
+    "营收",
 )
-_RESEARCH_QUERY_NOISE = (
-    "请帮我",
-    "帮我",
-    "并形成报告",
-    "形成报告",
-    "撰写报告",
-    "生成报告",
-    "研究一下",
-    "分析一下",
-    "调研一下",
-    "请",
-    "研究",
-    "分析",
-    "调研",
+_RESEARCH_COMMERCIAL_EN = (
+    "contract",
+    "pricing",
+    "price",
+    "procurement",
+    "purchase",
+    "payment",
+    "receivable",
+    "payable",
+    "renewal",
+    "account period",
+    "credit terms",
+    "quote",
+    "quotation",
+    "discount",
+    "order",
+    "revenue",
 )
+_RESEARCH_PUBLIC_CONTEXT_CN = ("公开", "年报", "官网", "官方", "上市", "公告", "财报")
+_RESEARCH_PUBLIC_CONTEXT_EN = (
+    "public",
+    "annual report",
+    "official",
+    "listed",
+    "filing",
+    "published",
+)
+
+
+def _contains_english_phrase(value: str, phrases: tuple[str, ...]) -> bool:
+    lowered = value.casefold()
+    return any(re.search(rf"(?<![a-z]){re.escape(phrase)}(?![a-z])", lowered) for phrase in phrases)
+
+
+def _research_semantic_classes(value: str) -> dict[str, bool]:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    capitalized_tokens = [
+        token
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9&.-]{2,}\b", normalized)
+        if token.casefold() not in {"analyze", "research", "study", "investigate", "please", "global"}
+    ]
+    organization = bool(
+        re.search(
+            r"[一-鿿A-Za-z0-9·]{2,}(?:公司|集团|研究院|研究所|大学|医院|银行|基金会|协会|委员会|中心|机构|工厂|局)",
+            normalized,
+        )
+        or bool(capitalized_tokens)
+    )
+    return {
+        "confidential": any(term in normalized for term in _RESEARCH_CONFIDENTIAL_CN)
+        or _contains_english_phrase(normalized, _RESEARCH_CONFIDENTIAL_EN),
+        "internal_context": any(term in normalized for term in _RESEARCH_INTERNAL_CONTEXT_CN)
+        or _contains_english_phrase(normalized, _RESEARCH_INTERNAL_CONTEXT_EN),
+        "private_relation": any(term in normalized for term in _RESEARCH_RELATION_CN)
+        or _contains_english_phrase(normalized, _RESEARCH_RELATION_EN),
+        "commercial": any(term in normalized for term in _RESEARCH_COMMERCIAL_CN)
+        or _contains_english_phrase(normalized, _RESEARCH_COMMERCIAL_EN),
+        "organization": organization,
+        "public_context": any(term in normalized for term in _RESEARCH_PUBLIC_CONTEXT_CN)
+        or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_CONTEXT_EN),
+    }
+
+
+def _blocked_by_research_semantics(value: str) -> bool:
+    classes = _research_semantic_classes(value)
+    if classes["confidential"]:
+        return True
+    if classes["internal_context"] and (
+        classes["private_relation"] or classes["commercial"] or classes["organization"]
+    ):
+        return True
+    if classes["private_relation"] and (classes["commercial"] or classes["organization"]):
+        return True
+    return bool(
+        classes["organization"]
+        and classes["commercial"]
+        and not classes["public_context"]
+    )
 
 
 def _project_public_research_query(original_request: str) -> str:
     """Build a topic query only from the immutable user request."""
     projected = unicodedata.normalize("NFKC", str(original_request or ""))
-    for noise in _RESEARCH_QUERY_NOISE:
-        projected = projected.replace(noise, " ")
+    projected = re.sub(
+        r"^\s*(?:(?:请(?:帮我)?|帮我)\s*)?(?:研究一下|分析一下|调研一下|研究|分析|调研)\s*",
+        "",
+        projected,
+    )
+    projected = re.sub(
+        r"^\s*(?:please\s+)?(?:help\s+me\s+)?(?:analyze|research|study|investigate)\b(?:\s+(?:the|a|an)\b)?\s*",
+        "",
+        projected,
+        flags=re.IGNORECASE,
+    )
+    projected = re.sub(r"\s*(?:并)?(?:形成|撰写|生成)(?:一份)?报告\s*$", "", projected)
+    projected = re.sub(
+        r"\s+(?:and\s+)?(?:write|create|generate|produce)\s+(?:a\s+)?report\s*$",
+        "",
+        projected,
+        flags=re.IGNORECASE,
+    )
     projected = re.sub(r"(?<=\S)(?=如何)", " ", projected)
     projected = re.sub(r"[与及、，,。.!！?？；;:：“”‘’()（）\[\]{}《》<>/\\|]+", " ", projected)
     return " ".join(projected.split())
@@ -104,13 +208,15 @@ def authorize_research_public_query(run: dict, query: str) -> dict:
             or re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", value, flags=re.IGNORECASE)
             or re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", value)
             or re.search(r"(?<!\d)\d{8,}(?!\d)", value)
-            or any(term in value for term in _RESEARCH_INTERNAL_TERMS)
+            or any(term in value for term in _RESEARCH_HARD_INTERNAL_TERMS)
         )
 
     blocked = bool(
         classification in {"restricted", "custom", "private", "confidential"}
         or blocked_by_dlp(original_request)
         or blocked_by_dlp(text)
+        or _blocked_by_research_semantics(original_request)
+        or _blocked_by_research_semantics(text)
     )
     safe_query = _project_public_research_query(original_request)
     blocked = blocked or not safe_query
