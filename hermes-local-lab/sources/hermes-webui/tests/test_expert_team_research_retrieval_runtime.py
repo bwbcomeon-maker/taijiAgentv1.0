@@ -1202,6 +1202,16 @@ def test_private_transaction_concepts_cover_common_financial_terms(tmp_path, sen
         "Acme contract pricing. Annual operations and report preparation",
         "Acme contract pricing; public access unavailable; benchmark pending",
         "Acme annual report excluded, report contract values",
+        "Acme annual report should never be used for contract values",
+        "Acme annual report does not apply to contract values",
+        "Acme retail is not relevant to contract pricing",
+        "苹果公司年报将不纳入研究范围的合同价格",
+        "苹果公司不适用年报中的合同价格",
+        "Acme contract pricing — annual operations and report preparation",
+        "Acme contract pricing (annual operations and report preparation)",
+        "Acme annual report excluded report contract values",
+        "Acme contract pricing governance trends",
+        "acme contract pricing governance trends",
     ],
 )
 def test_public_transaction_context_does_not_cross_negation_or_clause_boundaries(
@@ -1219,13 +1229,14 @@ def test_public_transaction_context_does_not_cross_negation_or_clause_boundaries
     assert authorize_research_public_query(run, sensitive)["authorized"] is False
 
 
-def test_public_contract_governance_and_pricing_trends_are_not_treated_as_private(
-    tmp_path,
+@pytest.mark.parametrize("topic", ["trends", "patterns", "evolution"])
+def test_public_contract_governance_and_pricing_topics_are_not_treated_as_private(
+    tmp_path, topic
 ):
     from api import expert_teams
     from api.expert_teams.data_egress import authorize_research_public_query
 
-    original_request = "Research contract governance and pricing trends"
+    original_request = f"Research contract governance and pricing {topic}"
     run = _research_run(
         expert_teams,
         tmp_path,
@@ -1234,7 +1245,7 @@ def test_public_contract_governance_and_pricing_trends_are_not_treated_as_privat
     )
     decision = authorize_research_public_query(run, original_request)
     assert decision["authorized"] is True
-    assert decision["safe_query"] == "contract governance and pricing trends"
+    assert decision["safe_query"] == f"contract governance and pricing {topic}"
 
 
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):

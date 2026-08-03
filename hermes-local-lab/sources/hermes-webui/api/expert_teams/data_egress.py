@@ -249,22 +249,32 @@ def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
         or _concepts_within(tokens, {"renewal"}, {"term", "terms", "risk"})
         or _concepts_within(tokens, {"account", "accounts"}, {"receivable", "payable"})
     )
-    generic_pricing_analysis = bool(
-        "contract" in tokens
-        and "pricing" in tokens
-        and "governance" in tokens
-        and any(token in tokens for token in {"trend", "trends"})
-        and not any(
-            token in tokens
-            for token in {"amount", "cost", "fee", "fees", "quote", "quotation", "value", "values"}
-        )
-    )
     chinese_private = bool(
         re.search(r"(?:合同|采购).{0,6}(?:报价|定价|价格|金额|账期)", chinese)
         or re.search(r"(?:报价|定价|价格|金额|账期).{0,6}(?:合同|采购)", chinese)
         or any(term in chinese for term in ("付款条款", "支付条款", "回款", "续约", "应收账款", "应付账款"))
     )
-    return (english_private and not generic_pricing_analysis) or chinese_private
+    return english_private or chinese_private
+
+
+def _generic_public_pricing_topic(tokens: list[str]) -> bool:
+    """Recognize an entity-free analytical topic, not an organization transaction."""
+    try:
+        contract_index = tokens.index("contract")
+    except ValueError:
+        return False
+    allowed_prefix = {"analyze", "global", "investigate", "please", "public", "research", "study"}
+    topic_terms = {"evolution", "outlook", "pattern", "patterns", "trend", "trends"}
+    return bool(
+        all(token in allowed_prefix for token in tokens[:contract_index])
+        and "governance" in tokens[contract_index:]
+        and "pricing" in tokens[contract_index:]
+        and any(token in topic_terms for token in tokens[contract_index:])
+        and not any(
+            token in tokens
+            for token in {"amount", "cost", "fee", "fees", "quote", "quotation", "value", "values"}
+        )
+    )
 
 
 def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool, bool]:
@@ -292,20 +302,22 @@ def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool
         ):
             left_positions = [index for index, token in enumerate(clause) if token == left]
             right_positions = [index for index, token in enumerate(clause) if token == right]
-            markers.extend(
-                (min(left_index, right_index), max(left_index, right_index))
-                for left_index in left_positions
-                for right_index in right_positions
-            )
+            for left_index in left_positions:
+                following = [index for index in right_positions if left_index <= index <= left_index + 6]
+                if following:
+                    markers.append((left_index, min(following)))
         for start, end in markers:
             prefix = clause[max(0, start - 5) : start]
-            postfix = clause[end + 1 : end + 7]
+            postfix = clause[end + 1 : end + 9]
             marker_negated = bool(
                 any(token in prefix_negators for token in prefix)
                 or any(token in postfix_negators for token in postfix)
                 or (
-                    "not" in postfix
-                    and any(token in postfix for token in {"applicable", "included", "used"})
+                    any(token in postfix for token in {"never", "not"})
+                    and any(
+                        token in postfix
+                        for token in {"applicable", "apply", "included", "relevant", "use", "used"}
+                    )
                 )
             )
             negated = negated or marker_negated
@@ -318,8 +330,8 @@ def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool
             prefix = clause[max(0, marker.start() - 12) : marker.start()]
             postfix = clause[marker.end() : marker.end() + 10]
             marker_negated = bool(
-                re.search(r"(?:不(?:是|属于|来自|应使用)?|非|排除)$", prefix)
-                or re.match(r"(?:除外|排除|不(?:纳入|采用|使用|适用|应使用))", postfix)
+                re.search(r"(?:不(?:是|属于|来自)?|不(?:应)?(?:使用|采用|适用)|非|排除)$", prefix)
+                or re.match(r"(?:(?:将)?不(?:纳入|采用|使用|适用|应使用)|除外|排除)", postfix)
             )
             negated = negated or marker_negated
             positive = positive or not marker_negated
@@ -336,7 +348,7 @@ def _transaction_segments(value: str) -> list[tuple[list[str], str]]:
     """
     normalized = unicodedata.normalize("NFKC", str(value or ""))
     raw_segments = re.split(
-        r"[,.!?;:\n，。！？；：]+|\b(?:but|however|yet)\b|(?:但是|但|然而)",
+        r"[,.!?;:\n，。！？；：()（）—–]+|\b(?:but|however|yet)\b|(?:但是|但|然而)",
         normalized,
         flags=re.IGNORECASE,
     )
@@ -354,7 +366,7 @@ def _has_uncovered_private_transaction(value: str) -> bool:
         if not _private_transaction_semantics(english, chinese):
             continue
         public, _negated = _public_transaction_semantics(english, chinese)
-        if not public:
+        if not public and not _generic_public_pricing_topic(english):
             return True
     return False
 
