@@ -21,7 +21,12 @@ TASK_CONFIGURATION_ERROR_MESSAGE = "当前任务配置异常，请重新发起�
 _MISSING = object()
 _LIFECYCLE_FIELDS = {"revision", "status", "confirmed_revision", "confirmed_at", "confirmed_sha256"}
 _TASK_MODES = {"create", "polish"}
-_SOURCE_MODES = {"provided_only", "approved_internal", "approved_public"}
+_SOURCE_MODES = {
+    "provided_only",
+    "approved_internal",
+    "approved_public",
+    "automatic_fallback",
+}
 _SOURCE_KINDS = {"attachment", "local_file", "provided_text", "approved_internal", "approved_public"}
 _CITATION_STYLES = {"none", "source_id", "footnote"}
 _UNKNOWN_FACT_ACTIONS = {"block_final", "allow_labeled_placeholder"}
@@ -334,7 +339,15 @@ def _value_at_path(mapping: dict, path: str):
     return current
 
 
-def validate_document_brief(brief, *, runtime_capabilities, source_registry, model_policy_registry, now="") -> dict:
+def validate_document_brief(
+    brief,
+    *,
+    runtime_capabilities,
+    source_registry,
+    model_policy_registry,
+    now="",
+    research_contract_version="",
+) -> dict:
     normalized = normalize_document_brief(brief)
     errors = []
     document_type = normalized.get("document_type")
@@ -377,8 +390,25 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
             )
         )
     source_policy = normalized.get("source_policy") or {}
+    automatic_fallback_authorized = bool(
+        research_contract_version == "research-report/v2"
+        and standalone
+        and document_type == "research_report"
+        and task_mode == "create"
+    )
     if source_policy.get("mode") not in _SOURCE_MODES:
         errors.append(_error("source_policy.mode", "invalid_enum", "资料模式无效"))
+    elif (
+        source_policy.get("mode") == "automatic_fallback"
+        and not automatic_fallback_authorized
+    ):
+        errors.append(
+            _error(
+                "source_policy.mode",
+                "automatic_fallback_not_authorized",
+                "自动补充资料模式仅适用于新版单机深度研究任务",
+            )
+        )
     if source_policy.get("citation_style") not in _CITATION_STYLES:
         errors.append(_error("source_policy.citation_style", "invalid_enum", "引用样式无效"))
     if source_policy.get("unknown_fact_action") not in _UNKNOWN_FACT_ACTIONS:
@@ -406,6 +436,11 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
                 continue
             path = _text(field.get("path"))
             if not path:
+                continue
+            if (
+                automatic_fallback_authorized
+                and path == "details.time_range.start"
+            ):
                 continue
             required_fields.append((path, _value_at_path(normalized, path)))
         errors.extend(_required(normalized, required_fields))
@@ -439,6 +474,8 @@ def validate_document_brief(brief, *, runtime_capabilities, source_registry, mod
     )
     capability_minimum = requirement.get("minimum_ready", 0)
     if not isinstance(capability_minimum, int) or isinstance(capability_minimum, bool):
+        capability_minimum = 0
+    if automatic_fallback_authorized:
         capability_minimum = 0
     minimum_ready = max(capability_minimum, 0 if standalone else 1)
     if (

@@ -92,6 +92,15 @@ def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool
     minimum_ready = requirement.get("minimum_ready") if isinstance(requirement, dict) else None
     source_policy = candidate.get("source_policy")
     profile_review = profile.get("review_policy")
+    research_v2 = bool(
+        profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("team_id") or "") == "deep-research-team"
+        and str(candidate.get("document_type") or "") == "research_report"
+        and isinstance(source_policy, dict)
+        and source_policy.get("mode") == "automatic_fallback"
+        and source_policy.get("unknown_fact_action") == "block_final"
+    )
     return bool(
         type(run.get("schema_version")) is int
         and run.get("schema_version") == 3
@@ -103,10 +112,16 @@ def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool
         and str(profile.get("document_type") or "") == str(candidate.get("document_type") or "")
         and isinstance(profile_review, dict)
         and profile_review.get("kind") == "local_confirmation"
-        and type(minimum_ready) is int
-        and minimum_ready == 0
-        and isinstance(source_policy, dict)
-        and source_policy.get("unknown_fact_action") == "allow_labeled_placeholder"
+        and (
+            research_v2
+            or (
+                type(minimum_ready) is int
+                and minimum_ready == 0
+                and isinstance(source_policy, dict)
+                and source_policy.get("unknown_fact_action")
+                == "allow_labeled_placeholder"
+            )
+        )
     )
 
 

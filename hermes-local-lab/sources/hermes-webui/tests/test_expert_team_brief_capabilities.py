@@ -628,7 +628,7 @@ def test_enterprise_contract_still_requires_classification_source_and_model_poli
     assert {"invalid_enum", "source_unresolved", "data_egress_not_authorized"} <= codes
 
 
-def test_standalone_view_projects_field_values_errors_and_source_requirement():
+def test_research_v2_view_hides_obsolete_brief_fields_and_zero_source_gate():
     from api import expert_teams
 
     run = expert_teams.build_standalone_expert_team_run(
@@ -642,15 +642,10 @@ def test_standalone_view_projects_field_values_errors_and_source_requirement():
     )
     view_brief = run["view"]["brief"]
 
-    assert view_brief["field_schema"][0]["path"] == "exact_title"
-    assert view_brief["field_schema"][0]["value"] == ""
-    assert any(
-        field["path"] == "details.core_question" and field["label"] == "核心研究问题"
-        for field in view_brief["field_schema"]
-    )
+    assert view_brief["field_schema"] == []
     assert view_brief["source_requirement"] == {
-        "minimum_ready": 1,
-        "empty_help": "研究报告必须至少添加一份可核对资料，并在正文中保留引用。",
+        "minimum_ready": 0,
+        "empty_help": "无需预先添加资料，服务端将在生成阶段按可用能力补充研究依据。",
     }
     assert view_brief["required_sections"] == [
         "研究问题",

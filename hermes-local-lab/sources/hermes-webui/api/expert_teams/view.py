@@ -1985,7 +1985,12 @@ def expert_team_run_view(run: dict) -> dict:
                 if isinstance(run.get("launch_profile_snapshot"), dict)
                 else {}
             )
-            schema = profile.get("brief_schema")
+            research_v2 = bool(
+                profile.get("research_contract_version") == "research-report/v2"
+                and str(run.get("launch_profile_id") or "") == "research-report"
+                and str(run.get("team_id") or "") == "deep-research-team"
+            )
+            schema = [] if research_v2 else profile.get("brief_schema")
             if not isinstance(schema, list):
                 schema = brief_schema(
                     str(full_brief.get("document_type") or ""),
@@ -2000,6 +2005,11 @@ def expert_team_run_view(run: dict) -> dict:
                 if isinstance(field, dict) and str(field.get("path") or "")
             ]
             requirement = profile.get("source_requirement")
+            if research_v2:
+                requirement = {
+                    "minimum_ready": 0,
+                    "empty_help": "无需预先添加资料，服务端将在生成阶段按可用能力补充研究依据。",
+                }
             brief["source_requirement"] = deepcopy(
                 requirement
                 if isinstance(requirement, dict)

@@ -98,6 +98,7 @@ _LAUNCH_PROFILES = {
     },
     "research-report": {
         "id": "research-report",
+        "research_contract_version": "research-report/v2",
         "capability_id": "research-report",
         "team_id": DEEP_RESEARCH_TEAM_ID,
         "document_type": "research_report",

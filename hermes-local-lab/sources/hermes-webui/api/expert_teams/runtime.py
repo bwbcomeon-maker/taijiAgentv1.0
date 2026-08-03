@@ -1668,6 +1668,7 @@ def _standalone_start_context(
     body: dict,
     *,
     launch_profile_snapshot: dict | None = None,
+    started_at: str,
 ) -> tuple[dict, dict]:
     validated = validate_standalone_start_request(body)
     profile = (
@@ -1684,6 +1685,39 @@ def _standalone_start_context(
             "launch_profile_id",
             "启动配置快照与任务类型不匹配",
         )
+    brief_seed = {
+        "task_mode": profile["task_mode"],
+        "document_control": {"render_template_id": profile["render_template_id"]},
+        "content_constraints": deepcopy(
+            profile.get("content_constraints") or {}
+        ),
+    }
+    if profile.get("research_contract_version") == "research-report/v2":
+        launch_date = str(started_at or "")[:10]
+        request_summary = " ".join(validated["prompt"].split()).translate(
+            str.maketrans({"「": "", "」": ""})
+        )
+        if len(request_summary) > 48:
+            request_summary = request_summary[:47].rstrip() + "…"
+        brief_seed.update(
+            {
+                "exact_title": f"关于「{request_summary}」的深度研究报告",
+                "purpose": "围绕原始诉求形成资料研究、分析与结论边界",
+                "audience": "任务发起者",
+                "usage_scenario": "专题研究与决策参考",
+                "source_policy": {
+                    "mode": "automatic_fallback",
+                    "as_of_date": launch_date,
+                    "citation_style": "source_id",
+                    "unknown_fact_action": "block_final",
+                    "source_refs": [],
+                },
+                "details": {
+                    "core_question": validated["prompt"],
+                    "time_range": {"start": "", "end": launch_date},
+                },
+            }
+        )
     resolved = {
         "session_id": validated["session_id"],
         "prompt": validated["prompt"],
@@ -1693,13 +1727,7 @@ def _standalone_start_context(
         "product_mode": "standalone",
         "intake_example_id": profile["intake_example_id"],
         "document_type": profile["document_type"],
-        "document_brief_seed": {
-            "task_mode": profile["task_mode"],
-            "document_control": {"render_template_id": profile["render_template_id"]},
-            "content_constraints": deepcopy(
-                profile.get("content_constraints") or {}
-            ),
-        },
+        "document_brief_seed": brief_seed,
     }
     return profile, resolved
 
@@ -1710,6 +1738,7 @@ def _build_expert_team_run(
     run_id: str | None = None,
     launch_profile_snapshot: dict | None = None,
 ) -> dict:
+    started_at = _now()
     standalone = "launch_profile_id" in body
     launch_profile = None
     resolved_body = body
@@ -1717,6 +1746,7 @@ def _build_expert_team_run(
         launch_profile, resolved_body = _standalone_start_context(
             body,
             launch_profile_snapshot=launch_profile_snapshot,
+            started_at=started_at,
         )
 
     contract_version = classify_contract_version(resolved_body)
@@ -1732,6 +1762,25 @@ def _build_expert_team_run(
     if contract_version == EXPERT_TEAM_CONTRACT_V1:
         prompt = str(resolved_body.get("prompt") or "")
         document_brief = build_document_brief(template["id"], resolved_body, now=_now())
+        research_contract_version = str(
+            (launch_profile or {}).get("research_contract_version") or ""
+        )
+        if research_contract_version == "research-report/v2":
+            validation = validate_document_brief(
+                document_brief,
+                runtime_capabilities={"approved_public_search": False},
+                source_registry={},
+                model_policy_registry={},
+                now=started_at,
+                research_contract_version=research_contract_version,
+            )
+            if not validation["valid_for_confirmation"]:
+                first = validation["field_errors"][0]
+                raise ContractError(first["code"], first["field"], first["message"])
+            document_brief = confirm_document_brief(
+                document_brief,
+                now=started_at,
+            )
     else:
         prompt = str(resolved_body.get("prompt") or resolved_body.get("message") or "").strip()
         document_brief = None
@@ -1753,11 +1802,23 @@ def _build_expert_team_run(
         "team_image": template.get("image") or "",
         "title": prompt[:120],
         "prompt": prompt,
-        "created_at": _now(),
-        "updated_at": _now(),
-        "workflow_state": "collecting_required",
+        "created_at": started_at,
+        "updated_at": started_at,
+        "workflow_state": (
+            "ready_to_generate"
+            if standalone
+            and (launch_profile or {}).get("research_contract_version")
+            == "research-report/v2"
+            else "collecting_required"
+        ),
         "current_stage_index": 0,
-        "questions": _questions(template, prompt),
+        "questions": (
+            []
+            if standalone
+            and (launch_profile or {}).get("research_contract_version")
+            == "research-report/v2"
+            else _questions(template, prompt)
+        ),
         "answers": [],
         "members": _members(template),
         "_tasks_template": task_template,
@@ -1832,6 +1893,21 @@ def verified_source_context_for_execution(workspace: Path, run: dict) -> dict:
     """Re-open and verify the confirmation-time snapshot immediately before dispatch."""
     if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
         raise ContractError("source_context_not_available", "contract_version", "历史任务没有企业资料快照")
+    if not isinstance(run.get("source_context_snapshot_ref"), dict):
+        brief = run.get("document_brief")
+        if allows_empty_source_context(run, brief=brief):
+            snapshot_ref = build_source_context_snapshot(
+                workspace,
+                str(run.get("run_id") or ""),
+                brief,
+                {},
+                brief_sha256=brief_digest(brief),
+                brief_revision=int(brief.get("confirmed_revision") or 0),
+                allow_empty=True,
+            )
+            candidate = deepcopy(run)
+            candidate["source_context_snapshot_ref"] = snapshot_ref
+            return verify_source_context_snapshot(workspace, candidate)
     return verify_source_context_snapshot(workspace, run)
 
 
@@ -2554,6 +2630,13 @@ def confirm_expert_team_document_brief(workspace: Path, body: dict) -> dict:
         source_registry=source_registry,
         model_policy_registry=load_model_policy_registry(),
         now=checked_at,
+        research_contract_version=str(
+            (run.get("launch_profile_snapshot") or {}).get(
+                "research_contract_version"
+            )
+            if isinstance(run.get("launch_profile_snapshot"), dict)
+            else ""
+        ),
     )
     if not validation["valid_for_confirmation"]:
         first = validation["field_errors"][0]
