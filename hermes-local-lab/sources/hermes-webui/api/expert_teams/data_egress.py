@@ -133,6 +133,17 @@ _RESEARCH_NEGATED_PUBLIC_TRANSACTION_EN = (
     "not official filing",
     "non-public market",
 )
+_RESEARCH_EN_CONNECTORS = {
+    "a",
+    "an",
+    "and",
+    "for",
+    "from",
+    "in",
+    "of",
+    "the",
+    "to",
+}
 _RESEARCH_LATIN_FUNCTION_WORDS = {
     "a",
     "an",
@@ -176,11 +187,92 @@ def _contains_english_phrase(value: str, phrases: tuple[str, ...]) -> bool:
     return any(re.search(rf"(?<![a-z]){re.escape(phrase)}(?![a-z])", lowered) for phrase in phrases)
 
 
-def _research_semantic_classes(value: str) -> dict[str, bool]:
+def _semantic_forms(value: str) -> tuple[str, list[str], str]:
+    """Normalize formatting before semantic policy checks.
+
+    The policy intentionally reasons over tokens rather than raw substrings so
+    punctuation, repeated whitespace and harmless connector words cannot alter
+    a private/public transaction decision.
+    """
     normalized = unicodedata.normalize("NFKC", str(value or ""))
-    private_transaction = any(
-        term in normalized for term in _RESEARCH_PRIVATE_TRANSACTION_CN
-    ) or _contains_english_phrase(normalized, _RESEARCH_PRIVATE_TRANSACTION_EN)
+    english_tokens = re.findall(r"[a-z0-9]+", normalized.casefold())
+    semantic_english = [
+        token for token in english_tokens if token not in _RESEARCH_EN_CONNECTORS
+    ]
+    chinese_compact = re.sub(r"[\s\W_]+", "", normalized, flags=re.UNICODE)
+    chinese_semantic = chinese_compact.replace("的", "")
+    return normalized, semantic_english, chinese_semantic
+
+
+def _has_token_sequence(tokens: list[str], *sequence: str) -> bool:
+    width = len(sequence)
+    return bool(
+        width
+        and any(tuple(tokens[index : index + width]) == sequence for index in range(len(tokens) - width + 1))
+    )
+
+
+def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
+    english_sequences = (
+        ("contract", "pricing"),
+        ("contract", "price"),
+        ("contract", "value"),
+        ("contract", "values"),
+        ("procurement", "pricing"),
+        ("procurement", "price"),
+        ("procurement", "cost"),
+        ("purchase", "price"),
+        ("payment", "terms"),
+        ("renewal", "terms"),
+        ("renewal", "risk"),
+        ("account", "period"),
+        ("credit", "terms"),
+        ("accounts", "receivable"),
+        ("accounts", "payable"),
+    )
+    return any(_has_token_sequence(tokens, *sequence) for sequence in english_sequences) or any(
+        term in chinese for term in _RESEARCH_PRIVATE_TRANSACTION_CN
+    )
+
+
+def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool, bool]:
+    english_markers = bool(
+        _has_token_sequence(tokens, "public", "market")
+        or "retail" in tokens
+        or _has_token_sequence(tokens, "annual", "report")
+        or _has_token_sequence(tokens, "official", "filing")
+        or _has_token_sequence(tokens, "official", "disclosure")
+    )
+    chinese_markers = any(
+        term in chinese
+        for term in (
+            "公开市场",
+            "零售",
+            "公开年报",
+            "年报",
+            "年度报告",
+            "官方公告",
+            "官方披露",
+        )
+    )
+    english_negated = bool(
+        {"not", "non", "no"}.intersection(tokens) and english_markers
+    )
+    chinese_negated = bool(
+        re.search(
+            r"(?:不(?:是|属于|来自)?|非).{0,8}(?:公开市场|零售|年报|年度报告|官方公告|官方披露)",
+            chinese,
+        )
+    )
+    negated = english_negated or chinese_negated
+    return (english_markers or chinese_markers) and not negated, negated
+
+
+def _research_semantic_classes(value: str) -> dict[str, bool]:
+    normalized, semantic_english, chinese_semantic = _semantic_forms(value)
+    private_transaction = _private_transaction_semantics(
+        semantic_english, chinese_semantic
+    )
     capitalized_tokens = [
         token
         for token in re.findall(r"\b[A-Z][A-Za-z0-9&.-]{1,}\b", normalized)
@@ -203,13 +295,8 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
         or bool(capitalized_tokens)
         or unknown_latin_entity
     )
-    public_transaction_context = bool(
-        (
-            any(term in normalized for term in _RESEARCH_PUBLIC_TRANSACTION_CN)
-            or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_TRANSACTION_EN)
-        )
-        and not any(term in normalized for term in _RESEARCH_NEGATED_PUBLIC_TRANSACTION_CN)
-        and not _contains_english_phrase(normalized, _RESEARCH_NEGATED_PUBLIC_TRANSACTION_EN)
+    public_transaction_context, negated_public_transaction_context = (
+        _public_transaction_semantics(semantic_english, chinese_semantic)
     )
     return {
         "confidential": any(term in normalized for term in _RESEARCH_CONFIDENTIAL_CN)
@@ -227,12 +314,15 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
         "public_context": any(term in normalized for term in _RESEARCH_PUBLIC_CONTEXT_CN)
         or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_CONTEXT_EN),
         "public_transaction_context": public_transaction_context,
+        "negated_public_transaction_context": negated_public_transaction_context,
     }
 
 
 def _blocked_by_research_semantics(value: str) -> bool:
     classes = _research_semantic_classes(value)
     if classes["confidential"]:
+        return True
+    if classes["negated_public_transaction_context"] and classes["private_transaction"]:
         return True
     if classes["internal_context"] and (
         classes["private_relation"]

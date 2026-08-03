@@ -937,6 +937,92 @@ def test_plain_public_price_trends_are_not_private_transactions(
     assert decision["safe_query"] == expected_query
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "acme contract-pricing",
+        "acme contract  pricing",
+        "acme contract and pricing",
+        "acme采购的价格",
+        "acme 采购 价格",
+        "acme 合同的报价",
+    ],
+)
+def test_private_transaction_tokens_ignore_formatting_and_connectors(
+    tmp_path, sensitive
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    assert authorize_research_public_query(run, sensitive)["authorized"] is False
+
+    safe = "Analyze global renewable energy market trends"
+    (tmp_path / "direction").mkdir()
+    direction_run = _research_run(
+        expert_teams,
+        tmp_path / "direction",
+        original_request=safe,
+        core_question=safe,
+    )
+    assert authorize_research_public_query(direction_run, sensitive)["authorized"] is False
+
+
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "Acme not a retail contract pricing",
+        "Acme non retail contract pricing",
+        "Acme not from an annual report contract values",
+        "苹果公司不是年报中的合同价格",
+        "苹果公司非官方披露合同价格",
+    ],
+)
+def test_negated_public_context_is_tokenized_before_authorization(tmp_path, sensitive):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    assert authorize_research_public_query(run, sensitive)["authorized"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_request", "expected_query"),
+    [
+        ("Analyze Apple annual-report contract values", "Apple annual-report contract values"),
+        ("研究苹果公司年度报告合同金额", "苹果公司年度报告合同金额"),
+    ],
+)
+def test_normalized_public_transaction_context_remains_authorized(
+    tmp_path, original_request, expected_query
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == expected_query
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
