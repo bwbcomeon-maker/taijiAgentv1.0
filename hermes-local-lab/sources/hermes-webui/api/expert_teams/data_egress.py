@@ -196,7 +196,9 @@ def _semantic_forms(value: str) -> tuple[str, list[str], str]:
     a private/public transaction decision.
     """
     normalized = unicodedata.normalize("NFKC", str(value or ""))
-    lowered = re.sub(r"\b(?:is|are|was|were|do|does|did|has|have|had)n['’]?t\b", "not", normalized.casefold())
+    lowered = normalized.casefold()
+    lowered = re.sub(r"\bcannot\s+be\s+treated\s+as\b", "not", lowered)
+    lowered = re.sub(r"\b(?:is|are|was|were|do|does|did|has|have|had)n['’]?t\b", "not", lowered)
     english_tokens = re.findall(r"[a-z0-9]+", lowered)
     semantic_english = [
         token for token in english_tokens if token not in _RESEARCH_EN_CONNECTORS
@@ -225,7 +227,18 @@ def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
         _concepts_within(
             tokens,
             {"contract"},
-            {"pricing", "price", "value", "values", "quote", "quotation", "amount"},
+            {
+                "pricing",
+                "price",
+                "value",
+                "values",
+                "quote",
+                "quotation",
+                "amount",
+                "cost",
+                "fee",
+                "fees",
+            },
         )
         or _concepts_within(
             tokens,
@@ -234,7 +247,7 @@ def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
         )
         or _concepts_within(tokens, {"payment", "credit"}, {"term", "terms", "period"})
         or _concepts_within(tokens, {"renewal"}, {"term", "terms", "risk"})
-        or _concepts_within(tokens, {"accounts"}, {"receivable", "payable"})
+        or _concepts_within(tokens, {"account", "accounts"}, {"receivable", "payable"})
     )
     chinese_private = bool(
         re.search(r"(?:合同|采购).{0,6}(?:报价|定价|价格|金额|账期)", chinese)
@@ -245,49 +258,58 @@ def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
 
 
 def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool, bool]:
-    marker_positions = []
-    marker_positions.extend(index for index, token in enumerate(tokens) if token == "retail")
-    for left, right in (
-        ("public", "market"),
-        ("annual", "report"),
-        ("official", "filing"),
-        ("official", "disclosure"),
-        ("public", "benchmark"),
-        ("public", "benchmarks"),
-    ):
-        for left_index, token in enumerate(tokens):
-            if token != left:
-                continue
-            for right_index in range(left_index, min(len(tokens), left_index + 5)):
-                if tokens[right_index] == right:
-                    marker_positions.append(left_index)
-                    break
-    english_markers = bool(marker_positions)
-    chinese_markers = any(
-        term in chinese
-        for term in (
-            "公开市场",
-            "零售",
-            "公开年报",
-            "年报",
-            "年度报告",
-            "官方公告",
-            "官方披露",
-        )
-    )
-    negators = {"not", "non", "no", "without", "excluding", "exclude"}
-    english_negated = any(
-        any(token in negators for token in tokens[max(0, marker - 4) : marker])
-        for marker in marker_positions
-    )
-    chinese_negated = bool(
-        re.search(
-            r"(?:不(?:是|属于|来自)?|非|排除).{0,8}(?:公开市场|零售|年报|年度报告|官方公告|官方披露)",
-            chinese,
-        )
-    )
-    negated = english_negated or chinese_negated
-    return (english_markers or chinese_markers) and not negated, negated
+    clauses: list[list[str]] = [[]]
+    for token in tokens:
+        if token in {"but", "however", "yet"}:
+            clauses.append([])
+        else:
+            clauses[-1].append(token)
+
+    positive = False
+    negated = False
+    prefix_negators = {"not", "non", "no", "without", "excluding", "exclude", "never"}
+    postfix_negators = {"excluded", "excluding"}
+    for clause in clauses:
+        markers: list[tuple[int, int]] = []
+        markers.extend((index, index) for index, token in enumerate(clause) if token == "retail")
+        for left, right in (
+            ("public", "market"),
+            ("annual", "report"),
+            ("official", "filing"),
+            ("official", "disclosure"),
+            ("public", "benchmark"),
+            ("public", "benchmarks"),
+        ):
+            left_positions = [index for index, token in enumerate(clause) if token == left]
+            right_positions = [index for index, token in enumerate(clause) if token == right]
+            markers.extend(
+                (min(left_index, right_index), max(left_index, right_index))
+                for left_index in left_positions
+                for right_index in right_positions
+            )
+        for start, end in markers:
+            prefix = clause[max(0, start - 5) : start]
+            postfix = clause[end + 1 : end + 3]
+            marker_negated = bool(
+                any(token in prefix_negators for token in prefix)
+                or any(token in postfix_negators for token in postfix)
+            )
+            negated = negated or marker_negated
+            positive = positive or not marker_negated
+
+    chinese_clauses = [item for item in re.split(r"(?:但是|但|然而|而)", chinese) if item]
+    chinese_marker_pattern = r"(?:公开市场|零售|公开年报|年报|年度报告|官方公告|官方披露)"
+    for clause in chinese_clauses:
+        for marker in re.finditer(chinese_marker_pattern, clause):
+            prefix = clause[max(0, marker.start() - 8) : marker.start()]
+            postfix = clause[marker.end() : marker.end() + 5]
+            marker_negated = bool(
+                re.search(r"(?:不(?:是|属于|来自)?|非|排除)$", prefix)
+                or re.match(r"(?:除外|排除)", postfix)
+            )
+            negated = negated or marker_negated
+            positive = positive or not marker_negated
+    return positive, negated
 
 
 def _research_semantic_classes(value: str) -> dict[str, bool]:
@@ -343,8 +365,6 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
 def _blocked_by_research_semantics(value: str) -> bool:
     classes = _research_semantic_classes(value)
     if classes["confidential"]:
-        return True
-    if classes["negated_public_transaction_context"] and classes["private_transaction"]:
         return True
     if classes["internal_context"] and (
         classes["private_relation"]

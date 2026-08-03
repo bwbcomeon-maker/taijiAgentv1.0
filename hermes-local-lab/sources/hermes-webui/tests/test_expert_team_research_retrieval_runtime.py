@@ -1113,6 +1113,84 @@ def test_public_context_uses_local_concept_windows(
     assert decision["safe_query"] == expected_query
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "Acme retail excluded contract pricing",
+        "Acme annual report excluded contract values",
+        "Acme never retail contract pricing",
+        "Acme cannot be treated as retail contract pricing",
+        "苹果公司年报除外的合同价格",
+    ],
+)
+def test_public_markers_support_postfix_and_natural_negation(tmp_path, sensitive):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+    assert authorize_research_public_query(run, sensitive)["authorized"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_request", "expected_query"),
+    [
+        (
+            "Analyze Apple retail contract pricing but not annual report",
+            "Apple retail contract pricing but not annual report",
+        ),
+        (
+            "Analyze Not revenue but Apple annual report contract values",
+            "Not revenue but Apple annual report contract values",
+        ),
+        (
+            "Analyze Apple annual consolidated audited financial performance report contract values",
+            "Apple annual consolidated audited financial performance report contract values",
+        ),
+    ],
+)
+def test_each_public_marker_has_independent_clause_scope(
+    tmp_path, original_request, expected_query
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+    decision = authorize_research_public_query(run, original_request)
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == expected_query
+
+
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "acme contract total cost",
+        "acme contract fee",
+        "acme account receivable",
+    ],
+)
+def test_private_transaction_concepts_cover_common_financial_terms(tmp_path, sensitive):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+    assert authorize_research_public_query(run, sensitive)["authorized"] is False
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
