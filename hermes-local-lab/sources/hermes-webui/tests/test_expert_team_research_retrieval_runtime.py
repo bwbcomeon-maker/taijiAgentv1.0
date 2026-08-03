@@ -1212,6 +1212,20 @@ def test_private_transaction_concepts_cover_common_financial_terms(tmp_path, sen
         "Acme annual report excluded report contract values",
         "Acme contract pricing governance trends",
         "acme contract pricing governance trends",
+        "Research contract governance and pricing trends for Acme",
+        "Research contract governance and pricing trends for acme",
+        "Acme annual report is unavailable for contract values",
+        "Acme annual report is out of scope for contract values",
+        "Acme annual report must be disregarded for contract values",
+        "Acme annual report cannot be relied on for contract values",
+        "Acme annual report should not be considered for contract values",
+        "Acme retail data is irrelevant to contract pricing",
+        "研究甲公司年报并非适用资料的合同价格",
+        "研究甲公司年报不在范围内的合同价格",
+        "研究甲公司年报不能作为依据的合同价格",
+        "研究甲公司年报应予排除的合同价格",
+        "Research Acme contract pricing [annual operations and report preparation]",
+        "Research Acme contract pricing / annual operations and report preparation",
     ],
 )
 def test_public_transaction_context_does_not_cross_negation_or_clause_boundaries(
@@ -1229,7 +1243,10 @@ def test_public_transaction_context_does_not_cross_negation_or_clause_boundaries
     assert authorize_research_public_query(run, sensitive)["authorized"] is False
 
 
-@pytest.mark.parametrize("topic", ["trends", "patterns", "evolution"])
+@pytest.mark.parametrize(
+    "topic",
+    ["trends", "patterns", "evolution", "trajectories", "dynamics"],
+)
 def test_public_contract_governance_and_pricing_topics_are_not_treated_as_private(
     tmp_path, topic
 ):
@@ -1246,6 +1263,28 @@ def test_public_contract_governance_and_pricing_topics_are_not_treated_as_privat
     decision = authorize_research_public_query(run, original_request)
     assert decision["authorized"] is True
     assert decision["safe_query"] == f"contract governance and pricing {topic}"
+
+
+@pytest.mark.parametrize(
+    "original_request",
+    [
+        "Research enterprise contract governance and pricing trends",
+        "研究合同治理与定价趋势",
+    ],
+)
+def test_entity_free_generic_contract_pricing_topics_are_public(
+    tmp_path, original_request
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+    assert authorize_research_public_query(run, original_request)["authorized"] is True
 
 
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
