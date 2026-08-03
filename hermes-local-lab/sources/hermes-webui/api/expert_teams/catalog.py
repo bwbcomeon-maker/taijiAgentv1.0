@@ -111,15 +111,9 @@ _CATALOG = {
             },
             {
                 "id": "boundary",
-                "title": "有哪些已知素材、口径要求、篇幅或表述边界？",
+                "title": "有哪些口径要求、篇幅或表述边界？",
                 "placeholder": "例如：包含已完成工作、存在问题、下一步安排，语气正式",
                 "required": True,
-            },
-            {
-                "id": "optional_context",
-                "title": "还有没有可选补充材料或特别强调的点？",
-                "placeholder": "可以补充数据、领导要求、禁用表述；没有可直接跳过",
-                "required": False,
             },
         ],
         "members": [
@@ -184,8 +178,7 @@ _CATALOG = {
         "questions": [
             {"id": "research_topic", "title": "本次要研究的主题或核心问题是什么？", "required": True},
             {"id": "audience_goal", "title": "材料面向谁，最终要支撑什么决策或汇报？", "required": True},
-            {"id": "source_boundary", "title": "资料范围、案例偏好或需要避开的边界是什么？", "required": True},
-            {"id": "optional_context", "title": "还有没有可选补充资料？", "required": False},
+            {"id": "source_boundary", "title": "研究范围、案例偏好或需要避开的边界是什么？", "required": True},
         ],
         "members": [
             {

@@ -241,8 +241,6 @@
     const fieldErrors=arr(brief.field_errors||(brief.validation||{}).field_errors).map(error=>({
       field:str(error&&error.field),code:str(error&&error.code),message:str(error&&error.message)
     })).filter(error=>error.field&&error.message);
-    const sourceRequirement=brief.source_requirement&&typeof brief.source_requirement==='object'
-      ? brief.source_requirement:{};
     return {
       status:str(brief.status,'draft'),
       revision:Number(brief.revision||0),
@@ -260,15 +258,7 @@
       sourcePolicySummary:brief.source_policy_summary&&typeof brief.source_policy_summary==='object'?brief.source_policy_summary:{},
       fieldSchema,
       fieldErrors,
-      sourceRequirement:{
-        minimumReady:Number(sourceRequirement.minimum_ready||0),
-        emptyHelp:str(sourceRequirement.empty_help)
-      },
       requiredSections:arr(brief.required_sections).map(section=>str(section)).filter(Boolean),
-      sources:arr(brief.sources).map(source=>({
-        source_id:str(source&&source.source_id),kind:str(source&&source.kind),label:str(source&&source.label),
-        status:str(source&&source.status),size_bytes:Number(source&&source.size_bytes||0),sha256:str(source&&source.sha256)
-      })),
       editable:brief.editable===true,
       editPolicy:str(brief.edit_policy),
       validation:brief.validation||{},

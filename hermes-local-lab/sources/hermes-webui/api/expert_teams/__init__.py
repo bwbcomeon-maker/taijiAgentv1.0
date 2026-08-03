@@ -55,8 +55,6 @@ from .runtime import (
     validate_standalone_start_request,
     submit_expert_team_stage_input,
     update_expert_team_document_brief,
-    add_expert_team_brief_source,
-    remove_expert_team_brief_source,
     verified_source_context_for_execution,
     confirm_expert_team_document_brief,
 )
@@ -123,8 +121,6 @@ __all__ = [
     "validate_standalone_launch_request",
     "submit_expert_team_stage_input",
     "update_expert_team_document_brief",
-    "add_expert_team_brief_source",
-    "remove_expert_team_brief_source",
     "verified_source_context_for_execution",
     "confirm_expert_team_document_brief",
 ]

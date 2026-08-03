@@ -124,6 +124,7 @@ async function main() {
       HERMES_WEBUI_PYTHON: pythonBin,
       TAIJI_AGENT_PYTHON: pythonBin,
       TAIJI_WEBUI_PYTHON: pythonBin,
+      TAIJI_AGENT_SYNC_PACKAGED_CONFIG: '0',
       TAIJI_AGENT_USE_USER_DIRS: '1', TAIJI_LICENSE_REQUIRED: '0', TAIJI_LICENSE_MACHINE_BINDING_REQUIRED: '0',
       TAIJI_EXPERT_TEAM_CONTRACT_V1_ROLLOUT: 'pilot',
       TAIJI_WORKSPACE: workspace,
@@ -144,7 +145,20 @@ async function main() {
       }
     });
     await page.waitForLoadState('domcontentloaded', { timeout: 90000 });
-    await page.waitForFunction(() => window.ExpertTeamV3 && typeof S !== 'undefined' && S._bootReady && typeof switchPanel === 'function', null, { timeout: 90000 });
+    try {
+      await page.waitForFunction(() => window.ExpertTeamV3 && typeof S !== 'undefined' && S._bootReady && typeof switchPanel === 'function', null, { timeout: 90000 });
+    } catch (error) {
+      const bootEvidence = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        body: String(document.body?.innerText || '').slice(0, 2000),
+        hasExpertTeamV3: Boolean(window.ExpertTeamV3),
+        hasState: typeof S !== 'undefined',
+        bootReady: typeof S !== 'undefined' ? Boolean(S._bootReady) : false,
+        hasSwitchPanel: typeof switchPanel === 'function',
+      })).catch(evaluateError => ({ evaluateError: evaluateError.message }));
+      throw new Error(`Electron boot did not reach the WebUI contract: ${error.message}\n${JSON.stringify(bootEvidence, null, 2)}`);
+    }
     const runtimeExpertScript = await page.evaluate(async () => {
       const source = document.querySelector('script[src*="expert-team-v3.js"]')?.src;
       return source ? fetch(source).then(response => response.text()) : '';
@@ -228,27 +242,36 @@ async function main() {
     await page.getByRole('button', { name: '发起专家团任务' }).click();
     await page.waitForSelector('#expertTeamV3Workbench [data-et3-brief-form]', { timeout: 20000 });
     await page.waitForFunction(() => document.querySelector('[data-et3-action="summon"]')?.getAttribute('aria-busy') === 'false');
+    const sourceUiCount = await page.locator('#expertTeamV3Workbench').locator('text=资料与依据').count()
+      + await page.locator('#expertTeamV3Workbench [data-et3-source-file], #expertTeamV3Workbench [data-et3-source-text], #expertTeamV3Workbench [data-et3-action="add-text-source"], #expertTeamV3Workbench [data-et3-action="choose-source-file"], #expertTeamV3Workbench [data-et3-action="remove-source"]').count();
+    assert(sourceUiCount === 0, '真实工作汇报 Brief 仍暴露资料与依据入口', { sourceUiCount });
     const workRequiredSections = await page.locator('#expertTeamV3Workbench .et3-required-sections li').allTextContents();
     assert(JSON.stringify(workRequiredSections) === JSON.stringify(['工作开展情况', '存在问题', '下一步工作安排']), '真实工作汇报 Brief 未展示服务端必备章节', { workRequiredSections });
     assert(await page.locator('#expertTeamV3Workbench .et3-required-sections input, #expertTeamV3Workbench .et3-required-sections textarea, #expertTeamV3Workbench .et3-required-sections select').count() === 0, '必备章节被错误渲染为客户端可编辑字段');
     await page.screenshot({ path: path.join(outDir, '03-real-brief-intake.png'), fullPage: false });
+    await page.setViewportSize({ width: 760, height: 800 });
+    const narrowIntakeLayout = await page.locator('#expertTeamV3Workbench').evaluate(root => ({
+      rootWidth: Math.round(root.getBoundingClientRect().width),
+      scrollWidth: root.scrollWidth,
+      clientWidth: root.clientWidth,
+    }));
+    assert(narrowIntakeLayout.rootWidth === 760 && narrowIntakeLayout.scrollWidth <= narrowIntakeLayout.clientWidth + 1, '760px 需求确认页没有保持单一工作区或发生横向溢出', narrowIntakeLayout);
+    assert(await page.locator('#expertTeamV3Workbench').locator('text=资料与依据').count() === 0, '760px 需求确认页仍显示资料与依据面板');
+    await page.screenshot({ path: path.join(outDir, '03-real-brief-intake-760.png'), fullPage: false });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.locator('[data-et3-brief-form] input[name="exact_title"]').fill('部门月度工作汇报（Electron 合同验证）');
     await page.locator('[data-et3-brief-form] label.et3-form-field textarea[name="purpose"]').fill('用于内部工作会议汇报');
     await page.locator('[data-et3-brief-form] input[name="audience"]').fill('公司分管领导');
     await page.locator('[data-et3-brief-form] input[name="usage_scenario"]').fill('月度工作例会');
     await page.locator('[data-et3-brief-form] input[name="details.reporting_period"]').fill('2026年7月');
     await page.locator('[data-et3-brief-form] input[name="details.reporting_unit"]').fill('生产运营部');
-    await page.locator('[data-et3-source-label]').fill('Electron 验证资料');
-    await page.locator('[data-et3-source-text]').fill('六月重点工作按计划推进，本行仅用于隔离测试。');
-    await page.getByRole('button', { name: '添加文字资料' }).click();
-    await page.waitForFunction(() => document.body.innerText.includes('Electron 验证资料'));
     await page.getByRole('button', { name: '保存规格' }).click();
     await page.waitForFunction(() => document.body.innerText.includes('规格已保存'));
     const intakeAnswers = await page.locator('[data-et3-brief-form] textarea[name^="question__"][required]').all();
     for (let index = 0; index < intakeAnswers.length; index += 1) {
       await intakeAnswers[index].fill(`Electron 验证答案 ${index + 1}`);
     }
-    assert(await page.locator('[data-et3-brief-form] textarea[name^="question__"]:not([required])').count() > 0, '真实任务没有覆盖可选问题留空场景');
+    assert(await page.locator('[data-et3-brief-form] textarea[name^="question__"]:not([required])').count() === 0, '真实任务仍暴露已删除的可选补充资料问题');
     await page.getByRole('button', { name: '保存回答' }).click();
     await page.getByRole('button', { name: '确认规格并继续' }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: '确认规格并继续' }).click();
@@ -271,7 +294,7 @@ async function main() {
       const run = payload.run || payload;
       return { runId: run.run_id, state: run.workflow_state, title: run.document_brief?.exact_title, sourceCount: (run.document_brief?.source_policy?.source_refs || []).length, requiredSections: run.document_brief?.content_constraints?.required_sections || [], profileRequiredSections: run.launch_profile_snapshot?.content_constraints?.required_sections || [] };
     });
-    assert(realBrief.title.includes('Electron') && realBrief.sourceCount === 1 && realBrief.state === 'ready_to_generate', '真实 Brief HTTP 保存、资料绑定或确认未生效', realBrief);
+    assert(realBrief.title.includes('Electron') && realBrief.sourceCount === 0 && realBrief.state === 'ready_to_generate', '真实 Brief HTTP 保存或确认未生效，或仍产生用户资料绑定', realBrief);
     assert(JSON.stringify(realBrief.requiredSections) === JSON.stringify(workRequiredSections) && JSON.stringify(realBrief.profileRequiredSections) === JSON.stringify(workRequiredSections), 'Launch Profile 到 Brief 的必备章节链路不一致', realBrief);
     await page.screenshot({ path: path.join(outDir, '03-real-brief.png'), fullPage: false });
     await page.screenshot({ path: path.join(outDir, '04-real-ready-required-sections.png'), fullPage: false });
@@ -297,6 +320,8 @@ async function main() {
     await page.waitForSelector('#expertTeamV3Workbench [data-et3-brief-form]', { timeout: 20000 });
     const researchRequiredSections = await page.locator('#expertTeamV3Workbench .et3-required-sections li').allTextContents();
     assert(JSON.stringify(researchRequiredSections) === JSON.stringify(['研究问题', '证据', '分析', '结论边界', '引用']), '真实研究报告 Brief 未展示完整必备章节', { researchRequiredSections });
+    assert(await page.locator('#expertTeamV3Workbench').locator('text=资料与依据').count() === 0, '真实研究报告 Brief 仍显示资料与依据面板');
+    assert(await page.locator('#expertTeamV3Workbench [data-et3-source-file], #expertTeamV3Workbench [data-et3-source-text], #expertTeamV3Workbench [data-et3-action="add-text-source"], #expertTeamV3Workbench [data-et3-action="choose-source-file"], #expertTeamV3Workbench [data-et3-action="remove-source"]').count() === 0, '真实研究报告 Brief 仍暴露资料控件');
     await page.screenshot({ path: path.join(outDir, '06-real-research-required-sections.png'), fullPage: false });
 
     await page.evaluate(({ source }) => {
@@ -597,13 +622,13 @@ async function main() {
       pythonBin: fs.realpathSync(pythonBin),
       runtimeRoot: runtime,
       sourceSha256: Object.fromEntries(sourceFiles.map(file => [file, sha256(path.join(webuiDir, file))])),
-      realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/sources/add', '/api/expert-teams/brief/update', '/api/expert-teams/answer', '/api/expert-teams/brief/confirm', '/api/expert-teams/run'],
+      realHttp: ['/api/session/new (fixture setup only)', '/api/expert-teams/catalog', '/api/expert-teams/launch', '/api/expert-teams/brief/update', '/api/expert-teams/answer', '/api/expert-teams/brief/confirm', '/api/expert-teams/run'],
       mocked: ['/api/expert-teams/stage/revise', '/api/expert-teams/stage/confirm', '/api/expert-teams/stage/input', '/api/expert-teams/delivery/open', '/api/expert-teams/delivery/revise', '/api/expert-teams/delivery/confirm', '/api/expert-teams/delivery/recover'],
     };
     const forbiddenRequests = await page.evaluate(() => window.__et3Forbidden || []);
     const recoveryCaptured = await page.evaluate(() => window.__et3RecoveryCaptured || []);
     const recoveryConflictCaptured = await page.evaluate(() => window.__et3RecoveryConflictCaptured || []);
-    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, workRequiredSections, readyRequiredSections, readyLayout, compactRequiredLayout, researchSessionId: researchSession.session_id, researchRequiredSections, captured, stageInputCaptured, deliveryCaptured, recoveryCaptured, recoveryConflictCaptured, forbiddenRequests, isolated }, null, 2));
+    fs.writeFileSync(path.join(outDir, 'result.json'), JSON.stringify({ evidence, portal, realBrief, workRequiredSections, narrowIntakeLayout, readyRequiredSections, readyLayout, compactRequiredLayout, researchSessionId: researchSession.session_id, researchRequiredSections, captured, stageInputCaptured, deliveryCaptured, recoveryCaptured, recoveryConflictCaptured, forbiddenRequests, isolated }, null, 2));
   } finally {
     await app.close();
   }
