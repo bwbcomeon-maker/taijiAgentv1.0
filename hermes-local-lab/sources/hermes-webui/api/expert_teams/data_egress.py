@@ -41,37 +41,38 @@ _RESEARCH_RELATION_EN = (
     "business relationship",
 )
 _RESEARCH_PRIVATE_TRANSACTION_CN = (
-    "合同",
-    "报价",
-    "定价",
-    "价格",
-    "采购",
-    "付款",
-    "支付",
+    "合同报价",
+    "合同定价",
+    "合同价格",
+    "合同金额",
+    "采购报价",
+    "采购定价",
+    "采购价格",
+    "采购金额",
+    "付款条款",
+    "支付条款",
     "回款",
     "账期",
     "续约",
-    "订单",
-    "折扣",
-    "应收",
-    "应付",
+    "应收账款",
+    "应付账款",
 )
 _RESEARCH_PRIVATE_TRANSACTION_EN = (
-    "contract",
-    "pricing",
-    "price",
-    "procurement",
-    "purchase",
-    "payment",
-    "receivable",
-    "payable",
-    "renewal",
+    "contract pricing",
+    "contract price",
+    "contract value",
+    "contract values",
+    "procurement pricing",
+    "procurement price",
+    "procurement cost",
+    "purchase price",
+    "payment terms",
+    "renewal terms",
+    "renewal risk",
     "account period",
     "credit terms",
-    "quote",
-    "quotation",
-    "discount",
-    "order",
+    "accounts receivable",
+    "accounts payable",
 )
 _RESEARCH_PUBLIC_FINANCIAL_CN = (
     "营收",
@@ -117,6 +118,20 @@ _RESEARCH_PUBLIC_TRANSACTION_EN = (
     "annual report",
     "official filing",
     "official disclosure",
+)
+_RESEARCH_NEGATED_PUBLIC_TRANSACTION_CN = (
+    "非年报",
+    "不属于年报",
+    "非公开市场",
+    "非零售",
+)
+_RESEARCH_NEGATED_PUBLIC_TRANSACTION_EN = (
+    "not retail",
+    "non-retail",
+    "not annual report",
+    "non-annual report",
+    "not official filing",
+    "non-public market",
 )
 _RESEARCH_LATIN_FUNCTION_WORDS = {
     "a",
@@ -188,6 +203,14 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
         or bool(capitalized_tokens)
         or unknown_latin_entity
     )
+    public_transaction_context = bool(
+        (
+            any(term in normalized for term in _RESEARCH_PUBLIC_TRANSACTION_CN)
+            or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_TRANSACTION_EN)
+        )
+        and not any(term in normalized for term in _RESEARCH_NEGATED_PUBLIC_TRANSACTION_CN)
+        and not _contains_english_phrase(normalized, _RESEARCH_NEGATED_PUBLIC_TRANSACTION_EN)
+    )
     return {
         "confidential": any(term in normalized for term in _RESEARCH_CONFIDENTIAL_CN)
         or _contains_english_phrase(normalized, _RESEARCH_CONFIDENTIAL_EN),
@@ -203,10 +226,7 @@ def _research_semantic_classes(value: str) -> dict[str, bool]:
         "organization": organization,
         "public_context": any(term in normalized for term in _RESEARCH_PUBLIC_CONTEXT_CN)
         or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_CONTEXT_EN),
-        "public_transaction_context": any(
-            term in normalized for term in _RESEARCH_PUBLIC_TRANSACTION_CN
-        )
-        or _contains_english_phrase(normalized, _RESEARCH_PUBLIC_TRANSACTION_EN),
+        "public_transaction_context": public_transaction_context,
     }
 
 
@@ -225,8 +245,7 @@ def _blocked_by_research_semantics(value: str) -> bool:
     ):
         return True
     return bool(
-        classes["organization"]
-        and classes["private_transaction"]
+        classes["private_transaction"]
         and not classes["public_transaction_context"]
     )
 

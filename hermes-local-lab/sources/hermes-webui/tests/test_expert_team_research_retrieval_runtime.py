@@ -799,6 +799,144 @@ def test_explicit_public_market_retail_and_annual_report_contexts_are_allowed(
     assert decision["safe_query"] == expected_query
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "analyze acme contract pricing",
+        "contract pricing and renewal terms for acme",
+        "ge contract pricing",
+    ],
+)
+def test_exact_private_transaction_phrases_block_lowercase_english_original(
+    tmp_path, sensitive
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    decision = authorize_research_public_query(run, sensitive)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    "sensitive_direction",
+    [
+        "analyze acme contract pricing",
+        "contract pricing and renewal terms for acme",
+        "ge contract pricing",
+    ],
+)
+def test_exact_private_transaction_phrases_block_lowercase_english_direction(
+    tmp_path, sensitive_direction
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "Analyze global renewable energy market trends"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, sensitive_direction)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "Acme not retail contract pricing",
+        "Acme non-retail contract pricing",
+        "苹果公司非年报合同价格",
+        "Apple non-annual report contract values",
+    ],
+)
+def test_negated_public_transaction_context_never_allows_private_transaction(
+    tmp_path, sensitive
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+
+    decision = authorize_research_public_query(run, sensitive)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    "sensitive_direction",
+    [
+        "Acme not retail contract pricing",
+        "Acme non-retail contract pricing",
+        "苹果公司非年报合同价格",
+        "Apple non-annual report contract values",
+    ],
+)
+def test_negated_public_transaction_context_is_blocked_in_direction(
+    tmp_path, sensitive_direction
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "Analyze global renewable energy market trends"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, sensitive_direction)
+
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    ("original_request", "expected_query"),
+    [
+        ("Analyze EV price trends", "EV price trends"),
+        ("研究 EV 价格趋势", "EV 价格趋势"),
+    ],
+)
+def test_plain_public_price_trends_are_not_private_transactions(
+    tmp_path, original_request, expected_query
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+
+    decision = authorize_research_public_query(run, original_request)
+
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == expected_query
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
