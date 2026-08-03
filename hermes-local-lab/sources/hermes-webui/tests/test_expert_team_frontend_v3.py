@@ -106,47 +106,23 @@ def test_v3_owns_one_scoped_namespace_and_uses_delegated_events():
     assert "writeflowStatusDock" not in script
 
 
-def test_v3_source_removal_uses_accessible_fail_closed_confirmation():
-    result = _run_v3_hooks(
-        """
-        (async()=>{
-          const calls=[];
-          context.window.showConfirmDialog=async options=>{calls.push(options);return true;};
-          const confirmed=await hooks.requestV3Confirmation({
-            title:'移除这份资料？',confirmLabel:'移除资料',cancelLabel:'保留资料',danger:true,
-          });
-          delete context.window.showConfirmDialog;
-          const unavailable=await hooks.requestV3Confirmation({title:'unavailable'});
-          context.window.showConfirmDialog=async()=>{throw new Error('dialog failed');};
-          const failed=await hooks.requestV3Confirmation({title:'failed'});
-          console.log(JSON.stringify({confirmed,unavailable,failed,calls}));
-        })();
-        """
-    )
-
-    assert result == {
-        "confirmed": True,
-        "unavailable": False,
-        "failed": False,
-        "calls": [
-            {
-                "title": "移除这份资料？",
-                "confirmLabel": "移除资料",
-                "cancelLabel": "保留资料",
-                "danger": True,
-                "focusCancel": True,
-            }
-        ],
-    }
-
+def test_v3_has_no_source_panel_controls_or_source_event_handlers():
     script = _read(SCRIPT)
-    remove_source = script[
-        script.index("if (action === 'remove-source')") : script.index("if (action === 'save-brief')")
-    ]
-    assert "await requestV3Confirmation" in remove_source
-    assert "window.confirm" not in remove_source
-    assert "cancelLabel: '保留资料'" in remove_source
-    assert "danger: true" in remove_source
+
+    for marker in (
+        "资料与依据",
+        "添加文字资料",
+        "添加本地文件",
+        "data-et3-source-file",
+        "data-et3-source-text",
+        "choose-source-file",
+        "add-text-source",
+        "remove-source",
+        "handleWorkbenchChange",
+        "addTextSource",
+        "addLocalFile",
+    ):
+        assert marker not in script
 
 
 def test_v3_free_form_document_intent_suggests_a_confirmable_task_without_hijacking_questions():
@@ -507,19 +483,17 @@ def test_v3_uses_server_product_error_instead_of_frontend_business_mapping():
     assert "mutationErrorMessage(error" in mutate_body
 
 
-def test_v3_brief_exposes_source_binding_and_explicit_start_gate():
+def test_v3_brief_keeps_explicit_start_gate_without_source_binding_ui():
     script = _read(SCRIPT)
 
+    for marker in ("确认规格", "开始生成"):
+        assert marker in script
     for marker in (
-        "资料与依据",
-        "添加文字资料",
-        "添加本地文件",
         "/api/expert-teams/brief/sources/add",
         "/api/expert-teams/brief/sources/remove",
-        "确认规格",
-        "开始生成",
+        "份已绑定",
     ):
-        assert marker in script
+        assert marker not in script
     assert "{ expected_brief_revision: Number(state.card.brief?.revision || 0), patch }" in script
     assert "{ expected_brief_revision: Number(state.card.brief?.revision || 0) }" in script
 
@@ -532,31 +506,6 @@ def test_v3_intake_actions_use_truthful_two_step_labels_and_observable_success_f
     assert "保存并继续" not in script
     assert "回答已保存，请确认规格。" in script
     assert "data-et3-brief-form" in script
-
-
-def test_v3_text_source_fields_clear_only_after_the_server_accepts_the_source():
-    script = _read(SCRIPT)
-    start = script.index("async function addTextSource")
-    end = script.index("async function addLocalFile", start)
-    function_body = script[start:end]
-
-    assert "const saved = await mutate(" in function_body
-    assert "if (!saved) return false" in function_body
-    assert "const clearedTextField = workbenchRoot().querySelector('[data-et3-source-text]')" in function_body
-    assert "const clearedLabelField = workbenchRoot().querySelector('[data-et3-source-label]')" in function_body
-    assert "clearedTextField.value = ''" in function_body
-    assert "clearedLabelField.value = ''" in function_body
-    assert "clearedLabelField?.focus()" in function_body
-    assert function_body.index("if (!saved) return false") < function_body.index("clearedTextField.value = ''")
-
-
-def test_v3_source_mutation_matches_backend_contract_and_presenter_keeps_safe_projection():
-    script = _read(SCRIPT)
-    presenter = _read(ROOT / "static" / "expert-team-presenter.js")
-
-    assert "expected_brief_revision" in script
-    assert "source: { kind: 'provided_text', label, text }" in script
-    assert "sources:arr(brief.sources)" in presenter
 
 
 def test_v3_exposes_every_public_state_as_a_user_actionable_screen():
@@ -595,7 +544,6 @@ def test_v3_dialog_and_workbench_have_keyboard_and_live_feedback_contracts():
     assert "state.dialogReturnFocus?.isConnected" in script
     assert 'data-team-id="${CSS.escape(state.selectedTeam.id)}"' in script
     assert "trapDialogFocus" in script
-    assert 'data-et3-action="choose-source-file"' in script
     assert 'data-et3-revision' in script
     assert 'class="et3-visually-hidden"' in script
 
@@ -645,7 +593,6 @@ def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
                     {path:'details.core_question',label:'核心研究问题',control:'textarea',required:true,placeholder:'填写研究问题',help:'限定研究主线',value:'如何落地'},
                   ],
                   field_errors:[{field:'details.core_question',code:'required',message:'请填写核心研究问题'}],
-                  source_requirement:{minimum_ready:1,empty_help:'必须添加一份可核对资料'},sources:[],
                 },
                 workflow:{stages:[],current_stage:{},progress:{done:0,total:6,is_intake:true}},
                 workspace:{},presentation:{},intake:{questions:[]}},
@@ -654,7 +601,6 @@ def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
             console.log(JSON.stringify({
               fields:card.brief.fieldSchema,
               errors:card.brief.fieldErrors,
-              requirement:card.brief.sourceRequirement,
               requiredSections:card.brief.requiredSections,
             }));
             """
@@ -677,10 +623,6 @@ def test_presenter_keeps_profile_brief_schema_nested_values_and_field_errors():
             "message": "请填写核心研究问题",
         }
     ]
-    assert result["requirement"] == {
-        "minimumReady": 1,
-        "emptyHelp": "必须添加一份可核对资料",
-    }
     assert result["requiredSections"] == ["研究问题", "证据", "分析", "结论边界", "引用"]
 
 
@@ -688,14 +630,13 @@ def test_v3_profile_fields_render_chinese_help_and_associated_inline_errors():
     result = _run_v3_hooks(
         """
         const card={productMode:'standalone',allowedActions:['answer'],questions:[],brief:{
-          originalRequest:'形成专题研究报告',documentTypeLabel:'研究报告',sources:[],
+          originalRequest:'形成专题研究报告',documentTypeLabel:'研究报告',
           requiredSections:['研究问题','证据','分析','结论边界','引用'],
           fieldSchema:[
             {path:'exact_title',label:'文档标题',control:'text',required:true,placeholder:'填写标题',help:'使用准确标题',value:''},
             {path:'details.core_question',label:'核心研究问题',control:'textarea',required:true,placeholder:'填写研究问题',help:'限定研究主线',value:''},
           ],
           fieldErrors:[{field:'details.core_question',code:'required',message:'请填写核心研究问题'}],
-          sourceRequirement:{minimumReady:1,emptyHelp:'研究报告必须至少添加一份可核对资料，并在正文中保留引用。'},
         }};
         console.log(JSON.stringify({html:hooks.briefPanel(card)}));
         """
@@ -707,16 +648,16 @@ def test_v3_profile_fields_render_chinese_help_and_associated_inline_errors():
     assert 'name="details.core_question"' in html
     assert 'aria-invalid="true"' in html
     assert "请填写核心研究问题" in html
-    assert "研究报告必须至少添加一份可核对资料" in html
-    assert "data-et3-source-error" in html
+    assert "资料与依据" not in html
+    assert "data-et3-source-error" not in html
 
 
 def test_v3_required_sections_are_visible_during_intake_and_before_generation():
     result = _run_v3_hooks(
         """
         const card={productMode:'standalone',allowedActions:['answer','start_generation'],questions:[],subtitle:'专题研究报告',brief:{
-          originalRequest:'形成专题研究报告',documentTypeLabel:'研究报告',audience:'项目决策小组',sources:[],
-          requiredSections:['研究问题','证据','分析','结论边界','引用'],fieldSchema:[],fieldErrors:[],sourceRequirement:{},
+          originalRequest:'形成专题研究报告',documentTypeLabel:'研究报告',audience:'项目决策小组',
+          requiredSections:['研究问题','证据','分析','结论边界','引用'],fieldSchema:[],fieldErrors:[],
         }};
         console.log(JSON.stringify({intake:hooks.briefPanel(card),ready:hooks.statePanel(card,'ready')}));
         """
@@ -765,7 +706,7 @@ def test_v3_brief_patch_uses_schema_whitelist_and_writes_nested_fields():
 def test_v3_custom_confirmation_validates_before_request_and_links_server_field_errors():
     script = _read(SCRIPT)
     save_start = script.index("async function saveBrief(button, confirmAfter)")
-    save_end = script.index("async function addTextSource", save_start)
+    save_end = script.index("function appendRevision", save_start)
     save_source = script[save_start:save_end]
     submit_start = script.index("async function submitAnswers(button)")
     submit_end = script.index("function saveBriefFields", submit_start)
@@ -783,34 +724,6 @@ def test_v3_custom_confirmation_validates_before_request_and_links_server_field_
     assert "showBriefFieldErrors" in script
     assert "error.payload.field" in script
     assert "aria-describedby" in script
-
-
-def test_v3_source_requirement_error_focuses_and_scrolls_to_actionable_source_input():
-    result = _run_v3_hooks(
-        """
-        let focused=false;let scrolled=false;
-        const sourceSlot={dataset:{},textContent:'',hidden:true};
-        const sourceField={focus(){focused=true;},scrollIntoView(options){scrolled=options&&options.block==='center';}};
-        const form={querySelectorAll(selector){return [];}};
-        const root={querySelector(selector){
-          if(selector==='[data-et3-brief-form]')return form;
-          if(selector==='[data-et3-source-error]')return sourceSlot;
-          if(selector==='[data-et3-source-text]')return sourceField;
-          return null;
-        }};
-        context.document.getElementById=()=>root;
-        const accepted=hooks.showBriefFieldErrors([{field:'source_policy.source_refs',code:'source_required',message:'请先添加需要润色的原始材料。'}]);
-        console.log(JSON.stringify({accepted,focused,scrolled,message:sourceSlot.textContent,hidden:sourceSlot.hidden}));
-        """
-    )
-
-    assert result == {
-        "accepted": False,
-        "focused": True,
-        "scrolled": True,
-        "message": "请先添加需要润色的原始材料。",
-        "hidden": False,
-    }
 
 
 def test_v3_save_and_continue_skips_blank_optional_intake_questions():

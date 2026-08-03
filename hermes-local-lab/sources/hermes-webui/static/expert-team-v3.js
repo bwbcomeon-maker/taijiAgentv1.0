@@ -960,11 +960,7 @@
 
   function briefPanel(card) {
     const brief = card.brief || {};
-    const sources = list(brief.sources);
     const fields = briefFieldSchema(brief);
-    const sourceRequirement = brief.sourceRequirement || {};
-    const sourceErrors = list(brief.fieldErrors).filter(error => String(error?.field || '').startsWith('source_policy.source_refs'));
-    const sourceErrorMessage = sourceErrors.map(error => error.message).filter(Boolean).join('；');
     const questions = list(card.questions).filter(question => !['answered', 'skipped'].includes(question.status));
     const canAnswer = actionAllowed(card, 'answer');
     const disabled = canAnswer ? '' : 'disabled aria-disabled="true" aria-describedby="expertTeamV3IntakeActionHelp"';
@@ -976,13 +972,6 @@
         ${fields.map(field => briefFieldHtml(field, brief)).join('')}
       </form>
     </section>
-    <section class="et3-panel"><h3>资料与依据</h3><p>支持 UTF-8 纯文本、TXT、Markdown、CSV、JSON，单份不超过 10MB。</p>
-      <ul class="et3-source-list">${sources.map(source => `<li class="et3-source"><span><strong>${esc(source.label || '资料')}</strong><small>${esc(source.kind || '')} · ${esc(source.status || '已绑定')}</small></span><button type="button" class="et3-button" data-et3-action="remove-source" data-source-id="${esc(source.source_id || source.sourceId)}" aria-label="移除资料：${esc(source.label || '未命名资料')}" ${disabled}>移除</button></li>`).join('') || `<li class="et3-help">${esc(sourceRequirement.emptyHelp || '尚未添加资料。')}</li>`}</ul>
-      <p id="expertTeamV3SourceError" class="et3-field-error" data-et3-source-error${sourceErrorMessage ? '' : ' hidden'}>${esc(sourceErrorMessage)}</p>
-      <label class="et3-form-field"><span>添加文字资料</span><textarea data-et3-source-text aria-describedby="expertTeamV3SourceHelp expertTeamV3SourceError" placeholder="粘贴需要引用的事实、数据或背景"></textarea></label>
-      <label class="et3-form-field"><span>资料名称</span><input data-et3-source-label placeholder="例如：6月工作台账"></label>
-      <div class="et3-inline-actions"><button type="button" class="et3-button" data-et3-action="add-text-source" ${disabled}>添加文字资料</button><button type="button" class="et3-button" data-et3-action="choose-source-file" aria-describedby="expertTeamV3SourceHelp${canAnswer ? '' : ' expertTeamV3IntakeActionHelp'}" ${canAnswer ? '' : 'disabled aria-disabled="true"'}>添加本地文件</button><input id="expertTeamV3SourceFile" class="et3-visually-hidden" type="file" data-et3-source-file accept=".txt,.md,.markdown,.csv,.json,text/plain,text/markdown,text/csv,application/json" ${canAnswer ? '' : 'disabled'}><span id="expertTeamV3SourceHelp" class="et3-visually-hidden">支持 UTF-8 文本，单份不超过 10MB</span></div>
-    </section>
     ${canAnswer ? '' : '<p id="expertTeamV3IntakeActionHelp" class="et3-help">任务规格已被其他操作更新，请刷新状态后继续。</p>'}
     <div class="et3-primary-actions"><button type="button" class="et3-button" data-et3-action="save-brief" ${disabled}>保存规格</button><button type="button" class="et3-button et3-button--primary" data-et3-action="${questions.length ? 'submit-answers' : 'confirm-brief'}" ${disabled}>${questions.length ? '保存回答' : '确认规格并继续'}</button></div>`;
   }
@@ -990,7 +979,7 @@
   function readyPanel(card) {
     const brief = card.brief || {};
     const canStart = actionAllowed(card, 'start_generation');
-    return `<section class="et3-panel"><h3>生成前确认</h3><dl class="et3-kv"><dt>标题</dt><dd>${esc(brief.exactTitle || card.subtitle)}</dd><dt>对象</dt><dd>${esc(brief.audience || '以已确认规格为准')}</dd><dt>资料</dt><dd>${list(brief.sources).length} 份已绑定</dd></dl>${requiredSectionsHtml(brief)}<p>开始后规格将冻结。每个阶段完成后都需要人工确认，不会自动越过复核。</p></section>${canStart ? '<div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="start-generation">开始生成</button></div>' : '<p class="et3-help">当前状态尚不允许开始生成，请刷新后重试。</p>'}`;
+    return `<section class="et3-panel"><h3>生成前确认</h3><dl class="et3-kv"><dt>标题</dt><dd>${esc(brief.exactTitle || card.subtitle)}</dd><dt>对象</dt><dd>${esc(brief.audience || '以已确认规格为准')}</dd></dl>${requiredSectionsHtml(brief)}<p>开始后规格将冻结。每个阶段完成后都需要人工确认，不会自动越过复核。</p></section>${canStart ? '<div class="et3-primary-actions"><button type="button" class="et3-button et3-button--primary" data-et3-action="start-generation">开始生成</button></div>' : '<p class="et3-help">当前状态尚不允许开始生成，请刷新后重试。</p>'}`;
   }
 
   function generatingPanel(card, current) {
@@ -1224,7 +1213,6 @@
     state.workbenchController = new AbortController();
     const signal = state.workbenchController.signal;
     root.addEventListener('click', event => handleWorkbenchClick(event), { signal });
-    root.addEventListener('change', event => handleWorkbenchChange(event), { signal });
     root.addEventListener('compositionstart', event => {
       if (!event.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
       state.compositionActive = true;
@@ -1294,7 +1282,6 @@
       return true;
     }
     const requiredAction = {
-      'add-text-source': 'answer', 'choose-source-file': 'answer', 'remove-source': 'answer',
       'save-brief': 'answer', 'confirm-brief': 'answer', 'submit-answers': 'answer',
       'start-generation': 'start_generation', 'submit-stage-input': 'submit_stage_input',
       'retry-run': 'resume', 'cancel-run': 'cancel', 'retry-cancel': 'retry_cancel',
@@ -1329,19 +1316,6 @@
     if (action === 'submit-delivery-revision') return submitDeliveryRevision(button);
     if (action === 'delivery-confirm') return confirmDelivery(button);
     if (action === 'delivery-recover') return recoverDelivery(button);
-    if (action === 'choose-source-file') { workbenchRoot().querySelector('[data-et3-source-file]')?.click(); return true; }
-    if (action === 'add-text-source') return addTextSource(button);
-    if (action === 'remove-source') {
-      const confirmed = await requestV3Confirmation({
-        title: '移除这份资料？',
-        message: '移除后，该资料不再用于本任务，已保存的历史记录不受影响。',
-        confirmLabel: '移除资料',
-        cancelLabel: '保留资料',
-        danger: true,
-      });
-      if (!confirmed) return false;
-      return mutate('/api/expert-teams/brief/sources/remove', { expected_brief_revision: Number(state.card.brief?.revision || 0), source_id: button.dataset.sourceId }, button);
-    }
     if (action === 'save-brief') return saveBrief(button, false);
     if (action === 'confirm-brief') return saveBrief(button, true);
     if (action === 'submit-answers') return submitAnswers(button);
@@ -1368,10 +1342,6 @@
       setLive('未能复制诊断信息，请使用“导出完整诊断”。', true);
       return false;
     }
-  }
-
-  function handleWorkbenchChange(event) {
-    if (event.target.matches('[data-et3-source-file]')) addLocalFile(event.target);
   }
 
   function mutationControl(kind) {
@@ -1622,17 +1592,10 @@
       if (invalid) control.setAttribute('aria-invalid', 'true');
       else control.removeAttribute('aria-invalid');
     });
-    const sourceMessages = normalized.filter(error => String(error.field).startsWith('source_policy.source_refs')).map(error => error.message);
-    const sourceSlot = workbenchRoot()?.querySelector('[data-et3-source-error]');
-    if (sourceSlot) {
-      sourceSlot.textContent = sourceMessages.join('；');
-      sourceSlot.hidden = sourceMessages.length === 0;
-    }
     const first = Array.from(form.querySelectorAll('[data-et3-brief-path]')).find(control => byField.has(String(control.dataset.et3BriefPath || '')));
-    const focusTarget = first || (sourceMessages.length ? workbenchRoot()?.querySelector('[data-et3-source-text]') : null);
-    if (focusTarget) {
-      focusTarget.focus();
-      focusTarget.scrollIntoView({ block: 'center' });
+    if (first) {
+      first.focus();
+      first.scrollIntoView({ block: 'center' });
     }
     return normalized.length === 0;
   }
@@ -1679,38 +1642,6 @@
     return mutate('/api/expert-teams/brief/confirm', { expected_brief_revision: Number(state.card.brief?.revision || 0) }, button, 'brief-confirm', {
       busyLabel: '正在确认规格…', successMessage: '规格已确认。',
     });
-  }
-
-  async function addTextSource(button) {
-    const textField = workbenchRoot().querySelector('[data-et3-source-text]');
-    const labelField = workbenchRoot().querySelector('[data-et3-source-label]');
-    const text = String(textField?.value || '').trim();
-    const label = String(labelField?.value || '').trim() || '粘贴资料';
-    if (!text) return setLive('请先填写需要添加的文字资料。', true);
-    const saved = await mutate('/api/expert-teams/brief/sources/add', { expected_brief_revision: Number(state.card.brief?.revision || 0), source: { kind: 'provided_text', label, text } }, button, 'source-add');
-    if (!saved) return false;
-    const clearedTextField = workbenchRoot().querySelector('[data-et3-source-text]');
-    const clearedLabelField = workbenchRoot().querySelector('[data-et3-source-label]');
-    if (clearedTextField) clearedTextField.value = '';
-    if (clearedLabelField) clearedLabelField.value = '';
-    clearedLabelField?.focus();
-    setLive('文字资料已添加。');
-    return true;
-  }
-
-  async function addLocalFile(input) {
-    const file = input.files && input.files[0];
-    if (!file) return;
-    if (file.size > 10 * 1024 * 1024) { setLive('文件超过 10MB，未添加。', true); input.value = ''; return; }
-    const extension = (file.name.split('.').pop() || '').toLowerCase();
-    if (!['txt', 'md', 'markdown', 'csv', 'json'].includes(extension)) { setLive('仅支持 TXT、Markdown、CSV、JSON。', true); input.value = ''; return; }
-    try {
-      const bytes = await file.arrayBuffer();
-      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-      if (text.includes('\u0000')) throw new Error('文件不是有效的 UTF-8 文本');
-      await mutate('/api/expert-teams/brief/sources/add', { expected_brief_revision: Number(state.card.brief?.revision || 0), source: { kind: 'provided_text', label: file.name, text } }, input, 'source-file-add');
-    } catch (error) { setLive(error.message || '读取文件失败。', true); }
-    input.value = '';
   }
 
   function appendRevision(text) {

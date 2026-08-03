@@ -16906,8 +16906,6 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path in {
         "/api/expert-teams/brief/update",
         "/api/expert-teams/brief/confirm",
-        "/api/expert-teams/brief/sources/add",
-        "/api/expert-teams/brief/sources/remove",
     }:
         from api import expert_teams
 
@@ -16917,8 +16915,6 @@ def handle_post(handler, parsed) -> bool:
             operation = {
                 "/api/expert-teams/brief/update": expert_teams.update_expert_team_document_brief,
                 "/api/expert-teams/brief/confirm": expert_teams.confirm_expert_team_document_brief,
-                "/api/expert-teams/brief/sources/add": expert_teams.add_expert_team_brief_source,
-                "/api/expert-teams/brief/sources/remove": expert_teams.remove_expert_team_brief_source,
             }[parsed.path]
             run = operation(workspace, body)
             return _expert_team_json_response(handler, {"ok": True, "run": run, "teams": expert_teams.expert_team_catalog()["teams"]})

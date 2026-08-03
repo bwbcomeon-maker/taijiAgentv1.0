@@ -136,10 +136,10 @@ body.expert-team-v3-collapsed #mainChat > .messages-shell { padding-right: 64px;
 .et3-question { display: grid; gap: 7px; margin: 13px 0; }
 .et3-question label { font-weight: 720; }
 .et3-question input, .et3-question textarea, .et3-question select { width: 100%; border: 1px solid var(--et3-line); border-radius: 10px; padding: 10px 11px; background: #fff; }
-.et3-source-list, .et3-review-list, .et3-artifact-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
-.et3-source, .et3-review-item, .et3-artifact { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid #e3edf3; border-radius: 11px; background: #fbfdff; }
-.et3-source strong, .et3-review-item strong, .et3-artifact strong { display: block; margin-bottom: 3px; }
-.et3-source small, .et3-review-item small, .et3-artifact small { color: var(--et3-muted); }
+.et3-review-list, .et3-artifact-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.et3-review-item, .et3-artifact { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid #e3edf3; border-radius: 11px; background: #fbfdff; }
+.et3-review-item strong, .et3-artifact strong { display: block; margin-bottom: 3px; }
+.et3-review-item small, .et3-artifact small { color: var(--et3-muted); }
 .et3-inline-actions, .et3-primary-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 13px; }
 .et3-quality-report { margin-top: 13px; }
 .et3-quality-report > summary { display: inline-flex; list-style: none; }
