@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -31,6 +33,7 @@ from .data_egress import load_model_policy_registry
 from .source_context import (
     SourceContextError,
     allows_empty_source_context,
+    build_research_source_context_snapshot,
     build_source_context_snapshot,
     verify_source_context_snapshot,
 )
@@ -1946,6 +1949,416 @@ def bind_initial_standalone_source_context(workspace: Path, run: dict) -> dict:
     )
     verify_source_context_snapshot(workspace, bound)
     return bound
+
+
+_RESEARCH_RETRIEVAL_SCHEMA = "research-retrieval/v1"
+_RESEARCH_QUERY_POLICY = {
+    "policy_id": "research-public-query/v1",
+    "trust_zone": "public_web",
+}
+
+
+def _research_retrieval_artifact(run: dict) -> dict:
+    """Return the immutable, human-confirmed direction artifact."""
+    from .prompts import approved_inputs_for_stage
+
+    inputs = approved_inputs_for_stage(run, "research")
+    artifact = next(
+        (
+            item
+            for item in inputs
+            if isinstance(item, dict)
+            and str(item.get("stage_id") or "") == "direction"
+            and str(item.get("artifact_type") or "") == "research_charter"
+        ),
+        None,
+    )
+    if not isinstance(artifact, dict) or not isinstance(artifact.get("payload"), dict):
+        raise SourceContextError("approved research direction is missing")
+    return artifact
+
+
+def _research_retrieval_eligible(run: dict) -> bool:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else _current_stage(run)
+    return bool(
+        profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("product_mode") or "") == "standalone"
+        and str(current.get("task_id") or current.get("id") or "") == "research"
+    )
+
+
+def research_retrieval_fingerprint(run: dict) -> str:
+    artifact = _research_retrieval_artifact(run)
+    payload = artifact["payload"]
+    value = {
+        "schema_version": _RESEARCH_RETRIEVAL_SCHEMA,
+        "run_id": str(run.get("run_id") or ""),
+        "brief_sha256": brief_digest(run.get("document_brief") or {}),
+        "direction_ref": {
+            "artifact_id": str(artifact.get("artifact_id") or ""),
+            "sha256": str(artifact.get("sha256") or ""),
+        },
+        "core_question": str(payload.get("core_question") or "").strip(),
+        "subquestions": [str(item).strip() for item in payload.get("subquestions") or [] if str(item).strip()],
+        "query_policy": _RESEARCH_QUERY_POLICY,
+    }
+    rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _research_query(run: dict) -> tuple[str, tuple[str, ...]]:
+    payload = _research_retrieval_artifact(run)["payload"]
+    core = " ".join(str(payload.get("core_question") or "").split())
+    subquestions = tuple(
+        dict.fromkeys(
+            " ".join(str(item).split())
+            for item in payload.get("subquestions") or []
+            if " ".join(str(item).split())
+        )
+    )
+    if not core or not subquestions:
+        raise SourceContextError("approved research direction has no queryable subquestions")
+    return "\n".join((core, *subquestions)), subquestions
+
+
+def _research_query_authorizer(run: dict):
+    from api.helpers import _redact_text
+    from .research_sources import QueryAuthorizationDecision
+
+    document_control = (run.get("document_brief") or {}).get("document_control") or {}
+    classification = str(document_control.get("classification") or "").strip().lower()
+    explicitly_restricted = classification in {"restricted", "custom", "private", "confidential"}
+
+    def authorize(query: str) -> QueryAuthorizationDecision:
+        text = str(query or "").strip()
+        redacted = _redact_text(text, _enabled=True)
+        local_path = bool(
+            re.search(r"(?:^|\s)(?:file://|~[/\\]|/[A-Za-z0-9_.-]+/|[A-Za-z]:[/\\])", text)
+        )
+        credentialed_url = bool(re.search(r"https?://[^\s/@:]+:[^\s/@]+@", text, flags=re.IGNORECASE))
+        if explicitly_restricted or not text or redacted != text or local_path or credentialed_url:
+            return QueryAuthorizationDecision(
+                False,
+                reason_code="policy_blocked",
+                safe_reason="研究查询包含不可向公共服务发送的内容",
+            )
+        return QueryAuthorizationDecision(
+            True,
+            safe_query=text,
+            policy_id=_RESEARCH_QUERY_POLICY["policy_id"],
+            trust_zone=_RESEARCH_QUERY_POLICY["trust_zone"],
+            reason_code="",
+            safe_reason="",
+        )
+
+    return authorize
+
+
+def _research_coverage(subquestions, hits):
+    from .research_sources import CoverageEvaluation
+
+    covered = []
+    for question in subquestions:
+        normalized = re.sub(r"\s+", "", str(question)).lower()
+        if normalized and any(
+            normalized in re.sub(r"\s+", "", f"{hit.safe_title}\n{hit.content}").lower()
+            for hit in hits
+        ):
+            covered.append(str(question))
+    return CoverageEvaluation(
+        "sufficient" if len(covered) == len(subquestions) and bool(hits) else "insufficient" if hits else "none",
+        tuple(covered),
+        "" if len(covered) == len(subquestions) and bool(hits) else "insufficient_evidence",
+        "" if len(covered) == len(subquestions) and bool(hits) else "现有资料不足以覆盖全部研究问题",
+    )
+
+
+def _research_local_roots(run: dict) -> list[Path]:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    roots = [Path(item) for item in profile.get("research_local_roots") or [] if str(item).strip()]
+    wiki_path = os.getenv("WIKI_PATH", "").strip()
+    if wiki_path:
+        roots.append(Path(wiki_path))
+    return roots
+
+
+def _research_materialized_refs(workspace: Path, run_id: str, persisted: list[dict]) -> list[dict]:
+    """Recover only immutable sources already bound to this exact Run."""
+    candidates = [deepcopy(item) for item in persisted if isinstance(item, dict)]
+    workspace_root = Path(workspace).resolve()
+    source_root = workspace_root / ".taiji" / "expert-teams" / "sources" / str(run_id)
+    current = workspace_root
+    for part in source_root.relative_to(workspace_root).parts:
+        current = current / part
+        if current.is_symlink():
+            return candidates
+    if source_root.is_dir() and not source_root.is_symlink():
+        for manifest_path in source_root.glob("*.source.json"):
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue
+            source_id = str(manifest.get("source_id") or "")
+            candidates.append(
+                {
+                    "source_id": source_id,
+                    "kind": str(manifest.get("kind") or ""),
+                    "label": str(manifest.get("label") or source_id),
+                    "locator": (
+                        Path(".taiji")
+                        / "expert-teams"
+                        / "sources"
+                        / str(run_id)
+                        / f"{source_id}.txt"
+                    ).as_posix(),
+                    "sha256": str(manifest.get("content_sha256") or ""),
+                }
+            )
+    deduplicated = []
+    seen = set()
+    for ref in candidates:
+        source_id = str(ref.get("source_id") or "")
+        if source_id and source_id not in seen:
+            deduplicated.append(ref)
+            seen.add(source_id)
+    return deduplicated
+
+
+@_serialized_run_mutation
+def _reserve_research_retrieval(workspace: Path, run_id: str, expected_version: int, fingerprint: str) -> tuple[dict, str]:
+    current = read_run(workspace, run_id)
+    state = current.get("research_retrieval_state") if isinstance(current.get("research_retrieval_state"), dict) else {}
+    if state.get("fingerprint") == fingerprint and state.get("status") == "completed":
+        verify_source_context_snapshot(workspace, current)
+        return _sync_derived(current), "completed"
+    if int(current.get("version") or 0) != int(expected_version):
+        raise ExpertTeamStateConflict("version_conflict", "research retrieval run version changed", current)
+    recovery = bool(state.get("fingerprint") == fingerprint and state.get("status") in {"in_progress", "uncertain"})
+    reservation_id = str(state.get("reservation_id") or uuid.uuid4()) if recovery else str(uuid.uuid4())
+    next_run = deepcopy(current)
+    next_run["research_retrieval_state"] = {
+        "schema_version": _RESEARCH_RETRIEVAL_SCHEMA,
+        "reservation_id": reservation_id,
+        "fingerprint": fingerprint,
+        "status": "in_progress",
+        "started_at": str(state.get("started_at") or _now()),
+        "completed_at": "",
+        "public_status": deepcopy(state.get("public_status") or {}),
+        "local_status": deepcopy(state.get("local_status") or {}),
+        "tier_decisions": deepcopy(state.get("tier_decisions") or []),
+        "materialized_refs": deepcopy(state.get("materialized_refs") or []),
+        "snapshot_ref": deepcopy(state.get("snapshot_ref") or {}),
+        "safe_reason": "",
+    }
+    next_run["version"] = int(current.get("version") or 0) + 1
+    next_run["updated_at"] = _now()
+    return write_run(workspace, _sync_derived(next_run)), "recovery" if recovery else "reserved"
+
+
+@_serialized_run_mutation
+def _complete_research_retrieval(
+    workspace: Path,
+    run_id: str,
+    expected_version: int,
+    fingerprint: str,
+    outcome: dict,
+) -> dict:
+    current = read_run(workspace, run_id)
+    state = current.get("research_retrieval_state") if isinstance(current.get("research_retrieval_state"), dict) else {}
+    if state.get("fingerprint") == fingerprint and state.get("status") == "completed":
+        verify_source_context_snapshot(workspace, current)
+        return _sync_derived(current)
+    if int(current.get("version") or 0) != int(expected_version):
+        raise ExpertTeamStateConflict("version_conflict", "research retrieval completion version changed", current)
+    if state.get("fingerprint") != fingerprint or state.get("status") != "in_progress":
+        raise ExpertTeamStateConflict("retrieval_reservation_missing", "research retrieval reservation is missing", current)
+
+    brief = deepcopy(current.get("document_brief") or {})
+    policy = brief.get("source_policy") if isinstance(brief.get("source_policy"), dict) else {}
+    combined_refs = []
+    seen = set()
+    for ref in [*(policy.get("source_refs") or []), *(outcome.get("materialized_refs") or [])]:
+        source_id = str((ref or {}).get("source_id") or "")
+        if source_id and source_id not in seen:
+            combined_refs.append(deepcopy(ref))
+            seen.add(source_id)
+    resolved_refs, registry = resolve_source_registry(workspace, run_id, combined_refs)
+    policy["source_refs"] = resolved_refs
+    brief["source_policy"] = policy
+    # Retrieval adds evidence to the same confirmed Brief revision.  The Brief
+    # hash remains the frozen user contract; evidence identity is carried by
+    # the retrieval fingerprint and the distinct immutable snapshot id.
+    snapshot_ref = build_research_source_context_snapshot(
+        workspace,
+        current,
+        registry,
+        resolved_refs,
+        retrieval_fingerprint=fingerprint,
+    )
+    next_run = deepcopy(current)
+    next_run["source_context_snapshot_ref"] = snapshot_ref
+    next_run["research_retrieval_state"] = {
+        **deepcopy(state),
+        "status": "completed",
+        "completed_at": _now(),
+        "public_status": deepcopy(outcome.get("public_status") or {}),
+        "local_status": deepcopy(outcome.get("local_status") or {}),
+        "tier_decisions": deepcopy(outcome.get("tier_decisions") or []),
+        "materialized_refs": resolved_refs,
+        "snapshot_ref": deepcopy(snapshot_ref),
+        "safe_reason": str(outcome.get("safe_reason") or ""),
+    }
+    next_run["version"] = int(current.get("version") or 0) + 1
+    next_run["updated_at"] = _now()
+    verify_source_context_snapshot(workspace, next_run)
+    return write_run(workspace, _sync_derived(next_run))
+
+
+def prepare_research_sources_for_gateway(
+    workspace: Path,
+    run: dict,
+    *,
+    web_adapter=None,
+    local_adapter=None,
+) -> dict:
+    """Freeze research evidence immediately before the research model call."""
+    if not _research_retrieval_eligible(run):
+        return run
+    from .research_sources import (
+        HermesWebResearchSourceAdapter,
+        LocalTextResearchSourceAdapter,
+        ProbeResult,
+        orchestrate_research_sources,
+    )
+
+    fingerprint = research_retrieval_fingerprint(run)
+    reserved, mode = _reserve_research_retrieval(
+        workspace,
+        str(run.get("run_id") or ""),
+        int(run.get("version") or 0),
+        fingerprint,
+    )
+    if mode == "completed":
+        return reserved
+
+    query, subquestions = _research_query(reserved)
+    actual_web = web_adapter or HermesWebResearchSourceAdapter()
+    if mode == "recovery":
+        class _InterruptedPublicAdapter:
+            async def probe(self):
+                return ProbeResult(False, "interrupted_before_commit", "上次公共检索在提交前中断，本次不重复出网")
+
+        actual_web = _InterruptedPublicAdapter()
+    actual_local = local_adapter or LocalTextResearchSourceAdapter(
+        roots=_research_local_roots(reserved),
+        workspace_root=workspace,
+    )
+    result = asyncio.run(
+        orchestrate_research_sources(
+            query,
+            web_adapter=actual_web,
+            local_adapter=actual_local,
+            query_authorizer=_research_query_authorizer(reserved),
+            research_subquestions=subquestions,
+            coverage_evaluator=_research_coverage,
+        )
+    )
+    materialized = _research_materialized_refs(
+        workspace,
+        str(run.get("run_id") or ""),
+        list((reserved.get("research_retrieval_state") or {}).get("materialized_refs") or []),
+    )
+    successful_hits = []
+    failed_kinds = set()
+    for hit in result.hits:
+        adapter = actual_web if hit.source_kind == "approved_public" else actual_local
+        try:
+            ref = asyncio.run(adapter.materialize(hit, workspace=workspace, run_id=str(run.get("run_id") or "")))
+        except Exception:
+            failed_kinds.add(hit.source_kind)
+            continue
+        if isinstance(ref, dict):
+            materialized.append(ref)
+            successful_hits.append(hit)
+        else:
+            failed_kinds.add(hit.source_kind)
+    public_refs = [item for item in materialized if item.get("kind") == "approved_public"]
+    local_refs = [item for item in materialized if item.get("kind") == "approved_internal"]
+    public_status = deepcopy(result.public_status)
+    local_status = deepcopy(result.local_status)
+    public_coverage = _research_coverage(subquestions, tuple(
+        hit for hit in successful_hits if hit.source_kind == "approved_public"
+    ))
+    local_coverage = _research_coverage(subquestions, tuple(
+        hit for hit in successful_hits if hit.source_kind == "approved_internal"
+    ))
+    final_coverage = _research_coverage(subquestions, tuple(successful_hits))
+    public_status["count"] = len(public_refs)
+    public_status["coverage"] = public_coverage.coverage
+    local_status["count"] = len(local_refs)
+    local_status["coverage"] = local_coverage.coverage
+    for kind, status in (
+        ("approved_public", public_status),
+        ("approved_internal", local_status),
+    ):
+        if kind in failed_kinds:
+            status.update(
+                {
+                    "status": "partial" if int(status.get("count") or 0) else "materialize_failed",
+                    "reason": "materialize_failed",
+                    "safe_reason": "候选资料未能固化到任务的受信证据区",
+                }
+            )
+    if mode == "recovery":
+        public_status.update(
+            {
+                "status": "skipped",
+                "reason": "interrupted_before_commit",
+                "safe_reason": "上次公共检索在提交前中断，本次不重复出网",
+                "count": len(public_refs),
+                "coverage": public_coverage.coverage,
+            }
+        )
+    tier_decisions = [
+        {"tier": "public", **public_status},
+        {"tier": "local", **local_status},
+    ]
+    if final_coverage.coverage != "sufficient":
+        tier_decisions.append(
+            {
+                "tier": "model",
+                "status": "used",
+                "reason": "materialize_failed" if failed_kinds else "insufficient_evidence",
+                "safe_reason": (
+                    "候选资料未能全部固化，将使用模型能力并保留证据缺口"
+                    if failed_kinds
+                    else "现有资料不足以覆盖全部研究问题"
+                ),
+                "count": 1,
+                "coverage": final_coverage.coverage,
+            }
+        )
+    return _complete_research_retrieval(
+        workspace,
+        str(run.get("run_id") or ""),
+        int(reserved.get("version") or 0),
+        fingerprint,
+        {
+            "public_status": public_status,
+            "local_status": local_status,
+            "tier_decisions": tier_decisions,
+            "materialized_refs": materialized,
+            "safe_reason": (
+                "候选资料固化失败，已降级为模型补全"
+                if failed_kinds and final_coverage.coverage != "sufficient"
+                else result.safe_reason
+            ),
+        },
+    )
 
 
 def latest_expert_team_run_for_session(workspace: Path, session_id: str) -> dict:

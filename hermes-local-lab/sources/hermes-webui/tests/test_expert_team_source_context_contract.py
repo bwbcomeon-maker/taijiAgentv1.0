@@ -168,6 +168,52 @@ def test_execution_rejects_missing_modified_or_symlinked_snapshot(tmp_path):
         verify_source_context_snapshot(tmp_path, run)
 
 
+def test_research_snapshot_identity_does_not_overwrite_launch_snapshot(tmp_path):
+    from api.expert_teams.contracts import brief_digest
+    from api.expert_teams.source_context import (
+        build_research_source_context_snapshot,
+        build_source_context_snapshot,
+    )
+
+    brief = {
+        "schema_version": "document-brief/v1",
+        "status": "confirmed",
+        "revision": 1,
+        "confirmed_revision": 1,
+        "confirmed_at": "2026-08-03T10:00:00+08:00",
+        "confirmed_sha256": "",
+        "source_policy": {"source_refs": []},
+    }
+    brief["confirmed_sha256"] = brief_digest(brief)
+    launch_ref = build_source_context_snapshot(
+        tmp_path,
+        "et-research-snapshot",
+        brief,
+        {},
+        brief_sha256=brief["confirmed_sha256"],
+        brief_revision=1,
+        allow_empty=True,
+    )
+    research_ref = build_research_source_context_snapshot(
+        tmp_path,
+        {
+            "run_id": "et-research-snapshot",
+            "launch_profile_id": "research-report",
+            "team_id": "deep-research-team",
+            "product_mode": "standalone",
+            "launch_profile_snapshot": {"research_contract_version": "research-report/v2"},
+            "current_stage": {"task_id": "research"},
+            "document_brief": brief,
+        },
+        {},
+        [],
+        retrieval_fingerprint="0123456789abcdef" * 4,
+    )
+
+    assert launch_ref["snapshot_id"] == "source-context-0001"
+    assert research_ref["snapshot_id"] == "research-evidence-0123456789abcdef01234567"
+    assert launch_ref["relative_path"] != research_ref["relative_path"]
+
 def test_materials_prompt_consumes_verified_real_segments_and_binds_snapshot(tmp_path):
     from api.expert_teams.prompts import build_stage_gateway_request
     from api.expert_teams.source_context import verify_source_context_snapshot

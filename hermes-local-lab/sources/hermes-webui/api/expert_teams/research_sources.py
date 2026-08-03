@@ -204,7 +204,14 @@ def _normalize_authorization(value: object) -> QueryAuthorizationDecision:
     safe_query = _safe_text(decision.safe_query, maximum=2000)
     policy_id = _safe_text(decision.policy_id, maximum=128)
     trust_zone = _safe_text(decision.trust_zone, maximum=128)
-    if not decision.authorized or not safe_query or not policy_id or not trust_zone:
+    if not decision.authorized:
+        return QueryAuthorizationDecision(
+            False,
+            reason_code=_safe_text(decision.reason_code, maximum=128) or "data_egress_not_authorized",
+            safe_reason=_safe_text(decision.safe_reason, maximum=500)
+            or _SAFE_REASONS["data_egress_not_authorized"],
+        )
+    if not safe_query or not policy_id or not trust_zone:
         return QueryAuthorizationDecision(False)
     return QueryAuthorizationDecision(True, safe_query, policy_id, trust_zone, "", "")
 
@@ -626,8 +633,8 @@ async def orchestrate_research_sources(
     if not decision.authorized:
         web = AdapterSearchResult(
             status="denied",
-            reason_code="data_egress_not_authorized",
-            safe_reason=_SAFE_REASONS["data_egress_not_authorized"],
+            reason_code=decision.reason_code or "data_egress_not_authorized",
+            safe_reason=decision.safe_reason or _SAFE_REASONS["data_egress_not_authorized"],
         )
     else:
         web_probe = await _safe_probe(web_adapter)

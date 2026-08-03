@@ -628,6 +628,71 @@ def test_execution_route_ignores_client_provider_override_and_dispatches_exact_c
     assert "client-forged" not in repr(request)
 
 
+def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(monkeypatch, tmp_path):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    order = []
+    requests = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda request: {
+            "provider": request.provider,
+            "model": request.model,
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+        },
+    )
+
+    def prepare(_workspace, candidate):
+        order.append("prepare")
+        prepared = deepcopy(candidate)
+        prepared["prepared_research_snapshot"] = "server-owned"
+        return prepared
+
+    def gateway(_workspace, candidate):
+        order.append("gateway")
+        assert candidate["prepared_research_snapshot"] == "server-owned"
+        return {
+            "messages": [
+                {"role": "system", "content": "strict system"},
+                {"role": "user", "content": '{"source_context":"frozen"}'},
+            ],
+            "tools_disabled": True,
+            "input_refs": [],
+        }
+
+    monkeypatch.setattr(expert_teams, "prepare_research_sources_for_gateway", prepare)
+    monkeypatch.setattr(routes, "_expert_team_enterprise_gateway_request", gateway)
+
+    def capture_start(self, request):
+        requests.append(request)
+        return runtime_adapter.RunStartResult(
+            run_id="route-order-runtime",
+            session_id=request.session_id,
+            stream_id="route-order-stream",
+            payload={"stream_id": "route-order-stream", "turn_id": "route-order-turn"},
+        )
+
+    monkeypatch.setattr(runtime_adapter.LegacyJournalRuntimeAdapter, "start_run", capture_start)
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 200, payload
+    assert order == ["prepare", "gateway"]
+    assert len(requests) == 1
+
+
 def test_execution_route_provider_preflight_failure_makes_zero_runtime_calls(
     monkeypatch, tmp_path
 ):

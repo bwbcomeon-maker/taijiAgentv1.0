@@ -5873,6 +5873,7 @@ def _start_expert_team_execution(
                 "standalone expert team execution requires schema 3 and contract v1"
             )
         if classified_contract == expert_teams.EXPERT_TEAM_CONTRACT_V1:
+            run = expert_teams.prepare_research_sources_for_gateway(workspace, run)
             enterprise_gateway_request = _expert_team_enterprise_gateway_request(workspace, run)
             if standalone:
                 _require_standalone_strict_execution_contract(

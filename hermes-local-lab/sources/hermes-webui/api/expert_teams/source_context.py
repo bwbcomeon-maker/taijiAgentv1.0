@@ -135,6 +135,7 @@ def _build_source_context_snapshot(
     brief_revision: int,
     extractor_identity: dict | None = None,
     allow_empty: bool = False,
+    snapshot_id: str | None = None,
 ) -> dict:
     root = Path(workspace).expanduser().resolve()
     safe_run_id = _safe_id(run_id, "run id")
@@ -188,7 +189,10 @@ def _build_source_context_snapshot(
     if not sources and not allow_empty:
         raise SourceContextError("source snapshot has no sources")
 
-    snapshot_id = f"source-context-{int(brief_revision):04d}"
+    snapshot_id = _safe_id(
+        snapshot_id or f"source-context-{int(brief_revision):04d}",
+        "snapshot id",
+    )
     payload = {
         "schema_version": SOURCE_CONTEXT_SCHEMA,
         "snapshot_id": snapshot_id,
@@ -253,6 +257,50 @@ def build_source_context_snapshot(
             brief_revision=brief_revision,
             extractor_identity=extractor_identity,
             allow_empty=allow_empty,
+        )
+    except SourceContextError:
+        raise
+    except OSError as exc:
+        raise SourceContextError("source snapshot I/O failed") from exc
+
+
+def build_research_source_context_snapshot(
+    workspace: Path,
+    run: dict,
+    source_registry: dict,
+    source_refs: list[dict],
+    *,
+    retrieval_fingerprint: str,
+) -> dict:
+    """Build the post-retrieval snapshot only for an authoritative v2 research Run."""
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    fingerprint = str(retrieval_fingerprint or "")
+    if (
+        profile.get("research_contract_version") != "research-report/v2"
+        or str(run.get("launch_profile_id") or "") != "research-report"
+        or str(run.get("team_id") or "") != "deep-research-team"
+        or str(run.get("product_mode") or "") != "standalone"
+        or str(current.get("task_id") or current.get("id") or "") != "research"
+        or str(brief.get("status") or "") != "confirmed"
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+    ):
+        raise SourceContextError("research source snapshot is not authorized for this run")
+    snapshot_brief = deepcopy(brief)
+    policy = snapshot_brief.get("source_policy") if isinstance(snapshot_brief.get("source_policy"), dict) else {}
+    policy["source_refs"] = deepcopy(source_refs)
+    snapshot_brief["source_policy"] = policy
+    try:
+        return _build_source_context_snapshot(
+            workspace,
+            str(run.get("run_id") or ""),
+            snapshot_brief,
+            source_registry,
+            brief_sha256=str(brief.get("confirmed_sha256") or ""),
+            brief_revision=int(brief.get("confirmed_revision") or 0),
+            allow_empty=True,
+            snapshot_id=f"research-evidence-{fingerprint[:24]}",
         )
     except SourceContextError:
         raise
