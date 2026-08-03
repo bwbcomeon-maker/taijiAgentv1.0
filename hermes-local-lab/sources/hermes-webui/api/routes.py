@@ -3413,6 +3413,10 @@ def _coordinate_expert_team_start(
                     run_id=run_id,
                     launch_profile_snapshot=launch_profile_snapshot,
                 )
+                initial_run = expert_teams.bind_initial_standalone_source_context(
+                    workspace,
+                    initial_run,
+                )
                 initial_run["start_transaction_id"] = transaction_id
                 initial_session_message_pair = (
                     _new_expert_team_start_session_messages(

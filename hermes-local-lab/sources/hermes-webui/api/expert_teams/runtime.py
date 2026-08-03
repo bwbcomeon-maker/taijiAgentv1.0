@@ -1068,13 +1068,21 @@ def _members(template: dict) -> list[dict]:
     return [{**deepcopy(member), "status": "待命"} for member in template.get("members") or []]
 
 
-def _initial_timeline_events(template: dict) -> list[dict]:
+def _initial_timeline_events(
+    template: dict,
+    *,
+    research_intake_ready: bool = False,
+) -> list[dict]:
     now = _now()
     events = [
         {
             "type": "team_created",
             "title": f"{template.get('title') or '专家团'}已创建",
-            "detail": "等待需求确认后开始协作。",
+            "detail": (
+                "内部研究规格已根据原始诉求确定，可直接开始生成。"
+                if research_intake_ready
+                else "等待需求确认后开始协作。"
+            ),
             "member_id": "director",
             "at": now,
         }
@@ -1091,9 +1099,17 @@ def _initial_timeline_events(template: dict) -> list[dict]:
         )
     events.append(
         {
-            "type": "intake_requested",
-            "title": "等待需求确认",
-            "detail": "请先补充必填需求，可选补充需要提交或跳过。",
+            "type": (
+                "research_intake_prepared"
+                if research_intake_ready
+                else "intake_requested"
+            ),
+            "title": "研究任务已就绪" if research_intake_ready else "等待需求确认",
+            "detail": (
+                "已根据原始诉求生成并确认内部研究规格。"
+                if research_intake_ready
+                else "请先补充必填需求，可选补充需要提交或跳过。"
+            ),
             "member_id": "director",
             "at": now,
         }
@@ -1102,7 +1118,11 @@ def _initial_timeline_events(template: dict) -> list[dict]:
         {
             "type": "phase_plan_created",
             "title": "已生成专家团阶段计划",
-            "detail": "将按流程安排、素材整理、初稿撰写、审稿打磨、交付确认推进。",
+            "detail": (
+                "将按研究方向、资料调研、事实核验、结构提纲、初稿与复核交付推进。"
+                if research_intake_ready
+                else "将按流程安排、素材整理、初稿撰写、审稿打磨、交付确认推进。"
+            ),
             "member_id": "director",
             "at": now,
         }
@@ -1792,6 +1812,11 @@ def _build_expert_team_run(
     task_template = deepcopy(
         launch_profile["stages"] if standalone and launch_profile is not None else template.get("tasks") or []
     )
+    research_intake_ready = bool(
+        standalone
+        and (launch_profile or {}).get("research_contract_version")
+        == "research-report/v2"
+    )
     run = {
         "schema_version": 3 if standalone else 2,
         "version": 1,
@@ -1804,19 +1829,11 @@ def _build_expert_team_run(
         "prompt": prompt,
         "created_at": started_at,
         "updated_at": started_at,
-        "workflow_state": (
-            "ready_to_generate"
-            if standalone
-            and (launch_profile or {}).get("research_contract_version")
-            == "research-report/v2"
-            else "collecting_required"
-        ),
+        "workflow_state": "ready_to_generate" if research_intake_ready else "collecting_required",
         "current_stage_index": 0,
         "questions": (
             []
-            if standalone
-            and (launch_profile or {}).get("research_contract_version")
-            == "research-report/v2"
+            if research_intake_ready
             else _questions(template, prompt)
         ),
         "answers": [],
@@ -1827,8 +1844,21 @@ def _build_expert_team_run(
         "stage_outputs": [],
         "review_items": [],
         "action_journal": [],
-        "events": [{"type": "team_created", "to": "collecting_required", "at": _now()}],
-        "timeline_events": _initial_timeline_events(template),
+        "events": [
+            {
+                "type": "team_created",
+                "to": (
+                    "ready_to_generate"
+                    if research_intake_ready
+                    else "collecting_required"
+                ),
+                "at": started_at,
+            }
+        ],
+        "timeline_events": _initial_timeline_events(
+            template,
+            research_intake_ready=research_intake_ready,
+        ),
     }
     if contract_version == EXPERT_TEAM_CONTRACT_V1:
         run.update(
@@ -1893,22 +1923,29 @@ def verified_source_context_for_execution(workspace: Path, run: dict) -> dict:
     """Re-open and verify the confirmation-time snapshot immediately before dispatch."""
     if classify_contract_version(run) != EXPERT_TEAM_CONTRACT_V1:
         raise ContractError("source_context_not_available", "contract_version", "历史任务没有企业资料快照")
-    if not isinstance(run.get("source_context_snapshot_ref"), dict):
-        brief = run.get("document_brief")
-        if allows_empty_source_context(run, brief=brief):
-            snapshot_ref = build_source_context_snapshot(
-                workspace,
-                str(run.get("run_id") or ""),
-                brief,
-                {},
-                brief_sha256=brief_digest(brief),
-                brief_revision=int(brief.get("confirmed_revision") or 0),
-                allow_empty=True,
-            )
-            candidate = deepcopy(run)
-            candidate["source_context_snapshot_ref"] = snapshot_ref
-            return verify_source_context_snapshot(workspace, candidate)
     return verify_source_context_snapshot(workspace, run)
+
+
+def bind_initial_standalone_source_context(workspace: Path, run: dict) -> dict:
+    """Bind the v2 zero-source snapshot before the atomic Run is persisted."""
+    brief = run.get("document_brief")
+    if not allows_empty_source_context(run, brief=brief):
+        return deepcopy(run)
+    bound = deepcopy(run)
+    if isinstance(bound.get("source_context_snapshot_ref"), dict):
+        verify_source_context_snapshot(workspace, bound)
+        return bound
+    bound["source_context_snapshot_ref"] = build_source_context_snapshot(
+        workspace,
+        str(bound.get("run_id") or ""),
+        brief,
+        {},
+        brief_sha256=brief_digest(brief),
+        brief_revision=int(brief.get("confirmed_revision") or 0),
+        allow_empty=True,
+    )
+    verify_source_context_snapshot(workspace, bound)
+    return bound
 
 
 def latest_expert_team_run_for_session(workspace: Path, session_id: str) -> dict:

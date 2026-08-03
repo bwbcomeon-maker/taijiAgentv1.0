@@ -543,6 +543,65 @@ def test_public_start_route_creates_only_standalone_schema_v3(monkeypatch, tmp_p
     assert run["launch_profile_id"] == "content-work-report"
 
 
+def test_research_v2_start_persists_empty_source_binding_for_restart_and_gateway(
+    monkeypatch,
+    tmp_path,
+):
+    from api import config, models, routes
+    from api.expert_teams import storage
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sessions = OrderedDict()
+    for module in (config, models, routes):
+        if hasattr(module, "SESSION_DIR"):
+            monkeypatch.setattr(module, "SESSION_DIR", session_dir)
+        if hasattr(module, "SESSION_INDEX_FILE"):
+            monkeypatch.setattr(module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+        if hasattr(module, "SESSIONS"):
+            monkeypatch.setattr(module, "SESSIONS", sessions)
+    session = models.Session(session_id="research-v2-api", workspace=str(tmp_path))
+    session.save(touch_updated_at=False, skip_index=True)
+    sessions[session.session_id] = session
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes,
+        "resolve_trusted_workspace",
+        lambda value: Path(value).resolve(),
+    )
+    monkeypatch.setattr(routes, "_replace_state_db_truth", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    payload = _profile_start(
+        launch_profile_id="research-report",
+        session_id="research-v2-api",
+        prompt="研究本地优先 AI 助理的落地趋势",
+        idempotency_key="research-v2-api-launch",
+    )
+
+    first = _post(routes, "/api/expert-teams/start", payload)
+    replay = _post(routes, "/api/expert-teams/start", payload)
+
+    assert first.status == 200
+    assert replay.status == 200
+    first_run = first.json_body()["run"]
+    replay_run = replay.json_body()["run"]
+    assert first_run["source_context_snapshot_ref"] == replay_run[
+        "source_context_snapshot_ref"
+    ]
+    restarted = storage.read_run(tmp_path, first_run["run_id"])
+    assert restarted["source_context_snapshot_ref"] == first_run[
+        "source_context_snapshot_ref"
+    ]
+    request = routes._expert_team_enterprise_gateway_request(tmp_path, restarted)
+    envelope = json.loads(request["messages"][1]["content"])
+    assert envelope["source_context"]["sources"] == []
+    assert request["input_refs"][-1] == {
+        "ref_type": "source_context",
+        "snapshot_id": first_run["source_context_snapshot_ref"]["snapshot_id"],
+        "sha256": first_run["source_context_snapshot_ref"]["sha256"],
+    }
+
+
 def test_profile_builder_creates_standalone_schema_v3_with_immutable_server_snapshot():
     from api import expert_teams
     from api.expert_teams.launch_profiles import get_launch_profile

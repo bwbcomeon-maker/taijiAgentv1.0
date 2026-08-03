@@ -92,6 +92,12 @@ def test_legacy_research_snapshot_without_v2_marker_keeps_old_intake_and_source_
     assert run["document_brief"]["status"] == "draft"
     assert run["document_brief"]["source_policy"]["mode"] == "provided_only"
     assert run["launch_profile_snapshot"].get("research_contract_version") is None
+    assert run["events"][0]["to"] == "collecting_required"
+    assert any(
+        event["type"] == "intake_requested"
+        and event["title"] == "等待需求确认"
+        for event in run["timeline_events"]
+    )
 
 
 def test_automatic_fallback_zero_source_is_valid_only_for_v2_standalone_research(monkeypatch):
@@ -142,24 +148,42 @@ def test_automatic_fallback_zero_source_is_valid_only_for_v2_standalone_research
     )
 
 
-def test_v2_research_can_build_and_reverify_an_empty_source_snapshot(monkeypatch, tmp_path):
+def test_v2_research_builder_projects_ready_events_without_intake_copy(monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
 
     monkeypatch.setattr(runtime, "_now", lambda: "2026-08-03T09:10:11+08:00")
     run = expert_teams.build_standalone_expert_team_run(
         _start_payload(
-            session_id="research-source-session",
-            idempotency_key="research-source-launch",
+            session_id="research-ready-events",
+            idempotency_key="research-ready-events-launch",
         ),
-        run_id="et-research-source",
+        run_id="et-research-ready-events",
     )
 
-    snapshot = expert_teams.verified_source_context_for_execution(tmp_path, run)
-
-    assert snapshot["sources"] == []
-    assert snapshot["brief_revision"] == run["document_brief"]["confirmed_revision"]
-    assert snapshot["brief_sha256"] == run["document_brief"]["confirmed_sha256"]
+    assert run["events"] == [
+        {
+            "type": "team_created",
+            "to": "ready_to_generate",
+            "at": "2026-08-03T09:10:11+08:00",
+        }
+    ]
+    assert [event["type"] for event in run["timeline_events"]] == [
+        "team_created",
+        "member_joined",
+        "member_joined",
+        "member_joined",
+        "member_joined",
+        "member_joined",
+        "member_joined",
+        "research_intake_prepared",
+        "phase_plan_created",
+    ]
+    assert run["timeline_events"][0]["detail"] == (
+        "内部研究规格已根据原始诉求确定，可直接开始生成。"
+    )
+    assert run["timeline_events"][-2]["title"] == "研究任务已就绪"
+    assert all("等待需求确认" not in str(event) for event in run["timeline_events"])
 
 
 def test_content_creator_intake_is_unchanged():
