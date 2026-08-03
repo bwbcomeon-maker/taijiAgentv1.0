@@ -776,8 +776,6 @@ def test_private_transaction_direction_uses_same_order_independent_gate(
     [
         ("Apple iPhone 公开市场价格趋势", "Apple iPhone 公开市场价格趋势"),
         ("Apple public retail price trends", "Apple public retail price trends"),
-        ("苹果公司公开年报合同金额", "苹果公司公开年报合同金额"),
-        ("Apple annual report contract values", "Apple annual report contract values"),
     ],
 )
 def test_explicit_public_market_retail_and_annual_report_contexts_are_allowed(
@@ -1005,7 +1003,7 @@ def test_negated_public_context_is_tokenized_before_authorization(tmp_path, sens
         ("研究苹果公司年度报告合同金额", "苹果公司年度报告合同金额"),
     ],
 )
-def test_normalized_public_transaction_context_remains_authorized(
+def test_public_labels_do_not_override_private_transaction_fail_closed_policy(
     tmp_path, original_request, expected_query
 ):
     from api import expert_teams
@@ -1019,8 +1017,8 @@ def test_normalized_public_transaction_context_remains_authorized(
     )
 
     decision = authorize_research_public_query(run, original_request)
-    assert decision["authorized"] is True
-    assert decision["safe_query"] == expected_query
+    assert decision["authorized"] is False
+    assert "safe_query" not in decision
 
 
 @pytest.mark.parametrize(
@@ -1090,10 +1088,6 @@ def test_local_negation_blocks_only_its_public_transaction_marker(tmp_path, sens
             "Analyze Apple annual financial report contract values",
             "Apple annual financial report contract values",
         ),
-        (
-            "Analyze public SaaS contract pricing benchmarks",
-            "public SaaS contract pricing benchmarks",
-        ),
     ],
 )
 def test_public_context_uses_local_concept_windows(
@@ -1109,8 +1103,24 @@ def test_public_context_uses_local_concept_windows(
         core_question=original_request,
     )
     decision = authorize_research_public_query(run, original_request)
+    assert decision["authorized"] is False
+    assert "safe_query" not in decision
+
+
+def test_entity_free_public_contract_pricing_benchmark_remains_authorized(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "Analyze public SaaS contract pricing benchmarks"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+    decision = authorize_research_public_query(run, original_request)
     assert decision["authorized"] is True
-    assert decision["safe_query"] == expected_query
+    assert decision["safe_query"] == "public SaaS contract pricing benchmarks"
 
 
 @pytest.mark.parametrize(
@@ -1153,7 +1163,7 @@ def test_public_markers_support_postfix_and_natural_negation(tmp_path, sensitive
         ),
     ],
 )
-def test_each_public_marker_has_independent_clause_scope(
+def test_public_markers_never_override_private_transaction_fail_closed_policy(
     tmp_path, original_request, expected_query
 ):
     from api import expert_teams
@@ -1166,8 +1176,8 @@ def test_each_public_marker_has_independent_clause_scope(
         core_question=original_request,
     )
     decision = authorize_research_public_query(run, original_request)
-    assert decision["authorized"] is True
-    assert decision["safe_query"] == expected_query
+    assert decision["authorized"] is False
+    assert "safe_query" not in decision
 
 
 @pytest.mark.parametrize(

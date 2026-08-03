@@ -259,34 +259,42 @@ def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
 
 def _generic_public_pricing_topic(tokens: list[str], chinese: str) -> bool:
     """Recognize an entity-free analytical topic, not an organization transaction."""
-    if chinese and re.fullmatch(
-        r"(?:请?(?:研究|分析|调研))?合同治理(?:与|及)?定价"
-        r"(?:趋势|演变|动态|走势|模式|格局|发展)",
-        chinese,
-    ):
-        return True
-    try:
-        contract_index = tokens.index("contract")
-    except ValueError:
-        return False
-    allowed_prefix = {
-        "analyze", "enterprise", "global", "industry", "investigate",
-        "please", "public", "research", "study",
-    }
+    if chinese:
+        required = all(term in chinese for term in ("合同", "治理", "定价"))
+        has_topic = any(
+            term in chinese
+            for term in ("发展趋势", "趋势", "演变", "动态", "走势", "模式", "格局", "发展")
+        )
+        remainder = chinese
+        for term in (
+            "请研究一下", "请分析一下", "请调研一下", "研究一下", "分析一下", "调研一下",
+            "公共部门", "跨境", "全球", "企业", "行业", "公共", "研究", "分析", "调研",
+            "发展趋势", "趋势", "演变", "动态", "走势", "模式", "格局", "发展",
+            "合同", "治理", "定价", "与", "及", "和",
+        ):
+            remainder = remainder.replace(term, "")
+        if required and has_topic and not remainder:
+            return True
     topic_terms = {
-        "development", "dynamics", "evolution", "landscape", "outlook",
+        "benchmark", "benchmarks", "development", "dynamics", "evolution", "landscape", "outlook",
         "pattern", "patterns", "trajectories", "trajectory", "trend", "trends",
     }
-    suffix = tokens[contract_index:]
+    allowed = {
+        "analyze", "border", "contract", "cross", "enterprise", "global",
+        "governance", "industry", "investigate", "please", "pricing", "public",
+        "research", "saas", "sector", "study", *topic_terms,
+    }
+    governance_topic = bool(
+        {"contract", "governance", "pricing"}.issubset(tokens)
+        and any(token in topic_terms - {"benchmark", "benchmarks"} for token in tokens)
+    )
+    public_benchmark = bool(
+        {"public", "contract", "pricing"}.issubset(tokens)
+        and any(token in {"benchmark", "benchmarks"} for token in tokens)
+    )
     return bool(
-        all(token in allowed_prefix for token in tokens[:contract_index])
-        and "governance" in suffix
-        and "pricing" in suffix
-        and any(token in topic_terms for token in suffix)
-        and all(
-            token in {"contract", "governance", "pricing", *topic_terms}
-            for token in suffix
-        )
+        (governance_topic or public_benchmark)
+        and all(token in allowed for token in tokens)
         and not any(
             token in tokens
             for token in {"amount", "cost", "fee", "fees", "quote", "quotation", "value", "values"}
@@ -400,13 +408,13 @@ def _transaction_segments(value: str) -> list[tuple[list[str], str]]:
 
 
 def _has_uncovered_private_transaction(value: str) -> bool:
-    for english, chinese in _transaction_segments(value):
-        if not _private_transaction_semantics(english, chinese):
-            continue
-        public, _negated = _public_transaction_semantics(english, chinese)
-        if not public and not _generic_public_pricing_topic(english, chinese):
-            return True
-    return False
+    _normalized, whole_english, whole_chinese = _semantic_forms(value)
+    if _generic_public_pricing_topic(whole_english, whole_chinese):
+        return False
+    return any(
+        _private_transaction_semantics(english, chinese)
+        for english, chinese in _transaction_segments(value)
+    )
 
 
 def _research_semantic_classes(value: str) -> dict[str, bool]:
