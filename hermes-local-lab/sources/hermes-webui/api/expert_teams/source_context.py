@@ -153,6 +153,8 @@ def _build_source_context_snapshot(
         if not isinstance(entry, dict) or entry.get("status") != "ready":
             raise SourceContextError(f"source is not ready: {source_id}")
         locator = str(entry.get("locator") or "").strip()
+        origin_locator = str(entry.get("origin_locator") or "").strip()
+        retrieved_at = str(entry.get("retrieved_at") or "").strip()
         unresolved = root / locator
         if unresolved.is_symlink():
             raise SourceContextError(f"source symlink is forbidden: {source_id}")
@@ -177,9 +179,10 @@ def _build_source_context_snapshot(
                 "kind": str(entry.get("kind") or ""),
                 "label": str(entry.get("label") or ""),
                 "locator": locator,
+                **({"origin_locator": origin_locator, "retrieved_at": retrieved_at} if origin_locator else {}),
                 "content_sha256": digest,
                 "content_text": text,
-                "segments": _segments(source_id, locator, text),
+                "segments": _segments(source_id, origin_locator or locator, text),
             }
         )
     if not sources and not allow_empty:
