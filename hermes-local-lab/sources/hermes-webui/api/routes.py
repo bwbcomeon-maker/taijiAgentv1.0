@@ -5883,6 +5883,21 @@ def _start_expert_team_execution(
             execution_prompt = ""
         else:
             execution_prompt = _expert_team_execution_prompt(run)
+    except expert_teams.ExpertTeamStateConflict as conflict:
+        if conflict.code != "retrieval_in_progress":
+            error = str(conflict) or "当前任务状态已变更，请重试。"
+            return _backend_failure({
+                "ok": False,
+                "code": conflict.code or "runtime_incompatible",
+                "error": error,
+                "run": _fail_known_pre_dispatch(error),
+            }), 503
+        return {
+            "ok": False,
+            "code": "retrieval_in_progress",
+            "error": str(conflict),
+            "run": conflict.run or run,
+        }, 409
     except SourceContextError:
         error = "资料快照缺失、已变更或不符合当前任务的资料要求"
         return _execution_failure({

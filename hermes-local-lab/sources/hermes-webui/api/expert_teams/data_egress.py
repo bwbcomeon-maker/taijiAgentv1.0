@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
+
+
+RESEARCH_PUBLIC_QUERY_POLICY = {
+    "policy_id": "research-public-query/v1",
+    "version": 1,
+    "authorization_basis": "user_initiated_standalone_research",
+    "trust_zone": "public_web",
+}
+_RESEARCH_INTERNAL_TERMS = (
+    "我司",
+    "本公司",
+    "内部合同",
+    "客户报价",
+    "续约风险",
+    "未公开",
+    "保密",
+    "敏感",
+    "项目代号",
+)
 
 
 def load_model_policy_registry() -> dict:
@@ -16,6 +36,56 @@ def load_model_policy_registry() -> dict:
         return {}
     registry = config.get("expert_team_model_data_policies") if isinstance(config, dict) else {}
     return registry if isinstance(registry, dict) else {}
+
+
+def authorize_research_public_query(run: dict, query: str) -> dict:
+    """Authorize one public research query from immutable server-owned policy."""
+    from api.helpers import _redact_text
+
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    policy = profile.get("research_query_egress_policy")
+    denied = {
+        "authorized": False,
+        "reason_code": "data_egress_not_authorized",
+        "safe_reason": "当前研究任务未绑定可用的公共查询外发策略",
+    }
+    if not isinstance(policy, dict) or policy != RESEARCH_PUBLIC_QUERY_POLICY:
+        return denied
+    if (
+        str(run.get("launch_profile_id") or "") != "research-report"
+        or str(run.get("product_mode") or "") != "standalone"
+        or profile.get("research_contract_version") != "research-report/v2"
+    ):
+        return denied
+
+    text = str(query or "").strip()
+    control = (run.get("document_brief") or {}).get("document_control") or {}
+    classification = str(control.get("classification") or "").strip().lower()
+    redacted = _redact_text(text, _enabled=True)
+    blocked = bool(
+        not text
+        or classification in {"restricted", "custom", "private", "confidential"}
+        or redacted != text
+        or re.search(r"(?:^|\s)(?:file://|~[/\\]|/[A-Za-z0-9_.-]+/|[A-Za-z]:[/\\])", text)
+        or re.search(r"https?://[^\s/@:]+:[^\s/@]+@", text, flags=re.IGNORECASE)
+        or re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", text, flags=re.IGNORECASE)
+        or re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", text)
+        or re.search(r"(?<!\d)\d{8,}(?!\d)", text)
+        or any(term in text for term in _RESEARCH_INTERNAL_TERMS)
+    )
+    if blocked:
+        return {
+            "authorized": False,
+            "reason_code": "policy_blocked",
+            "safe_reason": "研究查询命中公共外发的数据防泄漏规则",
+        }
+    return {
+        "authorized": True,
+        "safe_query": text,
+        **RESEARCH_PUBLIC_QUERY_POLICY,
+        "reason_code": "",
+        "safe_reason": "",
+    }
 
 
 def _error(field: str, code: str, message: str) -> dict:

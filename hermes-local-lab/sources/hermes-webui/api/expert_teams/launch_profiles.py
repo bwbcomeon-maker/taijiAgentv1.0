@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from .contracts import ContractError
+from .data_egress import RESEARCH_PUBLIC_QUERY_POLICY
 from .document_capabilities import resolve_document_capability
 
 
@@ -99,6 +100,7 @@ _LAUNCH_PROFILES = {
     "research-report": {
         "id": "research-report",
         "research_contract_version": "research-report/v2",
+        "research_query_egress_policy": deepcopy(RESEARCH_PUBLIC_QUERY_POLICY),
         "capability_id": "research-report",
         "team_id": DEEP_RESEARCH_TEAM_ID,
         "document_type": "research_report",

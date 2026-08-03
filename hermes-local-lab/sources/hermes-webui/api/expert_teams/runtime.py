@@ -29,7 +29,7 @@ from .contracts import (
     patch_document_brief,
     validate_document_brief,
 )
-from .data_egress import load_model_policy_registry
+from .data_egress import authorize_research_public_query, load_model_policy_registry
 from .source_context import (
     SourceContextError,
     allows_empty_source_context,
@@ -94,6 +94,8 @@ _BASE_WPS_VISUAL_CHECKS = {
 }
 _START_LOCKS: dict[str, threading.RLock] = {}
 _START_LOCKS_GUARD = threading.Lock()
+_RESEARCH_RETRIEVAL_OWNERS: dict[tuple[str, str], str] = {}
+_RESEARCH_RETRIEVAL_OWNERS_LOCK = threading.Lock()
 _RUN_FILE_LOCK_DEPTH = threading.local()
 _EXPECTED_CURSOR_UNSET = object()
 _STANDALONE_START_FIELDS = frozenset(
@@ -1952,10 +1954,6 @@ def bind_initial_standalone_source_context(workspace: Path, run: dict) -> dict:
 
 
 _RESEARCH_RETRIEVAL_SCHEMA = "research-retrieval/v1"
-_RESEARCH_QUERY_POLICY = {
-    "policy_id": "research-public-query/v1",
-    "trust_zone": "public_web",
-}
 
 
 def _research_retrieval_artifact(run: dict) -> dict:
@@ -2002,7 +2000,9 @@ def research_retrieval_fingerprint(run: dict) -> str:
         },
         "core_question": str(payload.get("core_question") or "").strip(),
         "subquestions": [str(item).strip() for item in payload.get("subquestions") or [] if str(item).strip()],
-        "query_policy": _RESEARCH_QUERY_POLICY,
+        "query_policy": deepcopy(
+            (run.get("launch_profile_snapshot") or {}).get("research_query_egress_policy") or {}
+        ),
     }
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
@@ -2024,36 +2024,7 @@ def _research_query(run: dict) -> tuple[str, tuple[str, ...]]:
 
 
 def _research_query_authorizer(run: dict):
-    from api.helpers import _redact_text
-    from .research_sources import QueryAuthorizationDecision
-
-    document_control = (run.get("document_brief") or {}).get("document_control") or {}
-    classification = str(document_control.get("classification") or "").strip().lower()
-    explicitly_restricted = classification in {"restricted", "custom", "private", "confidential"}
-
-    def authorize(query: str) -> QueryAuthorizationDecision:
-        text = str(query or "").strip()
-        redacted = _redact_text(text, _enabled=True)
-        local_path = bool(
-            re.search(r"(?:^|\s)(?:file://|~[/\\]|/[A-Za-z0-9_.-]+/|[A-Za-z]:[/\\])", text)
-        )
-        credentialed_url = bool(re.search(r"https?://[^\s/@:]+:[^\s/@]+@", text, flags=re.IGNORECASE))
-        if explicitly_restricted or not text or redacted != text or local_path or credentialed_url:
-            return QueryAuthorizationDecision(
-                False,
-                reason_code="policy_blocked",
-                safe_reason="研究查询包含不可向公共服务发送的内容",
-            )
-        return QueryAuthorizationDecision(
-            True,
-            safe_query=text,
-            policy_id=_RESEARCH_QUERY_POLICY["policy_id"],
-            trust_zone=_RESEARCH_QUERY_POLICY["trust_zone"],
-            reason_code="",
-            safe_reason="",
-        )
-
-    return authorize
+    return lambda query: authorize_research_public_query(run, query)
 
 
 def _research_coverage(subquestions, hits):
@@ -2085,47 +2056,56 @@ def _research_local_roots(run: dict) -> list[Path]:
 
 
 def _research_materialized_refs(workspace: Path, run_id: str, persisted: list[dict]) -> list[dict]:
-    """Recover only immutable sources already bound to this exact Run."""
+    """Verify only refs durably receipted by the current retrieval state."""
     candidates = [deepcopy(item) for item in persisted if isinstance(item, dict)]
-    workspace_root = Path(workspace).resolve()
-    source_root = workspace_root / ".taiji" / "expert-teams" / "sources" / str(run_id)
-    current = workspace_root
-    for part in source_root.relative_to(workspace_root).parts:
-        current = current / part
-        if current.is_symlink():
-            return candidates
-    if source_root.is_dir() and not source_root.is_symlink():
-        for manifest_path in source_root.glob("*.source.json"):
-            if manifest_path.is_symlink() or not manifest_path.is_file():
-                continue
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, ValueError):
-                continue
-            source_id = str(manifest.get("source_id") or "")
-            candidates.append(
-                {
-                    "source_id": source_id,
-                    "kind": str(manifest.get("kind") or ""),
-                    "label": str(manifest.get("label") or source_id),
-                    "locator": (
-                        Path(".taiji")
-                        / "expert-teams"
-                        / "sources"
-                        / str(run_id)
-                        / f"{source_id}.txt"
-                    ).as_posix(),
-                    "sha256": str(manifest.get("content_sha256") or ""),
-                }
+    if not candidates:
+        return []
+    resolved, _registry = resolve_source_registry(workspace, run_id, candidates)
+    return resolved
+
+
+def _research_receipted_hits(workspace: Path, run_id: str, persisted: list[dict]):
+    from .research_sources import ResearchSourceHit
+
+    refs = _research_materialized_refs(workspace, run_id, persisted)
+    if not refs:
+        return [], []
+    refs, registry = resolve_source_registry(workspace, run_id, refs)
+    hits = []
+    root = Path(workspace).resolve()
+    for ref in refs:
+        entry = registry[str(ref.get("source_id") or "")]
+        content = (root / str(entry.get("locator") or "")).read_text(encoding="utf-8")
+        hits.append(
+            ResearchSourceHit.create(
+                source_kind=str(entry.get("kind") or ""),
+                safe_title=str(entry.get("label") or entry.get("source_id") or ""),
+                locator=str(entry.get("origin_locator") or entry.get("locator") or ""),
+                content=content,
+                retrieved_at=str(entry.get("retrieved_at") or ""),
             )
-    deduplicated = []
-    seen = set()
-    for ref in candidates:
-        source_id = str(ref.get("source_id") or "")
-        if source_id and source_id not in seen:
-            deduplicated.append(ref)
-            seen.add(source_id)
-    return deduplicated
+        )
+    return refs, hits
+
+
+def _claim_research_retrieval_owner(workspace: Path, run: dict) -> tuple[tuple[str, str], str]:
+    key = (str(Path(workspace).resolve()), str(run.get("run_id") or ""))
+    token = uuid.uuid4().hex
+    with _RESEARCH_RETRIEVAL_OWNERS_LOCK:
+        if key in _RESEARCH_RETRIEVAL_OWNERS:
+            raise ExpertTeamStateConflict(
+                "retrieval_in_progress",
+                "research retrieval is already in progress",
+                run,
+            )
+        _RESEARCH_RETRIEVAL_OWNERS[key] = token
+    return key, token
+
+
+def _release_research_retrieval_owner(key: tuple[str, str], token: str) -> None:
+    with _RESEARCH_RETRIEVAL_OWNERS_LOCK:
+        if _RESEARCH_RETRIEVAL_OWNERS.get(key) == token:
+            _RESEARCH_RETRIEVAL_OWNERS.pop(key, None)
 
 
 @_serialized_run_mutation
@@ -2139,24 +2119,56 @@ def _reserve_research_retrieval(workspace: Path, run_id: str, expected_version: 
         raise ExpertTeamStateConflict("version_conflict", "research retrieval run version changed", current)
     recovery = bool(state.get("fingerprint") == fingerprint and state.get("status") in {"in_progress", "uncertain"})
     reservation_id = str(state.get("reservation_id") or uuid.uuid4()) if recovery else str(uuid.uuid4())
+    previous = state if recovery else {}
     next_run = deepcopy(current)
     next_run["research_retrieval_state"] = {
         "schema_version": _RESEARCH_RETRIEVAL_SCHEMA,
         "reservation_id": reservation_id,
         "fingerprint": fingerprint,
         "status": "in_progress",
-        "started_at": str(state.get("started_at") or _now()),
+        "started_at": str(previous.get("started_at") or _now()),
         "completed_at": "",
-        "public_status": deepcopy(state.get("public_status") or {}),
-        "local_status": deepcopy(state.get("local_status") or {}),
-        "tier_decisions": deepcopy(state.get("tier_decisions") or []),
-        "materialized_refs": deepcopy(state.get("materialized_refs") or []),
-        "snapshot_ref": deepcopy(state.get("snapshot_ref") or {}),
+        "public_status": deepcopy(previous.get("public_status") or {}),
+        "local_status": deepcopy(previous.get("local_status") or {}),
+        "tier_decisions": deepcopy(previous.get("tier_decisions") or []),
+        "materialized_refs": deepcopy(previous.get("materialized_refs") or []),
+        "snapshot_ref": deepcopy(previous.get("snapshot_ref") or {}),
         "safe_reason": "",
     }
     next_run["version"] = int(current.get("version") or 0) + 1
     next_run["updated_at"] = _now()
     return write_run(workspace, _sync_derived(next_run)), "recovery" if recovery else "reserved"
+
+
+@_serialized_run_mutation
+def _record_research_materialized_ref(
+    workspace: Path,
+    run_id: str,
+    expected_version: int,
+    fingerprint: str,
+    reservation_id: str,
+    ref: dict,
+) -> dict:
+    current = read_run(workspace, run_id)
+    state = current.get("research_retrieval_state") if isinstance(current.get("research_retrieval_state"), dict) else {}
+    if int(current.get("version") or 0) != int(expected_version):
+        raise ExpertTeamStateConflict("version_conflict", "research retrieval receipt version changed", current)
+    if (
+        state.get("fingerprint") != fingerprint
+        or state.get("reservation_id") != reservation_id
+        or state.get("status") != "in_progress"
+    ):
+        raise ExpertTeamStateConflict("retrieval_reservation_missing", "research retrieval receipt is stale", current)
+    refs = [deepcopy(item) for item in state.get("materialized_refs") or [] if isinstance(item, dict)]
+    source_id = str(ref.get("source_id") or "")
+    if any(str(item.get("source_id") or "") == source_id for item in refs):
+        return _sync_derived(current)
+    resolved, _registry = resolve_source_registry(workspace, run_id, [*refs, ref])
+    next_run = deepcopy(current)
+    next_run["research_retrieval_state"]["materialized_refs"] = resolved
+    next_run["version"] = int(current.get("version") or 0) + 1
+    next_run["updated_at"] = _now()
+    return write_run(workspace, _sync_derived(next_run))
 
 
 @_serialized_run_mutation
@@ -2218,7 +2230,7 @@ def _complete_research_retrieval(
     return write_run(workspace, _sync_derived(next_run))
 
 
-def prepare_research_sources_for_gateway(
+def _prepare_research_sources_for_gateway_owned(
     workspace: Path,
     run: dict,
     *,
@@ -2246,6 +2258,13 @@ def prepare_research_sources_for_gateway(
         return reserved
 
     query, subquestions = _research_query(reserved)
+    state = reserved.get("research_retrieval_state") or {}
+    reservation_id = str(state.get("reservation_id") or "")
+    materialized, recovered_hits = _research_receipted_hits(
+        workspace,
+        str(run.get("run_id") or ""),
+        list(state.get("materialized_refs") or []),
+    )
     actual_web = web_adapter or HermesWebResearchSourceAdapter()
     if mode == "recovery":
         class _InterruptedPublicAdapter:
@@ -2267,12 +2286,7 @@ def prepare_research_sources_for_gateway(
             coverage_evaluator=_research_coverage,
         )
     )
-    materialized = _research_materialized_refs(
-        workspace,
-        str(run.get("run_id") or ""),
-        list((reserved.get("research_retrieval_state") or {}).get("materialized_refs") or []),
-    )
-    successful_hits = []
+    successful_hits = list(recovered_hits)
     failed_kinds = set()
     for hit in result.hits:
         adapter = actual_web if hit.source_kind == "approved_public" else actual_local
@@ -2282,7 +2296,15 @@ def prepare_research_sources_for_gateway(
             failed_kinds.add(hit.source_kind)
             continue
         if isinstance(ref, dict):
-            materialized.append(ref)
+            reserved = _record_research_materialized_ref(
+                workspace,
+                str(run.get("run_id") or ""),
+                int(reserved.get("version") or 0),
+                fingerprint,
+                reservation_id,
+                ref,
+            )
+            materialized = list((reserved.get("research_retrieval_state") or {}).get("materialized_refs") or [])
             successful_hits.append(hit)
         else:
             failed_kinds.add(hit.source_kind)
@@ -2359,6 +2381,28 @@ def prepare_research_sources_for_gateway(
             ),
         },
     )
+
+
+def prepare_research_sources_for_gateway(
+    workspace: Path,
+    run: dict,
+    *,
+    web_adapter=None,
+    local_adapter=None,
+) -> dict:
+    """Freeze research evidence under one process-local active owner."""
+    if not _research_retrieval_eligible(run):
+        return run
+    owner_key, owner_token = _claim_research_retrieval_owner(workspace, run)
+    try:
+        return _prepare_research_sources_for_gateway_owned(
+            workspace,
+            run,
+            web_adapter=web_adapter,
+            local_adapter=local_adapter,
+        )
+    finally:
+        _release_research_retrieval_owner(owner_key, owner_token)
 
 
 def latest_expert_team_run_for_session(workspace: Path, session_id: str) -> dict:

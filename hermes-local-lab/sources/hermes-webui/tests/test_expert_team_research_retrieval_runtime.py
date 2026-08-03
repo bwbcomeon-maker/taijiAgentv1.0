@@ -1,15 +1,19 @@
 import copy
+import hashlib
 import json
+import threading
+
+import pytest
 
 
-def _research_run(expert_teams, tmp_path):
+def _research_run(expert_teams, tmp_path, *, core_question="本地优先 AI 助理如何落地", subquestions=None):
     from api.expert_teams import runtime
 
     run = expert_teams.build_standalone_expert_team_run(
         {
             "launch_profile_id": "research-report",
             "session_id": "research-runtime",
-            "prompt": "请评估本地优先 AI 助理的部署成本",
+            "prompt": core_question,
             "idempotency_key": "research-runtime-start",
         },
         run_id="et-research-runtime",
@@ -22,8 +26,8 @@ def _research_run(expert_teams, tmp_path):
         "artifact_type": "research_charter",
         "stage_attempt": 1,
         "payload": {
-            "core_question": "本地优先 AI 助理如何落地",
-            "subquestions": ["部署成本如何"],
+            "core_question": core_question,
+            "subquestions": list(subquestions or ["部署成本如何"]),
         },
         "validation_status": "valid",
         "blocking_issues": [],
@@ -348,3 +352,202 @@ def test_old_stage_bypasses_retrieval_and_orphan_scan_rejects_symlink_parent(tmp
     manifest.write_text('{"source_id":"PUB-forged","kind":"approved_public"}', encoding="utf-8")
     (symlink_workspace / ".taiji").symlink_to(outside, target_is_directory=True)
     assert runtime._research_materialized_refs(symlink_workspace, direction["run_id"], []) == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "我司客户报价与续约风险如何",
+        "未公开的项目代号是太极-A7",
+        "联系 research@example.com 调研",
+        "联系手机 13800138000 调研",
+        "内部合同编号 1234567890123456 的风险",
+    ],
+)
+def test_server_owned_research_egress_policy_blocks_sensitive_queries(tmp_path, monkeypatch, query):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(expert_teams, tmp_path, core_question=query)
+    web = _Web()
+    _memory_storage(monkeypatch, runtime, run)
+    result = expert_teams.prepare_research_sources_for_gateway(
+        tmp_path,
+        run,
+        web_adapter=web,
+        local_adapter=_LocalUnavailable(),
+    )
+
+    assert web.search_calls == 0
+    assert result["research_retrieval_state"]["public_status"]["reason"] == "policy_blocked"
+
+
+def test_research_egress_policy_is_frozen_in_profile_and_old_snapshot_fails_closed(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    safe = _research_run(expert_teams, tmp_path / "safe")
+    policy = safe["launch_profile_snapshot"]["research_query_egress_policy"]
+    assert policy == {
+        "policy_id": "research-public-query/v1",
+        "version": 1,
+        "authorization_basis": "user_initiated_standalone_research",
+        "trust_zone": "public_web",
+    }
+    _memory_storage(monkeypatch, runtime, safe)
+    safe_web = _Web()
+    safe_result = expert_teams.prepare_research_sources_for_gateway(
+        tmp_path / "safe", safe, web_adapter=safe_web, local_adapter=_LocalUnavailable()
+    )
+    assert safe_web.search_calls == 1
+    assert safe_result["research_retrieval_state"]["public_status"]["policy_id"] == policy["policy_id"]
+
+    old_workspace = tmp_path / "old"
+    old = _research_run(expert_teams, old_workspace)
+    old["launch_profile_snapshot"].pop("research_query_egress_policy", None)
+    _memory_storage(monkeypatch, runtime, old)
+    old_web = _Web()
+    old_result = expert_teams.prepare_research_sources_for_gateway(
+        old_workspace, old, web_adapter=old_web, local_adapter=_LocalUnavailable()
+    )
+    assert old_web.search_calls == 0
+    assert old_result["research_retrieval_state"]["public_status"]["reason"] == "data_egress_not_authorized"
+
+
+def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingWeb(_Web):
+        async def search(self, query, *, limit=5, policy_decision=None):
+            entered.set()
+            assert release.wait(timeout=5)
+            return await super().search(query, limit=limit, policy_decision=policy_decision)
+
+    run = _research_run(expert_teams, tmp_path)
+    cell = _memory_storage(monkeypatch, runtime, run)
+    web = BlockingWeb()
+    first = []
+
+    def invoke_first():
+        try:
+            first.append(
+                expert_teams.prepare_research_sources_for_gateway(
+                    tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
+                )
+            )
+        except Exception as exc:  # pragma: no cover - asserted below
+            first.append(exc)
+
+    worker = threading.Thread(target=invoke_first)
+    worker.start()
+    assert entered.wait(timeout=5)
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as conflict:
+        expert_teams.prepare_research_sources_for_gateway(
+            tmp_path,
+            copy.deepcopy(cell["run"]),
+            web_adapter=web,
+            local_adapter=_LocalUnavailable(),
+        )
+    assert conflict.value.code == "retrieval_in_progress"
+    release.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert web.search_calls == 1
+    assert len(first) == 1 and isinstance(first[0], dict)
+    assert cell["run"]["research_retrieval_state"]["status"] == "completed"
+    assert cell["run"]["research_retrieval_state"]["public_status"]["status"] == "success"
+
+
+def test_new_fingerprint_reservation_drops_old_receipts_and_snapshot(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(expert_teams, tmp_path)
+    run["research_retrieval_state"] = {
+        "schema_version": "research-retrieval/v1",
+        "reservation_id": "old-reservation",
+        "fingerprint": "f" * 64,
+        "status": "completed",
+        "started_at": "2026-08-03T09:00:00+00:00",
+        "completed_at": "2026-08-03T09:01:00+00:00",
+        "public_status": {"status": "success", "count": 1},
+        "local_status": {},
+        "tier_decisions": [{"tier": "public", "status": "success"}],
+        "materialized_refs": [{"source_id": "PUB-OLD", "kind": "approved_public"}],
+        "snapshot_ref": {"snapshot_id": "research-evidence-old"},
+        "safe_reason": "old",
+    }
+    _memory_storage(monkeypatch, runtime, run)
+    fingerprint = runtime.research_retrieval_fingerprint(run)
+    reserved, mode = runtime._reserve_research_retrieval(
+        tmp_path, run["run_id"], run["version"], fingerprint
+    )
+
+    assert mode == "reserved"
+    state = reserved["research_retrieval_state"]
+    assert state["fingerprint"] == fingerprint
+    assert state["materialized_refs"] == []
+    assert state["public_status"] == {}
+    assert state["local_status"] == {}
+    assert state["tier_decisions"] == []
+    assert state["snapshot_ref"] == {}
+
+
+def test_recovery_uses_only_receipted_refs_for_coverage_and_skips_model(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(expert_teams, tmp_path)
+    cell = _memory_storage(monkeypatch, runtime, run)
+    web = _Web()
+    original_complete = runtime._complete_research_retrieval
+
+    def crash_before_complete(*args, **kwargs):
+        raise RuntimeError("crash after receipt")
+
+    monkeypatch.setattr(runtime, "_complete_research_retrieval", crash_before_complete)
+    with pytest.raises(RuntimeError, match="crash after receipt"):
+        expert_teams.prepare_research_sources_for_gateway(
+            tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
+        )
+    state = cell["run"]["research_retrieval_state"]
+    assert state["status"] == "in_progress"
+    assert len(state["materialized_refs"]) == 1
+
+    monkeypatch.setattr(runtime, "_complete_research_retrieval", original_complete)
+    recovered = expert_teams.prepare_research_sources_for_gateway(
+        tmp_path,
+        copy.deepcopy(cell["run"]),
+        web_adapter=web,
+        local_adapter=_LocalUnavailable(),
+    )
+
+    assert web.search_calls == 1
+    tiers = recovered["research_retrieval_state"]["tier_decisions"]
+    assert not any(item["tier"] == "model" for item in tiers)
+    assert recovered["research_retrieval_state"]["public_status"]["count"] == 1
+    assert recovered["research_retrieval_state"]["public_status"]["coverage"] == "sufficient"
+
+
+def test_unreceipted_orphan_manifest_is_never_recovered(tmp_path):
+    from api.expert_teams import runtime
+    from api.expert_teams.source_registry import materialize_approved_source
+
+    content = "部署成本如何：孤儿资料"
+    ref = materialize_approved_source(
+        tmp_path,
+        "et-orphan",
+        kind="approved_public",
+        label="orphan",
+        origin_locator="https://example.test/orphan",
+        content=content,
+        retrieved_at="2026-08-03T10:00:00+00:00",
+        content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
+    assert ref["source_id"]
+    assert runtime._research_materialized_refs(tmp_path, "et-orphan", []) == []

@@ -693,6 +693,45 @@ def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(m
     assert len(requests) == 1
 
 
+def test_execution_route_projects_retrieval_in_progress_as_transient_conflict(monkeypatch, tmp_path):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    dispatches = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+
+    def in_progress(_workspace, candidate):
+        raise expert_teams.ExpertTeamStateConflict(
+            "retrieval_in_progress",
+            "research retrieval is already in progress",
+            candidate,
+        )
+
+    monkeypatch.setattr(expert_teams, "prepare_research_sources_for_gateway", in_progress)
+    monkeypatch.setattr(
+        runtime_adapter.LegacyJournalRuntimeAdapter,
+        "start_run",
+        lambda self, request: dispatches.append(request),
+    )
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 409
+    assert payload["code"] == "retrieval_in_progress"
+    assert payload["run"]["workflow_state"] == "ready_to_generate"
+    assert payload["run"]["workflow_state"] != "generation_failed"
+    assert payload["run"].get("last_execution_error_code") != "retrieval_in_progress"
+    assert dispatches == []
+
+
 def test_execution_route_provider_preflight_failure_makes_zero_runtime_calls(
     monkeypatch, tmp_path
 ):
