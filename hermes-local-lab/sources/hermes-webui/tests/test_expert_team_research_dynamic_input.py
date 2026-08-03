@@ -622,7 +622,8 @@ def test_stage_input_ref_survives_real_build_and_completion_round_trip(tmp_path,
         task_id="direction",
     )
 
-    assert completed["workflow_state"] == "awaiting_review"
+    assert completed["workflow_state"] == "ready_to_generate"
+    assert completed["approved_stage_artifact_refs"]["direction"]["artifact_id"] == "direction:1"
     artifact = completed["stage_artifacts"][-1]
     assert artifact["stage_attempt"] == reservation["stage_attempt"]
     assert artifact["input_refs"] == gateway["input_refs"]
