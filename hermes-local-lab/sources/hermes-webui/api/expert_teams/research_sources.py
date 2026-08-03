@@ -627,10 +627,32 @@ async def orchestrate_research_sources(
     query_authorizer: Callable[[str], object] | None = None,
     research_subquestions: Sequence[str] = (),
     coverage_evaluator: Callable[[tuple[str, ...], tuple[ResearchSourceHit, ...]], object] | None = None,
+    existing_hits: Sequence[ResearchSourceHit] = (),
     limit: int = 5,
 ) -> ResearchFallbackResult:
+    required_subquestions = tuple(
+        dict.fromkeys(_safe_text(item, maximum=500) for item in research_subquestions if _safe_text(item, maximum=500))
+    )
+    existing = _deduplicate_hits(
+        tuple(hit for hit in existing_hits if hit.source_kind in _ALLOWED_SOURCE_KINDS)
+    )
+    existing_public = tuple(hit for hit in existing if hit.source_kind == "approved_public")
+    existing_local = tuple(hit for hit in existing if hit.source_kind == "approved_internal")
+    existing_public_evaluation = await _evaluate_coverage(
+        coverage_evaluator,
+        required_subquestions,
+        existing_public,
+    )
     decision = await _authorize_query(query_authorizer, query)
-    if not decision.authorized:
+    if existing_public_evaluation.coverage == "sufficient":
+        web = AdapterSearchResult(
+            hits=existing_public,
+            coverage="sufficient",
+            status="reused",
+            reason_code="",
+            safe_reason="已恢复的公共证据已覆盖研究问题",
+        )
+    elif not decision.authorized:
         web = AdapterSearchResult(
             status="denied",
             reason_code=decision.reason_code or "data_egress_not_authorized",
@@ -652,34 +674,63 @@ async def orchestrate_research_sources(
                 code = classify_adapter_exception(exc)
                 web = AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
 
-    required_subquestions = tuple(
-        dict.fromkeys(_safe_text(item, maximum=500) for item in research_subquestions if _safe_text(item, maximum=500))
+    public_hits = _deduplicate_hits(
+        (*existing_public, *(hit for hit in web.hits if hit.source_kind == "approved_public"))
     )
-    public_hits = tuple(hit for hit in web.hits if hit.source_kind == "approved_public")
     public_evaluation = await _evaluate_coverage(coverage_evaluator, required_subquestions, public_hits)
-    local_hits: tuple[ResearchSourceHit, ...] = ()
-    local_evaluation = CoverageEvaluation("none")
+    local_hits: tuple[ResearchSourceHit, ...] = existing_local
+    local_evaluation = await _evaluate_coverage(coverage_evaluator, required_subquestions, local_hits)
     local = AdapterSearchResult(
+        hits=local_hits,
         status="skipped",
         reason_code="not_needed",
         safe_reason="公共资料已覆盖研究问题，无需查询内部资料",
     )
     if public_evaluation.coverage != "sufficient":
-        local_probe = await _safe_probe(local_adapter)
-        if not local_probe.available:
+        recovered_evaluation = await _evaluate_coverage(
+            coverage_evaluator,
+            required_subquestions,
+            _deduplicate_hits((*public_hits, *existing_local)),
+        )
+        if recovered_evaluation.coverage == "sufficient":
             local = AdapterSearchResult(
-                status="unavailable",
-                reason_code=local_probe.reason_code or "no_results",
-                safe_reason=local_probe.safe_reason or "未配置可访问的内部资料目录",
+                hits=existing_local,
+                coverage="sufficient",
+                status="reused",
+                reason_code="",
+                safe_reason="已恢复的证据已覆盖研究问题",
             )
         else:
-            try:
-                local = await local_adapter.search(query, limit=limit)
-                local_hits = tuple(hit for hit in local.hits if hit.source_kind == "approved_internal")
-                local_evaluation = await _evaluate_coverage(coverage_evaluator, required_subquestions, local_hits)
-            except Exception as exc:
-                code = classify_adapter_exception(exc)
-                local = AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
+            local_probe = await _safe_probe(local_adapter)
+            if not local_probe.available:
+                local = AdapterSearchResult(
+                    hits=existing_local,
+                    status="unavailable",
+                    reason_code=local_probe.reason_code or "no_results",
+                    safe_reason=local_probe.safe_reason or "未配置可访问的内部资料目录",
+                )
+            else:
+                try:
+                    searched_local = await local_adapter.search(query, limit=limit)
+                    local_hits = _deduplicate_hits(
+                        (*existing_local, *(hit for hit in searched_local.hits if hit.source_kind == "approved_internal"))
+                    )
+                    local = AdapterSearchResult(
+                        hits=local_hits,
+                        coverage=searched_local.coverage,
+                        status=searched_local.status,
+                        reason_code=searched_local.reason_code,
+                        safe_reason=searched_local.safe_reason,
+                    )
+                    local_evaluation = await _evaluate_coverage(coverage_evaluator, required_subquestions, local_hits)
+                except Exception as exc:
+                    code = classify_adapter_exception(exc)
+                    local = AdapterSearchResult(
+                        hits=existing_local,
+                        status="failed",
+                        reason_code=code,
+                        safe_reason=_SAFE_REASONS[code],
+                    )
 
     combined = _deduplicate_hits((*public_hits, *local_hits))
     final_evaluation = (

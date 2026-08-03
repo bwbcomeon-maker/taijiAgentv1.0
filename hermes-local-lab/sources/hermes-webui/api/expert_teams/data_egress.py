@@ -11,6 +11,7 @@ RESEARCH_PUBLIC_QUERY_POLICY = {
     "version": 1,
     "authorization_basis": "user_initiated_standalone_research",
     "trust_zone": "public_web",
+    "projection_version": "research-public-topic/v1",
 }
 _RESEARCH_INTERNAL_TERMS = (
     "我司",
@@ -22,6 +23,26 @@ _RESEARCH_INTERNAL_TERMS = (
     "保密",
     "敏感",
     "项目代号",
+    "客户",
+    "合同",
+    "报价",
+    "回款",
+    "商业关系",
+)
+_RESEARCH_PUBLIC_TOPIC_TERMS = (
+    "本地优先",
+    "AI 助理",
+    "人工智能",
+    "企业办公",
+    "部署成本",
+    "行业趋势",
+    "技术架构",
+    "数据安全",
+    "开源软件",
+    "大语言模型",
+    "生成式人工智能",
+    "知识管理",
+    "办公自动化",
 )
 
 
@@ -59,19 +80,30 @@ def authorize_research_public_query(run: dict, query: str) -> dict:
         return denied
 
     text = str(query or "").strip()
+    original_request = str(run.get("prompt") or "").strip()
     control = (run.get("document_brief") or {}).get("document_control") or {}
     classification = str(control.get("classification") or "").strip().lower()
-    redacted = _redact_text(text, _enabled=True)
+    def blocked_by_dlp(value: str) -> bool:
+        return bool(
+            not value
+            or _redact_text(value, _enabled=True) != value
+            or re.search(r"(?:^|\s)(?:file://|~[/\\]|/[A-Za-z0-9_.-]+/|[A-Za-z]:[/\\])", value)
+            or re.search(r"https?://[^\s/@:]+:[^\s/@]+@", value, flags=re.IGNORECASE)
+            or re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", value, flags=re.IGNORECASE)
+            or re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", value)
+            or re.search(r"(?<!\d)\d{8,}(?!\d)", value)
+            or any(term in value for term in _RESEARCH_INTERNAL_TERMS)
+        )
+
+    original_topics = tuple(term for term in _RESEARCH_PUBLIC_TOPIC_TERMS if term in original_request)
+    direction_topics = tuple(term for term in _RESEARCH_PUBLIC_TOPIC_TERMS if term in text)
     blocked = bool(
-        not text
-        or classification in {"restricted", "custom", "private", "confidential"}
-        or redacted != text
-        or re.search(r"(?:^|\s)(?:file://|~[/\\]|/[A-Za-z0-9_.-]+/|[A-Za-z]:[/\\])", text)
-        or re.search(r"https?://[^\s/@:]+:[^\s/@]+@", text, flags=re.IGNORECASE)
-        or re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", text, flags=re.IGNORECASE)
-        or re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", text)
-        or re.search(r"(?<!\d)\d{8,}(?!\d)", text)
-        or any(term in text for term in _RESEARCH_INTERNAL_TERMS)
+        classification in {"restricted", "custom", "private", "confidential"}
+        or blocked_by_dlp(original_request)
+        or blocked_by_dlp(text)
+        or not original_topics
+        or not direction_topics
+        or not set(original_topics).intersection(direction_topics)
     )
     if blocked:
         return {
@@ -81,7 +113,7 @@ def authorize_research_public_query(run: dict, query: str) -> dict:
         }
     return {
         "authorized": True,
-        "safe_query": text,
+        "safe_query": " ".join(direction_topics),
         **RESEARCH_PUBLIC_QUERY_POLICY,
         "reason_code": "",
         "safe_reason": "",

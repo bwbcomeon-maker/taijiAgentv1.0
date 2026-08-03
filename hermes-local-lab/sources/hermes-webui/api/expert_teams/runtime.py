@@ -2284,11 +2284,15 @@ def _prepare_research_sources_for_gateway_owned(
             query_authorizer=_research_query_authorizer(reserved),
             research_subquestions=subquestions,
             coverage_evaluator=_research_coverage,
+            existing_hits=recovered_hits,
         )
     )
     successful_hits = list(recovered_hits)
+    recovered_hashes = {hit.content_sha256 for hit in recovered_hits}
     failed_kinds = set()
     for hit in result.hits:
+        if hit.content_sha256 in recovered_hashes:
+            continue
         adapter = actual_web if hit.source_kind == "approved_public" else actual_local
         try:
             ref = asyncio.run(adapter.materialize(hit, workspace=workspace, run_id=str(run.get("run_id") or "")))

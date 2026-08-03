@@ -6,14 +6,21 @@ import threading
 import pytest
 
 
-def _research_run(expert_teams, tmp_path, *, core_question="本地优先 AI 助理如何落地", subquestions=None):
+def _research_run(
+    expert_teams,
+    tmp_path,
+    *,
+    core_question="本地优先 AI 助理如何落地",
+    subquestions=None,
+    original_request=None,
+):
     from api.expert_teams import runtime
 
     run = expert_teams.build_standalone_expert_team_run(
         {
             "launch_profile_id": "research-report",
             "session_id": "research-runtime",
-            "prompt": core_question,
+            "prompt": original_request or core_question,
             "idempotency_key": "research-runtime-start",
         },
         run_id="et-research-runtime",
@@ -58,6 +65,7 @@ def _research_run(expert_teams, tmp_path, *, core_question="本地优先 AI 助�
 class _Web:
     def __init__(self):
         self.search_calls = 0
+        self.queries = []
 
     async def probe(self):
         from api.expert_teams.research_sources import ProbeResult
@@ -68,7 +76,8 @@ class _Web:
         from api.expert_teams.research_sources import AdapterSearchResult, ResearchSourceHit
 
         self.search_calls += 1
-        assert query == "本地优先 AI 助理如何落地 部署成本如何"
+        self.queries.append(query)
+        assert query == "本地优先 AI 助理 部署成本"
         assert policy_decision.policy_id == "research-public-query/v1"
         hit = ResearchSourceHit.create(
             source_kind="approved_public",
@@ -99,6 +108,24 @@ class _LocalUnavailable:
         from api.expert_teams.research_sources import ProbeResult
 
         return ProbeResult(False, "no_results", "未配置本地资料")
+
+
+class _CountingLocal:
+    def __init__(self):
+        self.probe_calls = 0
+        self.search_calls = 0
+
+    async def probe(self):
+        from api.expert_teams.research_sources import ProbeResult
+
+        self.probe_calls += 1
+        return ProbeResult(True)
+
+    async def search(self, query, *, limit=5, policy_decision=None):
+        from api.expert_teams.research_sources import AdapterSearchResult
+
+        self.search_calls += 1
+        return AdapterSearchResult(status="empty", reason_code="no_results", safe_reason="无本地结果")
 
 
 class _WebUnavailable:
@@ -393,6 +420,7 @@ def test_research_egress_policy_is_frozen_in_profile_and_old_snapshot_fails_clos
         "version": 1,
         "authorization_basis": "user_initiated_standalone_research",
         "trust_zone": "public_web",
+        "projection_version": "research-public-topic/v1",
     }
     _memory_storage(monkeypatch, runtime, safe)
     safe_web = _Web()
@@ -412,6 +440,66 @@ def test_research_egress_policy_is_frozen_in_profile_and_old_snapshot_fails_clos
     )
     assert old_web.search_calls == 0
     assert old_result["research_retrieval_state"]["public_status"]["reason"] == "data_egress_not_authorized"
+
+
+def test_public_query_projection_blocks_customer_contract_commercial_analysis(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    sensitive = "分析客户甲的合同报价与回款风险"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        core_question=sensitive,
+        subquestions=["客户甲是否存在续约风险"],
+    )
+    web = _Web()
+    _memory_storage(monkeypatch, runtime, run)
+
+    result = expert_teams.prepare_research_sources_for_gateway(
+        tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
+    )
+
+    assert web.search_calls == 0
+    assert result["research_retrieval_state"]["public_status"]["reason"] == "policy_blocked"
+
+
+def test_sensitive_frozen_original_request_cannot_be_bypassed_by_safe_direction(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request="分析客户甲的合同报价与回款风险",
+        core_question="本地优先 AI 助理如何落地",
+        subquestions=["部署成本如何"],
+    )
+    web = _Web()
+    _memory_storage(monkeypatch, runtime, run)
+
+    result = expert_teams.prepare_research_sources_for_gateway(
+        tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
+    )
+
+    assert web.search_calls == 0
+    assert result["research_retrieval_state"]["public_status"]["reason"] == "policy_blocked"
+
+
+def test_safe_public_topic_uses_deidentified_server_projection(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(expert_teams, tmp_path)
+    web = _Web()
+    _memory_storage(monkeypatch, runtime, run)
+    expert_teams.prepare_research_sources_for_gateway(
+        tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
+    )
+
+    assert web.queries == ["本地优先 AI 助理 部署成本"]
+    assert "如何落地" not in web.queries[0]
+    assert "客户" not in web.queries[0]
 
 
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
@@ -532,6 +620,42 @@ def test_recovery_uses_only_receipted_refs_for_coverage_and_skips_model(tmp_path
     assert not any(item["tier"] == "model" for item in tiers)
     assert recovered["research_retrieval_state"]["public_status"]["count"] == 1
     assert recovered["research_retrieval_state"]["public_status"]["coverage"] == "sufficient"
+
+
+def test_recovered_sufficient_public_evidence_skips_healthy_local_probe_and_search(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(expert_teams, tmp_path)
+    cell = _memory_storage(monkeypatch, runtime, run)
+    web = _Web()
+    original_complete = runtime._complete_research_retrieval
+    monkeypatch.setattr(
+        runtime,
+        "_complete_research_retrieval",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("crash after receipt")),
+    )
+    with pytest.raises(RuntimeError, match="crash after receipt"):
+        expert_teams.prepare_research_sources_for_gateway(
+            tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
+        )
+    monkeypatch.setattr(runtime, "_complete_research_retrieval", original_complete)
+    local = _CountingLocal()
+
+    recovered = expert_teams.prepare_research_sources_for_gateway(
+        tmp_path,
+        copy.deepcopy(cell["run"]),
+        web_adapter=web,
+        local_adapter=local,
+    )
+
+    assert web.search_calls == 1
+    assert local.probe_calls == 0
+    assert local.search_calls == 0
+    assert not any(
+        item["tier"] == "model"
+        for item in recovered["research_retrieval_state"]["tier_decisions"]
+    )
 
 
 def test_unreceipted_orphan_manifest_is_never_recovered(tmp_path):
