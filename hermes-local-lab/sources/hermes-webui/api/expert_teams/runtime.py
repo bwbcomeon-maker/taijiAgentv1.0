@@ -3818,6 +3818,39 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         raise ValueError("Expert team cannot request stage input in current state")
     synced = _sync_derived(deepcopy(run))
     current = synced.get("current_stage") if isinstance(synced.get("current_stage"), dict) else {}
+    research_v2 = _research_retrieval_eligible(synced)
+    if research_v2:
+        category = str(body.get("category") or "").strip()
+        reason = str(body.get("reason") or "").strip()
+        if category not in {"scope", "object", "caliber"} or reason != "core_conclusion_ambiguity":
+            raise ExpertTeamStateConflict(
+                "research_stage_input_not_allowed",
+                "research v2 only permits blocking questions about the core conclusion boundary",
+                run,
+            )
+        dynamic_input_count = int(run.get("research_dynamic_input_count") or 0)
+        if dynamic_input_count >= 2:
+            assumptions = [
+                deepcopy(item)
+                for item in run.get("research_boundary_assumptions") or []
+                if isinstance(item, dict)
+            ]
+            assumptions.append(
+                {
+                    "scope": "conclusion",
+                    "stage_id": str(current.get("task_id") or current.get("id") or ""),
+                    "assumption": str(body.get("conservative_assumption") or "").strip(),
+                    "impact": str(body.get("impact") or "").strip(),
+                }
+            )
+            _record_action(run, body, "request_stage_input")
+            return _transition(
+                workspace,
+                run,
+                str(run.get("workflow_state") or "ready_to_generate"),
+                "research_boundary_assumption_applied",
+                {"research_boundary_assumptions": assumptions},
+            )
     pending_input = {
         "id": str(body.get("input_id") or ("stage-input-" + uuid.uuid4().hex[:8])),
         "question": str(body.get("question") or "当前阶段需要你确认后继续生成。").strip(),
@@ -3828,6 +3861,22 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         "worker_id": str(current.get("worker_id") or ""),
         "created_at": _now(),
     }
+    patch = {
+        "pending_input": pending_input,
+        "execution_status": "paused",
+        "last_execution_error": "",
+    }
+    if research_v2:
+        pending_input.update(
+            {
+                "scope": "conclusion",
+                "blocking": True,
+                "category": str(body.get("category") or "").strip(),
+                "reason": str(body.get("reason") or "").strip(),
+                "impact": str(body.get("impact") or "").strip(),
+            }
+        )
+        patch["research_dynamic_input_count"] = int(run.get("research_dynamic_input_count") or 0) + 1
     if not pending_input["question"]:
         pending_input["question"] = "当前阶段需要你确认后继续生成。"
     _record_action(run, body, "request_stage_input")
@@ -3836,11 +3885,7 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         run,
         "awaiting_stage_input",
         "stage_input_requested",
-        {
-            "pending_input": pending_input,
-            "execution_status": "paused",
-            "last_execution_error": "",
-        },
+        patch,
     )
 
 
@@ -3865,17 +3910,31 @@ def submit_expert_team_stage_input(workspace: Path, body: dict) -> dict:
     if pending.get("required", True) is not False and not answer and not note:
         raise ValueError("Stage input answer is required")
     rows = [deepcopy(row) for row in run.get("stage_inputs") or [] if isinstance(row, dict)]
-    rows.append(
-        {
-            "input_id": str(pending.get("id") or ""),
-            "stage_id": str(pending.get("stage_id") or ""),
-            "worker_id": str(pending.get("worker_id") or ""),
-            "question": str(pending.get("question") or ""),
-            "answer": answer,
-            "note": note,
-            "answered_at": _now(),
-        }
-    )
+    answered_input = {
+        "input_id": str(pending.get("id") or ""),
+        "stage_id": str(pending.get("stage_id") or ""),
+        "worker_id": str(pending.get("worker_id") or ""),
+        "scope": str(pending.get("scope") or ""),
+        "category": str(pending.get("category") or ""),
+        "question": str(pending.get("question") or ""),
+        "answer": answer,
+        "note": note,
+        "answered_at": _now(),
+    }
+    answer_sha256 = hashlib.sha256(
+        json.dumps(
+            answered_input,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    answered_input["ref"] = {
+        "ref_type": "stage_input",
+        "input_id": answered_input["input_id"],
+        "sha256": answer_sha256,
+    }
+    rows.append(answered_input)
     _record_action(run, body, "submit_stage_input")
     return _transition(
         workspace,

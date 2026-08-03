@@ -431,6 +431,10 @@ def _research_citation_result(
             "required_claim_count": 0,
             "validated_claim_count": 0,
         }, []
+    v2 = (
+        isinstance(brief.get("source_policy"), dict)
+        and brief["source_policy"].get("mode") == "automatic_fallback"
+    )
     evidence = next(
         (
             item
@@ -482,8 +486,8 @@ def _research_citation_result(
         for item in usage_rows
         if str(item.get("claim_id") or "").strip()
     }
-    available_source_ids = {
-        str(source.get("source_id") or "").strip()
+    available_sources = {
+        str(source.get("source_id") or "").strip(): source
         for source in (
             source_context.get("sources")
             if isinstance(source_context, dict)
@@ -492,6 +496,7 @@ def _research_citation_result(
         )
         if isinstance(source, dict) and str(source.get("source_id") or "").strip()
     }
+    available_source_ids = set(available_sources)
     if not _source_ref_is_bound(
         {"input_refs": []},
         approved_artifacts,
@@ -538,6 +543,29 @@ def _research_citation_result(
             )
             continue
         marker = str(usage.get("citation_marker") or "").strip()
+        origin_tier = str(claim.get("origin_tier") or "").strip()
+        if v2 and origin_tier == "model_knowledge":
+            if marker or claim.get("evidence") or claim.get("status") == "verified":
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_citation_forbidden",
+                        f"claim:{claim_id}",
+                        "模型知识 claim 不得绑定来源、引用标记或已核验状态",
+                    )
+                )
+                continue
+            if "模型知识·未核验" not in markdown:
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_label_missing",
+                        f"claim:{claim_id}",
+                        "模型知识内容未在正文明示为未核验",
+                    )
+                )
+                continue
+            if claim_id in required_claim_ids:
+                validated_claim_ids.add(claim_id)
+            continue
         marker_tokens = set(
             re.findall(r"[A-Za-z0-9][A-Za-z0-9._:-]*", marker)
         )
@@ -548,6 +576,16 @@ def _research_citation_result(
             and str(claim.get("status") or "") == "verified"
             and str(ref.get("relationship") or "") in {"supports", "context"}
             and str(ref.get("source_id") or "").strip() in available_source_ids
+            and (
+                not v2
+                or origin_tier not in {"public_web", "local_knowledge"}
+                or available_sources[str(ref.get("source_id") or "").strip()].get("kind")
+                == (
+                    "approved_public"
+                    if origin_tier == "public_web"
+                    else "approved_internal"
+                )
+            )
         }
         valid_marker = bool(marker_tokens & allowed_source_ids)
         marker_present = bool(marker and marker in markdown)
@@ -569,6 +607,62 @@ def _research_citation_result(
             )
         if valid_marker and marker_present and claim_id in required_claim_ids:
             validated_claim_ids.add(claim_id)
+    required_claims = [
+        evidence_claims[claim_id]
+        for claim_id in required_claim_ids
+        if claim_id in evidence_claims
+    ]
+    model_only = bool(required_claims) and all(
+        claim.get("origin_tier") == "model_knowledge"
+        for claim in required_claims
+    )
+    has_model_knowledge = any(
+        claim.get("origin_tier") == "model_knowledge"
+        for claim in required_claims
+    )
+    if v2 and has_model_knowledge:
+        time_basis = ((evidence or {}).get("payload") or {}).get(
+            "model_knowledge_time_basis"
+        )
+        expected_time_label = (
+            str(time_basis.get("label") or "").strip()
+            if isinstance(time_basis, dict)
+            else ""
+        ) or "模型知识时效未知"
+        if expected_time_label not in markdown:
+            issues.append(
+                _semantic_issue(
+                    "model_knowledge_time_basis_missing",
+                    "model-knowledge:time-basis",
+                    "报告未按可信元数据声明模型知识时效",
+                )
+            )
+    if v2 and model_only:
+        match = re.search(
+            r"(?ms)^##\s+引用\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+            markdown,
+        )
+        reference_body = match.group("body").strip() if match else ""
+        if not reference_body:
+            issues.append(
+                _semantic_issue(
+                    "model_only_reference_section_empty",
+                    "section:引用",
+                    "纯模型知识报告的引用章节必须说明无可核验外部来源",
+                )
+            )
+        elif re.search(
+            r"https?://|\[\^[^\]]+\]|\[[A-Za-z][A-Za-z0-9._:-]*\]",
+            markdown,
+            re.I,
+        ):
+            issues.append(
+                _semantic_issue(
+                    "model_knowledge_citation_forbidden",
+                    "section:引用",
+                    "纯模型知识报告不得伪造 URL、脚注或 source_id",
+                )
+            )
     return {
         "status": "passed" if not issues else "failed",
         "required_claim_count": len(required_claim_ids),

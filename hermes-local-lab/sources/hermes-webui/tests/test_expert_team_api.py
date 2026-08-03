@@ -153,7 +153,7 @@ def test_catalog_defaults_to_office_material_teams_only():
     assert "通知通报" in payload
 
 
-def test_catalog_keeps_only_task_boundary_questions_without_supplemental_material_prompts():
+def test_catalog_keeps_content_boundaries_and_has_no_fixed_research_questionnaire():
     from api import expert_teams
 
     teams = {team["id"]: team for team in expert_teams.expert_team_catalog()["teams"]}
@@ -162,8 +162,7 @@ def test_catalog_keeps_only_task_boundary_questions_without_supplemental_materia
 
     assert [question["id"] for question in content_questions] == ["topic", "audience", "boundary"]
     assert content_questions[-1]["title"] == "有哪些口径要求、篇幅或表述边界？"
-    assert [question["id"] for question in research_questions] == ["research_topic", "audience_goal", "source_boundary"]
-    assert research_questions[-1]["title"] == "研究范围、案例偏好或需要避开的边界是什么？"
+    assert research_questions == []
     questions_json = json.dumps([content_questions, research_questions], ensure_ascii=False)
     assert "补充材料" not in questions_json
     assert "补充资料" not in questions_json

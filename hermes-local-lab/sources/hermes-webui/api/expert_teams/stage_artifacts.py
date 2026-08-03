@@ -42,6 +42,12 @@ _FENCE_PATTERN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 _SECTION_HEADING_PATTERN = re.compile(
     r"^ {0,3}#{2,6}[ \t]+(?P<heading>.*?)[ \t]*$"
 )
+_FRESHNESS_SENSITIVE_MODEL_CLAIM = re.compile(
+    r"(?:最新|近期|实时|当前|现行).{0,12}(?:政策|价格|统计|状态|数据)"
+    r"|(?:政策|价格|统计|状态|数据).{0,12}(?:最新|近期|实时|当前|现行)",
+    re.I,
+)
+_UNVERIFIED_MODEL_CLAIM = re.compile(r"无法(?:外部)?核验|不能确认|无法确认")
 
 
 class StageArtifactError(ValueError):
@@ -241,7 +247,7 @@ def _validate_section_map(value, path):
     return rows
 
 
-def _validate_usage(value, id_field, path):
+def _validate_usage(value, id_field, path, *, allow_empty_citation_marker=False):
     if not isinstance(value, list):
         raise StageArtifactError("invalid_type", path)
     seen_ids = set()
@@ -249,7 +255,11 @@ def _validate_usage(value, id_field, path):
         fields = (id_field, "section_id") if id_field == "fact_id" else (id_field, "section_id", "citation_marker")
         _exact(row, fields, path=f"{path}.{index}")
         for field in fields:
-            _string(row[field], f"{path}.{index}.{field}")
+            if field == "citation_marker" and allow_empty_citation_marker:
+                if not isinstance(row[field], str):
+                    raise StageArtifactError("invalid_type", f"{path}.{index}.{field}")
+            else:
+                _string(row[field], f"{path}.{index}.{field}")
         if id_field == "claim_id":
             claim_id = row[id_field]
             if claim_id in seen_ids:
@@ -300,7 +310,14 @@ def _validate_document_payload(payload, brief, *, reviewed=False, research=False
         brief,
         "payload.section_map",
     )
-    _validate_usage(payload["claim_usage" if research else "fact_usage"], "claim_id" if research else "fact_id", "payload.claim_usage" if research else "payload.fact_usage")
+    _validate_usage(
+        payload["claim_usage" if research else "fact_usage"],
+        "claim_id" if research else "fact_id",
+        "payload.claim_usage" if research else "payload.fact_usage",
+        allow_empty_citation_marker=(
+            research and _is_automatic_fallback_research(brief)
+        ),
+    )
     if not research:
         _validate_asset_requests(payload["asset_requests"], "payload.asset_requests")
     _review_issues(payload["open_issues"], "payload.open_issues")
@@ -408,7 +425,38 @@ def _canonicalize_material_ledger(payload, snapshot):
     return result
 
 
-def canonicalize_trusted_payload(parsed, *, artifact_type, source_snapshot=None):
+def _is_automatic_fallback_research(brief):
+    return (
+        isinstance(brief, dict)
+        and brief.get("document_type") == "research_report"
+        and isinstance(brief.get("source_policy"), dict)
+        and brief["source_policy"].get("mode") == "automatic_fallback"
+    )
+
+
+def _trusted_model_knowledge_time_basis(source_snapshot):
+    metadata = (
+        source_snapshot.get("trusted_provider_metadata")
+        if isinstance(source_snapshot, dict)
+        and isinstance(source_snapshot.get("trusted_provider_metadata"), dict)
+        else {}
+    )
+    cutoff = metadata.get("knowledge_cutoff_date")
+    if not isinstance(cutoff, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
+        cutoff = None
+    return {
+        "cutoff_date": cutoff,
+        "label": f"模型知识截止日期：{cutoff}" if cutoff else "模型知识时效未知",
+    }
+
+
+def canonicalize_trusted_payload(
+    parsed,
+    *,
+    artifact_type,
+    source_snapshot=None,
+    brief=None,
+):
     result = deepcopy(parsed)
     if artifact_type == "material_ledger":
         result["payload"] = _canonicalize_material_ledger(result["payload"], source_snapshot)
@@ -422,6 +470,10 @@ def canonicalize_trusted_payload(parsed, *, artifact_type, source_snapshot=None)
                 _evidence_ref(ref, sources, segments, f"payload.claims.{claim_index}.evidence.{index}")
                 for index, ref in enumerate(claim.get("evidence") or [])
             ]
+        if _is_automatic_fallback_research(brief):
+            result["payload"]["model_knowledge_time_basis"] = (
+                _trusted_model_knowledge_time_basis(source_snapshot)
+            )
     return result
 
 
@@ -554,12 +606,38 @@ def _validate_contradictions(value, path):
         _string_list(row["chosen_source_ids"], f"{item_path}.chosen_source_ids", unique=True)
 
 
-def _validate_evidence_matrix(payload, snapshot):
-    _exact(payload, ("claims", "contradictions", "gaps"), path="payload")
+def _validate_evidence_matrix(payload, snapshot, brief=None):
+    v2 = _is_automatic_fallback_research(brief)
+    payload_fields = (
+        "claims",
+        "contradictions",
+        "gaps",
+        "model_knowledge_time_basis",
+    ) if v2 else ("claims", "contradictions", "gaps")
+    _exact(payload, payload_fields, path="payload")
+    sources, _ = _snapshot_index(snapshot)
     claims = _unique_rows(payload["claims"], "claim_id", "payload.claims")
     for index, row in enumerate(claims):
         item_path = f"payload.claims.{index}"
-        _exact(row, ("claim_id", "statement", "claim_type", "evidence", "status", "confidence", "notes"), path=item_path)
+        claim_fields = (
+            "claim_id",
+            "statement",
+            "claim_type",
+            "evidence",
+            "status",
+            "confidence",
+            "notes",
+            "origin_tier",
+        ) if v2 else (
+            "claim_id",
+            "statement",
+            "claim_type",
+            "evidence",
+            "status",
+            "confidence",
+            "notes",
+        )
+        _exact(row, claim_fields, path=item_path)
         _string(row["statement"], f"{item_path}.statement")
         _enum(row["claim_type"], {"fact", "estimate", "judgment"}, f"{item_path}.claim_type")
         if not isinstance(row["evidence"], list):
@@ -569,11 +647,55 @@ def _validate_evidence_matrix(payload, snapshot):
         _enum(row["status"], {"verified", "conflicted", "insufficient"}, f"{item_path}.status")
         _enum(row["confidence"], {"high", "medium", "low"}, f"{item_path}.confidence")
         _string(row["notes"], f"{item_path}.notes")
+        if v2:
+            origin_tier = row["origin_tier"]
+            _enum(
+                origin_tier,
+                {"public_web", "local_knowledge", "model_knowledge"},
+                f"{item_path}.origin_tier",
+            )
+            if origin_tier == "model_knowledge":
+                if row["evidence"] or row["status"] == "verified":
+                    raise StageArtifactError(
+                        "model_knowledge_must_be_unverified",
+                        item_path,
+                    )
+                if (
+                    _FRESHNESS_SENSITIVE_MODEL_CLAIM.search(row["statement"])
+                    and not _UNVERIFIED_MODEL_CLAIM.search(row["statement"])
+                ):
+                    raise StageArtifactError(
+                        "time_sensitive_model_claim_unverifiable",
+                        f"{item_path}.statement",
+                    )
+            else:
+                expected_kind = (
+                    "approved_public"
+                    if origin_tier == "public_web"
+                    else "approved_internal"
+                )
+                if any(
+                    sources.get(str(ref.get("source_id") or ""), {}).get("kind")
+                    != expected_kind
+                    for ref in row["evidence"]
+                ):
+                    raise StageArtifactError(
+                        "origin_tier_source_mismatch",
+                        f"{item_path}.evidence",
+                    )
         if row["claim_type"] in {"fact", "estimate"} and row["status"] == "verified" and not row["evidence"]:
             raise StageArtifactError("verified_without_evidence", f"{item_path}.evidence")
     _validate_contradictions(payload["contradictions"], "payload.contradictions")
     _validate_search_gaps(payload["gaps"], "payload.gaps")
-    _snapshot_index(snapshot)
+    if v2:
+        time_basis = payload["model_knowledge_time_basis"]
+        _exact(time_basis, ("cutoff_date", "label"), path="payload.model_knowledge_time_basis")
+        _string(
+            time_basis["cutoff_date"],
+            "payload.model_knowledge_time_basis.cutoff_date",
+            nullable=True,
+        )
+        _string(time_basis["label"], "payload.model_knowledge_time_basis.label")
 
 
 def _validate_research_outline(payload, brief):
@@ -651,7 +773,7 @@ def _validate_payload(artifact_type, payload, brief, source_snapshot):
     elif artifact_type == "source_register":
         _validate_source_register(payload, source_snapshot)
     elif artifact_type == "evidence_matrix":
-        _validate_evidence_matrix(payload, source_snapshot)
+        _validate_evidence_matrix(payload, source_snapshot, brief)
     elif artifact_type == "research_outline":
         _validate_research_outline(payload, brief)
     elif artifact_type == "document_draft":
@@ -746,7 +868,12 @@ def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, 
             for ref in input_refs
         ):
             raise StageArtifactError("source_snapshot_binding_mismatch", "input_refs")
-    trusted = canonicalize_trusted_payload(parsed, artifact_type=artifact_type, source_snapshot=source_snapshot)
+    trusted = canonicalize_trusted_payload(
+        parsed,
+        artifact_type=artifact_type,
+        source_snapshot=source_snapshot,
+        brief=brief,
+    )
     _validate_payload(artifact_type, trusted["payload"], brief, source_snapshot)
     markdown = trusted.get("deliverable_markdown")
     if artifact_type in _DOCUMENT_TYPES:

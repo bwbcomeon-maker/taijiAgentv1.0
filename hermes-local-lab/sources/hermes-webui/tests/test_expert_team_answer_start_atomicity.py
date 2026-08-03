@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from tests.test_expert_team_v2_runtime import (
-    _answer_required,
     _bound_delivery,
     _configure_route,
     _control,
@@ -17,7 +16,7 @@ from tests.test_expert_team_v2_runtime import (
 )
 
 
-def _collecting_optional(expert_teams, workspace, *, session_id: str) -> dict:
+def _collecting_required(expert_teams, workspace, *, session_id: str) -> dict:
     run = expert_teams.start_expert_team(
         workspace,
         {
@@ -26,16 +25,20 @@ def _collecting_optional(expert_teams, workspace, *, session_id: str) -> dict:
             "prompt": "帮我起草工作汇报",
         },
     )
-    required = _answer_required(expert_teams, workspace, run)
-    assert required["workflow_state"] == "collecting_optional"
-    return required
+    assert run["workflow_state"] == "collecting_required"
+    return run
 
 
 def _final_answer_body(run: dict, key: str) -> dict:
+    answers = {
+        str(question.get("id")): "已确认"
+        for question in run.get("questions") or []
+        if question.get("required") and question.get("status") == "pending"
+    }
     return _control(
         run,
         key,
-        answers={"optional_context": ""},
+        answers=answers,
         skip_optional=True,
     )
 
@@ -222,7 +225,7 @@ def test_last_answer_and_start_reservation_are_one_durable_transition(monkeypatc
     from api import expert_teams
     from api.expert_teams import runtime
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-atomic-single-write")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-atomic-single-write")
     writes = []
     original_write = runtime.write_run
 
@@ -255,7 +258,7 @@ def test_process_exit_at_start_helper_boundary_never_leaves_ready_to_generate(mo
     from api import expert_teams, routes
     from api.expert_teams.storage import write_run
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-answer-helper-crash")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-answer-helper-crash")
     session = SimpleNamespace(
         session_id=collecting["session_id"],
         model="test-model",
@@ -293,7 +296,7 @@ def test_process_exit_at_start_helper_boundary_never_leaves_ready_to_generate(mo
 def test_known_pre_dispatch_failure_leaves_recoverable_start_failed(monkeypatch, tmp_path):
     from api import expert_teams, routes
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-start-preflight-failure")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-start-preflight-failure")
     session = SimpleNamespace(
         session_id=collecting["session_id"],
         model="test-model",
@@ -324,7 +327,7 @@ def test_known_pre_dispatch_failure_leaves_recoverable_start_failed(monkeypatch,
 def test_legacy_dispatch_intent_is_durable_before_external_start(monkeypatch, tmp_path):
     from api import expert_teams, routes
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-legacy-dispatch-marker")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-legacy-dispatch-marker")
     session = SimpleNamespace(
         session_id=collecting["session_id"],
         model="test-model",
@@ -357,7 +360,7 @@ def test_exit_after_dispatch_marker_before_legacy_start_recovers_not_found(monke
     from api import expert_teams, routes
     from api.expert_teams.storage import write_run
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-dispatch-exit")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-dispatch-exit")
     reserved, created = expert_teams.answer_and_reserve_expert_team_execution_start(
         tmp_path,
         _final_answer_body(collecting, "answer-dispatch-exit"),
@@ -399,7 +402,7 @@ def test_registered_legacy_stream_is_bound_after_exit_before_start_commit(monkey
 
     session_dir = tmp_path / "sessions"
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-bind-after-exit")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-bind-after-exit")
     reserved, created = expert_teams.answer_and_reserve_expert_team_execution_start(
         tmp_path,
         _final_answer_body(collecting, "answer-bind-after-exit"),
@@ -454,7 +457,7 @@ def test_late_legacy_start_is_cancelled_after_manual_retry_wins(monkeypatch, tmp
     from api import expert_teams, routes, runtime_adapter
     from api.expert_teams.storage import write_run
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-late-start-retry")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-late-start-retry")
     first_reserved, created = expert_teams.answer_and_reserve_expert_team_execution_start(
         tmp_path,
         _final_answer_body(collecting, "answer-late-start-retry"),
@@ -621,7 +624,7 @@ def test_concurrent_deterministic_legacy_starts_have_one_stream_owner(monkeypatc
 def test_duplicate_final_answer_reuses_same_reservation(tmp_path):
     from api import expert_teams
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-answer-reserve-duplicate")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-answer-reserve-duplicate")
     body = _final_answer_body(collecting, "answer-reserve-duplicate")
 
     first, first_created = expert_teams.answer_and_reserve_expert_team_execution_start(
@@ -698,7 +701,7 @@ def test_partial_answer_persists_without_starting_runtime(monkeypatch, tmp_path)
 def test_concurrent_identical_final_answers_create_one_reservation(tmp_path):
     from api import expert_teams
 
-    collecting = _collecting_optional(expert_teams, tmp_path, session_id="sid-concurrent-answer-reserve")
+    collecting = _collecting_required(expert_teams, tmp_path, session_id="sid-concurrent-answer-reserve")
     body = _final_answer_body(collecting, "concurrent-answer-reserve")
     barrier = threading.Barrier(2)
     results = []
