@@ -249,12 +249,22 @@ def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
         or _concepts_within(tokens, {"renewal"}, {"term", "terms", "risk"})
         or _concepts_within(tokens, {"account", "accounts"}, {"receivable", "payable"})
     )
+    generic_pricing_analysis = bool(
+        "contract" in tokens
+        and "pricing" in tokens
+        and "governance" in tokens
+        and any(token in tokens for token in {"trend", "trends"})
+        and not any(
+            token in tokens
+            for token in {"amount", "cost", "fee", "fees", "quote", "quotation", "value", "values"}
+        )
+    )
     chinese_private = bool(
         re.search(r"(?:合同|采购).{0,6}(?:报价|定价|价格|金额|账期)", chinese)
         or re.search(r"(?:报价|定价|价格|金额|账期).{0,6}(?:合同|采购)", chinese)
         or any(term in chinese for term in ("付款条款", "支付条款", "回款", "续约", "应收账款", "应付账款"))
     )
-    return english_private or chinese_private
+    return (english_private and not generic_pricing_analysis) or chinese_private
 
 
 def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool, bool]:
@@ -289,10 +299,14 @@ def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool
             )
         for start, end in markers:
             prefix = clause[max(0, start - 5) : start]
-            postfix = clause[end + 1 : end + 3]
+            postfix = clause[end + 1 : end + 7]
             marker_negated = bool(
                 any(token in prefix_negators for token in prefix)
                 or any(token in postfix_negators for token in postfix)
+                or (
+                    "not" in postfix
+                    and any(token in postfix for token in {"applicable", "included", "used"})
+                )
             )
             negated = negated or marker_negated
             positive = positive or not marker_negated
@@ -301,15 +315,48 @@ def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool
     chinese_marker_pattern = r"(?:公开市场|零售|公开年报|年报|年度报告|官方公告|官方披露)"
     for clause in chinese_clauses:
         for marker in re.finditer(chinese_marker_pattern, clause):
-            prefix = clause[max(0, marker.start() - 8) : marker.start()]
-            postfix = clause[marker.end() : marker.end() + 5]
+            prefix = clause[max(0, marker.start() - 12) : marker.start()]
+            postfix = clause[marker.end() : marker.end() + 10]
             marker_negated = bool(
-                re.search(r"(?:不(?:是|属于|来自)?|非|排除)$", prefix)
-                or re.match(r"(?:除外|排除)", postfix)
+                re.search(r"(?:不(?:是|属于|来自|应使用)?|非|排除)$", prefix)
+                or re.match(r"(?:除外|排除|不(?:纳入|采用|使用|适用|应使用))", postfix)
             )
             negated = negated or marker_negated
             positive = positive or not marker_negated
     return positive, negated
+
+
+def _transaction_segments(value: str) -> list[tuple[list[str], str]]:
+    """Keep public evidence markers scoped to the clause they qualify.
+
+    Public-query authorization is intentionally conservative: punctuation and
+    adversative conjunctions terminate a marker's authority. This prevents a
+    harmless phrase in a later sentence from laundering a private transaction
+    phrase in an earlier one.
+    """
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    raw_segments = re.split(
+        r"[,.!?;:\n，。！？；：]+|\b(?:but|however|yet)\b|(?:但是|但|然而)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    segments: list[tuple[list[str], str]] = []
+    for segment in raw_segments:
+        if not segment.strip():
+            continue
+        _, english, chinese = _semantic_forms(segment)
+        segments.append((english, chinese))
+    return segments
+
+
+def _has_uncovered_private_transaction(value: str) -> bool:
+    for english, chinese in _transaction_segments(value):
+        if not _private_transaction_semantics(english, chinese):
+            continue
+        public, _negated = _public_transaction_semantics(english, chinese)
+        if not public:
+            return True
+    return False
 
 
 def _research_semantic_classes(value: str) -> dict[str, bool]:
@@ -376,10 +423,7 @@ def _blocked_by_research_semantics(value: str) -> bool:
         classes["private_transaction"] or classes["organization"]
     ):
         return True
-    return bool(
-        classes["private_transaction"]
-        and not classes["public_transaction_context"]
-    )
+    return _has_uncovered_private_transaction(value)
 
 
 def _project_public_research_query(original_request: str) -> str:

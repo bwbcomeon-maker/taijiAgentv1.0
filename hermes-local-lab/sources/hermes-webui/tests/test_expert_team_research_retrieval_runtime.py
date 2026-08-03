@@ -1191,6 +1191,52 @@ def test_private_transaction_concepts_cover_common_financial_terms(tmp_path, sen
     assert authorize_research_public_query(run, sensitive)["authorized"] is False
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "Acme annual report is not applicable contract values",
+        "Acme annual report has been excluded contract values",
+        "Acme retail should be excluded contract pricing",
+        "苹果公司年报不纳入研究范围的合同价格",
+        "苹果公司不应使用年报中的合同价格",
+        "Acme contract pricing. Annual operations and report preparation",
+        "Acme contract pricing; public access unavailable; benchmark pending",
+        "Acme annual report excluded, report contract values",
+    ],
+)
+def test_public_transaction_context_does_not_cross_negation_or_clause_boundaries(
+    tmp_path, sensitive
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+    assert authorize_research_public_query(run, sensitive)["authorized"] is False
+
+
+def test_public_contract_governance_and_pricing_trends_are_not_treated_as_private(
+    tmp_path,
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    original_request = "Research contract governance and pricing trends"
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=original_request,
+        core_question=original_request,
+    )
+    decision = authorize_research_public_query(run, original_request)
+    assert decision["authorized"] is True
+    assert decision["safe_query"] == "contract governance and pricing trends"
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
