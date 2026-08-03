@@ -223,83 +223,47 @@ def _concepts_within(tokens: list[str], left: set[str], right: set[str], *, wind
 
 
 def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
+    contract_terms = {
+        token
+        for token in tokens
+        if token == "contract" or token.startswith("contract")
+    }
+    pricing_terms = {
+        token
+        for token in tokens
+        if token in {
+            "amount", "cost", "costs", "fee", "fees", "price", "priced",
+            "prices", "pricing", "quotation", "quotations", "quote", "quotes",
+            "rate", "rates", "value", "values",
+        }
+    }
     english_private = bool(
-        _concepts_within(
-            tokens,
-            {"contract"},
-            {
-                "pricing",
-                "price",
-                "value",
-                "values",
-                "quote",
-                "quotation",
-                "amount",
-                "cost",
-                "fee",
-                "fees",
-            },
+        (contract_terms and pricing_terms)
+        or (
+            any(token.startswith("procurement") or token.startswith("purchase") for token in tokens)
+            and pricing_terms
         )
-        or _concepts_within(
-            tokens,
-            {"procurement", "purchase"},
-            {"pricing", "price", "cost", "value", "values", "amount"},
+        or (
+            any(token in {"payment", "payments", "credit"} for token in tokens)
+            and any(token in {"period", "settlement", "term", "terms"} for token in tokens)
         )
-        or _concepts_within(tokens, {"payment", "credit"}, {"term", "terms", "period"})
-        or _concepts_within(tokens, {"renewal"}, {"term", "terms", "risk"})
-        or _concepts_within(tokens, {"account", "accounts"}, {"receivable", "payable"})
+        or (
+            any(token.startswith("renewal") for token in tokens)
+            and any(token in {"risk", "risks", "term", "terms"} for token in tokens)
+        )
+        or (
+            any(token in {"account", "accounts"} for token in tokens)
+            and any(token in {"payable", "payables", "receivable", "receivables"} for token in tokens)
+        )
     )
     chinese_private = bool(
-        re.search(r"(?:合同|采购).{0,6}(?:报价|定价|价格|金额|账期)", chinese)
-        or re.search(r"(?:报价|定价|价格|金额|账期).{0,6}(?:合同|采购)", chinese)
+        (
+            re.search(r"(?:合同|协议|采购)", chinese)
+            and re.search(r"(?:报价|定价|价格|单价|价|金额|费用|成本|条款|账期)", chinese)
+        )
         or any(term in chinese for term in ("付款条款", "支付条款", "回款", "续约", "应收账款", "应付账款"))
     )
     return english_private or chinese_private
-
-
-def _generic_public_pricing_topic(tokens: list[str], chinese: str) -> bool:
-    """Recognize an entity-free analytical topic, not an organization transaction."""
-    if chinese:
-        required = all(term in chinese for term in ("合同", "治理", "定价"))
-        has_topic = any(
-            term in chinese
-            for term in ("发展趋势", "趋势", "演变", "动态", "走势", "模式", "格局", "发展")
-        )
-        remainder = chinese
-        for term in (
-            "请研究一下", "请分析一下", "请调研一下", "研究一下", "分析一下", "调研一下",
-            "公共部门", "跨境", "全球", "企业", "行业", "公共", "研究", "分析", "调研",
-            "发展趋势", "趋势", "演变", "动态", "走势", "模式", "格局", "发展",
-            "合同", "治理", "定价", "与", "及", "和",
-        ):
-            remainder = remainder.replace(term, "")
-        if required and has_topic and not remainder:
-            return True
-    topic_terms = {
-        "benchmark", "benchmarks", "development", "dynamics", "evolution", "landscape", "outlook",
-        "pattern", "patterns", "trajectories", "trajectory", "trend", "trends",
-    }
-    allowed = {
-        "analyze", "border", "contract", "cross", "enterprise", "global",
-        "governance", "industry", "investigate", "please", "pricing", "public",
-        "research", "saas", "sector", "study", *topic_terms,
-    }
-    governance_topic = bool(
-        {"contract", "governance", "pricing"}.issubset(tokens)
-        and any(token in topic_terms - {"benchmark", "benchmarks"} for token in tokens)
-    )
-    public_benchmark = bool(
-        {"public", "contract", "pricing"}.issubset(tokens)
-        and any(token in {"benchmark", "benchmarks"} for token in tokens)
-    )
-    return bool(
-        (governance_topic or public_benchmark)
-        and all(token in allowed for token in tokens)
-        and not any(
-            token in tokens
-            for token in {"amount", "cost", "fee", "fees", "quote", "quotation", "value", "values"}
-        )
-    )
 
 
 def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool, bool]:
@@ -409,12 +373,7 @@ def _transaction_segments(value: str) -> list[tuple[list[str], str]]:
 
 def _has_uncovered_private_transaction(value: str) -> bool:
     _normalized, whole_english, whole_chinese = _semantic_forms(value)
-    if _generic_public_pricing_topic(whole_english, whole_chinese):
-        return False
-    return any(
-        _private_transaction_semantics(english, chinese)
-        for english, chinese in _transaction_segments(value)
-    )
+    return _private_transaction_semantics(whole_english, whole_chinese)
 
 
 def _research_semantic_classes(value: str) -> dict[str, bool]:

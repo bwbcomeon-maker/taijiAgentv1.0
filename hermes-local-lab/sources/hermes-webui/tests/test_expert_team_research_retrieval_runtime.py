@@ -1107,7 +1107,7 @@ def test_public_context_uses_local_concept_windows(
     assert "safe_query" not in decision
 
 
-def test_entity_free_public_contract_pricing_benchmark_remains_authorized(tmp_path):
+def test_public_contract_pricing_benchmark_uses_safe_fallback_instead_of_web(tmp_path):
     from api import expert_teams
     from api.expert_teams.data_egress import authorize_research_public_query
 
@@ -1119,8 +1119,8 @@ def test_entity_free_public_contract_pricing_benchmark_remains_authorized(tmp_pa
         core_question=original_request,
     )
     decision = authorize_research_public_query(run, original_request)
-    assert decision["authorized"] is True
-    assert decision["safe_query"] == "public SaaS contract pricing benchmarks"
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
 
 
 @pytest.mark.parametrize(
@@ -1236,6 +1236,18 @@ def test_private_transaction_concepts_cover_common_financial_terms(tmp_path, sen
         "研究甲公司年报应予排除的合同价格",
         "Research Acme contract pricing [annual operations and report preparation]",
         "Research Acme contract pricing / annual operations and report preparation",
+        "Research Acme contract/pricing trends",
+        "Research Acme contract: pricing trends",
+        "研究甲公司合同/价格趋势",
+        "Acme contracts pricing trends",
+        "Acme contractual pricing trends",
+        "Acme contract-priced services",
+        "Acme contract detailed bespoke negotiated commercial current pricing trends",
+        "Acme payment heavily negotiated unusual commercial settlement terms",
+        "Acme procurement detailed bespoke negotiated commercial current pricing",
+        "甲公司合同价趋势",
+        "甲公司合同单价趋势",
+        "甲公司协议价格趋势",
     ],
 )
 def test_public_transaction_context_does_not_cross_negation_or_clause_boundaries(
@@ -1257,7 +1269,7 @@ def test_public_transaction_context_does_not_cross_negation_or_clause_boundaries
     "topic",
     ["trends", "patterns", "evolution", "trajectories", "dynamics"],
 )
-def test_public_contract_governance_and_pricing_topics_are_not_treated_as_private(
+def test_contract_governance_and_pricing_topics_fail_closed_to_safe_fallback(
     tmp_path, topic
 ):
     from api import expert_teams
@@ -1271,8 +1283,8 @@ def test_public_contract_governance_and_pricing_topics_are_not_treated_as_privat
         core_question=original_request,
     )
     decision = authorize_research_public_query(run, original_request)
-    assert decision["authorized"] is True
-    assert decision["safe_query"] == f"contract governance and pricing {topic}"
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
 
 
 @pytest.mark.parametrize(
@@ -1282,7 +1294,7 @@ def test_public_contract_governance_and_pricing_topics_are_not_treated_as_privat
         "研究合同治理与定价趋势",
     ],
 )
-def test_entity_free_generic_contract_pricing_topics_are_public(
+def test_entity_free_generic_contract_pricing_topics_also_fail_closed(
     tmp_path, original_request
 ):
     from api import expert_teams
@@ -1294,7 +1306,9 @@ def test_entity_free_generic_contract_pricing_topics_are_public(
         original_request=original_request,
         core_question=original_request,
     )
-    assert authorize_research_public_query(run, original_request)["authorized"] is True
+    decision = authorize_research_public_query(run, original_request)
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
 
 
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
