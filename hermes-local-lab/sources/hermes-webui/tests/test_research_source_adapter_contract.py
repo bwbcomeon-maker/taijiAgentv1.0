@@ -3,6 +3,7 @@ import importlib
 import importlib.util
 import json
 import ssl
+import time
 
 import pytest
 
@@ -396,7 +397,7 @@ def test_materialized_approved_sources_are_registry_trusted_idempotent_and_not_c
         )
 
 
-def test_same_content_hash_deduplicates_materialized_sources(tmp_path):
+def test_same_content_different_origins_keep_distinct_materialized_source_identity(tmp_path):
     module = _module()
     adapter = module.HermesWebResearchSourceAdapter(search_callable=lambda *_a, **_k: {}, extract_callable=None)
     first_hit = _hit(module, "approved_public", "A", "https://a.example", "same body")
@@ -405,8 +406,135 @@ def test_same_content_hash_deduplicates_materialized_sources(tmp_path):
     first = _run(adapter.materialize(first_hit, workspace=tmp_path, run_id="run-1"))
     second = _run(adapter.materialize(second_hit, workspace=tmp_path, run_id="run-1"))
 
-    assert first["source_id"] == second["source_id"]
-    assert first["locator"] == second["locator"]
+    assert first["source_id"] != second["source_id"]
+    assert first["locator"] != second["locator"]
+
+
+def test_same_origin_and_content_is_idempotent_under_concurrent_materialization(tmp_path):
+    module = _module()
+    adapter = module.HermesWebResearchSourceAdapter(search_callable=lambda *_a, **_k: {}, extract_callable=None)
+    first_hit = _hit(module, "approved_public", "First title", "https://EXAMPLE.com:443/a#fragment", "same body")
+    second_hit = _hit(module, "approved_public", "Later title", "https://example.com/a", "same body")
+
+    async def materialize_both():
+        return await asyncio.gather(
+            adapter.materialize(first_hit, workspace=tmp_path, run_id="run-1"),
+            adapter.materialize(second_hit, workspace=tmp_path, run_id="run-1"),
+        )
+
+    first, second = _run(materialize_both())
+
+    assert first == second
+    assert first["source_id"].startswith("PUB-")
+
+
+def test_materialized_identity_is_independent_of_insertion_order(tmp_path):
+    module = _module()
+    adapter = module.HermesWebResearchSourceAdapter(search_callable=lambda *_a, **_k: {}, extract_callable=None)
+    hits = (
+        _hit(module, "approved_public", "A", "https://a.example/report", "same body"),
+        _hit(module, "approved_public", "B", "https://b.example/report", "same body"),
+    )
+    (tmp_path / "forward").mkdir()
+    (tmp_path / "reverse").mkdir()
+
+    forward = {
+        hit.locator: _run(adapter.materialize(hit, workspace=tmp_path / "forward", run_id="run-1"))["source_id"]
+        for hit in hits
+    }
+    reverse = {
+        hit.locator: _run(adapter.materialize(hit, workspace=tmp_path / "reverse", run_id="run-1"))["source_id"]
+        for hit in reversed(hits)
+    }
+
+    assert forward == reverse
+    assert len(set(forward.values())) == 2
+
+
+def test_materialization_rejects_symlinked_taiji_storage_before_writing(tmp_path):
+    module = _module()
+    from api.expert_teams.source_registry import SourceRegistryError
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / ".taiji").symlink_to(outside, target_is_directory=True)
+    hit = _hit(module, "approved_public", "A", "https://a.example/report", "body")
+    adapter = module.HermesWebResearchSourceAdapter(search_callable=lambda *_a, **_k: {}, extract_callable=None)
+
+    with pytest.raises(SourceRegistryError):
+        _run(adapter.materialize(hit, workspace=workspace, run_id="run-1"))
+
+    assert list(outside.rglob("*")) == []
+
+
+def test_sync_web_search_runs_off_event_loop_thread():
+    module = _module()
+    events = []
+
+    def slow_search(_query, **_kwargs):
+        time.sleep(0.05)
+        events.append("search_done")
+        return {"success": True, "data": {"web": []}}
+
+    adapter = module.HermesWebResearchSourceAdapter(
+        search_callable=slow_search,
+        extract_callable=lambda *_a, **_k: None,
+        query_authorizer=_allow_query(module),
+    )
+
+    async def scenario():
+        task = asyncio.create_task(adapter.search("topic"))
+        await asyncio.sleep(0.005)
+        events.append("tick")
+        await task
+
+    _run(scenario())
+    assert events[0] == "tick"
+
+
+def test_local_scan_and_read_run_off_event_loop_thread(tmp_path, monkeypatch):
+    module = _module()
+    allowed = tmp_path / "approved"
+    allowed.mkdir()
+    (allowed / "memo.md").write_text("alpha evidence", encoding="utf-8")
+    original_read_bytes = module.Path.read_bytes
+    events = []
+
+    def slow_read(path):
+        time.sleep(0.05)
+        events.append("read_done")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(module.Path, "read_bytes", slow_read)
+    adapter = module.LocalTextResearchSourceAdapter(roots=[allowed])
+
+    async def scenario():
+        task = asyncio.create_task(adapter.search("alpha"))
+        await asyncio.sleep(0.005)
+        events.append("tick")
+        await task
+
+    _run(scenario())
+    assert events[0] == "tick"
+
+
+def test_local_scan_honors_entry_limit_without_pre_enumerating_tree(tmp_path, monkeypatch):
+    module = _module()
+    allowed = tmp_path / "approved"
+    allowed.mkdir()
+    for index in range(20):
+        (allowed / f"{index:02d}.md").write_text("alpha evidence", encoding="utf-8")
+
+    def forbidden_rglob(*_args, **_kwargs):
+        raise AssertionError("local scan must not pre-enumerate the entire tree")
+
+    monkeypatch.setattr(module.Path, "rglob", forbidden_rglob)
+    adapter = module.LocalTextResearchSourceAdapter(roots=[allowed], max_files_scanned=2, max_results=20)
+    result = _run(adapter.search("alpha", limit=20))
+
+    assert len(result.hits) <= 2
 
 
 def test_source_snapshot_preserves_server_manifest_origin_and_retrieval_time(tmp_path):

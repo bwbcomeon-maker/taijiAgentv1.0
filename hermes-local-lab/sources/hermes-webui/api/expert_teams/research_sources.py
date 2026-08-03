@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -179,6 +180,13 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+async def _call_without_blocking(callable_: Callable[..., object], *args, **kwargs) -> object:
+    if inspect.iscoroutinefunction(callable_):
+        return await callable_(*args, **kwargs)
+    value = await asyncio.to_thread(callable_, *args, **kwargs)
+    return await _maybe_await(value)
+
+
 def _normalize_authorization(value: object) -> QueryAuthorizationDecision:
     if isinstance(value, QueryAuthorizationDecision):
         decision = value
@@ -321,7 +329,7 @@ class HermesWebResearchSourceAdapter:
             )
         try:
             payload = _decode_payload(
-                await _maybe_await(self._search(decision.safe_query, limit=max(1, int(limit))))
+                await _call_without_blocking(self._search, decision.safe_query, limit=max(1, int(limit)))
             )
         except Exception as exc:
             code = classify_adapter_exception(exc)
@@ -358,8 +366,11 @@ class HermesWebResearchSourceAdapter:
         for url, search_title in unique:
             try:
                 extracted = _decode_payload(
-                    await _maybe_await(
-                        self._extract([url], format="markdown", use_llm_processing=False)
+                    await _call_without_blocking(
+                        self._extract,
+                        [url],
+                        format="markdown",
+                        use_llm_processing=False,
                     )
                 )
                 if extracted.get("success") is False or extracted.get("error"):
@@ -416,7 +427,8 @@ class HermesWebResearchSourceAdapter:
     async def materialize(self, hit: ResearchSourceHit, *, workspace: Path, run_id: str) -> dict:
         if hit.source_kind != "approved_public":
             raise ValueError("web adapter only materializes approved_public hits")
-        return materialize_approved_source(
+        return await asyncio.to_thread(
+            materialize_approved_source,
             workspace,
             run_id,
             kind=hit.source_kind,
@@ -473,6 +485,35 @@ class LocalTextResearchSourceAdapter:
         limit: int = 5,
         policy_decision: QueryAuthorizationDecision | None = None,
     ) -> AdapterSearchResult:
+        return await asyncio.to_thread(self._search_sync, query, limit)
+
+    def _bounded_files(self, roots: tuple[Path, ...]):
+        visited_entries = 0
+        for root_index, root in enumerate(roots):
+            pending = [root]
+            while pending and visited_entries < self._max_files_scanned:
+                directory = pending.pop()
+                try:
+                    iterator = os.scandir(directory)
+                except OSError:
+                    continue
+                with iterator:
+                    for entry in iterator:
+                        visited_entries += 1
+                        if visited_entries > self._max_files_scanned:
+                            return
+                        try:
+                            if entry.is_symlink():
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(Path(entry.path))
+                                continue
+                            if entry.is_file(follow_symlinks=False):
+                                yield root_index, root, Path(entry.path)
+                        except OSError:
+                            continue
+
+    def _search_sync(self, query: str, limit: int) -> AdapterSearchResult:
         roots = self._approved_roots()
         if not roots:
             return AdapterSearchResult(
@@ -491,47 +532,40 @@ class LocalTextResearchSourceAdapter:
             return AdapterSearchResult()
 
         hits: list[ResearchSourceHit] = []
-        scanned = 0
         result_limit = min(max(1, int(limit)), self._max_results)
-        for root_index, root in enumerate(roots):
-            for candidate in sorted(root.rglob("*")):
-                if scanned >= self._max_files_scanned or len(hits) >= result_limit:
-                    break
-                if candidate.is_symlink() or not candidate.is_file():
-                    continue
-                scanned += 1
-                try:
-                    resolved = candidate.resolve(strict=True)
-                    resolved.relative_to(root)
-                except (OSError, ValueError):
-                    continue
-                if resolved.suffix.lower() not in _ALLOWED_LOCAL_SUFFIXES:
-                    continue
-                try:
-                    size = resolved.stat().st_size
-                    if size <= 0 or size > self._max_file_bytes:
-                        continue
-                    data = resolved.read_bytes()
-                    if b"\x00" in data:
-                        continue
-                    content = data.decode("utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-                lowered = content.lower()
-                if not any(term in lowered for term in terms):
-                    continue
-                relative = resolved.relative_to(root).as_posix()
-                hits.append(
-                    ResearchSourceHit.create(
-                        source_kind="approved_internal",
-                        safe_title=resolved.name,
-                        locator=f"local://{root_index}/{relative}",
-                        content=content,
-                        retrieved_at=self._clock(),
-                    )
-                )
-            if scanned >= self._max_files_scanned or len(hits) >= result_limit:
+        for root_index, root, candidate in self._bounded_files(roots):
+            if len(hits) >= result_limit:
                 break
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if resolved.suffix.lower() not in _ALLOWED_LOCAL_SUFFIXES:
+                continue
+            try:
+                size = resolved.stat().st_size
+                if size <= 0 or size > self._max_file_bytes:
+                    continue
+                data = resolved.read_bytes()
+                if b"\x00" in data:
+                    continue
+                content = data.decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            lowered = content.lower()
+            if not any(term in lowered for term in terms):
+                continue
+            relative = resolved.relative_to(root).as_posix()
+            hits.append(
+                ResearchSourceHit.create(
+                    source_kind="approved_internal",
+                    safe_title=resolved.name,
+                    locator=f"local://{root_index}/{relative}",
+                    content=content,
+                    retrieved_at=self._clock(),
+                )
+            )
 
         if not hits:
             return AdapterSearchResult()
@@ -546,7 +580,8 @@ class LocalTextResearchSourceAdapter:
     async def materialize(self, hit: ResearchSourceHit, *, workspace: Path, run_id: str) -> dict:
         if hit.source_kind != "approved_internal":
             raise ValueError("local adapter only materializes approved_internal hits")
-        return materialize_approved_source(
+        return await asyncio.to_thread(
+            materialize_approved_source,
             workspace,
             run_id,
             kind=hit.source_kind,
