@@ -10,8 +10,22 @@ PRESENTER_JS = (REPO_ROOT / "static" / "expert-team-presenter.js").read_text(enc
 EXPERT_UI_JS = (REPO_ROOT / "static" / "expert-team-ui.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+EXPERT_V3_JS = (REPO_ROOT / "static" / "expert-team-v3.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def test_research_v2_auto_continuation_uses_post_resume_not_get_side_effects():
+    body = _function_body(
+        EXPERT_V3_JS,
+        "function scheduleResearchAutoContinuation",
+        "function clearStatusSurface",
+    )
+    assert "ready_to_generate" in body
+    assert "delivery_validation_required" in body
+    assert "'/api/expert-teams/resume'" in body
+    assert "queueMicrotask" in body
+    assert "pendingInputId" in body
 
 
 def test_expert_team_portal_payload_is_the_minimal_standalone_launch_contract():

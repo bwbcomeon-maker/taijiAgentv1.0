@@ -22,6 +22,7 @@
     suggestionMode: false,
     suggestedPrompt: '',
     suggestedSourceSessionId: '',
+    autoContinuationKeys: new Set(),
   };
 
   const teamPresentationDefaults = [
@@ -901,6 +902,41 @@
     restoreConflictRevisionDraft(root, card);
     restoreConflictDeliveryDraft(root, card);
     state.draft = null;
+    scheduleResearchAutoContinuation(card);
+    return true;
+  }
+
+  function scheduleResearchAutoContinuation(card) {
+    const workflowState = String(card?.workflowState || '');
+    if (
+      !card?.researchV2
+      || !['ready_to_generate', 'delivery_validation_required'].includes(workflowState)
+      || card.pendingInputId
+    ) return false;
+    const key = `${String(card.runId || '')}:${Number(card.version || 0)}:${workflowState}`;
+    if (!card.runId || state.autoContinuationKeys.has(key)) return false;
+    state.autoContinuationKeys.add(key);
+    queueMicrotask(async () => {
+      const current = state.card || {};
+      if (
+        String(current.runId || '') !== String(card.runId || '')
+        || Number(current.version || 0) !== Number(card.version || 0)
+        || String(current.workflowState || '') !== workflowState
+      ) return;
+      setLive(
+        workflowState === 'delivery_validation_required'
+          ? '内容已完成，正在自动生成和检查 DOCX。'
+          : '当前阶段已通过校验，正在自动继续研究。',
+      );
+      const continued = await mutate(
+        '/api/expert-teams/resume',
+        {},
+        null,
+        'auto-continuation',
+        { successMessage: '已自动进入下一步。' },
+      );
+      if (!continued) state.autoContinuationKeys.delete(key);
+    });
     return true;
   }
 
@@ -915,6 +951,7 @@
     state.collapsed = false;
     state.compositionActive = false;
     state.deferredCard = null;
+    state.autoContinuationKeys.clear();
     return true;
   }
 

@@ -292,7 +292,55 @@ def test_research_v2_duplicate_model_completion_is_read_only_replay(
     assert replay["version"] == first["version"]
     assert len(replay["stage_artifacts"]) == len(run["stage_artifacts"]) + 1
     assert len(replay.get("automatic_stage_approvals") or []) == 1
+    assert replay["automatic_stage_approvals"][0]["delivery_id"] == delivery["id"]
+    assert replay["automatic_stage_approvals"][0]["delivery_content_sha256"] == hashlib.sha256(
+        delivery["content"].encode("utf-8")
+    ).hexdigest()
     assert cell["run"] == first
+
+
+@pytest.mark.parametrize(
+    "delivery_override",
+    [
+        {"id": "direction-result", "content": "different-model-output"},
+        {"id": "direction-result-2", "content": "contract-valid-model-output"},
+    ],
+)
+def test_research_v2_conflicting_completion_replay_is_immutable(
+    tmp_path, monkeypatch, delivery_override
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams import stage_artifacts
+
+    run = _research_stage_run(expert_teams, runtime, tmp_path, "direction")
+    _memory_storage(monkeypatch, runtime, run)
+    artifact = _artifact_for(run)
+    monkeypatch.setattr(stage_artifacts, "parse_stage_response", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        stage_artifacts,
+        "build_stage_artifact",
+        lambda *_a, **_k: copy.deepcopy(artifact),
+    )
+    delivery = {
+        "stream_id": run["execution_stream_id"],
+        "stage_id": "direction",
+        "attempt": 1,
+        "id": "direction-result",
+        "kind": "chat",
+        "content": "contract-valid-model-output",
+    }
+    expert_teams.mark_expert_team_execution_complete(
+        tmp_path, run["run_id"], delivery
+    )
+    conflicting = {**delivery, **delivery_override}
+
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as rejected:
+        expert_teams.mark_expert_team_execution_complete(
+            tmp_path, run["run_id"], conflicting
+        )
+
+    assert rejected.value.code == "stage_completion_immutable_conflict"
 
 
 def test_non_research_standalone_stage_keeps_manual_confirmation_behavior(
@@ -386,7 +434,7 @@ def test_research_v2_intermediate_view_never_exposes_manual_approve_action(tmp_p
     "workflow_state",
     ["ready_to_generate", "delivery_validation_required"],
 )
-def test_route_runner_dispatches_research_v2_auto_continuation(
+def test_get_reconciliation_never_dispatches_research_v2_external_side_effect(
     tmp_path, monkeypatch, workflow_state
 ):
     from api import expert_teams, routes
@@ -426,8 +474,19 @@ def test_route_runner_dispatches_research_v2_auto_continuation(
 
     result = routes._expert_team_run_with_execution_truth(tmp_path, run)
 
-    assert starts == [(run["run_id"], workflow_state)]
-    assert result["workflow_state"] == "generating"
+    assert starts == []
+    assert result["workflow_state"] == workflow_state
+
+
+def test_research_v2_system_delivery_can_continue_through_resume_mutation():
+    from api import routes
+
+    assert routes._expert_team_resume_requires_execution(
+        {
+            "workflow_state": "delivery_validation_required",
+            "pending_system_stage": {"id": "delivery", "executor": "system"},
+        }
+    ) is True
 
 
 def test_system_delivery_reservation_replay_does_not_render_again(tmp_path, monkeypatch):

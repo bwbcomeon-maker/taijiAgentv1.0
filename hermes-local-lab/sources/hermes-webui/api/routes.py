@@ -5028,15 +5028,6 @@ def _expert_team_run_with_execution_truth(workspace: Path, run: dict | None) -> 
     if str(run.get("workflow_state") or "") == "awaiting_stage_input":
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
-    from api.expert_teams.runtime import _research_v2_run
-
-    if _research_v2_run(run) and str(run.get("workflow_state") or "") in {
-        "ready_to_generate",
-        "delivery_validation_required",
-    }:
-        payload, _status = _start_expert_team_execution(workspace, run, {})
-        continued = payload.get("run") if isinstance(payload, dict) else None
-        return continued if isinstance(continued, dict) else run
     if str(run.get("workflow_state") or "") not in {"generating", "result_unverified", "cancelling"}:
         run["view"] = expert_teams.expert_team_run_view(run)
         return run
@@ -5767,7 +5758,10 @@ def _expert_team_resume_requires_execution(run: dict) -> bool:
         if isinstance((run or {}).get("pending_system_stage"), dict)
         else {}
     )
-    return state == "generated_invalid" and pending.get("executor") == "system"
+    return (
+        state in {"delivery_validation_required", "generated_invalid"}
+        and pending.get("executor") == "system"
+    )
 
 
 def _start_expert_team_execution(

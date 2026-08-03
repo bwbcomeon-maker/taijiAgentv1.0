@@ -198,6 +198,25 @@ def _markdown_section_body(markdown: str, heading: str) -> str:
     return ""
 
 
+def _contains_exact_statement(text: object, statement: object) -> bool:
+    """Match the declared claim text exactly after Unicode/whitespace normalization."""
+
+    normalized_text = re.sub(
+        r"\s+", " ", unicodedata.normalize("NFKC", str(text or ""))
+    ).strip()
+    normalized_statement = re.sub(
+        r"\s+", " ", unicodedata.normalize("NFKC", str(statement or ""))
+    ).strip()
+    if not normalized_statement:
+        return False
+    prefix = r"(?<!\w)" if re.match(r"\w", normalized_statement[0]) else ""
+    suffix = r"(?!\w)" if re.match(r"\w", normalized_statement[-1]) else ""
+    return re.search(
+        prefix + re.escape(normalized_statement) + suffix,
+        normalized_text,
+    ) is not None
+
+
 def _source_anchor_fingerprints(source_context: dict | None) -> list[str]:
     """Extract deterministic high-signal literals without persisting source text."""
 
@@ -570,6 +589,7 @@ def _research_citation_result(
             if re.search(
                 r"https?://|\bwww\.\S+|\[\^[^\]]+\]"
                 r"|\[[A-Za-z][A-Za-z0-9._:-]*\]"
+                r"|(?:\[|【|（)\s*\d+\s*(?:\]|】|）)"
                 r"|(?:\[|【|（)[^\]】）]*(?:来源|资料|参考|source|ref)[^\]】）]*(?:\]|】|）)"
                 r"|脚注\s*[0-9一二三四五六七八九十]+",
                 body,
@@ -617,6 +637,29 @@ def _research_citation_result(
                         "model_knowledge_label_missing",
                         f"claim:{claim_id}",
                         "模型知识内容未在正文明示为未核验",
+                    )
+                )
+                continue
+            statement = str(claim.get("statement") or "").strip()
+            appears_in_declared_section = _contains_exact_statement(
+                section_body,
+                statement,
+            )
+            appears_in_citable_section = any(
+                _contains_exact_statement(
+                    _markdown_section_body(markdown, outline_headings.get(other_section_id, "")),
+                    statement,
+                )
+                for other_section_id in non_model_usage_sections
+                if other_section_id != str(usage.get("section_id") or "").strip()
+                and outline_headings.get(other_section_id, "")
+            )
+            if not appears_in_declared_section or appears_in_citable_section:
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_statement_section_mismatch",
+                        f"claim:{claim_id}",
+                        "模型知识 claim 的原声明必须仅出现在其声明章节，不得出现在可引用 claim 章节",
                     )
                 )
                 continue

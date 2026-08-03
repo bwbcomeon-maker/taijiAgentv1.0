@@ -80,10 +80,12 @@
 | 检查项 | 命令/工具 | 结果 | 备注 |
 |---|---|---|---|
 | 研究 v2 前端合同 | `pytest ... tests/test_expert_team_research_frontend_v2.py` | 6 passed | Presenter、发起页、工作台、追问、对比度、兼容分支 |
-| 现有前端回归 | `pytest ... test_expert_team_frontend.py test_expert_team_launch_frontend.py test_expert_team_frontend_v3.py test_expert_team_research_frontend_v2.py` | 118 passed | 使用当前 worktree agent `.venv`，含 1 条上游 deprecation warning |
+| 前端聚合回归 | `pytest ... test_expert_team_frontend*.py test_expert_team_launch_frontend.py test_expert_team_research_frontend_v2.py` | 206 passed | 使用当前 worktree agent `.venv`，含 1 条上游 deprecation warning |
 | 现有 Electron V3 回归 | `node tests/expert_team_v3_electron_smoke.js` | 通过 | 隔离 runtime，无错误输出 |
 | 研究 v2 Electron 实测 | `/tmp/taiji_research_v2_electron_smoke.js` | 通过 | 发起、工作台、键盘追问、三档断点 |
 | diff 格式 | `git diff --check` | 通过 | 无空白错误 |
+| 自动续跑前端合同 | `pytest ... tests/test_expert_team_frontend_v2.py` | 88 passed | GET 只读，v2 由 POST `/resume` 自动续跑 |
+| 模板级 DOCX 原生打开 | Word + WPS + LibreOffice | 带限制通过 | 两份 smoke DOCX 可打开；macOS 的 ChatGPT App Data 授权弹窗遮挡了部分原生页面检查 |
 
 ## 问题列表
 
@@ -103,6 +105,7 @@
 - 深度研究极简发起分支根据后端 catalog 返回的稳定公开 `launch_profile_id="research-report"` 识别；若后端将来改名，需同步升级 catalog 合同。
 - 截图为功能分支的 development Electron 证据，不代表正式 `main`、安装态或发布态已通过。
 - 未实测真实公网、真实本地知识库和真实 Provider 故障后的完整界面切换。
+- 两份 DOCX 是研究模板级 smoke 产物，不是真实 Provider 经正式产品路由生成的最终交付。
 
 ## 未验证项目
 
@@ -111,7 +114,8 @@
 - 1024 截图独立人工放大检查：未验证（但 DOM 断点尺寸和溢出断言已通过）。
 - 长时间连续使用疲劳测试：未验证。
 - 真实 Provider/公网/内网知识库与最终 DOCX 的研究专属端到端：未验证。
-- Word/WPS 打开本轮研究 DOCX：未验证。
+- Word/WPS 打开模板级研究 DOCX：已验证可打开；完整逐页原生检查受 macOS 授权弹窗遮挡，未完成。
+- 正式产品路由生成的 Word/WPS 最终验收：未验证。
 - 正式 `main` 和安装态 Electron：未验证。
 
 ## 后续建议

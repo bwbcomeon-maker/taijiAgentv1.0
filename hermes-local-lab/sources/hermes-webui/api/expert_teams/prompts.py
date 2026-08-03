@@ -748,6 +748,19 @@ def build_stage_gateway_request(
     ]
     if boundary_assumptions:
         envelope["research_boundary_assumptions"] = boundary_assumptions
+    input_consumptions = [
+        {
+            "input_id": str(item.get("input_id") or ""),
+            "stage_id": str(item.get("stage_id") or ""),
+            "disposition": str(item.get("disposition") or ""),
+        }
+        for item in run.get("research_input_consumptions") or []
+        if isinstance(item, dict)
+        and str(item.get("stage_id") or "") == str(declared["id"])
+        and str(item.get("input_id") or "")
+    ]
+    if input_consumptions:
+        envelope["research_input_consumptions"] = input_consumptions
     system = _system_message(
         str(declared["artifact_type"]),
         brief,

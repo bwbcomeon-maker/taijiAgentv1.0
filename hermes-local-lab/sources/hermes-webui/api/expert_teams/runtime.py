@@ -2512,15 +2512,36 @@ def _intake_state(run: dict) -> str:
 
 def _stage_input_binding_sha256(run: dict, stage: dict, input_refs: list[dict]) -> str:
     brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    stage_id = str(stage.get("id") or stage.get("task_id") or "")
     payload = {
         "run_id": str(run.get("run_id") or ""),
-        "stage_id": str(stage.get("id") or stage.get("task_id") or ""),
+        "stage_id": stage_id,
         "executor": str(stage.get("executor") or ""),
         "artifact_type": str(stage.get("artifact_type") or ""),
         "brief_revision": int(brief.get("confirmed_revision") or 0),
         "brief_sha256": str(brief.get("confirmed_sha256") or ""),
         "input_refs": deepcopy(input_refs),
     }
+    boundary_assumptions = [
+        deepcopy(item)
+        for item in run.get("research_boundary_assumptions") or []
+        if isinstance(item, dict) and str(item.get("stage_id") or "") == stage_id
+    ]
+    if boundary_assumptions:
+        payload["research_boundary_assumptions"] = boundary_assumptions
+    input_consumptions = [
+        {
+            "input_id": str(item.get("input_id") or ""),
+            "stage_id": str(item.get("stage_id") or ""),
+            "disposition": str(item.get("disposition") or ""),
+        }
+        for item in run.get("research_input_consumptions") or []
+        if isinstance(item, dict)
+        and str(item.get("stage_id") or "") == stage_id
+        and str(item.get("input_id") or "")
+    ]
+    if input_consumptions:
+        payload["research_input_consumptions"] = input_consumptions
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -3881,7 +3902,8 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
     requested_input_id = str(body.get("input_id") or "").strip()
     existing_input_ids = {
         str(item.get("input_id") or item.get("id") or "").strip()
-        for item in run.get("stage_inputs") or []
+        for item in (run.get("stage_inputs") or [])
+        + (run.get("research_input_consumptions") or [])
         if isinstance(item, dict)
     }
     pending = run.get("pending_input")
@@ -3894,13 +3916,27 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
             "stage input id was already used by this run",
             run,
         )
+    if not requested_input_id:
+        requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
+        while requested_input_id in existing_input_ids:
+            requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
     if research_v2:
         category = str(body.get("category") or "").strip()
         reason = str(body.get("reason") or "").strip()
-        semantic_text = "\n".join(
+        semantic_values = [
             str(body.get(field) or "").strip()
-            for field in ("question", "impact", "conservative_assumption")
+            for field in (
+                "question",
+                "description",
+                "impact",
+                "conservative_assumption",
+            )
+        ]
+        semantic_values.extend(
+            str(option or "").strip()
+            for option in body.get("options") or []
         )
+        semantic_text = "\n".join(semantic_values)
         if (
             category not in {"scope", "object", "caliber"}
             or reason != "core_conclusion_ambiguity"
@@ -3921,12 +3957,29 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
                 for item in run.get("research_boundary_assumptions") or []
                 if isinstance(item, dict)
             ]
-            assumptions.append(
+            stage_id = str(current.get("task_id") or current.get("id") or "")
+            impact = str(body.get("impact") or "").strip()
+            assumption = {
+                "scope": "conclusion",
+                "stage_id": stage_id,
+                "assumption": conservative_assumption,
+                "impact": impact,
+            }
+            if assumption not in assumptions:
+                assumptions.append(assumption)
+            consumptions = [
+                deepcopy(item)
+                for item in run.get("research_input_consumptions") or []
+                if isinstance(item, dict)
+            ]
+            consumptions.append(
                 {
-                    "scope": "conclusion",
-                    "stage_id": str(current.get("task_id") or current.get("id") or ""),
+                    "input_id": requested_input_id,
+                    "stage_id": stage_id,
+                    "disposition": "conservative_assumption",
                     "assumption": conservative_assumption,
-                    "impact": str(body.get("impact") or "").strip(),
+                    "impact": impact,
+                    "consumed_at": _now(),
                 }
             )
             _record_action(run, body, "request_stage_input")
@@ -3941,12 +3994,9 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
                     **superseded,
                     "pending_input": {},
                     "research_boundary_assumptions": assumptions,
+                    "research_input_consumptions": consumptions,
                 },
             )
-    if not requested_input_id:
-        requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
-        while requested_input_id in existing_input_ids:
-            requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
     pending_input = {
         "id": requested_input_id,
         "question": str(body.get("question") or "当前阶段需要你确认后继续生成。").strip(),
@@ -4167,10 +4217,21 @@ def _complete_enterprise_stage_artifact(
     }
     run["last_validation_error"] = run["validation"]["message"] if blocking_count else ""
     if not blocking_count and _research_v2_run(run):
+        delivery_id = str(
+            output.get("delivery_id")
+            or output.get("id")
+            or "expert-team-chat-delivery"
+        )
+        delivery_content_sha256 = str(
+            output.get("delivery_content_sha256")
+            or hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
+        )
         return _auto_approve_research_v2_stage(
             workspace,
             run,
             artifact,
+            delivery_id=delivery_id,
+            delivery_content_sha256=delivery_content_sha256,
         )
     status = "generated_invalid" if blocking_count else "generated_valid"
     state = "generated_invalid" if blocking_count else "awaiting_review"
@@ -4182,6 +4243,9 @@ def _auto_approve_research_v2_stage(
     workspace: Path,
     run: dict,
     artifact: dict,
+    *,
+    delivery_id: str,
+    delivery_content_sha256: str,
 ) -> dict:
     """Advance one contract-valid research/v2 model stage without user review."""
 
@@ -4194,6 +4258,8 @@ def _auto_approve_research_v2_stage(
         "artifact_id": str(artifact.get("artifact_id") or ""),
         "artifact_sha256": str(artifact.get("sha256") or ""),
         "execution_stream_id": str(run.get("execution_stream_id") or ""),
+        "delivery_id": delivery_id,
+        "delivery_content_sha256": delivery_content_sha256,
         "approved_at": approved_at,
     }
     approvals = [
@@ -4290,14 +4356,34 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         delivered_attempt = int((delivery or {}).get("attempt"))
     except (TypeError, ValueError):
         delivered_attempt = -1
-    if _research_v2_run(run) and any(
-        str(item.get("stage_id") or "") == delivered_stage_id
-        and int(item.get("stage_attempt") or 0) == delivered_attempt
-        and str(item.get("execution_stream_id") or "") == delivered_stream_id
-        for item in run.get("automatic_stage_approvals") or []
-        if isinstance(item, dict)
-    ):
-        return _sync_derived(run)
+    delivered_id = str((delivery or {}).get("id") or "expert-team-chat-delivery")
+    delivered_content_sha256 = hashlib.sha256(
+        str((delivery or {}).get("content") or "").encode("utf-8")
+    ).hexdigest()
+    if _research_v2_run(run):
+        replay_approval = next(
+            (
+                item
+                for item in run.get("automatic_stage_approvals") or []
+                if isinstance(item, dict)
+                and str(item.get("stage_id") or "") == delivered_stage_id
+                and int(item.get("stage_attempt") or 0) == delivered_attempt
+                and str(item.get("execution_stream_id") or "") == delivered_stream_id
+            ),
+            None,
+        )
+        if replay_approval is not None:
+            if (
+                str(replay_approval.get("delivery_id") or "") == delivered_id
+                and str(replay_approval.get("delivery_content_sha256") or "")
+                == delivered_content_sha256
+            ):
+                return _sync_derived(run)
+            raise ExpertTeamStateConflict(
+                "stage_completion_immutable_conflict",
+                "stage completion identity was already approved with different delivery content",
+                run,
+            )
     if state not in {"generating", "result_unverified"}:
         code = "missing_stream" if state == "ready_to_generate" and not expected_stream_id else "stale_state"
         raise ExpertTeamStateConflict(code, "expert team execution is not generating", run)
@@ -4324,6 +4410,8 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         )
     business_context = business_context_for_run(run)
     output = structured_output_from_delivery(delivery or {}, business_context)
+    output["delivery_id"] = delivered_id
+    output["delivery_content_sha256"] = delivered_content_sha256
     current = _current_stage(_sync_derived(deepcopy(run)))
     output["task_id"] = current.get("task_id") or ""
     output["stage_id"] = current.get("task_id") or ""
@@ -6557,7 +6645,14 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
             "previous expert team runtime cleanup is not yet confirmed",
             run,
         )
-    if state not in {"ready_to_generate", "start_failed", "generation_failed", "result_unverified", "generated_invalid"}:
+    if state not in {
+        "ready_to_generate",
+        "start_failed",
+        "generation_failed",
+        "result_unverified",
+        "generated_invalid",
+        "delivery_validation_required",
+    }:
         raise ExpertTeamStateConflict("stale_state", "expert team run is not resumable", run)
     _record_action(run, body, "resume")
     if recovery_patch := _warning_only_review_recovery_patch(run):
@@ -6575,17 +6670,26 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
     )
     if (
         pending_system_stage.get("executor") == "system"
-        and state in {"generated_invalid", "ready_to_generate"}
+        and state in {
+            "delivery_validation_required",
+            "generated_invalid",
+            "ready_to_generate",
+        }
     ):
         # A failed system delivery is retried by the system dispatcher itself.
         # Moving it into the model-stage ready state makes the dispatcher reject
         # its own retry and leaves the UI in a resume loop.  Preserve the
         # retryable system state until the route reserves/finishes that exact
         # delivery side effect.
+        target_state = (
+            "delivery_validation_required"
+            if state == "delivery_validation_required"
+            else "generated_invalid"
+        )
         return _transition(
             workspace,
             run,
-            "generated_invalid",
+            target_state,
             "system_stage_retry_requested",
             _clear_execution_patch(),
         )

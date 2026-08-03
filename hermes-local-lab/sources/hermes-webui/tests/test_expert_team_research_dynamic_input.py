@@ -207,8 +207,12 @@ def test_v2_forbidden_dynamic_input_category_is_rejected_at_every_stage(
     [
         ("question", "断网了，请选择要使用哪个本地资料来源？"),
         ("question", "The network failed; which source should be selected?"),
+        ("description", "网络失败后请选择本地资料来源。"),
+        ("description", "Select a local source after the network failure."),
         ("impact", "证据不足，需要用户确定引用格式和报告日期。"),
         ("impact", "Evidence is insufficient and local knowledge selection is required."),
+        ("options", ["继续", "选择本地资料来源"]),
+        ("options", ["Continue", "Select local source after network failure"]),
         ("conservative_assumption", "假设当前标题、日期和引用格式已由用户确认。"),
         ("conservative_assumption", "Assume today's citation format after a network failure."),
     ],
@@ -372,6 +376,102 @@ def test_v2_research_third_question_continues_with_consumable_boundary_assumptio
     )
     envelope = json.loads(request["messages"][1]["content"])
     assert envelope["research_boundary_assumptions"] == continued["research_boundary_assumptions"]
+
+
+def test_v2_question_limit_consumption_is_durable_unique_and_idempotent(
+    tmp_path, monkeypatch
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _research_run(expert_teams, tmp_path)
+    run["research_dynamic_input_count"] = 2
+    stage = next(item for item in run["_tasks_template"] if item["id"] == "research")
+    snapshot = expert_teams.verified_source_context_for_execution(tmp_path, run)
+    before_request = build_stage_gateway_request(
+        run,
+        stage,
+        source_context=snapshot,
+    )
+    before_binding = runtime._stage_input_binding_sha256(
+        run,
+        stage,
+        before_request["input_refs"],
+    )
+    _memory_storage(monkeypatch, runtime, run)
+    body = _control(
+        run,
+        "limit-consumption-first",
+        input_id="limit-consumption-1",
+        scope="conclusion",
+        blocking=True,
+        category="scope",
+        reason="core_conclusion_ambiguity",
+        question="核心结论的对象范围如何确定？",
+        impact="对象范围会改变核心结论。",
+        options=["单一部门", "全公司"],
+        conservative_assumption="按单一部门试点口径作保守结论。",
+    )
+
+    consumed = expert_teams.request_expert_team_stage_input(tmp_path, body)
+    replay = expert_teams.request_expert_team_stage_input(tmp_path, body)
+
+    assert consumed["workflow_state"] == "ready_to_generate"
+    assert consumed.get("pending_input") in ({}, None)
+    assert consumed["research_dynamic_input_count"] == 2
+    assert consumed["research_boundary_assumptions"] == [
+        {
+            "scope": "conclusion",
+            "stage_id": "research",
+            "assumption": "按单一部门试点口径作保守结论。",
+            "impact": "对象范围会改变核心结论。",
+        }
+    ]
+    assert consumed["research_input_consumptions"] == [
+        {
+            "input_id": "limit-consumption-1",
+            "stage_id": "research",
+            "disposition": "conservative_assumption",
+            "assumption": "按单一部门试点口径作保守结论。",
+            "impact": "对象范围会改变核心结论。",
+            "consumed_at": consumed["research_input_consumptions"][0]["consumed_at"],
+        }
+    ]
+    assert replay == consumed
+    assert replay["version"] == consumed["version"]
+    after_request = build_stage_gateway_request(
+        consumed,
+        stage,
+        source_context=expert_teams.verified_source_context_for_execution(
+            tmp_path,
+            consumed,
+        ),
+    )
+    envelope = json.loads(after_request["messages"][1]["content"])
+    assert envelope["research_input_consumptions"] == [
+        {
+            "input_id": "limit-consumption-1",
+            "stage_id": "research",
+            "disposition": "conservative_assumption",
+        }
+    ]
+    assert after_request["data_envelope_sha256"] != before_request[
+        "data_envelope_sha256"
+    ]
+    assert runtime._stage_input_binding_sha256(
+        consumed,
+        stage,
+        after_request["input_refs"],
+    ) != before_binding
+
+    conflicting_body = copy.deepcopy(body)
+    conflicting_body["idempotency_key"] = "limit-consumption-conflict"
+    conflicting_body["expected_version"] = consumed["version"]
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as rejected:
+        expert_teams.request_expert_team_stage_input(tmp_path, conflicting_body)
+
+    assert rejected.value.code == "stage_input_id_conflict"
 
 
 def test_v2_third_question_requires_non_empty_conservative_assumption(tmp_path, monkeypatch):

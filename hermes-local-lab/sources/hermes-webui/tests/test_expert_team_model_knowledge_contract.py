@@ -634,6 +634,7 @@ def test_mixed_report_keeps_public_citations_and_model_claims_isolated():
             origin_tier="model_knowledge",
             source_id=None,
             status="insufficient",
+            statement="仅作分析补充。",
         ),
     ]
     usages = [
@@ -687,6 +688,62 @@ def test_mixed_report_keeps_public_citations_and_model_claims_isolated():
     )
     assert "model_knowledge_citation_forbidden" in {
         issue["code"] for issue in borrowed_report["issues"]
+    }
+
+
+@pytest.mark.parametrize("also_in_declared_section", [False, True])
+def test_model_claim_statement_cannot_appear_in_a_public_claim_section(
+    also_in_declared_section,
+):
+    model_statement = "仅作模型方法分析，不代表实时事实。"
+    claims = [
+        _claim(claim_id="CLAIM-PUB", origin_tier="public_web"),
+        _claim(
+            claim_id="CLAIM-MODEL",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+            statement=model_statement,
+        ),
+    ]
+    usages = [
+        {"claim_id": "CLAIM-PUB", "section_id": "SEC-EVIDENCE", "citation_marker": "[PUB-001]"},
+        {"claim_id": "CLAIM-MODEL", "section_id": "SEC-ANALYSIS", "citation_marker": "模型知识·未核验"},
+    ]
+    artifact = _research_artifact(
+        usages,
+        evidence_text=f"公开资料结论 [PUB-001]。{model_statement}",
+        references="[PUB-001] 公开资料。",
+    )
+    analysis_text = "模型知识·未核验：模型知识时效未知。"
+    if also_in_declared_section:
+        analysis_text = f"模型知识·未核验：{model_statement}模型知识时效未知。"
+    artifact["deliverable_markdown"] = artifact["deliverable_markdown"].replace(
+        "在证据边界内进行分析。",
+        analysis_text,
+    )
+    outline_sections = [
+        {
+            "section_id": "SEC-EVIDENCE",
+            "heading": "证据",
+            "claim_ids": ["CLAIM-PUB"],
+        },
+        {
+            "section_id": "SEC-ANALYSIS",
+            "heading": "分析",
+            "claim_ids": ["CLAIM-MODEL"],
+        },
+    ]
+
+    report = _semantic_report(
+        artifact,
+        claims,
+        sources=[{"source_id": "PUB-001", "kind": "approved_public"}],
+        outline_sections=outline_sections,
+    )
+
+    assert "model_knowledge_statement_section_mismatch" in {
+        issue["code"] for issue in report["issues"]
     }
 
 
@@ -775,6 +832,9 @@ def test_each_model_claim_requires_one_label_occurrence_in_the_same_section():
         "【参考一】",
         "（来源一）",
         "[PUB-001]",
+        "[1]",
+        "【1】",
+        "（1）",
     ],
 )
 def test_model_claim_section_blocks_long_distance_and_fake_source_markers(
@@ -785,6 +845,7 @@ def test_model_claim_section_blocks_long_distance_and_fake_source_markers(
             origin_tier="model_knowledge",
             source_id=None,
             status="insufficient",
+            statement="本项仅作方法分析。",
         )
     ]
     spacer = "仅作方法分析。" * 80
@@ -899,6 +960,7 @@ def test_model_only_report_has_no_fake_citations_or_empty_reference_shell():
             origin_tier="model_knowledge",
             source_id=None,
             status="insufficient",
+            statement="本项仅作方法分析。",
         )
     ]
     usage = [

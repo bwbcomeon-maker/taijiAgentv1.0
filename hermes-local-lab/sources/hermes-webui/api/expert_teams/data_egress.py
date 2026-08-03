@@ -196,6 +196,49 @@ def _semantic_forms(value: str) -> tuple[str, list[str], str]:
     a private/public transaction decision.
     """
     normalized = unicodedata.normalize("NFKC", str(value or ""))
+    # Format/control characters and common cross-script homoglyphs must not be
+    # able to split a policy keyword.  This is a DLP comparison form only; the
+    # original text remains unchanged for display and audit.
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", normalized)
+        if unicodedata.category(character) not in {"Cf", "Mn", "Me"}
+        and character != "\u00ad"
+    )
+    normalized = normalized.translate(
+        str.maketrans(
+            {
+                "а": "a", "с": "c", "е": "e", "о": "o", "р": "p", "ο": "o", "ρ": "p", "ι": "i", "н": "n",
+                "х": "x", "у": "y", "і": "i", "ј": "j", "к": "k",
+                "м": "m", "т": "t",
+                "А": "A", "С": "C", "Е": "E", "О": "O", "Р": "P", "Ο": "O", "Ρ": "P", "Ι": "I", "Н": "N",
+                "Х": "X", "У": "Y", "І": "I", "Ј": "J", "К": "K",
+                "М": "M", "Т": "T",
+            }
+        )
+    )
+
+    protected_terms = {
+        "account", "accounts", "agreement", "agreements", "amount", "amounts",
+        "balance", "balances", "bid", "bids", "billing", "budget", "budgets",
+        "commercial", "commission", "compensation", "contract",
+        "contracts", "contractual", "cost", "costs", "credit", "deal", "deals",
+        "deposit", "fee", "fees", "invoice", "invoices", "likelihood", "order", "orders",
+        "payable", "payables", "payment", "payments", "period", "price", "priced",
+        "prices", "pricing", "procurement", "purchase", "quotation", "quotations",
+        "quote", "quotes", "rate", "rates", "receivable", "receivables", "remuneration",
+        "renewal", "renewals", "renewing", "schedule", "settlement", "spend", "sum", "sums",
+        "tender", "tenders", "term", "terms", "total", "unit", "value", "values",
+    }
+    for term in sorted(protected_terms, key=len, reverse=True):
+        separator = r"(?:[\W_\d]+)?"
+        pattern = separator.join(re.escape(character) for character in term)
+        normalized = re.sub(
+            rf"(?<![A-Za-z]){pattern}(?![A-Za-z])",
+            term,
+            normalized,
+            flags=re.IGNORECASE,
+        )
     lowered = normalized.casefold()
     lowered = re.sub(r"\bcannot\s+be\s+treated\s+as\b", "not", lowered)
     lowered = re.sub(r"\b(?:is|are|was|were|do|does|did|has|have|had)n['’]?t\b", "not", lowered)
@@ -203,9 +246,62 @@ def _semantic_forms(value: str) -> tuple[str, list[str], str]:
     semantic_english = [
         token for token in english_tokens if token not in _RESEARCH_EN_CONNECTORS
     ]
+    ascii_skeleton = re.sub(r"[^a-z0-9]+", "", lowered)
+    transaction_roots = (
+        "account", "agreement", "bid", "bidding", "billing", "commission", "contract",
+        "deal", "deposit", "invoic", "order", "credit", "payment", "procurement",
+        "purchas", "renewal", "renewing", "renegotiat", "settlement", "tender", "unit",
+    )
+    transaction_values = (
+        "amount", "balance", "budget", "compensation", "cost", "cycle", "discount",
+        "fee", "limit", "margin", "period", "price", "pricing", "quotation", "quote",
+        "rate", "rebate", "remuneration", "schedule", "spend", "sum", "term", "total", "value",
+    )
+    def near_contains(term: str) -> bool:
+        """Match one inserted, deleted, or replaced character in a compact term."""
+        if len(term) <= 4:
+            return any(token in {term, f"{term}s"} for token in semantic_english)
+        for width in {len(term) - 1, len(term), len(term) + 1}:
+            if width <= 0:
+                continue
+            for start in range(max(0, len(ascii_skeleton) - width + 1)):
+                candidate = ascii_skeleton[start : start + width]
+                if _edit_distance_at_most_one(candidate, term):
+                    return True
+        return False
+
+    if (
+        any(near_contains(root) for root in transaction_roots)
+        and any(near_contains(value) for value in transaction_values)
+    ) or "quotation" in ascii_skeleton:
+        semantic_english.append("__private_transaction__")
     chinese_compact = re.sub(r"[\s\W_]+", "", normalized, flags=re.UNICODE)
+    chinese_compact = re.sub(r"[A-Za-z0-9]+", "", chinese_compact)
+    chinese_compact = chinese_compact.translate(
+        str.maketrans({"協": "协", "議": "议", "價": "价", "採": "采", "購": "购", "額": "额", "條": "条"})
+    )
     chinese_semantic = chinese_compact.replace("的", "")
     return normalized, semantic_english, chinese_semantic
+
+
+def _edit_distance_at_most_one(left: str, right: str) -> bool:
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) > len(right):
+        left, right = right, left
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) <= 1
+    index_left = index_right = differences = 0
+    while index_left < len(left) and index_right < len(right):
+        if left[index_left] == right[index_right]:
+            index_left += 1
+            index_right += 1
+            continue
+        differences += 1
+        if differences > 1:
+            return False
+        index_right += 1
+    return True
 
 
 def _has_token_sequence(tokens: list[str], *sequence: str) -> bool:
@@ -223,47 +319,110 @@ def _concepts_within(tokens: list[str], left: set[str], right: set[str], *, wind
 
 
 def _private_transaction_semantics(tokens: list[str], chinese: str) -> bool:
-    contract_terms = {
-        token
-        for token in tokens
-        if token == "contract" or token.startswith("contract")
+    # Deliberately fail closed.  Ambiguous public topics (for example smart
+    # contracts plus market pricing) use the automatic local/model fallback
+    # instead of creating a semantic exception that can launder a private tail.
+    if "__private_transaction__" in tokens:
+        return True
+    anchor_words = {
+        "agreement", "agreements", "bid", "bids", "billing", "deal", "deals",
+        "invoice", "invoices", "order", "orders", "payment", "payments",
+        "settlement", "tender", "tenders",
     }
-    pricing_terms = {
-        token
-        for token in tokens
-        if token in {
-            "amount", "cost", "costs", "fee", "fees", "price", "priced",
-            "prices", "pricing", "quotation", "quotations", "quote", "quotes",
-            "rate", "rates", "value", "values",
-        }
+    money_words = {
+        "amount", "amounts", "budget", "budgets", "cost", "costs", "fee",
+        "fees", "compensation", "price", "priced", "prices", "pricing", "quotation",
+        "quotations", "quote", "quotes", "rate", "rates", "spend", "sum",
+        "sums", "total", "remuneration", "value", "values",
+    }
+    anchors: set[int] = set()
+    money: set[int] = set()
+    for index, token in enumerate(tokens):
+        transaction_anchor = bool(
+            token in anchor_words
+            or token == "contract"
+            or token.startswith("contracts")
+            or token.startswith("contractual")
+            or token.startswith("procurement")
+            or token.startswith("purchase")
+        )
+        if transaction_anchor:
+            anchors.add(index)
+        if token in money_words:
+            money.add(index)
+
+    token_text = " ".join(tokens)
+    nearby_transaction = any(
+        abs(anchor_index - money_index) <= 12
+        for anchor_index in anchors
+        for money_index in money
+    )
+    payment_positions = {
+        index
+        for index, token in enumerate(tokens)
+        if token in {"payment", "payments", "credit"}
+    }
+    settlement_positions = {
+        index
+        for index, token in enumerate(tokens)
+        if token in {"period", "schedule", "settlement", "term", "terms"}
     }
     english_private = bool(
-        (contract_terms and pricing_terms)
-        or (
-            any(token.startswith("procurement") or token.startswith("purchase") for token in tokens)
-            and pricing_terms
+        nearby_transaction
+        or any(
+            abs(left - right) <= 5
+            for left in payment_positions
+            for right in settlement_positions
         )
-        or (
-            any(token in {"payment", "payments", "credit"} for token in tokens)
-            and any(token in {"period", "settlement", "term", "terms"} for token in tokens)
+        or _concepts_within(
+            tokens,
+            {"settlement"},
+            {"period", "schedule", "term", "terms"},
+            window=5,
         )
-        or (
-            any(token.startswith("renewal") for token in tokens)
-            and any(token in {"risk", "risks", "term", "terms"} for token in tokens)
+        or _concepts_within(
+            tokens,
+            {"renewal", "renewals"},
+            {"condition", "conditions", "likelihood", "risk", "risks", "term", "terms"},
+            window=5,
         )
-        or (
-            any(token in {"account", "accounts"} for token in tokens)
-            and any(token in {"payable", "payables", "receivable", "receivables"} for token in tokens)
+        or _concepts_within(
+            tokens,
+            {"account", "accounts"},
+            {"balance", "balances", "payable", "payables", "receivable", "receivables"},
+            window=5,
+        )
+        or _has_token_sequence(tokens, "commercial", "terms")
+        or _has_token_sequence(tokens, "billing", "terms")
+    )
+
+    chinese_anchor = bool(
+        re.search(
+            r"(?:合同|协议|合约|订单|采购|付款|支付|结算|续签|授信|保证金|尾款|佣金|优惠)",
+            chinese,
+        )
+    )
+    chinese_money = bool(
+        re.search(
+            r"(?:报价|定价|价格|单价|价|金额|费用|费率|成本|毛利|折扣|折让|总额|预算|支出|条款|账期|周期|日期|安排|额度)",
+            chinese,
         )
     )
     chinese_private = bool(
-        (
-            re.search(r"(?:合同|协议|采购)", chinese)
-            and re.search(r"(?:报价|定价|价格|单价|价|金额|费用|成本|条款|账期)", chinese)
+        (chinese_anchor and chinese_money)
+        or re.search(
+            r"(?:合同|协议|合约|订单).{0,4}(?:报价|定价|价格|单价|价|金额|费用|费率|成本|毛利|折扣|总额|额|款|条款|账期)", chinese
         )
-        or any(term in chinese for term in ("付款条款", "支付条款", "回款", "续约", "应收账款", "应付账款"))
+        or re.search(r"采购.{0,4}(?:报价|定价|价格|单价|金额|费用|成本|预算|支出|条款|账期)", chinese)
+        or re.search(r"(?:成交|中标)(?:价|价格|金额)", chinese)
+        or re.search(r"(?:付款|支付|结算).{0,4}(?:周期|条款|账期|金额|日期|安排|价)", chinese)
+        or re.search(r"续签.{0,4}(?:条件|风险|概率|价格|金额|价)", chinese)
+        or re.search(r"授信.{0,4}额度", chinese)
+        or re.search(r"应(?:收|付).{0,4}(?:余额|账款)", chinese)
+        or any(term in chinese for term in ("报价", "回款", "续约", "应收账款", "应付账款"))
     )
-    return english_private or chinese_private
+    mixed_private = bool((anchors and chinese_money) or (money and chinese_anchor))
+    return english_private or chinese_private or mixed_private
 
 
 def _public_transaction_semantics(tokens: list[str], chinese: str) -> tuple[bool, bool]:

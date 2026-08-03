@@ -1311,6 +1311,221 @@ def test_entity_free_generic_contract_pricing_topics_also_fail_closed(
     assert decision["reason_code"] == "policy_blocked"
 
 
+@pytest.mark.parametrize(
+    "sensitive",
+    [
+        "Acme con\u200btract pricing",
+        "contract pri\u200bcing",
+        "con\u00adtract pricing",
+        "Acme c\u043entract pricing",
+        "Acme c\u03bfntract pricing",
+        "con\u0301tract pricing",
+        "con\ufe0ftract pricing",
+        "con/tract pricing",
+        "con:tract pricing",
+        "con|tract pricing",
+        "con\\tract pricing",
+        "con·tract pricing",
+        "con⁄tract pricing",
+        "con tract pricing",
+        "contra1ct pricing",
+        "contract pri/cing",
+        "contract pric.ing",
+        "contract pr/ice",
+        "contract am/ount",
+        "contract qu/ote",
+        "contract va/lue",
+        "contract ra/te",
+        "contract fe/e",
+        "contract su/m",
+        "procurement co/st",
+        "procurement sp/end",
+        "conאtract pricing",
+        "con中tract pricing",
+        "conաtract pricing",
+        "contract pr中ice",
+        "contract ρ-ricing",
+        "contract pr-ι-cing",
+        "co-н-tract pricing",
+        "Acme agreement price",
+        "deal value",
+        "order price",
+        "invoice amount",
+        "bid price",
+        "tender price",
+        "procurement spend",
+        "contract sum",
+        "payment schedule",
+        "settlement period",
+        "commercial terms",
+        "renewal likelihood",
+        "accounts balance",
+        "Acme public contract pricing",
+        "Acme government procurement pricing",
+        "Acme public procurement spend",
+        "Acme contract energy pricing",
+        "Acme procurement energy costs",
+        "Acme public payment terms",
+        "Acme public credit terms",
+        "Acme contract compensation",
+        "Acme contract remuneration",
+        "Acme contract total",
+        "payment amount",
+        "settlement amount",
+        "billing terms",
+        "Acme contract margin",
+        "Acme contract discount",
+        "Acme contract rebate",
+        "invoice balance",
+        "renewal price",
+        "billing cycle",
+        "credit limit",
+        "Acme quotation",
+        "甲公司合同总额",
+        "甲公司合同额",
+        "甲公司合同款",
+        "成交价",
+        "中标价",
+        "采购预算",
+        "采购支出",
+        "付款周期",
+        "支付周期",
+        "结算条款",
+        "续签条件",
+        "应收余额",
+        "甲公司合约价",
+        "订单金额",
+        "结算金额",
+        "付款金额",
+        "续签价格",
+        "甲公司合同折扣",
+        "甲公司合同费率",
+        "甲公司合同毛利",
+        "付款日期",
+        "支付安排",
+        "结算价",
+        "续签价",
+        "授信额度",
+        "报价",
+        "研究政府采购政策与碳定价以及甲公司合同价格",
+        "研究公共采购制度与能源成本另含甲公司协议金额",
+        "Acme contract价格",
+        "甲公司合同 price",
+        "Acme procurement价格",
+        "甲公司采购 pricing",
+        "Acme contrαct pricing",
+        "Acme conτract pricing",
+        "Acme contrəct pricing",
+        "Acme c0ntract pricing",
+        "Acme contract pr1cing",
+        "Acme contr@ct pricing",
+        "Acme contr中ct pricing",
+        "bidding price",
+        "purchasing costs",
+        "invoicing amount",
+        "renewing price",
+        "renegotiation price",
+        "b/id price",
+        "acc/ount balance",
+        "Acme unit price",
+        "deposit amount",
+        "commission rate",
+        "甲公司合a同价格",
+        "甲公司合1同价格",
+        "甲公司協議價格",
+        "甲公司合同價",
+        "甲公司採購金額",
+        "甲公司付款條款",
+        "甲公司保证金金额",
+        "尾款金额",
+        "佣金费率",
+        "优惠价格",
+        "结算折让",
+    ],
+)
+def test_private_transaction_gate_handles_obfuscation_synonyms_and_mixed_language(
+    tmp_path, sensitive
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=sensitive,
+        core_question=sensitive,
+    )
+    decision = authorize_research_public_query(run, sensitive)
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    "public_topic",
+    [
+        "social contract theory and carbon pricing trends",
+        "contract law reform and consumer pricing trends",
+        "contract workers and housing prices",
+        "procurement law reform and carbon pricing policy",
+        "public payment systems and credit settlement infrastructure",
+        "smart contracts and cloud pricing trends",
+        "employment contracts and electricity pricing trends",
+        "futures contracts and commodity prices",
+        "e-procurement adoption and healthcare pricing policy",
+        "options contracts and market prices",
+        "public service contracts and inflation pricing",
+        "union contracts and wage price trends",
+        "digital procurement adoption and AI pricing models",
+        "trade agreements and energy prices",
+        "贸易协议与能源价格走势",
+        "劳动合同价格指数",
+        "合同法改革和能源价格趋势",
+        "政府采购制度与碳定价机制",
+        "国际协议治理与平台服务条款",
+        "公共采购政策与能源成本走势",
+    ],
+)
+def test_ambiguous_public_transaction_terms_fail_closed_to_automatic_fallback(
+    tmp_path, public_topic
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=public_topic,
+        core_question=public_topic,
+    )
+    decision = authorize_research_public_query(run, public_topic)
+    assert decision["authorized"] is False
+    assert decision["reason_code"] == "policy_blocked"
+
+
+@pytest.mark.parametrize(
+    "scientific_topic",
+    [
+        "Research TNFα signaling pathways in inflammation",
+        "Study IFNγ immune response",
+        "Analyze Aβ42 aggregation mechanisms",
+        "Research β-catenin signaling",
+    ],
+)
+def test_mixed_script_scientific_terms_are_not_blocked_without_transaction_semantics(
+    tmp_path, scientific_topic
+):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_research_public_query
+
+    run = _research_run(
+        expert_teams,
+        tmp_path,
+        original_request=scientific_topic,
+        core_question=scientific_topic,
+    )
+    assert authorize_research_public_query(run, scientific_topic)["authorized"] is True
+
+
 def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
