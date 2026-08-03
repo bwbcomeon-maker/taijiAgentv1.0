@@ -5665,6 +5665,9 @@ def _resolve_standalone_legacy_provider_context(request) -> dict:
             "model": str(resolved_model or "").strip(),
             "api_mode": api_mode,
             "transport": STRICT_PROVIDER_TRANSPORTS.get(api_mode, ""),
+            "provider_metadata": {
+                "knowledge_cutoff_date": runtime.get("knowledge_cutoff_date")
+            },
         }
     finally:
         reset_hermes_home_override(override_token)
@@ -5765,10 +5768,12 @@ def _start_expert_team_execution(
         LegacyJournalRuntimeAdapter,
         STRICT_PROVIDER_BINDING_METADATA_KEY,
         StartRunRequest,
+        build_strict_provider_context,
         build_runtime_adapter,
     )
     from api.product_contract import attach_product_error
     from api.expert_teams.error_projection import attach_expert_team_product_error
+    from api.expert_teams.runtime import _research_retrieval_eligible
     from api.expert_teams.source_context import SourceContextError
 
     def _execution_failure(payload: dict, status: int) -> dict:
@@ -5863,6 +5868,7 @@ def _start_expert_team_execution(
         display_msg = _expert_team_execution_display_message(run)
         execution_message_start_index = len(list(getattr(session, "messages", None) or []))
         enterprise_gateway_request = None
+        trusted_provider_context = None
         classified_contract = expert_teams.classify_contract_version(run)
         if standalone and (
             type(run.get("schema_version")) is not int
@@ -5873,7 +5879,53 @@ def _start_expert_team_execution(
                 "standalone expert team execution requires schema 3 and contract v1"
             )
         if classified_contract == expert_teams.EXPERT_TEAM_CONTRACT_V1:
-            run = expert_teams.prepare_research_sources_for_gateway(workspace, run)
+            if standalone and _research_retrieval_eligible(run):
+                preflight_request = StartRunRequest(
+                    session_id=sid,
+                    message="",
+                    messages=[
+                        {"role": "system", "content": "strict provider preflight"},
+                        {"role": "user", "content": "{}"},
+                    ],
+                    tools_disabled=True,
+                    attachments=[],
+                    workspace=str((standalone_binding or {}).get("workspace") or workspace),
+                    profile=(standalone_binding or {}).get("profile"),
+                    provider=model_provider,
+                    model=model,
+                    source="expert-team",
+                    metadata={"expert_team_product_mode": "standalone"},
+                )
+                resolved_provider_context = _resolve_standalone_legacy_provider_context(
+                    preflight_request
+                )
+                trusted_provider_context = build_strict_provider_context(
+                    provider=resolved_provider_context.get("provider"),
+                    model=resolved_provider_context.get("model"),
+                    api_mode=resolved_provider_context.get("api_mode"),
+                    transport=resolved_provider_context.get("transport"),
+                    provider_metadata=(
+                        resolved_provider_context.get("provider_metadata")
+                        if isinstance(
+                            resolved_provider_context.get("provider_metadata"), dict
+                        )
+                        else {
+                            "knowledge_cutoff_date": resolved_provider_context.get(
+                                "knowledge_cutoff_date"
+                            )
+                        }
+                    ),
+                )
+                _validate_standalone_runtime_provider_context(
+                    trusted_provider_context,
+                    expected_provider=model_provider,
+                    expected_model=model,
+                )
+            run = expert_teams.prepare_research_sources_for_gateway(
+                workspace,
+                run,
+                trusted_provider_context=trusted_provider_context,
+            )
             enterprise_gateway_request = _expert_team_enterprise_gateway_request(workspace, run)
             if standalone:
                 _require_standalone_strict_execution_contract(
@@ -6129,11 +6181,13 @@ def _start_expert_team_execution(
 
     if enterprise_gateway_request is not None and standalone:
         try:
-            provider_context = adapter.resolve_provider_context(start_request)
+            provider_context = trusted_provider_context
+            if provider_context is None:
+                provider_context = adapter.resolve_provider_context(start_request)
             _validate_standalone_runtime_provider_context(
                 provider_context,
-                expected_provider=None,
-                expected_model=None,
+                expected_provider=model_provider,
+                expected_model=model,
             )
             from dataclasses import replace
 

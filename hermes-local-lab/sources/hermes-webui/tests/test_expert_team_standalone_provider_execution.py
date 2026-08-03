@@ -392,6 +392,7 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
         "model": "gpt-actual",
         "api_mode": "codex_responses",
         "transport": "openai_responses",
+        "provider_metadata": {"knowledge_cutoff_date": None},
     }
     assert calls == [
         ("profile", None),
@@ -630,6 +631,7 @@ def test_execution_route_ignores_client_provider_override_and_dispatches_exact_c
 
 def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(monkeypatch, tmp_path):
     from api import expert_teams, routes, runtime_adapter
+    from api.expert_teams import runtime as expert_team_runtime
 
     run = _ready_direct_run(tmp_path)
     session = _direct_session(tmp_path)
@@ -644,6 +646,11 @@ def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(m
         lambda model, provider: (model, provider, False),
     )
     monkeypatch.setattr(
+        expert_team_runtime,
+        "_research_retrieval_eligible",
+        lambda _run: True,
+    )
+    monkeypatch.setattr(
         routes,
         "_resolve_standalone_legacy_provider_context",
         lambda request: {
@@ -651,11 +658,16 @@ def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(m
             "model": request.model,
             "api_mode": "chat_completions",
             "transport": "openai_chat_completions",
+            "provider_metadata": {"knowledge_cutoff_date": "2025-06-30"},
         },
     )
 
-    def prepare(_workspace, candidate):
+    def prepare(_workspace, candidate, *, trusted_provider_context):
         order.append("prepare")
+        assert trusted_provider_context["trusted_provider_metadata"] == {
+            "knowledge_cutoff_date": "2025-06-30"
+        }
+        assert len(trusted_provider_context["binding_sha256"]) == 64
         prepared = deepcopy(candidate)
         prepared["prepared_research_snapshot"] = "server-owned"
         return prepared
@@ -708,7 +720,7 @@ def test_execution_route_projects_retrieval_in_progress_as_transient_conflict(mo
         lambda model, provider: (model, provider, False),
     )
 
-    def in_progress(_workspace, candidate):
+    def in_progress(_workspace, candidate, **_kwargs):
         raise expert_teams.ExpertTeamStateConflict(
             "retrieval_in_progress",
             "research retrieval is already in progress",

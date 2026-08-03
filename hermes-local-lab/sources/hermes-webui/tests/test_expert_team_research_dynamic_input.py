@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 
 import pytest
@@ -76,7 +77,16 @@ def _control(run, key, **extra):
     }
 
 
-def _request(expert_teams, workspace, run, key, *, category="scope", input_id="conclusion-input"):
+def _request(
+    expert_teams,
+    workspace,
+    run,
+    key,
+    *,
+    category="scope",
+    input_id="conclusion-input",
+    conservative_assumption="按单一部门试点口径作保守结论。",
+):
     return expert_teams.request_expert_team_stage_input(
         workspace,
         _control(
@@ -90,7 +100,7 @@ def _request(expert_teams, workspace, run, key, *, category="scope", input_id="c
             question="核心结论应以单一部门还是全公司为研究对象？",
             impact="对象范围会改变成本结论和推广建议。",
             options=["单一部门", "全公司"],
-            conservative_assumption="按单一部门试点口径作保守结论。",
+            conservative_assumption=conservative_assumption,
         ),
     )
 
@@ -104,6 +114,92 @@ def _submit(expert_teams, workspace, paused, key, answer, *, input_id="conclusio
         note="回答仅用于当前研究阶段结论口径。",
     )
     return expert_teams.submit_expert_team_stage_input(workspace, body), body
+
+
+def _at_stage(runtime, run, stage_id):
+    staged = copy.deepcopy(run)
+    staged["current_stage_index"] = next(
+        index
+        for index, stage in enumerate(staged["_tasks_template"])
+        if stage["id"] == stage_id
+    )
+    return runtime._sync_derived(staged)
+
+
+def _generating_reservation(run, *, input_refs, attempt=1):
+    stage_id = run["current_stage"]["task_id"]
+    authoritative_stage = next(
+        stage
+        for stage in run["_tasks_template"]
+        if stage["id"] == stage_id
+    )
+    reservation = {
+        "reservation_id": f"stage-attempt-{attempt}",
+        "stage_id": stage_id,
+        "stage_attempt": attempt,
+        "executor": "model",
+        "artifact_type": authoritative_stage["artifact_type"],
+        "input_refs": copy.deepcopy(input_refs),
+        "input_binding_sha256": hashlib.sha256(
+            json.dumps(input_refs, sort_keys=True).encode()
+        ).hexdigest(),
+        "idempotency_key": f"attempt-{attempt}",
+        "status": "generating",
+        "created_at": "2026-08-03T10:00:00+08:00",
+    }
+    run["workflow_state"] = "generating"
+    run["stage_attempt_counters"] = {stage_id: attempt}
+    run["stage_attempt_reservations"] = [copy.deepcopy(reservation)]
+    run["current_stage_attempt_reservation"] = copy.deepcopy(reservation)
+    run["execution_stream_id"] = "stream-active"
+    run["execution_runtime_run_id"] = "runtime-active"
+    run["execution_stage_id"] = stage_id
+    run["execution_attempt"] = attempt
+    return run
+
+
+@pytest.mark.parametrize(
+    "stage_id",
+    ["direction", "research", "evidence", "outline", "draft", "review"],
+)
+def test_v2_dynamic_input_gate_and_count_apply_to_every_research_stage(
+    tmp_path, monkeypatch, stage_id
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _at_stage(runtime, _research_run(expert_teams, tmp_path), stage_id)
+    _memory_storage(monkeypatch, runtime, run)
+
+    paused = _request(expert_teams, tmp_path, run, f"request-{stage_id}")
+
+    assert paused["workflow_state"] == "awaiting_stage_input"
+    assert paused["research_dynamic_input_count"] == 1
+    assert paused["pending_input"]["scope"] == "conclusion"
+
+
+@pytest.mark.parametrize(
+    "stage_id",
+    ["direction", "research", "evidence", "outline", "draft", "review"],
+)
+def test_v2_forbidden_dynamic_input_category_is_rejected_at_every_stage(
+    tmp_path, monkeypatch, stage_id
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _at_stage(runtime, _research_run(expert_teams, tmp_path), stage_id)
+    _memory_storage(monkeypatch, runtime, run)
+
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as rejected:
+        _request(
+            expert_teams,
+            tmp_path,
+            run,
+            f"reject-{stage_id}",
+            category="network_failure",
+        )
+    assert rejected.value.code == "research_stage_input_not_allowed"
 
 
 def test_v2_research_pending_input_persists_and_projects_conclusion_contract(tmp_path, monkeypatch):
@@ -198,6 +294,71 @@ def test_v2_research_third_question_continues_with_consumable_boundary_assumptio
     assert envelope["research_boundary_assumptions"] == continued["research_boundary_assumptions"]
 
 
+def test_v2_third_question_requires_non_empty_conservative_assumption(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _at_stage(runtime, _research_run(expert_teams, tmp_path), "outline")
+    run["research_dynamic_input_count"] = 2
+    _memory_storage(monkeypatch, runtime, run)
+
+    with pytest.raises(ValueError, match="conservative_assumption"):
+        _request(
+            expert_teams,
+            tmp_path,
+            run,
+            "request-third-empty",
+            conservative_assumption="   ",
+        )
+
+
+def test_v2_third_question_supersedes_active_attempt_and_changes_same_stage_envelope(
+    tmp_path, monkeypatch
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _research_run(expert_teams, tmp_path)
+    run["research_dynamic_input_count"] = 2
+    snapshot = expert_teams.verified_source_context_for_execution(tmp_path, run)
+    stage = {
+        "id": "research",
+        "executor": "model",
+        "artifact_type": "source_register",
+        "depends_on": ["direction"],
+    }
+    before_request = build_stage_gateway_request(run, stage, source_context=snapshot)
+    run = _generating_reservation(run, input_refs=before_request["input_refs"])
+    cell = _memory_storage(monkeypatch, runtime, run)
+
+    continued = _request(expert_teams, tmp_path, run, "request-third-generating")
+
+    assert continued["workflow_state"] == "ready_to_generate"
+    assert continued.get("current_stage_attempt_reservation") in ({}, None)
+    assert continued["stage_attempt_reservations"][-1]["status"] == "superseded_by_input"
+    assert continued["execution_stream_id"] == ""
+    assert continued["execution_runtime_run_id"] == ""
+    after_request = build_stage_gateway_request(
+        continued,
+        stage,
+        source_context=expert_teams.verified_source_context_for_execution(tmp_path, continued),
+    )
+    assert after_request["data_envelope_sha256"] != before_request["data_envelope_sha256"]
+    reserved, reservation, created = expert_teams.reserve_stage_attempt(
+        tmp_path,
+        continued["run_id"],
+        stage_id="research",
+        executor="model",
+        input_refs=after_request["input_refs"],
+        idempotency_key="attempt-after-boundary-assumption",
+    )
+    assert created is True
+    assert reservation["stage_attempt"] == 2
+    assert reserved["current_stage_attempt_reservation"] == reservation
+    assert cell["run"]["current_stage_attempt_reservation"] == reservation
+
+
 def _answered_request(expert_teams, runtime, workspace, monkeypatch, answer):
     run = _research_run(expert_teams, workspace)
     _memory_storage(monkeypatch, runtime, run)
@@ -225,6 +386,8 @@ def test_answer_is_immutable_stage_input_ref_in_envelope_and_attempt_binding(tmp
     first_envelope = json.loads(first_request["messages"][1]["content"])
     stage_input_ref = next(item for item in first_request["input_refs"] if item["ref_type"] == "stage_input")
     assert stage_input_ref == first["stage_inputs"][0]["ref"]
+    assert set(stage_input_ref) == {"ref_type", "input_id", "stage_id", "sha256"}
+    assert stage_input_ref["stage_id"] == "research"
     assert first_envelope["stage_inputs"] == first["stage_inputs"]
     _, first_reservation, _ = expert_teams.reserve_stage_attempt(
         first_workspace,
@@ -254,6 +417,186 @@ def test_answer_is_immutable_stage_input_ref_in_envelope_and_attempt_binding(tmp
 
     assert first_request["input_refs"] != second_request["input_refs"]
     assert first_reservation["input_binding_sha256"] != second_reservation["input_binding_sha256"]
+
+
+def test_submitting_answer_supersedes_old_attempt_and_next_reservation_increments(
+    tmp_path, monkeypatch
+):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _research_run(expert_teams, tmp_path)
+    snapshot = expert_teams.verified_source_context_for_execution(tmp_path, run)
+    stage = {
+        "id": "research",
+        "executor": "model",
+        "artifact_type": "source_register",
+        "depends_on": ["direction"],
+    }
+    original_request = build_stage_gateway_request(run, stage, source_context=snapshot)
+    run = _generating_reservation(run, input_refs=original_request["input_refs"])
+    _memory_storage(monkeypatch, runtime, run)
+    paused = _request(expert_teams, tmp_path, run, "request-during-attempt")
+
+    answered, _ = _submit(expert_teams, tmp_path, paused, "submit-during-attempt", "单一部门")
+
+    assert answered.get("current_stage_attempt_reservation") in ({}, None)
+    assert answered["stage_attempt_reservations"][-1]["status"] == "superseded_by_input"
+    next_request = build_stage_gateway_request(
+        answered,
+        stage,
+        source_context=expert_teams.verified_source_context_for_execution(tmp_path, answered),
+    )
+    reserved, reservation, created = expert_teams.reserve_stage_attempt(
+        tmp_path,
+        answered["run_id"],
+        stage_id="research",
+        executor="model",
+        input_refs=next_request["input_refs"],
+        idempotency_key="attempt-after-stage-input",
+    )
+    assert created is True
+    assert reservation["stage_attempt"] == 2
+    assert reserved["current_stage_attempt_reservation"] == reservation
+
+
+def _direction_response(run):
+    brief = run["document_brief"]
+    payload = {
+        "core_question": brief["details"]["core_question"],
+        "decision_to_support": "支撑本地优先 AI 助理的落地决策",
+        "scope_in": ["企业内部办公"],
+        "scope_out": ["未经核验的实时市场数据"],
+        "time_range": copy.deepcopy(brief["details"]["time_range"]),
+        "source_policy": {
+            key: brief["source_policy"][key]
+            for key in ("mode", "as_of_date", "citation_style")
+        },
+        "subquestions": ["对象范围和统计口径如何确定"],
+        "evaluation_criteria": ["结论边界可追溯"],
+        "stop_conditions": ["无法核验时停止外推"],
+    }
+    meta = {
+        "artifact_type": "research_charter",
+        "summary": "研究方向已明确",
+        "payload": payload,
+        "blocking_issues": [],
+    }
+    return (
+        "<<<TAIJI_META_V1>>>\n"
+        + json.dumps(meta, ensure_ascii=False)
+        + "\n<<<TAIJI_META_END>>>"
+    )
+
+
+def test_stage_input_ref_survives_real_build_and_completion_round_trip(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.prompts import build_stage_gateway_request
+
+    run = _at_stage(runtime, _research_run(expert_teams, tmp_path), "direction")
+    run.update(
+        {
+            "stage_artifacts": [],
+            "stage_outputs": [],
+            "approved_stage_artifact_refs": {},
+            "local_stage_confirmations": [],
+        }
+    )
+    cell = _memory_storage(monkeypatch, runtime, run)
+    paused = _request(expert_teams, tmp_path, run, "request-direction-input")
+    answered, _ = _submit(
+        expert_teams,
+        tmp_path,
+        paused,
+        "submit-direction-input",
+        "单一部门",
+    )
+    snapshot = expert_teams.verified_source_context_for_execution(tmp_path, answered)
+    stage = {
+        "id": "direction",
+        "executor": "model",
+        "artifact_type": "research_charter",
+        "depends_on": [],
+    }
+    gateway = build_stage_gateway_request(answered, stage, source_context=snapshot)
+    reserved, reservation, created = expert_teams.reserve_stage_attempt(
+        tmp_path,
+        answered["run_id"],
+        stage_id="direction",
+        executor="model",
+        input_refs=gateway["input_refs"],
+        idempotency_key="direction-attempt-after-input",
+    )
+    assert created is True
+    reserved["workflow_state"] = "generating"
+    reserved["current_stage_attempt_reservation"]["status"] = "generating"
+    reserved["stage_attempt_reservations"][-1]["status"] = "generating"
+    cell["run"] = copy.deepcopy(reserved)
+
+    completed = runtime._complete_enterprise_stage_artifact(
+        tmp_path,
+        reserved,
+        {"content": _direction_response(reserved)},
+        task_id="direction",
+    )
+
+    assert completed["workflow_state"] == "awaiting_review"
+    artifact = completed["stage_artifacts"][-1]
+    assert artifact["stage_attempt"] == reservation["stage_attempt"]
+    assert artifact["input_refs"] == gateway["input_refs"]
+    assert next(ref for ref in artifact["input_refs"] if ref["ref_type"] == "stage_input") == answered["stage_inputs"][-1]["ref"]
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected_code"),
+    [
+        (
+            {"ref_type": "stage_input", "input_id": "input-1", "sha256": "a" * 64},
+            "required_field_missing",
+        ),
+        (
+            {
+                "ref_type": "stage_input",
+                "input_id": "input-1",
+                "stage_id": "research",
+                "sha256": "a" * 64,
+            },
+            "stage_input_stage_mismatch",
+        ),
+        (
+            {
+                "ref_type": "stage_input",
+                "input_id": "input-1",
+                "stage_id": "direction",
+                "sha256": "not-a-sha",
+            },
+            "invalid_sha256",
+        ),
+    ],
+)
+def test_stage_artifact_strictly_validates_stage_input_refs(tmp_path, ref, expected_code):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.stage_artifacts import StageArtifactError, build_stage_artifact, parse_stage_response
+
+    run = _at_stage(runtime, _research_run(expert_teams, tmp_path), "direction")
+    parsed = parse_stage_response(
+        _direction_response(run),
+        artifact_type="research_charter",
+        requires_document=False,
+    )
+    with pytest.raises(StageArtifactError) as rejected:
+        build_stage_artifact(
+            parsed,
+            stage_id="direction",
+            stage_attempt=1,
+            brief=run["document_brief"],
+            input_refs=[ref],
+            now="2026-08-03T10:00:00+08:00",
+        )
+    assert rejected.value.code == expected_code
 
 
 def test_historical_content_stage_input_contract_remains_available(tmp_path):

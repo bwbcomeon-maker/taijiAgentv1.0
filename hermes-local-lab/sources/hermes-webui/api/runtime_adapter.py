@@ -12,6 +12,7 @@ approval callbacks, clarify callbacks, or new long-lived queues.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 import hashlib
 import json
 import os
@@ -49,6 +50,7 @@ _STRICT_PROVIDER_BINDING_FIELDS = {
     "model",
     "api_mode",
     "transport",
+    "trusted_provider_metadata",
     *_STRICT_PROVIDER_CAPABILITY_FIELDS,
     "binding_sha256",
 }
@@ -64,12 +66,28 @@ def _strict_provider_binding_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _trusted_provider_metadata(value: dict[str, Any] | None) -> dict[str, Any]:
+    metadata = value if isinstance(value, dict) else {}
+    cutoff = metadata.get("knowledge_cutoff_date")
+    if isinstance(cutoff, str):
+        cutoff = cutoff.strip()
+        try:
+            if date.fromisoformat(cutoff).isoformat() != cutoff:
+                cutoff = None
+        except ValueError:
+            cutoff = None
+    else:
+        cutoff = None
+    return {"knowledge_cutoff_date": cutoff}
+
+
 def build_strict_provider_context(
     *,
     provider: str | None,
     model: str | None,
     api_mode: str | None,
     transport: str | None = None,
+    provider_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the only Provider binding accepted by standalone expert turns.
 
@@ -99,6 +117,7 @@ def build_strict_provider_context(
         "model": normalized_model,
         "api_mode": normalized_api_mode,
         "transport": normalized_transport,
+        "trusted_provider_metadata": _trusted_provider_metadata(provider_metadata),
     }
     payload.update({field: True for field in _STRICT_PROVIDER_CAPABILITY_FIELDS})
     return {
@@ -133,6 +152,7 @@ def validate_strict_provider_context(
         model=context.get("model"),
         api_mode=context.get("api_mode"),
         transport=context.get("transport"),
+        provider_metadata=context.get("trusted_provider_metadata"),
     )
     if rebuilt != context:
         raise ValueError("standalone runtime provider binding digest is invalid")
@@ -513,6 +533,13 @@ class LegacyJournalRuntimeAdapter:
                 model=resolved.get("model"),
                 api_mode=resolved.get("api_mode"),
                 transport=resolved.get("transport"),
+                provider_metadata=(
+                    resolved.get("provider_metadata")
+                    if isinstance(resolved.get("provider_metadata"), dict)
+                    else {
+                        "knowledge_cutoff_date": resolved.get("knowledge_cutoff_date")
+                    }
+                ),
             )
         raise NotImplementedError(
             "Legacy runtime cannot preserve role-separated enterprise prompts or preflight provider fallback"

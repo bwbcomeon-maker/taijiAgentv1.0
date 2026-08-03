@@ -1987,6 +1987,48 @@ def _research_retrieval_eligible(run: dict) -> bool:
     )
 
 
+def _research_v2_run(run: dict) -> bool:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else _current_stage(run)
+    return bool(
+        profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("team_id") or "") == "deep-research-team"
+        and str(run.get("product_mode") or "") == "standalone"
+        and str(current.get("task_id") or current.get("id") or "")
+        in {"direction", "research", "evidence", "outline", "draft", "review"}
+    )
+
+
+def _supersede_current_stage_attempt_for_input(run: dict) -> dict:
+    current = (
+        deepcopy(run.get("current_stage_attempt_reservation"))
+        if isinstance(run.get("current_stage_attempt_reservation"), dict)
+        else None
+    )
+    reservations = [
+        deepcopy(item)
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    if current is not None:
+        matched = False
+        for item in reservations:
+            if item.get("reservation_id") == current.get("reservation_id"):
+                item["status"] = "superseded_by_input"
+                item["superseded_at"] = _now()
+                matched = True
+                break
+        if not matched:
+            current["status"] = "superseded_by_input"
+            current["superseded_at"] = _now()
+            reservations.append(current)
+    return {
+        "stage_attempt_reservations": reservations,
+        "current_stage_attempt_reservation": None,
+    }
+
+
 def research_retrieval_fingerprint(run: dict) -> str:
     artifact = _research_retrieval_artifact(run)
     payload = artifact["payload"]
@@ -2178,6 +2220,8 @@ def _complete_research_retrieval(
     expected_version: int,
     fingerprint: str,
     outcome: dict,
+    *,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     current = read_run(workspace, run_id)
     state = current.get("research_retrieval_state") if isinstance(current.get("research_retrieval_state"), dict) else {}
@@ -2210,6 +2254,7 @@ def _complete_research_retrieval(
         registry,
         resolved_refs,
         retrieval_fingerprint=fingerprint,
+        trusted_provider_context=trusted_provider_context,
     )
     next_run = deepcopy(current)
     next_run["source_context_snapshot_ref"] = snapshot_ref
@@ -2236,6 +2281,7 @@ def _prepare_research_sources_for_gateway_owned(
     *,
     web_adapter=None,
     local_adapter=None,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     """Freeze research evidence immediately before the research model call."""
     if not _research_retrieval_eligible(run):
@@ -2384,6 +2430,7 @@ def _prepare_research_sources_for_gateway_owned(
                 else result.safe_reason
             ),
         },
+        trusted_provider_context=trusted_provider_context,
     )
 
 
@@ -2393,6 +2440,7 @@ def prepare_research_sources_for_gateway(
     *,
     web_adapter=None,
     local_adapter=None,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     """Freeze research evidence under one process-local active owner."""
     if not _research_retrieval_eligible(run):
@@ -2404,6 +2452,7 @@ def prepare_research_sources_for_gateway(
             run,
             web_adapter=web_adapter,
             local_adapter=local_adapter,
+            trusted_provider_context=trusted_provider_context,
         )
     finally:
         _release_research_retrieval_owner(owner_key, owner_token)
@@ -2529,7 +2578,7 @@ def _reserve_stage_attempt_in_run(
     for item in reservations:
         if (
             item.get("stage_id") == stage_id
-            and item.get("status") not in {"superseded", "invalidated"}
+            and item.get("status") not in {"superseded", "superseded_by_input", "invalidated"}
         ):
             item["status"] = "superseded"
             item["superseded_at"] = _now()
@@ -3818,7 +3867,7 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         raise ValueError("Expert team cannot request stage input in current state")
     synced = _sync_derived(deepcopy(run))
     current = synced.get("current_stage") if isinstance(synced.get("current_stage"), dict) else {}
-    research_v2 = _research_retrieval_eligible(synced)
+    research_v2 = _research_v2_run(synced)
     if research_v2:
         category = str(body.get("category") or "").strip()
         reason = str(body.get("reason") or "").strip()
@@ -3830,6 +3879,9 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
             )
         dynamic_input_count = int(run.get("research_dynamic_input_count") or 0)
         if dynamic_input_count >= 2:
+            conservative_assumption = str(body.get("conservative_assumption") or "").strip()
+            if not conservative_assumption:
+                raise ValueError("conservative_assumption is required after the research input limit")
             assumptions = [
                 deepcopy(item)
                 for item in run.get("research_boundary_assumptions") or []
@@ -3839,17 +3891,23 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
                 {
                     "scope": "conclusion",
                     "stage_id": str(current.get("task_id") or current.get("id") or ""),
-                    "assumption": str(body.get("conservative_assumption") or "").strip(),
+                    "assumption": conservative_assumption,
                     "impact": str(body.get("impact") or "").strip(),
                 }
             )
             _record_action(run, body, "request_stage_input")
+            superseded = _supersede_current_stage_attempt_for_input(run)
             return _transition(
                 workspace,
                 run,
-                str(run.get("workflow_state") or "ready_to_generate"),
+                "ready_to_generate",
                 "research_boundary_assumption_applied",
-                {"research_boundary_assumptions": assumptions},
+                {
+                    **_clear_execution_patch(),
+                    **superseded,
+                    "pending_input": {},
+                    "research_boundary_assumptions": assumptions,
+                },
             )
     pending_input = {
         "id": str(body.get("input_id") or ("stage-input-" + uuid.uuid4().hex[:8])),
@@ -3932,10 +3990,12 @@ def submit_expert_team_stage_input(workspace: Path, body: dict) -> dict:
     answered_input["ref"] = {
         "ref_type": "stage_input",
         "input_id": answered_input["input_id"],
+        "stage_id": answered_input["stage_id"],
         "sha256": answer_sha256,
     }
     rows.append(answered_input)
     _record_action(run, body, "submit_stage_input")
+    superseded = _supersede_current_stage_attempt_for_input(run)
     return _transition(
         workspace,
         run,
@@ -3943,6 +4003,7 @@ def submit_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         "stage_input_answered",
         {
             **_clear_execution_patch(),
+            **superseded,
             "pending_input": {},
             "stage_inputs": rows,
         },

@@ -43,11 +43,17 @@ _SECTION_HEADING_PATTERN = re.compile(
     r"^ {0,3}#{2,6}[ \t]+(?P<heading>.*?)[ \t]*$"
 )
 _FRESHNESS_SENSITIVE_MODEL_CLAIM = re.compile(
-    r"(?:最新|近期|实时|当前|现行).{0,12}(?:政策|价格|统计|状态|数据)"
-    r"|(?:政策|价格|统计|状态|数据).{0,12}(?:最新|近期|实时|当前|现行)",
+    r"(?:最新|近期|实时|当前|现行|今日|今天).{0,12}(?:政策|法规|规定|价格|统计|状态|数据)"
+    r"|(?:政策|法规|规定|价格|统计|状态|数据).{0,12}(?:最新|近期|实时|当前|现行|今日|今天)"
+    r"|(?:current|latest|today(?:'s)?|recent|real[- ]time).{0,40}(?:policy|regulation|price|statistics?|status|data)"
+    r"|(?:policy|regulation|price|statistics?|status|data).{0,40}(?:current|latest|today(?:'s)?|recent|real[- ]time)",
     re.I,
 )
-_UNVERIFIED_MODEL_CLAIM = re.compile(r"无法(?:外部)?核验|不能确认|无法确认")
+_UNVERIFIED_MODEL_CLAIM = re.compile(
+    r"无法(?:外部)?核验|不能确认|无法确认"
+    r"|cannot verify|unable to verify|not externally verified|unverified",
+    re.I,
+)
 
 
 class StageArtifactError(ValueError):
@@ -669,6 +675,11 @@ def _validate_evidence_matrix(payload, snapshot, brief=None):
                         f"{item_path}.statement",
                     )
             else:
+                if not row["evidence"]:
+                    raise StageArtifactError(
+                        "source_backed_claim_requires_evidence",
+                        f"{item_path}.evidence",
+                    )
                 expected_kind = (
                     "approved_public"
                     if origin_tier == "public_web"
@@ -790,7 +801,7 @@ def _validate_payload(artifact_type, payload, brief, source_snapshot):
         raise StageArtifactError("unsupported_artifact_type", "artifact_type")
 
 
-def _input_refs(value):
+def _input_refs(value, *, stage_id=None):
     if not isinstance(value, list):
         raise StageArtifactError("invalid_type", "input_refs")
     identities = set()
@@ -804,6 +815,13 @@ def _input_refs(value):
         elif ref.get("ref_type") == "source_context":
             _exact(ref, ("ref_type", "snapshot_id", "sha256"), path=path)
             identity = ("source_context", ref["snapshot_id"])
+        elif ref.get("ref_type") == "stage_input":
+            _exact(ref, ("ref_type", "input_id", "stage_id", "sha256"), path=path)
+            _string(ref["input_id"], f"{path}.input_id")
+            _string(ref["stage_id"], f"{path}.stage_id")
+            if stage_id is not None and ref["stage_id"] != stage_id:
+                raise StageArtifactError("stage_input_stage_mismatch", f"{path}.stage_id")
+            identity = ("stage_input", ref["input_id"])
         else:
             raise StageArtifactError("invalid_ref_type", f"{path}.ref_type")
         if not _HEX64.fullmatch(str(ref.get("sha256") or "")):
@@ -852,7 +870,7 @@ def build_stage_artifact(parsed, *, stage_id, stage_attempt, brief, input_refs, 
     if not isinstance(stage_attempt, int) or stage_attempt <= 0:
         raise StageArtifactError("invalid_stage_attempt", "stage_attempt")
     _string(stage_id, "stage_id")
-    _input_refs(input_refs)
+    _input_refs(input_refs, stage_id=stage_id)
     if brief.get("status") != "confirmed" or not _HEX64.fullmatch(str(brief.get("confirmed_sha256") or "")):
         raise StageArtifactError("confirmed_brief_required", "brief")
     artifact_type = parsed.get("artifact_type")
@@ -928,7 +946,7 @@ def validate_stage_artifact(artifact, *, brief, approved_inputs):
         raise StageArtifactError("artifact_id_mismatch", "artifact_id")
     if artifact.get("brief_sha256") != brief.get("confirmed_sha256") or int(artifact.get("brief_revision") or 0) != int(brief.get("confirmed_revision") or brief.get("revision") or 0):
         raise StageArtifactError("brief_binding_mismatch", "brief_sha256")
-    _input_refs(artifact.get("input_refs"))
+    _input_refs(artifact.get("input_refs"), stage_id=artifact.get("stage_id"))
     _issues(artifact.get("blocking_issues"))
     _enum(artifact.get("validation_status"), {"valid", "invalid"}, "validation_status")
     from .issue_policy import classify_stage_issues

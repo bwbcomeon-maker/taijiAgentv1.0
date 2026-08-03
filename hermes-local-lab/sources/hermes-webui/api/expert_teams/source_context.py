@@ -125,6 +125,17 @@ def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool
     )
 
 
+def _trusted_provider_metadata(context: dict | None) -> dict:
+    if context is None:
+        return {"knowledge_cutoff_date": None}
+    from api.runtime_adapter import validate_strict_provider_context
+
+    validated = validate_strict_provider_context(context)
+    metadata = validated.get("trusted_provider_metadata")
+    cutoff = metadata.get("knowledge_cutoff_date") if isinstance(metadata, dict) else None
+    return {"knowledge_cutoff_date": cutoff if isinstance(cutoff, str) else None}
+
+
 def _build_source_context_snapshot(
     workspace: Path,
     run_id: str,
@@ -136,6 +147,7 @@ def _build_source_context_snapshot(
     extractor_identity: dict | None = None,
     allow_empty: bool = False,
     snapshot_id: str | None = None,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     root = Path(workspace).expanduser().resolve()
     safe_run_id = _safe_id(run_id, "run id")
@@ -200,6 +212,9 @@ def _build_source_context_snapshot(
         "brief_revision": int(brief_revision),
         "brief_sha256": str(brief_sha256),
         "extractor_identity": identity,
+        "trusted_provider_metadata": _trusted_provider_metadata(
+            trusted_provider_context
+        ),
         "sources": sources,
     }
     payload["snapshot_sha256"] = _snapshot_digest(payload)
@@ -245,6 +260,7 @@ def build_source_context_snapshot(
     brief_revision: int,
     extractor_identity: dict | None = None,
     allow_empty: bool = False,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     """Build a snapshot while projecting filesystem failures as contract errors."""
     try:
@@ -257,6 +273,7 @@ def build_source_context_snapshot(
             brief_revision=brief_revision,
             extractor_identity=extractor_identity,
             allow_empty=allow_empty,
+            trusted_provider_context=trusted_provider_context,
         )
     except SourceContextError:
         raise
@@ -271,6 +288,7 @@ def build_research_source_context_snapshot(
     source_refs: list[dict],
     *,
     retrieval_fingerprint: str,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     """Build the post-retrieval snapshot only for an authoritative v2 research Run."""
     profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
@@ -291,6 +309,14 @@ def build_research_source_context_snapshot(
     policy = snapshot_brief.get("source_policy") if isinstance(snapshot_brief.get("source_policy"), dict) else {}
     policy["source_refs"] = deepcopy(source_refs)
     snapshot_brief["source_policy"] = policy
+    binding_suffix = ""
+    if trusted_provider_context is not None:
+        from api.runtime_adapter import validate_strict_provider_context
+
+        validated_provider_context = validate_strict_provider_context(
+            trusted_provider_context
+        )
+        binding_suffix = f"-{validated_provider_context['binding_sha256'][:8]}"
     try:
         return _build_source_context_snapshot(
             workspace,
@@ -300,7 +326,8 @@ def build_research_source_context_snapshot(
             brief_sha256=str(brief.get("confirmed_sha256") or ""),
             brief_revision=int(brief.get("confirmed_revision") or 0),
             allow_empty=True,
-            snapshot_id=f"research-evidence-{fingerprint[:24]}",
+            snapshot_id=f"research-evidence-{fingerprint[:24]}{binding_suffix}",
+            trusted_provider_context=trusted_provider_context,
         )
     except SourceContextError:
         raise

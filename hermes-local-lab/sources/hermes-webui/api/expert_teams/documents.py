@@ -486,6 +486,11 @@ def _research_citation_result(
         for item in usage_rows
         if str(item.get("claim_id") or "").strip()
     }
+    outline_headings = {
+        str(section.get("section_id") or "").strip(): str(section.get("heading") or "").strip()
+        for section in ((outline or {}).get("payload") or {}).get("sections") or []
+        if isinstance(section, dict) and str(section.get("section_id") or "").strip()
+    }
     available_sources = {
         str(source.get("source_id") or "").strip(): source
         for source in (
@@ -554,12 +559,28 @@ def _research_citation_result(
                     )
                 )
                 continue
-            if "模型知识·未核验" not in markdown:
+            section_heading = outline_headings.get(str(usage.get("section_id") or "").strip(), "")
+            section_body = _markdown_section_body(markdown, section_heading) if section_heading else ""
+            if "模型知识·未核验" not in section_body:
                 issues.append(
                     _semantic_issue(
                         "model_knowledge_label_missing",
                         f"claim:{claim_id}",
                         "模型知识内容未在正文明示为未核验",
+                    )
+                )
+                continue
+            if re.search(
+                r"(?:\[[^\]]+\]|【[^】]+】)\s{0,24}模型知识·未核验"
+                r"|模型知识·未核验.{0,24}(?:\[[^\]]+\]|【[^】]+】)",
+                section_body,
+                re.S,
+            ):
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_citation_forbidden",
+                        f"claim:{claim_id}",
+                        "模型知识 claim 不得借用相邻引用标记",
                     )
                 )
                 continue
@@ -652,7 +673,8 @@ def _research_citation_result(
                 )
             )
         elif re.search(
-            r"https?://|\[\^[^\]]+\]|\[[A-Za-z][A-Za-z0-9._:-]*\]",
+            r"https?://|\[\^[^\]]+\]|\[[A-Za-z][A-Za-z0-9._:-]*\]"
+            r"|\[[^\]]*来源[^\]]*\]|【[^】]*来源[^】]*】|脚注\s*[0-9一二三四五六七八九十]+",
             markdown,
             re.I,
         ):

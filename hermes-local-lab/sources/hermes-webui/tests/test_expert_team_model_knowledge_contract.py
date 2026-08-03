@@ -223,6 +223,109 @@ def test_model_knowledge_time_basis_only_comes_from_trusted_provider_metadata(
     }
 
 
+@pytest.mark.parametrize(
+    ("provider_metadata", "expected_cutoff"),
+    [
+        ({"knowledge_cutoff_date": "2025-06-01"}, "2025-06-01"),
+        ({"knowledge_cutoff_date": "2025/06/01"}, None),
+        (None, None),
+    ],
+)
+def test_production_source_snapshot_freezes_trusted_provider_cutoff(
+    tmp_path, provider_metadata, expected_cutoff
+):
+    from api.expert_teams.source_context import (
+        build_source_context_snapshot,
+        read_source_context_snapshot,
+    )
+    from api.runtime_adapter import build_strict_provider_context
+
+    provider_context = build_strict_provider_context(
+        provider="openai",
+        model="gpt-runtime",
+        api_mode="chat_completions",
+        provider_metadata=provider_metadata,
+    )
+    brief = _v2_brief()
+    snapshot_ref = build_source_context_snapshot(
+        tmp_path,
+        "et-provider-cutoff",
+        brief,
+        {},
+        brief_sha256=brief["confirmed_sha256"],
+        brief_revision=brief["confirmed_revision"],
+        allow_empty=True,
+        trusted_provider_context=provider_context,
+    )
+    snapshot = read_source_context_snapshot(
+        tmp_path,
+        "et-provider-cutoff",
+        snapshot_ref,
+    )
+
+    assert snapshot["trusted_provider_metadata"] == {
+        "knowledge_cutoff_date": expected_cutoff,
+    }
+    artifact = _build_evidence(
+        [
+            _claim(
+                origin_tier="model_knowledge",
+                source_id=None,
+                status="insufficient",
+            )
+        ],
+        snapshot=snapshot,
+    )
+    assert artifact["payload"]["model_knowledge_time_basis"]["cutoff_date"] == expected_cutoff
+
+
+def test_model_payload_cannot_override_unknown_trusted_cutoff():
+    from api.expert_teams.stage_artifacts import build_stage_artifact
+
+    source_snapshot = _snapshot()
+    parsed = {
+        "artifact_type": "evidence_matrix",
+        "summary": "证据矩阵",
+        "payload": {
+            "claims": [
+                _claim(
+                    origin_tier="model_knowledge",
+                    source_id=None,
+                    status="insufficient",
+                )
+            ],
+            "contradictions": [],
+            "gaps": [],
+            "model_knowledge_time_basis": {
+                "cutoff_date": "2099-12-31",
+                "label": "模型自称时效",
+            },
+        },
+        "blocking_issues": [],
+        "deliverable_markdown": None,
+    }
+
+    artifact = build_stage_artifact(
+        parsed,
+        stage_id="evidence",
+        stage_attempt=1,
+        brief=_v2_brief(),
+        input_refs=[
+            {
+                "ref_type": "source_context",
+                "snapshot_id": source_snapshot["snapshot_id"],
+                "sha256": source_snapshot["snapshot_sha256"],
+            }
+        ],
+        source_snapshot=source_snapshot,
+        now="2026-08-03T10:00:00+08:00",
+    )
+    assert artifact["payload"]["model_knowledge_time_basis"] == {
+        "cutoff_date": None,
+        "label": "模型知识时效未知",
+    }
+
+
 def test_model_cannot_self_declare_a_knowledge_cutoff():
     from api.expert_teams.stage_artifacts import StageArtifactError
 
@@ -265,6 +368,51 @@ def test_freshness_sensitive_model_claims_must_state_that_they_cannot_be_verifie
         ]
     )
     assert artifact["validation_status"] == "valid"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "Current regulation requires immediate compliance.",
+        "The latest price is 99 dollars.",
+        "Today's statistics show rapid growth.",
+        "Recent market statistics confirm the result.",
+        "现行法规要求立即完成整改。",
+        "当前价格已上涨至 99 元。",
+    ],
+)
+def test_bilingual_freshness_sensitive_model_claims_fail_closed(statement):
+    from api.expert_teams.stage_artifacts import StageArtifactError
+
+    with pytest.raises(StageArtifactError) as error:
+        _build_evidence(
+            [
+                _claim(
+                    origin_tier="model_knowledge",
+                    source_id=None,
+                    status="insufficient",
+                    statement=statement,
+                )
+            ]
+        )
+    assert error.value.code == "time_sensitive_model_claim_unverifiable"
+
+
+@pytest.mark.parametrize("origin_tier", ["public_web", "local_knowledge"])
+def test_source_backed_claims_require_evidence_even_when_not_verified(origin_tier):
+    from api.expert_teams.stage_artifacts import StageArtifactError
+
+    with pytest.raises(StageArtifactError) as error:
+        _build_evidence(
+            [
+                _claim(
+                    origin_tier=origin_tier,
+                    source_id=None,
+                    status="insufficient",
+                )
+            ]
+        )
+    assert error.value.code == "source_backed_claim_requires_evidence"
 
 
 def test_v2_prompts_define_model_knowledge_boundary_and_citation_isolation():
@@ -380,6 +528,7 @@ def _approved_research_inputs(claims: list[dict]) -> list[dict]:
                 "sections": [
                     {
                         "section_id": "SEC-EVIDENCE",
+                        "heading": "证据",
                         "claim_ids": [claim["claim_id"] for claim in claims],
                     }
                 ]
@@ -473,6 +622,100 @@ def test_mixed_report_keeps_public_citations_and_model_claims_isolated():
     borrowed_report = _semantic_report(borrowed, claims, sources=sources)
     assert "model_knowledge_citation_forbidden" in {
         issue["code"] for issue in borrowed_report["issues"]
+    }
+
+
+def test_each_model_claim_requires_label_at_its_own_usage_section():
+    claims = [
+        _claim(
+            claim_id="CLAIM-MODEL-1",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+            statement="方案一仅作方法分析。",
+        ),
+        _claim(
+            claim_id="CLAIM-MODEL-2",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+            statement="方案二仅作方法分析。",
+        ),
+    ]
+    usages = [
+        {"claim_id": "CLAIM-MODEL-1", "section_id": "SEC-EVIDENCE", "citation_marker": ""},
+        {"claim_id": "CLAIM-MODEL-2", "section_id": "SEC-ANALYSIS", "citation_marker": ""},
+    ]
+    artifact = _research_artifact(
+        usages,
+        evidence_text="模型知识·未核验：方案一仅作方法分析。模型知识时效未知。",
+        references="无可核验外部来源。",
+    )
+    artifact["deliverable_markdown"] = artifact["deliverable_markdown"].replace(
+        "在证据边界内进行分析。",
+        "方案二仅作方法分析。",
+    )
+
+    report = _semantic_report(artifact, claims, sources=[])
+
+    assert "model_knowledge_label_missing" in {
+        issue["code"] for issue in report["issues"]
+        if issue["target_id"] == "claim:CLAIM-MODEL-2"
+    }
+
+
+@pytest.mark.parametrize("fake_marker", ["[来源一]", "【来源一】", "见脚注1"])
+def test_model_only_report_blocks_chinese_fake_citations(fake_marker):
+    claims = [
+        _claim(
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+        )
+    ]
+    artifact = _research_artifact(
+        [{"claim_id": "CLAIM-001", "section_id": "SEC-EVIDENCE", "citation_marker": ""}],
+        evidence_text="模型知识·未核验：仅作方法分析。模型知识时效未知。",
+        references=f"无可核验外部来源；{fake_marker}",
+    )
+
+    report = _semantic_report(artifact, claims, sources=[])
+
+    assert "model_knowledge_citation_forbidden" in {
+        issue["code"] for issue in report["issues"]
+    }
+
+
+def test_model_claim_cannot_borrow_adjacent_public_citation():
+    claims = [
+        _claim(claim_id="CLAIM-PUB", origin_tier="public_web"),
+        _claim(
+            claim_id="CLAIM-MODEL",
+            origin_tier="model_knowledge",
+            source_id=None,
+            status="insufficient",
+        ),
+    ]
+    artifact = _research_artifact(
+        [
+            {"claim_id": "CLAIM-PUB", "section_id": "SEC-EVIDENCE", "citation_marker": "[PUB-001]"},
+            {"claim_id": "CLAIM-MODEL", "section_id": "SEC-EVIDENCE", "citation_marker": ""},
+        ],
+        evidence_text=(
+            "公开资料结论 [PUB-001] 模型知识·未核验：仅作分析补充。"
+            "模型知识时效未知。"
+        ),
+        references="[PUB-001] 公开资料。",
+    )
+
+    report = _semantic_report(
+        artifact,
+        claims,
+        sources=[{"source_id": "PUB-001", "kind": "approved_public"}],
+    )
+
+    assert "model_knowledge_citation_forbidden" in {
+        issue["code"] for issue in report["issues"]
     }
 
 
