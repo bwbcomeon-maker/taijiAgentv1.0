@@ -4,6 +4,15 @@
 
 带限制完成（功能分支已通过定向自动化和隔离 Electron 真实运行验证；axe 自动化和独立像素级视觉回归未验证）。
 
+## 2026-08-04 自动续跑卡死修复增量 QA
+
+- 根因：`POST /api/expert-teams/resume` 在 Provider/会话预检失败前没有先持久化执行预留，失败后仍投影为 `ready_to_generate`；前端随后删除去重键并再次自动续跑，形成请求风暴。全局 `busy` 判断同时拦截了关闭按钮。
+- 修复后的合同：同一运行快照只自动续跑一次；预检失败持久化为 `start_failed` 并显示“研究已暂停”和“重试当前阶段”；关闭/展开操作不受后台请求忙碌状态限制；聊天记录明确区分“本轮模型调用结束”和“整个研究任务结束”。
+- 已实时验证：首版定向 Electron smoke 在隔离端口完成，结果为 `collapsedWhileBusy=true`、`resumeCalls=1`，并出现可恢复的 Provider 错误；截图 `/tmp/taiji-research-recovery-focused/research-provider-recovery.png` 已人工查看。
+- 已实时验证：Python/JS 定向合同覆盖自动续跑去重、关闭按钮、失败状态文案、后端失败持久化及聊天文案。
+- 未验证：在删除重复错误标题并补充 1024/760 与键盘 Enter 断言后的最终定向 Electron 脚本，因 GUI 执行审批通道中断未能再次运行；因此最终视觉细节、两档响应式和该脚本中的键盘断言仍标记为未验证，不以首版截图替代。
+- 既有大型 Electron smoke 本轮提前结束且没有生成 `result.json`，结论为“不充分”，不计作本次通过证据。
+
 ## 变更范围
 
 - `research-report/v2` 发起页：仅保留能力说明、“原始诉求”文本框和“开始研究”。

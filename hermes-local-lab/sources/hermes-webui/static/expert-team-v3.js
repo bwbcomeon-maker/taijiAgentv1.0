@@ -624,7 +624,11 @@
   function progressHtml(card) {
     if (card.researchV2) {
       const progress = card.researchProgress || {};
-      const statusText = String(progress.statusText || '正在形成研究报告').trim();
+      const statusText = String(
+        card.productError?.schema === 'taiji.product.error.v1'
+          ? '研究已暂停'
+          : progress.statusText || '正在形成研究报告'
+      ).trim();
       return `<section class="et3-research-progress" data-et3-research-progress role="status" aria-live="polite" aria-atomic="true"><span class="et3-research-progress-dot" aria-hidden="true"></span><strong>${esc(statusText)}</strong></section>`;
     }
     const progress = card.progress || {};
@@ -928,14 +932,13 @@
           ? '内容已完成，正在自动生成和检查 DOCX。'
           : '当前阶段已通过校验，正在自动继续研究。',
       );
-      const continued = await mutate(
+      await mutate(
         '/api/expert-teams/resume',
         {},
         null,
         'auto-continuation',
         { successMessage: '已自动进入下一步。' },
       );
-      if (!continued) state.autoContinuationKeys.delete(key);
     });
     return true;
   }
@@ -958,14 +961,19 @@
   function workbenchHtml(card) {
     const current = effectiveState(card);
     const copy = card.researchV2
-      ? [String(card.researchProgress?.statusText || '正在形成研究报告'), '研究会自动检索、核验和整理，只在核心结论存在歧义时请你确认。']
+      ? card.productError?.schema === 'taiji.product.error.v1'
+        ? [String(card.productError.title || '研究任务需要恢复'), String(card.productError.message || '任务进度和资料已保留，请按提示恢复。')]
+        : [String(card.researchProgress?.statusText || '正在形成研究报告'), '研究会自动检索、核验和整理，只在核心结论存在歧义时请你确认。']
       : stateCopyFor(card, current);
     const statusLabel = copy[0];
+    const stateBanner = card.researchV2 && card.productError?.schema === 'taiji.product.error.v1'
+      ? ''
+      : `<section class="et3-state-banner"><div><strong>${esc(copy[0])}</strong><p>${esc(copy[1])}</p></div><span class="et3-state-pill">${esc(statusLabel)}</span></section>`;
     return `<div class="et3-workbench-shell">
       <header class="et3-workbench-head"><div class="et3-workbench-head-row"><div><p class="et3-eyebrow">专家团工作台</p><h2>${esc(card.researchV2 ? '深度研究报告' : (card.presentation?.visibleTitle || card.subtitle || '专家团任务'))}</h2><p>${esc(card.team?.title || '专家团')}${card.researchV2 ? ' · 深度研究' : ` · ${esc(card.phase || '需求确认')}`}</p></div><button type="button" class="et3-icon-button" data-et3-action="close-workbench" aria-label="收起专家团工作台">×</button></div></header>
       ${progressHtml(card)}
       <div class="et3-workbench-scroll">
-        <section class="et3-state-banner"><div><strong>${esc(copy[0])}</strong><p>${esc(copy[1])}</p></div><span class="et3-state-pill">${esc(statusLabel)}</span></section>
+        ${stateBanner}
         ${card.researchV2 ? researchRequestPanel(card) : ''}
         ${staleConflictRevisionHtml(card)}
         ${staleConflictDeliveryHtml(card)}
@@ -1353,9 +1361,10 @@
 
   async function handleWorkbenchClick(event) {
     const button = event.target.closest('[data-et3-action]');
-    if (!button || state.busy) return;
-    if (button.type === 'submit') event.preventDefault?.();
+    if (!button) return;
     const action = button.dataset.et3Action;
+    if (state.busy && !['close-workbench', 'restore-workbench'].includes(action)) return;
+    if (button.type === 'submit') event.preventDefault?.();
     if (action === 'open-model-settings') {
       if (typeof window.switchSettingsSection === 'function') window.switchSettingsSection('models');
       else setLive('模型配置入口暂不可用，请从设置中打开模型配置。', true);

@@ -35,7 +35,7 @@
   }
   function projectExpertTeamTranscriptContent(messages,index,content){
     if(!isExpertTeamProtocolAssistant(messages,index))return content;
-    return '专家团阶段处理已结束，请在右侧工作台查看结果状态和下一步。';
+    return '本轮模型调用已结束，研究任务状态请以右侧工作台为准。';
   }
   function normalizeAction(action){
     if(!action||typeof action!=='object')return null;

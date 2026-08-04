@@ -2517,7 +2517,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         sendBrowserNotification(
           'Response complete',
           _isExpertTeamProtocolStream()
-            ? '专家团阶段处理已结束，请在右侧工作台查看结果状态。'
+            ? '本轮模型调用已结束，研究任务状态请以右侧工作台为准。'
             : (assistantText?assistantText.slice(0,100):'Task finished')
         );
       };
