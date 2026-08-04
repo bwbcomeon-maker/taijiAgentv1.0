@@ -10,6 +10,10 @@
 
 凡涉及仓库文件修改、Git/GitHub、分支/worktree、PR/CI、源码启动、开发/运行目录、持久服务、打包或发布，必须先阅读并完整遵循 [`docs/runbooks/development-lifecycle.md`](docs/runbooks/development-lifecycle.md)。该文档是本项目唯一的完整开发生命周期规范；本文件不重复维护细则。
 
+## 标准收尾快捷授权
+
+当用户明确说“按标准收尾”时，表示授权对当前独立成果连续执行本地验证与提交、push 功能分支、创建 PR、处理当前成果导致的 CI 红灯，并在全部门禁通过后合并、同步和复验正式 `main`，最后进入安全清理。该触发词不授权制包、安装、部署、持久服务、发布、绕过门禁、影响其它任务或删除归属不明的内容；具体动作、停止条件和证据要求以 [`docs/runbooks/development-lifecycle.md`](docs/runbooks/development-lifecycle.md) 第 4、8、9、10 节为准。
+
 ## Linux/Kylin/UOS 打包规则
 
 凡涉及 Linux/Kylin/UOS 打包、安装脚本、桌面壳启动链、诊断脚本、运行时目录调整、离线交付或用户安装包去 Hermes 化，必须先显式调用 `$taiji-kylin-packaging`，并以该 skill 中的 release gate、目标机验收命令和已确认 Kylin 离线交付经验为准；本文件不重复维护打包细则。
