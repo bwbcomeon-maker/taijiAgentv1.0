@@ -29,6 +29,7 @@
 4. 用 Shift+Tab 检查焦点不逃出对话框，用 Escape 关闭并确认焦点归还到触发卡片。
 5. 注入后端 v2 view，确认工作台只显示一次原始诉求、中文状态、来源徽标和降级理由，不出现内部日志/阶段产物/中间确认。
 6. 键盘选中“全公司”并 Enter 提交关键追问，实际捕获到 `/api/expert-teams/stage/input` 请求中 `answer="全公司"`。
+7. 从真实 worktree 桌面入口复现并修复 `.venv` 解释器未传递导致的启动失败；确认 Agent、WebUI 健康后，从主导航进入“专家团 → 深度材料研究团”，极简发起页可见。
 
 ## 功能契约摘要
 
@@ -45,6 +46,7 @@
 - 运行环境：当前 worktree 的 Electron development 模式，隔离 runtime/user-data，独立 22042/22087 端口。
 - 现有 Electron V3 回归脚本成功退出，证明非研究内容创作团路径未被新分支破坏。
 - 研究专属 Electron 脚本结果：`{"ok": true}`；已检查发起页、工作台、追问键盘提交和三档视口。
+- 2026-08-04 真实启动恢复：Agent `127.0.0.1:18642/health` 与 WebUI `127.0.0.1:18787/health` 均返回 `status=ok`；进程命令指向 `deep-research-online` 的 `.venv`、Agent 和 WebUI 源码。
 
 ## 截图情况
 
@@ -53,6 +55,7 @@
 - `/tmp/taiji-research-v2-electron/research-launch-760.png`：已人工查看。
 - `/tmp/taiji-research-v2-electron/research-workbench-1024.png`：已人工查看（实际截图时维持 760 视口，文件名仅为场景标识）。
 - `/tmp/taiji-research-v2-electron/research-question-keyboard.png`：已人工查看。
+- `/tmp/taiji-deep-research-launch-fixed.png`：已人工查看，启动失败页消失并进入首次运行引导；随后通过真实 Electron 可访问性树确认进入深度材料研究团极简发起页。
 
 ## 可访问性检查
 
@@ -85,12 +88,14 @@
 | 研究 v2 Electron 实测 | `/tmp/taiji_research_v2_electron_smoke.js` | 通过 | 发起、工作台、键盘追问、三档断点 |
 | diff 格式 | `git diff --check` | 通过 | 无空白错误 |
 | 自动续跑前端合同 | `pytest ... tests/test_expert_team_frontend_v2.py` | 88 passed | GET 只读，v2 由 POST `/resume` 自动续跑 |
+| 桌面启动器 Python 运行时合同 | `node --test apps/taiji-desktop/tests/*.test.js` | 16 passed | 同时兼容 `venv` 与 `.venv`，向 Agent/WebUI 传递同一解释器 |
 | 模板级 DOCX 原生打开 | Word + WPS + LibreOffice | 带限制通过 | 两份 smoke DOCX 可打开；macOS 的 ChatGPT App Data 授权弹窗遮挡了部分原生页面检查 |
 
 ## 问题列表
 
 | 严重程度 | 问题 | 证据 | 建议修复方式 | 是否已修复 |
 |---|---|---|---|---|
+| P0 | 源码 worktree 只有 `.venv` 时桌面端查找 `venv/bin/python`，应用停在“启动失败” | 用户截图与实例日志均显示 `start-agent.sh exited with code 1` | 桌面源码启动器按 `venv → .venv` 解析并显式传给 Agent/WebUI | 是 |
 | P1 | 研究发起页暴露成员、任务选择与固定规格流程 | RED 测试失败；旧 DOM 包含“团队成员/选择文档任务” | 按后端 catalog 的 `research-report` 可用任务切换极简表单 | 是 |
 | P1 | 工作台未消费安全化进度/证据字段，仍可见阶段产物和确认 | RED 测试失败 | Presenter 投影 view 字段，v2 独立信息分层 | 是 |
 | P1 | 关键追问不是标准表单，未展示 impact | RED 测试失败 | 使用 form/fieldset/radio/submit 并关联 impact | 是 |
@@ -98,7 +103,7 @@
 
 ## 已修复问题
 
-上表 4 项均已在功能分支修复并通过定向测试与 Electron 验证。
+上表 5 项均已在功能分支修复并通过定向测试与 Electron 验证。
 
 ## 剩余风险
 
