@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+TRUSTED_GIT="$ROOT_DIR/scripts/taiji-trusted-git"
 PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 DELIVERY_DIR="$ROOT_DIR/taijiagent 打包交付"
@@ -22,6 +23,7 @@ command -v python3 >/dev/null 2>&1 || fail "缺少 python3"
 [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] || fail "证据必须是普通 JSON 文件且不能是符号链接"
 [ -f "$PRIVATE_KEY" ] && [ ! -L "$PRIVATE_KEY" ] || fail "发布私钥必须是普通文件且不能是符号链接"
 [ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || fail "仓库缺少固定验签公钥"
+[ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "仓库缺少可信 Git 边界"
 python3 - "$PRIVATE_KEY" <<'PY' \
   || fail "发布私钥必须由当前用户独占，权限只能是 0400/0600、不能是硬链接，且不能经过非 root 所有的祖先符号链接"
 import os
@@ -139,7 +141,7 @@ TAIJI_REPO_ROOT="$ROOT_DIR" \
   bash "$DELIVERY_DIR/01_制包机_发布预检.sh" \
   || fail "真实发布预检未通过，拒绝签名"
 
-commit="$(git -C "$ROOT_DIR" rev-parse --short=8 HEAD)"
+commit="$("$TRUSTED_GIT" -C "$ROOT_DIR" rev-parse HEAD)"
 deb_count="$(find "$DELIVERY_DIR/生成的安装包" -maxdepth 1 -type f -name 'taiji-agent_*.deb' | wc -l | tr -d ' ')"
 [ "$deb_count" = "1" ] || fail "当前 DEB 数量必须为 1"
 deb="$(find "$DELIVERY_DIR/生成的安装包" -maxdepth 1 -type f -name 'taiji-agent_*.deb' | head -n 1)"

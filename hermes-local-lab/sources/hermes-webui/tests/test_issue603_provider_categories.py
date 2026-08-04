@@ -33,7 +33,10 @@ def _apply_setup_in_isolated_profile(tmp_path, monkeypatch, body):
     monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
     monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
-    monkeypatch.setattr("api.onboarding.get_onboarding_status", lambda: {"completed": True})
+    monkeypatch.setattr(
+        "api.onboarding.get_onboarding_status",
+        lambda **_kwargs: {"completed": True},
+    )
     monkeypatch.setattr("api.profiles._reload_dotenv", lambda _home: None)
 
     apply_onboarding_setup({**body, "confirm_overwrite": True})

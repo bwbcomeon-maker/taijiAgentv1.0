@@ -1,8 +1,101 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+tree_contains_mountpoint() {
+  local root="$1" entry
+  command -v mountpoint >/dev/null 2>&1 || return 0
+  while IFS= read -r -d '' entry; do
+    if mountpoint -q -- "$entry"; then
+      return 0
+    fi
+  done < <(find "$root" -xdev -type d -print0 2>/dev/null)
+  return 1
+}
+
+safe_purge_tree() {
+  local path="$1" owner unsafe_entry
+  case "$path" in
+    /var/lib/taiji-agent|\
+    /var/log/taiji-agent|\
+    /opt/taiji-agent/runtime-home|\
+    /opt/taiji-agent/workspace|\
+    /opt/taiji-agent/logs|\
+    /opt/taiji-agent/tmp) ;;
+    *)
+      printf '[WARN] refusing non-allowlisted purge path: %s\n' "$path" >&2
+      return 0
+      ;;
+  esac
+
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if [ -L "$path" ]; then
+    printf '[WARN] preserving symlinked purge path: %s\n' "$path" >&2
+    return 0
+  fi
+  if [ ! -d "$path" ]; then
+    printf '[WARN] preserving purge path with unexpected type (directory required): %s\n' "$path" >&2
+    return 0
+  fi
+  owner="$(stat -c '%u' -- "$path" 2>/dev/null || true)"
+  if [ "$owner" != "0" ]; then
+    printf '[WARN] preserving non-root-owned purge path: %s\n' "$path" >&2
+    return 0
+  fi
+
+  if tree_contains_mountpoint "$path"; then
+    printf '[WARN] preserving purge tree that is or contains a mountpoint: %s\n' "$path" >&2
+    return 0
+  fi
+  unsafe_entry="$(find "$path" -xdev \( -type l -o ! -user root \) -print -quit 2>/dev/null || true)"
+  if [ -n "$unsafe_entry" ]; then
+    printf '[WARN] preserving purge tree with symlink/non-root-owned entry: %s\n' "$unsafe_entry" >&2
+    return 0
+  fi
+  # GNU find stays on the verified filesystem and never follows symlinks.
+  find "$path" -xdev -depth -delete
+}
+
+safe_remove_empty_install_root() {
+  local path="$1" owner
+  case "$path" in
+    /opt/taiji-agent) ;;
+    *)
+      printf '[WARN] refusing non-allowlisted install-root removal: %s\n' "$path" >&2
+      return 0
+      ;;
+  esac
+
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if [ -L "$path" ]; then
+    printf '[WARN] preserving symlinked install root: %s\n' "$path" >&2
+    return 0
+  fi
+  if [ ! -d "$path" ]; then
+    printf '[WARN] preserving install root with unexpected type (directory required): %s\n' "$path" >&2
+    return 0
+  fi
+  owner="$(stat -c '%u' -- "$path" 2>/dev/null || true)"
+  if [ "$owner" != "0" ]; then
+    printf '[WARN] preserving non-root-owned install root: %s\n' "$path" >&2
+    return 0
+  fi
+  if tree_contains_mountpoint "$path"; then
+    printf '[WARN] preserving install root that is or contains a mountpoint: %s\n' "$path" >&2
+    return 0
+  fi
+  if ! rmdir -- "$path" 2>/dev/null; then
+    printf '[WARN] preserving non-empty install root after allowlisted purge: %s\n' "$path" >&2
+  fi
+}
+
 if [ "${1:-}" = "purge" ]; then
-  rm -rf /opt/taiji-agent
+  safe_purge_tree /var/lib/taiji-agent
+  safe_purge_tree /var/log/taiji-agent
+  safe_purge_tree /opt/taiji-agent/runtime-home
+  safe_purge_tree /opt/taiji-agent/workspace
+  safe_purge_tree /opt/taiji-agent/logs
+  safe_purge_tree /opt/taiji-agent/tmp
+  safe_remove_empty_install_root /opt/taiji-agent
 fi
 
 if command -v update-desktop-database >/dev/null 2>&1; then

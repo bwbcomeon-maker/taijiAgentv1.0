@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ROOT_DIR="${TAIJI_RELEASE_REPO_ROOT:-$SCRIPT_ROOT}"
+TRUSTED_GIT="$SCRIPT_ROOT/scripts/taiji-trusted-git"
 SOURCE_GATE="$SCRIPT_ROOT/scripts/check-clean-worktree.sh"
 EVIDENCE_VALIDATOR="$SCRIPT_ROOT/scripts/validate-taiji-release-evidence.py"
 EVIDENCE_ATTESTATION_PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
@@ -96,7 +97,8 @@ run_delivery_preflight() {
 
 check_source_archive() {
   local commit archive count hash_line
-  commit="$(git -C "$ROOT_DIR" rev-parse --short=8 HEAD)"
+  [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || { fail "缺少可信 Git 边界"; return 1; }
+  commit="$("$TRUSTED_GIT" -C "$ROOT_DIR" rev-parse HEAD)"
   count="$(find "$DELIVERY_DIR" -maxdepth 1 -type f -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' | wc -l | tr -d ' ')"
   [ "$count" = "1" ] || { fail "源码包数量不是 1：$count"; return 1; }
   archive="$(find "$DELIVERY_DIR" -maxdepth 1 -type f -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' | head -n 1)"
@@ -155,7 +157,11 @@ validate_release_evidence() {
   local evidence="$2"
   local commit deb package_count challenge source_archive output_dir
   output_dir="$DELIVERY_DIR/生成的安装包"
-  commit="$(git -C "$ROOT_DIR" rev-parse --short=8 HEAD 2>/dev/null)" || {
+  [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || {
+    printf '缺少可信 Git 边界\n' >&2
+    return 1
+  }
+  commit="$("$TRUSTED_GIT" -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null)" || {
     printf '无法读取当前源码 commit\n' >&2
     return 1
   }

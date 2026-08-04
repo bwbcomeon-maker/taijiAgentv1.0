@@ -218,14 +218,32 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 :
                 ;;
               apt-get)
-                case "${1:-}" in
+                operation=""
+                for arg in "$@"; do
+                  case "$arg" in
+                    purge|install|update) operation="$arg"; break ;;
+                  esac
+                done
+                case "$operation" in
                   purge)
                     if [ "${FAKE_APT_PURGE_FAIL:-0}" = "1" ]; then
                       exit 1
                     fi
                     touch "$FAKE_STATE/purged"
                     ;;
-                  install) touch "$FAKE_STATE/installed" ;;
+                  install)
+                    touch "$FAKE_STATE/install_attempted"
+                    if [ "${FAKE_APT_INSTALL_FAIL:-0}" = "1" ]; then
+                      exit 42
+                    fi
+                    if [ "${FAKE_APT_INSTALL_FAIL_ONCE:-0}" = "1" ] && [ ! -f "$FAKE_STATE/install_failed_once" ]; then
+                      touch "$FAKE_STATE/install_failed_once"
+                      touch "$FAKE_STATE/half_configured"
+                      exit 42
+                    fi
+                    touch "$FAKE_STATE/installed"
+                    rm -f "$FAKE_STATE/half_configured"
+                    ;;
                 esac
                 ;;
               dpkg)
@@ -295,6 +313,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
             r'''
             #!/usr/bin/env bash
             set -euo pipefail
+            [ "${FAKE_DPKG_MANAGED:-1}" = "1" ] || exit 1
             [ ! -f "$FAKE_STATE/purged" ] || exit 1
             case "$*" in
               *'${db:Status-Abbrev}'*) printf 'ii ' ;;
@@ -372,7 +391,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self,
         *,
         apt_purge_fails: bool = False,
+        apt_install_fails: bool = False,
+        apt_install_fails_once: bool = False,
         dpkg_persists: bool = False,
+        dpkg_managed: bool = True,
         lsof_mode: str = "none",
         pgrep_mode: str = "none",
         online_ok: bool = False,
@@ -396,7 +418,10 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                 export HOME="{self.fake_home}"
                 export XDG_CONFIG_HOME="{xdg_config_home or ''}"
                 export FAKE_APT_PURGE_FAIL="{1 if apt_purge_fails else 0}"
+                export FAKE_APT_INSTALL_FAIL="{1 if apt_install_fails else 0}"
+                export FAKE_APT_INSTALL_FAIL_ONCE="{1 if apt_install_fails_once else 0}"
                 export FAKE_DPKG_PERSIST="{1 if dpkg_persists else 0}"
+                export FAKE_DPKG_MANAGED="{1 if dpkg_managed else 0}"
                 export FAKE_LSOF_MODE="{lsof_mode}"
                 export FAKE_PGREP_MODE="{pgrep_mode}"
                 export FAKE_TAMPER_STAGED_PACKAGES="{1 if tamper_staged_packages else 0}"
@@ -441,6 +466,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
                   esac
                 }}
                 validate_install_inputs
+                CURRENT_STAGE="安装太极 Agent"
                 install_package
                 if [ -n "${{OFFLINE_APT_REPO_SOURCE:-}}" ]; then
                   [ -f "$OFFLINE_APT_REPO_SOURCE/Packages" ] && cp "$OFFLINE_APT_REPO_SOURCE/Packages" "$FAKE_STATE/offline_Packages"
@@ -604,7 +630,7 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertIn("不要使用 sudo bash", output)
         self.assertNotIn("sudo ", self.fake_log_text())
 
-    def test_root_owned_staging_precedes_purge_and_is_cleaned_on_exit(self):
+    def test_root_owned_staging_precedes_managed_install_and_is_cleaned_on_exit(self):
         result = self.run_install_package()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -633,8 +659,11 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         )
         self.assertLess(
             log.index("sudo mktemp -d /var/tmp/taiji-agent-install.XXXXXX"),
-            log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"),
+            log.index(" install -y --reinstall --allow-downgrades --allow-change-held-packages"),
         )
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn("apt-mark unhold taiji-agent", log)
+        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertIn(f"Dir::Etc::sourcelist={staging}/taiji-agent-offline.list", log)
         self.assertIn(f"install -y --reinstall --allow-downgrades --allow-change-held-packages {staging}/package/taiji-agent_0.1.0_amd64.deb", log)
         self.assertNotIn(f"install -y --reinstall --allow-downgrades --allow-change-held-packages {self.tmp_path / '生成的安装包'}", log)
@@ -828,46 +857,92 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertIn("缺少 packages_sha256", result.stdout + result.stderr)
         self.assertFalse((self.fake_state / "installed").exists())
 
-    def test_clean_reinstall_removes_legacy_without_backup_before_installing(self):
+    def test_managed_upgrade_uses_native_dpkg_path_without_destructive_cleanup(self):
         result = self.run_install_package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         log = self.fake_log_text()
         self.assertNotIn("sudo tar -C / -czf", log)
-        self.assertLess(log.index("sudo systemctl stop taiji-agent-webui.service"), log.index("sudo apt-mark unhold taiji-agent"))
-        self.assertLess(log.index("sudo apt-mark unhold taiji-agent"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
-        self.assertLess(log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"), log.index("sudo rm -rf -- /opt/taiji-agent"))
-        self.assertLess(log.index("sudo rm -rf -- /opt/taiji-agent"), log.index(" install -y --reinstall --allow-downgrades --allow-change-held-packages"))
-        self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
-        self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
+        self.assertLess(
+            log.index(" install -y --reinstall --allow-downgrades --allow-change-held-packages"),
+            log.index("sudo systemctl stop taiji-agent-webui.service"),
+        )
+        self.assertNotIn("sudo apt-mark unhold taiji-agent", log)
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn("sudo dpkg --remove", log)
+        self.assertNotIn("sudo dpkg --purge", log)
+        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertIn(" install -y --reinstall --allow-downgrades --allow-change-held-packages", log)
 
-    def test_dpkg_purge_fallback_allows_install_when_apt_purge_fails(self):
-        result = self.run_install_package(apt_purge_fails=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        log = self.fake_log_text()
-        self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
-        self.assertIn("sudo dpkg --remove --force-remove-reinstreq taiji-agent", log)
-        self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
-        self.assertIn(" install -y --reinstall", log)
-
-    def test_persistent_dpkg_state_stops_before_file_removal_and_install(self):
-        result = self.run_install_package(apt_purge_fails=True, dpkg_persists=True)
+    def test_failed_managed_upgrade_preserves_install_and_is_retryable(self):
+        result = self.run_install_package(apt_install_fails=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
         log = self.fake_log_text()
-        self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn("sudo dpkg --remove", log)
+        self.assertNotIn("sudo dpkg --purge", log)
         self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertNotIn(" install -y --reinstall", log)
+        self.assertIn(" install -y --reinstall", log)
+        self.assertTrue((self.fake_state / "install_attempted").is_file(), log)
 
-    def test_legacy_opt_process_is_killed_before_package_purge(self):
+    def test_half_configured_managed_install_succeeds_on_second_run_without_cleanup(self):
+        first = self.run_install_package(apt_install_fails_once=True)
+
+        self.assertNotEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertTrue((self.fake_state / "half_configured").is_file())
+        first_log = self.fake_log_text()
+        self.assertNotIn("apt-get purge -y taiji-agent", first_log)
+        self.assertNotIn("sudo dpkg --remove", first_log)
+        self.assertNotIn("sudo dpkg --purge", first_log)
+        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", first_log)
+        diagnostics = sorted((self.tmp_path / "构建日志").glob("失败诊断-*.txt"))
+        self.assertTrue(diagnostics, first.stdout + first.stderr)
+        first_diagnostic = diagnostics[-1].read_text(encoding="utf-8")
+        self.assertIn("sudo dpkg --configure taiji-agent", first_diagnostic)
+        self.assertIn("不要手工删除 /opt/taiji-agent", first_diagnostic)
+
+        second = self.run_install_package(apt_install_fails_once=True)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertTrue((self.fake_state / "installed").is_file())
+        self.assertFalse((self.fake_state / "half_configured").exists())
+        second_log = self.fake_log_text()
+        self.assertEqual(second_log.count(" install -y --reinstall"), 2, second_log)
+        self.assertNotIn("apt-get purge -y taiji-agent", second_log)
+        self.assertNotIn("sudo dpkg --remove", second_log)
+        self.assertNotIn("sudo dpkg --purge", second_log)
+        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", second_log)
+
+    def test_existing_dpkg_state_is_not_forcibly_removed(self):
+        result = self.run_install_package(apt_purge_fails=True, dpkg_persists=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        log = self.fake_log_text()
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn("sudo dpkg --purge", log)
+        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
+        self.assertIn(" install -y --reinstall", log)
+
+    def test_managed_upgrade_does_not_pattern_kill_processes(self):
         result = self.run_install_package(pgrep_mode="legacy")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         log = self.fake_log_text()
-        self.assertIn("sudo kill 9999", log)
-        self.assertLess(log.index("sudo kill 9999"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
+        self.assertNotIn("sudo kill 9999", log)
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertIn(" install -y --reinstall", log)
+
+    def test_unmanaged_legacy_migration_is_allowlisted_without_package_purge(self):
+        result = self.run_install_package(dpkg_managed=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        log = self.fake_log_text()
+        self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
+        self.assertIn("sudo systemctl disable taiji-agent-webui.service", log)
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn("sudo dpkg --remove", log)
+        self.assertNotIn("sudo dpkg --purge", log)
         self.assertIn(" install -y --reinstall", log)
 
     def test_non_taiji_port_conflict_is_reported_without_blocking_install(self):
@@ -876,8 +951,8 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
 
         log = self.fake_log_text()
         self.assertNotIn("sudo kill 43210", log)
-        self.assertIn("apt-get purge -y taiji-agent", log)
-        self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
+        self.assertNotIn("apt-get purge -y taiji-agent", log)
+        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
         self.assertIn(" install -y --reinstall", log)
 
     def test_missing_offline_repo_blocks_default_install(self):

@@ -21,6 +21,20 @@ PAYLOAD_VERIFIER="$REPO_ROOT/packaging/linux/verify-payload.py"
 RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-runtime-components.py"
 PYTHON_RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-python-runtime.py"
 ELECTRON_RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-electron-runtime.py"
+DESKTOP_JS_STAGER="$REPO_ROOT/packaging/linux/stage-desktop-js-closure.js"
+TARGET_BASELINE_TOOL="$REPO_ROOT/packaging/linux/target_baseline.py"
+APPROVED_MAINTAINER_FILE="$REPO_ROOT/packaging/linux/approved-maintainer.json"
+APPROVED_MAINTAINER_VALIDATOR="$REPO_ROOT/packaging/linux/validate-approved-maintainer.py"
+RUNTIME_DEPENDS_FILE="$SCRIPT_DIR/runtime-depends.txt"
+PREINST_RENDERER="$SCRIPT_DIR/render-preinst.py"
+TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
+TARGET_BASELINE_FILE="${TAIJI_TARGET_BASELINE_FILE:-}"
+TARGET_BASELINE_MAX_AGE_DAYS="${TAIJI_TARGET_BASELINE_MAX_AGE_DAYS:-30}"
+PACKAGE_MAINTAINER="${TAIJI_PACKAGE_MAINTAINER:-}"
+TARGET_BASELINE_SNAPSHOT=""
+TARGET_BASELINE_PROFILE_ID=""
+TARGET_BASELINE_SHA256=""
+TARGET_BASELINE_GLIBC_MIN=""
 PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
 PACKAGED_NODE_VERSION="22.23.1"
 ISSUER_PUBLIC_KEY_FINGERPRINT="2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
@@ -35,6 +49,7 @@ if [ -n "${TAIJI_AGENT_VERSION:-}" ] && [ "$TAIJI_AGENT_VERSION" != "$VERSION" ]
   exit 1
 fi
 ARCH="amd64"
+SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
 BUILD_ROOT="$REPO_ROOT/runtime/package-build/deb"
 PKG_ROOT="$BUILD_ROOT/root"
 INSTALL_ROOT="$PKG_ROOT/opt/taiji-agent"
@@ -44,11 +59,86 @@ DESKTOP_RUNTIME="$INSTALL_ROOT/apps/taiji-desktop"
 OUT_DIR="$REPO_ROOT/packages/麒麟操作系统安装包"
 OUT_DEB="$OUT_DIR/taiji-agent_${VERSION}_${ARCH}.deb"
 ARCHIVE_DIR="$OUT_DIR/旧版本归档"
-DEB_DEPENDS="libc6, libgtk-3-0, libnss3, libnspr4, libxss1, libasound2, libatk1.0-0, libatk-bridge2.0-0, libatspi2.0-0, libdrm2, libgbm1, libxkbcommon0, libx11-6, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxrandr2, libxrender1, libxshmfence1, libxcb1, libcups2, libdbus-1-3, libglib2.0-0, libpango-1.0-0, libcairo2, libexpat1, libfontconfig1, libsecret-1-0, libxtst6, libuuid1, xdg-utils, ca-certificates"
+DEB_DEPENDS=""
 
 fail() {
   echo "$*" >&2
   exit 1
+}
+
+cleanup_target_baseline_snapshot() {
+  if [ -n "${TARGET_BASELINE_SNAPSHOT:-}" ] && [ -f "$TARGET_BASELINE_SNAPSHOT" ] && [ ! -L "$TARGET_BASELINE_SNAPSHOT" ]; then
+    rm -f -- "$TARGET_BASELINE_SNAPSHOT"
+  fi
+}
+trap cleanup_target_baseline_snapshot EXIT HUP INT TERM
+
+validate_sales_release_inputs() {
+  [ -f "$TARGET_BASELINE_TOOL" ] || fail "Missing target baseline validator: $TARGET_BASELINE_TOOL"
+  [ -f "$RUNTIME_DEPENDS_FILE" ] || fail "Missing runtime dependency contract: $RUNTIME_DEPENDS_FILE"
+  [ -f "$PREINST_RENDERER" ] || fail "Missing target-bound preinst renderer: $PREINST_RENDERER"
+  [ -n "$TARGET_BASELINE_FILE" ] \
+    || fail "TAIJI_TARGET_BASELINE_FILE is required; a sales DEB cannot be built without current target evidence."
+  [ -f "$TARGET_BASELINE_FILE" ] && [ ! -L "$TARGET_BASELINE_FILE" ] \
+    || fail "TAIJI_TARGET_BASELINE_FILE must be a regular non-symlink file."
+  [ "$(stat -c '%h' -- "$TARGET_BASELINE_FILE")" = "1" ] \
+    || fail "TAIJI_TARGET_BASELINE_FILE must have exactly one hard link."
+  printf '%s\n' "$TARGET_BASELINE_MAX_AGE_DAYS" | grep -Eq '^[1-9][0-9]?$' \
+    || fail "TAIJI_TARGET_BASELINE_MAX_AGE_DAYS must be between 1 and 99."
+
+  [ -n "$PACKAGE_MAINTAINER" ] \
+    || fail "TAIJI_PACKAGE_MAINTAINER is required and must match the approved formal-source release contact."
+  [ -f "$APPROVED_MAINTAINER_VALIDATOR" ] && [ ! -L "$APPROVED_MAINTAINER_VALIDATOR" ] \
+    || fail "Missing approved maintainer validator: $APPROVED_MAINTAINER_VALIDATOR"
+  [ -f "$APPROVED_MAINTAINER_FILE" ] && [ ! -L "$APPROVED_MAINTAINER_FILE" ] \
+    || fail "Missing approved formal-source maintainer: $APPROVED_MAINTAINER_FILE"
+  python3 "$APPROVED_MAINTAINER_VALIDATOR" \
+    --file "$APPROVED_MAINTAINER_FILE" \
+    --expect "$PACKAGE_MAINTAINER" \
+    || fail "TAIJI_PACKAGE_MAINTAINER is not the identity approved in formal source."
+
+  TARGET_BASELINE_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/taiji-target-baseline.XXXXXX.json")"
+  chmod 0600 "$TARGET_BASELINE_SNAPSHOT"
+  cp -- "$TARGET_BASELINE_FILE" "$TARGET_BASELINE_SNAPSHOT"
+  [ "$(sha256sum "$TARGET_BASELINE_FILE" | awk '{print $1}')" = "$(sha256sum "$TARGET_BASELINE_SNAPSHOT" | awk '{print $1}')" ] \
+    || fail "Target baseline changed while it was being snapshotted."
+
+  python3 "$TARGET_BASELINE_TOOL" validate \
+    --profile "$TARGET_BASELINE_SNAPSHOT" \
+    --depends-file "$RUNTIME_DEPENDS_FILE" \
+    --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS" >/dev/null
+  TARGET_BASELINE_PROFILE_ID="$(python3 - "$TARGET_BASELINE_SNAPSHOT" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    print(json.load(handle)["profile_id"])
+PY
+)"
+  TARGET_BASELINE_GLIBC_MIN="$(python3 - "$TARGET_BASELINE_SNAPSHOT" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    print(json.load(handle)["glibc"]["version"])
+PY
+)"
+  TARGET_BASELINE_SHA256="$(sha256sum "$TARGET_BASELINE_SNAPSHOT" | awk '{print $1}')"
+  printf '%s\n' "$TARGET_BASELINE_PROFILE_ID" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$' \
+    || fail "Validated target baseline returned an unsafe profile_id."
+  printf '%s\n' "$TARGET_BASELINE_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "Validated target baseline returned an unsafe SHA256."
+
+  DEB_DEPENDS="$(
+    python3 "$TARGET_BASELINE_TOOL" render-depends \
+      --profile "$TARGET_BASELINE_SNAPSHOT" \
+      --depends-file "$RUNTIME_DEPENDS_FILE" \
+      --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS"
+  )" || fail "Cannot render versioned runtime dependencies from the target baseline."
+  [ -n "$DEB_DEPENDS" ] || fail "Versioned runtime dependency contract is empty."
+
+  build_glibc="$(ldd --version 2>&1 | awk 'NR == 1 { print }' | grep -Eo '[0-9]+(\.[0-9]+)+' | tail -n 1)"
+  [ -n "$build_glibc" ] || fail "Cannot determine Linux build-host glibc version."
+  dpkg --compare-versions "$build_glibc" le "$TARGET_BASELINE_GLIBC_MIN" \
+    || fail "Build-host glibc $build_glibc is newer than target baseline $TARGET_BASELINE_GLIBC_MIN."
 }
 
 [ -n "$PACKAGED_NODE_ROOT" ] || fail "TAIJI_PACKAGED_NODE_ROOT is required; system Node and source-tree fallback are not release inputs."
@@ -64,6 +154,39 @@ require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     fail "Missing required command: $1"
   fi
+}
+
+resolve_source_commit() {
+  local git_commit=""
+  if command -v git >/dev/null 2>&1; then
+    [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] \
+      || fail "Missing trusted Git boundary: $TRUSTED_GIT"
+    git_commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if [ -n "$git_commit" ]; then
+    if [ -n "$SOURCE_COMMIT" ] && [ "$SOURCE_COMMIT" != "$git_commit" ]; then
+      fail "TAIJI_SOURCE_COMMIT does not exactly match the source Git HEAD."
+    fi
+    SOURCE_COMMIT="$git_commit"
+  fi
+  printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
+    || fail "A full 40-character lowercase hexadecimal TAIJI_SOURCE_COMMIT is required."
+}
+
+write_desktop_release_manifest() {
+  cat > "$INSTALL_ROOT/resources/taiji-release-manifest.json" <<MANIFEST
+{
+  "schema": "taiji-release-manifest/v1",
+  "platform": "linux",
+  "arch": "amd64",
+  "version": "$VERSION",
+  "commit": "$SOURCE_COMMIT",
+  "targetBaselineProfile": "$TARGET_BASELINE_PROFILE_ID",
+  "targetBaselineSha256": "$TARGET_BASELINE_SHA256",
+  "installRoot": "/opt/taiji-agent"
+}
+MANIFEST
+  chmod 0644 "$INSTALL_ROOT/resources/taiji-release-manifest.json"
 }
 
 verify_linux_electron_runtime() {
@@ -246,9 +369,9 @@ write_packaged_webui_version() {
   local base digest
   base="${TAIJI_WEBUI_VERSION:-}"
   if [ -z "$base" ] && command -v git >/dev/null 2>&1; then
-    base="$(git -C "$SOURCE_WEB_DIR" describe --tags --always 2>/dev/null || true)"
+    base="$("$TRUSTED_GIT" -C "$SOURCE_WEB_DIR" describe --tags --always 2>/dev/null || true)"
     if [ -z "$base" ]; then
-      base="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+      base="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
     fi
   fi
   if [ -z "$base" ]; then
@@ -480,12 +603,18 @@ scan_deb_release_artifact() {
 }
 
 audit_deb_payload() {
-  local contents required missing
+  local contents required missing audit_root control_root
   contents="$BUILD_ROOT/deb-contents.txt"
   dpkg-deb -c "$OUT_DEB" > "$contents"
   for required in \
     "./opt/taiji-agent/runtime/agent/venv/bin/python" \
     "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" \
+    "./opt/taiji-agent/apps/taiji-desktop/src/main.js" \
+    "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" \
+    "./opt/taiji-agent/apps/taiji-desktop/src/external-link-policy.js" \
+    "./opt/taiji-agent/apps/taiji-desktop/src/launch-profile.js" \
+    "./opt/taiji-agent/resources/taiji-release-manifest.json" \
+    "./opt/taiji-agent/resources/target-baseline.json" \
     "./opt/taiji-agent/runtime/web/server.pyc" \
     "./opt/taiji-agent/scripts/taiji-native-verify" \
     "./usr/share/applications/taiji-agent.desktop" \
@@ -499,6 +628,35 @@ audit_deb_payload() {
     printf '%s' "$missing" >&2
     fail "DEB payload is missing required runtime paths."
   fi
+  if ! awk '
+    $1 == "-rw-r--r--" && $2 == "root/root" &&
+    $NF == "./opt/taiji-agent/resources/taiji-release-manifest.json" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$contents"; then
+    fail "DEB release manifest must be root-owned and mode 0644."
+  fi
+  if ! awk '
+    $1 == "-rw-r--r--" && $2 == "root/root" &&
+    $NF == "./opt/taiji-agent/resources/target-baseline.json" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$contents"; then
+    fail "DEB target baseline must be root-owned and mode 0644."
+  fi
+
+  audit_root="$BUILD_ROOT/deb-audit-root"
+  control_root="$BUILD_ROOT/deb-audit-control"
+  rm -rf "$audit_root" "$control_root"
+  mkdir -p "$audit_root" "$control_root"
+  dpkg-deb -x "$OUT_DEB" "$audit_root"
+  dpkg-deb -e "$OUT_DEB" "$control_root"
+  cmp -s "$TARGET_BASELINE_SNAPSHOT" "$audit_root/opt/taiji-agent/resources/target-baseline.json" \
+    || fail "DEB target baseline is not byte-identical to the validated release input."
+  grep -F "$TARGET_BASELINE_PROFILE_ID" "$control_root/preinst" >/dev/null \
+    || fail "DEB preinst is not bound to the validated target profile."
+  if grep -F '@@TAIJI_BASELINE_' "$control_root/preinst" >/dev/null; then
+    fail "DEB preinst still contains unrendered target baseline tokens."
+  fi
+  bash -n "$control_root/preinst"
 }
 
 if [ "$(uname -s)" != "Linux" ]; then
@@ -514,9 +672,11 @@ case "$(uname -m)" in
     ;;
 esac
 
-for cmd in dpkg-deb rsync npm sha256sum file ldd strings perl python3 openssl; do
+for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp; do
   require_cmd "$cmd"
 done
+resolve_source_commit
+validate_sales_release_inputs
 
 if [ -n "${TAIJI_LICENSE_PRIVATE_KEY:-}" ] || [ -n "${TAIJI_LICENSE_PRIVATE_KEY_FILE:-}" ]; then
   warn "license signing private-key environment variables are ignored by package builds"
@@ -564,6 +724,8 @@ chmod 0644 "$AGENT_RUNTIME/PYTHON_VERSION"
 printf '%s\n' "$VERSION" > "$WEB_RUNTIME/PRODUCT_VERSION"
 chmod 0644 "$WEB_RUNTIME/PRODUCT_VERSION"
 install -m 0644 "$PAYLOAD_CONTRACT" "$INSTALL_ROOT/resources/payload-contract.json"
+install -m 0644 "$TARGET_BASELINE_SNAPSHOT" "$INSTALL_ROOT/resources/target-baseline.json"
+write_desktop_release_manifest
 python3 "$RUNTIME_STAGER" \
   --repo-root "$REPO_ROOT" \
   --install-root "$INSTALL_ROOT" \
@@ -594,8 +756,11 @@ fi
 
 mkdir -p "$DESKTOP_RUNTIME/src" "$DESKTOP_RUNTIME/node_modules"
 install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"
-install -m 0644 "$APP_DIR/src/main.js" "$DESKTOP_RUNTIME/src/main.js"
-install -m 0644 "$APP_DIR/src/preload.js" "$DESKTOP_RUNTIME/src/preload.js"
+node "$DESKTOP_JS_STAGER" \
+  --source "$APP_DIR/src" \
+  --destination "$DESKTOP_RUNTIME/src" \
+  --entry main.js \
+  --entry preload.js
 python3 "$ELECTRON_RUNTIME_STAGER" \
   --source "$APP_DIR/node_modules/electron" \
   --destination "$DESKTOP_RUNTIME/node_modules/electron" \
@@ -604,19 +769,16 @@ python3 "$ELECTRON_RUNTIME_STAGER" \
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/taiji-agent"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-diagnose" "$PKG_ROOT/usr/bin/taiji-agent-diagnose"
+install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-native-verify" "$INSTALL_ROOT/bin/taiji-native-verify"
 install -m 0644 "$DESKTOP_FILE" "$PKG_ROOT/usr/share/applications/taiji-agent.desktop"
 install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
 install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$INSTALL_ROOT/resources/icons/taiji-agent.png"
-cat > "$INSTALL_ROOT/bin/taiji-native-verify" <<'VERIFY'
-#!/usr/bin/env bash
-set -euo pipefail
-export TAIJI_AGENT_ROOT="${TAIJI_AGENT_ROOT:-/opt/taiji-agent}"
-export TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"
-exec "$TAIJI_AGENT_ROOT/scripts/taiji-native-verify" "$@"
-VERIFY
-chmod 0755 "$INSTALL_ROOT/bin/taiji-native-verify"
-
-install -m 0755 "$SCRIPT_DIR/preinst" "$PKG_ROOT/DEBIAN/preinst"
+python3 "$PREINST_RENDERER" \
+  --template "$SCRIPT_DIR/preinst" \
+  --profile "$TARGET_BASELINE_SNAPSHOT" \
+  --depends-file "$RUNTIME_DEPENDS_FILE" \
+  --output "$PKG_ROOT/DEBIAN/preinst" \
+  --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS"
 install -m 0755 "$SCRIPT_DIR/postinst" "$PKG_ROOT/DEBIAN/postinst"
 install -m 0755 "$SCRIPT_DIR/prerm" "$PKG_ROOT/DEBIAN/prerm"
 install -m 0755 "$SCRIPT_DIR/postrm" "$PKG_ROOT/DEBIAN/postrm"
@@ -629,7 +791,7 @@ Section: utils
 Priority: optional
 Architecture: $ARCH
 Installed-Size: $installed_size
-Maintainer: Taiji Agent Team <support@example.invalid>
+Maintainer: $PACKAGE_MAINTAINER
 Depends: $DEB_DEPENDS
 Description: Taiji Agent local desktop app
  Local desktop shell and offline runtime for Taiji Agent WebUI and Agent API.

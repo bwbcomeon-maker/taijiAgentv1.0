@@ -105,6 +105,22 @@ function buildProbeCode(challenge, sessionId) {
   return `TAIJI-ATTACHMENT-PROBE-${digest.slice(0, 32)}`;
 }
 
+function assertVisibleFirstConfigurationStart(state) {
+  if (!state || state.visible !== true || state.active !== true || state.completed !== false) {
+    throw new Error("installed acceptance must start with the visible onboarding workflow");
+  }
+}
+
+function firstConfigurationCompletionObserved(state) {
+  return Boolean(
+    state
+    && state.visible === false
+    && state.active === false
+    && state.completed === true
+    && state.preflightReady === true
+  );
+}
+
 function validateDesktopAppUrl(rawUrl) {
   let parsed;
   try {
@@ -400,6 +416,7 @@ class CdpClient {
 
 function buildDriverResult(measurements) {
   const requiredChecks = [
+    "visible_first_configuration_completion",
     "desktop_launch",
     "real_model_conversation",
     "attachment_flow",
@@ -1022,18 +1039,52 @@ async function runAcceptance(args) {
       label: "installed Electron App readiness with preload bridge",
     });
 
-    const onboardingVisible = await evaluate(client, `(() => {
+    const firstConfigurationStart = await evaluate(client, `(() => {
       const overlay = document.getElementById("onboardingOverlay");
-      return Boolean(overlay && getComputedStyle(overlay).display !== "none");
+      return {
+        visible: Boolean(overlay && getComputedStyle(overlay).display !== "none"),
+        active: Boolean(typeof ONBOARDING === "object" && ONBOARDING.active),
+        completed: Boolean(typeof ONBOARDING === "object" && ONBOARDING.status && ONBOARDING.status.completed === true),
+      };
     })()`, deadline);
-    if (onboardingVisible) {
-      await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-      await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    assertVisibleFirstConfigurationStart(firstConfigurationStart);
+
+    for (const expectedStep of ["system", "setup", "workspace", "password"]) {
       await waitFor(() => evaluate(client, `(() => {
-        const overlay = document.getElementById("onboardingOverlay");
-        return !overlay || getComputedStyle(overlay).display === "none";
-      })()`, deadline), { deadline, label: "onboarding dismissal" });
+        const button = document.getElementById("onboardingNextBtn");
+        const step = typeof ONBOARDING === "object" ? ONBOARDING.steps[ONBOARDING.step] : "";
+        return Boolean(step === ${JSON.stringify(expectedStep)} && button && !button.disabled && getComputedStyle(button).display !== "none");
+      })()`, deadline), { deadline, intervalMs: 250, label: `visible first-configuration ${expectedStep} step` });
+      await physicalClickVisibleElement(client, "#onboardingNextBtn", deadline, `first-configuration ${expectedStep} Continue action`);
+      await waitFor(() => evaluate(client, `(() => (
+        typeof ONBOARDING === "object" && ONBOARDING.steps[ONBOARDING.step] !== ${JSON.stringify(expectedStep)}
+      ))()`, deadline), { deadline, intervalMs: 250, label: `first-configuration advance from ${expectedStep}` });
     }
+
+    await waitFor(() => evaluate(client, `(() => {
+      const button = document.getElementById("onboardingNextBtn");
+      const step = typeof ONBOARDING === "object" ? ONBOARDING.steps[ONBOARDING.step] : "";
+      return Boolean(step === "finish" && button && !button.disabled && getComputedStyle(button).display !== "none");
+    })()`, deadline), { deadline, intervalMs: 250, label: "visible first-configuration Finish action" });
+    await physicalClickVisibleElement(client, "#onboardingNextBtn", deadline, "first-configuration Finish action");
+    await waitFor(() => evaluate(client, `(async () => {
+      const overlay = document.getElementById("onboardingOverlay");
+      let status = null;
+      try {
+        const response = await fetch("/api/onboarding/status", { credentials: "include" });
+        if (response.ok) status = await response.json();
+      } catch (_) {}
+      return {
+        visible: Boolean(overlay && getComputedStyle(overlay).display !== "none"),
+        active: Boolean(typeof ONBOARDING === "object" && ONBOARDING.active),
+        completed: Boolean(status && status.completed === true),
+        preflightReady: Boolean(status && status.preflight && status.preflight.overall_ready === true),
+      };
+    })()`, deadline).then((state) => firstConfigurationCompletionObserved(state) ? state : null), {
+      deadline,
+      intervalMs: 350,
+      label: "server-confirmed visible first-configuration completion",
+    });
 
     const stateHome = process.env.XDG_STATE_HOME
       ? path.resolve(process.env.XDG_STATE_HOME)
@@ -1236,6 +1287,7 @@ async function runAcceptance(args) {
       jsErrors: unexpectedJsErrors,
       unexpectedHttpFailures,
       checks: {
+        visible_first_configuration_completion: true,
         desktop_launch: true,
         real_model_conversation: true,
         attachment_flow: true,
@@ -1278,6 +1330,7 @@ module.exports = {
   ELECTRON_PATH,
   PROBE_PROMPT,
   attachFixtureThroughVisibleChooser,
+  assertVisibleFirstConfigurationStart,
   buildDriverResult,
   buildElectronArgs,
   buildInstalledAcceptanceEnv,
@@ -1285,6 +1338,7 @@ module.exports = {
   completionSnapshotPassed,
   filterUnexpectedHttpFailures,
   filterUnexpectedJsErrors,
+  firstConfigurationCompletionObserved,
   insertTextThroughVisibleComposer,
   isExpectedBackgroundConsoleError,
   isExpectedDesktopHttpFailure,

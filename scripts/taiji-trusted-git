@@ -1,0 +1,20 @@
+#!/bin/bash -p
+# Execute release-identity Git operations without inheriting ambient GIT_* selectors.
+set -euo pipefail
+
+PATH="/usr/bin:/bin"
+export PATH
+
+while IFS= read -r -d '' _taiji_git_env_entry; do
+  _taiji_git_env_name="${_taiji_git_env_entry%%=*}"
+  case "$_taiji_git_env_name" in
+    GIT_*) unset "$_taiji_git_env_name" ;;
+  esac
+done < <(/usr/bin/env -0)
+unset _taiji_git_env_entry _taiji_git_env_name
+
+[ -x /usr/bin/git ] || {
+  printf 'trusted-git-failed\t/usr/bin/git is missing\n' >&2
+  exit 127
+}
+exec /usr/bin/git "$@"

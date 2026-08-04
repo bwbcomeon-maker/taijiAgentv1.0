@@ -39,7 +39,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.docker_log = self.temp_path / "docker.log"
         self.docker_state = self.temp_path / "docker-state.json"
         self.source_commit = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--short=8", "HEAD"],
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
             check=True,
             text=True,
             capture_output=True,
@@ -68,11 +68,13 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         checksum = package_dir / f"{deb.name}.sha256"
         checksum.write_text(f"{sha256(deb)}  {deb.name}\n", encoding="utf-8")
         generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        target_profile_id = "kylin-v10-amd64-123456789abc"
+        target_profile_sha256 = "b" * 64
         manifest = package_dir / "taiji-package-manifest.json"
         manifest.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "package": "taiji-agent",
                     "version": "0.1.0",
                     "build_arch": "x86_64",
@@ -87,6 +89,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "packages_gz_sha256": sha256(packages_gz),
                     "electron_executable_sha256": "e" * 64,
                     "desktop_entry_sha256": "d" * 64,
+                    "target_baseline_profile_id": target_profile_id,
+                    "target_baseline_sha256": target_profile_sha256,
                     "built_at": generated_at,
                 },
                 sort_keys=True,
@@ -107,6 +111,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     f"manifest={manifest.name}",
                     f"packages_sha256={sha256(packages)}",
                     f"packages_gz_sha256={sha256(packages_gz)}",
+                    f"target_baseline_profile_id={target_profile_id}",
+                    f"target_baseline_sha256={target_profile_sha256}",
                 )
             )
             + "\n",
@@ -129,6 +135,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         )
         (acceptance_tools / "assemble-target-evidence.py").write_text(
             "# fixture target evidence assembler\n", encoding="utf-8"
+        )
+        (acceptance_tools / "observe-single-deb-install.py").write_text(
+            "# fixture pre-install observer\n", encoding="utf-8"
         )
         (acceptance_tools / "validate-taiji-release-evidence.py").write_text(
             "# fixture release evidence validator\n", encoding="utf-8"
@@ -459,6 +468,12 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertEqual(session["challenge_nonce"], CHALLENGE)
         self.assertEqual(session["checks"], {"install": True, "uninstall": True, "reinstall": True})
         self.assertEqual(evidence["challenge_nonce"], CHALLENGE)
+        self.assertEqual(evidence["schema_version"], 2)
+        self.assertEqual(
+            evidence["target_baseline_profile_id"],
+            "kylin-v10-amd64-123456789abc",
+        )
+        self.assertEqual(evidence["target_baseline_sha256"], "b" * 64)
         self.assertEqual(evidence["log_sha256"], sha256(session_path))
         self.assertFalse(evidence["desktop_app_verified"])
         self.assertFalse(evidence["target_verified"])
@@ -554,20 +569,21 @@ class OfflineRehearsalDocumentationTest(unittest.TestCase):
             "不能替代真实 Electron 桌面 App 验收",
         )
 
-        for path in (SALE_READINESS, DELIVERY_GUIDE):
-            with self.subTest(path=path):
-                document = path.read_text(encoding="utf-8")
-                for snippet in required_snippets:
-                    self.assertIn(snippet, document)
+        readiness = SALE_READINESS.read_text(encoding="utf-8")
+        self.assertIn("完整操作步骤以", readiness)
+        self.assertIn("runbooks/taiji-kylin-uos-offline-delivery.md", readiness)
+        document = DELIVERY_GUIDE.read_text(encoding="utf-8")
+        for snippet in required_snippets:
+            self.assertIn(snippet, document)
 
     def test_final_release_gate_reuses_original_challenges(self):
-        document = SALE_READINESS.read_text(encoding="utf-8")
-        final_gate = document.split("## 一键门禁", 1)[1].split("离线生命周期演练证据目录默认是", 1)[0]
+        document = DELIVERY_GUIDE.read_text(encoding="utf-8")
+        final_gate = document.split("## 最终销售发布", 1)[1].split("## 第五步", 1)[0]
 
-        self.assertIn('<本次断网演练时保留的原 challenge>', final_gate)
-        self.assertIn('<本次真实桌面 App 验收时保留的原 challenge>', final_gate)
-        self.assertIn("最终门禁只复用本次验收时保留的原 challenge", final_gate)
-        self.assertIn("不得在最终门禁阶段重新执行 `openssl rand`", final_gate)
+        self.assertIn('<当轮断网演练原值>', final_gate)
+        self.assertIn('<当轮真机验收原值>', final_gate)
+        self.assertIn("TAIJI_OFFLINE_REHEARSAL_CHALLENGE", final_gate)
+        self.assertIn("TAIJI_TARGET_ACCEPTANCE_CHALLENGE", final_gate)
         self.assertNotIn("openssl rand -hex 32", final_gate)
 
 

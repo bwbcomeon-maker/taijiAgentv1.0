@@ -27,6 +27,9 @@ ELECTRON_PATH = Path(
     "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
 )
 PRESERVED_DRIVER_BASENAME = "desktop-driver-result.json"
+INSTALL_OBSERVATION_BASENAME = "single-deb-install-observation.json"
+INSTALL_METHOD_ATTESTATION_BASENAME = "single-deb-install-method-attestation.json"
+GRAPHICAL_INSTALLER_EVIDENCE_BASENAME = "single-deb-graphical-installer.png"
 DRIVER_KEYS = {
     "schema",
     "acceptance_session_id",
@@ -128,6 +131,10 @@ def load_module(path: Path, name: str):
 
 class TargetEvidenceAssemblerTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.previous_non_linux_test_identity = os.environ.get(
+            "TAIJI_ASSEMBLER_NON_LINUX_TEST_IDENTITY"
+        )
+        os.environ["TAIJI_ASSEMBLER_NON_LINUX_TEST_IDENTITY"] = "assembler-contract-test-v1"
         self.temporary = tempfile.TemporaryDirectory(prefix="taiji-target-assembler-test-")
         self.root = Path(self.temporary.name)
         self.inputs = self.root / "inputs"
@@ -135,10 +142,18 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
         self.output = self.root / "target-verification"
         self.challenge = "2" * 64
         self.session_id = "1" * 32
-        self.source_commit = "a" * 12
+        self.source_commit = "a" * 40
         self.version = "0.1.0-preview"
         self.release_hash = "9" * 64
-        self.machine_hash = "8" * 64
+        assembler = load_module(ASSEMBLER, "taiji_target_assembler_fixture_identity")
+        self.machine_hash, self.boot_hash = assembler.current_target_fingerprints(self.challenge)
+        (
+            self.target_uid,
+            self.canonical_home_fingerprint,
+            self.user_state_paths_fingerprint,
+        ) = assembler.current_user_context_fingerprints(self.challenge)
+        self.profile_id = "kylin-v10-amd64-123456789abc"
+        self.profile_sha256 = "b" * 64
 
         self.deb = self.inputs / f"taiji-agent_{self.version}_amd64.deb"
         self.deb.write_bytes((b"taiji-deb-payload" * 131072) + b"end")
@@ -160,7 +175,7 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
         self.manifest.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "package": "taiji-agent",
                     "build_arch": "x86_64",
                     "dpkg_arch": "amd64",
@@ -170,6 +185,76 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
                     "deb_sha256": sha256(self.deb),
                     "electron_executable_sha256": sha256(self.electron),
                     "desktop_entry_sha256": sha256(self.desktop_entry),
+                    "target_baseline_profile_id": self.profile_id,
+                    "target_baseline_sha256": self.profile_sha256,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        self.install_observation = self.inputs / INSTALL_OBSERVATION_BASENAME
+        self.install_observation.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji.single-deb-install-observation.v1",
+                    "generated_at_utc": utc_now(),
+                    "started_at_utc": utc_now(),
+                    "completed_at_utc": utc_now(),
+                    "challenge_nonce": self.challenge,
+                    "machine_fingerprint_sha256": self.machine_hash,
+                    "boot_fingerprint_sha256": self.boot_hash,
+                    "target_uid": self.target_uid,
+                    "canonical_home_fingerprint_sha256": self.canonical_home_fingerprint,
+                    "user_state_paths_fingerprint_sha256": self.user_state_paths_fingerprint,
+                    "source_commit": self.source_commit,
+                    "manifest_sha256": sha256(self.manifest),
+                    "deb_observed_basename": self.deb.name,
+                    "deb_sha256": sha256(self.deb),
+                    "target_baseline_profile_id": self.profile_id,
+                    "target_baseline_sha256": self.profile_sha256,
+                    "candidate_file_count": 1,
+                    "additional_install_files_observed": False,
+                    "package_status_before": "not-installed",
+                    "package_status_after": "install ok installed",
+                    "package_status_transitions": [
+                        "not-installed",
+                        "install ok unpacked",
+                        "install ok installed",
+                    ],
+                    "network_observation": "continuous-process-sampling-no-non-loopback-up",
+                    "network_sample_interval_ms": 250,
+                    "network_sample_count": 23,
+                    "user_state_before": "absent",
+                    "user_state_after_install_before_first_launch": "absent",
+                    "first_launch_eligible": True,
+                    "installation_method_machine_observed": False,
+                    "observation_process_continuous": True,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        self.graphical_installer_evidence = self.inputs / GRAPHICAL_INSTALLER_EVIDENCE_BASENAME
+        self.graphical_installer_evidence.write_bytes(png_fixture())
+        self.install_method_attestation = self.inputs / INSTALL_METHOD_ATTESTATION_BASENAME
+        self.install_method_attestation.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji.single-deb-install-method-attestation.v1",
+                    "generated_at_utc": utc_now(),
+                    "observation_basename": self.install_observation.name,
+                    "observation_sha256": sha256(self.install_observation),
+                    "challenge_nonce": self.challenge,
+                    "machine_fingerprint_sha256": self.machine_hash,
+                    "boot_fingerprint_sha256": self.boot_hash,
+                    "deb_sha256": sha256(self.deb),
+                    "installation_method_attested": "desktop-double-click",
+                    "installation_method_machine_observed": False,
+                    "attestation_scope": "human-observed-system-graphical-installer",
+                    "operator_id": "target-operator-01",
+                    "confirmation": True,
+                    "graphical_installer_evidence_basename": self.graphical_installer_evidence.name,
+                    "graphical_installer_evidence_sha256": sha256(self.graphical_installer_evidence),
                 },
                 sort_keys=True,
             ),
@@ -180,6 +265,12 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+        if self.previous_non_linux_test_identity is None:
+            os.environ.pop("TAIJI_ASSEMBLER_NON_LINUX_TEST_IDENTITY", None)
+        else:
+            os.environ["TAIJI_ASSEMBLER_NON_LINUX_TEST_IDENTITY"] = (
+                self.previous_non_linux_test_identity
+            )
 
     def driver_payload(self) -> dict[str, object]:
         payload = {
@@ -207,6 +298,7 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             "screenshot_basename": self.screenshot.name,
             "diagnostic_basename": self.diagnostic.name,
             "checks": {
+                "visible_first_configuration_completion": True,
                 "desktop_launch": True,
                 "real_model_conversation": True,
                 "attachment_flow": True,
@@ -219,6 +311,39 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
         }
         self.assertEqual(set(payload), DRIVER_KEYS)
         return payload
+
+    def test_release_manifest_requires_schema2_full_commit_and_target_baseline(self) -> None:
+        assembler = load_module(ASSEMBLER, "taiji_target_assembler_manifest_identity_test")
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        kwargs = {
+            "deb": self.deb,
+            "deb_sha256": sha256(self.deb),
+            "electron_sha256": sha256(self.electron),
+            "desktop_entry_sha256": sha256(self.desktop_entry),
+            "installed_version": self.version,
+        }
+
+        self.assertEqual(
+            assembler.validate_manifest(manifest, **kwargs),
+            (self.source_commit, self.version, self.profile_id, self.profile_sha256),
+        )
+        schema1 = {**manifest, "schema_version": 1}
+        with self.assertRaisesRegex(assembler.AssemblyError, "source_commit"):
+            assembler.validate_manifest({**manifest, "source_commit": "a" * 12}, **kwargs)
+        with self.assertRaisesRegex(assembler.AssemblyError, "schema_version=2"):
+            assembler.validate_manifest(schema1, **kwargs)
+        with self.assertRaisesRegex(assembler.AssemblyError, "target_baseline"):
+            assembler.validate_manifest(
+                {key: value for key, value in manifest.items() if key != "target_baseline_sha256"},
+                **kwargs,
+            )
+
+    def test_assembler_derives_current_machine_and_boot_fingerprints(self) -> None:
+        assembler = load_module(ASSEMBLER, "taiji_target_assembler_current_identity_test")
+        machine, boot = assembler.current_target_fingerprints(self.challenge)
+        self.assertRegex(machine, r"^[0-9a-f]{64}$")
+        self.assertRegex(boot, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(machine, boot)
 
     def write_driver_result(self, transform=None) -> None:
         payload = self.driver_payload()
@@ -235,8 +360,10 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             "deb": self.deb,
             "electron_executable": self.electron,
             "desktop_entry": self.desktop_entry,
+            "install_observation": self.install_observation,
+            "install_method_attestation": self.install_method_attestation,
+            "graphical_installer_evidence": self.graphical_installer_evidence,
             "release_artifacts_sha256": self.release_hash,
-            "machine_fingerprint_sha256": self.machine_hash,
             "installed_package_version": self.version,
             "challenge": self.challenge,
             "os_id": "kylin",
@@ -275,6 +402,9 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
                 "desktop-acceptance-session.json",
                 "desktop-app.png",
                 PRESERVED_DRIVER_BASENAME,
+                INSTALL_OBSERVATION_BASENAME,
+                INSTALL_METHOD_ATTESTATION_BASENAME,
+                GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
                 "taiji-support-bundle.json",
                 "target-verification.json",
             },
@@ -290,10 +420,33 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
         self.assertEqual(preserved_driver.read_bytes(), self.driver_result.read_bytes())
         self.assertEqual(evidence["driver_result_basename"], PRESERVED_DRIVER_BASENAME)
         self.assertEqual(evidence["driver_result_sha256"], sha256(preserved_driver))
+        self.assertEqual(evidence["schema_version"], 2)
+        self.assertEqual(evidence["target_baseline_profile_id"], self.profile_id)
+        self.assertEqual(evidence["target_baseline_sha256"], self.profile_sha256)
+        self.assertEqual(evidence["installation_method"], "desktop-double-click")
+        self.assertEqual(
+            evidence["installation_network"],
+            "continuous-process-sampling-no-non-loopback-up",
+        )
+        self.assertEqual(evidence["installation_file_count"], 1)
+        self.assertFalse(evidence["additional_install_files"])
+        self.assertEqual(evidence["dpkg_status_before"], "not-installed")
+        self.assertEqual(evidence["dpkg_status_after"], "install ok installed")
+        self.assertTrue(evidence["first_configuration_cycle_completed"])
+        self.assertEqual(evidence["install_observation_sha256"], sha256(self.install_observation))
+        self.assertEqual(
+            evidence["install_method_attestation_sha256"],
+            sha256(self.install_method_attestation),
+        )
+        self.assertEqual(
+            evidence["graphical_installer_evidence_sha256"],
+            sha256(self.graphical_installer_evidence),
+        )
         args = SimpleNamespace(
             source_commit=self.source_commit,
             challenge=self.challenge,
             deb=self.deb,
+            manifest=self.manifest,
         )
         validator.validate_target(
             evidence,
@@ -304,6 +457,8 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             self.release_hash,
             sha256(self.electron),
             sha256(self.desktop_entry),
+            self.profile_id,
+            self.profile_sha256,
         )
 
         session = json.loads(
@@ -312,6 +467,18 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
         self.assertEqual(session["transport"], "electron-cdp")
         self.assertTrue(session["desktop_token_present"])
         self.assertFalse(session["web_fallback_used"])
+        self.assertEqual(session["target_baseline_profile_id"], self.profile_id)
+        self.assertEqual(session["target_baseline_sha256"], self.profile_sha256)
+        self.assertEqual(session["installation_method"], "desktop-double-click")
+        self.assertEqual(
+            session["installation_network"],
+            "continuous-process-sampling-no-non-loopback-up",
+        )
+        self.assertEqual(session["installation_file_count"], 1)
+        self.assertFalse(session["additional_install_files"])
+        self.assertEqual(session["dpkg_status_before"], "not-installed")
+        self.assertEqual(session["dpkg_status_after"], "install ok installed")
+        self.assertTrue(session["first_configuration_cycle_completed"])
         rendered = json.dumps(session, ensure_ascii=False)
         self.assertNotIn("openai/gpt-test", rendered)
         self.assertNotIn("taiji_desktop_token", rendered)
@@ -329,6 +496,7 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             source_commit=self.source_commit,
             challenge=self.challenge,
             deb=self.deb,
+            manifest=self.manifest,
         )
 
         cases = {
@@ -370,9 +538,72 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
                         self.release_hash,
                         sha256(self.electron),
                         sha256(self.desktop_entry),
+                        self.profile_id,
+                        self.profile_sha256,
                     )
 
         driver_path.write_text(json.dumps(original_driver, sort_keys=True), encoding="utf-8")
+
+    def test_install_observation_and_human_attestation_are_hash_bound(self) -> None:
+        result = self.run_assembler()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validator = load_module(VALIDATOR, "taiji_release_evidence_validator_install_observation_test")
+        evidence_path = self.output / "target-verification.json"
+        evidence = validator.load_json(evidence_path, "target evidence")
+        args = SimpleNamespace(
+            source_commit=self.source_commit,
+            challenge=self.challenge,
+            deb=self.deb,
+            manifest=self.manifest,
+        )
+
+        observation_path = self.output / INSTALL_OBSERVATION_BASENAME
+        observation = json.loads(observation_path.read_text(encoding="utf-8"))
+        observation["challenge_nonce"] = "f" * 64
+        observation_path.write_text(json.dumps(observation, sort_keys=True), encoding="utf-8")
+        tampered = dict(evidence)
+        tampered["install_observation_sha256"] = sha256(observation_path)
+        with self.assertRaises(validator.EvidenceError):
+            validator.validate_target(
+                tampered, evidence_path, args, sha256(self.deb), self.version,
+                self.release_hash, sha256(self.electron), sha256(self.desktop_entry),
+                self.profile_id, self.profile_sha256,
+            )
+
+    def test_assembler_rejects_internally_rebound_foreign_machine_or_boot_observation(self) -> None:
+        original_observation = json.loads(self.install_observation.read_text(encoding="utf-8"))
+        original_attestation = json.loads(
+            self.install_method_attestation.read_text(encoding="utf-8")
+        )
+        cases = {
+            "machine_fingerprint_sha256": "current target",
+            "boot_fingerprint_sha256": "boot identity",
+        }
+        for field, expected_error in cases.items():
+            with self.subTest(field=field):
+                observation = dict(original_observation)
+                observation[field] = "0" * 64
+                self.install_observation.write_text(
+                    json.dumps(observation, sort_keys=True), encoding="utf-8"
+                )
+                attestation = dict(original_attestation)
+                attestation[field] = "0" * 64
+                attestation["observation_sha256"] = sha256(self.install_observation)
+                self.install_method_attestation.write_text(
+                    json.dumps(attestation, sort_keys=True), encoding="utf-8"
+                )
+
+                result = self.run_assembler()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
+                self.assert_no_partial_output()
+
+        self.install_observation.write_text(
+            json.dumps(original_observation, sort_keys=True), encoding="utf-8"
+        )
+        self.install_method_attestation.write_text(
+            json.dumps(original_attestation, sort_keys=True), encoding="utf-8"
+        )
 
     def test_unknown_or_failed_driver_fields_are_rejected_without_publication(self) -> None:
         cases = {

@@ -21,6 +21,7 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         self.assertIn("/usr/share/applications/taiji-agent.desktop", script)
         self.assertIn("run-installed-electron-acceptance.js", script)
         self.assertIn("assemble-target-evidence.py", script)
+        self.assertIn("observe-single-deb-install.py", script)
         self.assertIn("validate-taiji-release-evidence.py", script)
         self.assertIn('/opt/taiji-agent/bin/taiji-native-verify', script)
         self.assertIn('TAIJI_AGENT_ROOT="/opt/taiji-agent"', script)
@@ -54,9 +55,36 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         self.assertIn("dpkg-query", script)
         self.assertIn("electron_executable_sha256", script)
         self.assertIn("desktop_entry_sha256", script)
-        self.assertIn("machine_fingerprint_sha256", script)
+        self.assertIn("validate_install_observation", script)
         self.assertIn("sha256sum", script)
         self.assertIn("证据输出目录已存在，拒绝覆盖", script)
+
+    def test_target_script_consumes_machine_observation_and_human_method_attestation(self):
+        script = read_text(DELIVERY / "04_目标终端_桌面App验收并导出证据.sh")
+
+        for required in (
+            "TAIJI_SINGLE_DEB_CUSTOMER_DIR",
+            "TAIJI_SINGLE_DEB_INSTALL_OBSERVATION",
+            "TAIJI_SINGLE_DEB_METHOD_ATTESTATION",
+            "TAIJI_SINGLE_DEB_GRAPHICAL_INSTALLER_EVIDENCE",
+            "--install-observation",
+            "--install-method-attestation",
+            "--graphical-installer-evidence",
+            "/usr/bin/python3 -B",
+        ):
+            self.assertIn(required, script)
+        for removed_post_hoc_flag in (
+            "TAIJI_TARGET_INSTALL_METHOD",
+            "TAIJI_TARGET_INSTALL_NETWORK",
+            "TAIJI_TARGET_DPKG_STATUS_BEFORE",
+            "TAIJI_TARGET_FIRST_LAUNCH",
+        ):
+            self.assertNotIn(removed_post_hoc_flag, script)
+        main = script[script.index("main() {") :]
+        self.assertLess(main.index("validate_install_observation"), main.index("run_desktop_acceptance"))
+        self.assertIn('entry_count="$(find "$SINGLE_DEB_CUSTOMER_DIR"', script)
+        self.assertIn('customer_sha256="$(sha256sum "$CUSTOMER_DEB"', script)
+        self.assertIn('"$customer_sha256" = "$EXPECTED_DEB_SHA256"', script)
 
     def test_builder_stages_and_preflight_requires_the_acceptance_toolchain(self):
         builder = read_text(DELIVERY / "00_制包机_生成离线交付包.sh")
@@ -67,6 +95,7 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         for filename in (
             "run-installed-electron-acceptance.js",
             "assemble-target-evidence.py",
+            "observe-single-deb-install.py",
             "validate-taiji-release-evidence.py",
             "signing-public.pem",
         ):

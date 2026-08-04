@@ -146,7 +146,7 @@ def test_onboarding_shared_zhipu_secret_bumps_epochs_inside_paired_commit(
     monkeypatch.setattr(
         onboarding,
         "get_onboarding_status",
-        lambda: {"ok": True},
+        lambda **_kwargs: {"ok": True},
     )
     monkeypatch.setattr(profiles, "_reload_dotenv", lambda _home: None)
     monkeypatch.setattr(cli_config, "reload", lambda: None, raising=False)

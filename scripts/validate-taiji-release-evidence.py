@@ -22,9 +22,12 @@ from urllib.parse import parse_qs, urlsplit
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
+FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+TARGET_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 INCIDENT_RE = re.compile(r"^inc-[0-9a-f]{12,32}$")
+OPERATOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 UNSAFE_VERSION_RE = re.compile(
     r"(?i)(?:hermes|password|passwd|passphrase|secret|token|bearer|(?:^|[-_.])sk-|(?:^|[-_.])key(?:[-_.]|$))"
 )
@@ -40,7 +43,11 @@ ELECTRON_PATH = "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/
 DRIVER_RESULT_BASENAME = "desktop-driver-result.json"
 SCREENSHOT_BASENAME = "desktop-app.png"
 DIAGNOSTIC_BASENAME = "taiji-support-bundle.json"
+INSTALL_OBSERVATION_BASENAME = "single-deb-install-observation.json"
+INSTALL_METHOD_ATTESTATION_BASENAME = "single-deb-install-method-attestation.json"
+GRAPHICAL_INSTALLER_EVIDENCE_BASENAME = "single-deb-graphical-installer.png"
 TARGET_CHECK_KEYS = {
+    "visible_first_configuration_completion",
     "desktop_launch",
     "real_model_conversation",
     "attachment_flow",
@@ -85,6 +92,8 @@ OFFLINE_KEYS = {
     "rehearsal_session_id",
     "challenge_nonce",
     "release_artifacts_sha256",
+    "target_baseline_profile_id",
+    "target_baseline_sha256",
     "source_commit",
     "deb_basename",
     "deb_sha256",
@@ -111,6 +120,8 @@ TARGET_KEYS = {
     "challenge_nonce",
     "machine_fingerprint_sha256",
     "release_artifacts_sha256",
+    "target_baseline_profile_id",
+    "target_baseline_sha256",
     "electron_executable_sha256",
     "desktop_entry_sha256",
     "installed_package_version",
@@ -121,6 +132,16 @@ TARGET_KEYS = {
     "os_id",
     "os_version",
     "desktop_environment",
+    "installation_method",
+    "installation_method_evidence",
+    "installation_method_machine_observed",
+    "installation_network",
+    "installation_file_count",
+    "additional_install_files",
+    "dpkg_status_before",
+    "dpkg_status_after",
+    "first_configuration_cycle_completed",
+    "visible_first_configuration_completion",
     "target_verified",
     "desktop_launch",
     "real_model_conversation",
@@ -135,6 +156,12 @@ TARGET_KEYS = {
     "diagnostic_sha256",
     "driver_result_basename",
     "driver_result_sha256",
+    "install_observation_basename",
+    "install_observation_sha256",
+    "install_method_attestation_basename",
+    "install_method_attestation_sha256",
+    "graphical_installer_evidence_basename",
+    "graphical_installer_evidence_sha256",
 }
 
 OFFLINE_SESSION_KEYS = {
@@ -167,7 +194,24 @@ TARGET_SESSION_KEYS = {
     "os_id",
     "os_version",
     "desktop_environment",
+    "target_baseline_profile_id",
+    "target_baseline_sha256",
+    "installation_method",
+    "installation_method_evidence",
+    "installation_method_machine_observed",
+    "installation_network",
+    "installation_file_count",
+    "additional_install_files",
+    "dpkg_status_before",
+    "dpkg_status_after",
+    "first_configuration_cycle_completed",
     "machine_fingerprint_sha256",
+    "install_observation_basename",
+    "install_observation_sha256",
+    "install_method_attestation_basename",
+    "install_method_attestation_sha256",
+    "graphical_installer_evidence_basename",
+    "graphical_installer_evidence_sha256",
     "electron_pid",
     "electron_executable",
     "electron_executable_sha256",
@@ -179,6 +223,25 @@ TARGET_SESSION_KEYS = {
     "checks",
     "js_error_count",
     "unexpected_http_failures",
+}
+
+INSTALL_OBSERVATION_KEYS = {
+    "schema", "generated_at_utc", "started_at_utc", "completed_at_utc", "challenge_nonce",
+    "machine_fingerprint_sha256", "boot_fingerprint_sha256", "source_commit", "manifest_sha256",
+    "target_uid", "canonical_home_fingerprint_sha256", "user_state_paths_fingerprint_sha256",
+    "deb_observed_basename", "deb_sha256", "target_baseline_profile_id", "target_baseline_sha256",
+    "candidate_file_count", "additional_install_files_observed", "package_status_before",
+    "package_status_after", "package_status_transitions", "network_observation",
+    "network_sample_interval_ms", "network_sample_count", "user_state_before",
+    "user_state_after_install_before_first_launch", "first_launch_eligible",
+    "installation_method_machine_observed", "observation_process_continuous",
+}
+INSTALL_METHOD_ATTESTATION_KEYS = {
+    "schema", "generated_at_utc", "observation_basename", "observation_sha256",
+    "challenge_nonce", "machine_fingerprint_sha256", "boot_fingerprint_sha256",
+    "deb_sha256", "installation_method_attested", "installation_method_machine_observed",
+    "attestation_scope", "operator_id", "confirmation",
+    "graphical_installer_evidence_basename", "graphical_installer_evidence_sha256",
 }
 
 
@@ -316,6 +379,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         "离线依赖/runtime-dependencies.txt",
         "验收工具/run-installed-electron-acceptance.js",
         "验收工具/assemble-target-evidence.py",
+        "验收工具/observe-single-deb-install.py",
         "验收工具/validate-taiji-release-evidence.py",
         "验收工具/signing-public.pem",
     }
@@ -604,8 +668,10 @@ def parse_marker(path: Path) -> dict[str, str]:
     return result
 
 
-def validate_build_binding(args: argparse.Namespace) -> tuple[str, str, str, str, str]:
-    if not COMMIT_RE.fullmatch(args.source_commit):
+def validate_build_binding(
+    args: argparse.Namespace,
+) -> tuple[str, str, str, str, str, str, str]:
+    if not FULL_COMMIT_RE.fullmatch(args.source_commit):
         raise EvidenceError(f"当前源码 commit 格式不合法: {args.source_commit!r}")
     deb_hash, _ = sha256_regular_file(args.deb, "当前 DEB")
     source_hash, _ = sha256_regular_file(args.source_archive, "当前源码包")
@@ -621,8 +687,11 @@ def validate_build_binding(args: argparse.Namespace) -> tuple[str, str, str, str
         raise EvidenceError("DEB SHA256 sidecar 未准确绑定当前 DEB basename 和内容")
 
     manifest = load_json(args.manifest, "发布 manifest")
+    schema_version = manifest.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
+        raise EvidenceError("销售发布门禁强制 manifest schema_version=2")
     required_manifest = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "package": "taiji-agent",
         "build_arch": "x86_64",
         "dpkg_arch": "amd64",
@@ -647,6 +716,14 @@ def validate_build_binding(args: argparse.Namespace) -> tuple[str, str, str, str
         manifest.get("electron_executable_sha256"), "electron_executable_sha256"
     )
     desktop_entry_hash = validate_sha256(manifest.get("desktop_entry_sha256"), "desktop_entry_sha256")
+    target_baseline_profile_id = require_nonempty_string(
+        manifest, "target_baseline_profile_id"
+    )
+    if not TARGET_PROFILE_ID_RE.fullmatch(target_baseline_profile_id):
+        raise EvidenceError("发布 manifest target_baseline_profile_id 格式不合法")
+    target_baseline_sha256 = validate_sha256(
+        manifest.get("target_baseline_sha256"), "target_baseline_sha256"
+    )
 
     marker = parse_marker(args.build_marker)
     expected_marker = {
@@ -659,6 +736,8 @@ def validate_build_binding(args: argparse.Namespace) -> tuple[str, str, str, str
         "manifest": args.manifest.name,
         "packages_sha256": packages_hash,
         "packages_gz_sha256": packages_gz_hash,
+        "target_baseline_profile_id": target_baseline_profile_id,
+        "target_baseline_sha256": target_baseline_sha256,
     }
     require_exact_keys(marker, set(expected_marker) | {"built_at"}, "构建成功标记")
     if not marker["built_at"].strip():
@@ -672,16 +751,25 @@ def validate_build_binding(args: argparse.Namespace) -> tuple[str, str, str, str
         delivery_inventory_sha256(args.delivery_dir),
         electron_executable_hash,
         desktop_entry_hash,
+        target_baseline_profile_id,
+        target_baseline_sha256,
     )
 
 
 def validate_artifact_binding(
-    data: dict[str, Any], args: argparse.Namespace, deb_hash: str, release_artifacts_hash: str
+    data: dict[str, Any],
+    args: argparse.Namespace,
+    deb_hash: str,
+    release_artifacts_hash: str,
+    target_baseline_profile_id: str,
+    target_baseline_sha256: str,
 ) -> None:
     require_exact(data, "source_commit", args.source_commit)
     require_exact(data, "deb_basename", args.deb.name)
     require_exact(data, "deb_sha256", deb_hash)
     require_exact(data, "release_artifacts_sha256", release_artifacts_hash)
+    require_exact(data, "target_baseline_profile_id", target_baseline_profile_id)
+    require_exact(data, "target_baseline_sha256", target_baseline_sha256)
 
 
 def validate_bound_file(
@@ -729,11 +817,12 @@ def validate_offline_session(data: dict[str, Any], session: dict[str, Any], args
 
 def validate_offline(
     data: dict[str, Any], evidence_path: Path, args: argparse.Namespace, deb_hash: str,
-    release_artifacts_hash: str,
+    release_artifacts_hash: str, target_baseline_profile_id: str,
+    target_baseline_sha256: str,
 ) -> None:
     require_exact_keys(data, OFFLINE_KEYS, evidence_path.name)
     for key, expected in {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "offline-install-rehearsal",
         "platform": "linux/amd64",
         "network": "none",
@@ -750,7 +839,14 @@ def validate_offline(
     require_choice(data, "environment", {"container", "vm", "chroot"})
     require_nonempty_string(data, "os_id")
     require_nonempty_string(data, "os_version")
-    validate_artifact_binding(data, args, deb_hash, release_artifacts_hash)
+    validate_artifact_binding(
+        data,
+        args,
+        deb_hash,
+        release_artifacts_hash,
+        target_baseline_profile_id,
+        target_baseline_sha256,
+    )
     _, log_payload, _ = validate_bound_file(
         data, evidence_path, "log_basename", "log_sha256", "离线演练结构化会话"
     )
@@ -939,6 +1035,113 @@ def validate_support_bundle(payload: bytes) -> None:
         raise EvidenceError("诊断导出 overall 与组件状态不一致")
 
 
+def _parsed_fresh_timestamp(value: Any, key: str) -> datetime:
+    validate_fresh_timestamp(value, key)
+    return datetime.fromisoformat(value[:-1] + "+00:00")
+
+
+def validate_install_observation(
+    data: dict[str, Any],
+    observation: dict[str, Any],
+    args: argparse.Namespace,
+    deb_hash: str,
+    target_baseline_profile_id: str,
+    target_baseline_sha256: str,
+) -> None:
+    require_exact_keys(observation, INSTALL_OBSERVATION_KEYS, "单 DEB 安装观察记录")
+    manifest_payload, _ = read_regular_bytes(args.manifest, "发布 manifest")
+    expected = {
+        "schema": "taiji.single-deb-install-observation.v1",
+        "challenge_nonce": args.challenge,
+        "machine_fingerprint_sha256": data["machine_fingerprint_sha256"],
+        "source_commit": args.source_commit,
+        "manifest_sha256": hashlib.sha256(manifest_payload).hexdigest(),
+        "deb_observed_basename": args.deb.name,
+        "deb_sha256": deb_hash,
+        "target_baseline_profile_id": target_baseline_profile_id,
+        "target_baseline_sha256": target_baseline_sha256,
+        "candidate_file_count": 1,
+        "additional_install_files_observed": False,
+        "package_status_before": "not-installed",
+        "package_status_after": "install ok installed",
+        "network_observation": "continuous-process-sampling-no-non-loopback-up",
+        "user_state_before": "absent",
+        "user_state_after_install_before_first_launch": "absent",
+        "first_launch_eligible": True,
+        "installation_method_machine_observed": False,
+        "observation_process_continuous": True,
+    }
+    for key, expected_value in expected.items():
+        require_exact(observation, key, expected_value)
+    validate_sha256(observation["boot_fingerprint_sha256"], "observer.boot_fingerprint_sha256")
+    if type(observation["target_uid"]) is not int or observation["target_uid"] <= 0:
+        raise EvidenceError("单 DEB 安装观察记录 target_uid 不合法")
+    validate_sha256(
+        observation["canonical_home_fingerprint_sha256"],
+        "observer.canonical_home_fingerprint_sha256",
+    )
+    validate_sha256(
+        observation["user_state_paths_fingerprint_sha256"],
+        "observer.user_state_paths_fingerprint_sha256",
+    )
+    started = _parsed_fresh_timestamp(observation["started_at_utc"], "observer.started_at_utc")
+    completed = _parsed_fresh_timestamp(observation["completed_at_utc"], "observer.completed_at_utc")
+    generated = _parsed_fresh_timestamp(observation["generated_at_utc"], "observer.generated_at_utc")
+    if not started <= completed <= generated <= datetime.now(timezone.utc) + timedelta(minutes=5):
+        raise EvidenceError("单 DEB 安装观察记录时间顺序不合法")
+    transitions = observation["package_status_transitions"]
+    if (
+        type(transitions) is not list
+        or not transitions
+        or any(type(value) is not str for value in transitions)
+        or transitions[0] != "not-installed"
+        or transitions[-1] != "install ok installed"
+    ):
+        raise EvidenceError("单 DEB 安装观察记录未证明 absent 到 installed 状态迁移")
+    if type(observation["network_sample_interval_ms"]) is not int or observation["network_sample_interval_ms"] <= 0:
+        raise EvidenceError("单 DEB 安装观察记录网络采样间隔不合法")
+    if type(observation["network_sample_count"]) is not int or observation["network_sample_count"] < 2:
+        raise EvidenceError("单 DEB 安装观察记录网络采样数量不足")
+
+
+def validate_install_method_attestation(
+    data: dict[str, Any],
+    observation: dict[str, Any],
+    observation_hash: str,
+    attestation: dict[str, Any],
+    graphical_evidence_hash: str,
+    args: argparse.Namespace,
+) -> None:
+    require_exact_keys(
+        attestation,
+        INSTALL_METHOD_ATTESTATION_KEYS,
+        "桌面双击安装人工见证",
+    )
+    expected = {
+        "schema": "taiji.single-deb-install-method-attestation.v1",
+        "observation_basename": INSTALL_OBSERVATION_BASENAME,
+        "observation_sha256": observation_hash,
+        "challenge_nonce": args.challenge,
+        "machine_fingerprint_sha256": data["machine_fingerprint_sha256"],
+        "boot_fingerprint_sha256": observation["boot_fingerprint_sha256"],
+        "deb_sha256": data["deb_sha256"],
+        "installation_method_attested": "desktop-double-click",
+        "installation_method_machine_observed": False,
+        "attestation_scope": "human-observed-system-graphical-installer",
+        "confirmation": True,
+        "graphical_installer_evidence_basename": GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+        "graphical_installer_evidence_sha256": graphical_evidence_hash,
+    }
+    for key, expected_value in expected.items():
+        require_exact(attestation, key, expected_value)
+    if type(attestation["operator_id"]) is not str or not OPERATOR_ID_RE.fullmatch(attestation["operator_id"]):
+        raise EvidenceError("人工见证 operator_id 格式不合法")
+    attested = _parsed_fresh_timestamp(attestation["generated_at_utc"], "attestation.generated_at_utc")
+    completed = _parsed_fresh_timestamp(observation["completed_at_utc"], "observer.completed_at_utc")
+    if attested < completed:
+        raise EvidenceError("桌面双击安装人工见证早于机器安装观察完成时间")
+
+
 def validate_target_session(
     data: dict[str, Any], session: dict[str, Any], args: argparse.Namespace, version: str
 ) -> None:
@@ -955,7 +1158,24 @@ def validate_target_session(
         "os_id": data["os_id"],
         "os_version": data["os_version"],
         "desktop_environment": data["desktop_environment"],
+        "target_baseline_profile_id": data["target_baseline_profile_id"],
+        "target_baseline_sha256": data["target_baseline_sha256"],
+        "installation_method": "desktop-double-click",
+        "installation_method_evidence": "human-attestation",
+        "installation_method_machine_observed": False,
+        "installation_network": "continuous-process-sampling-no-non-loopback-up",
+        "installation_file_count": 1,
+        "additional_install_files": False,
+        "dpkg_status_before": "not-installed",
+        "dpkg_status_after": "install ok installed",
+        "first_configuration_cycle_completed": True,
         "machine_fingerprint_sha256": data["machine_fingerprint_sha256"],
+        "install_observation_basename": data["install_observation_basename"],
+        "install_observation_sha256": data["install_observation_sha256"],
+        "install_method_attestation_basename": data["install_method_attestation_basename"],
+        "install_method_attestation_sha256": data["install_method_attestation_sha256"],
+        "graphical_installer_evidence_basename": data["graphical_installer_evidence_basename"],
+        "graphical_installer_evidence_sha256": data["graphical_installer_evidence_sha256"],
         "electron_executable_sha256": data["electron_executable_sha256"],
         "desktop_entry_sha256": data["desktop_entry_sha256"],
         "installed_package_version": version,
@@ -1029,10 +1249,11 @@ def validate_target_driver(
 def validate_target(
     data: dict[str, Any], evidence_path: Path, args: argparse.Namespace, deb_hash: str, version: str,
     release_artifacts_hash: str, electron_executable_hash: str, desktop_entry_hash: str,
+    target_baseline_profile_id: str, target_baseline_sha256: str,
 ) -> None:
     require_exact_keys(data, TARGET_KEYS, evidence_path.name)
     for key, expected in {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "target-desktop-verification",
         "application": "taiji-electron-desktop",
         "platform": "linux/amd64",
@@ -1043,6 +1264,16 @@ def validate_target(
         "window_close_exit": True,
         "diagnostic_export": True,
         "installed_package_version": version,
+        "installation_method": "desktop-double-click",
+        "installation_method_evidence": "human-attestation",
+        "installation_method_machine_observed": False,
+        "installation_network": "continuous-process-sampling-no-non-loopback-up",
+        "installation_file_count": 1,
+        "additional_install_files": False,
+        "dpkg_status_before": "not-installed",
+        "dpkg_status_after": "install ok installed",
+        "first_configuration_cycle_completed": True,
+        "visible_first_configuration_completion": True,
     }.items():
         require_exact(data, key, expected)
     validate_fresh_timestamp(data["generated_at_utc"], "generated_at_utc")
@@ -1054,7 +1285,14 @@ def validate_target(
     require_choice(data, "os_id", {"kylin", "uos", "openkylin"})
     require_nonempty_string(data, "os_version")
     require_nonempty_string(data, "desktop_environment")
-    validate_artifact_binding(data, args, deb_hash, release_artifacts_hash)
+    validate_artifact_binding(
+        data,
+        args,
+        deb_hash,
+        release_artifacts_hash,
+        target_baseline_profile_id,
+        target_baseline_sha256,
+    )
     session_path, session_payload, session_stat = validate_bound_file(
         data, evidence_path, "session_log_basename", "session_log_sha256", "桌面验收结构化会话"
     )
@@ -1072,17 +1310,62 @@ def validate_target(
         "driver_result_sha256",
         "桌面 App 驱动原始结果",
     )
+    require_exact(data, "install_observation_basename", INSTALL_OBSERVATION_BASENAME)
+    observation_path, observation_payload, observation_stat = validate_bound_file(
+        data,
+        evidence_path,
+        "install_observation_basename",
+        "install_observation_sha256",
+        "单 DEB 安装观察记录",
+    )
+    require_exact(
+        data,
+        "install_method_attestation_basename",
+        INSTALL_METHOD_ATTESTATION_BASENAME,
+    )
+    attestation_path, attestation_payload, attestation_stat = validate_bound_file(
+        data,
+        evidence_path,
+        "install_method_attestation_basename",
+        "install_method_attestation_sha256",
+        "桌面双击安装人工见证",
+    )
+    require_exact(
+        data,
+        "graphical_installer_evidence_basename",
+        GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+    )
+    graphical_path, graphical_payload, graphical_stat = validate_bound_file(
+        data,
+        evidence_path,
+        "graphical_installer_evidence_basename",
+        "graphical_installer_evidence_sha256",
+        "系统图形安装器证据截图",
+    )
+    if len(observation_payload) > MAX_JSON_BYTES or len(attestation_payload) > MAX_JSON_BYTES:
+        raise EvidenceError("安装观察记录或人工见证超过 JSON 大小上限")
     if len(driver_payload) > MAX_JSON_BYTES:
         raise EvidenceError("桌面 App 驱动原始结果超过 JSON 大小上限")
-    paths = {session_path.name, screenshot_path.name, diagnostic_path.name, driver_path.name}
+    paths = {
+        session_path.name,
+        screenshot_path.name,
+        diagnostic_path.name,
+        driver_path.name,
+        observation_path.name,
+        attestation_path.name,
+        graphical_path.name,
+    }
     identities = {
         (session_stat.st_dev, session_stat.st_ino),
         (screenshot_stat.st_dev, screenshot_stat.st_ino),
         (diagnostic_stat.st_dev, diagnostic_stat.st_ino),
         (driver_stat.st_dev, driver_stat.st_ino),
+        (observation_stat.st_dev, observation_stat.st_ino),
+        (attestation_stat.st_dev, attestation_stat.st_ino),
+        (graphical_stat.st_dev, graphical_stat.st_ino),
     }
-    if len(paths) != 4 or len(identities) != 4:
-        raise EvidenceError("桌面验收会话、截图、诊断导出和驱动原始结果必须是四个不同文件")
+    if len(paths) != 7 or len(identities) != 7:
+        raise EvidenceError("桌面验收七个绑定证据必须是彼此独立的普通文件")
     session = parse_json_bytes(session_payload, "桌面 App 验收会话")
     validate_target_session(data, session, args, version)
     validate_target_driver(
@@ -1090,7 +1373,25 @@ def validate_target(
         session,
         parse_json_bytes(driver_payload, "桌面 App 驱动原始结果"),
     )
+    observation = parse_json_bytes(observation_payload, "单 DEB 安装观察记录")
+    validate_install_observation(
+        data,
+        observation,
+        args,
+        deb_hash,
+        target_baseline_profile_id,
+        target_baseline_sha256,
+    )
+    validate_install_method_attestation(
+        data,
+        observation,
+        hashlib.sha256(observation_payload).hexdigest(),
+        parse_json_bytes(attestation_payload, "桌面双击安装人工见证"),
+        hashlib.sha256(graphical_payload).hexdigest(),
+        args,
+    )
     validate_png(screenshot_payload)
+    validate_png(graphical_payload)
     validate_support_bundle(diagnostic_payload)
 
 
@@ -1131,9 +1432,19 @@ def main() -> int:
             release_artifacts_hash,
             electron_executable_hash,
             desktop_entry_hash,
+            target_baseline_profile_id,
+            target_baseline_sha256,
         ) = validate_build_binding(args)
         if args.mode == "offline":
-            validate_offline(data, args.evidence, args, deb_hash, release_artifacts_hash)
+            validate_offline(
+                data,
+                args.evidence,
+                args,
+                deb_hash,
+                release_artifacts_hash,
+                target_baseline_profile_id,
+                target_baseline_sha256,
+            )
         else:
             validate_target(
                 data,
@@ -1144,6 +1455,8 @@ def main() -> int:
                 release_artifacts_hash,
                 electron_executable_hash,
                 desktop_entry_hash,
+                target_baseline_profile_id,
+                target_baseline_sha256,
             )
     except (EvidenceError, OSError, KeyError, TypeError, ValueError) as exc:
         print(f"release-evidence-invalid: {exc}", file=sys.stderr)

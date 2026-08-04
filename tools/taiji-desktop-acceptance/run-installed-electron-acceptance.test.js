@@ -39,6 +39,8 @@ const {
   terminateManagedProcess,
   validateDesktopAuthCookies,
   validateDesktopTarget,
+  assertVisibleFirstConfigurationStart,
+  firstConfigurationCompletionObserved,
 } = require("./run-installed-electron-acceptance.js");
 
 class FakeWebSocket extends EventTarget {
@@ -95,6 +97,26 @@ test("parseArgs rejects malformed identity fields and duplicate flags", () => {
   assert.throws(() => parseArgs(validArgv({ sessionId: "ABC" })), /session-id/);
   assert.throws(() => parseArgs(validArgv({ challenge: "f".repeat(63) })), /challenge/);
   assert.throws(() => parseArgs([...validArgv(), "--timeout-ms", "900000"]), /duplicate argument/);
+});
+
+test("first-configuration acceptance requires a visible start and completed server state", () => {
+  assert.doesNotThrow(() => assertVisibleFirstConfigurationStart({ visible: true, active: true, completed: false }));
+  assert.throws(
+    () => assertVisibleFirstConfigurationStart({ visible: false, active: false, completed: true }),
+    /must start with the visible onboarding workflow/,
+  );
+  assert.equal(firstConfigurationCompletionObserved({
+    visible: false,
+    active: false,
+    completed: true,
+    preflightReady: true,
+  }), true);
+  assert.equal(firstConfigurationCompletionObserved({
+    visible: false,
+    active: false,
+    completed: false,
+    preflightReady: true,
+  }), false);
 });
 
 test("buildElectronArgs enables loopback CDP before the fixed App directory", () => {
@@ -498,6 +520,7 @@ test("buildDriverResult is fail-closed and emits no desktop token", () => {
     jsErrors: [],
     unexpectedHttpFailures: [],
     checks: {
+      visible_first_configuration_completion: true,
       desktop_launch: true,
       real_model_conversation: true,
       attachment_flow: true,

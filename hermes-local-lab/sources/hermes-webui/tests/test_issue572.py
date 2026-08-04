@@ -11,8 +11,8 @@ Covers:
   1. _provider_api_key_present returns True for minimax-cn when
      MINIMAX_CN_API_KEY is in env (via hermes_cli.auth.get_auth_status)
   2. _status_from_runtime gives chat_ready=True for minimax-cn with a key set
-  3. get_onboarding_status returns completed=True for a fully-configured
-     unsupported provider when config.yaml exists
+  3. get_onboarding_status only auto-completes a fully-configured unsupported
+     provider after the complete setup preflight is ready
   4. The hermes_cli import failure path is safe (falls back gracefully)
 """
 from __future__ import annotations
@@ -171,6 +171,12 @@ class TestOnboardingStatusUnsupportedProvider:
             "current_base_url": None,
             "env_path": "/tmp/.env",
         }
+        preflight = {
+            "schema_version": "taiji-setup-status/v1",
+            "installed_production": False,
+            "overall_ready": chat_ready,
+            "items": [],
+        }
         with (
             mock.patch.object(mod, "load_settings", return_value={}),
             mock.patch.object(mod, "get_config", return_value=cfg),
@@ -179,6 +185,7 @@ class TestOnboardingStatusUnsupportedProvider:
             mock.patch.object(mod, "load_workspaces", return_value=[]),
             mock.patch.object(mod, "get_last_workspace", return_value=None),
             mock.patch.object(mod, "get_available_models", return_value=[]),
+            mock.patch.object(mod, "get_setup_status", return_value=preflight),
             mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
             mock.patch.object(pathlib.Path, "exists", return_value=True),
         ):
@@ -192,21 +199,15 @@ class TestOnboardingStatusUnsupportedProvider:
             "config.yaml + chat_ready=True must auto-complete onboarding regardless of provider."
         )
 
-    def test_minimax_cn_not_ready_skips_wizard(self):
-        """minimax-cn + chat_ready=False → wizard still skipped for non-wizard providers.
+    def test_minimax_cn_not_ready_keeps_preflight_open(self):
+        """A non-wizard provider cannot bypass the sales-grade readiness gate.
 
-        The onboarding wizard has no minimax-cn option — showing it would only confuse
-        the user or let them accidentally overwrite their config with an OpenAI/Anthropic
-        provider.  For any provider not in _SUPPORTED_PROVIDER_SETUPS, onboarding is
-        auto-completed as long as provider_configured is True, regardless of chat_ready.
-        Users on non-wizard providers with no API key should fix credentials via
-        Settings → Providers, not via the first-run wizard.  (#1020)
+        The workbench keeps the first-run gate open and points the user to the
+        provider recovery route instead of overwriting the provider selection.
         """
         result = self._make_status(chat_ready=False)
-        assert result["completed"] is True, (
-            "Wizard fired for minimax-cn user with provider_configured=True! "
-            "Non-wizard providers must auto-complete onboarding because the wizard "
-            "cannot configure them and would silently overwrite their config."
+        assert result["completed"] is False, (
+            "A provider_configured flag must not bypass a failed setup preflight."
         )
 
     def test_current_is_oauth_set_for_unsupported_provider(self):

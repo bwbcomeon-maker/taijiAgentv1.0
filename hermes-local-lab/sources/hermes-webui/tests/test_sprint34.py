@@ -254,12 +254,13 @@ def test_control_center_tab_highlight_on_open():
         'No active-state style for .side-menu-item — sidebar section highlight missing'
 
 
-# ── apply_onboarding_setup: unsupported/OAuth providers complete gracefully ──
+# ── apply_onboarding_setup: unsupported/OAuth providers return safely ──
 
 class TestApplyOnboardingSetupUnsupportedProvider:
     """PR #323 / Issue #322: apply_onboarding_setup must not raise ValueError for
     providers already configured via CLI (openai-codex, copilot, nous, etc.).
-    Instead it marks onboarding complete and returns current status.
+    It returns current status without entering the API-key write path. The
+    dedicated completion endpoint remains the only user-flow completion gate.
     """
 
     def _call(self, provider: str) -> dict:
@@ -277,7 +278,7 @@ class TestApplyOnboardingSetupUnsupportedProvider:
                                      return_value=pathlib.Path(tmp) / "config.yaml"), \
                  unittest.mock.patch("api.onboarding.save_settings") as mock_save, \
                  unittest.mock.patch("api.onboarding.get_onboarding_status",
-                                     return_value={"completed": True, "system": {}}):
+                                     return_value={"completed": False, "system": {}}):
                 result = apply_onboarding_setup({"provider": provider, "model": "", "api_key": ""})
                 return result, mock_save
 
@@ -296,12 +297,10 @@ class TestApplyOnboardingSetupUnsupportedProvider:
         result, _ = self._call("nous")
         assert result is not None
 
-    def test_unsupported_provider_marks_onboarding_complete(self):
-        """apply_onboarding_setup with an unsupported provider must save onboarding_completed=True."""
+    def test_unsupported_provider_does_not_mark_onboarding_complete(self):
+        """Unsupported setup cannot bypass the readiness completion gate."""
         _, mock_save = self._call("openai-codex")
-        calls = [str(c) for c in mock_save.call_args_list]
-        assert any("onboarding_completed" in c for c in calls), \
-            "save_settings must be called with onboarding_completed=True for unsupported providers"
+        mock_save.assert_not_called()
 
     def test_unsupported_provider_returns_status_dict(self):
         """apply_onboarding_setup with an unsupported provider must return a status dict (not raise)."""

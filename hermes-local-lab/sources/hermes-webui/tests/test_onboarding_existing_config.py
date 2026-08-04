@@ -16,6 +16,7 @@ import os
 import pathlib
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from unittest import mock
 
 import pytest
@@ -33,7 +34,13 @@ _needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed —
 # ---------------------------------------------------------------------------
 
 
-def _make_status(*, config_exists: bool, chat_ready: bool, onboarding_done: bool = False):
+def _make_status(
+    *,
+    config_exists: bool,
+    chat_ready: bool,
+    onboarding_done: bool = False,
+    installed_production: bool = False,
+):
     """Call get_onboarding_status() with a controlled filesystem + settings."""
     import importlib
 
@@ -67,6 +74,16 @@ def _make_status(*, config_exists: bool, chat_ready: bool, onboarding_done: bool
             return_value=(chat_ready, [], {}),
         ),
         mock.patch.object(mod, "_status_from_runtime", return_value=runtime),
+        mock.patch.object(
+            mod,
+            "get_setup_status",
+            return_value={
+                "schema_version": "taiji-setup-status/v1",
+                "installed_production": installed_production,
+                "overall_ready": chat_ready,
+                "items": [],
+            },
+        ),
         mock.patch.object(mod, "load_workspaces", return_value=[]),
         mock.patch.object(mod, "get_last_workspace", return_value=None),
         mock.patch.object(mod, "get_available_models", return_value=[]),
@@ -105,10 +122,24 @@ class TestOnboardingGate:
             "Broken config (chat_ready=False) must still show the wizard."
         )
 
-    def test_onboarding_done_flag_always_respected(self):
-        """If user already completed onboarding in settings, never show wizard."""
+    def test_stale_onboarding_done_flag_cannot_bypass_current_readiness(self):
+        """An old completed flag must not hide a currently blocked readiness gate."""
         result = _make_status(config_exists=False, chat_ready=False, onboarding_done=True)
-        assert result["completed"] is True
+        assert result["completed"] is False
+
+    def test_installed_production_ignores_source_skip_override(self):
+        """The developer-only skip variable cannot bypass an installed build."""
+        with mock.patch.dict(
+            os.environ,
+            {"HERMES_WEBUI_SKIP_ONBOARDING": "1"},
+        ):
+            result = _make_status(
+                config_exists=False,
+                chat_ready=False,
+                installed_production=True,
+            )
+
+        assert result["completed"] is False
 
     def test_config_exists_always_exposed_in_system(self):
         """config_exists must still appear in the response system block."""
@@ -142,6 +173,16 @@ class TestOnboardingGate:
             mock.patch.object(mod, "get_config", return_value={}),
             mock.patch.object(mod, "verify_hermes_imports", return_value=(True, [], {})),
             mock.patch.object(mod, "_status_from_runtime", return_value=runtime),
+            mock.patch.object(
+                mod,
+                "get_setup_status",
+                return_value={
+                    "schema_version": "taiji-setup-status/v1",
+                    "installed_production": False,
+                    "overall_ready": True,
+                    "items": [],
+                },
+            ),
             mock.patch.object(mod, "load_workspaces", return_value=[]),
             mock.patch.object(mod, "get_last_workspace", return_value=None),
             mock.patch.object(mod, "get_available_models", return_value=[]),
@@ -190,6 +231,81 @@ class TestApplyOnboardingSetupGuard:
             f"Expected error='config_exists', got: {result}"
         )
         assert result.get("requires_confirm") is True
+
+    def test_setup_requires_literal_boolean_confirmation(self):
+        """Truthy strings must not be accepted as an overwrite confirmation."""
+        result = self._call_setup(
+            {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4.6",
+                "api_key": "test-key",
+                "confirm_overwrite": "true",
+            },
+            config_yaml_exists=True,
+        )
+
+        assert result.get("error") == "config_exists"
+        assert result.get("requires_confirm") is True
+
+    def test_conflict_guard_is_zero_write_for_config_env_and_process_env(self, monkeypatch, tmp_path):
+        import api.onboarding as mod
+
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        original_config = "model:\n  provider: deepseek\n  default: deepseek-chat\n"
+        original_env = "DEEPSEEK_API_KEY=existing-secret\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        env_path.write_text(original_env, encoding="utf-8")
+        monkeypatch.setattr(mod, "_get_config_path", lambda: config_path)
+        before_environ = dict(os.environ)
+
+        result = mod.apply_onboarding_setup(
+            {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4.6",
+                "api_key": "replacement-secret",
+            }
+        )
+
+        assert result["error_code"] == "config_exists"
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert env_path.read_text(encoding="utf-8") == original_env
+        assert dict(os.environ) == before_environ
+
+    def test_config_created_during_setup_is_not_overwritten(self, monkeypatch, tmp_path):
+        import agent.provider_credentials as credentials
+        import api.onboarding as mod
+
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        raced_config = "model:\n  provider: deepseek\n  default: deepseek-chat\n"
+        monkeypatch.setattr(mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(mod, "_load_yaml_config", lambda _path: {})
+        monkeypatch.setattr(mod, "_load_env_file", lambda _path: {})
+        monkeypatch.delenv("HERMES_WEBUI_SKIP_ONBOARDING", raising=False)
+
+        @contextmanager
+        def create_config_before_lock_body(_config_path):
+            config_path.write_text(raced_config, encoding="utf-8")
+            yield
+
+        monkeypatch.setattr(
+            credentials,
+            "credential_transaction",
+            create_config_before_lock_body,
+        )
+
+        result = mod.apply_onboarding_setup(
+            {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4.6",
+                "api_key": "replacement-secret",
+            }
+        )
+
+        assert result["error_code"] == "config_exists"
+        assert config_path.read_text(encoding="utf-8") == raced_config
+        assert not env_path.exists()
 
     @_needs_yaml
     def test_setup_allowed_with_confirm_overwrite(self):
@@ -373,14 +489,17 @@ class TestOnboardingGateIntegration:
             _http_post("/api/settings", {"onboarding_completed": False})
     @_needs_yaml
     def test_setup_blocked_for_existing_config(self):
-        """POST /api/onboarding/setup must return config_exists error if config.yaml exists."""
+        """Existing config is a 409 conflict and must not mutate config or .env."""
         import yaml
 
         hermes_home = _server_hermes_home()
         cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
-        (hermes_home / "config.yaml").write_text(
-            yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
-        )
+        config_path = hermes_home / "config.yaml"
+        env_path = hermes_home / ".env"
+        original_config = yaml.safe_dump(cfg, sort_keys=False)
+        original_env = "OPENROUTER_API_KEY=existing-secret\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        env_path.write_text(original_env, encoding="utf-8")
 
         data, status = _http_post(
             "/api/onboarding/setup",
@@ -390,11 +509,14 @@ class TestOnboardingGateIntegration:
                 "api_key": "test-key",
             },
         )
-        assert status == 200
+        assert status == 409
         assert data.get("error") == "config_exists", (
             f"Expected config_exists guard. Got: {data}"
         )
+        assert data.get("error_code") == "config_exists"
         assert data.get("requires_confirm") is True
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert env_path.read_text(encoding="utf-8") == original_env
 
     @_needs_yaml
     def test_setup_allowed_with_confirm_overwrite(self):

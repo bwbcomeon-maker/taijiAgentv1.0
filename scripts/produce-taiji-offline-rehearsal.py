@@ -20,6 +20,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TRUSTED_GIT = ROOT / "scripts" / "taiji-trusted-git"
 VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
 PUBLIC_KEY = ROOT / "tools" / "taiji-release-evidence" / "signing-public.pem"
 PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
@@ -29,7 +30,7 @@ SESSION_BASENAME = "offline-install-rehearsal-session.json"
 EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
-COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 OFFLINE_SESSION_KEYS = {
     "schema",
     "generated_at_utc",
@@ -111,8 +112,10 @@ def docker_json(docker: str, args: list[str], label: str) -> dict[str, Any]:
 
 
 def current_source_commit() -> str:
+    if not TRUSTED_GIT.is_file() or TRUSTED_GIT.is_symlink():
+        raise ProducerError(f"缺少可信 Git 边界：{TRUSTED_GIT}")
     commit = run_command(
-        ["git", "-C", str(ROOT), "rev-parse", "--short=8", "HEAD"]
+        [str(TRUSTED_GIT), "-C", str(ROOT), "rev-parse", "HEAD"]
     ).stdout.strip()
     if not COMMIT_RE.fullmatch(commit):
         raise ProducerError(f"当前源码 commit 格式不合法：{commit!r}")
@@ -172,9 +175,17 @@ def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, 
         binding = validator.validate_build_binding(binding_args)
     except Exception as exc:
         raise ProducerError(f"交付物与当前源码/manifest 绑定校验失败：{exc}") from exc
-    if type(binding) is not tuple or len(binding) < 3:
+    if type(binding) is not tuple or len(binding) != 7:
         raise ProducerError("release evidence validator 返回了不兼容的 build binding")
-    deb_hash, version, release_hash = binding[:3]
+    (
+        deb_hash,
+        version,
+        release_hash,
+        _electron_hash,
+        _desktop_entry_hash,
+        target_baseline_profile_id,
+        target_baseline_sha256,
+    ) = binding
     return {
         "source_commit": commit,
         "deb": deb,
@@ -187,6 +198,8 @@ def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, 
         "deb_sha256": deb_hash,
         "version": version,
         "release_artifacts_sha256": release_hash,
+        "target_baseline_profile_id": target_baseline_profile_id,
+        "target_baseline_sha256": target_baseline_sha256,
     }
 
 
@@ -458,12 +471,14 @@ def produce(delivery_arg: Path, output_arg: Path, image: str, challenge: str) ->
             raise ProducerError("DEB 在 Docker 演练期间发生变化")
 
         evidence = {
-            "schema_version": 1,
+            "schema_version": 2,
             "evidence_type": "offline-install-rehearsal",
             "generated_at_utc": session["generated_at_utc"],
             "rehearsal_session_id": session["rehearsal_session_id"],
             "challenge_nonce": challenge,
             "release_artifacts_sha256": release["release_artifacts_sha256"],
+            "target_baseline_profile_id": release["target_baseline_profile_id"],
+            "target_baseline_sha256": release["target_baseline_sha256"],
             "source_commit": release["source_commit"],
             "deb_basename": release["deb"].name,
             "deb_sha256": release["deb_sha256"],

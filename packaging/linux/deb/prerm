@@ -1,9 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pkill -f '/opt/taiji-agent/.*/taiji_runtime.main' 2>/dev/null || true
-pkill -f '/opt/taiji-agent/.*/runtime/web/server.py' 2>/dev/null || true
-pkill -f '/opt/taiji-agent/.*/runtime/web/server.pyc' 2>/dev/null || true
-pkill -f '/opt/taiji-agent/apps/taiji-desktop' 2>/dev/null || true
+INSTALL_ROOT="/opt/taiji-agent"
+PROC_ROOT="/proc"
+owned_pids=""
+
+pid_owned_by_install() {
+  local pid="$1" executable
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -L "$PROC_ROOT/$pid/exe" ] || return 1
+  executable="$(readlink -f -- "$PROC_ROOT/$pid/exe" 2>/dev/null || true)"
+  case "$executable" in
+    "$INSTALL_ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+for proc_dir in "$PROC_ROOT"/[0-9]*; do
+  [ -d "$proc_dir" ] || continue
+  pid="${proc_dir##*/}"
+  [ "$pid" != "$$" ] || continue
+  if pid_owned_by_install "$pid"; then
+    owned_pids="${owned_pids}${pid}"$'\n'
+  fi
+done
+unset proc_dir pid
+
+while IFS= read -r pid; do
+  [ -n "$pid" ] || continue
+  pid_owned_by_install "$pid" || continue
+  kill -TERM "$pid" 2>/dev/null || true
+done <<< "$owned_pids"
+
+for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+  survivors=0
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null && pid_owned_by_install "$pid"; then
+      survivors=1
+      break
+    fi
+  done <<< "$owned_pids"
+  [ "$survivors" -eq 1 ] || break
+  sleep 0.1
+done
+unset _attempt survivors
+
+while IFS= read -r pid; do
+  [ -n "$pid" ] || continue
+  # Re-read /proc immediately before SIGKILL so a reused PID cannot be killed.
+  if kill -0 "$pid" 2>/dev/null && pid_owned_by_install "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+done <<< "$owned_pids"
 
 exit 0

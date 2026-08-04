@@ -24,6 +24,12 @@ NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9e
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
+TARGET_BASELINE_FILE="$SCRIPT_DIR/目标基线/target-baseline.json"
+TARGET_BASELINE_MAX_AGE_DAYS="${TAIJI_TARGET_BASELINE_MAX_AGE_DAYS:-30}"
+PACKAGE_MAINTAINER="${TAIJI_PACKAGE_MAINTAINER:-}"
+TARGET_BASELINE_SNAPSHOT="$BUILD_ROOT/target-baseline.input.json"
+TARGET_BASELINE_PROFILE_ID=""
+TARGET_BASELINE_SHA256=""
 
 LOG_DIR_REAL=""
 LOG_FILE=""
@@ -118,6 +124,12 @@ failure_next_steps() {
     *"kysec"*|*"Permission denied by kysec"*)
       printf 'next=麒麟安全策略拦截了构建脚本中的解释器写文件。新版脚本已避免用 python 写 manifest/report；请使用最新制包输入包重新构建\n'
       ;;
+    *"目标基线"*|*"target-baseline.json"*)
+      printf 'next=在待交付的真实麒麟/UOS x86_64 目标机执行 packaging/linux/capture-target-baseline.sh，将新鲜 target-baseline.json 放入 目标基线/ 后重试\n'
+      ;;
+    *"TAIJI_PACKAGE_MAINTAINER"*|*"真实维护人"*)
+      printf 'next=使用真实售后联系人重试：TAIJI_PACKAGE_MAINTAINER="Company Support <support@company.cn>" bash ./00_制包机_生成离线交付包.sh\n'
+      ;;
     *"源码包"*|*"SHA256"*|*"当前 commit"*|*"未提交改动"*|*"已暂存未提交"*)
       printf 'next=在本地重新生成唯一源码包和 SHA256SUMS.txt，并重新拷贝整个交付目录\n'
       ;;
@@ -175,6 +187,48 @@ on_error() {
 trap 'on_error "$?" "$BASH_COMMAND"' ERR
 
 require_cmd() { have "$1" || fail "缺少命令：$1"; }
+
+validate_package_maintainer() {
+  [ -n "$PACKAGE_MAINTAINER" ] \
+    || fail "缺少真实维护人：请设置 TAIJI_PACKAGE_MAINTAINER='Company Support <support@company.cn>'"
+  printf '%s\n' "$PACKAGE_MAINTAINER" | grep -Eq '^[^<>[:cntrl:]]+ <[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>$' \
+    || fail "TAIJI_PACKAGE_MAINTAINER 必须包含真实显示名和邮箱地址"
+  if printf '%s\n' "$PACKAGE_MAINTAINER" | grep -Eqi 'example\.(com|org|net|invalid)|@localhost|\.invalid>'; then
+    fail "TAIJI_PACKAGE_MAINTAINER 不能使用占位邮箱"
+  fi
+}
+
+validate_approved_package_maintainer() {
+  local approved_file validator
+  approved_file="$SRC_DIR/packaging/linux/approved-maintainer.json"
+  validator="$SRC_DIR/packaging/linux/validate-approved-maintainer.py"
+  [ -f "$validator" ] && [ ! -L "$validator" ] \
+    || fail "源码包缺少批准维护人校验器：$validator"
+  [ -f "$approved_file" ] && [ ! -L "$approved_file" ] \
+    || fail "正式源码未配置已批准售后维护人：$approved_file"
+  python3 "$validator" \
+    --file "$approved_file" \
+    --expect "$PACKAGE_MAINTAINER" \
+    || fail "TAIJI_PACKAGE_MAINTAINER 与正式源码批准身份不一致"
+  ok "维护人与正式源码批准身份一致"
+}
+
+check_target_baseline_input() {
+  local baseline_dir baseline_mode
+  baseline_dir="$(dirname "$TARGET_BASELINE_FILE")"
+  [ -d "$baseline_dir" ] && [ ! -L "$baseline_dir" ] \
+    || fail "缺少安全的目标基线目录：$baseline_dir"
+  [ -f "$TARGET_BASELINE_FILE" ] && [ ! -L "$TARGET_BASELINE_FILE" ] \
+    || fail "缺少真实目标机基线：$TARGET_BASELINE_FILE"
+  [ "$(stat -c '%h' -- "$TARGET_BASELINE_FILE")" = "1" ] \
+    || fail "目标基线不能是硬链接：$TARGET_BASELINE_FILE"
+  baseline_mode="$(stat -c '%a' -- "$TARGET_BASELINE_FILE")"
+  if (( (8#$baseline_mode & 0022) != 0 )); then
+    fail "目标基线不能对 group/other 可写：$TARGET_BASELINE_FILE"
+  fi
+  printf '%s\n' "$TARGET_BASELINE_MAX_AGE_DAYS" | grep -Eq '^[1-9][0-9]?$' \
+    || fail "TAIJI_TARGET_BASELINE_MAX_AGE_DAYS 必须为 1-99 天"
+}
 
 read_product_version() {
   local version_file="$SRC_DIR/VERSION" product_version
@@ -240,21 +294,23 @@ verify_source_archive_checksum() {
 }
 
 create_source_archive_from_git() {
-  local repo_root source_gate short archive_name
+  local repo_root source_gate trusted_git commit archive_name
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd -P)"
   source_gate="$repo_root/scripts/check-clean-worktree.sh"
+  trusted_git="$repo_root/scripts/taiji-trusted-git"
   [ -e "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
   require_cmd git
   [ -x "$source_gate" ] || fail "缺少正式源码门禁：$source_gate"
+  [ -x "$trusted_git" ] && [ ! -L "$trusted_git" ] || fail "缺少可信 Git 边界：$trusted_git"
   "$source_gate" \
     --mode formal \
     --repo-root "$repo_root" \
     --source-root "$repo_root" \
     || fail "发布源码包必须来自干净本地 main"
-  short="$(git -C "$repo_root" rev-parse --short=8 HEAD)"
-  archive_name="taiji-agentv1.0-kylin-build-src-$short.tar.gz"
+  commit="$("$trusted_git" -C "$repo_root" rev-parse HEAD)"
+  archive_name="taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
   info "使用 git archive 生成源码包：$archive_name"
-  git -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
+  "$trusted_git" -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
   (cd "$SCRIPT_DIR" && sha256sum "$archive_name" > SHA256SUMS.txt)
   SRC_ARCHIVE="$SCRIPT_DIR/$archive_name"
   ok "源码包已生成并写入 SHA256SUMS.txt"
@@ -335,6 +391,9 @@ preflight() {
   require_cmd apt-cache
   require_cmd dpkg
   require_cmd sha256sum
+  require_cmd python3
+  validate_package_maintainer
+  check_target_baseline_input
   require_admin_capability
   arch="$(dpkg --print-architecture 2>/dev/null || true)"
   [ "$arch" = "amd64" ] || fail "dpkg 架构不是 amd64：${arch:-unknown}"
@@ -619,6 +678,45 @@ unpack_source() {
   ok "源码已解压：$SRC_DIR"
 }
 
+validate_target_baseline() {
+  local target_baseline_tool runtime_depends_file source_sha snapshot_sha
+  target_baseline_tool="$SRC_DIR/packaging/linux/target_baseline.py"
+  runtime_depends_file="$SRC_DIR/packaging/linux/deb/runtime-depends.txt"
+  [ -f "$target_baseline_tool" ] && [ ! -L "$target_baseline_tool" ] \
+    || fail "源码包缺少 target_baseline.py：$target_baseline_tool"
+  [ -f "$runtime_depends_file" ] && [ ! -L "$runtime_depends_file" ] \
+    || fail "源码包缺少 runtime-depends.txt：$runtime_depends_file"
+
+  check_target_baseline_input
+  install -m 0600 -- "$TARGET_BASELINE_FILE" "$TARGET_BASELINE_SNAPSHOT" \
+    || fail "无法在受控构建工作区快照目标基线"
+  source_sha="$(sha256sum "$TARGET_BASELINE_FILE" | awk '{print $1}')"
+  snapshot_sha="$(sha256sum "$TARGET_BASELINE_SNAPSHOT" | awk '{print $1}')"
+  [ "$source_sha" = "$snapshot_sha" ] \
+    || fail "目标基线在快照期间发生变化"
+
+  python3 "$target_baseline_tool" validate \
+    --profile "$TARGET_BASELINE_SNAPSHOT" \
+    --depends-file "$runtime_depends_file" \
+    --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS" \
+    || fail "目标基线缺失、过期或与当前运行依赖契约不一致"
+
+  TARGET_BASELINE_PROFILE_ID="$(python3 - "$TARGET_BASELINE_SNAPSHOT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    print(json.load(handle)["profile_id"])
+PY
+)" || fail "无法读取已验证目标基线 profile_id"
+  TARGET_BASELINE_SHA256="$snapshot_sha"
+  printf '%s\n' "$TARGET_BASELINE_PROFILE_ID" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$' \
+    || fail "目标基线 profile_id 格式非法"
+  printf '%s\n' "$TARGET_BASELINE_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "目标基线 SHA256 格式非法"
+  ok "目标基线已验证并快照：$TARGET_BASELINE_PROFILE_ID"
+}
+
 npm_ci_with_network_fallback() {
   local registry electron_mirror installed
   local -a npm_args=("$@")
@@ -664,7 +762,7 @@ run_setup_local() {
 }
 
 build_runtime_and_deb() {
-  local uv_lock_mode
+  local uv_lock_mode source_commit
   export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
   export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"
@@ -694,7 +792,14 @@ build_runtime_and_deb() {
 
   info "构建 DEB 安装包"
   cd "$SRC_DIR"
+  source_commit="$(basename "$SRC_ARCHIVE" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
+  printf '%s\n' "$source_commit" | grep -Eq '^[0-9a-f]{40}$' \
+    || fail "无法从源码包名称解析发布 commit：$(basename "$SRC_ARCHIVE")"
   TAIJI_AGENT_VERSION="$VERSION" \
+  TAIJI_SOURCE_COMMIT="$source_commit" \
+  TAIJI_TARGET_BASELINE_FILE="$TARGET_BASELINE_SNAPSHOT" \
+  TAIJI_TARGET_BASELINE_MAX_AGE_DAYS="$TARGET_BASELINE_MAX_AGE_DAYS" \
+  TAIJI_PACKAGE_MAINTAINER="$PACKAGE_MAINTAINER" \
   TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current" \
     ./packaging/linux/deb/build-deb.sh
 }
@@ -853,7 +958,7 @@ json_string() {
 write_release_manifest() {
   info "生成发布 manifest"
   local src_name deb_name checksum_name source_sha deb_sha packages_sha packages_gz_sha build_os build_glibc build_arch dpkg_arch source_commit
-  local payload_root electron_executable_sha desktop_entry_sha
+  local payload_root electron_executable_sha desktop_entry_sha embedded_target_baseline embedded_target_baseline_sha
   src_name="$(basename "$SRC_ARCHIVE")"
   deb_name="taiji-agent_${VERSION}_amd64.deb"
   checksum_name="$deb_name.sha256"
@@ -878,6 +983,20 @@ write_release_manifest() {
     cleanup_release_manifest_payload "$payload_root"
     fail "当前 DEB 缺少可绑定的安装态 Electron 或 desktop entry"
   fi
+  embedded_target_baseline="$payload_root/opt/taiji-agent/resources/target-baseline.json"
+  if [ ! -f "$embedded_target_baseline" ] || [ -L "$embedded_target_baseline" ]; then
+    cleanup_release_manifest_payload "$payload_root"
+    fail "当前 DEB 缺少安全的 resources/target-baseline.json"
+  fi
+  if ! cmp -s "$TARGET_BASELINE_SNAPSHOT" "$embedded_target_baseline"; then
+    cleanup_release_manifest_payload "$payload_root"
+    fail "DEB 内 target-baseline.json 与已验证制包快照不一致"
+  fi
+  embedded_target_baseline_sha="$(sha256sum "$embedded_target_baseline" | awk '{print $1}')"
+  if [ "$embedded_target_baseline_sha" != "$TARGET_BASELINE_SHA256" ]; then
+    cleanup_release_manifest_payload "$payload_root"
+    fail "DEB 内 target-baseline.json 摘要与已验证制包快照不一致"
+  fi
   electron_executable_sha="$(sha256sum "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" | awk '{print $1}')"
   desktop_entry_sha="$(sha256sum "$payload_root/usr/share/applications/taiji-agent.desktop" | awk '{print $1}')"
   cleanup_release_manifest_payload "$payload_root"
@@ -897,28 +1016,29 @@ write_release_manifest() {
     printf '  "package": "taiji-agent",\n'
     printf '  "packages_sha256": %s,\n' "$(json_string "$packages_sha")"
     printf '  "packages_gz_sha256": %s,\n' "$(json_string "$packages_gz_sha")"
-    printf '  "schema_version": 1,\n'
+    printf '  "schema_version": 2,\n'
     printf '  "source_archive": %s,\n' "$(json_string "$src_name")"
     printf '  "source_commit": %s,\n' "$(json_string "$source_commit")"
     printf '  "source_sha256": %s,\n' "$(json_string "$source_sha")"
+    printf '  "target_baseline_profile_id": %s,\n' "$(json_string "$TARGET_BASELINE_PROFILE_ID")"
+    printf '  "target_baseline_sha256": %s,\n' "$(json_string "$TARGET_BASELINE_SHA256")"
     printf '  "support_boundary": {\n'
     printf '    "supported": [\n'
-    printf '      "x86_64/amd64",\n'
-    printf '      "Debian-like package manager with apt-get and dpkg",\n'
-    printf '      "Graphical desktop session for Electron startup",\n'
-    printf '      "Complete delivery directory with generated DEB and local offline apt repository"\n'
+    printf '      "Internal rehearsal archive: complete delivery directory with generated DEB and local offline apt repository",\n'
+    printf '      "Customer installation: exactly one bit-identical DEB on the bound target baseline",\n'
+    printf '      "All versioned system runtime dependencies are already installed in the captured target baseline",\n'
+    printf '      "x86_64/amd64 Debian-like graphical desktop session with apt-get, dpkg and systemd"\n'
     printf '    ],\n'
     printf '    "unsupported": [\n'
     printf '      "RPM-only terminals without dpkg/apt",\n'
     printf '      "ARM/aarch64 terminals",\n'
     printf '      "Headless or strongly sandboxed terminals without desktop session",\n'
-    printf '      "Offline installations missing 离线依赖/Packages or Packages.gz"\n'
+    printf '      "Customer targets whose OS identity or installed dependency versions differ from the bound target baseline",\n'
+    printf '      "Customer installation requiring network access or a second installation file"\n'
     printf '    ]\n'
     printf '  },\n'
     printf '  "target_matrix": [\n'
-    printf '    "Debian-like x86_64/amd64 desktop Linux",\n'
-    printf '    "Kylin V10 SP1 x86_64 desktop baseline",\n'
-    printf '    "UOS/openKylin x86_64 desktop, apt/dpkg variant"\n'
+    printf '    %s\n' "$(json_string "Exact captured baseline: $TARGET_BASELINE_PROFILE_ID")"
     printf '  ],\n'
     printf '  "version": %s\n' "$(json_string "$VERSION")"
     printf '}\n'
@@ -928,6 +1048,8 @@ write_release_manifest() {
     printf 'manifest=%s\n' "$(basename "$MANIFEST_FILE")"
     printf 'packages_sha256=%s\n' "$packages_sha"
     printf 'packages_gz_sha256=%s\n' "$packages_gz_sha"
+    printf 'target_baseline_profile_id=%s\n' "$TARGET_BASELINE_PROFILE_ID"
+    printf 'target_baseline_sha256=%s\n' "$TARGET_BASELINE_SHA256"
   } >> "$BUILD_MARKER"
   ok "发布 manifest 已生成：$MANIFEST_FILE"
 }
@@ -963,10 +1085,14 @@ write_build_report() {
     printf 'DEB SHA256：%s\n' "$deb_line"
     printf 'Packages SHA256：%s\n' "$packages_line"
     printf 'Packages.gz SHA256：%s\n' "$packages_gz_line"
+    printf '目标基线 profile_id：%s\n' "$TARGET_BASELINE_PROFILE_ID"
+    printf '目标基线 SHA256：%s\n' "$TARGET_BASELINE_SHA256"
     printf '发布 manifest：%s\n' "$(basename "$MANIFEST_FILE")"
-    printf '支持边界：Debian-like x86_64/amd64 图形桌面，必须同时包含离线依赖/Packages 与 Packages.gz；RPM/.run 另行制包。\n'
-    printf '目标机安装脚本：02_目标终端_安装并验证.sh\n'
-    printf '目标机离线仓库：离线依赖/Packages 与 Packages.gz\n'
+    printf '内部演练边界：完整内部目录包含离线依赖/Packages 与 Packages.gz，供断网安装→卸载→重装演练和审计，不作为客户安装目录。\n'
+    printf '客户销售边界：门禁通过后只交付一个与目标基线绑定、逐字节一致的 DEB；目标依赖版本必须与采集基线一致，不联网、不需要第二个安装文件。\n'
+    printf '不支持边界：RPM-only、ARM/aarch64、无图形桌面、目标系统或依赖版本偏离绑定基线。\n'
+    printf '内部生命周期演练脚本：02_目标终端_安装并验证.sh\n'
+    printf '内部生命周期演练仓库：离线依赖/Packages 与 Packages.gz\n'
   } > "$BUILD_REPORT"
   ok "构建报告已生成：$BUILD_REPORT"
 }
@@ -975,6 +1101,7 @@ stage_target_acceptance_tools() {
   local target="$SCRIPT_DIR/验收工具"
   local driver="$SRC_DIR/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
   local assembler="$SRC_DIR/tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+  local install_observer="$SRC_DIR/tools/taiji-desktop-acceptance/observe-single-deb-install.py"
   local validator="$SRC_DIR/scripts/validate-taiji-release-evidence.py"
   local public_key="$SRC_DIR/tools/taiji-release-evidence/signing-public.pem"
   local public_fingerprint expected_fingerprint
@@ -983,10 +1110,11 @@ stage_target_acceptance_tools() {
   info "收集目标终端真实 Electron 桌面 App 验收工具"
   [ -f "$driver" ] && [ ! -L "$driver" ] || fail "源码缺少桌面 App 验收驱动：$driver"
   [ -f "$assembler" ] && [ ! -L "$assembler" ] || fail "源码缺少目标证据组装器：$assembler"
+  [ -f "$install_observer" ] && [ ! -L "$install_observer" ] || fail "源码缺少单 DEB 安装前观察器：$install_observer"
   [ -f "$validator" ] && [ ! -L "$validator" ] || fail "源码缺少发布证据校验器：$validator"
   [ -f "$public_key" ] && [ ! -L "$public_key" ] || fail "源码缺少发布证据验签公钥：$public_key"
   node --check "$driver" >/dev/null || fail "桌面 App 验收驱动 JavaScript 语法检查失败"
-  python3 - "$assembler" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
+  python3 - "$assembler" "$install_observer" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
 import sys
 from pathlib import Path
 
@@ -1001,6 +1129,7 @@ PY
   install -d -m 0755 "$target"
   install -m 0644 "$driver" "$target/run-installed-electron-acceptance.js"
   install -m 0644 "$assembler" "$target/assemble-target-evidence.py"
+  install -m 0644 "$install_observer" "$target/observe-single-deb-install.py"
   install -m 0644 "$validator" "$target/validate-taiji-release-evidence.py"
   install -m 0644 "$public_key" "$target/signing-public.pem"
   ok "目标终端桌面 App 验收工具已收集：$target"
@@ -1076,6 +1205,10 @@ main() {
   ensure_node
   set_stage "解压源码"
   unpack_source
+  set_stage "核对批准维护人"
+  validate_approved_package_maintainer
+  set_stage "验证目标基线"
+  validate_target_baseline
   set_stage "构建运行时和 DEB"
   build_runtime_and_deb
   set_stage "收集安装包产物"

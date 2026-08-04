@@ -18,10 +18,12 @@ import os
 import queue
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
 import uuid
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -5010,6 +5012,31 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 
 # ── Settings persistence ─────────────────────────────────────────────────────
 
+_SETTINGS_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class _OnboardingCompletionMarker:
+    """Opaque process-local ownership marker for one completion request."""
+
+    generation: int
+    token: str
+    preserve_completed: bool
+
+
+_settings_completion_generation = 0
+_settings_completion_current: _OnboardingCompletionMarker | None = None
+_settings_completion_committed_generation = 0
+_settings_completion_invalidated_generation = 0
+
+# These ownership counters intentionally stay process-local. The supported
+# server is one ThreadingHTTPServer process, so the shared lock covers every
+# request thread. After a process crash/restart there is no in-flight request
+# left to own or compensate; the persisted boolean is still fail-closed by
+# get_onboarding_status()'s fresh readiness projection. Persisting opaque
+# tokens would add public-state leakage without improving crash recovery.
+
+
 _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
@@ -5116,6 +5143,16 @@ def _normalize_appearance(theme, skin) -> tuple[str, str]:
     return next_theme, next_skin
 
 
+def _settings_transaction_locked(func):
+    @wraps(func)
+    def locked(*args, **kwargs):
+        with _SETTINGS_LOCK:
+            return func(*args, **kwargs)
+
+    return locked
+
+
+@_settings_transaction_locked
 def load_settings() -> dict:
     """Load settings from disk, merging with defaults for any missing keys."""
     settings = dict(_SETTINGS_DEFAULTS)
@@ -5296,7 +5333,30 @@ _SETTINGS_BOOL_KEYS = {
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
 
 
-def save_settings(settings: dict) -> dict:
+def _atomic_write_settings(payload: dict) -> None:
+    """Durably replace settings.json without exposing a partial JSON file."""
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{SETTINGS_FILE.name}.",
+        suffix=".tmp",
+        dir=str(SETTINGS_FILE.parent),
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, SETTINGS_FILE)
+        _fsync_parent_directory(SETTINGS_FILE)
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Unable to remove temporary settings file %s", temporary_path)
+
+
+def _save_settings_locked(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     current = load_settings()
     pending_theme = current.get("theme")
@@ -5385,11 +5445,7 @@ def save_settings(settings: dict) -> dict:
         resolve_default_workspace(current.get("default_workspace"))
     )
     persisted = {k: v for k, v in current.items() if k != "default_model"}
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(
-        json.dumps(persisted, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _atomic_write_settings(persisted)
     # Invalidate the in-memory password hash cache so the next call to
     # get_password_hash() picks up the new value from disk immediately.
     if _password_changed:
@@ -5402,6 +5458,109 @@ def save_settings(settings: dict) -> dict:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
     current["default_model"] = get_effective_default_model()
     return current
+
+
+def save_settings(settings: dict) -> dict:
+    """Merge one update under the shared settings read/modify/write lock.
+
+    The private copy is intentional: password controls historically used
+    ``pop`` and mutated request dictionaries owned by their callers.
+    """
+    global _settings_completion_generation
+    global _settings_completion_current
+    global _settings_completion_committed_generation
+    global _settings_completion_invalidated_generation
+
+    updates = copy.deepcopy(settings)
+    completion_is_explicit = "onboarding_completed" in updates
+    completion_value = bool(updates.get("onboarding_completed"))
+    with _SETTINGS_LOCK:
+        saved = _save_settings_locked(updates)
+        if completion_is_explicit:
+            _settings_completion_generation += 1
+            _settings_completion_current = None
+            _settings_completion_invalidated_generation = (
+                _settings_completion_generation
+            )
+            _settings_completion_committed_generation = (
+                _settings_completion_generation if completion_value else 0
+            )
+        return saved
+
+
+def _begin_onboarding_completion() -> _OnboardingCompletionMarker:
+    """Persist a tentative completion flag owned by one request."""
+    global _settings_completion_generation
+    global _settings_completion_current
+
+    with _SETTINGS_LOCK:
+        current = load_settings()
+        preserve_completed = bool(current.get("onboarding_completed")) and (
+            _settings_completion_current is None
+            or _settings_completion_committed_generation > 0
+        )
+        next_generation = _settings_completion_generation + 1
+        marker = _OnboardingCompletionMarker(
+            generation=next_generation,
+            token=uuid.uuid4().hex,
+            preserve_completed=preserve_completed,
+        )
+        _save_settings_locked({"onboarding_completed": True})
+        _settings_completion_generation = next_generation
+        _settings_completion_current = marker
+        return marker
+
+
+def _commit_onboarding_completion(marker: _OnboardingCompletionMarker) -> bool:
+    """CAS commit without reviving a request invalidated by an explicit save."""
+    global _settings_completion_current
+    global _settings_completion_committed_generation
+
+    with _SETTINGS_LOCK:
+        if _settings_completion_current == marker:
+            _save_settings_locked({"onboarding_completed": True})
+            _settings_completion_committed_generation = max(
+                _settings_completion_committed_generation,
+                marker.generation,
+            )
+            _settings_completion_current = None
+            return True
+
+        # A newer completion request may have replaced this marker without an
+        # explicit settings update in between. Record the older success so the
+        # newer request's later rollback preserves it, but never clear or write
+        # through the newer owner's marker. An explicit save advances the
+        # invalidation generation and makes every older result stale.
+        active = _settings_completion_current
+        if (
+            active is not None
+            and active.generation > marker.generation
+            and marker.generation > _settings_completion_invalidated_generation
+        ):
+            _settings_completion_committed_generation = max(
+                _settings_completion_committed_generation,
+                marker.generation,
+            )
+        return False
+
+
+def _rollback_onboarding_completion(marker: _OnboardingCompletionMarker) -> bool:
+    """CAS rollback: only the request that still owns the marker may revert it."""
+    global _settings_completion_current
+    global _settings_completion_committed_generation
+
+    with _SETTINGS_LOCK:
+        if _settings_completion_current != marker:
+            return False
+        keep_completed = (
+            marker.preserve_completed
+            or _settings_completion_committed_generation > 0
+        )
+        _save_settings_locked({"onboarding_completed": keep_completed})
+        _settings_completion_current = None
+        if not keep_completed:
+            _settings_completion_committed_generation = 0
+        return True
 
 
 # Apply saved settings on startup (override env-derived defaults)
@@ -5423,10 +5582,8 @@ if _settings_file_exists:
     if _startup_settings.get("default_workspace") != str(DEFAULT_WORKSPACE):
         _startup_settings["default_workspace"] = str(DEFAULT_WORKSPACE)
         try:
-            SETTINGS_FILE.write_text(
-                json.dumps(_startup_settings, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with _SETTINGS_LOCK:
+                _atomic_write_settings(_startup_settings)
         except Exception:
             pass
 

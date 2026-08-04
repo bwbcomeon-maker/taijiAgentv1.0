@@ -1,5 +1,6 @@
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
 import py_compile
@@ -20,6 +21,60 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def read_text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def write_target_baseline_fixture(profile_path: Path, depends_path: Path):
+    module_path = ROOT / "packaging/linux/target_baseline.py"
+    spec = importlib.util.spec_from_file_location("taiji_target_baseline_fixture", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    dependency_names = module.load_dependency_names(depends_path)
+    profile = {
+        "schema": "taiji-target-baseline/v1",
+        "capture_tool_version": 1,
+        "captured_at_utc": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "profile_id": "pending",
+        "os_release": {
+            "id": "kylin",
+            "id_like": ["debian"],
+            "version_id": "V10",
+            "variant_id": "professional",
+            "build_id": "fixture",
+        },
+        "architecture": {"uname_machine": "x86_64", "dpkg": "amd64"},
+        "glibc": {"version": "2.31", "banner": "fixture glibc 2.31"},
+        "package_manager": {
+            "format": "deb",
+            "commands": {
+                "apt-get": True,
+                "apt-cache": True,
+                "dpkg": True,
+                "systemctl": True,
+            },
+        },
+        "runtime_dependencies": {
+            "contract_sha256": hashlib.sha256(depends_path.read_bytes()).hexdigest(),
+            "packages": [
+                {
+                    "name": name,
+                    "status": "install ok installed",
+                    "version": "1.0-fixture",
+                    "architecture": "amd64",
+                }
+                for name in dependency_names
+            ],
+        },
+    }
+    profile["profile_id"] = module.compute_profile_id(profile)
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return profile["profile_id"], hashlib.sha256(profile_path.read_bytes()).hexdigest()
 
 
 def png_fixture(width: int = 1120, height: int = 720, color_type: int = 2, *, varied: bool = True) -> bytes:
@@ -148,8 +203,61 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         for forbidden in ("LIBARCHIVE", "com.apple", "PaxHeaders", "SCHILY.xattr"):
             self.assertIn(forbidden, build)
 
-    def test_deb_declares_electron_runtime_libraries_for_kylin_v10(self):
+    def test_deb_stages_desktop_dependencies_and_release_identity_manifest(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
+        offline_builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        input_builder = read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh")
+        release_preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+        target_acceptance = read_text("taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh")
+        release_check = read_text("scripts/taiji-release-check.sh")
+        release_signer = read_text("scripts/sign-taiji-release-evidence.sh")
+        rehearsal_producer = read_text("scripts/produce-taiji-offline-rehearsal.py")
+        rehearsal_runner = read_text("tools/taiji-offline-rehearsal/run-lifecycle.sh")
+        evidence_validator = read_text("scripts/validate-taiji-release-evidence.py")
+
+        self.assertIn(
+            'node "$DESKTOP_JS_STAGER"',
+            build,
+        )
+        self.assertIn('--entry main.js', build)
+        self.assertIn('--entry preload.js', build)
+        self.assertIn('"$INSTALL_ROOT/resources/taiji-release-manifest.json"', build)
+        for field in (
+            '"schema": "taiji-release-manifest/v1"',
+            '"platform": "linux"',
+            '"arch": "amd64"',
+            '"version": "$VERSION"',
+            '"commit": "$SOURCE_COMMIT"',
+            '"installRoot": "/opt/taiji-agent"',
+        ):
+            self.assertIn(field, build)
+        self.assertIn('TAIJI_SOURCE_COMMIT="$source_commit"', offline_builder)
+        self.assertIn('printf \'  "schema_version": 2,\\n\'', offline_builder)
+        self.assertIn("^[0-9a-f]{40}$", build)
+        self.assertIn('DEB release manifest must be root-owned and mode 0644.', build)
+        self.assertIn("^[0-9a-f]{40}$", offline_builder)
+        for source in (offline_builder, input_builder, release_preflight):
+            self.assertIn("rev-parse HEAD", source)
+            self.assertNotIn("rev-parse --short=8 HEAD", source)
+        for source in (release_check, release_signer, rehearsal_producer):
+            self.assertNotIn("rev-parse --short=8 HEAD", source)
+        self.assertIn(
+            'if type(schema_version) is not int or schema_version != 2:',
+            target_acceptance,
+        )
+        self.assertIn(
+            'if not re.fullmatch(r"[0-9a-f]{40}", data["source_commit"]):',
+            target_acceptance,
+        )
+        self.assertIn('FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")', evidence_validator)
+        self.assertGreaterEqual(evidence_validator.count('"schema_version": 2'), 2)
+        self.assertIn("^[0-9a-f]{40}$", rehearsal_runner)
+
+    def test_deb_declares_electron_runtime_libraries_from_canonical_contract(self):
+        build = read_text("packaging/linux/deb/build-deb.sh")
+        dependency_contract = read_text(
+            "packaging/linux/deb/runtime-depends.txt"
+        ).splitlines()
 
         expected_deps = (
             "libx11-6",
@@ -168,7 +276,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "libatspi2.0-0",
         )
         for dep in expected_deps:
-            self.assertIn(dep, build)
+            self.assertIn(dep, dependency_contract)
+        self.assertIn(
+            'RUNTIME_DEPENDS_FILE="$SCRIPT_DIR/runtime-depends.txt"', build
+        )
+        self.assertIn('python3 "$TARGET_BASELINE_TOOL" render-depends', build)
+        self.assertIn('--profile "$TARGET_BASELINE_SNAPSHOT"', build)
+        self.assertIn('--depends-file "$RUNTIME_DEPENDS_FILE"', build)
+        self.assertNotIn('DEB_DEPENDS="$(awk ', build)
 
     def test_native_verify_checks_packaged_electron_runtime(self):
         verify = read_text("hermes-local-lab/scripts/taiji-native-verify")
@@ -244,6 +359,155 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("-m taiji_runtime.main --version", health_check)
         self.assertIn("-m taiji_runtime.main --help", build)
 
+    def test_all_installed_entrypoints_pin_opt_profile_and_sanitize_code_environment(self):
+        installed_cli = read_text("packaging/linux/bin/taiji")
+        installed_desktop = read_text("packaging/linux/bin/taiji-agent")
+        installed_diagnose = read_text("packaging/linux/bin/taiji-agent-diagnose")
+        installed_native_verify = read_text("packaging/linux/bin/taiji-native-verify")
+        source_cli = read_text("hermes-local-lab/scripts/taiji")
+
+        for entrypoint in (
+            installed_cli,
+            installed_desktop,
+            installed_diagnose,
+            installed_native_verify,
+        ):
+            self.assertTrue(entrypoint.startswith("#!/bin/bash -p\n"))
+            self.assertIn('APP_ROOT="/opt/taiji-agent"', entrypoint)
+            self.assertNotIn("${TAIJI_AGENT_ROOT:-/opt/taiji-agent}", entrypoint)
+            self.assertIn('TAIJI_LAUNCH_PROFILE="installed-production"', entrypoint)
+            self.assertIn('TAIJI_AGENT_ROOT="$APP_ROOT"', entrypoint)
+            self.assertIn('TAIJI_AGENT_USE_USER_DIRS="1"', entrypoint)
+            self.assertIn('/usr/bin/env -0', entrypoint)
+            self.assertIn('/usr/bin/env "${_taiji_unset_args[@]}"', entrypoint)
+            self.assertIn('/bin/bash --noprofile --norc -p "$0" "$@"', entrypoint)
+            for selector in (
+                "PYTHON*", "NODE_*", "LD_*", "DYLD_*", "BASH_FUNC_*",
+                "BASH_ENV", "ENV", "ELECTRON_RUN_AS_NODE",
+                "TAIJI_AGENT_PYTHON", "TAIJI_WEBUI_PYTHON", "TAIJI_PYTHON",
+                "TAIJI_SOURCE_*", "TAIJI_LAUNCH_PROFILE",
+            ):
+                self.assertIn(selector, entrypoint)
+
+        self.assertIn('TAIJI_AGENT_ROOT="$LAB_DIR"', source_cli)
+        self.assertNotIn('TAIJI_LAUNCH_PROFILE="installed-production"', source_cli)
+
+    def test_installed_entrypoints_reject_inherited_code_and_path_selectors(self):
+        with tempfile.TemporaryDirectory(prefix="taiji-installed-entrypoint-") as tmp:
+            fixture_root = Path(tmp).resolve()
+            app_root = fixture_root / "opt" / "taiji-agent"
+            wrapper_dir = fixture_root / "bin"
+            runtime_env = app_root / "scripts" / "runtime-env.sh"
+            python_entry = app_root / "runtime" / "agent" / "venv" / "bin" / "python"
+            diagnose_entry = app_root / "scripts" / "taiji-agent-diagnose"
+            native_verify_entry = app_root / "scripts" / "taiji-native-verify"
+            electron_entry = (
+                app_root / "apps" / "taiji-desktop" / "node_modules" /
+                "electron" / "dist" / "electron"
+            )
+            wrapper_dir.mkdir(parents=True)
+            python_entry.parent.mkdir(parents=True)
+            electron_entry.parent.mkdir(parents=True)
+            runtime_env.parent.mkdir(parents=True, exist_ok=True)
+
+            runtime_env.write_text(
+                'AGENT_DIR="$TAIJI_AGENT_ROOT/runtime/agent"\n'
+                'TAIJI_AGENT_AGENT_DIR="$AGENT_DIR"\n'
+                'TAIJI_AGENT_WEBUI_DIR="$TAIJI_AGENT_ROOT/runtime/web"\n'
+                'TAIJI_AGENT_PYTHON="$AGENT_DIR/venv/bin/python"\n'
+                'TAIJI_WEBUI_PYTHON="$TAIJI_AGENT_PYTHON"\n'
+                'TAIJI_WEBUI_AGENT_DIR="$AGENT_DIR"\n'
+                'export AGENT_DIR TAIJI_AGENT_AGENT_DIR TAIJI_AGENT_WEBUI_DIR\n'
+                'export TAIJI_AGENT_PYTHON TAIJI_WEBUI_PYTHON TAIJI_WEBUI_AGENT_DIR\n',
+                encoding="utf-8",
+            )
+            python_entry.write_text(
+                "#!/bin/bash -p\n/usr/bin/env\n",
+                encoding="utf-8",
+            )
+            diagnose_entry.write_text(
+                "#!/bin/bash -p\n"
+                "source \"$TAIJI_AGENT_ROOT/scripts/runtime-env.sh\"\n"
+                "/usr/bin/env\n",
+                encoding="utf-8",
+            )
+            native_verify_entry.write_text(
+                "#!/bin/bash -p\n/usr/bin/env\n",
+                encoding="utf-8",
+            )
+            electron_entry.write_text(
+                "#!/bin/bash -p\n/usr/bin/env\n",
+                encoding="utf-8",
+            )
+            python_entry.chmod(0o755)
+            diagnose_entry.chmod(0o755)
+            native_verify_entry.chmod(0o755)
+            electron_entry.chmod(0o755)
+
+            wrappers = []
+            for basename in (
+                "taiji",
+                "taiji-agent",
+                "taiji-agent-diagnose",
+                "taiji-native-verify",
+            ):
+                source = read_text(f"packaging/linux/bin/{basename}")
+                staged = wrapper_dir / basename
+                staged.write_text(
+                    source.replace("/opt/taiji-agent", str(app_root)),
+                    encoding="utf-8",
+                )
+                staged.chmod(0o755)
+                wrappers.append(staged)
+
+            bash_env_marker = fixture_root / "bash-env-executed"
+            bash_env = fixture_root / "hostile-bash-env.sh"
+            bash_env.write_text(
+                f"/usr/bin/touch {bash_env_marker}\n",
+                encoding="utf-8",
+            )
+            hostile = os.environ.copy()
+            hostile.update(
+                {
+                    "TAIJI_AGENT_ROOT": "/tmp/evil-root",
+                    "TAIJI_AGENT_AGENT_DIR": "/tmp/evil-agent",
+                    "TAIJI_AGENT_PYTHON": "/tmp/evil-python",
+                    "TAIJI_LAUNCH_PROFILE": "source",
+                    "TAIJI_SOURCE_ROOT": "/tmp/evil-source",
+                    "TAIJI_SOURCE_COMMIT": "evil",
+                    "TAIJI_RELEASE_COMMIT": "evil",
+                    "PYTHONPATH": "/tmp/evil-pythonpath",
+                    "NODE_OPTIONS": "--require=/tmp/evil-node.js",
+                    "LD_FAKE_SELECTOR": "/tmp/evil-loader",
+                    "BASH_ENV": str(bash_env),
+                    "ELECTRON_RUN_AS_NODE": "1",
+                    "BASH_FUNC_taiji_probe%%": "() { /usr/bin/touch /tmp/evil-function; }",
+                }
+            )
+
+            for wrapper in wrappers:
+                result = subprocess.run(
+                    [str(wrapper), "probe"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=hostile,
+                )
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, output)
+                self.assertIn(f"TAIJI_AGENT_ROOT={app_root}", output)
+                self.assertIn("TAIJI_LAUNCH_PROFILE=installed-production", output)
+                if wrapper.name != "taiji-native-verify":
+                    self.assertIn(f"TAIJI_AGENT_PYTHON={python_entry}", output)
+                for removed in (
+                    "TAIJI_SOURCE_ROOT=", "TAIJI_SOURCE_COMMIT=", "TAIJI_RELEASE_COMMIT=",
+                    "PYTHONPATH=", "NODE_OPTIONS=", "LD_FAKE_SELECTOR=", "BASH_ENV=",
+                    "ELECTRON_RUN_AS_NODE=", "BASH_FUNC_taiji_probe%%=",
+                ):
+                    self.assertNotIn(removed, output)
+                self.assertNotIn("/tmp/evil", output)
+            self.assertFalse(bash_env_marker.exists())
+
     def test_health_check_reads_user_dir_runtime_env_for_desktop_launches(self):
         health_check = read_text("hermes-local-lab/scripts/health-check.sh")
         runtime_env = read_text("hermes-local-lab/scripts/runtime-env.sh")
@@ -277,6 +541,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         start_agent = read_text("hermes-local-lab/scripts/start-agent.sh")
         start_webui = read_text("hermes-local-lab/scripts/start-webui.sh")
         main_js = read_text("apps/taiji-desktop/src/main.js")
+        launch_profile = read_text("apps/taiji-desktop/src/launch-profile.js")
 
         self.assertIn('TAIJI_SECURITY_MODE="${TAIJI_SECURITY_MODE:-restricted}"', runtime_env)
         self.assertIn('"$TAIJI_RUNTIME_HOME/skills"', runtime_env)
@@ -285,16 +550,198 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertIn(f'export {var}="$TMP_DIR"', runtime_env)
         self.assertIn("TAIJI_SECURITY_MODE", start_agent)
         self.assertIn("TAIJI_SECURITY_MODE", start_webui)
-        self.assertIn("resolveSecurityProfile", main_js)
-        self.assertIn('profile.name === "local_controlled"', main_js)
-        self.assertIn('env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || profile.mode', main_js)
+        self.assertIn("applySecurityProfile", main_js)
+        self.assertIn('profile.name === "local_controlled"', launch_profile)
+        self.assertIn('runtimeEnv.TAIJI_SECURITY_MODE = sourceEnv.TAIJI_SECURITY_MODE || profile.mode', launch_profile)
+        self.assertIn('runtimeEnv.TAIJI_SECURITY_PROFILE = "strict"', launch_profile)
+        self.assertIn('runtimeEnv.TAIJI_SECURITY_MODE = "restricted"', launch_profile)
         for var in (
             "TAIJI_ALLOW_TERMINAL",
             "TAIJI_ALLOW_EXECUTE_CODE",
             "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS",
             "TAIJI_ALLOW_DELEGATE_TASK",
         ):
-            self.assertIn(var, main_js)
+            self.assertIn(var, launch_profile)
+
+    def test_installed_runtime_reasserts_strict_after_user_dotenv(self):
+        source_runtime_env = ROOT / "hermes-local-lab/scripts/runtime-env.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir).resolve()
+            install_root = temp_root / "opt/taiji-agent"
+            runtime_env = install_root / "scripts/runtime-env.sh"
+            python_path = install_root / "runtime/agent/venv/bin/python"
+            (install_root / "scripts").mkdir(parents=True)
+            python_path.parent.mkdir(parents=True)
+            (install_root / "runtime/web").mkdir(parents=True)
+            python_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python_path.chmod(0o755)
+            runtime_env.write_text(
+                source_runtime_env.read_text(encoding="utf-8").replace(
+                    "/opt/taiji-agent", str(install_root)
+                ),
+                encoding="utf-8",
+            )
+            runtime_home = temp_root / "runtime-home"
+            runtime_home.mkdir()
+            (runtime_home / ".env").write_text(
+                "TAIJI_SECURITY_PROFILE=full\n"
+                "TAIJI_SECURITY_MODE=full\n"
+                "TAIJI_ALLOW_TERMINAL=1\n"
+                "TAIJI_ALLOW_FUTURE_RELAXATION=true\n"
+                "TAIJI_RELEASE_VERSION=forged-version\n"
+                "TAIJI_RELEASE_COMMIT=forged-commit\n"
+                "TAIJI_SOURCE_ROOT=/tmp/forged-source\n"
+                "TAIJI_SOURCE_COMMIT=forged-source-commit\n"
+                "TAIJI_SOURCE_DIRTY=1\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    'source "$1"; printf "%s\\n" '
+                    '"$TAIJI_SECURITY_PROFILE" "$TAIJI_SECURITY_MODE" '
+                    '"$TAIJI_ALLOW_TERMINAL" "$TAIJI_ALLOW_FUTURE_RELAXATION" '
+                    '"$TAIJI_RELEASE_VERSION" "$TAIJI_RELEASE_COMMIT" '
+                    '"${TAIJI_SOURCE_ROOT:-unset}" "${TAIJI_SOURCE_COMMIT:-unset}" '
+                    '"${TAIJI_SOURCE_DIRTY:-unset}"',
+                    "bash",
+                    str(runtime_env),
+                ],
+                env={
+                    **os.environ,
+                    "TAIJI_LAUNCH_PROFILE": "installed-production",
+                    "TAIJI_RELEASE_VERSION": "1.2.3",
+                    "TAIJI_RELEASE_COMMIT": "0123456789abcdef0123456789abcdef01234567",
+                    "TAIJI_RUNTIME_HOME": str(runtime_home),
+                    "XDG_STATE_HOME": str(temp_root / "state"),
+                    "XDG_DATA_HOME": str(temp_root / "data"),
+                    "XDG_CONFIG_HOME": str(temp_root / "config"),
+                    "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    "strict",
+                    "restricted",
+                    "0",
+                    "0",
+                    "1.2.3",
+                    "0123456789abcdef0123456789abcdef01234567",
+                    "unset",
+                    "unset",
+                    "unset",
+                ],
+            )
+
+    def _run_installed_runtime_path_attack(self, *, inherited, dotenv):
+        source_runtime_env = ROOT / "hermes-local-lab/scripts/runtime-env.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            physical_temp_root = Path(temp_dir).resolve()
+            install_root = physical_temp_root / "opt/taiji-agent"
+            scripts_dir = install_root / "scripts"
+            agent_dir = install_root / "runtime/agent"
+            webui_dir = install_root / "runtime/web"
+            python_path = agent_dir / "venv/bin/python"
+            runtime_home = physical_temp_root / "runtime-home"
+            scripts_dir.mkdir(parents=True)
+            python_path.parent.mkdir(parents=True)
+            webui_dir.mkdir(parents=True)
+            runtime_home.mkdir(parents=True)
+            python_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python_path.chmod(0o755)
+            runtime_env = scripts_dir / "runtime-env.sh"
+            runtime_env.write_text(
+                source_runtime_env.read_text(encoding="utf-8").replace(
+                    "/opt/taiji-agent", str(install_root)
+                ),
+                encoding="utf-8",
+            )
+            (runtime_home / ".env").write_text(dotenv, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    'source "$1"; printf "%s\\n" '
+                    '"$LAB_DIR" "$AGENT_DIR" "$WEBUI_DIR" '
+                    '"$TAIJI_AGENT_ROOT" "$TAIJI_AGENT_AGENT_DIR" '
+                    '"$TAIJI_AGENT_WEBUI_DIR" "$TAIJI_AGENT_PYTHON" '
+                    '"$TAIJI_WEBUI_PYTHON" "$TAIJI_WEBUI_AGENT_DIR" '
+                    '"${PYTHONPATH:-unset}" "${NODE_OPTIONS:-unset}" '
+                    '"${ELECTRON_RUN_AS_NODE:-unset}" "$PATH"',
+                    "bash",
+                    str(runtime_env),
+                ],
+                env={
+                    **os.environ,
+                    **inherited,
+                    "TAIJI_LAUNCH_PROFILE": "installed-production",
+                    "TAIJI_RELEASE_VERSION": "1.2.3",
+                    "TAIJI_RELEASE_COMMIT": "0123456789abcdef0123456789abcdef01234567",
+                    "TAIJI_RUNTIME_HOME": str(runtime_home),
+                    "XDG_STATE_HOME": str(physical_temp_root / "state"),
+                    "XDG_DATA_HOME": str(physical_temp_root / "data"),
+                    "XDG_CONFIG_HOME": str(physical_temp_root / "config"),
+                    "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    str(install_root),
+                    str(agent_dir),
+                    str(webui_dir),
+                    str(install_root),
+                    str(agent_dir),
+                    str(webui_dir),
+                    str(python_path),
+                    str(python_path),
+                    str(agent_dir),
+                    "unset",
+                    "unset",
+                    "unset",
+                    "/usr/bin:/bin:/usr/sbin:/sbin",
+                ],
+            )
+
+    def test_installed_runtime_rejects_inherited_code_path_selectors(self):
+        attack = {
+            "TAIJI_AGENT_ROOT": "/tmp/taiji-evil-root",
+            "TAIJI_AGENT_AGENT_DIR": "/tmp/taiji-evil-agent",
+            "TAIJI_AGENT_WEBUI_DIR": "/tmp/taiji-evil-web",
+            "TAIJI_AGENT_PYTHON": "/tmp/taiji-evil-python",
+            "TAIJI_WEBUI_PYTHON": "/tmp/taiji-evil-web-python",
+            "TAIJI_WEBUI_AGENT_DIR": "/tmp/taiji-evil-web-agent",
+            "PYTHONPATH": "/tmp/taiji-evil-pythonpath",
+            "NODE_OPTIONS": "--require=/tmp/taiji-evil-node.js",
+            "ELECTRON_RUN_AS_NODE": "1",
+            "PATH": "/tmp/taiji-evil-bin",
+        }
+        self._run_installed_runtime_path_attack(inherited=attack, dotenv="")
+
+    def test_installed_runtime_rejects_dotenv_code_path_selectors(self):
+        dotenv = (
+            "TAIJI_AGENT_ROOT=/tmp/taiji-dotenv-root\n"
+            "TAIJI_AGENT_AGENT_DIR=/tmp/taiji-dotenv-agent\n"
+            "TAIJI_AGENT_WEBUI_DIR=/tmp/taiji-dotenv-web\n"
+            "TAIJI_AGENT_PYTHON=/tmp/taiji-dotenv-python\n"
+            "TAIJI_WEBUI_PYTHON=/tmp/taiji-dotenv-web-python\n"
+            "TAIJI_WEBUI_AGENT_DIR=/tmp/taiji-dotenv-web-agent\n"
+            "PYTHONPATH=/tmp/taiji-dotenv-pythonpath\n"
+            "NODE_OPTIONS=--require=/tmp/taiji-dotenv-node.js\n"
+            "ELECTRON_RUN_AS_NODE=1\n"
+            "PATH=/tmp/taiji-dotenv-bin\n"
+        )
+        self._run_installed_runtime_path_attack(inherited={}, dotenv=dotenv)
 
     def test_taiji_diagnose_exports_security_and_allowlist_reports(self):
         diagnose = read_text("hermes-local-lab/scripts/taiji-agent-diagnose")
@@ -468,12 +915,17 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             deb.write_bytes(b"current deb bytes")
             deb_sha256 = hashlib.sha256(deb.read_bytes()).hexdigest()
             source_commit = subprocess.run(
-                ["git", "rev-parse", "--short=8", "HEAD"],
+                ["git", "rev-parse", "HEAD"],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
                 check=True,
             ).stdout.strip()
+            target_baseline = delivery_dir / "目标基线/target-baseline.json"
+            target_profile_id, target_baseline_sha256 = write_target_baseline_fixture(
+                target_baseline,
+                ROOT / "packaging/linux/deb/runtime-depends.txt",
+            )
             generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             challenge = "ab" * 32
             test_private_key = tmp_path / "test-attestation-private.pem"
@@ -527,7 +979,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             manifest.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "package": "taiji-agent",
                         "version": "0.1.0-preview",
                         "build_arch": "x86_64",
@@ -542,6 +994,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                         "packages_gz_sha256": packages_gz_sha256,
                         "electron_executable_sha256": "4" * 64,
                         "desktop_entry_sha256": "5" * 64,
+                        "target_baseline_profile_id": target_profile_id,
+                        "target_baseline_sha256": target_baseline_sha256,
                         "built_at": generated_at,
                     }
                 ),
@@ -561,6 +1015,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                         f"manifest={manifest.name}",
                         f"packages_sha256={packages_sha256}",
                         f"packages_gz_sha256={packages_gz_sha256}",
+                        f"target_baseline_profile_id={target_profile_id}",
+                        f"target_baseline_sha256={target_baseline_sha256}",
                     ]
                 )
                 + "\n",
@@ -586,6 +1042,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             (acceptance_tools / "assemble-target-evidence.py").write_text(
                 "# fixture target assembler\n", encoding="utf-8"
             )
+            (acceptance_tools / "observe-single-deb-install.py").write_text(
+                "# fixture pre-install observer\n", encoding="utf-8"
+            )
             (acceptance_tools / "validate-taiji-release-evidence.py").write_text(
                 "# fixture release validator\n", encoding="utf-8"
             )
@@ -602,18 +1061,24 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
             driver_result = None
             driver_payload = None
+            install_observation = None
+            install_observation_payload = None
+            install_method_attestation = None
+            graphical_installer_evidence = None
             if gate_name == "check_offline_install_rehearsal":
                 real_evidence_dir = tmp_path / "offline-install-rehearsal-real"
                 evidence_name = "offline-install-rehearsal.json"
                 log = real_evidence_dir / "offline-install-rehearsal-session.json"
                 session_id = "1" * 32
                 base_payload = {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "evidence_type": "offline-install-rehearsal",
                     "generated_at_utc": generated_at,
                     "rehearsal_session_id": session_id,
                     "challenge_nonce": challenge,
                     "release_artifacts_sha256": release_artifacts_sha256,
+                    "target_baseline_profile_id": target_profile_id,
+                    "target_baseline_sha256": target_baseline_sha256,
                     "source_commit": source_commit,
                     "deb_basename": deb.name,
                     "deb_sha256": deb_sha256,
@@ -655,10 +1120,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 screenshot = real_evidence_dir / "desktop-app.png"
                 diagnostic = real_evidence_dir / "taiji-support-bundle.json"
                 driver_result = real_evidence_dir / "desktop-driver-result.json"
+                install_observation = real_evidence_dir / "single-deb-install-observation.json"
+                install_method_attestation = real_evidence_dir / "single-deb-install-method-attestation.json"
+                graphical_installer_evidence = real_evidence_dir / "single-deb-graphical-installer.png"
                 session_id = "2" * 32
                 machine_fingerprint = "3" * 64
                 base_payload = {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "evidence_type": "target-desktop-verification",
                     "application": "taiji-electron-desktop",
                     "generated_at_utc": generated_at,
@@ -666,6 +1134,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "challenge_nonce": challenge,
                     "machine_fingerprint_sha256": machine_fingerprint,
                     "release_artifacts_sha256": release_artifacts_sha256,
+                    "target_baseline_profile_id": target_profile_id,
+                    "target_baseline_sha256": target_baseline_sha256,
                     "electron_executable_sha256": "4" * 64,
                     "desktop_entry_sha256": "5" * 64,
                     "installed_package_version": "0.1.0-preview",
@@ -676,6 +1146,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "os_id": "kylin",
                     "os_version": "V10",
                     "desktop_environment": "UKUI",
+                    "installation_method": "desktop-double-click",
+                    "installation_method_evidence": "human-attestation",
+                    "installation_method_machine_observed": False,
+                    "installation_network": "continuous-process-sampling-no-non-loopback-up",
+                    "installation_file_count": 1,
+                    "additional_install_files": False,
+                    "dpkg_status_before": "not-installed",
+                    "dpkg_status_after": "install ok installed",
+                    "first_configuration_cycle_completed": True,
+                    "visible_first_configuration_completion": True,
                     "target_verified": True,
                     "desktop_launch": True,
                     "real_model_conversation": True,
@@ -690,6 +1170,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "diagnostic_sha256": "",
                     "driver_result_basename": driver_result.name,
                     "driver_result_sha256": "",
+                    "install_observation_basename": install_observation.name,
+                    "install_observation_sha256": "",
+                    "install_method_attestation_basename": install_method_attestation.name,
+                    "install_method_attestation_sha256": "",
+                    "graphical_installer_evidence_basename": graphical_installer_evidence.name,
+                    "graphical_installer_evidence_sha256": "",
                 }
                 environment_name = "TAIJI_TARGET_VERIFICATION_DIR"
                 session_payload = {
@@ -704,7 +1190,24 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "os_id": "kylin",
                     "os_version": "V10",
                     "desktop_environment": "UKUI",
+                    "target_baseline_profile_id": target_profile_id,
+                    "target_baseline_sha256": target_baseline_sha256,
+                    "installation_method": "desktop-double-click",
+                    "installation_method_evidence": "human-attestation",
+                    "installation_method_machine_observed": False,
+                    "installation_network": "continuous-process-sampling-no-non-loopback-up",
+                    "installation_file_count": 1,
+                    "additional_install_files": False,
+                    "dpkg_status_before": "not-installed",
+                    "dpkg_status_after": "install ok installed",
+                    "first_configuration_cycle_completed": True,
                     "machine_fingerprint_sha256": machine_fingerprint,
+                    "install_observation_basename": install_observation.name,
+                    "install_observation_sha256": "",
+                    "install_method_attestation_basename": install_method_attestation.name,
+                    "install_method_attestation_sha256": "",
+                    "graphical_installer_evidence_basename": graphical_installer_evidence.name,
+                    "graphical_installer_evidence_sha256": "",
                     "electron_pid": 4242,
                     "electron_executable": "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
                     "electron_executable_sha256": "4" * 64,
@@ -714,6 +1217,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "desktop_token_present": True,
                     "web_fallback_used": False,
                     "checks": {
+                        "visible_first_configuration_completion": True,
                         "desktop_launch": True,
                         "real_model_conversation": True,
                         "attachment_flow": True,
@@ -752,6 +1256,37 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "unexpected_http_failures": 0,
                     "electron_exit_code": 0,
                 }
+                install_observation_payload = {
+                    "schema": "taiji.single-deb-install-observation.v1",
+                    "generated_at_utc": generated_at,
+                    "started_at_utc": generated_at,
+                    "completed_at_utc": generated_at,
+                    "challenge_nonce": challenge,
+                    "machine_fingerprint_sha256": machine_fingerprint,
+                    "boot_fingerprint_sha256": "7" * 64,
+                    "target_uid": 1000,
+                    "canonical_home_fingerprint_sha256": "8" * 64,
+                    "user_state_paths_fingerprint_sha256": "9" * 64,
+                    "source_commit": source_commit,
+                    "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                    "deb_observed_basename": deb.name,
+                    "deb_sha256": deb_sha256,
+                    "target_baseline_profile_id": target_profile_id,
+                    "target_baseline_sha256": target_baseline_sha256,
+                    "candidate_file_count": 1,
+                    "additional_install_files_observed": False,
+                    "package_status_before": "not-installed",
+                    "package_status_after": "install ok installed",
+                    "package_status_transitions": ["not-installed", "install ok installed"],
+                    "network_observation": "continuous-process-sampling-no-non-loopback-up",
+                    "network_sample_interval_ms": 250,
+                    "network_sample_count": 8,
+                    "user_state_before": "absent",
+                    "user_state_after_install_before_first_launch": "absent",
+                    "first_launch_eligible": True,
+                    "installation_method_machine_observed": False,
+                    "observation_process_continuous": True,
+                }
             else:
                 raise AssertionError(f"unknown gate: {gate_name}")
 
@@ -768,6 +1303,42 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 log.write_text(json.dumps(session_payload), encoding="utf-8")
                 base_payload["log_sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
             else:
+                install_observation.write_text(
+                    json.dumps(install_observation_payload), encoding="utf-8"
+                )
+                graphical_installer_evidence.write_bytes(png_fixture())
+                attestation_payload = {
+                    "schema": "taiji.single-deb-install-method-attestation.v1",
+                    "generated_at_utc": generated_at,
+                    "observation_basename": install_observation.name,
+                    "observation_sha256": hashlib.sha256(install_observation.read_bytes()).hexdigest(),
+                    "challenge_nonce": challenge,
+                    "machine_fingerprint_sha256": machine_fingerprint,
+                    "boot_fingerprint_sha256": "7" * 64,
+                    "deb_sha256": deb_sha256,
+                    "installation_method_attested": "desktop-double-click",
+                    "installation_method_machine_observed": False,
+                    "attestation_scope": "human-observed-system-graphical-installer",
+                    "operator_id": "target-operator-01",
+                    "confirmation": True,
+                    "graphical_installer_evidence_basename": graphical_installer_evidence.name,
+                    "graphical_installer_evidence_sha256": hashlib.sha256(
+                        graphical_installer_evidence.read_bytes()
+                    ).hexdigest(),
+                }
+                install_method_attestation.write_text(
+                    json.dumps(attestation_payload), encoding="utf-8"
+                )
+                for payload in (base_payload, session_payload):
+                    payload["install_observation_sha256"] = hashlib.sha256(
+                        install_observation.read_bytes()
+                    ).hexdigest()
+                    payload["install_method_attestation_sha256"] = hashlib.sha256(
+                        install_method_attestation.read_bytes()
+                    ).hexdigest()
+                    payload["graphical_installer_evidence_sha256"] = hashlib.sha256(
+                        graphical_installer_evidence.read_bytes()
+                    ).hexdigest()
                 log.write_text(json.dumps(session_payload), encoding="utf-8")
                 screenshot_payload = png_fixture()
                 if screenshot_transform:
@@ -905,6 +1476,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             ("wrong_commit", lambda data: {**data, "source_commit": "deadbeef"}),
             ("wrong_deb_hash", lambda data: {**data, "deb_sha256": "0" * 64}),
             ("wrong_challenge", lambda data: {**data, "challenge_nonce": "cd" * 32}),
+            ("wrong_target_profile", lambda data: {**data, "target_baseline_profile_id": "wrong-profile"}),
+            ("wrong_target_baseline_hash", lambda data: {**data, "target_baseline_sha256": "0" * 64}),
             ("wrong_log_hash", lambda data: {**data, "log_sha256": "0" * 64}),
             ("unsafe_log_path", lambda data: {**data, "log_basename": "../outside.log"}),
             ("invalid_environment_type", lambda data: {**data, "environment": ["container"]}),
@@ -936,6 +1509,27 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             ("wrong_electron_hash", lambda data: {**data, "electron_executable_sha256": "0" * 64}),
             ("wrong_desktop_entry_hash", lambda data: {**data, "desktop_entry_sha256": "0" * 64}),
             ("wrong_challenge", lambda data: {**data, "challenge_nonce": "cd" * 32}),
+            ("wrong_target_profile", lambda data: {**data, "target_baseline_profile_id": "wrong-profile"}),
+            ("wrong_target_baseline_hash", lambda data: {**data, "target_baseline_sha256": "0" * 64}),
+            ("non_double_click_install", lambda data: {**data, "installation_method": "dpkg-cli"}),
+            ("online_install", lambda data: {**data, "installation_network": "online"}),
+            ("multiple_install_files", lambda data: {**data, "installation_file_count": 2}),
+            ("additional_install_files", lambda data: {**data, "additional_install_files": True}),
+            ("already_installed", lambda data: {**data, "dpkg_status_before": "install ok installed"}),
+            ("not_installed_after", lambda data: {**data, "dpkg_status_after": "not-installed"}),
+            (
+                "first_configuration_cycle_incomplete",
+                lambda data: {**data, "first_configuration_cycle_completed": False},
+            ),
+            (
+                "visible_first_configuration_incomplete",
+                lambda data: {**data, "visible_first_configuration_completion": False},
+            ),
+            (
+                "method_falsely_machine_observed",
+                lambda data: {**data, "installation_method_machine_observed": True},
+            ),
+            ("wrong_observation_hash", lambda data: {**data, "install_observation_sha256": "0" * 64}),
             ("no_desktop_launch", lambda data: {**data, "desktop_launch": False}),
             ("no_model_conversation", lambda data: {**data, "real_model_conversation": False}),
             ("no_attachment", lambda data: {**data, "attachment_flow": False}),
@@ -1188,9 +1782,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             main.index("check_offline_install_rehearsal"),
             main.index("check_target_verification"),
         )
-        self.assertIn("TAIJI_OFFLINE_REHEARSAL_DIR", docs)
-        self.assertIn('"network": "none"', docs)
-        self.assertIn('"target_verified": false', docs)
+        self.assertIn("observe-single-deb-install.py", docs)
+        self.assertIn("人工见证", docs)
+        self.assertIn("不能被表述为机器自动识别", docs)
 
     def test_release_check_main_aggregates_both_missing_evidence_gates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1312,7 +1906,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
 
         self.assertIn("check_source_archive_matches_git_head", preflight)
-        self.assertIn("git -C \"$REPO_ROOT\" archive", preflight)
+        self.assertIn('"$TRUSTED_GIT" -C "$REPO_ROOT" archive', preflight)
         self.assertIn('gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" -', preflight)
         self.assertNotIn('cmp -s "$expected_archive" "$SOURCE_ARCHIVE"', preflight)
         self.assertIn("verify_offline_repository_integrity", preflight)
@@ -1359,6 +1953,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             gate_dir = repo_root / "scripts"
             gate_dir.mkdir()
             shutil.copy2(ROOT / "scripts/check-clean-worktree.sh", gate_dir)
+            shutil.copy2(ROOT / "scripts/taiji-trusted-git", gate_dir)
             (repo_root / ".gitignore").write_text(
                 "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.tar.gz\n"
                 "/taijiagent 打包交付/SHA256SUMS.txt\n",
@@ -1378,8 +1973,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 ["git", "-C", str(repo_root), "commit", "-q", "-m", "fixture"],
                 check=True,
             )
-            short = subprocess.run(
-                ["git", "-C", str(repo_root), "rev-parse", "--short=8", "HEAD"],
+            commit = subprocess.run(
+                ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -1406,7 +2001,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             ).stdout
             self.assertNotEqual(alternate_gzip, local_gzip)
 
-            archive = delivery / f"taiji-agentv1.0-kylin-build-src-{short}.tar.gz"
+            archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
             archive.write_bytes(alternate_gzip)
             digest = hashlib.sha256(alternate_gzip).hexdigest()
             (delivery / "SHA256SUMS.txt").write_text(
@@ -1853,18 +2448,21 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("TAIJI_UV_LOCK_MODE=auto", doc)
         self.assertIn("TAIJI_UV_LOCK_MODE=strict", doc)
 
-    def test_delivery_install_script_replaces_legacy_webui_package_safely(self):
+    def test_delivery_install_script_uses_native_managed_upgrade_and_allowlisted_legacy_migration(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
         self.assertIn("taiji-agent-webui.service", install)
         self.assertIn("taiji-agent-gateway.service", install)
         self.assertIn("clean_reinstall_legacy_package", install)
         self.assertIn("systemctl disable", install)
-        self.assertIn("apt-mark unhold taiji-agent", install)
-        self.assertIn("apt-get purge -y taiji-agent", install)
-        self.assertIn("dpkg --remove --force-remove-reinstreq taiji-agent", install)
-        self.assertIn("dpkg --purge --force-all taiji-agent", install)
-        self.assertIn("LEGACY_PROCESS_PATTERNS", install)
+        self.assertIn("受 dpkg 管理的 taiji-agent", install)
+        self.assertIn("不受 dpkg 管理的旧版 taiji-agent 残留", install)
+        self.assertNotIn("apt-mark unhold taiji-agent", install)
+        self.assertNotIn("apt-get purge -y taiji-agent", install)
+        self.assertNotIn("dpkg --remove --force-remove-reinstreq taiji-agent", install)
+        self.assertNotIn("dpkg --purge --force-all taiji-agent", install)
+        self.assertNotIn("pgrep -f", install)
+        self.assertIn('readlink -f -- "$proc_dir/exe"', install)
         self.assertIn("check_port_conflict", install)
         self.assertIn("--reinstall --allow-downgrades --allow-change-held-packages", install)
         self.assertIn("新版桌面端会自动选择空闲端口", install)
@@ -1911,12 +2509,21 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_builder_installs_declared_deb_runtime_dependencies_for_ldd_audit(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         deb_builder = read_text("packaging/linux/deb/build-deb.sh")
-        match = re.search(r'^DEB_DEPENDS="([^"]+)"$', deb_builder, re.MULTILINE)
-        self.assertIsNotNone(match)
-        declared = [item.strip() for item in match.group(1).split(",")]
+        declared = read_text("packaging/linux/deb/runtime-depends.txt").splitlines()
         install_body = builder[
             builder.index("install_build_dependencies() {") : builder.index("source_lab_dir() {")
         ]
+
+        self.assertIn(
+            'RUNTIME_DEPENDS_FILE="$SCRIPT_DIR/runtime-depends.txt"', deb_builder
+        )
+        self.assertIn('python3 "$TARGET_BASELINE_TOOL" render-depends', deb_builder)
+        self.assertIn('--profile "$TARGET_BASELINE_SNAPSHOT"', deb_builder)
+        self.assertIn('--depends-file "$RUNTIME_DEPENDS_FILE"', deb_builder)
+        self.assertNotIn('DEB_DEPENDS="$(awk ', deb_builder)
+        self.assertNotRegex(
+            deb_builder, re.compile(r'^DEB_DEPENDS="libc6,', re.MULTILINE)
+        )
 
         for package in declared:
             with self.subTest(package=package):
@@ -2279,6 +2886,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         tampered_acceptance_tool=None,
         extra_output_case=None,
         dependency_repo_mode="valid",
+        target_binding_mode="valid",
     ):
         source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         with tempfile.TemporaryDirectory() as tmp:
@@ -2291,6 +2899,63 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             verifier = repo_root / "packaging/linux/verify-payload.py"
             for directory in (delivery, output_dir, offline_repo, fake_bin, verifier.parent):
                 directory.mkdir(parents=True, exist_ok=True)
+
+            target_baseline_tool = repo_root / "packaging/linux/target_baseline.py"
+            runtime_depends = repo_root / "packaging/linux/deb/runtime-depends.txt"
+            approved_maintainer_validator = (
+                repo_root / "packaging/linux/validate-approved-maintainer.py"
+            )
+            approved_maintainer_file = (
+                repo_root / "packaging/linux/approved-maintainer.json"
+            )
+            runtime_depends.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / "packaging/linux/target_baseline.py", target_baseline_tool)
+            shutil.copy2(ROOT / "packaging/linux/deb/runtime-depends.txt", runtime_depends)
+            shutil.copy2(
+                ROOT / "packaging/linux/validate-approved-maintainer.py",
+                approved_maintainer_validator,
+            )
+            approved_maintainer_file.write_text(
+                json.dumps(
+                    {
+                        "schema": "taiji-approved-maintainer/v1",
+                        "maintainer": "Acme Product Support <support@acme.cn>",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            approved_maintainer_file.chmod(0o644)
+            target_baseline = delivery / "目标基线/target-baseline.json"
+            target_profile_id, target_baseline_sha256 = write_target_baseline_fixture(
+                target_baseline, runtime_depends
+            )
+            embedded_target_baseline = target_baseline
+            if target_binding_mode == "missing":
+                target_baseline.unlink()
+            elif target_binding_mode == "stale":
+                stale_profile = json.loads(target_baseline.read_text(encoding="utf-8"))
+                stale_profile["captured_at_utc"] = "2000-01-01T00:00:00Z"
+                target_baseline.write_text(
+                    json.dumps(stale_profile, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                target_baseline_sha256 = hashlib.sha256(
+                    target_baseline.read_bytes()
+                ).hexdigest()
+            elif target_binding_mode == "embedded_mismatch":
+                embedded_target_baseline = tmp_path / "tampered-target-baseline.json"
+                embedded_target_baseline.write_bytes(
+                    target_baseline.read_bytes() + b"\n"
+                )
+            elif target_binding_mode not in {
+                "valid",
+                "manifest_mismatch",
+                "marker_mismatch",
+            }:
+                raise AssertionError(
+                    f"unknown target binding mode: {target_binding_mode}"
+                )
 
             script = delivery / "01_制包机_发布预检.sh"
             shutil.copy2(source_script, script)
@@ -2309,6 +2974,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 ),
                 "assemble-target-evidence.py": Path(
                     "tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+                ),
+                "observe-single-deb-install.py": Path(
+                    "tools/taiji-desktop-acceptance/observe-single-deb-install.py"
                 ),
                 "validate-taiji-release-evidence.py": Path(
                     "scripts/validate-taiji-release-evidence.py"
@@ -2358,12 +3026,24 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
             electron_payload = b"fake electron\n"
             desktop_payload = b"fake desktop\n"
-            (output_dir / ".build-success").write_text("ok\n", encoding="utf-8")
+            (output_dir / ".build-success").write_text(
+                "version=1.0.0\n"
+                f"target_baseline_profile_id={'wrong-profile' if target_binding_mode == 'marker_mismatch' else target_profile_id}\n"
+                f"target_baseline_sha256={target_baseline_sha256}\n",
+                encoding="utf-8",
+            )
             (output_dir / "taiji-package-manifest.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": 2,
                         "electron_executable_sha256": hashlib.sha256(electron_payload).hexdigest(),
                         "desktop_entry_sha256": hashlib.sha256(desktop_payload).hexdigest(),
+                        "target_baseline_profile_id": target_profile_id,
+                        "target_baseline_sha256": (
+                            "0" * 64
+                            if target_binding_mode == "manifest_mismatch"
+                            else target_baseline_sha256
+                        ),
                     }
                 )
                 + "\n",
@@ -2453,6 +3133,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 "    Package) printf '%s\\n' \"$package_name\" ;;\n"
                 "    Version) printf '%s\\n' \"$package_version\" ;;\n"
                 "    Architecture) printf 'amd64\\n' ;;\n"
+                "    Maintainer) printf 'Acme Product Support <support@acme.cn>\\n' ;;\n"
                 "    Depends) [ \"$package_name\" != taiji-agent ] || printf 'dependency-fixture (>= 1.0)\\n' ;;\n"
                 "    Pre-Depends) : ;;\n"
                 "    *) exit 2 ;;\n"
@@ -2460,9 +3141,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 "  exit 0\n"
                 "fi\n"
                 "[ \"${1:-}\" = \"-x\" ] || exit 2\n"
-                "mkdir -p \"$3/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist\" \"$3/usr/share/applications\"\n"
+                "mkdir -p \"$3/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist\" \"$3/opt/taiji-agent/resources\" \"$3/usr/share/applications\"\n"
                 "printf 'fake electron\\n' > \"$3/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron\"\n"
-                "printf 'fake desktop\\n' > \"$3/usr/share/applications/taiji-agent.desktop\"\n",
+                "printf 'fake desktop\\n' > \"$3/usr/share/applications/taiji-agent.desktop\"\n"
+                "cp -- \"$TAIJI_TEST_TARGET_BASELINE\" \"$3/opt/taiji-agent/resources/target-baseline.json\"\n"
+                "printf '{\"targetBaselineProfile\":\"%s\",\"targetBaselineSha256\":\"%s\"}\\n' \"$TAIJI_TEST_TARGET_PROFILE_ID\" \"$TAIJI_TEST_TARGET_BASELINE_SHA256\" > \"$3/opt/taiji-agent/resources/taiji-release-manifest.json\"\n",
                 encoding="utf-8",
             )
             fake_dpkg_deb.chmod(0o755)
@@ -2475,6 +3158,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "TAIJI_RELEASE_SKIP_GIT_CHECK": "1",
                     "TAIJI_REPO_ROOT": str(repo_root),
                     "TAIJI_TEST_DPKG_LOG": str(unpack_log),
+                    "TAIJI_TEST_TARGET_BASELINE": str(embedded_target_baseline),
+                    "TAIJI_TEST_TARGET_PROFILE_ID": target_profile_id,
+                    "TAIJI_TEST_TARGET_BASELINE_SHA256": target_baseline_sha256,
                 }
             )
             result = subprocess.run(
@@ -2513,7 +3199,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
                 self.assertNotEqual(result.returncode, 0, output)
                 self.assertIn("生成的安装包/ 含不允许的条目", output)
-                self.assertEqual(unpack_calls, "", output)
+                self.assertNotIn("-x ", unpack_calls, output)
 
     def test_release_preflight_rejects_bytewise_modified_staged_acceptance_tool(self):
         if not shutil.which("sha256sum"):
@@ -2523,6 +3209,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "04_目标终端_桌面App验收并导出证据.sh",
             "run-installed-electron-acceptance.js",
             "assemble-target-evidence.py",
+            "observe-single-deb-install.py",
             "validate-taiji-release-evidence.py",
             "signing-public.pem",
         ):
@@ -2553,7 +3240,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
                 self.assertNotEqual(result.returncode, 0, output)
                 self.assertIn(expected_error, output)
-                self.assertEqual(unpack_calls, "", output)
+                self.assertNotIn("-x ", unpack_calls, output)
 
     def test_release_preflight_accepts_valid_deb_checksum_before_payload_unpack(self):
         if not shutil.which("sha256sum"):
@@ -2565,6 +3252,26 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("DEB SHA256 sidecar 校验通过", output)
         self.assertIn("-x ", unpack_calls)
+
+    def test_release_preflight_rejects_invalid_target_baseline_bindings(self):
+        if not shutil.which("sha256sum"):
+            self.skipTest("sha256sum is required by release preflight")
+
+        cases = (
+            ("missing", "目标基线缺失或文件身份不安全"),
+            ("stale", "older than 30 days"),
+            ("manifest_mismatch", "manifest/.build-success 与当前目标基线不一致"),
+            ("marker_mismatch", "manifest/.build-success 与当前目标基线不一致"),
+            ("embedded_mismatch", "不是同一字节"),
+        )
+        for target_binding_mode, expected_error in cases:
+            with self.subTest(target_binding_mode=target_binding_mode):
+                result, _ = self._run_release_preflight_artifact_gate(
+                    "valid", target_binding_mode=target_binding_mode
+                )
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn(expected_error, output)
 
     def test_release_preflight_rejects_empty_dependency_closure_for_deb_with_depends(self):
         if not shutil.which("sha256sum"):
@@ -2901,14 +3608,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             'install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"',
             desktop_stage,
         )
-        self.assertIn(
-            'install -m 0644 "$APP_DIR/src/main.js" "$DESKTOP_RUNTIME/src/main.js"',
-            desktop_stage,
-        )
-        self.assertIn(
-            'install -m 0644 "$APP_DIR/src/preload.js" "$DESKTOP_RUNTIME/src/preload.js"',
-            desktop_stage,
-        )
+        self.assertIn('node "$DESKTOP_JS_STAGER"', desktop_stage)
+        self.assertIn('--source "$APP_DIR/src"', desktop_stage)
+        self.assertIn('--destination "$DESKTOP_RUNTIME/src"', desktop_stage)
+        self.assertIn('--entry main.js', desktop_stage)
+        self.assertIn('--entry preload.js', desktop_stage)
         self.assertIn("stage-electron-runtime.py", build)
         self.assertIn('--source "$APP_DIR/node_modules/electron"', desktop_stage)
         self.assertIn('--destination "$DESKTOP_RUNTIME/node_modules/electron"', desktop_stage)
@@ -3078,6 +3782,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             install.index("prepare_legacy_replacement()"):
             install.index("install_package()", install.index("prepare_legacy_replacement()"))
         ]
+        self.assertLess(prepare.index("dpkg_has_taiji_state"), prepare.index("legacy_installation_detected"))
+        self.assertIn("原生升级/重装路径", prepare)
         self.assertLess(prepare.index("check_port_conflict \"安装前\""), prepare.index("clean_reinstall_legacy_package"))
         self.assertLess(prepare.index("clean_reinstall_legacy_package"), prepare.index("check_port_conflict \"安装前清理后\""))
 
@@ -3086,9 +3792,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             install.index("install_package()", install.index("clean_reinstall_legacy_package()"))
         ]
         self.assertLess(clean.index("stop_and_disable_legacy_services"), clean.index("stop_legacy_processes"))
-        self.assertLess(clean.index("stop_legacy_processes"), clean.index("purge_legacy_package_state"))
-        self.assertLess(clean.index("purge_legacy_package_state"), clean.index("remove_legacy_files"))
+        self.assertLess(clean.index("stop_legacy_processes"), clean.index("remove_legacy_files"))
         self.assertLess(clean.index("remove_legacy_files"), clean.index("systemctl daemon-reload"))
+        self.assertNotIn("purge_legacy_package_state", install)
+        self.assertNotIn("dpkg --purge", install)
         remove_files = install[
             install.index("remove_legacy_files()"):
             install.index("pid_uses_taiji_install_root()", install.index("remove_legacy_files()"))

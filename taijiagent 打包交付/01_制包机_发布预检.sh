@@ -5,12 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SOURCE_TREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 REPO_ROOT="${TAIJI_REPO_ROOT:-$SOURCE_TREE_ROOT}"
 SOURCE_GATE="$SOURCE_TREE_ROOT/scripts/check-clean-worktree.sh"
+TRUSTED_GIT="$SOURCE_TREE_ROOT/scripts/taiji-trusted-git"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
+TARGET_BASELINE_FILE="$SCRIPT_DIR/目标基线/target-baseline.json"
+TARGET_BASELINE_TOOL="$REPO_ROOT/packaging/linux/target_baseline.py"
+RUNTIME_DEPENDS_FILE="$REPO_ROOT/packaging/linux/deb/runtime-depends.txt"
+APPROVED_MAINTAINER_FILE="$REPO_ROOT/packaging/linux/approved-maintainer.json"
+APPROVED_MAINTAINER_VALIDATOR="$REPO_ROOT/packaging/linux/validate-approved-maintainer.py"
+TARGET_BASELINE_MAX_AGE_DAYS="${TAIJI_TARGET_BASELINE_MAX_AGE_DAYS:-30}"
+TARGET_BASELINE_PROFILE_ID=""
+TARGET_BASELINE_SHA256=""
 ACCEPTANCE_TOOLS="$SCRIPT_DIR/验收工具"
 PAYLOAD_VERIFIER="$REPO_ROOT/packaging/linux/verify-payload.py"
 REQUIRE_ARTIFACTS="${TAIJI_RELEASE_REQUIRE_ARTIFACTS:-0}"
@@ -22,6 +31,60 @@ info() { printf '[INFO] %s\n' "$*"; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+check_target_baseline_presence() {
+  local baseline_dir
+  baseline_dir="$(dirname "$TARGET_BASELINE_FILE")"
+  have python3 || fail "缺少 python3，无法安全核对目标基线"
+  python3 - "$baseline_dir" "$TARGET_BASELINE_FILE" <<'PY' \
+    || fail "目标基线缺失或文件身份不安全"
+import stat
+import sys
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+profile = Path(sys.argv[2])
+directory_mode = directory.lstat().st_mode
+profile_stat = profile.lstat()
+if not stat.S_ISDIR(directory_mode) or directory.is_symlink():
+    raise SystemExit("target baseline directory is not a real directory")
+if not stat.S_ISREG(profile_stat.st_mode) or profile.is_symlink():
+    raise SystemExit("target baseline is not a regular non-symlink file")
+if profile_stat.st_nlink != 1:
+    raise SystemExit("target baseline has hard links")
+if stat.S_IMODE(profile_stat.st_mode) & 0o022:
+    raise SystemExit("target baseline is group/other writable")
+PY
+  printf '%s\n' "$TARGET_BASELINE_MAX_AGE_DAYS" | grep -Eq '^[1-9][0-9]?$' \
+    || fail "TAIJI_TARGET_BASELINE_MAX_AGE_DAYS 必须为 1-99 天"
+}
+
+validate_target_baseline_profile() {
+  [ -f "$TARGET_BASELINE_TOOL" ] && [ ! -L "$TARGET_BASELINE_TOOL" ] \
+    || fail "缺少源码内 target_baseline.py：$TARGET_BASELINE_TOOL"
+  [ -f "$RUNTIME_DEPENDS_FILE" ] && [ ! -L "$RUNTIME_DEPENDS_FILE" ] \
+    || fail "缺少源码内 runtime-depends.txt：$RUNTIME_DEPENDS_FILE"
+  have python3 || fail "缺少 python3，无法验证目标基线"
+  have sha256sum || fail "缺少 sha256sum，无法绑定目标基线"
+
+  python3 "$TARGET_BASELINE_TOOL" validate \
+    --profile "$TARGET_BASELINE_FILE" \
+    --depends-file "$RUNTIME_DEPENDS_FILE" \
+    --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS" \
+    || fail "目标基线缺失、过期或与当前运行依赖契约不一致"
+  TARGET_BASELINE_PROFILE_ID="$(python3 - "$TARGET_BASELINE_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    print(json.load(handle)["profile_id"])
+PY
+)" || fail "无法读取已验证目标基线 profile_id"
+  TARGET_BASELINE_SHA256="$(sha256sum "$TARGET_BASELINE_FILE" | awk '{print $1}')"
+  printf '%s\n' "$TARGET_BASELINE_PROFILE_ID" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$' \
+    || fail "目标基线 profile_id 格式非法"
+  hex64 "$TARGET_BASELINE_SHA256" || fail "目标基线 SHA256 格式非法"
+}
 
 hex64() {
   local value="${1:-}"
@@ -82,15 +145,16 @@ check_git_clean_and_commit_match() {
     --source-root "$SOURCE_TREE_ROOT" \
     || fail "正式发布必须来自干净本地 main"
 
-  local short source_name
-  short="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
+  local commit source_name
+  [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
+  commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
   source_name="$(basename "$SOURCE_ARCHIVE")"
   case "$source_name" in
-    *-"$short".tar.gz)
-      ok "源码包与当前 commit 匹配：$short"
+    *-"$commit".tar.gz)
+      ok "源码包与当前 commit 匹配：$commit"
       ;;
     *)
-      fail "源码包不匹配当前 commit：当前=$short 源码包=$source_name"
+      fail "源码包不匹配当前 commit：当前=$commit 源码包=$source_name"
       ;;
   esac
 }
@@ -103,7 +167,8 @@ check_source_archive_matches_git_head() {
   have cmp || fail "缺少 cmp，无法逐字节核对当前 HEAD 源码包"
   local expected_archive
   expected_archive="$(mktemp /tmp/taiji-source-head.XXXXXX.tar)"
-  if ! git -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD > "$expected_archive"; then
+  [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
+  if ! "$TRUSTED_GIT" -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD > "$expected_archive"; then
     rm -f "$expected_archive"
     fail "无法从当前 HEAD 重建确定性源码包"
   fi
@@ -185,8 +250,61 @@ cleanup_payload_verification_root() {
     || fail "payload 校验临时目录清理后仍存在：$root"
 }
 
+verify_target_baseline_binding() {
+  validate_target_baseline_profile
+  python3 - \
+    "$MANIFEST_FILE" \
+    "$BUILD_MARKER" \
+    "$TARGET_BASELINE_PROFILE_ID" \
+    "$TARGET_BASELINE_SHA256" <<'PY' \
+    || fail "发布 manifest/.build-success 与当前目标基线不一致"
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def no_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+manifest_path = Path(sys.argv[1])
+marker_path = Path(sys.argv[2])
+profile_id = sys.argv[3]
+profile_sha256 = sys.argv[4]
+manifest = json.loads(
+    manifest_path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicates
+)
+if manifest.get("schema_version") != 2:
+    raise SystemExit("target-bound sales artifacts require manifest schema_version 2")
+if manifest.get("target_baseline_profile_id") != profile_id:
+    raise SystemExit("manifest target_baseline_profile_id mismatch")
+if manifest.get("target_baseline_sha256") != profile_sha256:
+    raise SystemExit("manifest target_baseline_sha256 mismatch")
+
+marker = {}
+for raw_line in marker_path.read_text(encoding="utf-8").splitlines():
+    if not raw_line or "=" not in raw_line:
+        raise SystemExit("invalid .build-success line")
+    key, value = raw_line.split("=", 1)
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", key) or key in marker:
+        raise SystemExit("invalid or duplicate .build-success key")
+    marker[key] = value
+if marker.get("target_baseline_profile_id") != profile_id:
+    raise SystemExit(".build-success target_baseline_profile_id mismatch")
+if marker.get("target_baseline_sha256") != profile_sha256:
+    raise SystemExit(".build-success target_baseline_sha256 mismatch")
+PY
+  ok "目标基线、发布 manifest 和 .build-success 绑定一致"
+}
+
 verify_assembled_deb_payload() {
-  local deb="$1" payload_root status manifest_status
+  local deb="$1" payload_root status manifest_status baseline_cmp_status current_baseline_sha
   have dpkg-deb || fail "缺少 dpkg-deb，无法真实解包验证 payload"
   have python3 || fail "缺少 python3，无法执行 payload contract verifier"
   [ -f "$PAYLOAD_VERIFIER" ] || fail "缺少 payload verifier：$PAYLOAD_VERIFIER"
@@ -198,9 +316,20 @@ verify_assembled_deb_payload() {
   set +e
   python3 "$PAYLOAD_VERIFIER" --root "$payload_root"
   status=$?
+  have cmp || fail "缺少 cmp，无法逐字节核对 DEB 内目标基线"
+  baseline_cmp_status=0
+  cmp -s \
+    "$TARGET_BASELINE_FILE" \
+    "$payload_root/opt/taiji-agent/resources/target-baseline.json" \
+    || baseline_cmp_status=$?
   python3 - "$MANIFEST_FILE" \
     "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" \
-    "$payload_root/usr/share/applications/taiji-agent.desktop" <<'PY'
+    "$payload_root/usr/share/applications/taiji-agent.desktop" \
+    "$payload_root/opt/taiji-agent/resources/target-baseline.json" \
+    "$payload_root/opt/taiji-agent/resources/taiji-release-manifest.json" \
+    "$TARGET_BASELINE_FILE" \
+    "$TARGET_BASELINE_PROFILE_ID" \
+    "$TARGET_BASELINE_SHA256" <<'PY'
 import hashlib
 import json
 import re
@@ -218,7 +347,11 @@ def no_duplicates(pairs):
     return result
 
 
-manifest_path, electron_path, desktop_path = map(Path, sys.argv[1:])
+manifest_path, electron_path, desktop_path, baseline_path, release_manifest_path, expected_baseline_path = map(
+    Path, sys.argv[1:7]
+)
+profile_id = sys.argv[7]
+profile_sha256 = sys.argv[8]
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicates)
 
 
@@ -243,12 +376,39 @@ for field, path in (
     actual = sha256_file(path)
     if actual != expected:
         raise SystemExit(f"payload hash does not match manifest: {field}")
+
+for path in (baseline_path, release_manifest_path, expected_baseline_path):
+    mode = path.lstat().st_mode
+    if not stat.S_ISREG(mode) or path.is_symlink():
+        raise SystemExit(f"unsafe target baseline binding file: {path}")
+if baseline_path.read_bytes() != expected_baseline_path.read_bytes():
+    raise SystemExit("payload target-baseline.json is not byte-identical to delivery input")
+if sha256_file(baseline_path) != profile_sha256:
+    raise SystemExit("payload target-baseline.json SHA256 mismatch")
+for field, expected in (
+    ("target_baseline_profile_id", profile_id),
+    ("target_baseline_sha256", profile_sha256),
+):
+    if manifest.get(field) != expected:
+        raise SystemExit(f"release manifest target binding mismatch: {field}")
+release_manifest = json.loads(
+    release_manifest_path.read_text(encoding="utf-8"),
+    object_pairs_hook=no_duplicates,
+)
+if release_manifest.get("targetBaselineProfile") != profile_id:
+    raise SystemExit("installed release manifest targetBaselineProfile mismatch")
+if release_manifest.get("targetBaselineSha256") != profile_sha256:
+    raise SystemExit("installed release manifest targetBaselineSha256 mismatch")
 PY
   manifest_status=$?
   set -e
   cleanup_payload_verification_root "$payload_root"
   [ "$status" -eq 0 ] || fail "DEB payload contract 验证失败：$(basename "$deb")"
+  [ "$baseline_cmp_status" -eq 0 ] || fail "DEB 内 target-baseline.json 与交付输入不是同一字节"
   [ "$manifest_status" -eq 0 ] || fail "DEB 内 Electron/desktop entry 摘要与发布 manifest 不一致：$(basename "$deb")"
+  current_baseline_sha="$(sha256sum "$TARGET_BASELINE_FILE" | awk '{print $1}')"
+  [ "$current_baseline_sha" = "$TARGET_BASELINE_SHA256" ] \
+    || fail "交付 target-baseline.json 在发布预检期间发生变化"
   ok "DEB 真实解包 payload contract 验证通过"
 }
 
@@ -266,6 +426,23 @@ verify_deb_checksum_sidecar() {
   actual="$(sha256sum "$deb" | awk '{print $1}')"
   [ "$actual" = "$expected" ] || fail "DEB SHA256 不匹配：$deb_name"
   ok "DEB SHA256 sidecar 校验通过：$deb_name"
+}
+
+verify_approved_deb_maintainer() {
+  local DEB_PATH="$1" package_maintainer
+  have python3 || fail "缺少 python3，无法核对批准维护人"
+  have dpkg-deb || fail "缺少 dpkg-deb，无法读取 DEB 维护人"
+  [ -f "$APPROVED_MAINTAINER_VALIDATOR" ] && [ ! -L "$APPROVED_MAINTAINER_VALIDATOR" ] \
+    || fail "缺少批准维护人校验器：$APPROVED_MAINTAINER_VALIDATOR"
+  [ -f "$APPROVED_MAINTAINER_FILE" ] && [ ! -L "$APPROVED_MAINTAINER_FILE" ] \
+    || fail "正式源码缺少已批准售后维护人：$APPROVED_MAINTAINER_FILE"
+  package_maintainer="$(dpkg-deb -f "$DEB_PATH" Maintainer)" \
+    || fail "无法读取 DEB Maintainer"
+  python3 "$APPROVED_MAINTAINER_VALIDATOR" \
+    --file "$APPROVED_MAINTAINER_FILE" \
+    --expect "$package_maintainer" \
+    || fail "DEB Maintainer 与正式源码批准身份不一致"
+  ok "DEB Maintainer 与正式源码批准身份一致"
 }
 
 verify_package_output_allowlist() {
@@ -482,16 +659,18 @@ verify_target_acceptance_toolchain() {
   local script="$SCRIPT_DIR/04_目标终端_桌面App验收并导出证据.sh"
   local driver="$ACCEPTANCE_TOOLS/run-installed-electron-acceptance.js"
   local assembler="$ACCEPTANCE_TOOLS/assemble-target-evidence.py"
+  local install_observer="$ACCEPTANCE_TOOLS/observe-single-deb-install.py"
   local validator="$ACCEPTANCE_TOOLS/validate-taiji-release-evidence.py"
   local public_key="$ACCEPTANCE_TOOLS/signing-public.pem"
   local source_script="$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh"
   local source_driver="$REPO_ROOT/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
   local source_assembler="$REPO_ROOT/tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+  local source_install_observer="$REPO_ROOT/tools/taiji-desktop-acceptance/observe-single-deb-install.py"
   local source_validator="$REPO_ROOT/scripts/validate-taiji-release-evidence.py"
   local source_public_key="$REPO_ROOT/tools/taiji-release-evidence/signing-public.pem"
   local public_fingerprint expected_fingerprint file source index
-  local staged_files=("$script" "$driver" "$assembler" "$validator" "$public_key")
-  local source_files=("$source_script" "$source_driver" "$source_assembler" "$source_validator" "$source_public_key")
+  local staged_files=("$script" "$driver" "$assembler" "$install_observer" "$validator" "$public_key")
+  local source_files=("$source_script" "$source_driver" "$source_assembler" "$source_install_observer" "$source_validator" "$source_public_key")
   expected_fingerprint="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 
   [ -f "$script" ] && [ ! -L "$script" ] || fail "缺少安全的目标终端桌面 App 验收脚本"
@@ -504,7 +683,7 @@ verify_target_acceptance_toolchain() {
     cmp -s "$source" "$file" || fail "目标终端验收工具与当前源码不一致：$(basename "$file")"
   done
   have python3 || fail "缺少 python3，无法检查目标证据工具"
-  python3 - "$assembler" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
+  python3 - "$assembler" "$install_observer" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
 import sys
 from pathlib import Path
 
@@ -524,6 +703,7 @@ PY
 
 check_delivery_artifacts() {
   [ "$REQUIRE_ARTIFACTS" = "1" ] || return 0
+  check_target_baseline_presence
   [ ! -e "$SCRIPT_DIR/.构建工具" ] || fail "交付目录仍含制包缓存 .构建工具/，必须清理后再发布"
   [ ! -e "$SCRIPT_DIR/构建工作区" ] || fail "交付目录仍含临时构建工作区，必须清理后再发布"
   [ -d "$OUTPUT_DIR" ] || fail "缺少生成的安装包/"
@@ -533,12 +713,14 @@ check_delivery_artifacts() {
   [ -d "$OFFLINE_REPO" ] || fail "缺少离线依赖/"
   [ -f "$OFFLINE_REPO/Packages" ] || fail "缺少离线依赖/Packages"
   [ -f "$OFFLINE_REPO/Packages.gz" ] || fail "缺少离线依赖/Packages.gz"
+  verify_target_baseline_binding
   verify_target_acceptance_toolchain
 
   local deb_count deb
   deb_count="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | wc -l | tr -d ' ')"
   [ "$deb_count" = "1" ] || fail "生成的安装包/ 必须且只能有一个 amd64 DEB，当前数量：$deb_count"
   deb="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | head -1)"
+  verify_approved_deb_maintainer "$deb"
   verify_deb_checksum_sidecar "$deb"
   verify_package_output_allowlist "$deb"
   verify_assembled_deb_payload "$deb"

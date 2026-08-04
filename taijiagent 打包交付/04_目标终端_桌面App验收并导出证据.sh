@@ -10,6 +10,7 @@ MANIFEST="$OUTPUT_DIR/taiji-package-manifest.json"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DRIVER="$TOOLS_DIR/run-installed-electron-acceptance.js"
 ASSEMBLER="$TOOLS_DIR/assemble-target-evidence.py"
+INSTALL_OBSERVER="$TOOLS_DIR/observe-single-deb-install.py"
 VALIDATOR="$TOOLS_DIR/validate-taiji-release-evidence.py"
 PUBLIC_KEY="$TOOLS_DIR/signing-public.pem"
 PUBLIC_KEY_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
@@ -20,6 +21,10 @@ DESKTOP_ENTRY="/usr/share/applications/taiji-agent.desktop"
 TARGET_DIR="${TAIJI_TARGET_VERIFICATION_DIR:-$SCRIPT_DIR/target-verification}"
 CHALLENGE="${TAIJI_TARGET_ACCEPTANCE_CHALLENGE:-}"
 TIMEOUT_MS="${TAIJI_TARGET_ACCEPTANCE_TIMEOUT_MS:-900000}"
+SINGLE_DEB_CUSTOMER_DIR="${TAIJI_SINGLE_DEB_CUSTOMER_DIR:-}"
+INSTALL_OBSERVATION="${TAIJI_SINGLE_DEB_INSTALL_OBSERVATION:-}"
+INSTALL_METHOD_ATTESTATION="${TAIJI_SINGLE_DEB_METHOD_ATTESTATION:-}"
+GRAPHICAL_INSTALLER_EVIDENCE="${TAIJI_SINGLE_DEB_GRAPHICAL_INSTALLER_EVIDENCE:-}"
 WORK_ROOT=""
 OUTPUT_CREATED=0
 SUCCESS=0
@@ -76,6 +81,25 @@ validate_inputs() {
   require_cmd dpkg-deb
   require_cmd mktemp
   require_cmd env
+  [ -x /usr/bin/python3 ] || fail "目标系统缺少 /usr/bin/python3，无法验证安装前持续观察记录"
+  case "$SINGLE_DEB_CUSTOMER_DIR" in
+    /*) ;;
+    *) fail "TAIJI_SINGLE_DEB_CUSTOMER_DIR 必须是单一 DEB 客户目录的绝对路径" ;;
+  esac
+  [ -d "$SINGLE_DEB_CUSTOMER_DIR" ] && [ ! -L "$SINGLE_DEB_CUSTOMER_DIR" ] \
+    || fail "单一 DEB 客户目录必须是实体目录：$SINGLE_DEB_CUSTOMER_DIR"
+  case "$INSTALL_OBSERVATION" in
+    /*) ;;
+    *) fail "TAIJI_SINGLE_DEB_INSTALL_OBSERVATION 必须是绝对路径" ;;
+  esac
+  case "$INSTALL_METHOD_ATTESTATION" in
+    /*) ;;
+    *) fail "TAIJI_SINGLE_DEB_METHOD_ATTESTATION 必须是绝对路径" ;;
+  esac
+  case "$GRAPHICAL_INSTALLER_EVIDENCE" in
+    /*) ;;
+    *) fail "TAIJI_SINGLE_DEB_GRAPHICAL_INSTALLER_EVIDENCE 必须是绝对路径" ;;
+  esac
   printf '%s\n' "$CHALLENGE" | grep -Eq '^[0-9a-f]{64,128}$' \
     || fail "请设置 64-128 位小写十六进制 TAIJI_TARGET_ACCEPTANCE_CHALLENGE"
   printf '%s\n' "$TIMEOUT_MS" | grep -Eq '^[0-9]+$' \
@@ -95,12 +119,16 @@ validate_inputs() {
   require_regular_file "$DESKTOP_ENTRY" "安装态 desktop entry"
   require_regular_file "$DRIVER" "桌面 App 验收驱动"
   require_regular_file "$ASSEMBLER" "目标证据组装器"
+  require_regular_file "$INSTALL_OBSERVER" "单 DEB 安装前观察器"
   require_regular_file "$VALIDATOR" "发布证据校验器"
   require_regular_file "$PUBLIC_KEY" "发布证据验签公钥"
   require_regular_file "$MANIFEST" "发布 manifest"
   require_regular_file "$BUILD_MARKER" "构建成功标记"
   require_regular_file "$OFFLINE_REPO/Packages" "离线仓库 Packages"
   require_regular_file "$OFFLINE_REPO/Packages.gz" "离线仓库 Packages.gz"
+  require_regular_file "$INSTALL_OBSERVATION" "单 DEB 安装持续观察记录"
+  require_regular_file "$INSTALL_METHOD_ATTESTATION" "桌面双击安装人工见证"
+  require_regular_file "$GRAPHICAL_INSTALLER_EVIDENCE" "系统图形安装器证据截图"
 }
 
 read_os_identity() {
@@ -161,12 +189,15 @@ def strict(pairs):
     return result
 
 data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"), object_pairs_hook=strict)
+schema_version = data.get("schema_version")
+if type(schema_version) is not int or schema_version != 2:
+    raise SystemExit("target acceptance requires manifest schema_version=2")
 fields = ("source_commit", "version", "deb", "deb_sha256", "electron_executable_sha256", "desktop_entry_sha256")
 for key in fields:
     value = data.get(key)
     if type(value) is not str or not value or any(character in value for character in "\r\n\t"):
         raise SystemExit(f"invalid manifest field: {key}")
-if not re.fullmatch(r"[0-9a-f]{7,40}", data["source_commit"]):
+if not re.fullmatch(r"[0-9a-f]{40}", data["source_commit"]):
     raise SystemExit("invalid source_commit")
 if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", data["version"]):
     raise SystemExit("invalid version")
@@ -207,16 +238,33 @@ PY
   INSTALLED_PACKAGE_VERSION="$package_version"
 }
 
-compute_private_machine_fingerprint() {
-  local machine_id_file machine_id
-  machine_id_file="/etc/machine-id"
-  [ -r "$machine_id_file" ] || machine_id_file="/var/lib/dbus/machine-id"
-  [ -r "$machine_id_file" ] || fail "无法读取系统机器标识用于隐私化摘要"
-  machine_id="$(tr -d '[:space:]' < "$machine_id_file")"
-  printf '%s\n' "$machine_id" | grep -Eq '^[0-9A-Fa-f-]{16,128}$' \
-    || fail "系统机器标识格式异常"
-  machine_fingerprint_sha256="$(printf '%s\0%s\0%s\0' "$CHALLENGE" "$OS_ID" "$machine_id" | sha256sum | awk '{print $1}')"
-  unset machine_id
+validate_single_deb_install_facts() {
+  local entry_count customer_count customer_sha256
+  entry_count="$(find "$SINGLE_DEB_CUSTOMER_DIR" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')"
+  [ "$entry_count" = "1" ] \
+    || fail "单一 DEB 客户目录必须且只能有一个安装文件，当前：$entry_count"
+  customer_count="$(find "$SINGLE_DEB_CUSTOMER_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d ' ')"
+  [ "$customer_count" = "1" ] \
+    || fail "单一 DEB 客户目录的唯一条目必须是 DEB 普通文件"
+  CUSTOMER_DEB="$(find "$SINGLE_DEB_CUSTOMER_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.deb' -print)"
+  require_regular_file "$CUSTOMER_DEB" "客户单一 DEB"
+  [ "$(basename "$CUSTOMER_DEB")" = "$DEB_BASENAME" ] \
+    || fail "客户单一 DEB 文件名必须与 manifest 完全一致：expected=$DEB_BASENAME"
+  customer_sha256="$(sha256sum "$CUSTOMER_DEB" | awk '{print $1}')"
+  [ "$customer_sha256" = "$EXPECTED_DEB_SHA256" ] \
+    || fail "客户单一 DEB 与当前发布 DEB 不是同一制品"
+}
+
+validate_install_observation() {
+  info "验证安装前启动、同机同启动周期、持续断网和 absent→installed 机器观察记录"
+  /usr/bin/python3 -B "$INSTALL_OBSERVER" verify \
+    --observation "$INSTALL_OBSERVATION" \
+    --manifest "$MANIFEST" \
+    --deb "$CUSTOMER_DEB" \
+    --attestation "$INSTALL_METHOD_ATTESTATION" \
+    --graphical-evidence "$GRAPHICAL_INSTALLER_EVIDENCE" \
+    --challenge "$CHALLENGE" \
+    || fail "单 DEB 安装观察记录或桌面双击人工见证无效"
 }
 
 compute_release_inventory() {
@@ -293,6 +341,10 @@ run_desktop_acceptance() {
   require_regular_file "$driver_output/desktop-app.png" "桌面 App 验收截图"
   require_regular_file "$driver_output/taiji-support-bundle.json" "桌面 App 诊断导出"
 
+  # Electron 验收可能运行数分钟；在组装器重新打开证据前再做一次当前
+  # 机器、启动会话、DEB 和人工见证绑定校验，关闭长流程的替换窗口。
+  validate_install_observation
+
   info "组装 challenge 绑定的目标终端证据"
   "$PYTHON_BIN" "$ASSEMBLER" \
     --driver-result "$driver_output/driver-result.json" \
@@ -302,8 +354,10 @@ run_desktop_acceptance() {
     --deb "$DEB" \
     --electron-executable "$ELECTRON_BIN" \
     --desktop-entry "$DESKTOP_ENTRY" \
+    --install-observation "$INSTALL_OBSERVATION" \
+    --install-method-attestation "$INSTALL_METHOD_ATTESTATION" \
+    --graphical-installer-evidence "$GRAPHICAL_INSTALLER_EVIDENCE" \
     --release-artifacts-sha256 "$RELEASE_ARTIFACTS_SHA256" \
-    --machine-fingerprint-sha256 "$machine_fingerprint_sha256" \
     --installed-package-version "$INSTALLED_PACKAGE_VERSION" \
     --challenge "$CHALLENGE" \
     --os-id "$OS_ID" \
@@ -335,7 +389,8 @@ main() {
   validate_inputs
   read_os_identity
   read_release_identity
-  compute_private_machine_fingerprint
+  validate_single_deb_install_facts
+  validate_install_observation
   compute_release_inventory
   run_desktop_acceptance
   SUCCESS=1

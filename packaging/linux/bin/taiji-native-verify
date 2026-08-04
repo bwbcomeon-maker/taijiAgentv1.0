@@ -1,0 +1,77 @@
+#!/bin/bash -p
+# Run the installed native acceptance check against the immutable package root.
+set -euo pipefail
+
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+_taiji_unset_args=()
+while IFS= read -r -d '' _taiji_env_entry; do
+  _taiji_env_name="${_taiji_env_entry%%=*}"
+  case "$_taiji_env_name" in
+    PYTHON* | NODE_* | LD_* | DYLD_* | BASH_FUNC_* | \
+    BASH_ENV | ENV | SHELLOPTS | BASHOPTS | CDPATH | GLOBIGNORE | IFS | \
+    PROMPT_COMMAND | RUBYOPT | RUBYLIB | PERL5OPT | PERL5LIB | \
+    JAVA_TOOL_OPTIONS | CLASSPATH | LUA_PATH | LUA_CPATH | \
+    ELECTRON_RUN_AS_NODE | \
+    TAIJI_AGENT_ROOT | TAIJI_AGENT_AGENT_DIR | TAIJI_AGENT_WEBUI_DIR | \
+    TAIJI_AGENT_PYTHON | TAIJI_WEBUI_PYTHON | TAIJI_WEBUI_AGENT_DIR | \
+    TAIJI_AGENT_RUNTIME_ENV | TAIJI_AGENT_ENV_FILE | TAIJI_AGENT_HOME | \
+    TAIJI_AGENT_USE_USER_DIRS | TAIJI_PYTHON | TAIJI_LAUNCH_PROFILE | \
+    TAIJI_NATIVE_VERIFY_MODE | TAIJI_VERIFY_DESKTOP_SMOKE | \
+    TAIJI_RUNTIME_HOME | TAIJI_WORKSPACE | \
+    TAIJI_AGENT_CONFIG_DIR | TAIJI_AGENT_DATA_DIR | TAIJI_AGENT_STATE_DIR | \
+    TAIJI_AGENT_LOG_DIR | TAIJI_AGENT_TMP_DIR | \
+    TAIJI_CONFIG_DIR | TAIJI_DATA_DIR | TAIJI_STATE_DIR | LOG_DIR | TMP_DIR | \
+    TAIJI_RELEASE_* | TAIJI_SOURCE_* | \
+    AGENT_DIR | WEBUI_DIR | LAB_DIR | SCRIPT_DIR | RUNTIME_ENV)
+      _taiji_unset_args+=("-u" "$_taiji_env_name")
+      ;;
+  esac
+done < <(/usr/bin/env -0)
+if [ "${#_taiji_unset_args[@]}" -gt 0 ]; then
+  exec /usr/bin/env "${_taiji_unset_args[@]}" \
+    PATH="$PATH" \
+    /bin/bash --noprofile --norc -p "$0" "$@"
+fi
+unset _taiji_unset_args _taiji_env_entry _taiji_env_name
+
+APP_ROOT="/opt/taiji-agent"
+VERIFY_SCRIPT="$APP_ROOT/scripts/taiji-native-verify"
+
+if [ ! -x "$VERIFY_SCRIPT" ]; then
+  echo "Taiji Agent native verification script not found: $VERIFY_SCRIPT" >&2
+  exit 1
+fi
+
+TAIJI_LAUNCH_PROFILE="installed-production"
+TAIJI_AGENT_ROOT="$APP_ROOT"
+case "${1:-}" in
+  --system-only)
+    shift
+    HOME="/nonexistent"
+    TAIJI_AGENT_USE_USER_DIRS="0"
+    TAIJI_NATIVE_VERIFY_MODE="system-only"
+    TAIJI_VERIFY_DESKTOP_SMOKE="0"
+    TAIJI_RUNTIME_HOME="/var/lib/taiji-agent/runtime-home"
+    TAIJI_WORKSPACE="/var/lib/taiji-agent/workspace"
+    TAIJI_AGENT_CONFIG_DIR="/var/lib/taiji-agent/config"
+    TAIJI_AGENT_DATA_DIR="/var/lib/taiji-agent/data"
+    TAIJI_AGENT_STATE_DIR="/var/lib/taiji-agent/state"
+    TAIJI_AGENT_LOG_DIR="/var/log/taiji-agent"
+    TAIJI_AGENT_TMP_DIR="/var/lib/taiji-agent/tmp"
+    unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME
+    export \
+      HOME TAIJI_AGENT_USE_USER_DIRS TAIJI_NATIVE_VERIFY_MODE \
+      TAIJI_VERIFY_DESKTOP_SMOKE TAIJI_RUNTIME_HOME TAIJI_WORKSPACE \
+      TAIJI_AGENT_CONFIG_DIR TAIJI_AGENT_DATA_DIR TAIJI_AGENT_STATE_DIR \
+      TAIJI_AGENT_LOG_DIR TAIJI_AGENT_TMP_DIR
+    ;;
+  *)
+    TAIJI_AGENT_USE_USER_DIRS="1"
+    unset TAIJI_NATIVE_VERIFY_MODE
+    export TAIJI_AGENT_USE_USER_DIRS
+    ;;
+esac
+export TAIJI_LAUNCH_PROFILE TAIJI_AGENT_ROOT
+exec /bin/bash --noprofile --norc -p "$VERIFY_SCRIPT" "$@"

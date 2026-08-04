@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -26,14 +27,23 @@ EVIDENCE_BASENAME = "target-verification.json"
 DRIVER_RESULT_BASENAME = "desktop-driver-result.json"
 SCREENSHOT_BASENAME = "desktop-app.png"
 DIAGNOSTIC_BASENAME = "taiji-support-bundle.json"
+INSTALL_OBSERVATION_BASENAME = "single-deb-install-observation.json"
+INSTALL_METHOD_ATTESTATION_BASENAME = "single-deb-install-method-attestation.json"
+GRAPHICAL_INSTALLER_EVIDENCE_BASENAME = "single-deb-graphical-installer.png"
 MAX_JSON_BYTES = 1024 * 1024
 MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
+FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+TARGET_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
+OPERATOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
+SYSTEM_ID_RE = re.compile(r"^[0-9a-fA-F-]{16,64}$")
+NON_LINUX_TEST_IDENTITY_ENV = "TAIJI_ASSEMBLER_NON_LINUX_TEST_IDENTITY"
 EXPECTED_CHECKS = {
+    "visible_first_configuration_completion",
     "desktop_launch",
     "real_model_conversation",
     "attachment_flow",
@@ -82,7 +92,24 @@ TARGET_SESSION_KEYS = {
     "os_id",
     "os_version",
     "desktop_environment",
+    "target_baseline_profile_id",
+    "target_baseline_sha256",
+    "installation_method",
+    "installation_method_evidence",
+    "installation_method_machine_observed",
+    "installation_network",
+    "installation_file_count",
+    "additional_install_files",
+    "dpkg_status_before",
+    "dpkg_status_after",
+    "first_configuration_cycle_completed",
     "machine_fingerprint_sha256",
+    "install_observation_basename",
+    "install_observation_sha256",
+    "install_method_attestation_basename",
+    "install_method_attestation_sha256",
+    "graphical_installer_evidence_basename",
+    "graphical_installer_evidence_sha256",
     "electron_pid",
     "electron_executable",
     "electron_executable_sha256",
@@ -104,6 +131,8 @@ TARGET_KEYS = {
     "challenge_nonce",
     "machine_fingerprint_sha256",
     "release_artifacts_sha256",
+    "target_baseline_profile_id",
+    "target_baseline_sha256",
     "electron_executable_sha256",
     "desktop_entry_sha256",
     "installed_package_version",
@@ -114,6 +143,16 @@ TARGET_KEYS = {
     "os_id",
     "os_version",
     "desktop_environment",
+    "installation_method",
+    "installation_method_evidence",
+    "installation_method_machine_observed",
+    "installation_network",
+    "installation_file_count",
+    "additional_install_files",
+    "dpkg_status_before",
+    "dpkg_status_after",
+    "first_configuration_cycle_completed",
+    "visible_first_configuration_completion",
     "target_verified",
     "desktop_launch",
     "real_model_conversation",
@@ -128,11 +167,125 @@ TARGET_KEYS = {
     "diagnostic_sha256",
     "driver_result_basename",
     "driver_result_sha256",
+    "install_observation_basename",
+    "install_observation_sha256",
+    "install_method_attestation_basename",
+    "install_method_attestation_sha256",
+    "graphical_installer_evidence_basename",
+    "graphical_installer_evidence_sha256",
+}
+
+INSTALL_OBSERVATION_KEYS = {
+    "schema", "generated_at_utc", "started_at_utc", "completed_at_utc", "challenge_nonce",
+    "machine_fingerprint_sha256", "boot_fingerprint_sha256", "source_commit", "manifest_sha256",
+    "target_uid", "canonical_home_fingerprint_sha256", "user_state_paths_fingerprint_sha256",
+    "deb_observed_basename", "deb_sha256", "target_baseline_profile_id", "target_baseline_sha256",
+    "candidate_file_count", "additional_install_files_observed", "package_status_before",
+    "package_status_after", "package_status_transitions", "network_observation",
+    "network_sample_interval_ms", "network_sample_count", "user_state_before",
+    "user_state_after_install_before_first_launch", "first_launch_eligible",
+    "installation_method_machine_observed", "observation_process_continuous",
+}
+INSTALL_METHOD_ATTESTATION_KEYS = {
+    "schema", "generated_at_utc", "observation_basename", "observation_sha256",
+    "challenge_nonce", "machine_fingerprint_sha256", "boot_fingerprint_sha256",
+    "deb_sha256", "installation_method_attested", "installation_method_machine_observed",
+    "attestation_scope", "operator_id", "confirmation",
+    "graphical_installer_evidence_basename", "graphical_installer_evidence_sha256",
 }
 
 
 class AssemblyError(ValueError):
     """Raised when an input cannot produce trustworthy target evidence."""
+
+
+def current_target_fingerprints(challenge: str) -> tuple[str, str]:
+    """Derive privacy-preserving identities for the current target and boot.
+
+    The production path is deliberately Linux-only and reads the same kernel
+    identities as the pre-install observer.  A separately named environment
+    variable exists only so the subprocess contract tests can run on the macOS
+    development host; it is ignored on Linux.
+    """
+    if not CHALLENGE_RE.fullmatch(challenge or ""):
+        raise AssemblyError("challenge must be 64-128 lowercase hexadecimal characters")
+    if sys.platform.startswith("linux"):
+        machine_path = next(
+            (
+                Path(candidate)
+                for candidate in ("/etc/machine-id", "/var/lib/dbus/machine-id")
+                if Path(candidate).is_file()
+            ),
+            None,
+        )
+        boot_path = Path("/proc/sys/kernel/random/boot_id")
+        if machine_path is None or not boot_path.is_file():
+            raise AssemblyError("current Linux machine or boot identity is unavailable")
+        try:
+            machine_id = machine_path.read_text(encoding="ascii").strip()
+            boot_id = boot_path.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise AssemblyError("current Linux machine or boot identity is unreadable") from exc
+        if not SYSTEM_ID_RE.fullmatch(machine_id) or not SYSTEM_ID_RE.fullmatch(boot_id):
+            raise AssemblyError("current Linux machine or boot identity is invalid")
+        machine_identity = machine_id.lower()
+        boot_identity = boot_id.lower()
+    else:
+        test_identity = os.environ.get(NON_LINUX_TEST_IDENTITY_ENV, "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{8,128}", test_identity):
+            raise AssemblyError("target evidence assembly is Linux-only outside contract tests")
+        machine_identity = f"non-linux-contract-test-machine:{test_identity}"
+        boot_identity = f"non-linux-contract-test-boot:{test_identity}"
+
+    def fingerprint(identity: str) -> str:
+        return hashlib.sha256((challenge + "\0" + identity).encode("utf-8")).hexdigest()
+
+    return fingerprint(machine_identity), fingerprint(boot_identity)
+
+
+def current_user_context_fingerprints(challenge: str) -> tuple[int, str, str]:
+    """Bind current uid, canonical account home, and the fixed Taiji XDG paths."""
+    if not CHALLENGE_RE.fullmatch(challenge or ""):
+        raise AssemblyError("challenge must be 64-128 lowercase hexadecimal characters")
+    uid = os.getuid()
+    try:
+        canonical_home = os.path.realpath(pwd.getpwuid(uid).pw_dir)
+    except (KeyError, OSError) as exc:
+        raise AssemblyError("cannot resolve the canonical account home") from exc
+    if not os.path.isabs(canonical_home):
+        raise AssemblyError("canonical account home must be absolute")
+    environment_home = Path(os.path.expanduser("~")).resolve()
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or environment_home / ".config")
+    data = Path(os.environ.get("XDG_DATA_HOME") or environment_home / ".local" / "share")
+    state = Path(os.environ.get("XDG_STATE_HOME") or environment_home / ".local" / "state")
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or environment_home / ".cache")
+    paths = [
+        config / "taiji-agent",
+        config / "taiji-agent-desktop",
+        config / "太极 Agent",
+        data / "taiji-agent",
+        data / "taiji-agent-desktop",
+        state / "taiji-agent",
+        cache / "taiji-agent",
+        cache / "taiji-agent-desktop",
+    ]
+    normalized_paths = []
+    for item in paths:
+        raw = os.fspath(item)
+        if not os.path.isabs(raw):
+            raise AssemblyError("current user state paths must be absolute")
+        normalized_paths.append(os.path.normpath(os.path.abspath(raw)))
+    if len(normalized_paths) != len(set(normalized_paths)):
+        raise AssemblyError("current user state paths must be unique")
+
+    def fingerprint(identity: str) -> str:
+        return hashlib.sha256((challenge + "\0" + identity).encode("utf-8")).hexdigest()
+
+    return (
+        uid,
+        fingerprint("canonical-account-home\0%d\0%s" % (uid, canonical_home)),
+        fingerprint("taiji-user-state-paths\0%d\0%s" % (uid, "\0".join(normalized_paths))),
+    )
 
 
 def require_exact_keys(data: dict[str, Any], expected: set[str], label: str) -> None:
@@ -395,9 +548,11 @@ def validate_manifest(
     electron_sha256: str,
     desktop_entry_sha256: str,
     installed_version: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str]:
+    schema_version = manifest.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
+        raise AssemblyError("sales target evidence requires release manifest schema_version=2")
     expected = {
-        "schema_version": 1,
         "package": "taiji-agent",
         "build_arch": "x86_64",
         "dpkg_arch": "amd64",
@@ -410,7 +565,7 @@ def validate_manifest(
         if key not in manifest or type(manifest[key]) is not type(value) or manifest[key] != value:
             raise AssemblyError(f"release manifest {key} does not match the current installed artifact")
     source_commit = manifest.get("source_commit")
-    if type(source_commit) is not str or not COMMIT_RE.fullmatch(source_commit):
+    if type(source_commit) is not str or not FULL_COMMIT_RE.fullmatch(source_commit):
         raise AssemblyError("release manifest source_commit is invalid")
     version = manifest.get("version")
     if type(version) is not str or not VERSION_RE.fullmatch(version):
@@ -419,7 +574,168 @@ def validate_manifest(
         raise AssemblyError("installed package version does not match the release manifest")
     if deb.name != f"taiji-agent_{version}_amd64.deb":
         raise AssemblyError("current DEB basename does not match the installed package version")
-    return source_commit, version
+    target_baseline_profile_id = manifest.get("target_baseline_profile_id")
+    if (
+        type(target_baseline_profile_id) is not str
+        or not TARGET_PROFILE_ID_RE.fullmatch(target_baseline_profile_id)
+    ):
+        raise AssemblyError("release manifest target_baseline_profile_id is invalid")
+    target_baseline_sha256 = require_sha256(
+        manifest.get("target_baseline_sha256"),
+        "release manifest target_baseline_sha256",
+    )
+    return source_commit, version, target_baseline_profile_id, target_baseline_sha256
+
+
+def require_utc_timestamp(value: Any, label: str) -> datetime:
+    if type(value) is not str or not value.endswith("Z"):
+        raise AssemblyError(f"{label} must be a UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise AssemblyError(f"{label} is not a valid timestamp") from exc
+    if parsed.tzinfo is None:
+        raise AssemblyError(f"{label} must include a UTC timezone")
+    return parsed
+
+
+def validate_install_observation(
+    observation: dict[str, Any],
+    *,
+    challenge: str,
+    manifest_sha256: str,
+    deb: Path,
+    deb_sha256: str,
+    source_commit: str,
+    target_baseline_profile_id: str,
+    target_baseline_sha256: str,
+) -> str:
+    require_exact_keys(observation, INSTALL_OBSERVATION_KEYS, "single-DEB install observation")
+    expected = {
+        "schema": "taiji.single-deb-install-observation.v1",
+        "challenge_nonce": challenge,
+        "source_commit": source_commit,
+        "manifest_sha256": manifest_sha256,
+        "deb_observed_basename": deb.name,
+        "deb_sha256": deb_sha256,
+        "target_baseline_profile_id": target_baseline_profile_id,
+        "target_baseline_sha256": target_baseline_sha256,
+        "candidate_file_count": 1,
+        "additional_install_files_observed": False,
+        "package_status_before": "not-installed",
+        "package_status_after": "install ok installed",
+        "network_observation": "continuous-process-sampling-no-non-loopback-up",
+        "user_state_before": "absent",
+        "user_state_after_install_before_first_launch": "absent",
+        "first_launch_eligible": True,
+        "installation_method_machine_observed": False,
+        "observation_process_continuous": True,
+    }
+    for key, value in expected.items():
+        if type(observation[key]) is not type(value) or observation[key] != value:
+            raise AssemblyError(f"single-DEB install observation {key} is invalid")
+    machine_fingerprint = require_sha256(
+        observation["machine_fingerprint_sha256"],
+        "single-DEB install observation machine_fingerprint_sha256",
+    )
+    boot_fingerprint = require_sha256(
+        observation["boot_fingerprint_sha256"],
+        "single-DEB install observation boot_fingerprint_sha256",
+    )
+    current_machine_fingerprint, current_boot_fingerprint = current_target_fingerprints(challenge)
+    if machine_fingerprint != current_machine_fingerprint:
+        raise AssemblyError(
+            "single-DEB install observation machine does not match the current target"
+        )
+    if boot_fingerprint != current_boot_fingerprint:
+        raise AssemblyError(
+            "single-DEB install observation boot identity does not match the current target"
+        )
+    current_uid, current_home_fingerprint, current_paths_fingerprint = (
+        current_user_context_fingerprints(challenge)
+    )
+    if type(observation["target_uid"]) is not int or observation["target_uid"] != current_uid:
+        raise AssemblyError("single-DEB install observation uid does not match the current user")
+    home_fingerprint = require_sha256(
+        observation["canonical_home_fingerprint_sha256"],
+        "single-DEB install observation canonical_home_fingerprint_sha256",
+    )
+    if home_fingerprint != current_home_fingerprint:
+        raise AssemblyError(
+            "single-DEB install observation canonical home does not match the current user"
+        )
+    paths_fingerprint = require_sha256(
+        observation["user_state_paths_fingerprint_sha256"],
+        "single-DEB install observation user_state_paths_fingerprint_sha256",
+    )
+    if paths_fingerprint != current_paths_fingerprint:
+        raise AssemblyError(
+            "single-DEB install observation user state paths do not match the current user"
+        )
+    started = require_utc_timestamp(observation["started_at_utc"], "install observation start")
+    completed = require_utc_timestamp(observation["completed_at_utc"], "install observation completion")
+    generated = require_utc_timestamp(observation["generated_at_utc"], "install observation generation")
+    if not started <= completed <= generated:
+        raise AssemblyError("single-DEB install observation timestamps are not ordered")
+    transitions = observation["package_status_transitions"]
+    if (
+        type(transitions) is not list
+        or not transitions
+        or any(type(value) is not str for value in transitions)
+        or transitions[0] != "not-installed"
+        or transitions[-1] != "install ok installed"
+    ):
+        raise AssemblyError("single-DEB install observation package transitions are invalid")
+    if type(observation["network_sample_interval_ms"]) is not int or observation["network_sample_interval_ms"] <= 0:
+        raise AssemblyError("single-DEB install observation sample interval is invalid")
+    if type(observation["network_sample_count"]) is not int or observation["network_sample_count"] < 2:
+        raise AssemblyError("single-DEB install observation sample count is invalid")
+    return machine_fingerprint
+
+
+def validate_install_method_attestation(
+    attestation: dict[str, Any],
+    *,
+    observation_sha256: str,
+    observation: dict[str, Any],
+    graphical_evidence_sha256: str,
+    challenge: str,
+) -> None:
+    require_exact_keys(
+        attestation,
+        INSTALL_METHOD_ATTESTATION_KEYS,
+        "single-DEB install method attestation",
+    )
+    expected = {
+        "schema": "taiji.single-deb-install-method-attestation.v1",
+        "observation_basename": INSTALL_OBSERVATION_BASENAME,
+        "observation_sha256": observation_sha256,
+        "challenge_nonce": challenge,
+        "machine_fingerprint_sha256": observation["machine_fingerprint_sha256"],
+        "boot_fingerprint_sha256": observation["boot_fingerprint_sha256"],
+        "deb_sha256": observation["deb_sha256"],
+        "installation_method_attested": "desktop-double-click",
+        "installation_method_machine_observed": False,
+        "attestation_scope": "human-observed-system-graphical-installer",
+        "confirmation": True,
+        "graphical_installer_evidence_basename": GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+        "graphical_installer_evidence_sha256": graphical_evidence_sha256,
+    }
+    for key, value in expected.items():
+        if type(attestation[key]) is not type(value) or attestation[key] != value:
+            raise AssemblyError(f"single-DEB install method attestation {key} is invalid")
+    if type(attestation["operator_id"]) is not str or not OPERATOR_ID_RE.fullmatch(attestation["operator_id"]):
+        raise AssemblyError("install method attestation operator_id is invalid")
+    attested_at = require_utc_timestamp(
+        attestation["generated_at_utc"],
+        "install method attestation generation",
+    )
+    completed_at = require_utc_timestamp(
+        observation["completed_at_utc"],
+        "install observation completion",
+    )
+    if attested_at < completed_at:
+        raise AssemblyError("install method attestation predates the observed installation")
 
 
 def write_exclusive(path: Path, payload: bytes) -> str:
@@ -578,9 +894,6 @@ def assemble(args: argparse.Namespace) -> None:
     release_artifacts_sha256 = require_sha256(
         args.release_artifacts_sha256, "release_artifacts_sha256"
     )
-    machine_fingerprint_sha256 = require_sha256(
-        args.machine_fingerprint_sha256, "machine_fingerprint_sha256"
-    )
     installed_version = args.installed_package_version
     if not VERSION_RE.fullmatch(installed_version or ""):
         raise AssemblyError("installed package version is invalid")
@@ -588,7 +901,6 @@ def assemble(args: argparse.Namespace) -> None:
         raise AssemblyError("os_id must be kylin, uos, or openkylin")
     os_version = require_visible_text(args.os_version, "os_version")
     desktop_environment = require_visible_text(args.desktop_environment, "desktop_environment")
-
     driver_payload = read_regular_bytes(args.driver_result, "driver-result.json")
     driver = parse_json_bytes(driver_payload, "driver-result.json")
     validate_driver_result(driver, challenge)
@@ -600,13 +912,64 @@ def assemble(args: argparse.Namespace) -> None:
         raise AssemblyError("installed Electron hash does not match the desktop acceptance driver")
     if desktop_entry_sha256 != driver["desktop_entry_sha256"]:
         raise AssemblyError("installed desktop entry hash does not match the desktop acceptance driver")
-    source_commit, version = validate_manifest(
+    (
+        source_commit,
+        version,
+        target_baseline_profile_id,
+        target_baseline_sha256,
+    ) = validate_manifest(
         manifest,
         deb=args.deb,
         deb_sha256=deb_sha256,
         electron_sha256=electron_sha256,
         desktop_entry_sha256=desktop_entry_sha256,
         installed_version=installed_version,
+    )
+    if args.install_observation.name != INSTALL_OBSERVATION_BASENAME:
+        raise AssemblyError("install observation input must use the fixed evidence basename")
+    if args.install_method_attestation.name != INSTALL_METHOD_ATTESTATION_BASENAME:
+        raise AssemblyError("install method attestation input must use the fixed evidence basename")
+    if args.graphical_installer_evidence.name != GRAPHICAL_INSTALLER_EVIDENCE_BASENAME:
+        raise AssemblyError("graphical installer evidence input must use the fixed evidence basename")
+    observation_payload = read_regular_bytes(
+        args.install_observation,
+        "single-DEB install observation",
+    )
+    observation = parse_json_bytes(observation_payload, "single-DEB install observation")
+    observation_hash = hashlib.sha256(observation_payload).hexdigest()
+    manifest_hash = sha256_regular_file(args.manifest, "release manifest")
+    machine_fingerprint_sha256 = validate_install_observation(
+        observation,
+        challenge=challenge,
+        manifest_sha256=manifest_hash,
+        deb=args.deb,
+        deb_sha256=deb_sha256,
+        source_commit=source_commit,
+        target_baseline_profile_id=target_baseline_profile_id,
+        target_baseline_sha256=target_baseline_sha256,
+    )
+    graphical_evidence_payload = read_regular_bytes(
+        args.graphical_installer_evidence,
+        "graphical installer evidence",
+        limit=MAX_SCREENSHOT_BYTES,
+    )
+    if not graphical_evidence_payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise AssemblyError("graphical installer evidence has an invalid PNG signature")
+    graphical_evidence_hash = hashlib.sha256(graphical_evidence_payload).hexdigest()
+    attestation_payload = read_regular_bytes(
+        args.install_method_attestation,
+        "single-DEB install method attestation",
+    )
+    attestation = parse_json_bytes(
+        attestation_payload,
+        "single-DEB install method attestation",
+    )
+    validate_install_method_attestation(
+        attestation,
+        observation_sha256=observation_hash,
+        observation=observation,
+        graphical_evidence_sha256=graphical_evidence_hash,
+        challenge=challenge,
     )
     if args.screenshot.name != driver["screenshot_basename"]:
         raise AssemblyError("screenshot input basename does not match the driver result")
@@ -641,6 +1004,22 @@ def assemble(args: argparse.Namespace) -> None:
         driver_result_hash = write_exclusive(
             temporary / DRIVER_RESULT_BASENAME, driver_payload
         )
+        install_observation_hash = write_exclusive(
+            temporary / INSTALL_OBSERVATION_BASENAME,
+            observation_payload,
+        )
+        install_method_attestation_hash = write_exclusive(
+            temporary / INSTALL_METHOD_ATTESTATION_BASENAME,
+            attestation_payload,
+        )
+        copied_graphical_evidence_hash = write_exclusive(
+            temporary / GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+            graphical_evidence_payload,
+        )
+        if install_observation_hash != observation_hash:
+            raise AssemblyError("copied install observation hash changed")
+        if copied_graphical_evidence_hash != graphical_evidence_hash:
+            raise AssemblyError("copied graphical installer evidence hash changed")
         session = {
             "schema": "taiji.desktop.acceptance.v1",
             "application": "taiji-electron-desktop",
@@ -653,7 +1032,24 @@ def assemble(args: argparse.Namespace) -> None:
             "os_id": args.os_id,
             "os_version": os_version,
             "desktop_environment": desktop_environment,
+            "target_baseline_profile_id": target_baseline_profile_id,
+            "target_baseline_sha256": target_baseline_sha256,
+            "installation_method": "desktop-double-click",
+            "installation_method_evidence": "human-attestation",
+            "installation_method_machine_observed": False,
+            "installation_network": "continuous-process-sampling-no-non-loopback-up",
+            "installation_file_count": 1,
+            "additional_install_files": False,
+            "dpkg_status_before": "not-installed",
+            "dpkg_status_after": "install ok installed",
+            "first_configuration_cycle_completed": True,
             "machine_fingerprint_sha256": machine_fingerprint_sha256,
+            "install_observation_basename": INSTALL_OBSERVATION_BASENAME,
+            "install_observation_sha256": install_observation_hash,
+            "install_method_attestation_basename": INSTALL_METHOD_ATTESTATION_BASENAME,
+            "install_method_attestation_sha256": install_method_attestation_hash,
+            "graphical_installer_evidence_basename": GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+            "graphical_installer_evidence_sha256": copied_graphical_evidence_hash,
             "electron_pid": driver["electron_pid"],
             "electron_executable": ELECTRON_PATH,
             "electron_executable_sha256": electron_sha256,
@@ -669,7 +1065,7 @@ def assemble(args: argparse.Namespace) -> None:
         require_exact_keys(session, TARGET_SESSION_KEYS, "assembled target session")
         session_hash = write_exclusive(temporary / SESSION_BASENAME, json_bytes(session))
         evidence = {
-            "schema_version": 1,
+            "schema_version": 2,
             "evidence_type": "target-desktop-verification",
             "application": "taiji-electron-desktop",
             "generated_at_utc": generated_at,
@@ -677,6 +1073,8 @@ def assemble(args: argparse.Namespace) -> None:
             "challenge_nonce": challenge,
             "machine_fingerprint_sha256": machine_fingerprint_sha256,
             "release_artifacts_sha256": release_artifacts_sha256,
+            "target_baseline_profile_id": target_baseline_profile_id,
+            "target_baseline_sha256": target_baseline_sha256,
             "electron_executable_sha256": electron_sha256,
             "desktop_entry_sha256": desktop_entry_sha256,
             "installed_package_version": version,
@@ -687,6 +1085,16 @@ def assemble(args: argparse.Namespace) -> None:
             "os_id": args.os_id,
             "os_version": os_version,
             "desktop_environment": desktop_environment,
+            "installation_method": "desktop-double-click",
+            "installation_method_evidence": "human-attestation",
+            "installation_method_machine_observed": False,
+            "installation_network": "continuous-process-sampling-no-non-loopback-up",
+            "installation_file_count": 1,
+            "additional_install_files": False,
+            "dpkg_status_before": "not-installed",
+            "dpkg_status_after": "install ok installed",
+            "first_configuration_cycle_completed": True,
+            "visible_first_configuration_completion": True,
             "target_verified": True,
             "desktop_launch": True,
             "real_model_conversation": True,
@@ -701,6 +1109,12 @@ def assemble(args: argparse.Namespace) -> None:
             "diagnostic_sha256": diagnostic_hash,
             "driver_result_basename": DRIVER_RESULT_BASENAME,
             "driver_result_sha256": driver_result_hash,
+            "install_observation_basename": INSTALL_OBSERVATION_BASENAME,
+            "install_observation_sha256": install_observation_hash,
+            "install_method_attestation_basename": INSTALL_METHOD_ATTESTATION_BASENAME,
+            "install_method_attestation_sha256": install_method_attestation_hash,
+            "graphical_installer_evidence_basename": GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+            "graphical_installer_evidence_sha256": copied_graphical_evidence_hash,
         }
         require_exact_keys(evidence, TARGET_KEYS, "assembled target evidence")
         write_exclusive(temporary / EVIDENCE_BASENAME, json_bytes(evidence))
@@ -729,8 +1143,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--deb", required=True, type=Path)
     parser.add_argument("--electron-executable", required=True, type=Path)
     parser.add_argument("--desktop-entry", required=True, type=Path)
+    parser.add_argument("--install-observation", required=True, type=Path)
+    parser.add_argument("--install-method-attestation", required=True, type=Path)
+    parser.add_argument("--graphical-installer-evidence", required=True, type=Path)
     parser.add_argument("--release-artifacts-sha256", required=True)
-    parser.add_argument("--machine-fingerprint-sha256", required=True)
     parser.add_argument("--installed-package-version", required=True)
     parser.add_argument("--challenge", required=True)
     parser.add_argument("--os-id", required=True)
@@ -746,6 +1162,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "deb",
         "electron_executable",
         "desktop_entry",
+        "install_observation",
+        "install_method_attestation",
+        "graphical_installer_evidence",
         "output_dir",
     ):
         if not getattr(args, name).is_absolute():

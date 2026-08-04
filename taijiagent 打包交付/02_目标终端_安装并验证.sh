@@ -43,21 +43,6 @@ LEGACY_SERVICES=(
   "taiji-agent-gateway.service"
 )
 
-LEGACY_PREFIX="her""mes"
-LEGACY_WEBUI_DIR="${LEGACY_PREFIX}-webui"
-LEGACY_AGENT_DIR="${LEGACY_PREFIX}-agent"
-LEGACY_CLI_MODULE="${LEGACY_PREFIX}_cli.main"
-
-LEGACY_PROCESS_PATTERNS=(
-  "/opt/taiji-agent"
-  "/opt/taiji-agent/src/${LEGACY_WEBUI_DIR}/bootstrap.py"
-  "/opt/taiji-agent/src/${LEGACY_WEBUI_DIR}/server.py"
-  "/opt/taiji-agent/.*/${LEGACY_WEBUI_DIR}/server.py"
-  "/opt/taiji-agent/src/${LEGACY_AGENT_DIR}/venv/bin/python -m ${LEGACY_CLI_MODULE} gateway"
-  "/opt/taiji-agent/.*/${LEGACY_PREFIX} gateway run"
-  "/opt/taiji-agent/apps/taiji-desktop"
-)
-
 CONFLICT_PORTS=(8787 18642 18787)
 
 mkdir -p "$LOG_DIR"
@@ -114,6 +99,10 @@ write_environment_snapshot() {
 
 failure_next_steps() {
   local reason="${1:-}"
+  if [ "${CURRENT_STAGE:-}" = "安装太极 Agent" ] && dpkg_has_taiji_state; then
+    printf 'next=保留现有 dpkg 状态，不要手工删除 /opt/taiji-agent。先用 sudo dpkg --audit 确认状态；若显示未配置完成，修复诊断中的根因后执行 sudo dpkg --configure taiji-agent 重试\n'
+    return 0
+  fi
   case "$reason" in
     *"只能在 Linux"*|*"不是 x86_64/amd64"*|*"缺少 apt-get"*|*"缺少 dpkg"*)
       printf 'next=当前目标机不在 DEB 支持矩阵内；需要 Linux x86_64/amd64 + apt/dpkg + 图形桌面，RPM/.run 需单独制品\n'
@@ -121,7 +110,7 @@ failure_next_steps() {
     *"离线 apt 仓库索引"*|*"无法下载 file:"*|*"无法找到文件"*"Packages"*)
       printf 'next=离线 apt 仓库索引不可读。新版安装脚本会在 root 所有的 /var/tmp staging 中同时准备 Packages 和 Packages.gz；请使用最新交付目录重试\n'
       ;;
-    *"管理员权限"*|*"sudo"*)
+    *"管理员权限"*|*"sudo -v"*)
       printf 'next=先执行 sudo -v，确认当前用户具备管理员权限后重试安装脚本\n'
       ;;
     *"缺少离线依赖仓库"*)
@@ -130,8 +119,8 @@ failure_next_steps() {
     *"构建成功标记"*|*"manifest"*|*"安装包与构建成功标记"*|*"Packages.gz"*)
       printf 'next=回到制包机重新执行 bash ./00_制包机_生成离线交付包.sh，并完整拷贝 生成的安装包/ 与 离线依赖/\n'
       ;;
-    *"旧版后台服务仍"*|*"旧包状态仍存在"*)
-      printf 'next=查看诊断中的 systemctl/dpkg 状态，先清理旧 taiji-agent 包状态后重试\n'
+    *"旧版后台服务仍"*)
+      printf 'next=查看诊断中的 systemctl 状态，保留 dpkg 包状态和 /opt/taiji-agent，处理确切的旧服务后重试\n'
       ;;
     *"TAIJI_ALLOW_HEADLESS_REHEARSAL=1"*)
       printf 'next=请在图形桌面终端中重跑脚本；只有不带桌面验收的离线安装演练才能显式设置 TAIJI_ALLOW_HEADLESS_REHEARSAL=1\n'
@@ -378,7 +367,6 @@ preflight() {
   require_cmd find
   require_cmd getent
   require_cmd systemctl
-  require_cmd pgrep
   require_cmd ps
   require_cmd lsof
 }
@@ -420,7 +408,6 @@ launcher_owned_by_taiji() {
 }
 
 legacy_installation_detected() {
-  dpkg_has_taiji_state && return 0
   path_exists /opt/taiji-agent && return 0
   path_exists /etc/default/taiji-agent && return 0
   launcher_owned_by_taiji /usr/bin/taiji && return 0
@@ -483,45 +470,41 @@ stop_and_disable_legacy_services() {
 }
 
 stop_legacy_processes() {
-  info "清理旧版 /opt/taiji-agent 相关进程"
-  local pattern pids pid
-  for pattern in "${LEGACY_PROCESS_PATTERNS[@]}"; do
-    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
-    [ -n "$pids" ] || continue
-    for pid in $pids; do
-      [ "$pid" != "$$" ] || continue
-      warn "停止旧版进程 pid=$pid pattern=$pattern"
-      sudo kill "$pid" >/dev/null 2>&1 || true
-    done
+  info "停止由 /opt/taiji-agent 内可执行文件启动的旧进程"
+  local proc_dir pid executable pids=""
+  for proc_dir in /proc/[0-9]*; do
+    [ -d "$proc_dir" ] || continue
+    pid="${proc_dir##*/}"
+    [ "$pid" != "$$" ] || continue
+    executable="$(readlink -f -- "$proc_dir/exe" 2>/dev/null || true)"
+    case "$executable" in
+      /opt/taiji-agent/*) pids="${pids}${pid}"$'\n' ;;
+    esac
   done
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    executable="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)"
+    case "$executable" in
+      /opt/taiji-agent/*)
+        warn "停止旧版进程 pid=$pid executable=$executable"
+        sudo kill -TERM "$pid" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done <<< "$pids"
 
   sleep 1
 
-  for pattern in "${LEGACY_PROCESS_PATTERNS[@]}"; do
-    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
-    [ -n "$pids" ] || continue
-    for pid in $pids; do
-      [ "$pid" != "$$" ] || continue
-      warn "强制停止旧版进程 pid=$pid pattern=$pattern"
-      sudo kill -9 "$pid" >/dev/null 2>&1 || true
-    done
-  done
-}
-
-purge_legacy_package_state() {
-  dpkg_has_taiji_state || return 0
-  info "清理旧版 DEB 包管理状态：taiji-agent"
-  sudo apt-mark unhold taiji-agent >/dev/null 2>&1 || true
-  if ! sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent; then
-    warn "apt-get purge taiji-agent 失败，将继续用 dpkg 强制清理旧包状态。"
-  fi
-  if dpkg_has_taiji_state; then
-    sudo dpkg --remove --force-remove-reinstreq taiji-agent || true
-    sudo dpkg --purge --force-all taiji-agent || true
-  fi
-  if dpkg_has_taiji_state; then
-    fail "taiji-agent 旧包状态仍存在，已停止安装，避免新旧包状态混在一起。"
-  fi
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    executable="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)"
+    case "$executable" in
+      /opt/taiji-agent/*)
+        warn "强制停止旧版进程 pid=$pid executable=$executable"
+        sudo kill -KILL "$pid" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done <<< "$pids"
 }
 
 remove_legacy_files() {
@@ -593,22 +576,26 @@ verify_legacy_services_inactive() {
 }
 
 clean_reinstall_legacy_package() {
+  dpkg_has_taiji_state && fail "内部错误：受 dpkg 管理的安装不得进入 legacy 清理路径"
   stop_and_disable_legacy_services
   stop_legacy_processes
-  purge_legacy_package_state
   remove_legacy_files
   sudo systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
 prepare_legacy_replacement() {
   check_port_conflict "安装前" || fail "安装前端口检查未通过，未执行旧版替换。"
+  if dpkg_has_taiji_state; then
+    ok "检测到受 dpkg 管理的 taiji-agent；保留现有安装并走原生升级/重装路径"
+    return 0
+  fi
   if ! legacy_installation_detected; then
     ok "未检测到旧版 taiji-agent WebUI 安装残留"
     return 0
   fi
 
-  warn "检测到旧版 taiji-agent WebUI/后台服务安装，将彻底清除旧系统安装后再安装新版。"
-  warn "旧版 /opt/taiji-agent、系统配置、旧服务和旧入口会被删除；旧模型 Key、微信 token 和历史会话不会备份。"
+  warn "检测到不受 dpkg 管理的旧版 taiji-agent 残留，将按明确白名单迁移后安装新版。"
+  warn "仅会清理白名单内的旧 /opt 安装、系统服务和入口；用户 XDG 配置、模型 Key 与历史会话不在清理范围。"
   clean_reinstall_legacy_package
   check_port_conflict "安装前清理后" || fail "安装前清理后端口检查未通过，已停止安装。"
   verify_legacy_services_inactive
@@ -889,6 +876,10 @@ install_package() {
   info "安装太极 Agent。这里可能需要输入 sudo 密码。"
   install_taiji_package
   install_trial_license
+  # Old package generations used these exact background services.  Stopping
+  # and disabling the two known units is non-destructive and prevents a stale
+  # browser-only runtime from surviving a native dpkg upgrade.
+  stop_and_disable_legacy_services
   check_port_conflict "安装后" || fail "安装后端口检查未通过。"
   verify_legacy_services_inactive
 }

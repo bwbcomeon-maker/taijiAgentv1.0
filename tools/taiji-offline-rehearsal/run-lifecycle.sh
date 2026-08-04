@@ -115,7 +115,7 @@ require_env TAIJI_EXPECTED_SOURCE_COMMIT
 require_env TAIJI_EXPECTED_DEB_BASENAME
 require_env TAIJI_EXPECTED_DEB_SHA256
 [[ "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE" =~ ^[0-9a-f]{64,128}$ ]] || fail "challenge 格式不合法"
-[[ "$TAIJI_EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{7,40}$ ]] || fail "source commit 格式不合法"
+[[ "$TAIJI_EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "source commit 格式不合法"
 [[ "$TAIJI_EXPECTED_DEB_BASENAME" =~ ^taiji-agent_[A-Za-z0-9.+:~_-]+_amd64\.deb$ ]] || fail "DEB basename 不合法"
 [[ "$TAIJI_EXPECTED_DEB_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DEB SHA256 格式不合法"
 

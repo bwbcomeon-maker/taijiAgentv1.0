@@ -1,11 +1,220 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE LD_PRELOAD LD_LIBRARY_PATH PYTHONPATH PYTHONHOME NODE_OPTIONS NODE_PATH ELECTRON_RUN_AS_NODE || true
+
+TAIJI_EXPECTED_PROFILE_ID=@@TAIJI_BASELINE_PROFILE_ID@@
+TAIJI_EXPECTED_OS_ID=@@TAIJI_BASELINE_OS_ID@@
+TAIJI_EXPECTED_OS_ID_LIKE=@@TAIJI_BASELINE_OS_ID_LIKE@@
+TAIJI_EXPECTED_OS_VERSION_ID=@@TAIJI_BASELINE_OS_VERSION_ID@@
+TAIJI_EXPECTED_OS_VARIANT_ID=@@TAIJI_BASELINE_OS_VARIANT_ID@@
+TAIJI_EXPECTED_OS_BUILD_ID=@@TAIJI_BASELINE_OS_BUILD_ID@@
+TAIJI_EXPECTED_GLIBC_MIN=@@TAIJI_BASELINE_GLIBC_MIN@@
+
+baseline_fail() {
+  printf '[FAIL] %s\n' "$*" >&2
+  return 1
+}
+
+trusted_stat_metadata() {
+  local path="$1"
+  local dereference="${2:-0}"
+  local metadata=""
+  if [ "$dereference" = "1" ]; then
+    metadata="$(stat -Lc '%u:%a:%h' -- "$path" 2>/dev/null)" \
+      || metadata="$(stat -L -f '%u:%Lp:%l' -- "$path" 2>/dev/null)" \
+      || return 1
+  else
+    metadata="$(stat -c '%u:%a:%h' -- "$path" 2>/dev/null)" \
+      || metadata="$(stat -f '%u:%Lp:%l' -- "$path" 2>/dev/null)" \
+      || return 1
+  fi
+  printf '%s' "$metadata"
+}
+
+resolve_trusted_os_release() {
+  local os_release_file="$1"
+  local trusted_usr_lib_file="$2"
+  local expected_owner_uid="$3"
+  local candidate="$os_release_file"
+  local link_value="" linked_path="" resolved_path="" trusted_path=""
+  local metadata="" owner="" mode="" link_count=""
+
+  if [ -L "$os_release_file" ]; then
+    metadata="$(trusted_stat_metadata "$os_release_file" 0)" \
+      || { baseline_fail "cannot inspect os-release symlink: $os_release_file"; return 1; }
+    IFS=: read -r owner mode link_count <<< "$metadata"
+    [ "$owner" = "$expected_owner_uid" ] \
+      || { baseline_fail "os-release symlink owner is not trusted: $os_release_file"; return 1; }
+    [ "$link_count" = "1" ] \
+      || { baseline_fail "os-release symlink has an unsafe link count: $os_release_file"; return 1; }
+
+    link_value="$(readlink "$os_release_file" 2>/dev/null)" \
+      || { baseline_fail "cannot read os-release symlink: $os_release_file"; return 1; }
+    case "$link_value" in
+      /*) linked_path="$link_value" ;;
+      *) linked_path="$(dirname "$os_release_file")/$link_value" ;;
+    esac
+    resolved_path="$(cd "$(dirname "$linked_path")" 2>/dev/null && pwd -P)" \
+      || { baseline_fail "unsafe os-release symlink target: $os_release_file"; return 1; }
+    resolved_path="$resolved_path/$(basename "$linked_path")"
+    trusted_path="$(cd "$(dirname "$trusted_usr_lib_file")" 2>/dev/null && pwd -P)" \
+      || { baseline_fail "trusted os-release target is missing: $trusted_usr_lib_file"; return 1; }
+    trusted_path="$trusted_path/$(basename "$trusted_usr_lib_file")"
+    [ "$resolved_path" = "$trusted_path" ] \
+      || { baseline_fail "unsafe os-release symlink target: $os_release_file"; return 1; }
+    candidate="$trusted_usr_lib_file"
+  fi
+
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] \
+    || { baseline_fail "unsafe or missing os-release file: $candidate"; return 1; }
+  metadata="$(trusted_stat_metadata "$candidate" 1)" \
+    || { baseline_fail "cannot inspect os-release file: $candidate"; return 1; }
+  IFS=: read -r owner mode link_count <<< "$metadata"
+  [ "$owner" = "$expected_owner_uid" ] \
+    || { baseline_fail "os-release file owner is not trusted: $candidate"; return 1; }
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] \
+    || { baseline_fail "os-release file mode is invalid: $candidate"; return 1; }
+  if (( (8#$mode & 8#22) != 0 )); then
+    baseline_fail "os-release file is group/other writable: $candidate"
+    return 1
+  fi
+  [ "$link_count" = "1" ] \
+    || { baseline_fail "os-release file has an unsafe link count: $candidate"; return 1; }
+  printf '%s' "$candidate"
+}
+
+read_os_release_value() {
+  local os_release_file="$1"
+  local key="$2"
+  local trusted_usr_lib_file="$3"
+  local expected_owner_uid="$4"
+  local trusted_file=""
+  local raw=""
+  trusted_file="$(resolve_trusted_os_release \
+    "$os_release_file" "$trusted_usr_lib_file" "$expected_owner_uid")" || return 1
+  raw="$(awk -v wanted="$key" '
+    index($0, wanted "=") == 1 {
+      print substr($0, length(wanted) + 2)
+      exit
+    }
+  ' "$trusted_file")" \
+    || { baseline_fail "cannot read os-release value $key"; return 1; }
+  case "$raw" in
+    \"*\") raw="${raw:1:${#raw}-2}" ;;
+    \'*\') raw="${raw:1:${#raw}-2}" ;;
+  esac
+  printf '%s' "$raw"
+}
+
+require_safe_os_value() {
+  local label="$1"
+  local value="$2"
+  local allow_spaces="${3:-0}"
+  if [ -z "$value" ]; then
+    return 0
+  fi
+  if [ "$allow_spaces" = "1" ]; then
+    [[ "$value" =~ ^[A-Za-z0-9._+:-]+([[:space:]][A-Za-z0-9._+:-]+)*$ ]] \
+      || { baseline_fail "$label contains unsupported characters"; return 1; }
+  else
+    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._+:-]*$ ]] \
+      || { baseline_fail "$label contains unsupported characters"; return 1; }
+  fi
+}
+
+numeric_version_ge() {
+  local actual="$1"
+  local minimum="$2"
+  local IFS=.
+  local -a actual_parts=()
+  local -a minimum_parts=()
+  local count index actual_part minimum_part
+  [[ "$actual" =~ ^[0-9]+(\.[0-9]+)+$ ]] || return 1
+  [[ "$minimum" =~ ^[0-9]+(\.[0-9]+)+$ ]] || return 1
+  read -r -a actual_parts <<< "$actual"
+  read -r -a minimum_parts <<< "$minimum"
+  count="${#actual_parts[@]}"
+  if [ "${#minimum_parts[@]}" -gt "$count" ]; then
+    count="${#minimum_parts[@]}"
+  fi
+  for ((index = 0; index < count; index += 1)); do
+    actual_part="${actual_parts[$index]:-0}"
+    minimum_part="${minimum_parts[$index]:-0}"
+    if ((10#$actual_part > 10#$minimum_part)); then
+      return 0
+    fi
+    if ((10#$actual_part < 10#$minimum_part)); then
+      return 1
+    fi
+  done
+  return 0
+}
+
+verify_target_baseline() {
+  local os_release_file="$1"
+  local actual_arch="$2"
+  local actual_glibc="$3"
+  local trusted_usr_lib_file="${4:-/usr/lib/os-release}"
+  local expected_owner_uid="${5:-0}"
+  local actual_id actual_id_like actual_version actual_variant actual_build
+
+  case "$TAIJI_EXPECTED_PROFILE_ID" in
+    *@*@*)
+      baseline_fail "preinst target baseline was not rendered by the release build"
+      return 1
+      ;;
+  esac
+
+  actual_id="$(read_os_release_value "$os_release_file" ID "$trusted_usr_lib_file" "$expected_owner_uid")" \
+    || return 1
+  actual_id_like="$(read_os_release_value "$os_release_file" ID_LIKE "$trusted_usr_lib_file" "$expected_owner_uid")" \
+    || return 1
+  actual_version="$(read_os_release_value "$os_release_file" VERSION_ID "$trusted_usr_lib_file" "$expected_owner_uid")" \
+    || return 1
+  actual_variant="$(read_os_release_value "$os_release_file" VARIANT_ID "$trusted_usr_lib_file" "$expected_owner_uid")" \
+    || return 1
+  actual_build="$(read_os_release_value "$os_release_file" BUILD_ID "$trusted_usr_lib_file" "$expected_owner_uid")" \
+    || return 1
+
+  require_safe_os_value "OS ID" "$actual_id" || return 1
+  require_safe_os_value "OS ID_LIKE" "$actual_id_like" 1 || return 1
+  require_safe_os_value "OS VERSION_ID" "$actual_version" || return 1
+  require_safe_os_value "OS VARIANT_ID" "$actual_variant" || return 1
+  require_safe_os_value "OS BUILD_ID" "$actual_build" || return 1
+
+  [ "$actual_id" = "$TAIJI_EXPECTED_OS_ID" ] \
+    || { baseline_fail "OS ID mismatch: expected $TAIJI_EXPECTED_OS_ID, got ${actual_id:-missing}"; return 1; }
+  [ "$actual_id_like" = "$TAIJI_EXPECTED_OS_ID_LIKE" ] \
+    || { baseline_fail "OS ID_LIKE mismatch for target profile $TAIJI_EXPECTED_PROFILE_ID"; return 1; }
+  [ "$actual_version" = "$TAIJI_EXPECTED_OS_VERSION_ID" ] \
+    || { baseline_fail "OS VERSION_ID mismatch: expected $TAIJI_EXPECTED_OS_VERSION_ID, got ${actual_version:-missing}"; return 1; }
+  [ "$actual_variant" = "$TAIJI_EXPECTED_OS_VARIANT_ID" ] \
+    || { baseline_fail "OS VARIANT_ID mismatch for target profile $TAIJI_EXPECTED_PROFILE_ID"; return 1; }
+  [ "$actual_build" = "$TAIJI_EXPECTED_OS_BUILD_ID" ] \
+    || { baseline_fail "OS BUILD_ID mismatch for target profile $TAIJI_EXPECTED_PROFILE_ID"; return 1; }
+  [ "$actual_arch" = "amd64" ] \
+    || { baseline_fail "architecture mismatch: expected amd64, got ${actual_arch:-missing}"; return 1; }
+  numeric_version_ge "$actual_glibc" "$TAIJI_EXPECTED_GLIBC_MIN" \
+    || { baseline_fail "target glibc is older than required $TAIJI_EXPECTED_GLIBC_MIN: ${actual_glibc:-missing}"; return 1; }
+
+  printf '[OK] Target baseline matched: %s\n' "$TAIJI_EXPECTED_PROFILE_ID"
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
 case "$arch" in
-  amd64|x86_64) exit 0 ;;
-  *)
-    echo "taiji-agent only supports amd64/x86_64 for the current Hygon/UOS package." >&2
-    exit 1
-    ;;
+  x86_64) arch=amd64 ;;
 esac
+glibc_banner="$(ldd --version 2>&1 | head -n 1)"
+glibc_version="$(printf '%s\n' "$glibc_banner" | grep -Eo '[0-9]+(\.[0-9]+)+' | tail -n 1)"
+[ -n "$glibc_version" ] \
+  || { baseline_fail "cannot determine target glibc version"; exit 1; }
+
+verify_target_baseline /etc/os-release "$arch" "$glibc_version"
+exit 0

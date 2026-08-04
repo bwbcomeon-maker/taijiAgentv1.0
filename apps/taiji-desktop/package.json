@@ -1,6 +1,6 @@
 {
   "name": "taiji-agent-desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Taiji Agent desktop shell for local Agent and WebUI services.",
   "main": "src/main.js",
@@ -9,6 +9,7 @@
     "check": "node --check src/main.js"
   },
   "dependencies": {
+    "acorn": "^8.15.0",
     "electron": "^39.2.7"
   }
 }

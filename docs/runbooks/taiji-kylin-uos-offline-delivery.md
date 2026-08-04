@@ -16,7 +16,7 @@
 - Debian-like Kylin、UOS、openKylin 类系统。
 - `apt-get`、`apt-cache`、`dpkg`、`systemctl` 和 `sudo` 可用。
 - 具备图形桌面会话，能够启动 Electron 应用。
-- 使用完整重建的 `taijiagent 打包交付/` 目录进行离线安装。
+- 内部断网演练和真机验收使用完整重建的 `taijiagent 打包交付/` 工作区；门禁通过后客户只使用唯一目标绑定 DEB。
 
 上述是产品设计与制品约束，不等于所有目标发行版都已实测支持。某个 Kylin/UOS/openKylin 版本只有取得与当前产物绑定的真实目标机证据后，才能写成该版本“已验证”。
 
@@ -43,6 +43,21 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 
 源码测试、macOS Electron App、旧 commit 的 DEB、旧日志或截图都不能替代当前产物的后一级证据。最终销售放行还要求两类证据经过发布负责人复核、签名，并通过 `scripts/taiji-release-check.sh`。
 
+### 3.1 单一 DEB 销售交付契约
+
+客户侧的目标是双击一个安装文件，因此销售目录只交付一个 `.deb`；构建报告、摘要、断网演练和真机验收材料保留在内部发布档案。这个简化只发生在客户交付面，不得删除内部证据链。
+
+单一 DEB 不是跨发行版通用包。必须遵守以下边界：
+
+- 每个精确基线先在真实目标机运行 `packaging/linux/capture-target-baseline.sh`，生成当轮 `target-baseline.json` 及摘要。
+- 基线记录发行版 ID/版本/变体/build ID、`amd64/x86_64`、glibc 版本，以及当前 `runtime-depends.txt` 中每项系统依赖的已安装状态和版本；不采集主机名、用户名、IP、序列号或客户凭据。
+- 正式构建缺少基线、基线超过 30 天、依赖契约变化、任一依赖未安装、架构不符或仍使用占位维护人邮箱时必须失败。
+- DEB 内嵌与构建输入逐字节一致的 `target-baseline.json`，`preinst` 再核对目标系统身份、架构和 glibc 下限。包内不捆绑 glibc，也不以复制系统核心库的方式绕过兼容性问题。
+- `packaging/linux/deb/publish-single-deb.sh` 只把经过审计的同一 DEB 字节复制到一个全新客户目录，并验证该目录恰好只有一个文件；摘要和 publication receipt 写入内部证据目录。
+- 只有该 DEB 在对应 Kylin/UOS 真实图形终端完成双击安装、首次配置、真实业务流、关闭、卸载/重装和适用的升级验收后，才能使用“目标机已验证”。
+
+如需支持另一个 Kylin/UOS 版本或不同依赖集合，重新采集、重新构建、重新演练和重新验收，不能从相近品牌或旧截图外推。
+
 ## 4. 四类环境的职责
 
 | 环境 | 负责内容 | 不能据此宣称 |
@@ -53,6 +68,40 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 | 真实国产终端 | 验证系统策略、桌面启动、真实业务链和关闭行为 | 其它未测试发行版也必然兼容 |
 
 ## 5. 标准交付链
+
+### 5.0 冻结维护人身份并采集目标基线
+
+正式构建前必须先完成两个外部输入，缺一项就保持失败，不得使用占位值绕过。
+
+第一项是把已经审批的真实售后身份写入正式源码：
+
+```bash
+cp packaging/linux/approved-maintainer.example.json \
+  packaging/linux/approved-maintainer.json
+# 编辑 maintainer 为真实且已审批的“显示名 <售后邮箱>”，然后纳入正式 main。
+python3 packaging/linux/validate-approved-maintainer.py \
+  --file packaging/linux/approved-maintainer.json \
+  --print
+```
+
+`approved-maintainer.example.json` 故意包含无效占位邮箱，只能作为结构模板。正式文件、构建环境变量、DEB `Maintainer` 和最终 publication receipt 必须逐字一致。
+
+第二项是在待支持的真实 Kylin/UOS x86_64 终端采集基线。把当前正式源码中的以下三个文件按原目录结构复制到临时采集目录：
+
+```text
+packaging/linux/capture-target-baseline.sh
+packaging/linux/target_baseline.py
+packaging/linux/deb/runtime-depends.txt
+```
+
+在目标机用明确的绝对路径执行：
+
+```bash
+/bin/bash -p /绝对路径/packaging/linux/capture-target-baseline.sh \
+  /绝对路径/target-baseline.json
+```
+
+将生成的 `target-baseline.json` 复制回正式发布工作区的 `taijiagent 打包交付/目标基线/target-baseline.json`，并设置为仅当前发布用户可写。采集脚本会同时生成 `.sha256` 便于传输核对；正式门禁以 JSON 的实际 SHA256、依赖契约和最长 30 天时效为准。依赖契约、目标系统或正式源码变化后必须重新采集。
 
 ### 5.1 准备制包机输入包
 
@@ -69,10 +118,11 @@ bash "taijiagent 打包交付/99_本机_准备制包输入包.sh"
 解压输入包后进入 `taijiagent 打包交付/`：
 
 ```bash
+export TAIJI_PACKAGE_MAINTAINER="<与正式源码 approved-maintainer.json 完全一致的真实身份>"
 bash ./00_制包机_生成离线交付包.sh
 ```
 
-只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。看到 DEB 文件但 manifest、报告、离线仓库或 `.build-success` 缺失时仍属于失败。
+只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、离线仓库或 `.build-success` 缺失时仍属于失败。
 
 ### 5.3 在受控发布机执行断网生命周期演练
 
@@ -93,13 +143,14 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 ### 5.4 在真实目标机安装并验收
 
-将完整的 `taijiagent 打包交付/` 目录复制到目标机，而不是只复制 `生成的安装包/`：
+真实验收必须覆盖两条路径，但不能在同一系统状态中混跑：
 
-```bash
-bash ./02_目标终端_安装并验证.sh
-```
+1. **客户单 DEB 路径是 `04` 的前置路径。**在与基线一致、没有 `taiji-agent` dpkg 记录且当前用户没有太极 XDG/Electron 状态的干净图形终端，准备一个只有 manifest 同名候选 DEB 的实体目录。先启动 `验收工具/observe-single-deb-install.py observe`，再关闭全部非 loopback 网络并从文件管理器双击 DEB，由系统图形包安装器完成安装。观察器必须从安装前持续存活到 `install ok installed`。
+2. **内部生命周期路径使用另一个干净环境或另一个恢复点。**完整工作区中的 `02_目标终端_安装并验证.sh` 用于 root staging、本地离线仓库、诊断、升级/同版本重装等验证。不得在准备运行 `04` 的同一目标状态上先执行 `02`，否则安装前观察合同已经失效。
 
-安装链通过后继续执行第 10 节的真实桌面验收。容器中的 `TAIJI_ALLOW_HEADLESS_REHEARSAL=1` 只允许生成非 GUI 演练结果，不能在真实交付报告中替代桌面验收。
+单 DEB 路径的命令、人工见证和首次配置顺序见第 10 节。机器观察记录替代旧的事后自报环境变量；`04` 不接受 `TAIJI_TARGET_INSTALL_METHOD`、`TAIJI_TARGET_INSTALL_NETWORK`、`TAIJI_TARGET_DPKG_STATUS_BEFORE` 或 `TAIJI_TARGET_FIRST_LAUNCH`。
+
+系统无法自动识别“鼠标双击”本身。机器记录只证明同机同启动周期、安装前无包记录、唯一同名同 hash DEB、持续断网、无首次用户状态及 dpkg 迁移；操作员必须另附至少 800x600、chunk/CRC/IHDR 有效的系统图形安装器 PNG，并使用严格确认语句出具人工见证。发布负责人复核这些原始材料后，才可对顶层目标证据签名。
 
 ### 5.5 签名与最终放行
 
@@ -108,8 +159,26 @@ bash ./02_目标终端_安装并验证.sh
 ```bash
 export TAIJI_OFFLINE_REHEARSAL_CHALLENGE="<当轮断网演练原值>"
 export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="<当轮真机验收原值>"
+bash scripts/sign-taiji-release-evidence.sh \
+  "taijiagent 打包交付/offline-install-rehearsal/offline-install-rehearsal.json" \
+  "/受控离线路径/offline-release-private-key.pem"
+bash scripts/sign-taiji-release-evidence.sh \
+  "taijiagent 打包交付/target-verification/target-verification.json" \
+  "/受控离线路径/offline-release-private-key.pem"
 bash scripts/taiji-release-check.sh
 ```
+
+门禁通过后才能生成客户目录；输出目录必须事先不存在，receipt 是内部档案，不交付客户：
+
+```bash
+mkdir -p customer-output internal-release-receipts
+bash packaging/linux/deb/publish-single-deb.sh \
+  --delivery-dir "$PWD/taijiagent 打包交付" \
+  --output-dir "$PWD/customer-output/taiji-agent-linux-amd64" \
+  --receipt-root "$PWD/internal-release-receipts/single-deb"
+```
+
+发布脚本会先快照候选 DEB，再执行正式 `01`、完整 release-check、维护人核对、目标基线核对和双证据绑定；最后原子生成新客户目录并复核其中恰好一个、字节不变的 `.deb`。客户只收到该目录中的 DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
 
 ## 6. 完整离线交付契约
 
@@ -170,6 +239,16 @@ SHA256SUMS.txt
 
 因此 Docker 通过后的最高口径是“离线安装已演练”。
 
+### 7.3 安装、升级与卸载生命周期边界
+
+- `postinst configure` 必须在无图形、无用户 HOME 的 system-only 环境中执行安装态原生校验；脚本权限、Electron `chrome-sandbox` 或 native verify 任一失败都必须返回非零。重复执行 `dpkg --configure taiji-agent` 应可安全重试。
+- 已由 `dpkg` 管理的现有安装直接走 apt/dpkg 原生升级或同版本重装；`02` 不得预先 unhold、purge、强制删除包状态或手工删除 `/opt/taiji-agent`。
+- 没有 `dpkg` 状态但存在旧系统安装时，`02` 仅允许清理固定白名单内的 legacy 路径；用户 XDG 配置、授权、密钥、会话和附件不在清理范围。
+- `prerm` 只能按 `/proc/<pid>/exe` 的物理路径识别 `/opt/taiji-agent/` 所属进程，并在发送 `SIGKILL` 前重新核验，禁止使用 `pkill/pgrep -f`。
+- 普通 remove 不清用户状态；purge 只清理已知的 root-owned、非 symlink 系统状态目录。发现 symlink、非 root owner、mountpoint 或“白名单目录实际是普通文件”的类型不匹配时应保留并告警，不能扩大递归删除范围。`/opt/taiji-agent` 顶层空目录也必须通过目录类型、root owner、非 symlink 和非 mountpoint 门禁后才能 `rmdir`。
+- Debian 的 `postinst` 失败会留下未配置完成状态，并不会自动恢复旧二进制。当前最小方案保证“不预删、可修复后重配”，不得表述成自动回滚；若销售合同要求旧版本自动恢复，需要另行设计旧 DEB 缓存、数据快照和恢复日志。
+- 从含旧 `prerm` 的历史包第一次直接升级时，dpkg 会先执行旧包脚本；新包无法追溯消除旧脚本行为。真实升级验收必须专门覆盖这一首跳边界。
+
 ## 8. 已确认故障经验矩阵
 
 下表只记录本轮已经出现的真实失败，或已由针对性负向测试证明的高风险缺口。未验证猜测不得升级为长期规则。
@@ -189,7 +268,8 @@ SHA256SUMS.txt
 | 核心代码执行测试批量返回 `capability_blocked` | 产品默认 restricted 是正确策略，但沙箱机制测试没有显式进入受控 full profile，导致根本未执行被测逻辑 | 机制测试 fixture 显式设置 full；默认拒绝、显式授权和失败关闭继续由独立安全套件验证 | 代码执行机制 131 项通过、3 项平台预期跳过；安全/授权相关 80/80 | 只调整测试前置条件，不放宽产品默认安全模式 |
 | `--network none` 被未启用的 tunnel 设备误报；sudo 提示 hostname 解析失败 | 只按网络节点存在判断；容器 hostname 未进入本地 hosts | 只拒绝启用链路、全局地址和非 loopback route；sudo 前确保本地 hostname 解析 | Docker inspect、网络负向测试和结构化会话记录 | 历史候选 `1d56849a` 已完成断网三阶段；后续源码提交仍须重跑 |
 | 无图形容器执行安装后可能被误写成目标机成功 | CLI 和包状态不能证明 Electron/UKUI | 无图形会话默认失败；仅显式 headless rehearsal 可继续，并强制 `desktop_app_verified=false`、`target_verified=false` | release gate 分开验证离线证据与真机证据 | 目标机仍必须执行 `04` |
-| 普通用户交付目录通过校验后、sudo 安装前可被替换 | 用户可写源文件存在 TOCTOU 窗口 | 复制到 root-owned `/var/tmp` staging 后重校验，再 purge/install | 拒绝 symlink、hardlink、路径穿越、未列入仓库文件和中途替换 | 安装脚本仿真与负向测试覆盖 |
+| 普通用户交付目录通过校验后、sudo 安装前可被替换 | 用户可写源文件存在 TOCTOU 窗口 | 复制到 root-owned `/var/tmp` staging 后重校验，再走原生 install/upgrade | 拒绝 symlink、hardlink、路径穿越、未列入仓库文件和中途替换 | 安装脚本仿真与负向测试覆盖 |
+| purge 白名单路径被替换为普通文件，或顶层 `/opt/taiji-agent` 绕过安全门禁直接 `rmdir` | 旧脚本把“路径在白名单”误当成“对象类型和身份已可信” | 目录类型不匹配一律保留告警；顶层空目录复用 owner/symlink/mountpoint/type 安全门禁 | 动态执行 ordinary remove、安全 purge、symlink、非 root owner、mountpoint、类型不匹配和顶层目录场景 | 当前只是脚本级动态回归，最终仍需当前制品的断网演练与真实目标机验收 |
 | 并发首次初始化偶发 `Template registry lock not found`，制包 `npm test` 中断 | 旧 regular-file lock 在 owner 内容完整前已经公开；等待者可能看到空锁、消失锁或错误代锁 | 使用 candidate directory 写完整 owner 后原子发布；owner 绑定 generation token；release/stale 通过 tombstone 隔离 | 多进程初始化、旧 owner 不能释放新代、延迟 stale reaper 不能隔离新代、压力测试 | 源码与 Ubuntu 聚焦测试已通过；最终仍以当前 manifest 和证据为准 |
 | `uv --locked` 提示 lockfile 需要更新 | Linux resolver 发现源码 lock 漂移 | 只在受控制包工作区按策略自动非 locked 重试，并写入构建报告 | Python relocation/import、payload audit；严格发布可显式使用 strict 模式 | fallback 是受控告警，不应被描述为 lock 已修复 |
 
@@ -238,7 +318,7 @@ PID 复用时应优先安全超时，不得删除可能属于新进程的锁。�
 
 ## 10. 真实 Kylin/UOS App 最终验收
 
-### 10.1 安装前事实采集
+### 10.1 干净单 DEB 验收机与 challenge
 
 ```bash
 cat /etc/os-release
@@ -249,23 +329,55 @@ command -v apt-get apt-cache dpkg systemctl sudo
 printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\n' "${DISPLAY:-}" "${WAYLAND_DISPLAY:-}"
 ```
 
-同时确认磁盘、内存、桌面类型、管理员能力、kysec/杀软/白名单策略和模型访问条件。
-
-### 10.2 安装态检查
+同时确认磁盘、内存、桌面类型、管理员能力、kysec/杀软/白名单策略和模型访问条件。该环境不得先执行 `02`；生命周期验收应使用另一个 VM/快照/终端。候选目录只能有 manifest 指定 basename 的单个 DEB。
 
 ```bash
-bash ./02_目标终端_安装并验证.sh
-/opt/taiji-agent/bin/taiji-native-verify
-taiji --help
-bash ./03_目标终端_导出诊断报告.sh
+export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="$(openssl rand -hex 32)"
+export TAIJI_SINGLE_DEB_CUSTOMER_DIR="/只有manifest同名候选DEB的绝对目录"
+export TAIJI_INSTALL_EVIDENCE_DIR="$PWD/install-observation-$TAIJI_TARGET_ACCEPTANCE_CHALLENGE"
+mkdir -m 0700 "$TAIJI_INSTALL_EVIDENCE_DIR"
 ```
 
-### 10.3 真实 Electron 自动验收
+challenge 必须由发布负责人当轮生成并保存；安装观察、人工见证、App 驱动、签名和最终 release-check 必须复用同一值。
 
-在 App 内先配置可用真实模型。完全隔离终端需要可访问的本地或内网模型：
+### 10.2 安装前启动观察器，再由图形安装器安装
+
+在终端 A 执行并保持进程运行：
 
 ```bash
-export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="<64 位小写十六进制 challenge>"
+/usr/bin/python3 -B ./验收工具/observe-single-deb-install.py observe \
+  --customer-dir "$TAIJI_SINGLE_DEB_CUSTOMER_DIR" \
+  --manifest "$PWD/生成的安装包/taiji-package-manifest.json" \
+  --challenge "$TAIJI_TARGET_ACCEPTANCE_CHALLENGE" \
+  --output-dir "$TAIJI_INSTALL_EVIDENCE_DIR"
+```
+
+观察器会自动拒绝：启动时已存在 dpkg 状态、候选 basename/hash 不符、目录或文件被替换、当前用户已有太极状态、机器/boot 改变、任一采样发现非 loopback 网络，或未观察到 absent→installed。终端 B 保持断网，从文件管理器双击唯一 DEB，并使用系统图形包安装器完成安装；等待终端 A 正常结束。
+
+保存完整系统安装器成功画面的有效 PNG（至少 800x600），再由现场操作员生成范围明确的人工见证：
+
+```bash
+/usr/bin/python3 -B ./验收工具/observe-single-deb-install.py attest \
+  --observation "$TAIJI_INSTALL_EVIDENCE_DIR/single-deb-install-observation.json" \
+  --graphical-evidence "/绝对路径/系统图形安装器成功界面.png" \
+  --challenge "$TAIJI_TARGET_ACCEPTANCE_CHALLENGE" \
+  --operator-id "<受控操作员编号>" \
+  --confirmation "I-observed-desktop-double-click-and-system-installer" \
+  --output-dir "$TAIJI_INSTALL_EVIDENCE_DIR"
+```
+
+`installation_method_machine_observed=false` 是固定事实：人工见证不能包装成机器检测。最终真实性由发布负责人结合 PNG 和现场记录复核，并通过顶层 evidence detached signature 承担。
+
+### 10.3 由真实 Electron 验收驱动完成可见首次配置
+
+安装完成后不要先手工启动 App，否则“驱动从首次配置开始”的证据合同失效。可按现场策略恢复批准的本地/内网模型访问，并通过受控环境为验收进程提供已批准的真实 Provider 凭据；凭据不得写入脚本、命令历史、安装包或证据目录。驱动会自行启动安装态 Electron，必须先观察到可见首次配置工作台，再通过真实可点击控件完成授权、模型、工作区和安全策略检查。不得使用 Escape、关闭覆盖层或直接调用完成 API 跳过。
+
+随后执行：
+
+```bash
+export TAIJI_SINGLE_DEB_INSTALL_OBSERVATION="$TAIJI_INSTALL_EVIDENCE_DIR/single-deb-install-observation.json"
+export TAIJI_SINGLE_DEB_METHOD_ATTESTATION="$TAIJI_INSTALL_EVIDENCE_DIR/single-deb-install-method-attestation.json"
+export TAIJI_SINGLE_DEB_GRAPHICAL_INSTALLER_EVIDENCE="$TAIJI_INSTALL_EVIDENCE_DIR/single-deb-graphical-installer.png"
 bash ./04_目标终端_桌面App验收并导出证据.sh
 ```
 
@@ -277,7 +389,9 @@ bash ./04_目标终端_桌面App验收并导出证据.sh
 - 真实模型完成 challenge 绑定的附件对话。
 - 支持包从用户可见入口导出。
 - 关闭窗口后 Electron、Agent、WebUI 进程和端口退出。
-- `target-verification/` 中的 JSON、截图、支持包和 driver result 摘要互相绑定。
+- 观察器证明首次启动前用户状态为空；驱动证明同一验收会话从可见工作台开始，并在服务端确认 `completed=true` 且 preflight 全部就绪后才继续；二者组合支持 `first_configuration_cycle_completed=true`。
+- 软件采样和文件摘要用于受控现场追溯，不是 TPM/远程证明；恶意 root 管理员不在本证据链的可对抗威胁模型内。
+- `target-verification/` 中的机器观察、人工见证、图形安装器 PNG、App JSON/截图、支持包和 driver result 摘要互相绑定。
 
 ### 10.4 人工业务复核
 
@@ -286,6 +400,8 @@ bash ./04_目标终端_桌面App验收并导出证据.sh
 - 图片能力按当前模型配置给出真实结果或明确能力不足提示。
 - 若交付包含 DOCX 结果，使用目标环境的 WPS/Word 完成人工视觉检查。
 - 卸载、同版本重装、旧版升级和异常中断恢复按本次交付范围分别验收。
+
+`02_目标终端_安装并验证.sh` 的内部生命周期检查在独立环境执行；不要在上述 `04` 单 DEB 安装观察之前运行。最终客户目录由 publisher 在双签名门禁后生成，允许受控加入 profile_id 到 basename，但输出 DEB 必须与本节已验收内部候选逐字节、SHA256 完全一致，receipt 同时绑定两端名称与摘要。
 
 ## 11. 一次性诊断包流程
 

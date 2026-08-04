@@ -1,8 +1,37 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Print a redacted Taiji Agent runtime diagnostic report.
 set -euo pipefail
 
-APP_ROOT="${TAIJI_AGENT_ROOT:-/opt/taiji-agent}"
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+_taiji_unset_args=()
+while IFS= read -r -d '' _taiji_env_entry; do
+  _taiji_env_name="${_taiji_env_entry%%=*}"
+  case "$_taiji_env_name" in
+    PYTHON* | NODE_* | LD_* | DYLD_* | BASH_FUNC_* | \
+    BASH_ENV | ENV | SHELLOPTS | BASHOPTS | CDPATH | GLOBIGNORE | IFS | \
+    PROMPT_COMMAND | RUBYOPT | RUBYLIB | PERL5OPT | PERL5LIB | \
+    JAVA_TOOL_OPTIONS | CLASSPATH | LUA_PATH | LUA_CPATH | \
+    ELECTRON_RUN_AS_NODE | \
+    TAIJI_AGENT_ROOT | TAIJI_AGENT_AGENT_DIR | TAIJI_AGENT_WEBUI_DIR | \
+    TAIJI_AGENT_PYTHON | TAIJI_WEBUI_PYTHON | TAIJI_WEBUI_AGENT_DIR | \
+    TAIJI_AGENT_RUNTIME_ENV | TAIJI_AGENT_ENV_FILE | TAIJI_AGENT_HOME | \
+    TAIJI_AGENT_USE_USER_DIRS | TAIJI_PYTHON | TAIJI_LAUNCH_PROFILE | \
+    TAIJI_RELEASE_* | TAIJI_SOURCE_* | \
+    AGENT_DIR | WEBUI_DIR | LAB_DIR | SCRIPT_DIR | RUNTIME_ENV)
+      _taiji_unset_args+=("-u" "$_taiji_env_name")
+      ;;
+  esac
+done < <(/usr/bin/env -0)
+if [ "${#_taiji_unset_args[@]}" -gt 0 ]; then
+  exec /usr/bin/env "${_taiji_unset_args[@]}" \
+    PATH="$PATH" \
+    /bin/bash --noprofile --norc -p "$0" "$@"
+fi
+unset _taiji_unset_args _taiji_env_entry _taiji_env_name
+
+APP_ROOT="/opt/taiji-agent"
 DIAGNOSE="$APP_ROOT/scripts/taiji-agent-diagnose"
 
 if [ ! -x "$DIAGNOSE" ]; then
@@ -10,6 +39,8 @@ if [ ! -x "$DIAGNOSE" ]; then
   exit 1
 fi
 
-export TAIJI_AGENT_ROOT="$APP_ROOT"
-export TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"
-exec "$DIAGNOSE" "$@"
+TAIJI_LAUNCH_PROFILE="installed-production"
+TAIJI_AGENT_ROOT="$APP_ROOT"
+TAIJI_AGENT_USE_USER_DIRS="1"
+export TAIJI_LAUNCH_PROFILE TAIJI_AGENT_ROOT TAIJI_AGENT_USE_USER_DIRS
+exec /bin/bash --noprofile --norc -p "$DIAGNOSE" "$@"

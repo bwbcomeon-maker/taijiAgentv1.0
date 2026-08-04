@@ -17,7 +17,7 @@ const ManagedDialog=(()=>{
   }
 
   function _canFocus(node){
-    return !!(node&&typeof node.focus==='function'&&!node.disabled&&node.getAttribute('aria-hidden')!=='true');
+    return !!(node&&typeof node.focus==='function'&&!node.disabled&&!node.hidden&&!node.closest('[hidden]')&&node.getAttribute('aria-hidden')!=='true');
   }
 
   function _focusable(root){
