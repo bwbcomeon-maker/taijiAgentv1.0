@@ -198,6 +198,25 @@ def _markdown_section_body(markdown: str, heading: str) -> str:
     return ""
 
 
+def _contains_exact_statement(text: object, statement: object) -> bool:
+    """Match the declared claim text exactly after Unicode/whitespace normalization."""
+
+    normalized_text = re.sub(
+        r"\s+", " ", unicodedata.normalize("NFKC", str(text or ""))
+    ).strip()
+    normalized_statement = re.sub(
+        r"\s+", " ", unicodedata.normalize("NFKC", str(statement or ""))
+    ).strip()
+    if not normalized_statement:
+        return False
+    prefix = r"(?<!\w)" if re.match(r"\w", normalized_statement[0]) else ""
+    suffix = r"(?!\w)" if re.match(r"\w", normalized_statement[-1]) else ""
+    return re.search(
+        prefix + re.escape(normalized_statement) + suffix,
+        normalized_text,
+    ) is not None
+
+
 def _source_anchor_fingerprints(source_context: dict | None) -> list[str]:
     """Extract deterministic high-signal literals without persisting source text."""
 
@@ -431,6 +450,10 @@ def _research_citation_result(
             "required_claim_count": 0,
             "validated_claim_count": 0,
         }, []
+    v2 = (
+        isinstance(brief.get("source_policy"), dict)
+        and brief["source_policy"].get("mode") == "automatic_fallback"
+    )
     evidence = next(
         (
             item
@@ -482,8 +505,13 @@ def _research_citation_result(
         for item in usage_rows
         if str(item.get("claim_id") or "").strip()
     }
-    available_source_ids = {
-        str(source.get("source_id") or "").strip()
+    outline_headings = {
+        str(section.get("section_id") or "").strip(): str(section.get("heading") or "").strip()
+        for section in ((outline or {}).get("payload") or {}).get("sections") or []
+        if isinstance(section, dict) and str(section.get("section_id") or "").strip()
+    }
+    available_sources = {
+        str(source.get("source_id") or "").strip(): source
         for source in (
             source_context.get("sources")
             if isinstance(source_context, dict)
@@ -492,6 +520,7 @@ def _research_citation_result(
         )
         if isinstance(source, dict) and str(source.get("source_id") or "").strip()
     }
+    available_source_ids = set(available_sources)
     if not _source_ref_is_bound(
         {"input_refs": []},
         approved_artifacts,
@@ -526,6 +555,53 @@ def _research_citation_result(
             )
         )
     validated_claim_ids = set()
+    model_usage_by_section = {}
+    non_model_usage_sections = set()
+    if v2:
+        for claim_id, usage in usage_by_claim.items():
+            claim = evidence_claims.get(claim_id)
+            if not isinstance(claim, dict):
+                continue
+            section_id = str(usage.get("section_id") or "").strip()
+            if claim.get("origin_tier") == "model_knowledge":
+                model_usage_by_section.setdefault(section_id, []).append(claim_id)
+            else:
+                non_model_usage_sections.add(section_id)
+        for section_id, model_claim_ids in model_usage_by_section.items():
+            heading = outline_headings.get(section_id, "")
+            body = _markdown_section_body(markdown, heading) if heading else ""
+            if body.count("模型知识·未核验") != len(model_claim_ids):
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_label_count_mismatch",
+                        f"section:{section_id}",
+                        "每个模型知识 claim 都必须在所属章节独立标注为未核验",
+                    )
+                )
+            if section_id in non_model_usage_sections:
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_section_not_isolated",
+                        f"section:{section_id}",
+                        "模型知识 claim 不得与可引用的公网或本地 claim 共用章节",
+                    )
+                )
+            if re.search(
+                r"https?://|\bwww\.\S+|\[\^[^\]]+\]"
+                r"|\[[A-Za-z][A-Za-z0-9._:-]*\]"
+                r"|(?:\[|【|（)\s*\d+\s*(?:\]|】|）)"
+                r"|(?:\[|【|（)[^\]】）]*(?:来源|资料|参考|source|ref)[^\]】）]*(?:\]|】|）)"
+                r"|脚注\s*[0-9一二三四五六七八九十]+",
+                body,
+                re.I,
+            ):
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_citation_forbidden",
+                        f"section:{section_id}",
+                        "含模型知识 claim 的章节不得包含来源标记、URL 或脚注",
+                    )
+                )
     for claim_id, usage in usage_by_claim.items():
         claim = evidence_claims.get(claim_id)
         if claim is None:
@@ -538,6 +614,58 @@ def _research_citation_result(
             )
             continue
         marker = str(usage.get("citation_marker") or "").strip()
+        origin_tier = str(claim.get("origin_tier") or "").strip()
+        if v2 and origin_tier == "model_knowledge":
+            if (
+                marker not in {"", "模型知识·未核验"}
+                or claim.get("evidence")
+                or claim.get("status") == "verified"
+            ):
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_citation_forbidden",
+                        f"claim:{claim_id}",
+                        "模型知识 claim 不得绑定来源、引用标记或已核验状态",
+                    )
+                )
+                continue
+            section_heading = outline_headings.get(str(usage.get("section_id") or "").strip(), "")
+            section_body = _markdown_section_body(markdown, section_heading) if section_heading else ""
+            if "模型知识·未核验" not in section_body:
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_label_missing",
+                        f"claim:{claim_id}",
+                        "模型知识内容未在正文明示为未核验",
+                    )
+                )
+                continue
+            statement = str(claim.get("statement") or "").strip()
+            appears_in_declared_section = _contains_exact_statement(
+                section_body,
+                statement,
+            )
+            appears_in_citable_section = any(
+                _contains_exact_statement(
+                    _markdown_section_body(markdown, outline_headings.get(other_section_id, "")),
+                    statement,
+                )
+                for other_section_id in non_model_usage_sections
+                if other_section_id != str(usage.get("section_id") or "").strip()
+                and outline_headings.get(other_section_id, "")
+            )
+            if not appears_in_declared_section or appears_in_citable_section:
+                issues.append(
+                    _semantic_issue(
+                        "model_knowledge_statement_section_mismatch",
+                        f"claim:{claim_id}",
+                        "模型知识 claim 的原声明必须仅出现在其声明章节，不得出现在可引用 claim 章节",
+                    )
+                )
+                continue
+            if claim_id in required_claim_ids:
+                validated_claim_ids.add(claim_id)
+            continue
         marker_tokens = set(
             re.findall(r"[A-Za-z0-9][A-Za-z0-9._:-]*", marker)
         )
@@ -548,6 +676,16 @@ def _research_citation_result(
             and str(claim.get("status") or "") == "verified"
             and str(ref.get("relationship") or "") in {"supports", "context"}
             and str(ref.get("source_id") or "").strip() in available_source_ids
+            and (
+                not v2
+                or origin_tier not in {"public_web", "local_knowledge"}
+                or available_sources[str(ref.get("source_id") or "").strip()].get("kind")
+                == (
+                    "approved_public"
+                    if origin_tier == "public_web"
+                    else "approved_internal"
+                )
+            )
         }
         valid_marker = bool(marker_tokens & allowed_source_ids)
         marker_present = bool(marker and marker in markdown)
@@ -569,6 +707,63 @@ def _research_citation_result(
             )
         if valid_marker and marker_present and claim_id in required_claim_ids:
             validated_claim_ids.add(claim_id)
+    required_claims = [
+        evidence_claims[claim_id]
+        for claim_id in required_claim_ids
+        if claim_id in evidence_claims
+    ]
+    model_only = bool(required_claims) and all(
+        claim.get("origin_tier") == "model_knowledge"
+        for claim in required_claims
+    )
+    has_model_knowledge = any(
+        claim.get("origin_tier") == "model_knowledge"
+        for claim in required_claims
+    )
+    if v2 and has_model_knowledge:
+        time_basis = ((evidence or {}).get("payload") or {}).get(
+            "model_knowledge_time_basis"
+        )
+        expected_time_label = (
+            str(time_basis.get("label") or "").strip()
+            if isinstance(time_basis, dict)
+            else ""
+        ) or "模型知识时效未知"
+        if expected_time_label not in markdown:
+            issues.append(
+                _semantic_issue(
+                    "model_knowledge_time_basis_missing",
+                    "model-knowledge:time-basis",
+                    "报告未按可信元数据声明模型知识时效",
+                )
+            )
+    if v2 and model_only:
+        match = re.search(
+            r"(?ms)^##\s+引用\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+            markdown,
+        )
+        reference_body = match.group("body").strip() if match else ""
+        if not reference_body:
+            issues.append(
+                _semantic_issue(
+                    "model_only_reference_section_empty",
+                    "section:引用",
+                    "纯模型知识报告的引用章节必须说明无可核验外部来源",
+                )
+            )
+        elif re.search(
+            r"https?://|\[\^[^\]]+\]|\[[A-Za-z][A-Za-z0-9._:-]*\]"
+            r"|\[[^\]]*来源[^\]]*\]|【[^】]*来源[^】]*】|脚注\s*[0-9一二三四五六七八九十]+",
+            markdown,
+            re.I,
+        ):
+            issues.append(
+                _semantic_issue(
+                    "model_knowledge_citation_forbidden",
+                    "section:引用",
+                    "纯模型知识报告不得伪造 URL、脚注或 source_id",
+                )
+            )
     return {
         "status": "passed" if not issues else "failed",
         "required_claim_count": len(required_claim_ids),

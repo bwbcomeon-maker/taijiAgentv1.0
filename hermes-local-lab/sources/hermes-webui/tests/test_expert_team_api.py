@@ -153,7 +153,7 @@ def test_catalog_defaults_to_office_material_teams_only():
     assert "通知通报" in payload
 
 
-def test_catalog_keeps_only_task_boundary_questions_without_supplemental_material_prompts():
+def test_catalog_keeps_content_boundaries_and_has_no_fixed_research_questionnaire():
     from api import expert_teams
 
     teams = {team["id"]: team for team in expert_teams.expert_team_catalog()["teams"]}
@@ -162,8 +162,7 @@ def test_catalog_keeps_only_task_boundary_questions_without_supplemental_materia
 
     assert [question["id"] for question in content_questions] == ["topic", "audience", "boundary"]
     assert content_questions[-1]["title"] == "有哪些口径要求、篇幅或表述边界？"
-    assert [question["id"] for question in research_questions] == ["research_topic", "audience_goal", "source_boundary"]
-    assert research_questions[-1]["title"] == "研究范围、案例偏好或需要避开的边界是什么？"
+    assert research_questions == []
     questions_json = json.dumps([content_questions, research_questions], ensure_ascii=False)
     assert "补充材料" not in questions_json
     assert "补充资料" not in questions_json
@@ -198,7 +197,7 @@ def test_start_run_uses_collecting_required_presentation(tmp_path):
     assert run["tasks"][0]["title"] == "专家团计划"
 
 
-def test_required_complete_moves_to_collecting_optional_not_generating(tmp_path):
+def test_required_complete_moves_directly_to_ready_without_optional_questions(tmp_path):
     from api import expert_teams
 
     run = expert_teams.start_expert_team(
@@ -207,46 +206,38 @@ def test_required_complete_moves_to_collecting_optional_not_generating(tmp_path)
     )
     updated = _answer_all_required(expert_teams, tmp_path, run)
 
-    assert updated["workflow_state"] == "collecting_optional"
+    assert updated["workflow_state"] == "ready_to_generate"
     assert updated["status"] == "awaiting_user"
     assert updated["execution_status"] == "idle"
-    assert updated["view"]["presentation"]["state"] == "collecting_optional"
-    assert updated["view"]["presentation"]["primary_action"]["id"] == "answer_optional"
+    assert updated["view"]["presentation"]["state"] == "ready_to_generate"
+    assert updated["view"]["presentation"]["primary_action"]["id"] == "start_generation"
+    assert all(question["id"] != "optional_context" for question in updated["questions"])
 
 
-def test_optional_skip_is_the_only_empty_answer_that_starts_generation(tmp_path):
+def test_legacy_optional_context_answer_does_not_restore_removed_question_or_start_runtime(tmp_path):
     from api import expert_teams
 
     run = expert_teams.start_expert_team(
         tmp_path,
         {"session_id": "sid-skip", "team_id": "content-creator-team", "prompt": "帮我起草工作汇报"},
     )
-    pending_optional = _answer_all_required(expert_teams, tmp_path, run)
+    ready = _answer_all_required(expert_teams, tmp_path, run)
 
-    still_pending = _answer(
+    unchanged = _answer(
         expert_teams,
         tmp_path,
-        pending_optional,
-        answers={"optional_context": ""},
-        key="optional-empty",
-    )
-    assert still_pending["workflow_state"] == "collecting_optional"
-    assert still_pending["questions"][-1]["status"] == "pending"
-
-    ready = _answer(
-        expert_teams,
-        tmp_path,
-        still_pending,
+        ready,
         answers={"optional_context": ""},
         skip_optional=True,
-        key="optional-skip",
+        key="legacy-optional-empty",
     )
-    assert ready["workflow_state"] == "ready_to_generate"
-    assert ready["status"] == "awaiting_user"
-    assert ready["execution_status"] == "idle"
-    assert ready["questions"][-1]["status"] == "skipped"
-    assert ready["view"]["presentation"]["state"] == "ready_to_generate"
-    assert ready["view"]["presentation"]["primary_action"]["id"] == "start_generation"
+    assert unchanged["workflow_state"] == "ready_to_generate"
+    assert unchanged["status"] == "awaiting_user"
+    assert unchanged["execution_status"] == "idle"
+    assert unchanged.get("execution_runtime_run_id") in {None, ""}
+    assert all(question["id"] != "optional_context" for question in unchanged["questions"])
+    assert unchanged["view"]["presentation"]["state"] == "ready_to_generate"
+    assert unchanged["view"]["presentation"]["primary_action"]["id"] == "start_generation"
 
 
 def test_generating_presentation_has_single_running_state(tmp_path):

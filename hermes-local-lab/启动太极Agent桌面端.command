@@ -11,6 +11,14 @@ APP_DIR="$REPO_DIR/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 SOURCE_GATE="$REPO_DIR/scripts/check-clean-worktree.sh"
 TAIJI_SOURCE_ROOT="$REPO_DIR"
+if [ -z "${TAIJI_AGENT_PYTHON:-}" ]; then
+  if [ -x "$LAB_DIR/sources/hermes-agent/venv/bin/python" ]; then
+    TAIJI_AGENT_PYTHON="$LAB_DIR/sources/hermes-agent/venv/bin/python"
+  else
+    TAIJI_AGENT_PYTHON="$LAB_DIR/sources/hermes-agent/.venv/bin/python"
+  fi
+fi
+TAIJI_WEBUI_PYTHON="${TAIJI_WEBUI_PYTHON:-$TAIJI_AGENT_PYTHON}"
 SOURCE_INSTANCE_ID="$(
   printf '%s' "$TAIJI_SOURCE_ROOT" \
     | /usr/bin/shasum -a 256 \
@@ -76,6 +84,8 @@ export XDG_STATE_HOME
 export TAIJI_RUNTIME_HOME
 export TAIJI_WORKSPACE
 export TAIJI_AGENT_TMP_DIR
+export TAIJI_AGENT_PYTHON
+export TAIJI_WEBUI_PYTHON
 export TMPDIR="$TAIJI_AGENT_TMP_DIR"
 export TMP="$TAIJI_AGENT_TMP_DIR"
 export TEMP="$TAIJI_AGENT_TMP_DIR"

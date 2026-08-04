@@ -4,6 +4,40 @@ import json
 import pytest
 
 
+def test_provider_source_projection_is_bounded_and_does_not_duplicate_full_text():
+    from api.expert_teams.prompts import _provider_source_context_projection
+
+    segment_text = "证据" * 2000
+    segments = [
+        {
+            "segment_id": f"SRC-1:SEG-{index:04d}",
+            "char_start": (index - 1) * len(segment_text),
+            "char_end": index * len(segment_text),
+            "locator": f"local://source#segment={index}",
+            "text": segment_text,
+            "text_sha256": "a" * 64,
+        }
+        for index in range(1, 40)
+    ]
+    snapshot = {
+        "snapshot_id": "source-context-0001",
+        "sources": [
+            {
+                "source_id": "SRC-1",
+                "content_sha256": "b" * 64,
+                "content_text": segment_text * 39,
+                "segments": segments,
+            }
+        ],
+    }
+
+    projected = _provider_source_context_projection(snapshot)
+    source = projected["sources"][0]
+    assert "content_text" not in source
+    assert sum(len(item["text"]) for item in source["segments"]) <= 24_000
+    assert source["provider_projection_truncated"] is True
+
+
 def test_local_source_is_hashed_from_original_bytes_and_locator_is_sanitized(tmp_path):
     from api.expert_teams.source_registry import resolve_source_registry
 
@@ -167,6 +201,52 @@ def test_execution_rejects_missing_modified_or_symlinked_snapshot(tmp_path):
     with pytest.raises(ValueError, match="missing or unsafe"):
         verify_source_context_snapshot(tmp_path, run)
 
+
+def test_research_snapshot_identity_does_not_overwrite_launch_snapshot(tmp_path):
+    from api.expert_teams.contracts import brief_digest
+    from api.expert_teams.source_context import (
+        build_research_source_context_snapshot,
+        build_source_context_snapshot,
+    )
+
+    brief = {
+        "schema_version": "document-brief/v1",
+        "status": "confirmed",
+        "revision": 1,
+        "confirmed_revision": 1,
+        "confirmed_at": "2026-08-03T10:00:00+08:00",
+        "confirmed_sha256": "",
+        "source_policy": {"source_refs": []},
+    }
+    brief["confirmed_sha256"] = brief_digest(brief)
+    launch_ref = build_source_context_snapshot(
+        tmp_path,
+        "et-research-snapshot",
+        brief,
+        {},
+        brief_sha256=brief["confirmed_sha256"],
+        brief_revision=1,
+        allow_empty=True,
+    )
+    research_ref = build_research_source_context_snapshot(
+        tmp_path,
+        {
+            "run_id": "et-research-snapshot",
+            "launch_profile_id": "research-report",
+            "team_id": "deep-research-team",
+            "product_mode": "standalone",
+            "launch_profile_snapshot": {"research_contract_version": "research-report/v2"},
+            "current_stage": {"task_id": "research"},
+            "document_brief": brief,
+        },
+        {},
+        [],
+        retrieval_fingerprint="0123456789abcdef" * 4,
+    )
+
+    assert launch_ref["snapshot_id"] == "source-context-0001"
+    assert research_ref["snapshot_id"] == "research-evidence-0123456789abcdef01234567"
+    assert launch_ref["relative_path"] != research_ref["relative_path"]
 
 def test_materials_prompt_consumes_verified_real_segments_and_binds_snapshot(tmp_path):
     from api.expert_teams.prompts import build_stage_gateway_request

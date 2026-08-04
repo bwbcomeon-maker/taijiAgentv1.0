@@ -92,6 +92,15 @@ def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool
     minimum_ready = requirement.get("minimum_ready") if isinstance(requirement, dict) else None
     source_policy = candidate.get("source_policy")
     profile_review = profile.get("review_policy")
+    research_v2 = bool(
+        profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("team_id") or "") == "deep-research-team"
+        and str(candidate.get("document_type") or "") == "research_report"
+        and isinstance(source_policy, dict)
+        and source_policy.get("mode") == "automatic_fallback"
+        and source_policy.get("unknown_fact_action") == "block_final"
+    )
     return bool(
         type(run.get("schema_version")) is int
         and run.get("schema_version") == 3
@@ -103,11 +112,28 @@ def allows_empty_source_context(run: dict, *, brief: dict | None = None) -> bool
         and str(profile.get("document_type") or "") == str(candidate.get("document_type") or "")
         and isinstance(profile_review, dict)
         and profile_review.get("kind") == "local_confirmation"
-        and type(minimum_ready) is int
-        and minimum_ready == 0
-        and isinstance(source_policy, dict)
-        and source_policy.get("unknown_fact_action") == "allow_labeled_placeholder"
+        and (
+            research_v2
+            or (
+                type(minimum_ready) is int
+                and minimum_ready == 0
+                and isinstance(source_policy, dict)
+                and source_policy.get("unknown_fact_action")
+                == "allow_labeled_placeholder"
+            )
+        )
     )
+
+
+def _trusted_provider_metadata(context: dict | None) -> dict:
+    if context is None:
+        return {"knowledge_cutoff_date": None}
+    from api.runtime_adapter import validate_strict_provider_context
+
+    validated = validate_strict_provider_context(context)
+    metadata = validated.get("trusted_provider_metadata")
+    cutoff = metadata.get("knowledge_cutoff_date") if isinstance(metadata, dict) else None
+    return {"knowledge_cutoff_date": cutoff if isinstance(cutoff, str) else None}
 
 
 def _build_source_context_snapshot(
@@ -120,6 +146,8 @@ def _build_source_context_snapshot(
     brief_revision: int,
     extractor_identity: dict | None = None,
     allow_empty: bool = False,
+    snapshot_id: str | None = None,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     root = Path(workspace).expanduser().resolve()
     safe_run_id = _safe_id(run_id, "run id")
@@ -138,6 +166,8 @@ def _build_source_context_snapshot(
         if not isinstance(entry, dict) or entry.get("status") != "ready":
             raise SourceContextError(f"source is not ready: {source_id}")
         locator = str(entry.get("locator") or "").strip()
+        origin_locator = str(entry.get("origin_locator") or "").strip()
+        retrieved_at = str(entry.get("retrieved_at") or "").strip()
         unresolved = root / locator
         if unresolved.is_symlink():
             raise SourceContextError(f"source symlink is forbidden: {source_id}")
@@ -162,15 +192,19 @@ def _build_source_context_snapshot(
                 "kind": str(entry.get("kind") or ""),
                 "label": str(entry.get("label") or ""),
                 "locator": locator,
+                **({"origin_locator": origin_locator, "retrieved_at": retrieved_at} if origin_locator else {}),
                 "content_sha256": digest,
                 "content_text": text,
-                "segments": _segments(source_id, locator, text),
+                "segments": _segments(source_id, origin_locator or locator, text),
             }
         )
     if not sources and not allow_empty:
         raise SourceContextError("source snapshot has no sources")
 
-    snapshot_id = f"source-context-{int(brief_revision):04d}"
+    snapshot_id = _safe_id(
+        snapshot_id or f"source-context-{int(brief_revision):04d}",
+        "snapshot id",
+    )
     payload = {
         "schema_version": SOURCE_CONTEXT_SCHEMA,
         "snapshot_id": snapshot_id,
@@ -178,6 +212,9 @@ def _build_source_context_snapshot(
         "brief_revision": int(brief_revision),
         "brief_sha256": str(brief_sha256),
         "extractor_identity": identity,
+        "trusted_provider_metadata": _trusted_provider_metadata(
+            trusted_provider_context
+        ),
         "sources": sources,
     }
     payload["snapshot_sha256"] = _snapshot_digest(payload)
@@ -223,6 +260,7 @@ def build_source_context_snapshot(
     brief_revision: int,
     extractor_identity: dict | None = None,
     allow_empty: bool = False,
+    trusted_provider_context: dict | None = None,
 ) -> dict:
     """Build a snapshot while projecting filesystem failures as contract errors."""
     try:
@@ -235,6 +273,61 @@ def build_source_context_snapshot(
             brief_revision=brief_revision,
             extractor_identity=extractor_identity,
             allow_empty=allow_empty,
+            trusted_provider_context=trusted_provider_context,
+        )
+    except SourceContextError:
+        raise
+    except OSError as exc:
+        raise SourceContextError("source snapshot I/O failed") from exc
+
+
+def build_research_source_context_snapshot(
+    workspace: Path,
+    run: dict,
+    source_registry: dict,
+    source_refs: list[dict],
+    *,
+    retrieval_fingerprint: str,
+    trusted_provider_context: dict | None = None,
+) -> dict:
+    """Build the post-retrieval snapshot only for an authoritative v2 research Run."""
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    fingerprint = str(retrieval_fingerprint or "")
+    if (
+        profile.get("research_contract_version") != "research-report/v2"
+        or str(run.get("launch_profile_id") or "") != "research-report"
+        or str(run.get("team_id") or "") != "deep-research-team"
+        or str(run.get("product_mode") or "") != "standalone"
+        or str(current.get("task_id") or current.get("id") or "") != "research"
+        or str(brief.get("status") or "") != "confirmed"
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+    ):
+        raise SourceContextError("research source snapshot is not authorized for this run")
+    snapshot_brief = deepcopy(brief)
+    policy = snapshot_brief.get("source_policy") if isinstance(snapshot_brief.get("source_policy"), dict) else {}
+    policy["source_refs"] = deepcopy(source_refs)
+    snapshot_brief["source_policy"] = policy
+    binding_suffix = ""
+    if trusted_provider_context is not None:
+        from api.runtime_adapter import validate_strict_provider_context
+
+        validated_provider_context = validate_strict_provider_context(
+            trusted_provider_context
+        )
+        binding_suffix = f"-{validated_provider_context['binding_sha256'][:8]}"
+    try:
+        return _build_source_context_snapshot(
+            workspace,
+            str(run.get("run_id") or ""),
+            snapshot_brief,
+            source_registry,
+            brief_sha256=str(brief.get("confirmed_sha256") or ""),
+            brief_revision=int(brief.get("confirmed_revision") or 0),
+            allow_empty=True,
+            snapshot_id=f"research-evidence-{fingerprint[:24]}{binding_suffix}",
+            trusted_provider_context=trusted_provider_context,
         )
     except SourceContextError:
         raise

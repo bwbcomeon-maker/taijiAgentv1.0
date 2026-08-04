@@ -963,6 +963,9 @@ def _pending_input(run: dict) -> dict:
         "id": str(pending.get("id") or "stage-input"),
         "question": str(pending.get("question") or ""),
         "description": str(pending.get("description") or ""),
+        "scope": str(pending.get("scope") or ""),
+        "blocking": pending.get("blocking", False) is True,
+        "impact": str(pending.get("impact") or ""),
         "options": [str(item) for item in pending.get("options") or []],
         "required": pending.get("required", True) is not False,
         "stage_id": str(pending.get("stage_id") or ""),
@@ -1787,6 +1790,225 @@ def _allowed_actions(
     return []
 
 
+_RESEARCH_STEP_TEXT = {
+    "public_search": "正在联网检索",
+    "local_knowledge": "正在补充本地资料",
+    "model_knowledge": "正在基于模型知识整理",
+    "report_generation": "正在形成研究报告",
+}
+
+_RESEARCH_SAFE_FALLBACK_REASONS = {
+    "policy_blocked": "当前环境无法使用公网检索，已自动继续使用可用资料。",
+    "data_egress_not_authorized": "当前环境无法使用公网检索，已自动继续使用可用资料。",
+    "network_unavailable": "公网资料暂时不可用，已自动继续使用可用资料。",
+    "network_unreachable": "公网资料暂时不可用，已自动继续使用可用资料。",
+    "tls_error": "公网资料暂时不可用，已自动继续使用可用资料。",
+    "timeout": "公网资料暂时不可用，已自动继续使用可用资料。",
+    "search_service_error": "公网资料暂时不可用，已自动继续使用可用资料。",
+    "probe_failed": "公网资料暂时不可用，已自动继续使用可用资料。",
+    "search_failed": "公网资料暂时不可用，已自动继续使用可用资料。",
+    "materialize_failed": "部分资料未能完成核验，已使用可用证据继续。",
+    "fetch_failed": "部分资料未能完成核验，已使用可用证据继续。",
+    "partial_success": "部分资料未能完成核验，已使用可用证据继续。",
+    "interrupted_before_commit": "上次检索未完成固化，已使用保留的可核验资料继续。",
+    "no_results": "未找到可用公网资料，已自动继续补充其他资料。",
+    "insufficient_evidence": "可核验资料覆盖不足，报告将标明未外部核验的模型知识。",
+    "not_configured": "本地资料当前不可用，已自动继续使用其他可用知识。",
+}
+
+
+def _is_research_v2_run(run: dict) -> bool:
+    profile = (
+        run.get("launch_profile_snapshot")
+        if isinstance(run.get("launch_profile_snapshot"), dict)
+        else {}
+    )
+    return bool(
+        profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("team_id") or "") == "deep-research-team"
+        and str(run.get("product_mode") or "") == "standalone"
+    )
+
+
+def _safe_research_tier_status(value) -> str:
+    row = value if isinstance(value, dict) else {}
+    status = str(row.get("status") or "").strip().lower()
+    if status in {"searching", "in_progress", "probing", "materializing"}:
+        return "running"
+    if status in {"success", "completed", "ready"}:
+        return "completed"
+    if status == "partial":
+        return "partial"
+    if status in {
+        "denied",
+        "unavailable",
+        "materialize_failed",
+        "failed",
+        "skipped",
+        "zero_results",
+    }:
+        return "unavailable"
+    return "pending"
+
+
+def _safe_research_fallback_reason(state: dict) -> str:
+    public = state.get("public_status") if isinstance(state.get("public_status"), dict) else {}
+    local = state.get("local_status") if isinstance(state.get("local_status"), dict) else {}
+    decisions = [
+        item
+        for item in state.get("tier_decisions") or []
+        if isinstance(item, dict)
+    ]
+    reason_codes = [
+        str(public.get("reason") or "").strip(),
+        str(local.get("reason") or "").strip(),
+        *[
+            str(item.get("reason") or "").strip()
+            for item in decisions
+            if item.get("tier") == "model" and item.get("status") == "used"
+        ],
+    ]
+    for code in reason_codes:
+        if code in _RESEARCH_SAFE_FALLBACK_REASONS:
+            return _RESEARCH_SAFE_FALLBACK_REASONS[code]
+    return ""
+
+
+def _research_progress_view(run: dict) -> dict:
+    if not _is_research_v2_run(run):
+        return {}
+    state = (
+        run.get("research_retrieval_state")
+        if isinstance(run.get("research_retrieval_state"), dict)
+        else {}
+    )
+    public_status = _safe_research_tier_status(state.get("public_status"))
+    local_status = _safe_research_tier_status(state.get("local_status"))
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else {}
+    stage_id = str(current.get("task_id") or current.get("id") or "")
+    model_used = any(
+        isinstance(item, dict)
+        and item.get("tier") == "model"
+        and item.get("status") == "used"
+        for item in state.get("tier_decisions") or []
+    )
+    if stage_id not in {"", "direction", "research"}:
+        step = "report_generation"
+    elif local_status == "running":
+        step = "local_knowledge"
+    elif model_used:
+        step = "model_knowledge"
+    elif public_status == "running" or state.get("status") == "in_progress":
+        step = "public_search"
+    else:
+        step = "report_generation"
+    return {
+        "current_step": step,
+        "status_text": _RESEARCH_STEP_TEXT[step],
+        "public_status": public_status,
+        "local_knowledge_status": local_status,
+        "safe_fallback_reason": _safe_research_fallback_reason(state),
+    }
+
+
+def _same_frozen_snapshot(run: dict, state: dict) -> bool:
+    run_ref = (
+        run.get("source_context_snapshot_ref")
+        if isinstance(run.get("source_context_snapshot_ref"), dict)
+        else {}
+    )
+    state_ref = state.get("snapshot_ref") if isinstance(state.get("snapshot_ref"), dict) else {}
+    return bool(
+        str(run_ref.get("snapshot_id") or "")
+        and str(run_ref.get("snapshot_id") or "") == str(state_ref.get("snapshot_id") or "")
+        and str(run_ref.get("sha256") or "")
+        and str(run_ref.get("sha256") or "") == str(state_ref.get("sha256") or "")
+    )
+
+
+def _approved_evidence_artifact(run: dict) -> dict:
+    approvals = (
+        run.get("approved_stage_artifact_refs")
+        if isinstance(run.get("approved_stage_artifact_refs"), dict)
+        else {}
+    )
+    approved = approvals.get("evidence") if isinstance(approvals.get("evidence"), dict) else {}
+    matches = [
+        item
+        for item in run.get("stage_artifacts") or []
+        if isinstance(item, dict)
+        and item.get("stage_id") == "evidence"
+        and item.get("artifact_type") == "evidence_matrix"
+        and item.get("validation_status") == "valid"
+        and item.get("artifact_id") == approved.get("artifact_id")
+        and item.get("sha256") == approved.get("sha256")
+    ]
+    return matches[0] if len(matches) == 1 else {}
+
+
+def _research_evidence_summary(run: dict) -> dict:
+    if not _is_research_v2_run(run):
+        return {}
+    state = (
+        run.get("research_retrieval_state")
+        if isinstance(run.get("research_retrieval_state"), dict)
+        else {}
+    )
+    refs = (
+        [item for item in state.get("materialized_refs") or [] if isinstance(item, dict)]
+        if _same_frozen_snapshot(run, state)
+        else []
+    )
+    source_kinds = {}
+    for item in refs:
+        source_id = str(item.get("source_id") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        if source_id and kind in {"approved_public", "approved_internal"}:
+            source_kinds.setdefault(source_id, kind)
+    public_count = sum(kind == "approved_public" for kind in source_kinds.values())
+    local_count = sum(kind == "approved_internal" for kind in source_kinds.values())
+
+    evidence = _approved_evidence_artifact(run)
+    payload = evidence.get("payload") if isinstance(evidence.get("payload"), dict) else {}
+    model_claim_ids = {
+        str(claim.get("claim_id") or "").strip()
+        for claim in payload.get("claims") or []
+        if isinstance(claim, dict)
+        and claim.get("origin_tier") == "model_knowledge"
+        and claim.get("status") != "verified"
+        and not claim.get("evidence")
+        and str(claim.get("claim_id") or "").strip()
+    }
+    model_count = len(model_claim_ids)
+    source_count = public_count + local_count
+    if model_count:
+        coverage = "partial" if source_count else "model_only"
+        basis = {
+            "id": "includes_model_knowledge",
+            "text": "包含模型知识·未外部核验",
+        }
+    elif public_count and local_count:
+        coverage = "sufficient"
+        basis = {"id": "public_and_local", "text": "公网＋本地资料"}
+    elif public_count:
+        coverage = "sufficient"
+        basis = {"id": "verified_public", "text": "已联网核验"}
+    elif local_count:
+        coverage = "sufficient"
+        basis = {"id": "local_only", "text": "基于本地资料"}
+    else:
+        coverage = "none"
+        basis = {"id": "none", "text": "尚无可用证据"}
+    return {
+        "public_source_count": public_count,
+        "local_source_count": local_count,
+        "unverified_model_claim_count": model_count,
+        "coverage_level": coverage,
+        "source_basis": basis,
+    }
+
+
 def expert_team_run_view(run: dict) -> dict:
     contract_version = classify_contract_version(run)
     business_context = business_context_for_run(run)
@@ -1908,6 +2130,9 @@ def expert_team_run_view(run: dict) -> dict:
         "capability": _capability_model(run, contract_version),
         "artifact_validation": {"status": "unavailable", "blocking_count": 0},
     }
+    if _is_research_v2_run(run):
+        result["research_progress"] = _research_progress_view(run)
+        result["evidence_summary"] = _research_evidence_summary(run)
     product_error_code = str(run.get("last_execution_error_code") or "").strip()
     if state == "generated_invalid" and _is_protocol_stage_error(run):
         product_error_code = "model_output_invalid"
@@ -1985,7 +2210,12 @@ def expert_team_run_view(run: dict) -> dict:
                 if isinstance(run.get("launch_profile_snapshot"), dict)
                 else {}
             )
-            schema = profile.get("brief_schema")
+            research_v2 = bool(
+                profile.get("research_contract_version") == "research-report/v2"
+                and str(run.get("launch_profile_id") or "") == "research-report"
+                and str(run.get("team_id") or "") == "deep-research-team"
+            )
+            schema = [] if research_v2 else profile.get("brief_schema")
             if not isinstance(schema, list):
                 schema = brief_schema(
                     str(full_brief.get("document_type") or ""),
@@ -2000,6 +2230,11 @@ def expert_team_run_view(run: dict) -> dict:
                 if isinstance(field, dict) and str(field.get("path") or "")
             ]
             requirement = profile.get("source_requirement")
+            if research_v2:
+                requirement = {
+                    "minimum_ready": 0,
+                    "empty_help": "无需预先添加资料，服务端将在生成阶段按可用能力补充研究依据。",
+                }
             brief["source_requirement"] = deepcopy(
                 requirement
                 if isinstance(requirement, dict)

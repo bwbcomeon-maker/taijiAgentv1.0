@@ -14,6 +14,8 @@ from api.expert_teams.issue_policy import brief_declares_labeled_placeholders
 
 SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v12"
 DATA_ENVELOPE_VERSION = "TAIJI_STAGE_INPUT_V2"
+_PROVIDER_SOURCE_TOTAL_CHARS = 96_000
+_PROVIDER_SOURCE_CHARS_PER_SOURCE = 24_000
 _SOURCE_STAGES = {
     ("content-creator-team", "materials"),
     ("deep-research-team", "direction"),
@@ -259,6 +261,14 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _is_automatic_fallback_research(brief: dict) -> bool:
+    return (
+        brief.get("document_type") == "research_report"
+        and isinstance(brief.get("source_policy"), dict)
+        and brief["source_policy"].get("mode") == "automatic_fallback"
+    )
+
+
 def _catalog_stage(run: dict, stage: dict) -> dict:
     try:
         template = get_template(str(run.get("team_id") or ""))
@@ -369,8 +379,20 @@ def _latest_stage_protocol_error(run: dict, stage_id: str) -> dict | None:
     return None
 
 
-def _response_template(artifact_type: str) -> str:
+def _response_template(artifact_type: str, brief: dict) -> str:
     payload_schema = deepcopy(_PAYLOAD_SCHEMAS[artifact_type])
+    if _is_automatic_fallback_research(brief):
+        if artifact_type == "evidence_matrix":
+            payload_schema["claims"][0]["origin_tier"] = (
+                "<public_web|local_knowledge|model_knowledge>"
+            )
+        elif artifact_type in {
+            "research_document_draft",
+            "reviewed_research_document",
+        }:
+            payload_schema["claim_usage"][0]["citation_marker"] = (
+                "<real source_id marker; empty string for model_knowledge>"
+            )
     meta_template = {
         "artifact_type": artifact_type,
         "summary": "<用一句非空文本概括本阶段产物>",
@@ -496,6 +518,29 @@ def _system_message(
             "draft 和 reviewed_document 必须逐项保留原文关键数字、标识、机构名称与明确结论，"
             "review_report.fact_traceability 必须在逐项核对后标记为 passed，修改说明只描述表达层调整。"
         )
+    elif _is_automatic_fallback_research(brief) and (
+        document_type == "research_report"
+        or artifact_type in {
+            "research_document_draft",
+            "reviewed_research_document",
+        }
+    ):
+        task_specific_rule = (
+            "这是 research-report/v2 自动降级研究任务："
+            "evidence_matrix 的每个 claim 必须填写 origin_tier，且只能是 "
+            "public_web、local_knowledge 或 model_knowledge。"
+            "public_web 只能引用 approved_public，local_knowledge 只能引用 approved_internal。"
+            "model_knowledge 必须以“模型知识·未核验”明示，evidence 必须为 []，"
+            "status 不得为 verified，claim_usage.citation_marker 必须为空字符串；"
+            "不得借用相邻来源、相邻脚注或其他 claim 的 source_id。"
+            "public_web 和 local_knowledge claim 仍必须且只能引用对应冻结证据的真实 source_id。"
+            "对最新政策、实时价格、近期统计和当前状态，模型知识只能说明无法核验，"
+            "不得补成确定事实。知识截止日期只能读取已批准 evidence_matrix 中的"
+            "model_knowledge_time_basis；若其 label 为“模型知识时效未知”，必须原样保留，"
+            "不得自行声明或推测 cutoff。"
+            "claim_usage 中每个 claim_id 必须且只能出现一次，不得虚构来源、URL、"
+            "引用标记、脚注或空参考文献条目。"
+        )
     elif document_type == "research_report" or artifact_type in {
         "research_document_draft",
         "reviewed_research_document",
@@ -546,7 +591,7 @@ def _system_message(
             "不要复述上一次输出，严格按下面格式重新生成。\n"
             f"{marker_correction}"
         )
-    response_template = _response_template(artifact_type)
+    response_template = _response_template(artifact_type, brief)
     return (
         "[SYSTEM PURPOSE]\n"
         f"你正在生成 {artifact_type}，只能完成本阶段职责。\n"
@@ -639,6 +684,46 @@ def _revision_context(value: dict | None) -> dict | None:
     }
 
 
+def _provider_source_context_projection(value: dict) -> dict:
+    """Project a frozen snapshot into one bounded, non-duplicated model input."""
+    if not value.get("sources"):
+        return deepcopy(value)
+    projected = {key: deepcopy(item) for key, item in value.items() if key != "sources"}
+    remaining_total = _PROVIDER_SOURCE_TOTAL_CHARS
+    sources = []
+    for source in value.get("sources") or []:
+        if not isinstance(source, dict) or remaining_total <= 0:
+            break
+        projected_source = {
+            key: deepcopy(item)
+            for key, item in source.items()
+            if key not in {"content_text", "segments"}
+        }
+        remaining_source = min(_PROVIDER_SOURCE_CHARS_PER_SOURCE, remaining_total)
+        segments = []
+        for segment in source.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text") or "")
+            if not text or len(text) > remaining_source:
+                break
+            segments.append(deepcopy(segment))
+            remaining_source -= len(text)
+            remaining_total -= len(text)
+        projected_source["segments"] = segments
+        projected_source["provider_projection_truncated"] = (
+            len(segments) < len(source.get("segments") or [])
+        )
+        sources.append(projected_source)
+    projected["sources"] = sources
+    projected["provider_projection"] = {
+        "max_total_chars": _PROVIDER_SOURCE_TOTAL_CHARS,
+        "max_chars_per_source": _PROVIDER_SOURCE_CHARS_PER_SOURCE,
+        "content_text_omitted": True,
+    }
+    return projected
+
+
 def _confirmed_brief(run: dict) -> dict:
     brief = run.get("document_brief")
     if not isinstance(brief, dict) or brief.get("status") != "confirmed":
@@ -671,18 +756,28 @@ def build_stage_gateway_request(
     if not uses_source_context:
         source_value = None
     else:
-        source_value = deepcopy(source_context if source_context is not None else run.get("verified_source_context"))
-        if source_value is None:
+        frozen_source_value = deepcopy(source_context if source_context is not None else run.get("verified_source_context"))
+        if frozen_source_value is None:
             raise PromptContractError("source_context_required", "当前阶段缺少已验证资料快照")
         snapshot_ref = run.get("source_context_snapshot_ref")
         if not isinstance(snapshot_ref, dict) or (
-            source_value.get("snapshot_id") != snapshot_ref.get("snapshot_id")
-            or source_value.get("snapshot_sha256") != snapshot_ref.get("sha256")
-            or source_value.get("brief_sha256") != snapshot_ref.get("brief_sha256")
+            frozen_source_value.get("snapshot_id") != snapshot_ref.get("snapshot_id")
+            or frozen_source_value.get("snapshot_sha256") != snapshot_ref.get("sha256")
+            or frozen_source_value.get("brief_sha256") != snapshot_ref.get("brief_sha256")
         ):
             raise PromptContractError("source_context_binding_mismatch", "资料快照与当前任务绑定不一致")
+        source_value = (
+            _provider_source_context_projection(frozen_source_value)
+            if str(run.get("team_id") or "") == "deep-research-team"
+            else frozen_source_value
+        )
 
     approved_inputs = approved_inputs_for_stage(run, str(declared["id"]))
+    stage_inputs = [
+        deepcopy(item)
+        for item in run.get("stage_inputs") or []
+        if isinstance(item, dict) and str(item.get("stage_id") or "") == str(declared["id"])
+    ]
     revision_context = _revision_context(revision_feedback)
     envelope = {
         "schema_version": DATA_ENVELOPE_VERSION,
@@ -691,6 +786,28 @@ def build_stage_gateway_request(
         "source_context": source_value,
         "revision_context": revision_context,
     }
+    if stage_inputs:
+        envelope["stage_inputs"] = stage_inputs
+    boundary_assumptions = [
+        deepcopy(item)
+        for item in run.get("research_boundary_assumptions") or []
+        if isinstance(item, dict) and str(item.get("stage_id") or "") == str(declared["id"])
+    ]
+    if boundary_assumptions:
+        envelope["research_boundary_assumptions"] = boundary_assumptions
+    input_consumptions = [
+        {
+            "input_id": str(item.get("input_id") or ""),
+            "stage_id": str(item.get("stage_id") or ""),
+            "disposition": str(item.get("disposition") or ""),
+        }
+        for item in run.get("research_input_consumptions") or []
+        if isinstance(item, dict)
+        and str(item.get("stage_id") or "") == str(declared["id"])
+        and str(item.get("input_id") or "")
+    ]
+    if input_consumptions:
+        envelope["research_input_consumptions"] = input_consumptions
     system = _system_message(
         str(declared["artifact_type"]),
         brief,
@@ -702,6 +819,11 @@ def build_stage_gateway_request(
         {"ref_type": "stage_artifact", "artifact_id": item["artifact_id"], "sha256": item["sha256"]}
         for item in approved_inputs
     ]
+    input_refs.extend(
+        deepcopy(item["ref"])
+        for item in stage_inputs
+        if isinstance(item.get("ref"), dict)
+    )
     if source_value is not None:
         input_refs.append(
             {

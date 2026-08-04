@@ -392,6 +392,10 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
         "model": "gpt-actual",
         "api_mode": "codex_responses",
         "transport": "openai_responses",
+        "provider_metadata": {
+            "knowledge_cutoff_date": None,
+            "network_scope": "public_network",
+        },
     }
     assert calls == [
         ("profile", None),
@@ -401,6 +405,22 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
         ("resolve", {"requested": "openai-codex"}),
         ("reset", "profile-token"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://127.0.0.1:11434/v1", "loopback"),
+        ("http://localhost:1234/v1", "loopback"),
+        ("http://10.0.0.8:11434/v1", "private_network"),
+        ("https://models.example.com/v1", "public_network"),
+        ("", "unknown"),
+    ],
+)
+def test_provider_network_scope_is_server_classified_without_exposing_endpoint(base_url, expected):
+    from api import routes
+
+    assert routes._provider_network_scope(base_url) == expected
 
 
 def test_route_legacy_preflight_rejects_missing_runtime_auth_before_dispatch(
@@ -626,6 +646,122 @@ def test_execution_route_ignores_client_provider_override_and_dispatches_exact_c
     assert request.metadata["runtime_binding_source"] == "committed_session"
     assert len(request.metadata["strict_provider_binding"]["binding_sha256"]) == 64
     assert "client-forged" not in repr(request)
+
+
+def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(monkeypatch, tmp_path):
+    from api import expert_teams, routes, runtime_adapter
+    from api.expert_teams import runtime as expert_team_runtime
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    order = []
+    requests = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        expert_team_runtime,
+        "_research_retrieval_eligible",
+        lambda _run: True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_standalone_legacy_provider_context",
+        lambda request: {
+            "provider": request.provider,
+            "model": request.model,
+            "api_mode": "chat_completions",
+            "transport": "openai_chat_completions",
+            "provider_metadata": {"knowledge_cutoff_date": "2025-06-30"},
+        },
+    )
+
+    def prepare(_workspace, candidate, *, trusted_provider_context):
+        order.append("prepare")
+        assert trusted_provider_context["trusted_provider_metadata"] == {
+            "knowledge_cutoff_date": "2025-06-30",
+            "network_scope": "unknown",
+        }
+        assert len(trusted_provider_context["binding_sha256"]) == 64
+        prepared = deepcopy(candidate)
+        prepared["prepared_research_snapshot"] = "server-owned"
+        return prepared
+
+    def gateway(_workspace, candidate):
+        order.append("gateway")
+        assert candidate["prepared_research_snapshot"] == "server-owned"
+        return {
+            "messages": [
+                {"role": "system", "content": "strict system"},
+                {"role": "user", "content": '{"source_context":"frozen"}'},
+            ],
+            "tools_disabled": True,
+            "input_refs": [],
+        }
+
+    monkeypatch.setattr(expert_teams, "prepare_research_sources_for_gateway", prepare)
+    monkeypatch.setattr(routes, "_expert_team_enterprise_gateway_request", gateway)
+
+    def capture_start(self, request):
+        requests.append(request)
+        return runtime_adapter.RunStartResult(
+            run_id="route-order-runtime",
+            session_id=request.session_id,
+            stream_id="route-order-stream",
+            payload={"stream_id": "route-order-stream", "turn_id": "route-order-turn"},
+        )
+
+    monkeypatch.setattr(runtime_adapter.LegacyJournalRuntimeAdapter, "start_run", capture_start)
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 200, payload
+    assert order == ["prepare", "gateway"]
+    assert len(requests) == 1
+
+
+def test_execution_route_projects_retrieval_in_progress_as_transient_conflict(monkeypatch, tmp_path):
+    from api import expert_teams, routes, runtime_adapter
+
+    run = _ready_direct_run(tmp_path)
+    session = _direct_session(tmp_path)
+    dispatches = []
+    monkeypatch.setattr(routes, "get_session", lambda _session_id: session)
+    _patch_in_memory_execution_state(monkeypatch, expert_teams, run)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+
+    def in_progress(_workspace, candidate, **_kwargs):
+        raise expert_teams.ExpertTeamStateConflict(
+            "retrieval_in_progress",
+            "research retrieval is already in progress",
+            candidate,
+        )
+
+    monkeypatch.setattr(expert_teams, "prepare_research_sources_for_gateway", in_progress)
+    monkeypatch.setattr(
+        runtime_adapter.LegacyJournalRuntimeAdapter,
+        "start_run",
+        lambda self, request: dispatches.append(request),
+    )
+
+    payload, status = routes._start_expert_team_execution(tmp_path, run, {})
+
+    assert status == 409
+    assert payload["code"] == "retrieval_in_progress"
+    assert payload["run"]["workflow_state"] == "ready_to_generate"
+    assert payload["run"]["workflow_state"] != "generation_failed"
+    assert payload["run"].get("last_execution_error_code") != "retrieval_in_progress"
+    assert dispatches == []
 
 
 def test_execution_route_provider_preflight_failure_makes_zero_runtime_calls(

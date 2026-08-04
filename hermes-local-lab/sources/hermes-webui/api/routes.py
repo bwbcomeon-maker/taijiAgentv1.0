@@ -3413,6 +3413,10 @@ def _coordinate_expert_team_start(
                     run_id=run_id,
                     launch_profile_snapshot=launch_profile_snapshot,
                 )
+                initial_run = expert_teams.bind_initial_standalone_source_context(
+                    workspace,
+                    initial_run,
+                )
                 initial_run["start_transaction_id"] = transaction_id
                 initial_session_message_pair = (
                     _new_expert_team_start_session_messages(
@@ -5393,11 +5397,16 @@ def _dispatch_expert_team_system_stage(workspace: Path, run: dict) -> tuple[dict
     ).hexdigest()
     reservation = {}
     try:
-        reserved_run, descriptor, reservation, _created = expert_teams.reserve_system_stage_attempt(
+        reserved_run, descriptor, reservation, created = expert_teams.reserve_system_stage_attempt(
             workspace,
             str(run.get("run_id") or ""),
             idempotency_key=f"system-stage-{lineage}",
         )
+        if not created and str(reservation.get("status") or "") in {
+            "generated_valid",
+            "confirmed",
+        }:
+            return {"ok": True, "run": reserved_run, "system_stage": True}, 200
         result = dispatch_system_stage(
             reserved_run,
             descriptor,
@@ -5596,6 +5605,29 @@ class _ExpertTeamModelConfigurationRequired(RuntimeError):
     """The selected runtime cannot authenticate a standalone generation."""
 
 
+def _provider_network_scope(base_url: object) -> str:
+    """Classify a resolved Provider endpoint without persisting the endpoint."""
+    import ipaddress
+
+    try:
+        hostname = (urlsplit(str(base_url or "").strip()).hostname or "").strip().lower()
+    except ValueError:
+        return "unknown"
+    if not hostname:
+        return "unknown"
+    if hostname == "localhost":
+        return "loopback"
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return "public_network"
+    if address.is_loopback:
+        return "loopback"
+    if address.is_private:
+        return "private_network"
+    return "public_network"
+
+
 def _resolve_standalone_legacy_provider_context(request) -> dict:
     """Resolve the protocol that the in-process worker would actually use.
 
@@ -5661,6 +5693,10 @@ def _resolve_standalone_legacy_provider_context(request) -> dict:
             "model": str(resolved_model or "").strip(),
             "api_mode": api_mode,
             "transport": STRICT_PROVIDER_TRANSPORTS.get(api_mode, ""),
+            "provider_metadata": {
+                "knowledge_cutoff_date": runtime.get("knowledge_cutoff_date"),
+                "network_scope": _provider_network_scope(resolved_base_url),
+            },
         }
     finally:
         reset_hermes_home_override(override_token)
@@ -5746,7 +5782,10 @@ def _expert_team_resume_requires_execution(run: dict) -> bool:
         if isinstance((run or {}).get("pending_system_stage"), dict)
         else {}
     )
-    return state == "generated_invalid" and pending.get("executor") == "system"
+    return (
+        state in {"delivery_validation_required", "generated_invalid"}
+        and pending.get("executor") == "system"
+    )
 
 
 def _start_expert_team_execution(
@@ -5761,10 +5800,12 @@ def _start_expert_team_execution(
         LegacyJournalRuntimeAdapter,
         STRICT_PROVIDER_BINDING_METADATA_KEY,
         StartRunRequest,
+        build_strict_provider_context,
         build_runtime_adapter,
     )
     from api.product_contract import attach_product_error
     from api.expert_teams.error_projection import attach_expert_team_product_error
+    from api.expert_teams.runtime import _research_retrieval_eligible
     from api.expert_teams.source_context import SourceContextError
 
     def _execution_failure(payload: dict, status: int) -> dict:
@@ -5859,6 +5900,7 @@ def _start_expert_team_execution(
         display_msg = _expert_team_execution_display_message(run)
         execution_message_start_index = len(list(getattr(session, "messages", None) or []))
         enterprise_gateway_request = None
+        trusted_provider_context = None
         classified_contract = expert_teams.classify_contract_version(run)
         if standalone and (
             type(run.get("schema_version")) is not int
@@ -5869,6 +5911,53 @@ def _start_expert_team_execution(
                 "standalone expert team execution requires schema 3 and contract v1"
             )
         if classified_contract == expert_teams.EXPERT_TEAM_CONTRACT_V1:
+            if standalone and _research_retrieval_eligible(run):
+                preflight_request = StartRunRequest(
+                    session_id=sid,
+                    message="",
+                    messages=[
+                        {"role": "system", "content": "strict provider preflight"},
+                        {"role": "user", "content": "{}"},
+                    ],
+                    tools_disabled=True,
+                    attachments=[],
+                    workspace=str((standalone_binding or {}).get("workspace") or workspace),
+                    profile=(standalone_binding or {}).get("profile"),
+                    provider=model_provider,
+                    model=model,
+                    source="expert-team",
+                    metadata={"expert_team_product_mode": "standalone"},
+                )
+                resolved_provider_context = _resolve_standalone_legacy_provider_context(
+                    preflight_request
+                )
+                trusted_provider_context = build_strict_provider_context(
+                    provider=resolved_provider_context.get("provider"),
+                    model=resolved_provider_context.get("model"),
+                    api_mode=resolved_provider_context.get("api_mode"),
+                    transport=resolved_provider_context.get("transport"),
+                    provider_metadata=(
+                        resolved_provider_context.get("provider_metadata")
+                        if isinstance(
+                            resolved_provider_context.get("provider_metadata"), dict
+                        )
+                        else {
+                            "knowledge_cutoff_date": resolved_provider_context.get(
+                                "knowledge_cutoff_date"
+                            )
+                        }
+                    ),
+                )
+                _validate_standalone_runtime_provider_context(
+                    trusted_provider_context,
+                    expected_provider=model_provider,
+                    expected_model=model,
+                )
+            run = expert_teams.prepare_research_sources_for_gateway(
+                workspace,
+                run,
+                trusted_provider_context=trusted_provider_context,
+            )
             enterprise_gateway_request = _expert_team_enterprise_gateway_request(workspace, run)
             if standalone:
                 _require_standalone_strict_execution_contract(
@@ -5878,6 +5967,21 @@ def _start_expert_team_execution(
             execution_prompt = ""
         else:
             execution_prompt = _expert_team_execution_prompt(run)
+    except expert_teams.ExpertTeamStateConflict as conflict:
+        if conflict.code != "retrieval_in_progress":
+            error = str(conflict) or "当前任务状态已变更，请重试。"
+            return _backend_failure({
+                "ok": False,
+                "code": conflict.code or "runtime_incompatible",
+                "error": error,
+                "run": _fail_known_pre_dispatch(error),
+            }), 503
+        return {
+            "ok": False,
+            "code": "retrieval_in_progress",
+            "error": str(conflict),
+            "run": conflict.run or run,
+        }, 409
     except SourceContextError:
         error = "资料快照缺失、已变更或不符合当前任务的资料要求"
         return _execution_failure({
@@ -6109,12 +6213,27 @@ def _start_expert_team_execution(
 
     if enterprise_gateway_request is not None and standalone:
         try:
-            provider_context = adapter.resolve_provider_context(start_request)
+            provider_context = trusted_provider_context
+            if provider_context is None:
+                provider_context = adapter.resolve_provider_context(start_request)
             _validate_standalone_runtime_provider_context(
                 provider_context,
-                expected_provider=None,
-                expected_model=None,
+                expected_provider=model_provider,
+                expected_model=model,
             )
+            from api.expert_teams.data_egress import (
+                authorize_standalone_research_provider,
+            )
+
+            provider_authorization = authorize_standalone_research_provider(
+                reserved_run,
+                provider_context,
+            )
+            if not provider_authorization.get("authorized"):
+                raise ValueError(
+                    provider_authorization.get("safe_reason")
+                    or "当前模型数据外发未获授权"
+                )
             from dataclasses import replace
 
             start_request = replace(
@@ -6123,6 +6242,9 @@ def _start_expert_team_execution(
                     **start_request.metadata,
                     STRICT_PROVIDER_BINDING_METADATA_KEY: copy.deepcopy(
                         provider_context
+                    ),
+                    "provider_authorization": copy.deepcopy(
+                        provider_authorization
                     ),
                 },
             )

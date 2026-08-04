@@ -284,6 +284,26 @@
       waivedIssueIds:arr(value.waived_issue_ids||value.waivedIssueIds).map(String)
     };
   }
+  function normalizedResearchProgress(value){
+    value=value&&typeof value==='object'?value:{};
+    return {
+      currentStep:str(value.current_step),statusText:str(value.status_text),
+      publicStatus:str(value.public_status,'pending'),
+      localKnowledgeStatus:str(value.local_knowledge_status,'pending'),
+      safeFallbackReason:str(value.safe_fallback_reason)
+    };
+  }
+  function normalizedResearchEvidenceSummary(value){
+    value=value&&typeof value==='object'?value:{};
+    const sourceBasis=value.source_basis&&typeof value.source_basis==='object'?value.source_basis:{};
+    return {
+      publicSourceCount:Number(value.public_source_count||0),
+      localSourceCount:Number(value.local_source_count||0),
+      unverifiedModelClaimCount:Number(value.unverified_model_claim_count||0),
+      coverageLevel:str(value.coverage_level,'none'),
+      sourceBasis:{id:str(sourceBasis.id,'none'),text:str(sourceBasis.text,'尚无可用证据')}
+    };
+  }
   function taskStatusText(task){
     const explicit=str(task&&task.status_label);
     if(explicit)return explicit;
@@ -362,6 +382,8 @@
     data=data||{};
     const presentation=buildExpertTeamPresentation(run);
     const view=run.view||{};
+    const researchV2=Object.prototype.hasOwnProperty.call(view,'research_progress')&&
+      Object.prototype.hasOwnProperty.call(view,'evidence_summary');
     const workspace=buildExpertTeamWorkspace(run);
     const productMode=str(view.product_mode);
     const standalone=productMode==='standalone';
@@ -473,6 +495,9 @@
       schemaVersion,
       version:Number(run.version||0),
       productMode,
+      researchV2,
+      researchProgress:researchV2?normalizedResearchProgress(view.research_progress):null,
+      evidenceSummary:researchV2?normalizedResearchEvidenceSummary(view.evidence_summary):null,
       publicState,
       workflowState:presentation.workflowState,
       allowedActions,

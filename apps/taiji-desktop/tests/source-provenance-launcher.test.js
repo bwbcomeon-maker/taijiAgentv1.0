@@ -70,6 +70,13 @@ test("source command launcher defaults linked worktrees to development and runs 
   assert.match(commandLauncher, /export TAIJI_SOURCE_MODE/);
 });
 
+test("source command launcher passes the available Python runtime to both services", () => {
+  assert.match(commandLauncher, /sources\/hermes-agent\/venv\/bin\/python/);
+  assert.match(commandLauncher, /sources\/hermes-agent\/\.venv\/bin\/python/);
+  assert.match(commandLauncher, /export TAIJI_AGENT_PYTHON/);
+  assert.match(commandLauncher, /export TAIJI_WEBUI_PYTHON/);
+});
+
 test("source command launcher isolates all mutable runtime state by physical source root", () => {
   assert.match(commandLauncher, /XDG_STATE_HOME=.*source-instances.*SOURCE_INSTANCE_ID/);
   assert.match(commandLauncher, /TAIJI_RUNTIME_HOME=.*source-instances.*SOURCE_INSTANCE_ID/);

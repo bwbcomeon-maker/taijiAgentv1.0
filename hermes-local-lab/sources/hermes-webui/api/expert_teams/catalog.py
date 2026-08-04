@@ -286,4 +286,10 @@ def expert_team_catalog() -> dict:
                 public_example["capability"] = {"kind": "standalone", "label": "本机协作"}
             public_examples.append(public_example)
         team["examples"] = public_examples
+        if any(
+            profile.get("research_contract_version") == "research-report/v2"
+            for (team_id, _example_id), profile in profiles.items()
+            if team_id == team.get("id")
+        ):
+            team["questions"] = []
     return {"product_mode": "standalone", "teams": teams}

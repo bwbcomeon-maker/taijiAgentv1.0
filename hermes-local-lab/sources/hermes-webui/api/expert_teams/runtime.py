@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -27,10 +29,11 @@ from .contracts import (
     patch_document_brief,
     validate_document_brief,
 )
-from .data_egress import load_model_policy_registry
+from .data_egress import authorize_research_public_query, load_model_policy_registry
 from .source_context import (
     SourceContextError,
     allows_empty_source_context,
+    build_research_source_context_snapshot,
     build_source_context_snapshot,
     verify_source_context_snapshot,
 )
@@ -91,6 +94,8 @@ _BASE_WPS_VISUAL_CHECKS = {
 }
 _START_LOCKS: dict[str, threading.RLock] = {}
 _START_LOCKS_GUARD = threading.Lock()
+_RESEARCH_RETRIEVAL_OWNERS: dict[tuple[str, str], str] = {}
+_RESEARCH_RETRIEVAL_OWNERS_LOCK = threading.Lock()
 _RUN_FILE_LOCK_DEPTH = threading.local()
 _EXPECTED_CURSOR_UNSET = object()
 _STANDALONE_START_FIELDS = frozenset(
@@ -103,6 +108,16 @@ _STANDALONE_START_MAX_LENGTHS = {
     "idempotency_key": 240,
 }
 _STANDALONE_IDEMPOTENCY_PATTERN = re.compile(r"[A-Za-z0-9:._-]+")
+_RESEARCH_INPUT_FORBIDDEN_SEMANTICS = re.compile(
+    r"网络(?:失败|异常|不可用)|断网|离线"
+    r"|本地(?:资料|知识|来源)|(?:资料|来源)选择|选择(?:资料|来源)"
+    r"|证据(?:不足|缺失|缺口)|标题|日期|引用(?:格式|样式)"
+    r"|network\s+(?:failure|failed|unavailable)|offline"
+    r"|local\s+(?:material|knowledge|source)s?|source\s+selection|select(?:ing)?\s+(?:a\s+)?source"
+    r"|insufficient\s+evidence|evidence\s+(?:gap|missing)"
+    r"|\btitle\b|\bdate\b|citation\s+(?:format|style)",
+    re.I,
+)
 
 
 class ExpertTeamStateConflict(ValueError):
@@ -1068,13 +1083,21 @@ def _members(template: dict) -> list[dict]:
     return [{**deepcopy(member), "status": "待命"} for member in template.get("members") or []]
 
 
-def _initial_timeline_events(template: dict) -> list[dict]:
+def _initial_timeline_events(
+    template: dict,
+    *,
+    research_intake_ready: bool = False,
+) -> list[dict]:
     now = _now()
     events = [
         {
             "type": "team_created",
             "title": f"{template.get('title') or '专家团'}已创建",
-            "detail": "等待需求确认后开始协作。",
+            "detail": (
+                "内部研究规格已根据原始诉求确定，可直接开始生成。"
+                if research_intake_ready
+                else "等待需求确认后开始协作。"
+            ),
             "member_id": "director",
             "at": now,
         }
@@ -1091,9 +1114,17 @@ def _initial_timeline_events(template: dict) -> list[dict]:
         )
     events.append(
         {
-            "type": "intake_requested",
-            "title": "等待需求确认",
-            "detail": "请先补充必填需求，可选补充需要提交或跳过。",
+            "type": (
+                "research_intake_prepared"
+                if research_intake_ready
+                else "intake_requested"
+            ),
+            "title": "研究任务已就绪" if research_intake_ready else "等待需求确认",
+            "detail": (
+                "已根据原始诉求生成并确认内部研究规格。"
+                if research_intake_ready
+                else "请先补充必填需求，可选补充需要提交或跳过。"
+            ),
             "member_id": "director",
             "at": now,
         }
@@ -1102,7 +1133,11 @@ def _initial_timeline_events(template: dict) -> list[dict]:
         {
             "type": "phase_plan_created",
             "title": "已生成专家团阶段计划",
-            "detail": "将按流程安排、素材整理、初稿撰写、审稿打磨、交付确认推进。",
+            "detail": (
+                "将按研究方向、资料调研、事实核验、结构提纲、初稿与复核交付推进。"
+                if research_intake_ready
+                else "将按流程安排、素材整理、初稿撰写、审稿打磨、交付确认推进。"
+            ),
             "member_id": "director",
             "at": now,
         }
@@ -1668,6 +1703,7 @@ def _standalone_start_context(
     body: dict,
     *,
     launch_profile_snapshot: dict | None = None,
+    started_at: str,
 ) -> tuple[dict, dict]:
     validated = validate_standalone_start_request(body)
     profile = (
@@ -1684,6 +1720,39 @@ def _standalone_start_context(
             "launch_profile_id",
             "启动配置快照与任务类型不匹配",
         )
+    brief_seed = {
+        "task_mode": profile["task_mode"],
+        "document_control": {"render_template_id": profile["render_template_id"]},
+        "content_constraints": deepcopy(
+            profile.get("content_constraints") or {}
+        ),
+    }
+    if profile.get("research_contract_version") == "research-report/v2":
+        launch_date = str(started_at or "")[:10]
+        request_summary = " ".join(validated["prompt"].split()).translate(
+            str.maketrans({"「": "", "」": ""})
+        )
+        if len(request_summary) > 48:
+            request_summary = request_summary[:47].rstrip() + "…"
+        brief_seed.update(
+            {
+                "exact_title": f"关于「{request_summary}」的深度研究报告",
+                "purpose": "围绕原始诉求形成资料研究、分析与结论边界",
+                "audience": "任务发起者",
+                "usage_scenario": "专题研究与决策参考",
+                "source_policy": {
+                    "mode": "automatic_fallback",
+                    "as_of_date": launch_date,
+                    "citation_style": "source_id",
+                    "unknown_fact_action": "block_final",
+                    "source_refs": [],
+                },
+                "details": {
+                    "core_question": validated["prompt"],
+                    "time_range": {"start": "", "end": launch_date},
+                },
+            }
+        )
     resolved = {
         "session_id": validated["session_id"],
         "prompt": validated["prompt"],
@@ -1693,13 +1762,7 @@ def _standalone_start_context(
         "product_mode": "standalone",
         "intake_example_id": profile["intake_example_id"],
         "document_type": profile["document_type"],
-        "document_brief_seed": {
-            "task_mode": profile["task_mode"],
-            "document_control": {"render_template_id": profile["render_template_id"]},
-            "content_constraints": deepcopy(
-                profile.get("content_constraints") or {}
-            ),
-        },
+        "document_brief_seed": brief_seed,
     }
     return profile, resolved
 
@@ -1710,6 +1773,7 @@ def _build_expert_team_run(
     run_id: str | None = None,
     launch_profile_snapshot: dict | None = None,
 ) -> dict:
+    started_at = _now()
     standalone = "launch_profile_id" in body
     launch_profile = None
     resolved_body = body
@@ -1717,6 +1781,7 @@ def _build_expert_team_run(
         launch_profile, resolved_body = _standalone_start_context(
             body,
             launch_profile_snapshot=launch_profile_snapshot,
+            started_at=started_at,
         )
 
     contract_version = classify_contract_version(resolved_body)
@@ -1732,6 +1797,25 @@ def _build_expert_team_run(
     if contract_version == EXPERT_TEAM_CONTRACT_V1:
         prompt = str(resolved_body.get("prompt") or "")
         document_brief = build_document_brief(template["id"], resolved_body, now=_now())
+        research_contract_version = str(
+            (launch_profile or {}).get("research_contract_version") or ""
+        )
+        if research_contract_version == "research-report/v2":
+            validation = validate_document_brief(
+                document_brief,
+                runtime_capabilities={"approved_public_search": False},
+                source_registry={},
+                model_policy_registry={},
+                now=started_at,
+                research_contract_version=research_contract_version,
+            )
+            if not validation["valid_for_confirmation"]:
+                first = validation["field_errors"][0]
+                raise ContractError(first["code"], first["field"], first["message"])
+            document_brief = confirm_document_brief(
+                document_brief,
+                now=started_at,
+            )
     else:
         prompt = str(resolved_body.get("prompt") or resolved_body.get("message") or "").strip()
         document_brief = None
@@ -1743,6 +1827,11 @@ def _build_expert_team_run(
     task_template = deepcopy(
         launch_profile["stages"] if standalone and launch_profile is not None else template.get("tasks") or []
     )
+    research_intake_ready = bool(
+        standalone
+        and (launch_profile or {}).get("research_contract_version")
+        == "research-report/v2"
+    )
     run = {
         "schema_version": 3 if standalone else 2,
         "version": 1,
@@ -1753,11 +1842,15 @@ def _build_expert_team_run(
         "team_image": template.get("image") or "",
         "title": prompt[:120],
         "prompt": prompt,
-        "created_at": _now(),
-        "updated_at": _now(),
-        "workflow_state": "collecting_required",
+        "created_at": started_at,
+        "updated_at": started_at,
+        "workflow_state": "ready_to_generate" if research_intake_ready else "collecting_required",
         "current_stage_index": 0,
-        "questions": _questions(template, prompt),
+        "questions": (
+            []
+            if research_intake_ready
+            else _questions(template, prompt)
+        ),
         "answers": [],
         "members": _members(template),
         "_tasks_template": task_template,
@@ -1766,8 +1859,21 @@ def _build_expert_team_run(
         "stage_outputs": [],
         "review_items": [],
         "action_journal": [],
-        "events": [{"type": "team_created", "to": "collecting_required", "at": _now()}],
-        "timeline_events": _initial_timeline_events(template),
+        "events": [
+            {
+                "type": "team_created",
+                "to": (
+                    "ready_to_generate"
+                    if research_intake_ready
+                    else "collecting_required"
+                ),
+                "at": started_at,
+            }
+        ],
+        "timeline_events": _initial_timeline_events(
+            template,
+            research_intake_ready=research_intake_ready,
+        ),
     }
     if contract_version == EXPERT_TEAM_CONTRACT_V1:
         run.update(
@@ -1835,6 +1941,615 @@ def verified_source_context_for_execution(workspace: Path, run: dict) -> dict:
     return verify_source_context_snapshot(workspace, run)
 
 
+def bind_initial_standalone_source_context(workspace: Path, run: dict) -> dict:
+    """Bind the v2 zero-source snapshot before the atomic Run is persisted."""
+    brief = run.get("document_brief")
+    if not allows_empty_source_context(run, brief=brief):
+        return deepcopy(run)
+    bound = deepcopy(run)
+    if isinstance(bound.get("source_context_snapshot_ref"), dict):
+        verify_source_context_snapshot(workspace, bound)
+        return bound
+    bound["source_context_snapshot_ref"] = build_source_context_snapshot(
+        workspace,
+        str(bound.get("run_id") or ""),
+        brief,
+        {},
+        brief_sha256=brief_digest(brief),
+        brief_revision=int(brief.get("confirmed_revision") or 0),
+        allow_empty=True,
+    )
+    verify_source_context_snapshot(workspace, bound)
+    return bound
+
+
+_RESEARCH_RETRIEVAL_SCHEMA = "research-retrieval/v1"
+
+
+def _research_retrieval_artifact(run: dict) -> dict:
+    """Return the immutable, human-confirmed direction artifact."""
+    from .prompts import approved_inputs_for_stage
+
+    inputs = approved_inputs_for_stage(run, "research")
+    artifact = next(
+        (
+            item
+            for item in inputs
+            if isinstance(item, dict)
+            and str(item.get("stage_id") or "") == "direction"
+            and str(item.get("artifact_type") or "") == "research_charter"
+        ),
+        None,
+    )
+    if not isinstance(artifact, dict) or not isinstance(artifact.get("payload"), dict):
+        raise SourceContextError("approved research direction is missing")
+    return artifact
+
+
+def _research_retrieval_eligible(run: dict) -> bool:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else _current_stage(run)
+    return bool(
+        profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("product_mode") or "") == "standalone"
+        and str(current.get("task_id") or current.get("id") or "") == "research"
+    )
+
+
+def _research_v2_run(run: dict) -> bool:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    current = run.get("current_stage") if isinstance(run.get("current_stage"), dict) else _current_stage(run)
+    return bool(
+        profile.get("research_contract_version") == "research-report/v2"
+        and str(run.get("launch_profile_id") or "") == "research-report"
+        and str(run.get("team_id") or "") == "deep-research-team"
+        and str(run.get("product_mode") or "") == "standalone"
+        and str(current.get("task_id") or current.get("id") or "")
+        in {"direction", "research", "evidence", "outline", "draft", "review"}
+    )
+
+
+def _supersede_current_stage_attempt_for_input(run: dict) -> dict:
+    current = (
+        deepcopy(run.get("current_stage_attempt_reservation"))
+        if isinstance(run.get("current_stage_attempt_reservation"), dict)
+        else None
+    )
+    reservations = [
+        deepcopy(item)
+        for item in run.get("stage_attempt_reservations") or []
+        if isinstance(item, dict)
+    ]
+    if current is not None:
+        matched = False
+        for item in reservations:
+            if item.get("reservation_id") == current.get("reservation_id"):
+                item["status"] = "superseded_by_input"
+                item["superseded_at"] = _now()
+                matched = True
+                break
+        if not matched:
+            current["status"] = "superseded_by_input"
+            current["superseded_at"] = _now()
+            reservations.append(current)
+    return {
+        "stage_attempt_reservations": reservations,
+        "current_stage_attempt_reservation": None,
+    }
+
+
+def research_retrieval_fingerprint(run: dict) -> str:
+    artifact = _research_retrieval_artifact(run)
+    payload = artifact["payload"]
+    value = {
+        "schema_version": _RESEARCH_RETRIEVAL_SCHEMA,
+        "run_id": str(run.get("run_id") or ""),
+        "brief_sha256": brief_digest(run.get("document_brief") or {}),
+        "direction_ref": {
+            "artifact_id": str(artifact.get("artifact_id") or ""),
+            "sha256": str(artifact.get("sha256") or ""),
+        },
+        "core_question": str(payload.get("core_question") or "").strip(),
+        "subquestions": [str(item).strip() for item in payload.get("subquestions") or [] if str(item).strip()],
+        "query_policy": deepcopy(
+            (run.get("launch_profile_snapshot") or {}).get("research_query_egress_policy") or {}
+        ),
+    }
+    rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _research_query(run: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    payload = _research_retrieval_artifact(run)["payload"]
+    core = " ".join(str(payload.get("core_question") or "").split())
+    subquestions = tuple(
+        dict.fromkeys(
+            " ".join(str(item).split())
+            for item in payload.get("subquestions") or []
+            if " ".join(str(item).split())
+        )
+    )
+    if not core or not subquestions:
+        raise SourceContextError("approved research direction has no queryable subquestions")
+    return tuple(dict.fromkeys((core, *subquestions))), subquestions
+
+
+def _research_query_authorizer(run: dict):
+    return lambda query: authorize_research_public_query(run, query)
+
+
+def _research_coverage(subquestions, hits):
+    from .research_sources import CoverageEvaluation
+
+    def terms(value: str) -> set[str]:
+        tokens = set()
+        for token in re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", str(value).lower()):
+            if re.fullmatch(r"[\u4e00-\u9fff]+", token):
+                tokens.update(token[index : index + 2] for index in range(max(0, len(token) - 1)))
+            elif len(token) > 2:
+                tokens.add(token)
+        return tokens
+
+    corpus_terms = terms("\n".join(f"{hit.safe_title}\n{hit.content}" for hit in hits))
+    covered = []
+    for question in subquestions:
+        question_terms = terms(str(question))
+        minimum = 1 if len(question_terms) <= 2 else max(2, int(len(question_terms) * 0.35 + 0.999))
+        if question_terms and len(question_terms & corpus_terms) >= minimum:
+            covered.append(str(question))
+    return CoverageEvaluation(
+        "sufficient" if len(covered) == len(subquestions) and bool(hits) else "insufficient" if hits else "none",
+        tuple(covered),
+        "" if len(covered) == len(subquestions) and bool(hits) else "insufficient_evidence",
+        "" if len(covered) == len(subquestions) and bool(hits) else "现有资料不足以覆盖全部研究问题",
+    )
+
+
+def _research_local_roots(run: dict, workspace: Path | None = None) -> list[Path]:
+    profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
+    roots = [Path(item) for item in profile.get("research_local_roots") or [] if str(item).strip()]
+    wiki_path = os.getenv("WIKI_PATH", "").strip()
+    if wiki_path:
+        roots.append(Path(wiki_path))
+    else:
+        try:
+            from api.routes import _llm_wiki_resolve_path
+
+            configured_wiki, _source, explicitly_configured = _llm_wiki_resolve_path()
+            if explicitly_configured:
+                roots.append(configured_wiki)
+        except Exception:
+            pass
+    if workspace is not None:
+        roots.append(Path(workspace))
+    return list(dict.fromkeys(Path(item).expanduser() for item in roots))
+
+
+def _research_materialized_refs(workspace: Path, run_id: str, persisted: list[dict]) -> list[dict]:
+    """Verify only refs durably receipted by the current retrieval state."""
+    candidates = [deepcopy(item) for item in persisted if isinstance(item, dict)]
+    if not candidates:
+        return []
+    resolved, _registry = resolve_source_registry(workspace, run_id, candidates)
+    return resolved
+
+
+def _research_receipted_hits(workspace: Path, run_id: str, persisted: list[dict]):
+    from .research_sources import ResearchSourceHit
+
+    refs = _research_materialized_refs(workspace, run_id, persisted)
+    if not refs:
+        return [], []
+    refs, registry = resolve_source_registry(workspace, run_id, refs)
+    hits = []
+    root = Path(workspace).resolve()
+    for ref in refs:
+        entry = registry[str(ref.get("source_id") or "")]
+        content = (root / str(entry.get("locator") or "")).read_text(encoding="utf-8")
+        hits.append(
+            ResearchSourceHit.create(
+                source_kind=str(entry.get("kind") or ""),
+                safe_title=str(entry.get("label") or entry.get("source_id") or ""),
+                locator=str(entry.get("origin_locator") or entry.get("locator") or ""),
+                content=content,
+                retrieved_at=str(entry.get("retrieved_at") or ""),
+            )
+        )
+    return refs, hits
+
+
+def _claim_research_retrieval_owner(workspace: Path, run: dict) -> tuple[tuple[str, str], str]:
+    key = (str(Path(workspace).resolve()), str(run.get("run_id") or ""))
+    token = uuid.uuid4().hex
+    with _RESEARCH_RETRIEVAL_OWNERS_LOCK:
+        if key in _RESEARCH_RETRIEVAL_OWNERS:
+            raise ExpertTeamStateConflict(
+                "retrieval_in_progress",
+                "research retrieval is already in progress",
+                run,
+            )
+        _RESEARCH_RETRIEVAL_OWNERS[key] = token
+    return key, token
+
+
+def _release_research_retrieval_owner(key: tuple[str, str], token: str) -> None:
+    with _RESEARCH_RETRIEVAL_OWNERS_LOCK:
+        if _RESEARCH_RETRIEVAL_OWNERS.get(key) == token:
+            _RESEARCH_RETRIEVAL_OWNERS.pop(key, None)
+
+
+@_serialized_run_mutation
+def _reserve_research_retrieval(workspace: Path, run_id: str, expected_version: int, fingerprint: str) -> tuple[dict, str]:
+    current = read_run(workspace, run_id)
+    state = current.get("research_retrieval_state") if isinstance(current.get("research_retrieval_state"), dict) else {}
+    if state.get("fingerprint") == fingerprint and state.get("status") == "completed":
+        verify_source_context_snapshot(workspace, current)
+        return _sync_derived(current), "completed"
+    if int(current.get("version") or 0) != int(expected_version):
+        raise ExpertTeamStateConflict("version_conflict", "research retrieval run version changed", current)
+    recovery = bool(state.get("fingerprint") == fingerprint and state.get("status") in {"in_progress", "uncertain"})
+    reservation_id = str(state.get("reservation_id") or uuid.uuid4()) if recovery else str(uuid.uuid4())
+    previous = state if recovery else {}
+    next_run = deepcopy(current)
+    next_run["research_retrieval_state"] = {
+        "schema_version": _RESEARCH_RETRIEVAL_SCHEMA,
+        "reservation_id": reservation_id,
+        "fingerprint": fingerprint,
+        "status": "in_progress",
+        "started_at": str(previous.get("started_at") or _now()),
+        "completed_at": "",
+        "public_status": deepcopy(previous.get("public_status") or {}),
+        "local_status": deepcopy(previous.get("local_status") or {}),
+        "tier_decisions": deepcopy(previous.get("tier_decisions") or []),
+        "materialized_refs": deepcopy(previous.get("materialized_refs") or []),
+        "snapshot_ref": deepcopy(previous.get("snapshot_ref") or {}),
+        "safe_reason": "",
+    }
+    next_run["version"] = int(current.get("version") or 0) + 1
+    next_run["updated_at"] = _now()
+    return write_run(workspace, _sync_derived(next_run)), "recovery" if recovery else "reserved"
+
+
+@_serialized_run_mutation
+def _record_research_materialized_ref(
+    workspace: Path,
+    run_id: str,
+    expected_version: int,
+    fingerprint: str,
+    reservation_id: str,
+    ref: dict,
+) -> dict:
+    current = read_run(workspace, run_id)
+    state = current.get("research_retrieval_state") if isinstance(current.get("research_retrieval_state"), dict) else {}
+    if int(current.get("version") or 0) != int(expected_version):
+        raise ExpertTeamStateConflict("version_conflict", "research retrieval receipt version changed", current)
+    if (
+        state.get("fingerprint") != fingerprint
+        or state.get("reservation_id") != reservation_id
+        or state.get("status") != "in_progress"
+    ):
+        raise ExpertTeamStateConflict("retrieval_reservation_missing", "research retrieval receipt is stale", current)
+    refs = [deepcopy(item) for item in state.get("materialized_refs") or [] if isinstance(item, dict)]
+    source_id = str(ref.get("source_id") or "")
+    if any(str(item.get("source_id") or "") == source_id for item in refs):
+        return _sync_derived(current)
+    resolved, _registry = resolve_source_registry(workspace, run_id, [*refs, ref])
+    next_run = deepcopy(current)
+    next_run["research_retrieval_state"]["materialized_refs"] = resolved
+    next_run["version"] = int(current.get("version") or 0) + 1
+    next_run["updated_at"] = _now()
+    return write_run(workspace, _sync_derived(next_run))
+
+
+@_serialized_run_mutation
+def _complete_research_retrieval(
+    workspace: Path,
+    run_id: str,
+    expected_version: int,
+    fingerprint: str,
+    outcome: dict,
+    *,
+    trusted_provider_context: dict | None = None,
+) -> dict:
+    current = read_run(workspace, run_id)
+    state = current.get("research_retrieval_state") if isinstance(current.get("research_retrieval_state"), dict) else {}
+    if state.get("fingerprint") == fingerprint and state.get("status") == "completed":
+        verify_source_context_snapshot(workspace, current)
+        return _sync_derived(current)
+    if int(current.get("version") or 0) != int(expected_version):
+        raise ExpertTeamStateConflict("version_conflict", "research retrieval completion version changed", current)
+    if state.get("fingerprint") != fingerprint or state.get("status") != "in_progress":
+        raise ExpertTeamStateConflict("retrieval_reservation_missing", "research retrieval reservation is missing", current)
+
+    brief = deepcopy(current.get("document_brief") or {})
+    policy = brief.get("source_policy") if isinstance(brief.get("source_policy"), dict) else {}
+    excluded_source_ids = {
+        str(item or "")
+        for item in outcome.get("excluded_source_ids") or []
+        if str(item or "")
+    }
+    combined_refs = []
+    seen = set()
+    for ref in [*(policy.get("source_refs") or []), *(outcome.get("materialized_refs") or [])]:
+        source_id = str((ref or {}).get("source_id") or "")
+        if source_id and source_id not in seen and source_id not in excluded_source_ids:
+            combined_refs.append(deepcopy(ref))
+            seen.add(source_id)
+    resolved_refs, registry = resolve_source_registry(workspace, run_id, combined_refs)
+    policy["source_refs"] = resolved_refs
+    brief["source_policy"] = policy
+    # Retrieval adds evidence to the same confirmed Brief revision.  The Brief
+    # hash remains the frozen user contract; evidence identity is carried by
+    # the retrieval fingerprint and the distinct immutable snapshot id.
+    snapshot_ref = build_research_source_context_snapshot(
+        workspace,
+        current,
+        registry,
+        resolved_refs,
+        retrieval_fingerprint=fingerprint,
+        trusted_provider_context=trusted_provider_context,
+    )
+    next_run = deepcopy(current)
+    next_run["source_context_snapshot_ref"] = snapshot_ref
+    next_run["research_retrieval_state"] = {
+        **deepcopy(state),
+        "status": "completed",
+        "completed_at": _now(),
+        "public_status": deepcopy(outcome.get("public_status") or {}),
+        "local_status": deepcopy(outcome.get("local_status") or {}),
+        "tier_decisions": deepcopy(outcome.get("tier_decisions") or []),
+        "materialized_refs": resolved_refs,
+        "snapshot_ref": deepcopy(snapshot_ref),
+        "safe_reason": str(outcome.get("safe_reason") or ""),
+        "excluded_source_refs": deepcopy(outcome.get("excluded_source_refs") or []),
+    }
+    next_run["version"] = int(current.get("version") or 0) + 1
+    next_run["updated_at"] = _now()
+    verify_source_context_snapshot(workspace, next_run)
+    return write_run(workspace, _sync_derived(next_run))
+
+
+def _prepare_research_sources_for_gateway_owned(
+    workspace: Path,
+    run: dict,
+    *,
+    web_adapter=None,
+    local_adapter=None,
+    trusted_provider_context: dict | None = None,
+) -> dict:
+    """Freeze research evidence immediately before the research model call."""
+    if not _research_retrieval_eligible(run):
+        return run
+    from .research_sources import (
+        AdapterSearchResult,
+        HermesWebResearchSourceAdapter,
+        LocalTextResearchSourceAdapter,
+        ProbeResult,
+        orchestrate_research_sources,
+    )
+
+    fingerprint = research_retrieval_fingerprint(run)
+    reserved, mode = _reserve_research_retrieval(
+        workspace,
+        str(run.get("run_id") or ""),
+        int(run.get("version") or 0),
+        fingerprint,
+    )
+    if mode == "completed":
+        return reserved
+
+    queries, subquestions = _research_query(reserved)
+    state = reserved.get("research_retrieval_state") or {}
+    reservation_id = str(state.get("reservation_id") or "")
+    materialized, recovered_hits = _research_receipted_hits(
+        workspace,
+        str(run.get("run_id") or ""),
+        list(state.get("materialized_refs") or []),
+    )
+    _bound_refs, bound_hits = _research_receipted_hits(
+        workspace,
+        str(run.get("run_id") or ""),
+        list(((reserved.get("document_brief") or {}).get("source_policy") or {}).get("source_refs") or []),
+    )
+    recovered_hits = list(
+        {
+            hit.content_sha256: hit
+            for hit in (*recovered_hits, *bound_hits)
+        }.values()
+    )
+    from .data_egress import authorize_standalone_research_provider
+
+    provider_authorization = authorize_standalone_research_provider(
+        reserved,
+        trusted_provider_context or {},
+    )
+    internal_allowed = bool(provider_authorization.get("internal_sources_allowed"))
+    excluded_source_refs = []
+    if not internal_allowed:
+        excluded_source_refs = [
+            {
+                "source_id": str(item.get("source_id") or ""),
+                "kind": str(item.get("kind") or ""),
+                "sha256": str(item.get("sha256") or ""),
+                "reason": "provider_boundary_not_authorized",
+            }
+            for item in _bound_refs
+            if item.get("kind") == "approved_internal"
+        ]
+        materialized = [item for item in materialized if item.get("kind") != "approved_internal"]
+        recovered_hits = [hit for hit in recovered_hits if hit.source_kind != "approved_internal"]
+    actual_web = web_adapter or HermesWebResearchSourceAdapter()
+    if mode == "recovery":
+        class _InterruptedPublicAdapter:
+            async def probe(self):
+                return ProbeResult(False, "interrupted_before_commit", "上次公共检索在提交前中断，本次不重复出网")
+
+        actual_web = _InterruptedPublicAdapter()
+    if internal_allowed:
+        actual_local = local_adapter or LocalTextResearchSourceAdapter(
+            roots=_research_local_roots(reserved, workspace),
+            workspace_root=workspace,
+        )
+    else:
+        class _PolicyBlockedLocalAdapter:
+            async def probe(self):
+                return ProbeResult(False, "policy_blocked", "当前模型运行时未获授权读取内部资料")
+
+            async def search(self, *_args, **_kwargs):
+                return AdapterSearchResult(status="denied", reason_code="policy_blocked", safe_reason="当前模型运行时未获授权读取内部资料")
+
+        actual_local = _PolicyBlockedLocalAdapter()
+    result = asyncio.run(
+        orchestrate_research_sources(
+            queries,
+            web_adapter=actual_web,
+            local_adapter=actual_local,
+            query_authorizer=_research_query_authorizer(reserved),
+            research_subquestions=subquestions,
+            coverage_evaluator=_research_coverage,
+            existing_hits=recovered_hits,
+        )
+    )
+    successful_hits = list(recovered_hits)
+    recovered_hashes = {hit.content_sha256 for hit in recovered_hits}
+    failed_kinds = set()
+    for hit in result.hits:
+        if hit.content_sha256 in recovered_hashes:
+            continue
+        adapter = actual_web if hit.source_kind == "approved_public" else actual_local
+        try:
+            ref = asyncio.run(adapter.materialize(hit, workspace=workspace, run_id=str(run.get("run_id") or "")))
+        except Exception:
+            failed_kinds.add(hit.source_kind)
+            continue
+        if isinstance(ref, dict):
+            reserved = _record_research_materialized_ref(
+                workspace,
+                str(run.get("run_id") or ""),
+                int(reserved.get("version") or 0),
+                fingerprint,
+                reservation_id,
+                ref,
+            )
+            materialized = list((reserved.get("research_retrieval_state") or {}).get("materialized_refs") or [])
+            successful_hits.append(hit)
+        else:
+            failed_kinds.add(hit.source_kind)
+    effective_refs = []
+    seen_source_ids = set()
+    for item in (*_bound_refs, *materialized):
+        source_id = str(item.get("source_id") or "")
+        if (
+            not source_id
+            or source_id in seen_source_ids
+            or any(ref["source_id"] == source_id for ref in excluded_source_refs)
+        ):
+            continue
+        seen_source_ids.add(source_id)
+        effective_refs.append(item)
+    public_refs = [item for item in effective_refs if item.get("kind") == "approved_public"]
+    local_refs = [item for item in effective_refs if item.get("kind") == "approved_internal"]
+    public_status = deepcopy(result.public_status)
+    local_status = deepcopy(result.local_status)
+    public_coverage = _research_coverage(subquestions, tuple(
+        hit for hit in successful_hits if hit.source_kind == "approved_public"
+    ))
+    local_coverage = _research_coverage(subquestions, tuple(
+        hit for hit in successful_hits if hit.source_kind == "approved_internal"
+    ))
+    final_coverage = _research_coverage(subquestions, tuple(successful_hits))
+    public_status["count"] = len(public_refs)
+    public_status["coverage"] = public_coverage.coverage
+    local_status["count"] = len(local_refs)
+    local_status["coverage"] = local_coverage.coverage
+    for kind, status in (
+        ("approved_public", public_status),
+        ("approved_internal", local_status),
+    ):
+        if kind in failed_kinds:
+            status.update(
+                {
+                    "status": "partial" if int(status.get("count") or 0) else "materialize_failed",
+                    "reason": "materialize_failed",
+                    "safe_reason": "候选资料未能固化到任务的受信证据区",
+                }
+            )
+    if mode == "recovery":
+        public_status.update(
+            {
+                "status": "skipped",
+                "reason": "interrupted_before_commit",
+                "safe_reason": "上次公共检索在提交前中断，本次不重复出网",
+                "count": len(public_refs),
+                "coverage": public_coverage.coverage,
+            }
+        )
+    tier_decisions = [
+        {"tier": "public", **public_status},
+        {"tier": "local", **local_status},
+    ]
+    if final_coverage.coverage != "sufficient":
+        tier_decisions.append(
+            {
+                "tier": "model",
+                "status": "used",
+                "reason": "materialize_failed" if failed_kinds else "insufficient_evidence",
+                "safe_reason": (
+                    "候选资料未能全部固化，将使用模型能力并保留证据缺口"
+                    if failed_kinds
+                    else "现有资料不足以覆盖全部研究问题"
+                ),
+                "count": 1,
+                "coverage": final_coverage.coverage,
+            }
+        )
+    return _complete_research_retrieval(
+        workspace,
+        str(run.get("run_id") or ""),
+        int(reserved.get("version") or 0),
+        fingerprint,
+        {
+            "public_status": public_status,
+            "local_status": local_status,
+            "tier_decisions": tier_decisions,
+            "materialized_refs": materialized,
+            "excluded_source_ids": [item["source_id"] for item in excluded_source_refs],
+            "excluded_source_refs": excluded_source_refs,
+            "safe_reason": (
+                "候选资料固化失败，已降级为模型补全"
+                if failed_kinds and final_coverage.coverage != "sufficient"
+                else result.safe_reason
+            ),
+        },
+        trusted_provider_context=trusted_provider_context,
+    )
+
+
+def prepare_research_sources_for_gateway(
+    workspace: Path,
+    run: dict,
+    *,
+    web_adapter=None,
+    local_adapter=None,
+    trusted_provider_context: dict | None = None,
+) -> dict:
+    """Freeze research evidence under one process-local active owner."""
+    if not _research_retrieval_eligible(run):
+        return run
+    owner_key, owner_token = _claim_research_retrieval_owner(workspace, run)
+    try:
+        return _prepare_research_sources_for_gateway_owned(
+            workspace,
+            run,
+            web_adapter=web_adapter,
+            local_adapter=local_adapter,
+            trusted_provider_context=trusted_provider_context,
+        )
+    finally:
+        _release_research_retrieval_owner(owner_key, owner_token)
+
+
 def latest_expert_team_run_for_session(workspace: Path, session_id: str) -> dict:
     run = _refresh_artifact_existence(workspace, latest_run_for_session(workspace, session_id))
     return _sync_derived(_completion_integrity_for_read(workspace, run))
@@ -1879,15 +2594,36 @@ def _intake_state(run: dict) -> str:
 
 def _stage_input_binding_sha256(run: dict, stage: dict, input_refs: list[dict]) -> str:
     brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    stage_id = str(stage.get("id") or stage.get("task_id") or "")
     payload = {
         "run_id": str(run.get("run_id") or ""),
-        "stage_id": str(stage.get("id") or stage.get("task_id") or ""),
+        "stage_id": stage_id,
         "executor": str(stage.get("executor") or ""),
         "artifact_type": str(stage.get("artifact_type") or ""),
         "brief_revision": int(brief.get("confirmed_revision") or 0),
         "brief_sha256": str(brief.get("confirmed_sha256") or ""),
         "input_refs": deepcopy(input_refs),
     }
+    boundary_assumptions = [
+        deepcopy(item)
+        for item in run.get("research_boundary_assumptions") or []
+        if isinstance(item, dict) and str(item.get("stage_id") or "") == stage_id
+    ]
+    if boundary_assumptions:
+        payload["research_boundary_assumptions"] = boundary_assumptions
+    input_consumptions = [
+        {
+            "input_id": str(item.get("input_id") or ""),
+            "stage_id": str(item.get("stage_id") or ""),
+            "disposition": str(item.get("disposition") or ""),
+        }
+        for item in run.get("research_input_consumptions") or []
+        if isinstance(item, dict)
+        and str(item.get("stage_id") or "") == stage_id
+        and str(item.get("input_id") or "")
+    ]
+    if input_consumptions:
+        payload["research_input_consumptions"] = input_consumptions
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -1955,7 +2691,7 @@ def _reserve_stage_attempt_in_run(
     for item in reservations:
         if (
             item.get("stage_id") == stage_id
-            and item.get("status") not in {"superseded", "invalidated"}
+            and item.get("status") not in {"superseded", "superseded_by_input", "invalidated"}
         ):
             item["status"] = "superseded"
             item["superseded_at"] = _now()
@@ -2554,6 +3290,13 @@ def confirm_expert_team_document_brief(workspace: Path, body: dict) -> dict:
         source_registry=source_registry,
         model_policy_registry=load_model_policy_registry(),
         now=checked_at,
+        research_contract_version=str(
+            (run.get("launch_profile_snapshot") or {}).get(
+                "research_contract_version"
+            )
+            if isinstance(run.get("launch_profile_snapshot"), dict)
+            else ""
+        ),
     )
     if not validation["valid_for_confirmation"]:
         first = validation["field_errors"][0]
@@ -3237,8 +3980,119 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         raise ValueError("Expert team cannot request stage input in current state")
     synced = _sync_derived(deepcopy(run))
     current = synced.get("current_stage") if isinstance(synced.get("current_stage"), dict) else {}
+    research_v2 = _research_v2_run(synced)
+    requested_input_id = str(body.get("input_id") or "").strip()
+    existing_input_ids = {
+        str(item.get("input_id") or item.get("id") or "").strip()
+        for item in (run.get("stage_inputs") or [])
+        + (run.get("research_input_consumptions") or [])
+        if isinstance(item, dict)
+    }
+    pending = run.get("pending_input")
+    if isinstance(pending, dict):
+        existing_input_ids.add(str(pending.get("id") or "").strip())
+    existing_input_ids.discard("")
+    if requested_input_id and requested_input_id in existing_input_ids:
+        raise ExpertTeamStateConflict(
+            "stage_input_id_conflict",
+            "stage input id was already used by this run",
+            run,
+        )
+    if not requested_input_id:
+        requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
+        while requested_input_id in existing_input_ids:
+            requested_input_id = "stage-input-" + uuid.uuid4().hex[:8]
+    if research_v2:
+        category = str(body.get("category") or "").strip()
+        reason = str(body.get("reason") or "").strip()
+        semantic_values = [
+            str(body.get(field) or "").strip()
+            for field in (
+                "question",
+                "description",
+                "impact",
+                "conservative_assumption",
+            )
+        ]
+        semantic_values.extend(
+            str(option or "").strip()
+            for option in body.get("options") or []
+        )
+        semantic_text = "\n".join(semantic_values)
+        if (
+            category not in {"scope", "object", "caliber"}
+            or reason != "core_conclusion_ambiguity"
+            or _RESEARCH_INPUT_FORBIDDEN_SEMANTICS.search(semantic_text)
+        ):
+            raise ExpertTeamStateConflict(
+                "research_stage_input_not_allowed",
+                "research v2 only permits blocking questions about the core conclusion boundary",
+                run,
+            )
+        dynamic_input_count = int(run.get("research_dynamic_input_count") or 0)
+        if dynamic_input_count >= 2:
+            prior_limit_consumptions = [
+                item
+                for item in run.get("research_input_consumptions") or []
+                if isinstance(item, dict)
+                and item.get("disposition") == "conservative_assumption"
+            ]
+            if prior_limit_consumptions:
+                raise ExpertTeamStateConflict(
+                    "research_stage_input_limit_reached",
+                    "research v2 has already applied its final conservative assumption",
+                    run,
+                )
+            conservative_assumption = str(body.get("conservative_assumption") or "").strip()
+            if not conservative_assumption:
+                raise ValueError("conservative_assumption is required after the research input limit")
+            assumptions = [
+                deepcopy(item)
+                for item in run.get("research_boundary_assumptions") or []
+                if isinstance(item, dict)
+            ]
+            stage_id = str(current.get("task_id") or current.get("id") or "")
+            impact = str(body.get("impact") or "").strip()
+            assumption = {
+                "scope": "conclusion",
+                "stage_id": stage_id,
+                "assumption": conservative_assumption,
+                "impact": impact,
+            }
+            if assumption not in assumptions:
+                assumptions.append(assumption)
+            consumptions = [
+                deepcopy(item)
+                for item in run.get("research_input_consumptions") or []
+                if isinstance(item, dict)
+            ]
+            consumptions.append(
+                {
+                    "input_id": requested_input_id,
+                    "stage_id": stage_id,
+                    "disposition": "conservative_assumption",
+                    "assumption": conservative_assumption,
+                    "impact": impact,
+                    "consumed_at": _now(),
+                }
+            )
+            _record_action(run, body, "request_stage_input")
+            superseded = _supersede_current_stage_attempt_for_input(run)
+            return _transition(
+                workspace,
+                run,
+                "ready_to_generate",
+                "research_boundary_assumption_applied",
+                {
+                    **_clear_execution_patch(),
+                    **superseded,
+                    "pending_input": {},
+                    "research_boundary_assumptions": assumptions,
+                    "research_input_consumptions": consumptions,
+                },
+            )
     pending_input = {
-        "id": str(body.get("input_id") or ("stage-input-" + uuid.uuid4().hex[:8])),
+        "id": requested_input_id,
         "question": str(body.get("question") or "当前阶段需要你确认后继续生成。").strip(),
         "description": str(body.get("description") or "").strip(),
         "options": [str(option) for option in body.get("options") or []],
@@ -3247,6 +4101,22 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         "worker_id": str(current.get("worker_id") or ""),
         "created_at": _now(),
     }
+    patch = {
+        "pending_input": pending_input,
+        "execution_status": "paused",
+        "last_execution_error": "",
+    }
+    if research_v2:
+        pending_input.update(
+            {
+                "scope": "conclusion",
+                "blocking": True,
+                "category": str(body.get("category") or "").strip(),
+                "reason": str(body.get("reason") or "").strip(),
+                "impact": str(body.get("impact") or "").strip(),
+            }
+        )
+        patch["research_dynamic_input_count"] = int(run.get("research_dynamic_input_count") or 0) + 1
     if not pending_input["question"]:
         pending_input["question"] = "当前阶段需要你确认后继续生成。"
     _record_action(run, body, "request_stage_input")
@@ -3255,11 +4125,7 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         run,
         "awaiting_stage_input",
         "stage_input_requested",
-        {
-            "pending_input": pending_input,
-            "execution_status": "paused",
-            "last_execution_error": "",
-        },
+        patch,
     )
 
 
@@ -3284,18 +4150,34 @@ def submit_expert_team_stage_input(workspace: Path, body: dict) -> dict:
     if pending.get("required", True) is not False and not answer and not note:
         raise ValueError("Stage input answer is required")
     rows = [deepcopy(row) for row in run.get("stage_inputs") or [] if isinstance(row, dict)]
-    rows.append(
-        {
-            "input_id": str(pending.get("id") or ""),
-            "stage_id": str(pending.get("stage_id") or ""),
-            "worker_id": str(pending.get("worker_id") or ""),
-            "question": str(pending.get("question") or ""),
-            "answer": answer,
-            "note": note,
-            "answered_at": _now(),
-        }
-    )
+    answered_input = {
+        "input_id": str(pending.get("id") or ""),
+        "stage_id": str(pending.get("stage_id") or ""),
+        "worker_id": str(pending.get("worker_id") or ""),
+        "scope": str(pending.get("scope") or ""),
+        "category": str(pending.get("category") or ""),
+        "question": str(pending.get("question") or ""),
+        "answer": answer,
+        "note": note,
+        "answered_at": _now(),
+    }
+    answer_sha256 = hashlib.sha256(
+        json.dumps(
+            answered_input,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    answered_input["ref"] = {
+        "ref_type": "stage_input",
+        "input_id": answered_input["input_id"],
+        "stage_id": answered_input["stage_id"],
+        "sha256": answer_sha256,
+    }
+    rows.append(answered_input)
     _record_action(run, body, "submit_stage_input")
+    superseded = _supersede_current_stage_attempt_for_input(run)
     return _transition(
         workspace,
         run,
@@ -3303,6 +4185,7 @@ def submit_expert_team_stage_input(workspace: Path, body: dict) -> dict:
         "stage_input_answered",
         {
             **_clear_execution_patch(),
+            **superseded,
             "pending_input": {},
             "stage_inputs": rows,
         },
@@ -3338,6 +4221,8 @@ def _complete_enterprise_stage_artifact(
         )
     stage_attempt = int(reservation.get("stage_attempt") or 0)
     raw_content = str(output.get("content") or "")
+    output["task_id"] = str(output.get("task_id") or task_id)
+    output["stage_id"] = str(output.get("stage_id") or task_id)
     output["stage_attempt"] = stage_attempt
     output["status"] = "generated"
     run.setdefault("stage_outputs", []).append(output)
@@ -3425,10 +4310,128 @@ def _complete_enterprise_stage_artifact(
         "message": validation_message,
     }
     run["last_validation_error"] = run["validation"]["message"] if blocking_count else ""
+    if not blocking_count and _research_v2_run(run):
+        delivery_id = str(
+            output.get("delivery_id")
+            or output.get("id")
+            or "expert-team-chat-delivery"
+        )
+        delivery_content_sha256 = str(
+            output.get("delivery_content_sha256")
+            or hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
+        )
+        return _auto_approve_research_v2_stage(
+            workspace,
+            run,
+            artifact,
+            delivery_id=delivery_id,
+            delivery_content_sha256=delivery_content_sha256,
+        )
     status = "generated_invalid" if blocking_count else "generated_valid"
     state = "generated_invalid" if blocking_count else "awaiting_review"
     event = "generation_invalid" if blocking_count else "generation_completed"
     return _transition(workspace, run, state, event, _stage_reservation_status_patch(run, status))
+
+
+def _auto_approve_research_v2_stage(
+    workspace: Path,
+    run: dict,
+    artifact: dict,
+    *,
+    delivery_id: str,
+    delivery_content_sha256: str,
+) -> dict:
+    """Advance one contract-valid research/v2 model stage without user review."""
+
+    stage_id = str(artifact.get("stage_id") or "")
+    approved_at = _now()
+    approval = {
+        "schema_version": "automatic-stage-approval/v1",
+        "stage_id": stage_id,
+        "stage_attempt": int(artifact.get("stage_attempt") or 0),
+        "artifact_id": str(artifact.get("artifact_id") or ""),
+        "artifact_sha256": str(artifact.get("sha256") or ""),
+        "execution_stream_id": str(run.get("execution_stream_id") or ""),
+        "delivery_id": delivery_id,
+        "delivery_content_sha256": delivery_content_sha256,
+        "approved_at": approved_at,
+    }
+    approvals = [
+        deepcopy(item)
+        for item in run.get("automatic_stage_approvals") or []
+        if isinstance(item, dict)
+    ]
+    approvals.append(approval)
+    run["automatic_stage_approvals"] = approvals
+    outputs = [
+        deepcopy(item)
+        for item in run.get("stage_outputs") or []
+        if isinstance(item, dict)
+    ]
+    for output in reversed(outputs):
+        if str(output.get("task_id") or output.get("stage_id") or "") == stage_id:
+            output["status"] = "approved"
+            output["approved_at"] = approved_at
+            output["approval_kind"] = "automatic_contract_validation"
+            break
+    run["stage_outputs"] = outputs
+    run["approved_stage_artifact_refs"] = {
+        **(
+            deepcopy(run.get("approved_stage_artifact_refs"))
+            if isinstance(run.get("approved_stage_artifact_refs"), dict)
+            else {}
+        ),
+        stage_id: {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+        },
+    }
+    final_review = artifact.get("artifact_type") == "reviewed_research_document"
+    if final_review:
+        brief = run.get("document_brief") or {}
+        run["canonical_document_ref"] = {
+            "artifact_id": artifact["artifact_id"],
+            "sha256": artifact["sha256"],
+            "brief_revision": int(brief.get("confirmed_revision") or 0),
+            "brief_sha256": str(brief.get("confirmed_sha256") or ""),
+        }
+        profile = run.get("launch_profile_snapshot")
+        if not isinstance(profile, dict):
+            raise ExpertTeamStateConflict(
+                "launch_profile_snapshot_missing",
+                "research auto approval requires its frozen launch profile",
+                run,
+            )
+        system_descriptors = [
+            item
+            for item in (profile.get("stages") or [])
+            + (profile.get("post_approval_system_steps") or [])
+            if isinstance(item, dict)
+            and item.get("executor") == "system"
+            and stage_id in (item.get("depends_on") or [])
+        ]
+        if len(system_descriptors) != 1:
+            raise ExpertTeamStateConflict(
+                "system_step_contract_missing",
+                "approved research document has no unique declared delivery stage",
+                run,
+            )
+        run["pending_system_stage"] = deepcopy(system_descriptors[0])
+    run["current_stage_index"] = int(run.get("current_stage_index") or 0) + 1
+    reservation_patch = _stage_reservation_status_patch(run, "approved")
+    patch = {
+        **_clear_execution_patch(),
+        **reservation_patch,
+    }
+    if not final_review:
+        patch["current_stage_artifact_ref"] = None
+    return _transition(
+        workspace,
+        run,
+        "delivery_validation_required" if final_review else "ready_to_generate",
+        "research_stage_auto_approved",
+        patch,
+    )
 
 
 @_serialized_run_mutation
@@ -3447,6 +4450,34 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         delivered_attempt = int((delivery or {}).get("attempt"))
     except (TypeError, ValueError):
         delivered_attempt = -1
+    delivered_id = str((delivery or {}).get("id") or "expert-team-chat-delivery")
+    delivered_content_sha256 = hashlib.sha256(
+        str((delivery or {}).get("content") or "").encode("utf-8")
+    ).hexdigest()
+    if _research_v2_run(run):
+        replay_approval = next(
+            (
+                item
+                for item in run.get("automatic_stage_approvals") or []
+                if isinstance(item, dict)
+                and str(item.get("stage_id") or "") == delivered_stage_id
+                and int(item.get("stage_attempt") or 0) == delivered_attempt
+                and str(item.get("execution_stream_id") or "") == delivered_stream_id
+            ),
+            None,
+        )
+        if replay_approval is not None:
+            if (
+                str(replay_approval.get("delivery_id") or "") == delivered_id
+                and str(replay_approval.get("delivery_content_sha256") or "")
+                == delivered_content_sha256
+            ):
+                return _sync_derived(run)
+            raise ExpertTeamStateConflict(
+                "stage_completion_immutable_conflict",
+                "stage completion identity was already approved with different delivery content",
+                run,
+            )
     if state not in {"generating", "result_unverified"}:
         code = "missing_stream" if state == "ready_to_generate" and not expected_stream_id else "stale_state"
         raise ExpertTeamStateConflict(code, "expert team execution is not generating", run)
@@ -3473,6 +4504,8 @@ def mark_expert_team_execution_complete(workspace: Path, run_id: str, delivery: 
         )
     business_context = business_context_for_run(run)
     output = structured_output_from_delivery(delivery or {}, business_context)
+    output["delivery_id"] = delivered_id
+    output["delivery_content_sha256"] = delivered_content_sha256
     current = _current_stage(_sync_derived(deepcopy(run)))
     output["task_id"] = current.get("task_id") or ""
     output["stage_id"] = current.get("task_id") or ""
@@ -5706,7 +6739,14 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
             "previous expert team runtime cleanup is not yet confirmed",
             run,
         )
-    if state not in {"ready_to_generate", "start_failed", "generation_failed", "result_unverified", "generated_invalid"}:
+    if state not in {
+        "ready_to_generate",
+        "start_failed",
+        "generation_failed",
+        "result_unverified",
+        "generated_invalid",
+        "delivery_validation_required",
+    }:
         raise ExpertTeamStateConflict("stale_state", "expert team run is not resumable", run)
     _record_action(run, body, "resume")
     if recovery_patch := _warning_only_review_recovery_patch(run):
@@ -5724,17 +6764,26 @@ def resume_expert_team(workspace: Path, body: dict) -> dict:
     )
     if (
         pending_system_stage.get("executor") == "system"
-        and state in {"generated_invalid", "ready_to_generate"}
+        and state in {
+            "delivery_validation_required",
+            "generated_invalid",
+            "ready_to_generate",
+        }
     ):
         # A failed system delivery is retried by the system dispatcher itself.
         # Moving it into the model-stage ready state makes the dispatcher reject
         # its own retry and leaves the UI in a resume loop.  Preserve the
         # retryable system state until the route reserves/finishes that exact
         # delivery side effect.
+        target_state = (
+            "delivery_validation_required"
+            if state == "delivery_validation_required"
+            else "generated_invalid"
+        )
         return _transition(
             workspace,
             run,
-            "generated_invalid",
+            target_state,
             "system_stage_retry_requested",
             _clear_execution_patch(),
         )
