@@ -285,7 +285,6 @@ def test_v2_stage_input_id_is_globally_unique_at_request_time(
 
     assert rejected.value.code == "stage_input_id_conflict"
 
-
 def test_v2_research_pending_input_persists_and_projects_conclusion_contract(tmp_path, monkeypatch):
     from api import expert_teams
     from api.expert_teams import runtime
@@ -472,6 +471,23 @@ def test_v2_question_limit_consumption_is_durable_unique_and_idempotent(
         expert_teams.request_expert_team_stage_input(tmp_path, conflicting_body)
 
     assert rejected.value.code == "stage_input_id_conflict"
+
+    fresh_after_limit = _control(
+        consumed,
+        "limit-consumption-fresh",
+        input_id="limit-consumption-2",
+        scope="conclusion",
+        blocking=True,
+        category="scope",
+        reason="core_conclusion_ambiguity",
+        question="是否再次调整范围？",
+        impact="再次调整会改变核心结论。",
+        options=["保持保守范围", "扩大范围"],
+        conservative_assumption="继续沿用已冻结的保守范围。",
+    )
+    with pytest.raises(expert_teams.ExpertTeamStateConflict) as limit_rejected:
+        expert_teams.request_expert_team_stage_input(tmp_path, fresh_after_limit)
+    assert limit_rejected.value.code == "research_stage_input_limit_reached"
 
 
 def test_v2_third_question_requires_non_empty_conservative_assumption(tmp_path, monkeypatch):

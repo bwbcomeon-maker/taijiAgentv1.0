@@ -361,15 +361,20 @@ def test_local_adapter_only_reads_explicit_text_roots_and_rejects_symlink_escape
     assert result.hits[0].source_kind == "approved_internal"
 
 
-def test_local_adapter_without_roots_or_with_broad_workspace_root_is_unavailable(tmp_path):
+def test_local_adapter_requires_explicit_root_and_allows_authorized_workspace(tmp_path):
     module = _module()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    (workspace / "approved-note.md").write_text("alpha workspace evidence", encoding="utf-8")
+    generated = workspace / ".taiji"
+    generated.mkdir()
+    (generated / "internal.txt").write_text("alpha generated state", encoding="utf-8")
 
     assert _run(module.LocalTextResearchSourceAdapter(roots=[]).probe()).available is False
-    assert _run(
-        module.LocalTextResearchSourceAdapter(roots=[workspace], workspace_root=workspace).probe()
-    ).available is False
+    adapter = module.LocalTextResearchSourceAdapter(roots=[workspace], workspace_root=workspace)
+    assert _run(adapter.probe()).available is True
+    result = _run(adapter.search("alpha"))
+    assert [hit.safe_title for hit in result.hits] == ["approved-note.md"]
 
 
 def test_materialized_approved_sources_are_registry_trusted_idempotent_and_not_client_forgeable(tmp_path):

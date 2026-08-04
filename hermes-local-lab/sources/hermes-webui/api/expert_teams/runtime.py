@@ -2060,7 +2060,7 @@ def research_retrieval_fingerprint(run: dict) -> str:
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
-def _research_query(run: dict) -> tuple[str, tuple[str, ...]]:
+def _research_query(run: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
     payload = _research_retrieval_artifact(run)["payload"]
     core = " ".join(str(payload.get("core_question") or "").split())
     subquestions = tuple(
@@ -2072,7 +2072,7 @@ def _research_query(run: dict) -> tuple[str, tuple[str, ...]]:
     )
     if not core or not subquestions:
         raise SourceContextError("approved research direction has no queryable subquestions")
-    return "\n".join((core, *subquestions)), subquestions
+    return tuple(dict.fromkeys((core, *subquestions))), subquestions
 
 
 def _research_query_authorizer(run: dict):
@@ -2082,13 +2082,21 @@ def _research_query_authorizer(run: dict):
 def _research_coverage(subquestions, hits):
     from .research_sources import CoverageEvaluation
 
+    def terms(value: str) -> set[str]:
+        tokens = set()
+        for token in re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", str(value).lower()):
+            if re.fullmatch(r"[\u4e00-\u9fff]+", token):
+                tokens.update(token[index : index + 2] for index in range(max(0, len(token) - 1)))
+            elif len(token) > 2:
+                tokens.add(token)
+        return tokens
+
+    corpus_terms = terms("\n".join(f"{hit.safe_title}\n{hit.content}" for hit in hits))
     covered = []
     for question in subquestions:
-        normalized = re.sub(r"\s+", "", str(question)).lower()
-        if normalized and any(
-            normalized in re.sub(r"\s+", "", f"{hit.safe_title}\n{hit.content}").lower()
-            for hit in hits
-        ):
+        question_terms = terms(str(question))
+        minimum = 1 if len(question_terms) <= 2 else max(2, int(len(question_terms) * 0.35 + 0.999))
+        if question_terms and len(question_terms & corpus_terms) >= minimum:
             covered.append(str(question))
     return CoverageEvaluation(
         "sufficient" if len(covered) == len(subquestions) and bool(hits) else "insufficient" if hits else "none",
@@ -2098,13 +2106,24 @@ def _research_coverage(subquestions, hits):
     )
 
 
-def _research_local_roots(run: dict) -> list[Path]:
+def _research_local_roots(run: dict, workspace: Path | None = None) -> list[Path]:
     profile = run.get("launch_profile_snapshot") if isinstance(run.get("launch_profile_snapshot"), dict) else {}
     roots = [Path(item) for item in profile.get("research_local_roots") or [] if str(item).strip()]
     wiki_path = os.getenv("WIKI_PATH", "").strip()
     if wiki_path:
         roots.append(Path(wiki_path))
-    return roots
+    else:
+        try:
+            from api.routes import _llm_wiki_resolve_path
+
+            configured_wiki, _source, explicitly_configured = _llm_wiki_resolve_path()
+            if explicitly_configured:
+                roots.append(configured_wiki)
+        except Exception:
+            pass
+    if workspace is not None:
+        roots.append(Path(workspace))
+    return list(dict.fromkeys(Path(item).expanduser() for item in roots))
 
 
 def _research_materialized_refs(workspace: Path, run_id: str, persisted: list[dict]) -> list[dict]:
@@ -2245,11 +2264,16 @@ def _complete_research_retrieval(
 
     brief = deepcopy(current.get("document_brief") or {})
     policy = brief.get("source_policy") if isinstance(brief.get("source_policy"), dict) else {}
+    excluded_source_ids = {
+        str(item or "")
+        for item in outcome.get("excluded_source_ids") or []
+        if str(item or "")
+    }
     combined_refs = []
     seen = set()
     for ref in [*(policy.get("source_refs") or []), *(outcome.get("materialized_refs") or [])]:
         source_id = str((ref or {}).get("source_id") or "")
-        if source_id and source_id not in seen:
+        if source_id and source_id not in seen and source_id not in excluded_source_ids:
             combined_refs.append(deepcopy(ref))
             seen.add(source_id)
     resolved_refs, registry = resolve_source_registry(workspace, run_id, combined_refs)
@@ -2278,6 +2302,7 @@ def _complete_research_retrieval(
         "materialized_refs": resolved_refs,
         "snapshot_ref": deepcopy(snapshot_ref),
         "safe_reason": str(outcome.get("safe_reason") or ""),
+        "excluded_source_refs": deepcopy(outcome.get("excluded_source_refs") or []),
     }
     next_run["version"] = int(current.get("version") or 0) + 1
     next_run["updated_at"] = _now()
@@ -2297,6 +2322,7 @@ def _prepare_research_sources_for_gateway_owned(
     if not _research_retrieval_eligible(run):
         return run
     from .research_sources import (
+        AdapterSearchResult,
         HermesWebResearchSourceAdapter,
         LocalTextResearchSourceAdapter,
         ProbeResult,
@@ -2313,7 +2339,7 @@ def _prepare_research_sources_for_gateway_owned(
     if mode == "completed":
         return reserved
 
-    query, subquestions = _research_query(reserved)
+    queries, subquestions = _research_query(reserved)
     state = reserved.get("research_retrieval_state") or {}
     reservation_id = str(state.get("reservation_id") or "")
     materialized, recovered_hits = _research_receipted_hits(
@@ -2321,6 +2347,38 @@ def _prepare_research_sources_for_gateway_owned(
         str(run.get("run_id") or ""),
         list(state.get("materialized_refs") or []),
     )
+    _bound_refs, bound_hits = _research_receipted_hits(
+        workspace,
+        str(run.get("run_id") or ""),
+        list(((reserved.get("document_brief") or {}).get("source_policy") or {}).get("source_refs") or []),
+    )
+    recovered_hits = list(
+        {
+            hit.content_sha256: hit
+            for hit in (*recovered_hits, *bound_hits)
+        }.values()
+    )
+    from .data_egress import authorize_standalone_research_provider
+
+    provider_authorization = authorize_standalone_research_provider(
+        reserved,
+        trusted_provider_context or {},
+    )
+    internal_allowed = bool(provider_authorization.get("internal_sources_allowed"))
+    excluded_source_refs = []
+    if not internal_allowed:
+        excluded_source_refs = [
+            {
+                "source_id": str(item.get("source_id") or ""),
+                "kind": str(item.get("kind") or ""),
+                "sha256": str(item.get("sha256") or ""),
+                "reason": "provider_boundary_not_authorized",
+            }
+            for item in _bound_refs
+            if item.get("kind") == "approved_internal"
+        ]
+        materialized = [item for item in materialized if item.get("kind") != "approved_internal"]
+        recovered_hits = [hit for hit in recovered_hits if hit.source_kind != "approved_internal"]
     actual_web = web_adapter or HermesWebResearchSourceAdapter()
     if mode == "recovery":
         class _InterruptedPublicAdapter:
@@ -2328,13 +2386,23 @@ def _prepare_research_sources_for_gateway_owned(
                 return ProbeResult(False, "interrupted_before_commit", "上次公共检索在提交前中断，本次不重复出网")
 
         actual_web = _InterruptedPublicAdapter()
-    actual_local = local_adapter or LocalTextResearchSourceAdapter(
-        roots=_research_local_roots(reserved),
-        workspace_root=workspace,
-    )
+    if internal_allowed:
+        actual_local = local_adapter or LocalTextResearchSourceAdapter(
+            roots=_research_local_roots(reserved, workspace),
+            workspace_root=workspace,
+        )
+    else:
+        class _PolicyBlockedLocalAdapter:
+            async def probe(self):
+                return ProbeResult(False, "policy_blocked", "当前模型运行时未获授权读取内部资料")
+
+            async def search(self, *_args, **_kwargs):
+                return AdapterSearchResult(status="denied", reason_code="policy_blocked", safe_reason="当前模型运行时未获授权读取内部资料")
+
+        actual_local = _PolicyBlockedLocalAdapter()
     result = asyncio.run(
         orchestrate_research_sources(
-            query,
+            queries,
             web_adapter=actual_web,
             local_adapter=actual_local,
             query_authorizer=_research_query_authorizer(reserved),
@@ -2368,8 +2436,20 @@ def _prepare_research_sources_for_gateway_owned(
             successful_hits.append(hit)
         else:
             failed_kinds.add(hit.source_kind)
-    public_refs = [item for item in materialized if item.get("kind") == "approved_public"]
-    local_refs = [item for item in materialized if item.get("kind") == "approved_internal"]
+    effective_refs = []
+    seen_source_ids = set()
+    for item in (*_bound_refs, *materialized):
+        source_id = str(item.get("source_id") or "")
+        if (
+            not source_id
+            or source_id in seen_source_ids
+            or any(ref["source_id"] == source_id for ref in excluded_source_refs)
+        ):
+            continue
+        seen_source_ids.add(source_id)
+        effective_refs.append(item)
+    public_refs = [item for item in effective_refs if item.get("kind") == "approved_public"]
+    local_refs = [item for item in effective_refs if item.get("kind") == "approved_internal"]
     public_status = deepcopy(result.public_status)
     local_status = deepcopy(result.local_status)
     public_coverage = _research_coverage(subquestions, tuple(
@@ -2434,6 +2514,8 @@ def _prepare_research_sources_for_gateway_owned(
             "local_status": local_status,
             "tier_decisions": tier_decisions,
             "materialized_refs": materialized,
+            "excluded_source_ids": [item["source_id"] for item in excluded_source_refs],
+            "excluded_source_refs": excluded_source_refs,
             "safe_reason": (
                 "候选资料固化失败，已降级为模型补全"
                 if failed_kinds and final_coverage.coverage != "sufficient"
@@ -3949,6 +4031,18 @@ def request_expert_team_stage_input(workspace: Path, body: dict) -> dict:
             )
         dynamic_input_count = int(run.get("research_dynamic_input_count") or 0)
         if dynamic_input_count >= 2:
+            prior_limit_consumptions = [
+                item
+                for item in run.get("research_input_consumptions") or []
+                if isinstance(item, dict)
+                and item.get("disposition") == "conservative_assumption"
+            ]
+            if prior_limit_consumptions:
+                raise ExpertTeamStateConflict(
+                    "research_stage_input_limit_reached",
+                    "research v2 has already applied its final conservative assumption",
+                    run,
+                )
             conservative_assumption = str(body.get("conservative_assumption") or "").strip()
             if not conservative_assumption:
                 raise ValueError("conservative_assumption is required after the research input limit")

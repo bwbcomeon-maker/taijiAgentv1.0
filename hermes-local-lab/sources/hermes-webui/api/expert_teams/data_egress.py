@@ -14,6 +14,14 @@ RESEARCH_PUBLIC_QUERY_POLICY = {
     "trust_zone": "public_web",
     "projection_version": "research-public-topic/v1",
 }
+_LOCAL_RESEARCH_PROVIDERS = {"lmstudio", "ollama"}
+_RESEARCH_SAFE_REFINEMENTS = (
+    "部署", "成本", "风险", "政策", "案例", "趋势", "技术", "效果",
+    "对比", "市场", "应用", "治理", "安全", "合规", "架构", "实施", "收益",
+    "deployment", "cost", "risk", "policy", "case", "trend", "technology",
+    "impact", "comparison", "market", "application", "governance", "security",
+    "compliance", "architecture", "implementation", "benefit",
+)
 _RESEARCH_HARD_INTERNAL_TERMS = (
     "项目代号",
 )
@@ -684,7 +692,24 @@ def authorize_research_public_query(run: dict, query: str) -> dict:
         or _blocked_by_research_semantics(original_request)
         or _blocked_by_research_semantics(text)
     )
-    safe_query = _project_public_research_query(original_request)
+    # The query is server-produced from the approved research direction.  Keep
+    # the original request in the DLP decision, but project the actual
+    # subquestion so each approved research query reaches the search backend.
+    safe_original = _project_public_research_query(original_request)
+    projected_candidate = _project_public_research_query(text)
+    if projected_candidate == safe_original:
+        safe_query = safe_original
+    else:
+        # Model-generated subquestions never gain arbitrary egress authority.
+        # They may only add server-owned generic research dimensions to the
+        # user's already approved public topic.
+        lowered = projected_candidate.lower()
+        refinements = [
+            item
+            for item in _RESEARCH_SAFE_REFINEMENTS
+            if item in lowered and item.lower() not in safe_original.lower()
+        ]
+        safe_query = " ".join(dict.fromkeys((safe_original, *refinements)))
     blocked = blocked or not safe_query
     if blocked:
         return {
@@ -698,6 +723,77 @@ def authorize_research_public_query(run: dict, query: str) -> dict:
         **RESEARCH_PUBLIC_QUERY_POLICY,
         "reason_code": "",
         "safe_reason": "",
+    }
+
+
+def authorize_standalone_research_provider(run: dict, provider_context: dict) -> dict:
+    """Fail closed before frozen research evidence is sent to a Provider.
+
+    Public sources and an empty/model-knowledge snapshot may use any strict
+    standalone Provider binding.  Internal sources are limited to the two
+    explicitly local runtimes; a cloud/custom Provider must never receive
+    automatically discovered intranet material without a separate enterprise
+    model-data policy.
+    """
+    from api.runtime_adapter import validate_strict_provider_context
+
+    try:
+        validated = validate_strict_provider_context(provider_context)
+    except ValueError:
+        return {
+            "authorized": False,
+            "reason_code": "data_egress_not_authorized",
+            "safe_reason": "当前模型运行时缺少可验证的数据边界",
+            "provider": "",
+            "source_kinds": [],
+            "internal_sources_allowed": False,
+        }
+    brief = run.get("document_brief") if isinstance(run.get("document_brief"), dict) else {}
+    source_policy = brief.get("source_policy") if isinstance(brief.get("source_policy"), dict) else {}
+    retrieval_state = (
+        run.get("research_retrieval_state")
+        if isinstance(run.get("research_retrieval_state"), dict)
+        else {}
+    )
+    source_refs = (
+        retrieval_state.get("materialized_refs") or []
+        if retrieval_state.get("status") == "completed"
+        else source_policy.get("source_refs") or []
+    )
+    source_kinds = sorted(
+        {
+            str(item.get("kind") or "").strip()
+            for item in source_refs
+            if isinstance(item, dict) and str(item.get("kind") or "").strip()
+        }
+    )
+    provider = str(validated.get("provider") or "").strip().lower()
+    metadata = validated.get("trusted_provider_metadata")
+    network_scope = str(
+        metadata.get("network_scope") if isinstance(metadata, dict) else "unknown"
+    ).strip().lower()
+    internal_allowed = (
+        provider in _LOCAL_RESEARCH_PROVIDERS
+        and network_scope == "loopback"
+    )
+    if "approved_internal" in source_kinds and not internal_allowed:
+        return {
+            "authorized": False,
+            "reason_code": "data_egress_not_authorized",
+            "safe_reason": "内部资料仅允许发送至已验证的本地模型运行时",
+            "provider": provider,
+            "network_scope": network_scope,
+            "source_kinds": source_kinds,
+            "internal_sources_allowed": False,
+        }
+    return {
+        "authorized": True,
+        "reason_code": "",
+        "safe_reason": "",
+        "provider": provider,
+        "network_scope": network_scope,
+        "source_kinds": source_kinds,
+        "internal_sources_allowed": internal_allowed,
     }
 
 

@@ -5605,6 +5605,29 @@ class _ExpertTeamModelConfigurationRequired(RuntimeError):
     """The selected runtime cannot authenticate a standalone generation."""
 
 
+def _provider_network_scope(base_url: object) -> str:
+    """Classify a resolved Provider endpoint without persisting the endpoint."""
+    import ipaddress
+
+    try:
+        hostname = (urlsplit(str(base_url or "").strip()).hostname or "").strip().lower()
+    except ValueError:
+        return "unknown"
+    if not hostname:
+        return "unknown"
+    if hostname == "localhost":
+        return "loopback"
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return "public_network"
+    if address.is_loopback:
+        return "loopback"
+    if address.is_private:
+        return "private_network"
+    return "public_network"
+
+
 def _resolve_standalone_legacy_provider_context(request) -> dict:
     """Resolve the protocol that the in-process worker would actually use.
 
@@ -5671,7 +5694,8 @@ def _resolve_standalone_legacy_provider_context(request) -> dict:
             "api_mode": api_mode,
             "transport": STRICT_PROVIDER_TRANSPORTS.get(api_mode, ""),
             "provider_metadata": {
-                "knowledge_cutoff_date": runtime.get("knowledge_cutoff_date")
+                "knowledge_cutoff_date": runtime.get("knowledge_cutoff_date"),
+                "network_scope": _provider_network_scope(resolved_base_url),
             },
         }
     finally:
@@ -6197,6 +6221,19 @@ def _start_expert_team_execution(
                 expected_provider=model_provider,
                 expected_model=model,
             )
+            from api.expert_teams.data_egress import (
+                authorize_standalone_research_provider,
+            )
+
+            provider_authorization = authorize_standalone_research_provider(
+                reserved_run,
+                provider_context,
+            )
+            if not provider_authorization.get("authorized"):
+                raise ValueError(
+                    provider_authorization.get("safe_reason")
+                    or "当前模型数据外发未获授权"
+                )
             from dataclasses import replace
 
             start_request = replace(
@@ -6205,6 +6242,9 @@ def _start_expert_team_execution(
                     **start_request.metadata,
                     STRICT_PROVIDER_BINDING_METADATA_KEY: copy.deepcopy(
                         provider_context
+                    ),
+                    "provider_authorization": copy.deepcopy(
+                        provider_authorization
                     ),
                 },
             )

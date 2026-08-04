@@ -14,6 +14,8 @@ from api.expert_teams.issue_policy import brief_declares_labeled_placeholders
 
 SYSTEM_TEMPLATE_VERSION = "taiji-stage-system/v12"
 DATA_ENVELOPE_VERSION = "TAIJI_STAGE_INPUT_V2"
+_PROVIDER_SOURCE_TOTAL_CHARS = 96_000
+_PROVIDER_SOURCE_CHARS_PER_SOURCE = 24_000
 _SOURCE_STAGES = {
     ("content-creator-team", "materials"),
     ("deep-research-team", "direction"),
@@ -682,6 +684,46 @@ def _revision_context(value: dict | None) -> dict | None:
     }
 
 
+def _provider_source_context_projection(value: dict) -> dict:
+    """Project a frozen snapshot into one bounded, non-duplicated model input."""
+    if not value.get("sources"):
+        return deepcopy(value)
+    projected = {key: deepcopy(item) for key, item in value.items() if key != "sources"}
+    remaining_total = _PROVIDER_SOURCE_TOTAL_CHARS
+    sources = []
+    for source in value.get("sources") or []:
+        if not isinstance(source, dict) or remaining_total <= 0:
+            break
+        projected_source = {
+            key: deepcopy(item)
+            for key, item in source.items()
+            if key not in {"content_text", "segments"}
+        }
+        remaining_source = min(_PROVIDER_SOURCE_CHARS_PER_SOURCE, remaining_total)
+        segments = []
+        for segment in source.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text") or "")
+            if not text or len(text) > remaining_source:
+                break
+            segments.append(deepcopy(segment))
+            remaining_source -= len(text)
+            remaining_total -= len(text)
+        projected_source["segments"] = segments
+        projected_source["provider_projection_truncated"] = (
+            len(segments) < len(source.get("segments") or [])
+        )
+        sources.append(projected_source)
+    projected["sources"] = sources
+    projected["provider_projection"] = {
+        "max_total_chars": _PROVIDER_SOURCE_TOTAL_CHARS,
+        "max_chars_per_source": _PROVIDER_SOURCE_CHARS_PER_SOURCE,
+        "content_text_omitted": True,
+    }
+    return projected
+
+
 def _confirmed_brief(run: dict) -> dict:
     brief = run.get("document_brief")
     if not isinstance(brief, dict) or brief.get("status") != "confirmed":
@@ -714,16 +756,21 @@ def build_stage_gateway_request(
     if not uses_source_context:
         source_value = None
     else:
-        source_value = deepcopy(source_context if source_context is not None else run.get("verified_source_context"))
-        if source_value is None:
+        frozen_source_value = deepcopy(source_context if source_context is not None else run.get("verified_source_context"))
+        if frozen_source_value is None:
             raise PromptContractError("source_context_required", "当前阶段缺少已验证资料快照")
         snapshot_ref = run.get("source_context_snapshot_ref")
         if not isinstance(snapshot_ref, dict) or (
-            source_value.get("snapshot_id") != snapshot_ref.get("snapshot_id")
-            or source_value.get("snapshot_sha256") != snapshot_ref.get("sha256")
-            or source_value.get("brief_sha256") != snapshot_ref.get("brief_sha256")
+            frozen_source_value.get("snapshot_id") != snapshot_ref.get("snapshot_id")
+            or frozen_source_value.get("snapshot_sha256") != snapshot_ref.get("sha256")
+            or frozen_source_value.get("brief_sha256") != snapshot_ref.get("brief_sha256")
         ):
             raise PromptContractError("source_context_binding_mismatch", "资料快照与当前任务绑定不一致")
+        source_value = (
+            _provider_source_context_projection(frozen_source_value)
+            if str(run.get("team_id") or "") == "deep-research-team"
+            else frozen_source_value
+        )
 
     approved_inputs = approved_inputs_for_stage(run, str(declared["id"]))
     stage_inputs = [

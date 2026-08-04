@@ -472,7 +472,13 @@ class LocalTextResearchSourceAdapter:
             if raw_root.is_symlink() or not raw_root.is_dir():
                 continue
             root = raw_root.resolve()
-            if root == home or root in home.parents or (self._workspace_root and self._workspace_root.is_relative_to(root)):
+            if root == home or root in home.parents:
+                continue
+            if (
+                self._workspace_root
+                and root != self._workspace_root
+                and self._workspace_root.is_relative_to(root)
+            ):
                 continue
             approved.append(root)
         return tuple(approved)
@@ -513,6 +519,8 @@ class LocalTextResearchSourceAdapter:
                             if entry.is_symlink():
                                 continue
                             if entry.is_dir(follow_symlinks=False):
+                                if entry.name in {".git", ".taiji", ".venv", "venv", "node_modules"}:
+                                    continue
                                 pending.append(Path(entry.path))
                                 continue
                             if entry.is_file(follow_symlinks=False):
@@ -620,7 +628,7 @@ def _deduplicate_hits(hits: Sequence[ResearchSourceHit]) -> tuple[ResearchSource
 
 
 async def orchestrate_research_sources(
-    query: str,
+    query: str | Sequence[str],
     *,
     web_adapter: ResearchSourceAdapter,
     local_adapter: ResearchSourceAdapter,
@@ -630,6 +638,15 @@ async def orchestrate_research_sources(
     existing_hits: Sequence[ResearchSourceHit] = (),
     limit: int = 5,
 ) -> ResearchFallbackResult:
+    queries = tuple(
+        dict.fromkeys(
+            _safe_text(item, maximum=500)
+            for item in ((query,) if isinstance(query, str) else query)
+            if _safe_text(item, maximum=500)
+        )
+    )
+    if not queries:
+        queries = ("",)
     required_subquestions = tuple(
         dict.fromkeys(_safe_text(item, maximum=500) for item in research_subquestions if _safe_text(item, maximum=500))
     )
@@ -643,7 +660,8 @@ async def orchestrate_research_sources(
         required_subquestions,
         existing_public,
     )
-    decision = await _authorize_query(query_authorizer, query)
+    decisions = [await _authorize_query(query_authorizer, item) for item in queries]
+    decision = next((item for item in decisions if item.authorized), decisions[0])
     if existing_public_evaluation.coverage == "sufficient":
         web = AdapterSearchResult(
             hits=existing_public,
@@ -652,7 +670,7 @@ async def orchestrate_research_sources(
             reason_code="",
             safe_reason="已恢复的公共证据已覆盖研究问题",
         )
-    elif not decision.authorized:
+    elif not any(item.authorized for item in decisions):
         web = AdapterSearchResult(
             status="denied",
             reason_code=decision.reason_code or "data_egress_not_authorized",
@@ -664,15 +682,32 @@ async def orchestrate_research_sources(
             code = web_probe.reason_code or "search_service_error"
             web = AdapterSearchResult(status="unavailable", reason_code=code, safe_reason=web_probe.safe_reason)
         else:
-            try:
-                web = await web_adapter.search(
-                    decision.safe_query,
-                    limit=limit,
-                    policy_decision=decision,
-                )
-            except Exception as exc:
-                code = classify_adapter_exception(exc)
-                web = AdapterSearchResult(status="failed", reason_code=code, safe_reason=_SAFE_REASONS[code])
+            web_hits = []
+            web_failures = []
+            web_safe_reasons = []
+            for current in decisions:
+                if not current.authorized:
+                    web_failures.append(current.reason_code or "data_egress_not_authorized")
+                    continue
+                try:
+                    searched = await web_adapter.search(
+                        current.safe_query,
+                        limit=limit,
+                        policy_decision=current,
+                    )
+                    web_hits.extend(searched.hits)
+                    if searched.status not in {"success", "ready", "reused"}:
+                        web_failures.append(searched.reason_code or "search_service_error")
+                        if searched.safe_reason:
+                            web_safe_reasons.append(searched.safe_reason)
+                except Exception as exc:
+                    web_failures.append(classify_adapter_exception(exc))
+            web = AdapterSearchResult(
+                hits=_deduplicate_hits(tuple(web_hits)),
+                status=("success" if web_hits and not web_failures else "partial" if web_hits else "failed"),
+                reason_code=(web_failures[0] if web_failures else ""),
+                safe_reason=(web_safe_reasons[0] if web_safe_reasons else _SAFE_REASONS.get(web_failures[0], "部分研究查询未取得结果") if web_failures else ""),
+            )
 
     public_hits = _deduplicate_hits(
         (*existing_public, *(hit for hit in web.hits if hit.source_kind == "approved_public"))
@@ -711,16 +746,25 @@ async def orchestrate_research_sources(
                 )
             else:
                 try:
-                    searched_local = await local_adapter.search(query, limit=limit)
+                    local_results = []
+                    local_failures = []
+                    for current_query in queries:
+                        try:
+                            searched = await local_adapter.search(current_query, limit=limit)
+                            local_results.extend(searched.hits)
+                            if searched.status not in {"success", "ready", "reused"}:
+                                local_failures.append(searched.reason_code or "no_results")
+                        except Exception as exc:
+                            local_failures.append(classify_adapter_exception(exc))
                     local_hits = _deduplicate_hits(
-                        (*existing_local, *(hit for hit in searched_local.hits if hit.source_kind == "approved_internal"))
+                        (*existing_local, *(hit for hit in local_results if hit.source_kind == "approved_internal"))
                     )
                     local = AdapterSearchResult(
                         hits=local_hits,
-                        coverage=searched_local.coverage,
-                        status=searched_local.status,
-                        reason_code=searched_local.reason_code,
-                        safe_reason=searched_local.safe_reason,
+                        coverage="unassessed",
+                        status=("success" if local_results and not local_failures else "partial" if local_results else "failed"),
+                        reason_code=(local_failures[0] if local_failures else ""),
+                        safe_reason=(_SAFE_REASONS.get(local_failures[0], "部分内部资料查询未取得结果") if local_failures else ""),
                     )
                     local_evaluation = await _evaluate_coverage(coverage_evaluator, required_subquestions, local_hits)
                 except Exception as exc:

@@ -392,7 +392,10 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
         "model": "gpt-actual",
         "api_mode": "codex_responses",
         "transport": "openai_responses",
-        "provider_metadata": {"knowledge_cutoff_date": None},
+        "provider_metadata": {
+            "knowledge_cutoff_date": None,
+            "network_scope": "public_network",
+        },
     }
     assert calls == [
         ("profile", None),
@@ -402,6 +405,22 @@ def test_route_legacy_preflight_resolves_runtime_inside_session_profile(
         ("resolve", {"requested": "openai-codex"}),
         ("reset", "profile-token"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://127.0.0.1:11434/v1", "loopback"),
+        ("http://localhost:1234/v1", "loopback"),
+        ("http://10.0.0.8:11434/v1", "private_network"),
+        ("https://models.example.com/v1", "public_network"),
+        ("", "unknown"),
+    ],
+)
+def test_provider_network_scope_is_server_classified_without_exposing_endpoint(base_url, expected):
+    from api import routes
+
+    assert routes._provider_network_scope(base_url) == expected
 
 
 def test_route_legacy_preflight_rejects_missing_runtime_auth_before_dispatch(
@@ -665,7 +684,8 @@ def test_execution_route_prepares_sources_before_gateway_and_uses_returned_run(m
     def prepare(_workspace, candidate, *, trusted_provider_context):
         order.append("prepare")
         assert trusted_provider_context["trusted_provider_metadata"] == {
-            "knowledge_cutoff_date": "2025-06-30"
+            "knowledge_cutoff_date": "2025-06-30",
+            "network_scope": "unknown",
         }
         assert len(trusted_provider_context["binding_sha256"]) == 64
         prepared = deepcopy(candidate)

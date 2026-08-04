@@ -78,7 +78,13 @@ def _trusted_provider_metadata(value: dict[str, Any] | None) -> dict[str, Any]:
             cutoff = None
     else:
         cutoff = None
-    return {"knowledge_cutoff_date": cutoff}
+    network_scope = str(metadata.get("network_scope") or "unknown").strip().lower()
+    if network_scope not in {"loopback", "private_network", "public_network", "unknown"}:
+        network_scope = "unknown"
+    return {
+        "knowledge_cutoff_date": cutoff,
+        "network_scope": network_scope,
+    }
 
 
 def build_strict_provider_context(

@@ -89,6 +89,9 @@
 | diff 格式 | `git diff --check` | 通过 | 无空白错误 |
 | 自动续跑前端合同 | `pytest ... tests/test_expert_team_frontend_v2.py` | 88 passed | GET 只读，v2 由 POST `/resume` 自动续跑 |
 | 桌面启动器 Python 运行时合同 | `node --test apps/taiji-desktop/tests/*.test.js` | 16 passed | 同时兼容 `venv` 与 `.venv`，向 Agent/WebUI 传递同一解释器 |
+| 研究安全与兼容矩阵 | `pytest -q tests/test_expert_team_*.py tests/test_research_source_adapter_contract.py` | 1710 passed / 1 compatibility failure；修正后直接相关 360 passed | 唯一失败为零来源快照新增投影元数据；已改为零来源保持原合同并复跑通过，GitHub CI 尚待验证 |
+| 最终研究安全定向矩阵 | `pytest -q`（Provider binding、检索、来源、模型知识、追问、零来源、runtime adapter） | 545 passed | 含 endpoint network scope、workspace roots、绑定来源计数、云端排除内部来源并继续降级；1 条上游 deprecation warning |
+| 独立代码复核 | 第四轮只读复核 | PASS | Critical 与两个 Important 均关闭；不替代真实发布验收 |
 | 模板级 DOCX 原生打开 | Word + WPS + LibreOffice | 带限制通过 | 两份 smoke DOCX 可打开；macOS 的 ChatGPT App Data 授权弹窗遮挡了部分原生页面检查 |
 
 ## 问题列表
@@ -96,6 +99,7 @@
 | 严重程度 | 问题 | 证据 | 建议修复方式 | 是否已修复 |
 |---|---|---|---|---|
 | P0 | 源码 worktree 只有 `.venv` 时桌面端查找 `venv/bin/python`，应用停在“启动失败” | 用户截图与实例日志均显示 `start-agent.sh exited with code 1` | 桌面源码启动器按 `venv → .venv` 解析并显式传给 Agent/WebUI | 是 |
+| P0 | 自动本地资料可能在未经过模型数据边界授权时进入云 Provider 请求 | 独立代码审查定位 standalone 分支缺少内部来源 Provider 门禁 | 云 Provider 自动跳过内部层并降级；只有严格绑定且 endpoint 经服务端判定为 loopback 的 Ollama/LM Studio 可消费内部来源，LAN、公网和未知地址均拒绝；模型输入去重并限制为 96k 字符 | 是（代码与回归已验证，真实内网部署未验证） |
 | P1 | 研究发起页暴露成员、任务选择与固定规格流程 | RED 测试失败；旧 DOM 包含“团队成员/选择文档任务” | 按后端 catalog 的 `research-report` 可用任务切换极简表单 | 是 |
 | P1 | 工作台未消费安全化进度/证据字段，仍可见阶段产物和确认 | RED 测试失败 | Presenter 投影 view 字段，v2 独立信息分层 | 是 |
 | P1 | 关键追问不是标准表单，未展示 impact | RED 测试失败 | 使用 form/fieldset/radio/submit 并关联 impact | 是 |
@@ -103,13 +107,14 @@
 
 ## 已修复问题
 
-上表 5 项均已在功能分支修复并通过定向测试与 Electron 验证。
+上表问题均已在功能分支修复；界面问题通过定向测试与 Electron 验证，数据外发问题通过代码门禁与回归验证，真实内网部署仍标记为未验证。
 
 ## 剩余风险
 
 - 深度研究极简发起分支根据后端 catalog 返回的稳定公开 `launch_profile_id="research-report"` 识别；若后端将来改名，需同步升级 catalog 合同。
 - 截图为功能分支的 development Electron 证据，不代表正式 `main`、安装态或发布态已通过。
 - 未实测真实公网、真实本地知识库和真实 Provider 故障后的完整界面切换。
+- 当前自动内部资料层仅在本地模型运行时获准使用；云 Provider 会安全跳过该层并明确降级到模型知识，未配置企业模型数据策略时不会静默外发内网资料。
 - 两份 DOCX 是研究模板级 smoke 产物，不是真实 Provider 经正式产品路由生成的最终交付。
 
 ## 未验证项目

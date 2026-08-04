@@ -4,6 +4,40 @@ import json
 import pytest
 
 
+def test_provider_source_projection_is_bounded_and_does_not_duplicate_full_text():
+    from api.expert_teams.prompts import _provider_source_context_projection
+
+    segment_text = "证据" * 2000
+    segments = [
+        {
+            "segment_id": f"SRC-1:SEG-{index:04d}",
+            "char_start": (index - 1) * len(segment_text),
+            "char_end": index * len(segment_text),
+            "locator": f"local://source#segment={index}",
+            "text": segment_text,
+            "text_sha256": "a" * 64,
+        }
+        for index in range(1, 40)
+    ]
+    snapshot = {
+        "snapshot_id": "source-context-0001",
+        "sources": [
+            {
+                "source_id": "SRC-1",
+                "content_sha256": "b" * 64,
+                "content_text": segment_text * 39,
+                "segments": segments,
+            }
+        ],
+    }
+
+    projected = _provider_source_context_projection(snapshot)
+    source = projected["sources"][0]
+    assert "content_text" not in source
+    assert sum(len(item["text"]) for item in source["segments"]) <= 24_000
+    assert source["provider_projection_truncated"] is True
+
+
 def test_local_source_is_hashed_from_original_bytes_and_locator_is_sanitized(tmp_path):
     from api.expert_teams.source_registry import resolve_source_registry
 

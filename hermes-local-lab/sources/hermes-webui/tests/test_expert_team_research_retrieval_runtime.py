@@ -77,7 +77,10 @@ class _Web:
 
         self.search_calls += 1
         self.queries.append(query)
-        assert query == "本地优先 AI 助理 如何落地"
+        assert query in {
+            "本地优先 AI 助理 如何落地",
+            "本地优先 AI 助理 如何落地 部署 成本",
+        }
         assert policy_decision.policy_id == "research-public-query/v1"
         hit = ResearchSourceHit.create(
             source_kind="approved_public",
@@ -219,7 +222,7 @@ def test_research_stage_persists_frozen_sources_and_replay_skips_transport(tmp_p
         local_adapter=_LocalUnavailable(),
     )
 
-    assert web.search_calls == 1
+    assert web.search_calls == 2
     assert replayed["research_retrieval_state"]["status"] == "completed"
     assert replayed["research_retrieval_state"]["public_status"]["status"] == "success"
     assert replayed["research_retrieval_state"]["local_status"]["status"] == "skipped"
@@ -282,6 +285,14 @@ def test_local_only_and_model_only_persist_truthful_tiers(tmp_path, monkeypatch)
         local_run,
         web_adapter=_WebUnavailable(),
         local_adapter=_LocalHit(),
+        trusted_provider_context=__import__(
+            "api.runtime_adapter", fromlist=["build_strict_provider_context"]
+        ).build_strict_provider_context(
+            provider="ollama",
+            model="qwen-local",
+            api_mode="chat_completions",
+            provider_metadata={"network_scope": "loopback"},
+        ),
     )
     state = local_result["research_retrieval_state"]
     assert state["public_status"]["status"] == "unavailable"
@@ -427,7 +438,7 @@ def test_research_egress_policy_is_frozen_in_profile_and_old_snapshot_fails_clos
     safe_result = expert_teams.prepare_research_sources_for_gateway(
         tmp_path / "safe", safe, web_adapter=safe_web, local_adapter=_LocalUnavailable()
     )
-    assert safe_web.search_calls == 1
+    assert safe_web.search_calls == 2
     assert safe_result["research_retrieval_state"]["public_status"]["policy_id"] == policy["policy_id"]
 
     old_workspace = tmp_path / "old"
@@ -497,7 +508,10 @@ def test_safe_public_topic_uses_deidentified_server_projection(tmp_path, monkeyp
         tmp_path, run, web_adapter=web, local_adapter=_LocalUnavailable()
     )
 
-    assert web.queries == ["本地优先 AI 助理 如何落地"]
+    assert web.queries == [
+        "本地优先 AI 助理 如何落地",
+        "本地优先 AI 助理 如何落地 部署 成本",
+    ]
     assert "部署成本" not in web.queries[0]
     assert "客户" not in web.queries[0]
 
@@ -544,13 +558,127 @@ def test_public_query_projection_never_imports_direction_only_entities(tmp_path)
 
     decision = authorize_research_public_query(
         run,
-        "新能源汽车市场 光明研究院 发展路径",
+        "新能源汽车市场 光明研究院 Alice 发展路径",
     )
 
     assert decision["authorized"] is True
     assert decision["safe_query"] == "新能源汽车市场"
     assert "光明研究院" not in decision["safe_query"]
+    assert "Alice" not in decision["safe_query"]
     assert "发展路径" not in decision["safe_query"]
+
+
+def test_internal_research_sources_are_fail_closed_for_cloud_provider(tmp_path):
+    from api import expert_teams
+    from api.expert_teams.data_egress import authorize_standalone_research_provider
+    from api.runtime_adapter import build_strict_provider_context
+
+    run = _research_run(expert_teams, tmp_path)
+    run["document_brief"]["source_policy"]["source_refs"] = [
+        {"source_id": "SRC-INTERNAL", "kind": "approved_internal", "sha256": "a" * 64}
+    ]
+    cloud = build_strict_provider_context(
+        provider="openai", model="gpt-runtime", api_mode="chat_completions"
+    )
+    local = build_strict_provider_context(
+        provider="ollama",
+        model="qwen-local",
+        api_mode="chat_completions",
+        provider_metadata={"network_scope": "loopback"},
+    )
+    remote_ollama = build_strict_provider_context(
+        provider="ollama",
+        model="qwen-remote",
+        api_mode="chat_completions",
+        provider_metadata={"network_scope": "private_network"},
+    )
+
+    denied = authorize_standalone_research_provider(run, cloud)
+    allowed = authorize_standalone_research_provider(run, local)
+    remote_denied = authorize_standalone_research_provider(run, remote_ollama)
+
+    assert denied["authorized"] is False
+    assert denied["internal_sources_allowed"] is False
+    assert allowed["authorized"] is True
+    assert allowed["internal_sources_allowed"] is True
+    assert remote_denied["authorized"] is False
+
+
+def test_production_local_roots_include_current_authorized_workspace(tmp_path):
+    from api import expert_teams
+    from api.expert_teams import runtime
+
+    run = _research_run(expert_teams, tmp_path)
+    assert tmp_path in runtime._research_local_roots(run, tmp_path)
+
+
+def test_bound_public_source_counts_and_cloud_bound_internal_source_is_skipped(tmp_path, monkeypatch):
+    from api import expert_teams
+    from api.expert_teams import runtime
+    from api.expert_teams.contracts import brief_digest
+    from api.expert_teams.data_egress import authorize_standalone_research_provider
+    from api.expert_teams.source_registry import materialize_approved_source
+    from api.runtime_adapter import build_strict_provider_context
+
+    public_root = tmp_path / "public"
+    internal_root = tmp_path / "internal"
+    public_root.mkdir()
+    internal_root.mkdir()
+
+    def bind(root, run, kind, label):
+        content = "部署成本如何：需要核算软件、硬件和运维成本。"
+        ref = materialize_approved_source(
+            root,
+            run["run_id"],
+            kind=kind,
+            label=label,
+            origin_locator=(
+                f"https://example.test/{label}"
+                if kind == "approved_public"
+                else f"local://0/{label}.md"
+            ),
+            content=content,
+            retrieved_at="2026-08-04T10:00:00+08:00",
+            content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        )
+        run["document_brief"]["source_policy"]["source_refs"] = [ref]
+        run["document_brief"]["confirmed_sha256"] = brief_digest(run["document_brief"])
+        return ref
+
+    public_run = _research_run(expert_teams, public_root)
+    internal_run = _research_run(expert_teams, internal_root)
+    public_ref = bind(public_root, public_run, "approved_public", "bound-public")
+    internal_ref = bind(internal_root, internal_run, "approved_internal", "bound-internal")
+    _memory_storage(monkeypatch, runtime, public_run)
+    public_result = expert_teams.prepare_research_sources_for_gateway(
+        public_root,
+        public_run,
+        web_adapter=_WebUnavailable(),
+        local_adapter=_LocalUnavailable(),
+    )
+    assert public_result["research_retrieval_state"]["public_status"]["count"] == 1
+    assert public_result["research_retrieval_state"]["materialized_refs"][0]["source_id"] == public_ref["source_id"]
+
+    _memory_storage(monkeypatch, runtime, internal_run)
+    cloud = build_strict_provider_context(
+        provider="openai",
+        model="gpt-runtime",
+        api_mode="chat_completions",
+        provider_metadata={"network_scope": "public_network"},
+    )
+    internal_result = expert_teams.prepare_research_sources_for_gateway(
+        internal_root,
+        internal_run,
+        web_adapter=_WebUnavailable(),
+        local_adapter=_LocalHit(),
+        trusted_provider_context=cloud,
+    )
+    state = internal_result["research_retrieval_state"]
+    assert state["local_status"]["reason"] == "policy_blocked"
+    assert state["local_status"]["count"] == 0
+    assert state["excluded_source_refs"][0]["source_id"] == internal_ref["source_id"]
+    assert expert_teams.verified_source_context_for_execution(internal_root, internal_result)["sources"] == []
+    assert authorize_standalone_research_provider(internal_result, cloud)["authorized"] is True
 
 
 def test_public_query_semantics_blocks_english_confidential_customer_contract(tmp_path):
@@ -1569,7 +1697,7 @@ def test_concurrent_same_process_retrieval_has_one_owner_and_one_web_call(tmp_pa
     worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert web.search_calls == 1
+    assert web.search_calls == 2
     assert len(first) == 1 and isinstance(first[0], dict)
     assert cell["run"]["research_retrieval_state"]["status"] == "completed"
     assert cell["run"]["research_retrieval_state"]["public_status"]["status"] == "success"
@@ -1639,7 +1767,7 @@ def test_recovery_uses_only_receipted_refs_for_coverage_and_skips_model(tmp_path
         local_adapter=_LocalUnavailable(),
     )
 
-    assert web.search_calls == 1
+    assert web.search_calls == 2
     tiers = recovered["research_retrieval_state"]["tier_decisions"]
     assert not any(item["tier"] == "model" for item in tiers)
     assert recovered["research_retrieval_state"]["public_status"]["count"] == 1
@@ -1673,7 +1801,7 @@ def test_recovered_sufficient_public_evidence_skips_healthy_local_probe_and_sear
         local_adapter=local,
     )
 
-    assert web.search_calls == 1
+    assert web.search_calls == 2
     assert local.probe_calls == 0
     assert local.search_calls == 0
     assert not any(
