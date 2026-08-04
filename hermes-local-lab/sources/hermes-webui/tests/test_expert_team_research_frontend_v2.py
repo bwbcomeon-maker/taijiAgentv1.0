@@ -34,7 +34,7 @@ def _run_v3_hooks(body: str) -> dict:
             const context={{
               window:{{}},
               document:{{readyState:'loading',addEventListener(){{}},getElementById(){{return null;}}}},
-              console,
+              console,queueMicrotask,setTimeout,
             }};
             vm.createContext(context);
             let source=fs.readFileSync('static/expert-team-v3.js','utf8');
@@ -42,11 +42,16 @@ def _run_v3_hooks(body: str) -> dict:
               'window.ExpertTeamV3 = Object.freeze({{',
               `window.__researchV2Hooks={{
                 renderTeamDialog,statePanel,workbenchHtml,
+                scheduleResearchAutoContinuation,handleWorkbenchClick,
                 setSelectedTeam(value){{
                   state.selectedTeam=value;
                   state.selectedExample=(value.examples||[]).find(item=>item.available===true)||null;
                   state.suggestionMode=false;
                 }},
+                setCard(value){{ state.card=value; }},
+                setBusy(value){{ state.busy=Boolean(value); }},
+                getCollapsed(){{ return state.collapsed; }},
+                getAutoContinuationKeyCount(){{ return state.autoContinuationKeys.size; }},
               }};\n  window.ExpertTeamV3 = Object.freeze({{`
             );
             vm.runInContext(source,context);
@@ -260,3 +265,78 @@ def test_research_v2_primary_button_uses_the_high_contrast_action_token():
     primary_rule = style[primary_start : style.index("}", primary_start)]
     assert "background: var(--et3-action-primary)" in primary_rule
     assert "color: #fff" in primary_rule
+
+
+def test_research_v2_failed_auto_continuation_is_not_rescheduled_for_the_same_snapshot():
+    result = _run_v3_hooks(
+        """
+        let calls=0;
+        context.window.api=async()=>{calls+=1;throw new Error('provider unavailable');};
+        const card={
+          researchV2:true,runId:'research-run',sourceSessionId:'research-session',version:7,
+          workflowState:'ready_to_generate',currentStageId:'research',productMode:'standalone',
+          publicState:'ready',allowedActions:['resume'],pendingInputId:'',
+        };
+        hooks.setCard(card);
+        hooks.scheduleResearchAutoContinuation(card);
+        setTimeout(()=>{
+          hooks.scheduleResearchAutoContinuation(card);
+          setTimeout(()=>console.log(JSON.stringify({calls,keyCount:hooks.getAutoContinuationKeyCount()})),0);
+        },0);
+        """
+    )
+
+    assert result == {"calls": 1, "keyCount": 1}
+
+
+def test_research_v2_close_remains_available_while_auto_continuation_is_busy():
+    result = _run_v3_hooks(
+        """
+        let restoreFocused=false;
+        const root={
+          classList:{add(){}},
+          querySelector(selector){
+            if(selector==='[data-et3-action="restore-workbench"]')return {focus(){restoreFocused=true;}};
+            return null;
+          },
+          querySelectorAll(){return [];},
+        };
+        context.document.body={classList:{add(){}}};
+        context.document.getElementById=id=>id==='expertTeamV3Workbench'?root:null;
+        hooks.setCard({runId:'research-run'});
+        hooks.setBusy(true);
+        const button={type:'button',dataset:{et3Action:'close-workbench'}};
+        Promise.resolve(hooks.handleWorkbenchClick({target:{closest(){return button;}}})).then(()=>{
+          console.log(JSON.stringify({collapsed:hooks.getCollapsed(),restoreFocused}));
+        });
+        """
+    )
+
+    assert result == {"collapsed": True, "restoreFocused": True}
+
+
+def test_research_v2_provider_failure_replaces_in_progress_copy_with_recovery_state():
+    result = _run_v3_hooks(
+        """
+        const card={
+          researchV2:true,runId:'research-run',sourceSessionId:'research-session',version:8,
+          workflowState:'start_failed',productMode:'standalone',publicState:'failed',
+          allowedActions:['resume'],team:{title:'深度材料研究团'},
+          researchProgress:{statusText:'正在形成研究报告'},
+          evidenceSummary:{},
+          productError:{
+            schema:'taiji.product.error.v1',code:'backend_unavailable',title:'模型服务暂不可用',
+            message:'任务进度和资料已保留，请稍后重试。',recoveryActions:[{id:'retry',label:'重试'}],
+          },
+        };
+        console.log(JSON.stringify({html:hooks.workbenchHtml(card)}));
+        """
+    )
+
+    assert "模型服务暂不可用" in result["html"]
+    assert result["html"].count("模型服务暂不可用") == 1
+    assert "研究已暂停" in result["html"]
+    assert "任务进度和资料已保留，请稍后重试。" in result["html"]
+    assert "重试当前阶段" in result["html"]
+    assert "正在形成研究报告" not in result["html"]
+    assert "正在自动继续研究" not in result["html"]

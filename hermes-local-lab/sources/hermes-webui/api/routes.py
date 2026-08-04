@@ -17436,7 +17436,21 @@ def handle_post(handler, parsed) -> bool:
                         "teams": expert_teams.expert_team_catalog()["teams"],
                     },
                 )
-            stream_payload, status = _start_expert_team_execution(workspace, run, body)
+            already_reserved = False
+            if str(run.get("workflow_state") or "") == "ready_to_generate":
+                run = expert_teams.reserve_expert_team_execution_start(
+                    workspace,
+                    str(run.get("run_id") or ""),
+                    expected_version=int(run.get("version") or 0),
+                    runtime_adapter=_expert_team_planned_runtime_adapter_name(),
+                )
+                already_reserved = True
+            stream_payload, status = _start_expert_team_execution(
+                workspace,
+                run,
+                body,
+                already_reserved=already_reserved,
+            )
             stream_payload["teams"] = expert_teams.expert_team_catalog()["teams"]
             return _expert_team_json_response(handler, stream_payload, status=status)
         except FileNotFoundError:

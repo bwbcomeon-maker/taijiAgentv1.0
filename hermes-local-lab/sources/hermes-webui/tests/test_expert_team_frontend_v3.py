@@ -982,7 +982,7 @@ def test_presenter_hides_expert_team_protocol_messages_but_keeps_normal_chat_unc
         "isProtocol": True,
         "explicitLive": True,
         "explicitNormal": False,
-        "projected": "专家团阶段处理已结束，请在右侧工作台查看结果状态和下一步。",
+        "projected": "本轮模型调用已结束，研究任务状态请以右侧工作台为准。",
         "normal": "正常回复",
     }
 

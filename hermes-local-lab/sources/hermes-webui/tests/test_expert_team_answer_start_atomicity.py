@@ -324,6 +324,37 @@ def test_known_pre_dispatch_failure_leaves_recoverable_start_failed(monkeypatch,
     assert stored.get("last_execution_error")
 
 
+def test_resume_pre_dispatch_failure_leaves_recoverable_start_failed(monkeypatch, tmp_path):
+    from api import expert_teams, routes
+
+    failed = _run_for_generic_start_entry(expert_teams, tmp_path, "resume")
+    session = SimpleNamespace(
+        session_id=failed["session_id"],
+        model="test-model",
+        model_provider=None,
+        messages=[],
+    )
+    _configure_route(monkeypatch, routes, tmp_path, session)
+    monkeypatch.setattr(routes, "_taiji_license_blocked_status", lambda: None)
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid, **_kwargs: (_ for _ in ()).throw(KeyError("session disappeared")),
+    )
+
+    handler = _post(
+        routes,
+        "/api/expert-teams/resume",
+        _control(failed, "resume-preflight-failure"),
+    )
+    stored = expert_teams.read_expert_team_run(tmp_path, failed["run_id"])
+
+    assert handler.status == 404
+    assert stored["workflow_state"] == "start_failed"
+    assert stored["view"]["actions"]["can_retry"] is True
+    assert stored.get("last_execution_error")
+
+
 def test_legacy_dispatch_intent_is_durable_before_external_start(monkeypatch, tmp_path):
     from api import expert_teams, routes
 
