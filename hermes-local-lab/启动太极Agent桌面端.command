@@ -55,6 +55,7 @@ mkdir -p \
 
 if ! /bin/bash "$SOURCE_GATE" \
   --mode "$TAIJI_SOURCE_MODE" \
+  --dirty-policy runtime \
   --repo-root "$REPO_DIR" \
   --source-root "$REPO_DIR"; then
   echo "当前源码来源校验失败，未启动太极 Agent。日志：$LOG_FILE" >&2

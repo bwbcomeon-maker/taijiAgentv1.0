@@ -41,19 +41,30 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def gate(self, repo, *, mode="formal", source_root=None, env_overrides=None):
+    def gate(
+        self,
+        repo,
+        *,
+        mode="formal",
+        source_root=None,
+        dirty_policy=None,
+        env_overrides=None,
+    ):
         source_root = source_root or repo
+        command = [
+            "bash",
+            str(SOURCE_GATE),
+            "--mode",
+            mode,
+            "--repo-root",
+            str(repo),
+            "--source-root",
+            str(source_root),
+        ]
+        if dirty_policy:
+            command.extend(["--dirty-policy", dirty_policy])
         return run(
-            [
-                "bash",
-                str(SOURCE_GATE),
-                "--mode",
-                mode,
-                "--repo-root",
-                str(repo),
-                "--source-root",
-                str(source_root),
-            ],
+            command,
             cwd=repo,
             check=False,
             env_overrides=env_overrides,
@@ -80,6 +91,72 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
         (self.repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
 
         result = self.gate(self.repo)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("formal source worktree is dirty", result.stderr)
+
+    def test_runtime_policy_allows_only_root_agent_instructions_to_be_dirty(self):
+        (self.repo / "AGENTS.md").write_text("initial instructions\n", encoding="utf-8")
+        run(["git", "add", "AGENTS.md"], cwd=self.repo)
+        run(["git", "commit", "-m", "add agent instructions"], cwd=self.repo)
+        (self.repo / "AGENTS.md").write_text("local instructions\n", encoding="utf-8")
+
+        result = self.gate(self.repo, dirty_policy="runtime")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("dirty: 1", result.stdout)
+        self.assertIn("runtime_dirty: 0", result.stdout)
+        self.assertIn("non_runtime_dirty: 1", result.stdout)
+        self.assertIn("non-runtime source changes ignored for local runtime", result.stderr)
+        self.assertIn("AGENTS.md", result.stderr)
+
+    def test_runtime_policy_allows_agent_skill_metadata_but_rejects_runtime_files(self):
+        agent_skill = self.repo / ".agents" / "skills" / "qa" / "SKILL.md"
+        agent_skill.parent.mkdir(parents=True)
+        agent_skill.write_text("local skill\n", encoding="utf-8")
+        runtime_file = self.repo / "apps" / "runtime.js"
+        runtime_file.parent.mkdir(parents=True)
+        runtime_file.write_text("runtime change\n", encoding="utf-8")
+
+        result = self.gate(self.repo, dirty_policy="runtime")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("runtime_dirty: 1", result.stdout)
+        self.assertIn("non_runtime_dirty: 1", result.stdout)
+        self.assertIn("apps/runtime.js", result.stderr)
+        self.assertIn("formal source has runtime-affecting changes", result.stderr)
+
+    def test_runtime_policy_rejects_agent_metadata_renamed_into_runtime_tree(self):
+        agent_payload = self.repo / ".agents" / "payload.js"
+        agent_payload.parent.mkdir(parents=True)
+        agent_payload.write_text("metadata\n", encoding="utf-8")
+        run(["git", "add", ".agents/payload.js"], cwd=self.repo)
+        run(["git", "commit", "-m", "add agent metadata"], cwd=self.repo)
+        runtime_payload = self.repo / "apps" / "payload.js"
+        runtime_payload.parent.mkdir(parents=True)
+        run(["git", "mv", ".agents/payload.js", "apps/payload.js"], cwd=self.repo)
+
+        result = self.gate(self.repo, dirty_policy="runtime")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("runtime_dirty: 1", result.stdout)
+        self.assertIn("apps/payload.js", result.stderr)
+
+    def test_runtime_policy_handles_unicode_agent_metadata_paths(self):
+        agent_skill = self.repo / ".agents" / "skills" / "质量检查.md"
+        agent_skill.parent.mkdir(parents=True)
+        agent_skill.write_text("local skill\n", encoding="utf-8")
+
+        result = self.gate(self.repo, dirty_policy="runtime")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("runtime_dirty: 0", result.stdout)
+        self.assertIn("质量检查.md", result.stderr)
+
+    def test_strict_policy_still_rejects_agent_instruction_changes(self):
+        (self.repo / "AGENTS.md").write_text("local instructions\n", encoding="utf-8")
+
+        result = self.gate(self.repo, dirty_policy="strict")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("formal source worktree is dirty", result.stderr)
@@ -152,6 +229,7 @@ class CanonicalMainGateWiringTests(unittest.TestCase):
                 self.assertIn("--mode formal", source)
                 self.assertIn("--repo-root", source)
                 self.assertIn("--source-root", source)
+                self.assertNotIn("--dirty-policy runtime", source)
 
     def test_browser_launcher_defaults_to_formal_but_supports_explicit_development_mode(self):
         source = self.read("hermes-local-lab/启动太极Agent.command")
@@ -161,6 +239,7 @@ class CanonicalMainGateWiringTests(unittest.TestCase):
         self.assertIn('--mode "$TAIJI_SOURCE_MODE"', source)
         self.assertIn('--repo-root "$REPO_DIR"', source)
         self.assertIn('--source-root "$REPO_DIR"', source)
+        self.assertIn('--dirty-policy runtime', source)
 
     def test_desktop_command_uses_the_shared_source_gate(self):
         source = self.read("hermes-local-lab/启动太极Agent桌面端.command")
@@ -174,6 +253,7 @@ class CanonicalMainGateWiringTests(unittest.TestCase):
         self.assertIn('--mode "$TAIJI_SOURCE_MODE"', source)
         self.assertIn('--repo-root "$REPO_DIR"', source)
         self.assertIn('--source-root "$REPO_DIR"', source)
+        self.assertIn('--dirty-policy runtime', source)
         self.assertIn("export TAIJI_SOURCE_MODE", source)
 
     def test_finder_desktop_launcher_delegates_source_mode_to_adjacent_command(self):

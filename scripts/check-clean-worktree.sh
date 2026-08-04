@@ -8,6 +8,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
 unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 mode="formal"
+dirty_policy="strict"
 repo_root_input=""
 source_root_input=""
 
@@ -15,6 +16,7 @@ usage() {
   cat <<'EOF'
 Usage:
   check-clean-worktree.sh [--mode formal|development]
+                          [--dirty-policy strict|runtime]
                           [--repo-root PATH]
                           [--source-root PATH]
 
@@ -24,6 +26,12 @@ formal (default):
 development:
   Explicitly allow a branch or linked worktree, including local changes, while
   still requiring the declared source root to match that Git worktree.
+
+dirty policy:
+  strict (default) rejects every tracked or untracked change. runtime permits
+  changes limited to repository-local coding-agent instructions (AGENTS.md and
+  .agents/) for formal local launch only; development mode keeps its existing
+  dirty-worktree preview behavior. Release and packaging must keep strict.
 EOF
 }
 
@@ -50,6 +58,11 @@ while [ "$#" -gt 0 ]; do
       repo_root_input="$2"
       shift 2
       ;;
+    --dirty-policy)
+      [ "$#" -ge 2 ] || fail "--dirty-policy requires a value"
+      dirty_policy="$2"
+      shift 2
+      ;;
     --source-root)
       [ "$#" -ge 2 ] || fail "--source-root requires a value"
       source_root_input="$2"
@@ -68,6 +81,10 @@ done
 case "$mode" in
   formal|development) ;;
   *) fail "unsupported mode: $mode" ;;
+esac
+case "$dirty_policy" in
+  strict|runtime) ;;
+  *) fail "unsupported dirty policy: $dirty_policy" ;;
 esac
 
 command -v git >/dev/null 2>&1 || fail "git is required"
@@ -116,6 +133,50 @@ else
   dirty="0"
 fi
 
+is_non_runtime_path() {
+  case "$1" in
+    AGENTS.md|.agents/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+append_runtime_status() {
+  runtime_status="${runtime_status}${runtime_status:+$'\n'}$1"
+}
+
+append_non_runtime_status() {
+  non_runtime_status="${non_runtime_status}${non_runtime_status:+$'\n'}$1"
+}
+
+runtime_status=""
+non_runtime_status=""
+while IFS= read -r -d '' status_entry; do
+  status_code="${status_entry:0:2}"
+  status_path="${status_entry:3}"
+  case "$status_code" in
+    *R*|*C*)
+      IFS= read -r -d '' original_path \
+        || fail "malformed Git status rename/copy record"
+      display_status="$status_code $original_path -> $status_path"
+      if is_non_runtime_path "$original_path" && is_non_runtime_path "$status_path"; then
+        append_non_runtime_status "$display_status"
+      else
+        append_runtime_status "$display_status"
+      fi
+      ;;
+    *)
+      display_status="$status_code $status_path"
+      if is_non_runtime_path "$status_path"; then
+        append_non_runtime_status "$display_status"
+      else
+        append_runtime_status "$display_status"
+      fi
+      ;;
+  esac
+done < <(git -C "$git_top" -c core.quotePath=false status --porcelain=v1 -z --untracked-files=all)
+if [ -n "$runtime_status" ]; then runtime_dirty="1"; else runtime_dirty="0"; fi
+if [ -n "$non_runtime_status" ]; then non_runtime_dirty="1"; else non_runtime_dirty="0"; fi
+
 printf 'mode: %s\n' "$mode"
 printf 'source_root: %s\n' "$source_root"
 printf 'repo: %s\n' "$git_top"
@@ -125,6 +186,9 @@ printf 'worktree: %s\n' "$worktree_kind"
 printf 'branch: %s\n' "${branch:-detached}"
 printf 'head: %s\n' "$head_commit"
 printf 'dirty: %s\n' "$dirty"
+printf 'dirty_policy: %s\n' "$dirty_policy"
+printf 'runtime_dirty: %s\n' "$runtime_dirty"
+printf 'non_runtime_dirty: %s\n' "$non_runtime_dirty"
 
 if [ "$mode" = "development" ]; then
   printf 'development source isolation gate passed\n'
@@ -141,7 +205,16 @@ main_commit="$(git -C "$git_top" rev-parse refs/heads/main 2>/dev/null)" \
 [ "$head_commit" = "$main_commit" ] \
   || fail "formal source HEAD does not match local main: head=$head_commit main=$main_commit"
 
-if [ "$dirty" != "0" ]; then
+if [ "$dirty_policy" = "runtime" ] && [ "$non_runtime_dirty" != "0" ]; then
+  printf '[WARN] non-runtime source changes ignored for local runtime:\n%s\n' "$non_runtime_status" >&2
+fi
+
+if [ "$dirty_policy" = "runtime" ] && [ "$runtime_dirty" != "0" ]; then
+  printf '%s\n' "$runtime_status" >&2
+  fail "formal source has runtime-affecting changes"
+fi
+
+if [ "$dirty_policy" = "strict" ] && [ "$dirty" != "0" ]; then
   printf '%s\n' "$status" >&2
   fail "formal source worktree is dirty"
 fi

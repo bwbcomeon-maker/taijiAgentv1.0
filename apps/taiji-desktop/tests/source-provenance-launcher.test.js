@@ -67,6 +67,7 @@ test("source command launcher defaults linked worktrees to development and runs 
   assert.match(commandLauncher, /--mode "\$TAIJI_SOURCE_MODE"/);
   assert.match(commandLauncher, /--repo-root "\$REPO_DIR"/);
   assert.match(commandLauncher, /--source-root "\$REPO_DIR"/);
+  assert.match(commandLauncher, /--dirty-policy runtime/);
   assert.match(commandLauncher, /export TAIJI_SOURCE_MODE/);
 });
 
@@ -122,7 +123,9 @@ test("Electron verifies formal source provenance before creating a window", () =
   assert.notEqual(gateIndex, -1);
   assert.notEqual(windowIndex, -1);
   assert.ok(gateIndex < windowIndex);
-  assert.match(mainSource, /spawnSync\("\/usr\/bin\/git"/);
+  assert.match(mainSource, /check-clean-worktree\.sh/);
+  assert.match(mainSource, /"--dirty-policy", "runtime"/);
+  assert.doesNotMatch(mainSource, /Formal source worktree is dirty/);
 });
 
 test("Electron authenticates the desktop session without putting the bearer token in the URL", () => {

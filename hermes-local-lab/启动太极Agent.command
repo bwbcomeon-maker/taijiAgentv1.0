@@ -14,6 +14,7 @@ TAIJI_SOURCE_MODE="${TAIJI_SOURCE_MODE:-formal}"
 
 "$SOURCE_GATE" \
   --mode "$TAIJI_SOURCE_MODE" \
+  --dirty-policy runtime \
   --repo-root "$REPO_DIR" \
   --source-root "$REPO_DIR"
 

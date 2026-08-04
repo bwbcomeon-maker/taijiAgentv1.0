@@ -123,20 +123,17 @@ function verifyFormalSourceBeforeWindow() {
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) {
     delete gitEnv[name];
   }
-  const git = (...args) => {
-    const result = spawnSync("/usr/bin/git", ["-C", sourceRoot, ...args], { encoding: "utf8", env: gitEnv });
-    if (result.status !== 0) throw new Error((result.stderr || result.stdout || "git source check failed").trim());
-    return String(result.stdout || "").trim();
-  };
-
-  const top = fs.realpathSync.native(git("rev-parse", "--show-toplevel"));
-  if (top !== fs.realpathSync.native(sourceRoot)) throw new Error("Source root does not match Git top-level.");
-  const commonRaw = git("rev-parse", "--git-common-dir");
-  const commonDir = path.isAbsolute(commonRaw) ? commonRaw : path.join(top, commonRaw);
-  if (fs.realpathSync.native(path.join(commonDir, "..")) !== top) throw new Error("Formal launch requires the primary worktree.");
-  if (git("symbolic-ref", "--quiet", "--short", "HEAD") !== "main") throw new Error("Formal launch requires branch main.");
-  if (git("rev-parse", "HEAD") !== git("rev-parse", "refs/heads/main")) throw new Error("Formal launch HEAD does not match main.");
-  if (git("status", "--porcelain=v1", "--untracked-files=all")) throw new Error("Formal source worktree is dirty.");
+  const sourceGate = path.join(sourceRoot, "scripts", "check-clean-worktree.sh");
+  const result = spawnSync("/bin/bash", [
+    sourceGate,
+    "--mode", "formal",
+    "--dirty-policy", "runtime",
+    "--repo-root", sourceRoot,
+    "--source-root", sourceRoot,
+  ], { encoding: "utf8", env: gitEnv });
+  const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+  if (result.status !== 0) throw new Error(output || "formal source check failed");
+  if (output) desktopBootLog(`source gate output=${JSON.stringify(output)}`);
   desktopBootLog(`source gate passed root=${JSON.stringify(sourceRoot)}`);
 }
 
