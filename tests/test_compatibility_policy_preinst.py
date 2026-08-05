@@ -67,13 +67,18 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         glibc="2.31",
         kernel="5.10.0",
         owner_uid=None,
+        effective_uid=None,
         result_path=None,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
         if owner_uid is None:
             owner_uid = os.getuid()
+        if effective_uid is None:
+            effective_uid = owner_uid
         if result_path is None:
             result_path = root / "var/lib/taiji-agent/preflight.json"
         command = (
+            "TAIJI_TEST_EFFECTIVE_UID=\"$9\"; "
+            "id() { if [ \"${1:-}\" = \"-u\" ]; then printf '%s' \"$TAIJI_TEST_EFFECTIVE_UID\"; else command id \"$@\"; fi; }; "
             "source \"$1\"; "
             "verify_compatibility \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\""
         )
@@ -95,6 +100,7 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                 str(root),
                 str(owner_uid),
                 str(result_path),
+                str(effective_uid),
             ],
             text=True,
             capture_output=True,
@@ -182,6 +188,7 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             ("systemd", "TAIJI-LINUX-E007-SYSTEMD"),
             ("loopback", "TAIJI-LINUX-E008-LOOPBACK"),
             ("opt", "TAIJI-LINUX-E009-DISK"),
+            ("disk", "TAIJI-LINUX-E009-DISK"),
         )
         for missing, code in cases:
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
@@ -195,6 +202,8 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                     (root / "sys/class/net/lo").rmdir()
                 elif missing == "opt":
                     (root / "opt").rmdir()
+                elif missing == "disk":
+                    (root / ".taiji-disk-headroom-mib").write_text("0\n", encoding="utf-8")
                 rendered = self.render(temp_root)
                 self.assert_blocked(rendered, root, os_release, code)
 
@@ -223,6 +232,14 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp_root = Path(directory)
             root, os_release = self.make_root(temp_root)
+            os_release.unlink()
+            os_release.symlink_to("/usr/lib/os-release")
+            rendered = self.render(temp_root)
+            self.assert_compatible(rendered, root, os_release)
+
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
             rendered = self.render(temp_root)
             os_release.unlink()
             os_release.symlink_to("../tmp/attacker-os-release")
@@ -242,8 +259,29 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             temp_root = Path(directory)
             root, os_release = self.make_root(temp_root)
             rendered = self.render(temp_root)
+            os_release.unlink()
+            os_release.write_text('ID="kylin"\n', encoding="utf-8")
+            os_release.chmod(0o644)
             self.assert_blocked(
-                rendered, root, os_release, "TAIJI-LINUX-E010-PRIVILEGE", owner_uid=os.getuid() + 1
+                rendered,
+                root,
+                os_release,
+                "TAIJI-LINUX-E002-OS",
+                owner_uid=os.getuid() + 1,
+                effective_uid=os.getuid() + 1,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            rendered = self.render(temp_root)
+            self.assert_blocked(
+                rendered,
+                root,
+                os_release,
+                "TAIJI-LINUX-E010-PRIVILEGE",
+                owner_uid=os.getuid(),
+                effective_uid=os.getuid() + 1,
             )
 
     def test_result_never_contains_certified_or_machine_identity(self):
@@ -251,6 +289,10 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             temp_root = Path(directory)
             root, os_release = self.make_root(temp_root)
             rendered = self.render(temp_root)
+            self.assertIn(
+                'verify_compatibility /etc/os-release "$arch" "$glibc_version" "$kernel_version" / 0 /var/lib/taiji-agent/preflight.json',
+                rendered.read_text(encoding="utf-8"),
+            )
             _, payload = self.call_verifier(rendered, root, os_release)
             serialized = json.dumps(payload, ensure_ascii=False).lower()
             for forbidden in ("certified", "hostname", "username", "ip", "mac", "serial", "machine"):

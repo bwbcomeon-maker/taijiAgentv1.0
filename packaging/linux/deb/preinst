@@ -87,7 +87,7 @@ resolve_trusted_os_release() {
     [ "$link_count" = "1" ] || return 1
     link_value="$(readlink "$os_release_file" 2>/dev/null)" || return 1
     case "$link_value" in
-      /*) linked_path="$link_value" ;;
+      /*) linked_path="$(root_path "$root_prefix" "$link_value")" ;;
       *) linked_path="$(dirname "$os_release_file")/$link_value" ;;
     esac
     resolved_path="$(cd "$(dirname "$linked_path")" 2>/dev/null && pwd -P)" || return 1
@@ -327,5 +327,4 @@ arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
 glibc_banner="$(ldd --version 2>&1 | head -n 1)"
 glibc_version="$(printf '%s\n' "$glibc_banner" | grep -Eo '[0-9]+(\.[0-9]+)+' | tail -n 1)"
 kernel_version="$(uname -r)"
-owner_uid="$(id -u)"
-verify_compatibility /etc/os-release "$arch" "$glibc_version" "$kernel_version" / "$owner_uid" /var/lib/taiji-agent/preflight.json
+verify_compatibility /etc/os-release "$arch" "$glibc_version" "$kernel_version" / 0 /var/lib/taiji-agent/preflight.json
