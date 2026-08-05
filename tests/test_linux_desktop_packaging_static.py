@@ -223,7 +223,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('--entry preload.js', build)
         self.assertIn('POLICY_FILE="$REPO_ROOT/packaging/linux/compatibility-policy.json"', build)
         self.assertIn('POLICY_INSTALL_PATH="$INSTALL_ROOT/resources/linux-compatibility-policy.json"', build)
+        self.assertIn('LAUNCH_MANIFEST_PATH="$INSTALL_ROOT/resources/taiji-release-manifest.json"', build)
         self.assertIn('ABI_REPORT_PATH="$INSTALL_ROOT/resources/elf-abi-audit.json"', build)
+        self.assertIn('write_launch_manifest', build)
         self.assertIn('write_package_manifest', build)
         for field in (
             '"schema": "taiji-package-manifest/v3"',

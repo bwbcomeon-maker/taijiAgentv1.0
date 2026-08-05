@@ -7,6 +7,19 @@
   },
   "components": [
     {
+      "id": "launch_manifest",
+      "path": "opt/taiji-agent/resources/taiji-release-manifest.json",
+      "type": "file",
+      "mode": "0644",
+      "version": {
+        "kind": "launch_manifest",
+        "schema": "taiji-release-manifest/v1",
+        "platform": "linux",
+        "architecture": "amd64",
+        "install_root": "/opt/taiji-agent"
+      }
+    },
+    {
       "id": "compatibility_policy",
       "path": "opt/taiji-agent/resources/linux-compatibility-policy.json",
       "type": "file",

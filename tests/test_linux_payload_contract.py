@@ -84,6 +84,24 @@ class LinuxPayloadContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         audit_target.chmod(0o644)
+        launch_manifest_target = root / "opt/taiji-agent/resources/taiji-release-manifest.json"
+        launch_manifest_target.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-release-manifest/v1",
+                    "platform": "linux",
+                    "arch": "amd64",
+                    "version": PRODUCT_VERSION,
+                    "commit": "0123456789abcdef0123456789abcdef01234567",
+                    "installRoot": "/opt/taiji-agent",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        launch_manifest_target.chmod(0o644)
 
         for component in contract["components"]:
             target = root / component["path"]

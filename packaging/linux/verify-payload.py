@@ -17,9 +17,11 @@ from typing import Any
 
 SCHEMA_VERSION = "taiji-payload-contract/v1"
 EMBEDDED_CONTRACT = "opt/taiji-agent/resources/payload-contract.json"
-TRUSTED_CONTRACT_SHA256 = "3291adff614f3a7159fb7391cad08a4cc4e5f473c45ad8e4d234da91f38e3d18"
+TRUSTED_CONTRACT_SHA256 = "e5c3b462946b03e699a9a8dead2d63d5ea4247fe0125a4639ddfac25a2ed5d4d"
 COMPATIBILITY_POLICY_SCHEMA = "taiji-linux-compatibility-policy/v1"
 ELF_ABI_AUDIT_SCHEMA = "taiji-elf-abi-audit/v1"
+LAUNCH_MANIFEST_SCHEMA = "taiji-release-manifest/v1"
+LAUNCH_MANIFEST_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_PROFILE_MARKER = b"source-development"
 READ_CHUNK_SIZE = 1024 * 1024
 SYMLINK_POLICY = "relative-internal-existing-targets-without-symlink-components"
@@ -344,6 +346,31 @@ def verify_elf_abi_audit(
     return str(report["compatibility_policy_sha256"])
 
 
+def verify_launch_manifest(
+    path: Path,
+    version: dict[str, Any],
+    product_version: str,
+    component_id: str,
+) -> str:
+    manifest = read_json(path, label=f"component {component_id}")
+    if not isinstance(manifest, dict) or isinstance(manifest, list):
+        raise PayloadContractError(f"component {component_id} must be a JSON object")
+    if manifest.get("schema") != version.get("schema") or manifest.get("schema") != LAUNCH_MANIFEST_SCHEMA:
+        raise PayloadContractError(f"component {component_id} has an unexpected launch manifest schema")
+    if manifest.get("platform") != version.get("platform") or manifest.get("platform") != "linux":
+        raise PayloadContractError(f"component {component_id} has an unexpected platform")
+    if manifest.get("arch") != version.get("architecture") or manifest.get("arch") != "amd64":
+        raise PayloadContractError(f"component {component_id} has an unexpected architecture")
+    if manifest.get("version") != product_version:
+        raise PayloadContractError(f"component {component_id} version does not match product version")
+    commit = manifest.get("commit")
+    if not isinstance(commit, str) or LAUNCH_MANIFEST_COMMIT_PATTERN.fullmatch(commit) is None:
+        raise PayloadContractError(f"component {component_id} commit must be a full lowercase Git SHA")
+    if manifest.get("installRoot") != version.get("install_root"):
+        raise PayloadContractError(f"component {component_id} install root is not fixed")
+    return str(manifest["version"])
+
+
 def verify_type_and_mode(root: Path, component: dict[str, Any]) -> None:
     component_id = str(component.get("id") or "")
     target = payload_path(root, component.get("path"), label=f"component {component_id}")
@@ -420,6 +447,13 @@ def resolve_component_version(
             label=f"component {component_id} audit",
         )
         actual = verify_elf_abi_audit(root, source, version, component_id)
+    elif kind == "launch_manifest":
+        source = payload_path(
+            root,
+            component_path or "",
+            label=f"component {component_id} launch manifest",
+        )
+        actual = verify_launch_manifest(source, version, product_version, component_id)
     else:
         raise PayloadContractError(f"component {component_id} has unsupported version kind {kind}")
 

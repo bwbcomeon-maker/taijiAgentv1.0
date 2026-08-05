@@ -52,6 +52,7 @@ OUT_DIR="$REPO_ROOT/packages/麒麟操作系统安装包"
 OUT_DEB="$OUT_DIR/taiji-agent_${VERSION}_${ARCH}.deb"
 ARCHIVE_DIR="$OUT_DIR/旧版本归档"
 POLICY_INSTALL_PATH="$INSTALL_ROOT/resources/linux-compatibility-policy.json"
+LAUNCH_MANIFEST_PATH="$INSTALL_ROOT/resources/taiji-release-manifest.json"
 ABI_REPORT_PATH="$INSTALL_ROOT/resources/elf-abi-audit.json"
 ABI_BUILD_REPORT="$BUILD_ROOT/elf-abi-audit.json"
 PRIVATE_STAGE_REPORT="$BUILD_ROOT/private-library-stage.json"
@@ -270,7 +271,7 @@ scan_deb_release_artifact() {
 audit_deb_payload() {
   local contents="$BUILD_ROOT/deb-contents.txt" audit_root="$BUILD_ROOT/deb-audit-root" control_root="$BUILD_ROOT/deb-audit-control" extracted_abi="$BUILD_ROOT/extracted-elf-abi-audit.json" required missing=""
   dpkg-deb -c "$OUT_DEB" > "$contents"
-  for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./usr/share/applications/taiji-agent.desktop" "./usr/bin/taiji" "./usr/bin/taiji-agent"; do
+  for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/taiji-release-manifest.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./usr/share/applications/taiji-agent.desktop" "./usr/bin/taiji" "./usr/bin/taiji-agent"; do
     grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
   done
   [ -z "$missing" ] || { printf '%s' "$missing" >&2; fail "DEB payload is missing required runtime paths"; }
@@ -323,6 +324,20 @@ MANIFEST
   (cd "$OUT_DIR" && sha256sum "$out_deb_name" > "$out_deb_name.sha256")
 }
 
+write_launch_manifest() {
+  cat > "$LAUNCH_MANIFEST_PATH" <<MANIFEST
+{
+  "schema": "taiji-release-manifest/v1",
+  "platform": "linux",
+  "arch": "$TAIJI_PACKAGE_ARCHITECTURE",
+  "version": "$VERSION",
+  "commit": "$SOURCE_COMMIT",
+  "installRoot": "$TAIJI_INSTALL_ROOT"
+}
+MANIFEST
+  chmod 0644 "$LAUNCH_MANIFEST_PATH"
+}
+
 if [ "$(uname -s)" != "Linux" ]; then fail "Refusing to build final DEB on non-Linux host"; fi
 case "$(uname -m)" in x86_64|amd64) ;; *) fail "Refusing to build on non-x86_64 host: $(uname -m)" ;; esac
 for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp readelf date; do require_cmd "$cmd"; done
@@ -354,6 +369,7 @@ printf '%s\n' "$VERSION" > "$WEB_RUNTIME/PRODUCT_VERSION"
 chmod 0644 "$WEB_RUNTIME/PRODUCT_VERSION"
 install -m 0644 "$PAYLOAD_CONTRACT" "$INSTALL_ROOT/resources/payload-contract.json"
 install -m 0644 "$POLICY_FILE" "$POLICY_INSTALL_PATH"
+write_launch_manifest
 python3 "$RUNTIME_STAGER" --repo-root "$REPO_ROOT" --install-root "$INSTALL_ROOT" --node-root "$PACKAGED_NODE_ROOT" --public-key-fingerprint "$ISSUER_PUBLIC_KEY_FINGERPRINT"
 chmod 0755 "$INSTALL_ROOT/resources/license"
 [ "$("$INSTALL_ROOT/runtime/node/bin/node" --version)" = "v$PACKAGED_NODE_VERSION" ] || fail "Staged Node runtime version mismatch"
