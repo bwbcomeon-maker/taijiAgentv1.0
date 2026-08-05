@@ -166,6 +166,7 @@ write_preflight_result() {
   local failed_json="[]"
   local item=""
   local tmp_path=""
+  local write_status=0
   if [ -n "$TAIJI_PREFLIGHT_ERROR_CODE" ]; then
     status="BLOCKED"
     error_code="$TAIJI_PREFLIGHT_ERROR_CODE"
@@ -186,17 +187,27 @@ write_preflight_result() {
   fi
   [ -n "$tmp_path" ] || return 1
   trap 'rm -f -- "$tmp_path"' RETURN
-  (
+  if (
     umask 077
     printf '{"schema":"taiji-install-preflight/v1","status":"%s","policy_id":"%s","compatibility_policy_sha256":"%s","error_code":"%s","reason_zh":"%s","failed_capabilities":%s}\n' \
-      "$status" "$TAIJI_POLICY_ID" "$TAIJI_POLICY_SHA256" "$error_code" "$reason_zh" "$failed_json" > "$tmp_path"
-    chmod 0600 "$tmp_path"
+      "$status" "$TAIJI_POLICY_ID" "$TAIJI_POLICY_SHA256" "$error_code" "$reason_zh" "$failed_json" > "$tmp_path" || exit 1
+    chmod 0600 "$tmp_path" || exit 1
     if command -v sync >/dev/null 2>&1; then
-      sync -d "$tmp_path" 2>/dev/null || sync
+      sync -d "$tmp_path" 2>/dev/null || sync || exit 1
     fi
-    mv -f -- "$tmp_path" "$result_path"
-  )
+    mv -f -- "$tmp_path" "$result_path" || exit 1
+  ); then
+    write_status=0
+  else
+    write_status=$?
+  fi
+  if [ "$write_status" -ne 0 ]; then
+    rm -f -- "$tmp_path" || true
+    trap - RETURN
+    return "$write_status"
+  fi
   trap - RETURN
+  return 0
 }
 
 verify_compatibility() {
@@ -270,7 +281,7 @@ verify_compatibility() {
     preflight_block "TAIJI-LINUX-E009-DISK" "安装目录父路径不存在"
   else
     marker="$root_prefix/.taiji-disk-headroom-mib"
-    if [ -f "$marker" ]; then
+    if [ "$root_prefix" != "/" ] && [ -f "$marker" ]; then
       disk_available_mib="$(cat "$marker" 2>/dev/null || printf '%s' 0)"
       [[ "$disk_available_mib" =~ ^[0-9]+$ ]] || disk_available_mib=0
     else

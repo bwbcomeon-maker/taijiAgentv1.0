@@ -73,6 +73,7 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         result_path=None,
         predictable_temp_target=None,
         fake_mktemp=False,
+        fake_mv=False,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
         if owner_uid is None:
             owner_uid = os.getuid()
@@ -81,19 +82,24 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         if result_path is None:
             result_path = root / "var/lib/taiji-agent/preflight.json"
         fake_bin = ""
-        if fake_mktemp:
+        if fake_mktemp or fake_mv:
             fake_bin_path = root / ".fake-bin"
             fake_bin_path.mkdir(parents=True, exist_ok=True)
-            real_mktemp = shutil.which("mktemp") or "/usr/bin/mktemp"
-            fake_mktemp_path = fake_bin_path / "mktemp"
-            fake_mktemp_path.write_text(
-                "#!/bin/sh\n"
-                f"state={shlex.quote(str(root / '.fake-mktemp-used'))}\n"
-                "if [ ! -e \"$state\" ]; then : > \"$state\"; exit 1; fi\n"
-                f"exec {shlex.quote(real_mktemp)} \"$@\"\n",
-                encoding="utf-8",
-            )
-            fake_mktemp_path.chmod(0o755)
+            if fake_mktemp:
+                real_mktemp = shutil.which("mktemp") or "/usr/bin/mktemp"
+                fake_mktemp_path = fake_bin_path / "mktemp"
+                fake_mktemp_path.write_text(
+                    "#!/bin/sh\n"
+                    f"state={shlex.quote(str(root / '.fake-mktemp-used'))}\n"
+                    "if [ ! -e \"$state\" ]; then : > \"$state\"; exit 1; fi\n"
+                    f"exec {shlex.quote(real_mktemp)} \"$@\"\n",
+                    encoding="utf-8",
+                )
+                fake_mktemp_path.chmod(0o755)
+            if fake_mv:
+                fake_mv_path = fake_bin_path / "mv"
+                fake_mv_path.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                fake_mv_path.chmod(0o755)
             fake_bin = str(fake_bin_path)
         result_path.parent.mkdir(parents=True, exist_ok=True)
         command = (
@@ -132,6 +138,7 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             env=env,
         )
         self.assertTrue(result_path.exists(), completed.stderr)
+        self.assertEqual(result_path.stat().st_mode & 0o777, 0o600)
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         return completed, payload
 
@@ -355,6 +362,21 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             temp_candidates = list(result_path.parent.glob(result_path.name + ".tmp.*"))
             self.assertTrue(temp_candidates)
             self.assertTrue(all(path.is_symlink() for path in temp_candidates))
+            for path in temp_candidates:
+                path.unlink()
+
+            old_content = result_path.read_bytes()
+            completed, _ = self.call_verifier(
+                rendered,
+                root,
+                os_release,
+                result_path=result_path,
+                fake_mv=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(result_path.read_bytes(), old_content)
+            remaining_temps = list(result_path.parent.glob(result_path.name + ".tmp.*"))
+            self.assertFalse(remaining_temps)
 
 
 if __name__ == "__main__":
