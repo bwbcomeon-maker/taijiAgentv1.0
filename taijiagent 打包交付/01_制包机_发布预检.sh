@@ -173,7 +173,8 @@ verify_deb_payload() {
   rm -rf "$payload_root"
 }
 verify_package_output_allowlist() {
-  local deb="$1" name="$(basename "$deb")"
+  local deb="$1" name
+  name="$(basename -- "$deb")"
   python3 - "$OUTPUT_DIR" "$name" <<'PY'
 import os
 import stat

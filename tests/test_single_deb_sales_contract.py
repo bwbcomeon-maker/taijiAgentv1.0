@@ -110,6 +110,13 @@ class SingleDebSalesContractTest(unittest.TestCase):
         self.assertIn("cmp -s \"$POLICY_FILE\" \"$embedded_policy\"", preflight)
         self.assertIn("verify_package_output_allowlist", preflight)
 
+    def test_output_allowlist_resolves_deb_name_after_argument_binding(self):
+        preflight = read(PREFLIGHT_PATH)
+
+        self.assertIn('local deb="$1" name', preflight)
+        self.assertIn('name="$(basename -- "$deb")"', preflight)
+        self.assertNotIn('local deb="$1" name="$(basename "$deb")"', preflight)
+
     def test_customer_contract_has_no_second_deb_or_offline_repo(self):
         builder = read(BUILDER_PATH)
         preflight = read(PREFLIGHT_PATH)
