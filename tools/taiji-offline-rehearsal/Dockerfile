@@ -7,11 +7,14 @@ LABEL io.taiji.release-evidence.role="offline-rehearsal-v1" \
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 
+# This apt transaction is image-build time only; the runner never has a package
+# repository or network and uses only local dpkg bytes.
 RUN test "$TARGETARCH" = "amd64" \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        dpkg \
         file \
         findutils \
         gzip \

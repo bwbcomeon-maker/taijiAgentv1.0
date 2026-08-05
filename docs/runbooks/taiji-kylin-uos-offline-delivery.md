@@ -132,6 +132,17 @@ docker build --platform linux/amd64 \
   tools/taiji-offline-rehearsal
 
 export TAIJI_OFFLINE_REHEARSAL_CHALLENGE="$(openssl rand -hex 32)"
+# 扩展生命周期的标准入口：candidate、N-1、当前 manifest 和 canonical policy 必须显式绑定。
+python3 scripts/produce-taiji-offline-rehearsal.py \
+  --deb "taijiagent 打包交付/生成的安装包/taiji-agent_<version>_amd64.deb" \
+  --previous-deb "/受控归档/N-1/taiji-agent_<n-1-version>_amd64.deb" \
+  --build-manifest "taijiagent 打包交付/生成的安装包/taiji-package-manifest.json" \
+  --policy "packaging/linux/compatibility-policy.json" \
+  --output-dir "taijiagent 打包交付/offline-install-rehearsal" \
+  --image taiji-offline-rehearsal:local \
+  --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
+
+# 旧版 --delivery-dir 入口仍保留兼容，但只适合历史 fresh/reinstall 演练，不能替代上面的 N-1 全生命周期。
 python3 scripts/produce-taiji-offline-rehearsal.py \
   --delivery-dir "taijiagent 打包交付" \
   --output-dir "taijiagent 打包交付/offline-install-rehearsal" \
@@ -246,13 +257,13 @@ SHA256SUMS.txt
 - 没有 `dpkg` 状态但存在旧系统安装时，`02` 仅允许清理固定白名单内的 legacy 路径；用户 XDG 配置、授权、密钥、会话和附件不在清理范围。
 - `prerm` 只能按 `/proc/<pid>/exe` 的物理路径识别 `/opt/taiji-agent/` 所属进程，并在发送 `SIGKILL` 前重新核验，禁止使用 `pkill/pgrep -f`。
 - 普通 remove 不清用户状态；purge 只清理已知的 root-owned、非 symlink 系统状态目录。发现 symlink、非 root owner、mountpoint 或“白名单目录实际是普通文件”的类型不匹配时应保留并告警，不能扩大递归删除范围。`/opt/taiji-agent` 顶层空目录也必须通过目录类型、root owner、非 symlink 和非 mountpoint 门禁后才能 `rmdir`。
-- Debian 原生 `postinst configure` 失败仍会留下未配置完成状态；维护者脚本本身不承诺恢复旧二进制，也不会触碰用户数据。只有 `02`/管理端静默部署在 `upgrade` 或 `rollback` 模式下同时拿到已校验的 N-1 DEB、SHA256 sidecar、detached signature、N-1 manifest/数据契约和业务用户时，才进入 root-owned transaction journal：先停受管运行时、快照配置/授权/会话/附件/workspace/Skills/模板及 SQLite，再执行 dpkg；失败会尝试安装 N-1 并恢复快照，任一恢复动作失败则保留 `manual_recovery_required` 状态并停止自动处理。该事务回滚边界尚未在真实麒麟/统信目标机以 dpkg 失败场景实时验证。
+- Debian 原生 `postinst configure` 失败仍会留下未配置完成状态；维护者脚本本身不承诺恢复旧二进制，也不会触碰用户数据。`02`/管理端静默部署的 `upgrade` 模式在同时拿到已校验的 N-1 DEB、SHA256 sidecar、detached signature、N-1 manifest/数据契约和业务用户时，才进入 root-owned transaction journal：先停受管运行时、快照配置/授权/会话/附件/workspace/Skills/模板及 SQLite，再执行 dpkg；失败会尝试安装 N-1 并恢复快照。`rollback` 是显式的单向降级：`PREVIOUS_DEB` 就是降级目标，当前版本 DEB 不作为第二个恢复制品绑定；因此降级期间的 dpkg/native verify 失败不会假称已恢复原版本，而是保留 `manual_recovery_required`，由运维用归档的当前版本材料处理。任一升级恢复动作失败同样保留 `manual_recovery_required`。该事务回滚边界尚未在真实麒麟/统信目标机以 dpkg 失败场景实时验证。
 - N-1 detached signature、其 `.sha256` sidecar 和对应 manifest 属于受控运维材料，不进入客户“只含一个 DEB”的目录；发布负责人必须在受控签名机用与目标机内置公钥对应的离线私钥生成并归档，升级调用方显式传入 `TAIJI_PREVIOUS_DEB`、`TAIJI_PREVIOUS_SHA256`、`TAIJI_PREVIOUS_SIGNATURE` 和 `TAIJI_PREVIOUS_MANIFEST`。普通客户 fresh install 不需要这些升级输入。
 - 从含旧 `prerm` 的历史包第一次直接升级时，dpkg 会先执行旧包脚本；新包无法追溯消除旧脚本行为。真实升级验收必须专门覆盖这一首跳边界。
 
 ### 7.4 本轮事务实现验证台账
 
-- **已实时验证**：事务/维护脚本/部署回执/安装脚本聚焦回归 `52` 项通过；Linux 静态门禁 `88` 项通过、`1` 项按平台条件跳过；相关 Bash 语法、Python 编译和 `git diff --check` 通过。
+- **已实时验证**：事务/维护脚本/部署回执/安装脚本/断网生命周期聚焦回归 `70` 项通过；Linux 静态门禁 `88` 项通过、`1` 项按平台条件跳过；相关 Bash 语法、Python 编译、JSON 校验和 `git diff --check` 通过。
 - **未实时验证**：真实麒麟、统信或 openKylin 终端；真实 `dpkg` maintainer failure 后的 N-1 自动回滚；真实 detached signature 验签；真实图形桌面安装和升级/卸载。
 - **验收边界**：上述聚焦测试只证明当前分支代码和模拟夹具的合同，不提升“制包机已构建”“离线安装已演练”或“目标机已验证”任一证据等级；冻结源码后仍须在 Linux amd64 制包机重建 DEB、执行断网生命周期，再绑定真实目标机证据。
 

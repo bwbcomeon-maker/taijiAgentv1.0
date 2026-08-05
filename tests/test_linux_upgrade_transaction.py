@@ -457,6 +457,19 @@ class LinuxUpgradeTransactionTest(unittest.TestCase):
         self.assertIn('ps -eo pid=', source)
         self.assertNotIn('ps -eo pid=,args=', source)
 
+    def test_silent_recovery_receipt_refreshes_n1_state_and_rollback_is_manual_only(self):
+        source = SILENT.read_text(encoding="utf-8")
+        recovery = source.split("attempt_upgrade_recovery() {", 1)[1].split("}\n\n", 1)[0]
+        self.assertIn("refresh_dpkg_state_after_recovery", recovery)
+        self.assertIn('DPKG_STATUS_AFTER="$(read_dpkg_status)"', source)
+        self.assertIn('VERSION_AFTER="$(read_dpkg_version)"', source)
+        verifier = source.split("verify_rollback_package() {", 1)[1].split("}\n\nstage_candidate_for_install", 1)[0]
+        self.assertIn('NATIVE_VERIFY="PASS"', verifier)
+        self.assertIn('NATIVE_VERIFY="FAIL"', verifier)
+        self.assertIn("ROLLBACK_DPKG_FAILED_MANUAL_RECOVERY", source)
+        self.assertIn("ROLLBACK_NATIVE_VERIFY_FAILED_MANUAL_RECOVERY", source)
+        self.assertIn("the current package is not bound as a second artifact", source)
+
 
 if __name__ == "__main__":
     unittest.main()

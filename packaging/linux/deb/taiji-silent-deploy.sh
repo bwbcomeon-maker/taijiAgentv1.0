@@ -87,7 +87,7 @@ usage: taiji-silent-deploy.sh --deb PATH --expected-version VERSION
   [--build-manifest PATH --policy PATH --certification-challenge HEX]
   [--release-evidence PATH --release-signature PATH]
   [--business-user LOGIN] [--previous-deb PATH --previous-sha256 SHA256 --previous-signature PATH]
-  [--previous-version VERSION --previous-manifest PATH]  # rollback only
+  [--previous-version VERSION --previous-manifest PATH]  # rollback target only; failure requires manual recovery
 EOF
 }
 
@@ -593,10 +593,19 @@ PY
 
 attempt_upgrade_recovery() {
   [ -n "$UPGRADE_TRANSACTION_ID" ] || return 1
-  if rollback_previous_package && verify_rollback_package; then
-    recover_upgrade_transaction
-    return $?
+  # Automatic N-1 recovery is deliberately limited to an upgrade.  In the
+  # explicit rollback operation PREVIOUS_DEB is the downgrade target itself;
+  # the current package is not bound as a second artifact, so a failed
+  # downgrade cannot safely claim that it restored the pre-rollback version.
+  if rollback_previous_package; then
+    if verify_rollback_package; then
+      recover_upgrade_transaction
+      return $?
+    fi
+  else
+    refresh_dpkg_state_after_recovery
   fi
+  refresh_dpkg_state_after_recovery
   recover_upgrade_transaction package_failed || true
   return 1
 }
@@ -650,19 +659,23 @@ rollback_previous_package() {
 
 verify_rollback_package() {
   [ "$OPERATION" = upgrade ] || return 0
-  local status version verifier="/opt/taiji-agent/bin/taiji-native-verify"
-  status="$(dpkg-query -W -f='${db:Status-Status}' taiji-agent 2>/dev/null || true)"
-  [ "$status" = installed ] || return 1
-  version="$(dpkg-query -W -f='${Version}' taiji-agent 2>/dev/null || true)"
-  [ "$version" = "$PREVIOUS_VERSION" ] || return 1
-  [ -x "$verifier" ] || return 1
-  env -i \
+  local verifier="/opt/taiji-agent/bin/taiji-native-verify"
+  refresh_dpkg_state_after_recovery
+  [ "$DPKG_STATUS_AFTER" = installed ] || return 1
+  [ "$VERSION_AFTER" = "$PREVIOUS_VERSION" ] || return 1
+  [ -x "$verifier" ] || { NATIVE_VERIFY="NOT_RUN"; return 1; }
+  if env -i \
     PATH=/usr/sbin:/usr/bin:/sbin:/bin \
     LANG=C.UTF-8 \
     TAIJI_LAUNCH_PROFILE=installed-production \
     TAIJI_NATIVE_VERIFY_MODE=system-only \
     TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0 \
-    "$verifier" >/dev/null 2>&1
+    "$verifier" >/dev/null 2>&1; then
+    NATIVE_VERIFY="PASS"
+    return 0
+  fi
+  NATIVE_VERIFY="FAIL"
+  return 1
 }
 
 stage_candidate_for_install() {
@@ -956,6 +969,11 @@ read_dpkg_version() {
   dpkg-query -W -f='${Version}' taiji-agent 2>/dev/null || true
 }
 
+refresh_dpkg_state_after_recovery() {
+  DPKG_STATUS_AFTER="$(read_dpkg_status)"
+  VERSION_AFTER="$(read_dpkg_version)"
+}
+
 preflight() {
   [ "$(uname -s)" = "Linux" ] || blocked preflight LINUX_REQUIRED 1
   case "$(uname -m)" in x86_64|amd64) ;; *) blocked preflight AMD64_REQUIRED 1 ;; esac
@@ -995,6 +1013,9 @@ install_local_deb() {
       ERROR_CODE="DPKG_INSTALL_FAILED_ROLLED_BACK"
       finish "$dpkg_rc"
     fi
+    if [ "$OPERATION" = rollback ]; then
+      manual_recovery dpkg ROLLBACK_DPKG_FAILED_MANUAL_RECOVERY "$dpkg_rc"
+    fi
     manual_recovery dpkg DPKG_INSTALL_FAILED "$dpkg_rc"
   fi
   local verifier="/opt/taiji-agent/bin/taiji-native-verify"
@@ -1008,6 +1029,9 @@ install_local_deb() {
         ERROR_STAGE="native_verify"
         ERROR_CODE="NATIVE_VERIFY_FAILED_ROLLED_BACK"
         finish 1
+      fi
+      if [ "$OPERATION" = rollback ]; then
+        manual_recovery native_verify ROLLBACK_NATIVE_VERIFY_FAILED_MANUAL_RECOVERY 1
       fi
       manual_recovery native_verify NATIVE_VERIFY_FAILED 1
     fi

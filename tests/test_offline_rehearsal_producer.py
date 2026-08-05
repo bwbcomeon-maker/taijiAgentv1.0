@@ -294,6 +294,45 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 (evidence_dir / "offline-install-rehearsal-session.json").write_text(
                     json.dumps(session, sort_keys=True) + "\n", encoding="utf-8"
                 )
+                if mode == "expanded_success":
+                    lifecycle = dict(session)
+                    lifecycle.update({
+                        "steps": [
+                            "fresh_install_n",
+                            "same_version_reinstall_n",
+                            "seed_n_minus_one",
+                            "upgrade_n_minus_one_to_n",
+                            "data_manifest_after_upgrade",
+                            "inject_postinst_failure_same_candidate",
+                            "automatic_rollback_to_n_minus_one",
+                            "upgrade_n_again",
+                            "remove_preserves_user_data",
+                            "purge_clears_root_state_only",
+                        ],
+                        "receipts": [
+                            {
+                                "operation": operation,
+                                "deb_sha256": state["env"]["TAIJI_EXPECTED_DEB_SHA256"],
+                                "compatibility_policy_id": state["env"]["TAIJI_COMPATIBILITY_POLICY_ID"],
+                                "compatibility_policy_sha256": state["env"]["TAIJI_COMPATIBILITY_POLICY_SHA256"],
+                            }
+                            for operation in ("fresh_install", "reinstall", "upgrade", "rollback")
+                        ],
+                        "data_manifests": {
+                            "before_upgrade": "d" * 64,
+                            "after_upgrade": "d" * 64,
+                            "after_rollback": "d" * 64,
+                        },
+                        "compatibility_policy_id": state["env"]["TAIJI_COMPATIBILITY_POLICY_ID"],
+                        "compatibility_policy_sha256": state["env"]["TAIJI_COMPATIBILITY_POLICY_SHA256"],
+                        "journal": {
+                            "resume": "partial journal is never committed",
+                            "manual_recovery_required": False,
+                        },
+                    })
+                    (evidence_dir / "offline-install-rehearsal-lifecycle.json").write_text(
+                        json.dumps(lifecycle, sort_keys=True) + "\n", encoding="utf-8"
+                    )
                 if mode == "tamper_delivery":
                     delivery_mount = next(
                         item for item in state["mounts"]
@@ -344,6 +383,59 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def run_producer_explicit(
+        self,
+        mode: str = "expanded_success",
+        *,
+        previous: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        previous = previous or self._write_previous_release()
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.fake_bin}:{env['PATH']}",
+                "FAKE_DOCKER_LOG": str(self.docker_log),
+                "FAKE_DOCKER_STATE": str(self.docker_state),
+                "FAKE_DOCKER_MODE": mode,
+            }
+        )
+        package_dir = self.delivery / "生成的安装包"
+        candidate = package_dir / "taiji-agent_0.1.0_amd64.deb"
+        return subprocess.run(
+            [
+                "python3",
+                str(PRODUCER),
+                "--deb",
+                str(candidate),
+                "--previous-deb",
+                str(previous),
+                "--build-manifest",
+                str(package_dir / "taiji-package-manifest.json"),
+                "--policy",
+                str(ROOT / "packaging/linux/compatibility-policy.json"),
+                "--output-dir",
+                str(self.output),
+                "--image",
+                "taiji-offline-rehearsal:test",
+                "--challenge",
+                CHALLENGE,
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _write_previous_release(self) -> Path:
+        previous = self.temp_path / "previous" / "taiji-agent_0.0.9_amd64.deb"
+        previous.parent.mkdir(parents=True, exist_ok=True)
+        previous.write_bytes(b"previous deb fixture\n")
+        (previous.parent / f"{previous.name}.sha256").write_text(
+            f"{sha256(previous)}  {previous.name}\n", encoding="utf-8"
+        )
+        return previous
 
     def docker_calls(self) -> list[list[str]]:
         return [json.loads(line) for line in self.docker_log.read_text(encoding="utf-8").splitlines()]
@@ -550,6 +642,77 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "existing evidence\n")
         self.assertFalse(self.docker_log.exists())
+
+    def test_lifecycle_runs_fresh_reinstall_upgrade_failed_rollback_and_second_upgrade(self):
+        result = self.run_producer_explicit()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads((self.output / "offline-install-rehearsal.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            evidence["steps"],
+            [
+                "fresh_install_n",
+                "same_version_reinstall_n",
+                "seed_n_minus_one",
+                "upgrade_n_minus_one_to_n",
+                "data_manifest_after_upgrade",
+                "inject_postinst_failure_same_candidate",
+                "automatic_rollback_to_n_minus_one",
+                "upgrade_n_again",
+                "remove_preserves_user_data",
+                "purge_clears_root_state_only",
+            ],
+        )
+
+    def test_postinst_failure_injection_uses_same_candidate_deb_bytes(self):
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+        self.assertIn("dpkg-divert", lifecycle)
+        self.assertIn("postinst", lifecycle)
+        self.assertIn("TAIJI_EXPECTED_DEB_SHA256", lifecycle)
+        self.assertIn("sha256sum", lifecycle)
+        self.assertIn("candidate DEB 字节", lifecycle)
+
+    def test_all_receipts_bind_same_candidate_sha_and_policy(self):
+        result = self.run_producer_explicit()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads((self.output / "offline-install-rehearsal.json").read_text(encoding="utf-8"))
+        receipts = evidence["receipts"]
+        self.assertGreaterEqual(len(receipts), 4)
+        for receipt in receipts:
+            self.assertEqual(receipt["deb_sha256"], evidence["deb_sha256"])
+            self.assertEqual(receipt["compatibility_policy_id"], evidence["compatibility_policy_id"])
+            self.assertEqual(receipt["compatibility_policy_sha256"], evidence["compatibility_policy_sha256"])
+
+    def test_data_manifest_matches_before_upgrade_after_upgrade_and_after_rollback(self):
+        result = self.run_producer_explicit()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads((self.output / "offline-install-rehearsal.json").read_text(encoding="utf-8"))
+        manifests = evidence["data_manifests"]
+        self.assertEqual(manifests["before_upgrade"], manifests["after_upgrade"])
+        self.assertEqual(manifests["before_upgrade"], manifests["after_rollback"])
+
+    def test_network_none_and_no_download_are_enforced_for_every_package_action(self):
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+        producer = PRODUCER.read_text(encoding="utf-8")
+        self.assertIn('"--network",\n            "none"', producer)
+        self.assertNotRegex(lifecycle, r"apt-get\s+(?:update|install|download|get)")
+        self.assertNotIn("apt-get install -f", lifecycle)
+        self.assertIn("dpkg --install", lifecycle)
+        self.assertIn("dpkg --purge", lifecycle)
+
+    def test_missing_previous_release_blocks_upgrade_rehearsal(self):
+        missing = self.temp_path / "missing-previous.deb"
+        result = self.run_producer_explicit(previous=missing)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("previous", (result.stdout + result.stderr).lower())
+        self.assertFalse(self.output.exists())
+
+    def test_power_loss_resume_never_treats_partial_journal_as_committed(self):
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+        transaction = (ROOT / "packaging/linux/upgrade_transaction.py").read_text(encoding="utf-8")
+        self.assertIn("journal", lifecycle)
+        self.assertIn("manual_recovery_required", lifecycle)
+        self.assertIn("resume", transaction)
+        self.assertIn("committed", transaction)
 
 
 class OfflineRehearsalDocumentationTest(unittest.TestCase):
