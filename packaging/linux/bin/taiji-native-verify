@@ -47,6 +47,7 @@ fi
 TAIJI_LAUNCH_PROFILE="installed-production"
 TAIJI_AGENT_ROOT="$APP_ROOT"
 TAIJI_PRIVATE_LIBRARY_DIR="$APP_ROOT/runtime/lib"
+export TAIJI_PRIVATE_LIBRARY_DIR
 case "${1:-}" in
   --system-only)
     shift

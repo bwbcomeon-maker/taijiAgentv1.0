@@ -128,10 +128,11 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self.readelf_outputs = {}
-            dynamic = "0x000000000000000e (SONAME)             Library soname: [libprivate.so.1]"
+            private = self.policy["elf"]["allowed_private_sonames"][0]
+            dynamic = f"0x000000000000000e (SONAME)             Library soname: [{private}]"
             self.fake_elf(root, "runtime/lib/a.so", dynamic=dynamic)
             self.fake_elf(root, "runtime/lib/b.so", dynamic=dynamic)
-            self.fake_elf(root, "runtime/agent/bin/python", dynamic="0x1 (NEEDED) Shared library: [libprivate.so.1]")
+            self.fake_elf(root, "runtime/agent/bin/python", dynamic=f"0x1 (NEEDED) Shared library: [{private}]")
             with self.install_readelf_stub():
                 with self.assertRaisesRegex(self.audit.ElfAuditError, "ambiguous"):
                     self.audit.audit_root(root, self.policy)
@@ -201,7 +202,8 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
 
             with mock.patch.object(self.stager, "readelf_soname", side_effect=fake_soname), \
                     mock.patch.object(self.stager, "source_metadata", return_value=(stat.S_IFREG | 0o644, 0, 1)), \
-                    mock.patch.object(self.stager, "_copy_atomically", side_effect=fake_copy):
+                    mock.patch.object(self.stager, "_copy_atomically", side_effect=fake_copy), \
+                    mock.patch.object(self.stager, "_ensure_private_directory"):
                 report = self.stager.stage_private_libraries(root, self.policy, sysroot)
             staged = root / "opt/taiji-agent/runtime/lib" / allowed
             self.assertTrue(staged.is_file())
@@ -255,6 +257,170 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                     mock.patch.object(self.stager, "source_metadata", return_value=(stat.S_IFREG | 0o644, 0, 1)):
                 with self.assertRaises(self.stager.StageError):
                     self.stager.validate_source(non_allowlisted, self.policy)
+
+    def test_source_native_verifier_reinjects_private_loader_path_after_runtime_env(self):
+        source_verifier = (ROOT / "hermes-local-lab/scripts/taiji-native-verify").read_text(encoding="utf-8")
+        runtime_env = (ROOT / "hermes-local-lab/scripts/runtime-env.sh").read_text(encoding="utf-8")
+        installed_wrapper = (ROOT / "packaging/linux/bin/taiji-native-verify").read_text(encoding="utf-8")
+        source_boundary = source_verifier.index('source "$SCRIPT_DIR/runtime-env.sh"')
+        reinjection = source_verifier.index('LD_LIBRARY_PATH="$TAIJI_PRIVATE_LIBRARY_DIR"')
+        self.assertLess(source_boundary, reinjection)
+        self.assertIn('TAIJI_PRIVATE_LIBRARY_DIR="$APP_ROOT/runtime/lib"', installed_wrapper)
+        self.assertIn('export TAIJI_PRIVATE_LIBRARY_DIR', installed_wrapper)
+        self.assertIn('[ ! -L "$TAIJI_PRIVATE_LIBRARY_DIR" ]', source_verifier)
+        self.assertIn("TAIJI_PRIVATE_LIBRARY_DIR", runtime_env)
+        self.assertNotIn("/etc/ld.so.conf", source_verifier)
+
+    def test_sysroot_candidate_requires_matching_authoritative_soname(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "payload"
+            sysroot = Path(temp_dir) / "sysroot"
+            root.mkdir()
+            sysroot.mkdir()
+            self.readelf_outputs = {}
+            self.fake_elf(
+                root,
+                "runtime/agent/bin/python",
+                dynamic=(
+                    "0x0000000000000001 (NEEDED) Shared library: "
+                    "[libasound.so.2]"
+                ),
+            )
+            self.fake_elf(
+                sysroot,
+                "libasound.so.2",
+                dynamic=(
+                    "0x000000000000000e (SONAME) Library soname: "
+                    "[libother.so.1]"
+                ),
+            )
+            with self.install_readelf_stub():
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "unresolved"):
+                    self.audit.audit_root(root, self.policy, sysroot)
+
+    def test_rejects_unknown_bundled_soname_even_when_unreferenced(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            self.fake_elf(
+                root,
+                "runtime/lib/libmystery.so.1",
+                dynamic=(
+                    "0x000000000000000e (SONAME) Library soname: "
+                    "[libmystery.so.1]"
+                ),
+            )
+            with self.install_readelf_stub():
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "non-allowlisted"):
+                    self.audit.audit_root(root, self.policy)
+
+    def test_rejects_malformed_dynamic_tags_and_empty_values(self):
+        malformed = (
+            "0x0000000000000001 (NEEDED) Shared library: libmissing.so.1\n"
+            "0x000000000000001d (RUNPATH) Library runpath: []"
+        )
+        with self.assertRaisesRegex(self.audit.ElfAuditError, "malformed"):
+            self.audit.parse_readelf_dynamic(malformed)
+
+    def test_report_writes_are_private_and_leave_no_predictable_temp_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            for module in (self.audit, self.stager):
+                report_path = directory / f"{module.__name__}.json"
+                module.write_report(report_path, {"schema": "fixture"})
+                self.assertEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
+                self.assertEqual(list(directory.glob(f".{report_path.name}.tmp-*")), [])
+                self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["schema"], "fixture")
+
+    def test_rejects_payload_symlink_that_escapes_audit_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = base / "payload"
+            outside = base / "outside.elf"
+            root.mkdir()
+            outside.write_bytes(b"\x7fELF\x02\x01\x01")
+            link = root / "runtime/agent/bin/python"
+            link.parent.mkdir(parents=True)
+            link.symlink_to(outside)
+            with self.assertRaisesRegex(self.audit.ElfAuditError, "symlink.*escape"):
+                self.audit.audit_root(root, self.policy)
+
+    def test_readelf_command_never_comes_from_hostile_user_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            marker = directory / "executed"
+            evil = directory / "readelf"
+            evil.write_text(
+                "#!/bin/sh\n"
+                f"touch '{marker}'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            evil.chmod(0o755)
+            candidate = directory / "candidate.elf"
+            candidate.write_bytes(b"\x7fELF")
+            with mock.patch.dict(os.environ, {"PATH": str(directory)}, clear=False):
+                with self.assertRaises(self.audit.ElfAuditError):
+                    self.audit.run_readelf(candidate, "-h")
+                try:
+                    self.stager.readelf_soname(candidate)
+                except self.stager.StageError:
+                    pass
+            self.assertFalse(marker.exists())
+
+    def test_stager_rejects_allowlisted_basename_without_authoritative_soname(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "payload"
+            sysroot = Path(temp_dir) / "sysroot"
+            root.mkdir()
+            sysroot.mkdir()
+            allowed = self.policy["elf"]["allowed_private_sonames"][0]
+            source = sysroot / allowed
+            source.write_bytes(b"not-an-elf")
+            with mock.patch.object(self.stager, "readelf_soname", return_value=None), \
+                    mock.patch.object(self.stager, "source_metadata", return_value=(stat.S_IFREG | 0o644, 0, 1)):
+                with self.assertRaisesRegex(self.stager.StageError, "SONAME"):
+                    self.stager.stage_private_libraries(root, self.policy, sysroot)
+            with mock.patch.object(self.stager, "readelf_soname", return_value="libother.so.1"), \
+                    mock.patch.object(self.stager, "source_metadata", return_value=(stat.S_IFREG | 0o644, 0, 1)):
+                with self.assertRaisesRegex(self.stager.StageError, "mismatched SONAME"):
+                    self.stager.stage_private_libraries(root, self.policy, sysroot)
+
+    def test_stager_private_library_directories_are_0755_under_umask_0002(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "payload"
+            root.mkdir()
+            destination = root / "opt/taiji-agent/runtime/lib"
+            real_lstat = os.lstat
+
+            def root_owned_lstat(path):
+                metadata = real_lstat(path)
+                path = Path(path)
+                if path != root and root in path.parents:
+                    values = list(metadata)
+                    values[4] = 0
+                    values[5] = 0
+                    metadata = os.stat_result(values)
+                return metadata
+
+            old_umask = os.umask(0o002)
+            try:
+                with mock.patch.object(self.stager.os, "geteuid", return_value=501), \
+                        mock.patch.object(self.stager.os, "lstat", side_effect=root_owned_lstat):
+                    self.stager._ensure_private_directory(destination, root)
+            finally:
+                os.umask(old_umask)
+            for relative in (
+                "opt",
+                "opt/taiji-agent",
+                "opt/taiji-agent/runtime",
+                "opt/taiji-agent/runtime/lib",
+            ):
+                self.assertEqual(
+                    stat.S_IMODE((root / relative).stat().st_mode),
+                    0o755,
+                    relative,
+                )
 
 
 if __name__ == "__main__":

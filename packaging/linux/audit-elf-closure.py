@@ -14,8 +14,10 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -43,6 +45,7 @@ _KNOWN_EXTERNAL_SONAMES = {
     "libnss_dns.so.2",
     "libnss_files.so.2",
 }
+_TRUSTED_READELF_CANDIDATES = (Path("/usr/bin/readelf"), Path("/bin/readelf"))
 
 
 class ElfAuditError(RuntimeError):
@@ -72,13 +75,34 @@ def policy_sha256(policy: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_policy_bytes(policy)).hexdigest()
 
 
+def resolve_trusted_readelf() -> str:
+    for candidate in _TRUSTED_READELF_CANDIDATES:
+        try:
+            metadata = candidate.lstat()
+        except OSError:
+            continue
+        mode = metadata.st_mode
+        if (
+            stat.S_ISREG(mode)
+            and metadata.st_uid == 0
+            and mode & 0o111
+            and not mode & 0o022
+        ):
+            return str(candidate)
+    raise ElfAuditError("trusted /usr/bin/readelf is missing or unsafe")
+
+
 def run_readelf(path: Path, option: str) -> str:
-    completed = subprocess.run(
-        ["readelf", option, str(path)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [resolve_trusted_readelf(), option, str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+        )
+    except OSError as exc:
+        raise ElfAuditError(f"trusted readelf could not execute for {path}: {exc}") from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise ElfAuditError(f"readelf {option} failed for {path}: {detail}")
@@ -115,8 +139,8 @@ def parse_readelf_dynamic(text: str) -> dict[str, Any]:
         if not tag:
             continue
         value = _bracket_value(line)
-        if value is None:
-            continue
+        if value is None or not value:
+            raise ElfAuditError(f"malformed dynamic {tag.group(1)} entry: {line.strip()}")
         kind = tag.group(1)
         if kind == "NEEDED":
             needed.append(value)
@@ -149,8 +173,21 @@ def _version_key(value: str) -> tuple[int, ...]:
 def _iter_regular_files(root: Path) -> Iterable[Path]:
     if not root.is_dir():
         raise ElfAuditError(f"ELF audit root is not a directory: {root}")
+    resolved_root = root.resolve(strict=True)
     for candidate in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
         try:
+            if candidate.is_symlink():
+                try:
+                    resolved_target = candidate.resolve(strict=False)
+                except (OSError, RuntimeError) as exc:
+                    raise ElfAuditError(f"cannot resolve payload symlink safely: {candidate}") from exc
+                try:
+                    resolved_target.relative_to(resolved_root)
+                except ValueError as exc:
+                    raise ElfAuditError(f"payload symlink escapes audit root: {candidate}") from exc
+                # Internal payload symlinks are audited through their regular
+                # target path; the payload contract owns symlink integrity.
+                continue
             if candidate.is_file():
                 yield candidate
         except OSError as exc:
@@ -235,20 +272,30 @@ def _sysroot_soname_candidates(sysroot: Path, soname: str) -> list[Path]:
     if not sysroot or not sysroot.is_dir():
         return []
     candidates: list[Path] = []
+    seen_inodes: set[tuple[int, int]] = set()
     for candidate in _iter_regular_files(sysroot):
         if candidate.name != soname and not candidate.name.startswith(soname + "."):
             continue
         try:
+            metadata = candidate.stat()
+            inode_key = (metadata.st_dev, metadata.st_ino)
+            if inode_key in seen_inodes:
+                continue
+            seen_inodes.add(inode_key)
             if _looks_like_elf(candidate):
-                candidates.append(candidate)
+                dynamic = parse_readelf_dynamic(run_readelf(candidate, "-d"))
+                if dynamic["soname"] == soname:
+                    candidates.append(candidate)
         except ElfAuditError:
-            continue
+            raise
     return candidates
 
 
 def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     root_sonames: dict[str, list[str]] = {}
+    private_allowed = set(policy["elf"]["allowed_private_sonames"])
+    required_system = set(policy["elf"]["required_system_sonames"])
     for path in _iter_regular_files(root):
         if not _looks_like_elf(path):
             continue
@@ -276,6 +323,10 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
         soname = record["_soname"]
         if len(record["_sonames"]) > 1:
             raise ElfAuditError(f"ambiguous SONAME declarations: {record['relative_path']}")
+        if soname and soname not in private_allowed:
+            raise ElfAuditError(
+                f"non-allowlisted bundled SONAME {soname}: {record['relative_path']}"
+            )
         if soname:
             root_sonames.setdefault(soname, []).append(record["relative_path"])
         records.append(record)
@@ -284,8 +335,6 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
         if len(paths) > 1:
             raise ElfAuditError(f"ambiguous SONAME {soname}: {', '.join(sorted(paths))}")
 
-    private_allowed = set(policy["elf"]["allowed_private_sonames"])
-    required_system = set(policy["elf"]["required_system_sonames"])
     private_sonames: set[str] = set()
     external_sonames: set[str] = set()
     available_sonames = set(root_sonames)
@@ -339,9 +388,30 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
 
 def write_report(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump(report, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        except OSError:
+            directory_fd = -1
+        if directory_fd >= 0:
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:

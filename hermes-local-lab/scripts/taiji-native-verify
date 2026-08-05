@@ -11,6 +11,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=runtime-env.sh
 source "$SCRIPT_DIR/runtime-env.sh"
 
+_taiji_private_library_dir_secure() {
+  local _taiji_private_library_meta _taiji_private_library_uid _taiji_private_library_mode
+  local _taiji_private_library_physical
+  [ -n "${TAIJI_PRIVATE_LIBRARY_DIR:-}" ] || return 1
+  [ -d "$TAIJI_PRIVATE_LIBRARY_DIR" ] && [ ! -L "$TAIJI_PRIVATE_LIBRARY_DIR" ] || return 1
+  _taiji_private_library_physical="$(cd -- "$TAIJI_PRIVATE_LIBRARY_DIR" 2>/dev/null && pwd -P)" || return 1
+  [ "$_taiji_private_library_physical" = "$TAIJI_PRIVATE_LIBRARY_DIR" ] || return 1
+  _taiji_private_library_meta="$(/usr/bin/stat -c '%u %a' -- "$TAIJI_PRIVATE_LIBRARY_DIR" 2>/dev/null)" || return 1
+  read -r _taiji_private_library_uid _taiji_private_library_mode <<< "$_taiji_private_library_meta"
+  [ "$_taiji_private_library_uid" = "0" ] || return 1
+  (( (8#$_taiji_private_library_mode & 18) == 0 )) || return 1
+  return 0
+}
+
+if [ "${TAIJI_LAUNCH_PROFILE:-}" = "installed-production" ] \
+  && _taiji_private_library_dir_secure; then
+  LD_LIBRARY_PATH="$TAIJI_PRIVATE_LIBRARY_DIR"
+  export LD_LIBRARY_PATH
+fi
+unset -f _taiji_private_library_dir_secure
+
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
 WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"

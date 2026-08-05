@@ -19,6 +19,7 @@ from typing import Any
 
 SCHEMA = "taiji-elf-private-library-stage/v1"
 _SONAME_RE = re.compile(r"\(SONAME\).*?\[([^\]]+)\]")
+_TRUSTED_READELF_CANDIDATES = (Path("/usr/bin/readelf"), Path("/bin/readelf"))
 
 
 class StageError(RuntimeError):
@@ -56,17 +57,43 @@ def source_metadata(path: Path) -> tuple[int, int, int]:
     return metadata.st_mode, metadata.st_uid, metadata.st_nlink
 
 
+def resolve_trusted_readelf() -> str:
+    for candidate in _TRUSTED_READELF_CANDIDATES:
+        try:
+            metadata = candidate.lstat()
+        except OSError:
+            continue
+        mode = metadata.st_mode
+        if (
+            stat.S_ISREG(mode)
+            and metadata.st_uid == 0
+            and mode & 0o111
+            and not mode & 0o022
+        ):
+            return str(candidate)
+    raise StageError("trusted /usr/bin/readelf is missing or unsafe")
+
+
 def readelf_soname(path: Path) -> str | None:
-    completed = subprocess.run(
-        ["readelf", "-d", str(path)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [resolve_trusted_readelf(), "-d", str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+        )
+    except OSError as exc:
+        raise StageError(f"trusted readelf could not execute for {path}: {exc}") from exc
     if completed.returncode != 0:
         return None
+    if "(SONAME)" in completed.stdout and not _SONAME_RE.search(completed.stdout):
+        raise StageError(f"malformed SONAME entry: {path}")
     match = _SONAME_RE.search(completed.stdout)
-    return match.group(1) if match else None
+    soname = match.group(1) if match else None
+    if match and not soname:
+        raise StageError(f"malformed SONAME entry: {path}")
+    return soname
 
 
 def validate_source(path: Path, policy: dict[str, Any]) -> str:
@@ -101,6 +128,64 @@ def _destination(root: Path, policy: dict[str, Any]) -> Path:
     ).relative_to(install_root)
 
 
+def _ensure_private_directory(destination: Path, root: Path) -> None:
+    try:
+        relative_parts = destination.relative_to(root).parts
+    except ValueError as exc:
+        raise StageError(f"private-library destination escapes staging root: {destination}") from exc
+    current = root
+    for part in relative_parts:
+        current = current / part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            try:
+                current.mkdir(mode=0o755)
+            except OSError as exc:
+                raise StageError(f"cannot create private-library directory: {current}") from exc
+            os.chmod(current, 0o755)
+            metadata = os.lstat(current)
+        except OSError as exc:
+            raise StageError(f"cannot inspect private-library directory: {current}") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise StageError(f"private-library directory is not a real directory: {current}")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            try:
+                os.chown(current, 0, 0)
+            except OSError as exc:
+                raise StageError(f"cannot root-own private-library directory: {current}") from exc
+            metadata = os.lstat(current)
+        if stat.S_IMODE(metadata.st_mode) != 0o755 or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise StageError(
+                f"private-library directory must be mode 0755 and not group/other writable: {current}"
+            )
+
+
+def _open_secure_directory(path: Path) -> tuple[int, os.stat_result]:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise StageError(f"cannot open private-library directory safely: {path}") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o755
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        os.close(descriptor)
+        raise StageError(f"private-library directory is not mode 0755 and private: {path}")
+    return descriptor, metadata
+
+
+def _basename_matches_allowlisted(path: Path, allowlisted: set[str]) -> bool:
+    return path.name in allowlisted or any(path.name.startswith(f"{soname}.") for soname in allowlisted)
+
+
 def _iter_sources(sysroot: Path, policy: dict[str, Any]):
     if not sysroot.is_dir():
         raise StageError(f"private-library sysroot is not a directory: {sysroot}")
@@ -110,7 +195,8 @@ def _iter_sources(sysroot: Path, policy: dict[str, Any]):
             if candidate.is_symlink():
                 # Let an allowlisted symlink reach validate_source so it is
                 # rejected explicitly instead of being silently ignored.
-                if readelf_soname(candidate) in allowlisted:
+                soname = readelf_soname(candidate)
+                if soname in allowlisted or _basename_matches_allowlisted(candidate, allowlisted):
                     yield candidate
                 continue
             if not candidate.is_file():
@@ -121,13 +207,11 @@ def _iter_sources(sysroot: Path, policy: dict[str, Any]):
 
 
 def _copy_atomically(source: Path, destination: Path, *, uid: int, gid: int) -> str:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError as exc:
-        raise StageError(f"cannot open private-library source safely: {source}") from exc
+    parent_descriptor, parent_snapshot = _open_secure_directory(destination.parent)
+    descriptor = -1
     temporary: Path | None = None
     try:
+        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_uid != 0:
             raise StageError(f"private-library source changed during staging: {source}")
@@ -146,18 +230,27 @@ def _copy_atomically(source: Path, destination: Path, *, uid: int, gid: int) -> 
         os.chmod(temporary, 0o644)
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             os.chown(temporary, uid, gid)
+        current_parent = os.fstat(parent_descriptor)
+        if (current_parent.st_dev, current_parent.st_ino) != (
+            parent_snapshot.st_dev,
+            parent_snapshot.st_ino,
+        ):
+            raise StageError(f"private-library destination directory changed: {destination.parent}")
         os.replace(temporary, destination)
-        directory_fd = os.open(destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        final_parent = os.fstat(parent_descriptor)
+        if (final_parent.st_dev, final_parent.st_ino) != (
+            parent_snapshot.st_dev,
+            parent_snapshot.st_ino,
+        ):
+            raise StageError(f"private-library destination directory changed after copy: {destination.parent}")
+        os.fsync(parent_descriptor)
         return digest.hexdigest()
     except OSError as exc:
         raise StageError(f"atomic private-library staging failed: {source} -> {destination}") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        os.close(parent_descriptor)
         if temporary is not None and temporary.exists():
             temporary.unlink(missing_ok=True)
 
@@ -171,7 +264,13 @@ def stage_private_libraries(root: Path, policy: dict[str, Any], sysroot: Path) -
             soname = readelf_soname(source)
         except OSError:
             soname = None
+        if soname is None and _basename_matches_allowlisted(source, allowlisted):
+            raise StageError(f"allowlisted private-library source has no SONAME: {source}")
         if soname not in allowlisted:
+            if _basename_matches_allowlisted(source, allowlisted):
+                raise StageError(
+                    f"allowlisted private-library basename has mismatched SONAME {soname}: {source}"
+                )
             continue
         # Validate again after selecting by SONAME so owner/link and symlink
         # checks cannot be bypassed by a path-shaped source.
@@ -185,6 +284,7 @@ def stage_private_libraries(root: Path, policy: dict[str, Any], sysroot: Path) -
             raise StageError(f"ambiguous private-library source for SONAME {soname}")
         source = matches[0]
         destination = destination_dir / soname
+        _ensure_private_directory(destination.parent, root)
         digest = _copy_atomically(source, destination, uid=0, gid=0)
         files.append({"soname": soname, "relative_path": destination.relative_to(root).as_posix(), "sha256": digest})
 
@@ -200,9 +300,30 @@ def stage_private_libraries(root: Path, policy: dict[str, Any], sysroot: Path) -
 
 def write_report(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump(report, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        except OSError:
+            directory_fd = -1
+        if directory_fd >= 0:
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
