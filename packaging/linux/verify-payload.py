@@ -17,7 +17,7 @@ from typing import Any
 
 SCHEMA_VERSION = "taiji-payload-contract/v1"
 EMBEDDED_CONTRACT = "opt/taiji-agent/resources/payload-contract.json"
-TRUSTED_CONTRACT_SHA256 = "e5c3b462946b03e699a9a8dead2d63d5ea4247fe0125a4639ddfac25a2ed5d4d"
+TRUSTED_CONTRACT_SHA256 = "661a83aac7d4280b59812cb41e7428d86f4d13170f8d595fabb2c976913cc850"
 COMPATIBILITY_POLICY_SCHEMA = "taiji-linux-compatibility-policy/v1"
 ELF_ABI_AUDIT_SCHEMA = "taiji-elf-abi-audit/v1"
 LAUNCH_MANIFEST_SCHEMA = "taiji-release-manifest/v1"

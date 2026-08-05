@@ -35,7 +35,7 @@ APP_ROOT="/opt/taiji-agent"
 DIAGNOSE="$APP_ROOT/scripts/taiji-agent-diagnose"
 
 if [ ! -x "$DIAGNOSE" ]; then
-  echo "Taiji Agent diagnose script not found: $DIAGNOSE" >&2
+  echo "Taiji Agent diagnose script unavailable." >&2
   exit 1
 fi
 

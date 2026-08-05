@@ -25,13 +25,14 @@ for required_script in \
   runtime-env.sh \
   taiji-native-verify \
   taiji-agent-diagnose \
+  support_bundle.py \
   sync-packaged-config.py; do
   require_regular_file "$INSTALL_ROOT/scripts/$required_script"
   chmod 0755 "$INSTALL_ROOT/scripts/$required_script"
 done
 unset required_script
 
-for launcher in /usr/bin/taiji-agent /usr/bin/taiji; do
+for launcher in /usr/bin/taiji-agent /usr/bin/taiji /usr/bin/taiji-agent-support; do
   require_regular_file "$launcher"
   chmod 0755 "$launcher"
 done

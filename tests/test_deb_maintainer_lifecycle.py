@@ -51,6 +51,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
                 "stop-all.sh",
                 "runtime-env.sh",
                 "taiji-agent-diagnose",
+                "support_bundle.py",
                 "sync-packaged-config.py",
             ):
                 write_executable(install_root / "scripts" / name, "#!/usr/bin/env bash\nexit 0\n")
@@ -86,6 +87,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             )
             write_executable(tmp_path / "taiji-agent", "#!/usr/bin/env bash\nexit 0\n")
             write_executable(tmp_path / "taiji", "#!/usr/bin/env bash\nexit 0\n")
+            write_executable(tmp_path / "taiji-agent-support", "#!/usr/bin/env bash\nexit 0\n")
             (install_root / "apps" / "taiji-desktop" / "node_modules" / "electron" / "dist" / "chrome-sandbox").write_text(
                 "sandbox\n", encoding="utf-8"
             )
@@ -96,6 +98,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             source = source.replace("/var/log/taiji-agent", str(tmp_path / "var" / "log" / "taiji-agent"))
             source = source.replace("/usr/bin/taiji-agent", str(tmp_path / "taiji-agent"))
             source = source.replace("/usr/bin/taiji", str(tmp_path / "taiji"))
+            source = source.replace("/usr/bin/taiji-agent-support", str(tmp_path / "taiji-agent-support"))
             script.write_text(source, encoding="utf-8")
             script.chmod(0o755)
 
