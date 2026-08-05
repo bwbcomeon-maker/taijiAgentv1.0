@@ -124,7 +124,9 @@ verify_linux_electron_runtime() {
   local electron_file ldd_output
   electron_file="$(file "$ELECTRON_BIN")"
   case "$electron_file" in *ELF*64-bit*x86-64*|*ELF*64-bit*X86-64*|*ELF*64-bit*80386*) ;; *) fail "Electron runtime is not Linux x86_64: $electron_file" ;; esac
-  ldd_output="$(ldd "$ELECTRON_BIN" 2>&1 || true)"
+  if ! ldd_output="$(ldd "$ELECTRON_BIN" 2>&1)"; then
+    fail "Cannot inspect Electron runtime shared-library output"
+  fi
   if printf '%s\n' "$ldd_output" | grep -F 'not found' >/dev/null; then
     fail "Electron runtime has missing shared libraries"
   else

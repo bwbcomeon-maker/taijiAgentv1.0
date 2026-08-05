@@ -2544,6 +2544,43 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertEqual(manifest["arch"], "amd64")
             self.assertEqual(manifest["version"], "1.0.0")
 
+    def test_electron_runtime_gate_distinguishes_ldd_failures_from_missing_libraries(self):
+        electron_gate = build_function_source("verify_linux_electron_runtime", "validate_packaged_config_template")
+
+        def run_gate(mode: str):
+            script = "\n".join(
+                [
+                    "set -euo pipefail",
+                    'fail() { printf \'%s\\n\' "$*" >&2; exit 42; }',
+                    "file() { printf '%s\\n' 'ELF 64-bit LSB pie executable, x86-64'; }",
+                    "ldd() {",
+                    "  case \"$MODE\" in",
+                    "    ok) printf '%s\\n' 'linux-vdso.so.1 => [kernel]'; return 0 ;;",
+                    "    missing) printf '%s\\n' 'libfixture.so => not found'; return 0 ;;",
+                    "    error) printf '%s\\n' 'ldd fixture failed'; return 7 ;;",
+                    "  esac",
+                    "}",
+                    electron_gate,
+                    "verify_linux_electron_runtime",
+                ]
+            )
+            return subprocess.run(
+                ["bash", "-c", script],
+                env={**os.environ, "ELECTRON_BIN": "/bin/sh", "MODE": mode},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        healthy = run_gate("ok")
+        self.assertEqual(healthy.returncode, 0, healthy.stderr)
+        missing = run_gate("missing")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("missing shared libraries", missing.stderr.lower())
+        failed = run_gate("error")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("cannot inspect electron", failed.stderr.lower())
+
     def test_postinst_repairs_electron_chrome_sandbox_permissions(self):
         postinst = read_text("packaging/linux/deb/postinst")
 
