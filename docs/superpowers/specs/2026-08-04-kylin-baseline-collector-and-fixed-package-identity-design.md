@@ -1,5 +1,7 @@
 # 麒麟/统信单文件基线采集器与固定包身份设计
 
+> 状态：已被 [2026-08-05 统一国产 Linux amd64 DEB 设计](2026-08-05-unified-kylin-uos-amd64-deb-design.md)取代。本文只保留历史决策，不得继续实施“每台终端采集基线后再制包”的流程；固定非个人包身份决策继续有效。
+
 日期：2026-08-04
 适用成果：`codex/linux-sales-grade-installer` 国产 Linux 单 DEB 离线交付链
 
