@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+TRUSTED_GIT="$ROOT_DIR/scripts/taiji-trusted-git"
 PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 
@@ -17,6 +18,7 @@ SIGNATURE="${EVIDENCE}.sig"
 
 command -v openssl >/dev/null 2>&1 || fail "缺少 openssl"
 command -v python3 >/dev/null 2>&1 || fail "缺少 python3"
+[ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "仓库缺少可信 Git 边界"
 [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] || fail "证据必须是普通 JSON 文件且不能是符号链接"
 [ -f "$PRIVATE_KEY" ] && [ ! -L "$PRIVATE_KEY" ] || fail "发布私钥必须是普通文件且不能是符号链接"
 [ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || fail "仓库缺少固定验签公钥"

@@ -139,6 +139,12 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         (acceptance_tools / "observe-single-deb-install.py").write_text(
             "# fixture pre-install observer\n", encoding="utf-8"
         )
+        (acceptance_tools / "certification-matrix.json").write_text(
+            "{\"schema\":\"taiji-linux-certification-matrix/v1\"}\n", encoding="utf-8"
+        )
+        (acceptance_tools / "assemble-taiji-certification-set.py").write_text(
+            "# fixture certification set assembler\n", encoding="utf-8"
+        )
         (acceptance_tools / "validate-taiji-release-evidence.py").write_text(
             "# fixture release evidence validator\n", encoding="utf-8"
         )
@@ -743,10 +749,10 @@ class OfflineRehearsalDocumentationTest(unittest.TestCase):
         document = DELIVERY_GUIDE.read_text(encoding="utf-8")
         final_gate = document.split("## 最终销售发布", 1)[1].split("## 第五步", 1)[0]
 
-        self.assertIn('<当轮断网演练原值>', final_gate)
-        self.assertIn('<当轮真机验收原值>', final_gate)
-        self.assertIn("TAIJI_OFFLINE_REHEARSAL_CHALLENGE", final_gate)
-        self.assertIn("TAIJI_TARGET_ACCEPTANCE_CHALLENGE", final_gate)
+        self.assertIn('<当轮认证集原值>', final_gate)
+        self.assertIn('<当轮发布回执原值>', final_gate)
+        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", final_gate)
+        self.assertIn("TAIJI_PUBLICATION_CHALLENGE", final_gate)
         self.assertNotIn("openssl rand -hex 32", final_gate)
 
 

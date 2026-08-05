@@ -418,24 +418,7 @@ run_desktop_acceptance() {
   OUTPUT_CREATED=1
 
   info "对未签名目标证据执行完整发布绑定校验"
-  if [ "${TAIJI_LEGACY_TARGET_BASELINE_MODE:-0}" = "1" ]; then
-    "$PYTHON_BIN" "$VALIDATOR" target \
-      --evidence "$TARGET_DIR/target-verification.json" \
-      --source-commit "$SOURCE_COMMIT" \
-      --deb "$DEB" \
-      --checksum "$CHECKSUM" \
-      --manifest "$MANIFEST" \
-      --build-marker "$BUILD_MARKER" \
-      --source-archive "$SOURCE_ARCHIVE" \
-      --packages "$OFFLINE_REPO/Packages" \
-      --packages-gz "$OFFLINE_REPO/Packages.gz" \
-      --delivery-dir "$SCRIPT_DIR" \
-      --attestation-public-key "$PUBLIC_KEY" \
-      --attestation-public-key-fingerprint "$PUBLIC_KEY_FINGERPRINT" \
-      --challenge "$CHALLENGE" \
-      --pre-sign
-  else
-    "$PYTHON_BIN" - "$TARGET_DIR/target-verification.json" "$CERTIFICATION_CATEGORY_ID" <<'PY' || fail "canonical target evidence envelope is invalid"
+  "$PYTHON_BIN" - "$TARGET_DIR/target-verification.json" "$CERTIFICATION_CATEGORY_ID" <<'PY' || fail "canonical target evidence envelope is invalid"
 import json
 import sys
 from pathlib import Path
@@ -447,7 +430,6 @@ if data.get("category_id") != sys.argv[2]:
 if "CERTIFIED" in json.dumps(data, ensure_ascii=False):
     raise SystemExit("single target evidence must not self-claim CERTIFIED")
 PY
-  fi
 }
 
 main() {

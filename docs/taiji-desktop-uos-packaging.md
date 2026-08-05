@@ -1,8 +1,14 @@
-# 太极 Agent 完全离线 Kylin/UOS 打包说明（旧架构资料）
+# 太极 Agent 国产 Linux 打包说明（历史参考）
 
 > **资料状态：旧架构参考，不是当前操作入口。** 本文保留早期设计背景，其中的旧脚本名称、交付物结构和状态结论可能已经失效，不得据此执行当前制包、安装或发布放行。当前长期规则以[《太极 Agent 国产 x86 Linux 离线交付运行手册》](runbooks/taiji-kylin-uos-offline-delivery.md)为准；现场命令以 [`taijiagent 打包交付/操作说明.md`](../taijiagent%20打包交付/操作说明.md) 和交付目录内现有 `00`、`01`、`02`、`03`、`04`、`99` 脚本为准。
 
 特别注意：本文后文提到的 `01_目标终端_构建安装包.sh` 已不是当前主流程，旧的产物清单也没有覆盖当前 manifest、`.build-success`、未压缩 `Packages`、验收工具和签名证据。遇到冲突时不要尝试恢复旧流程。
+
+## 当前统一 DEB 合同
+
+第一版销售交付只覆盖 `x86_64/amd64 + 图形桌面 + dpkg/apt + Kylin/UOS/openKylin`。统一兼容范围由 `packaging/linux/compatibility-policy.json` 和六正六负 `packaging/linux/certification-matrix.json` 固定；不按每台终端采集 baseline，也不按终端 profile 重新生成 DEB。客户最终只收到 `taiji-agent_${VERSION}_amd64.deb` 一个文件，内部认证记录、签名、receipt、N-1 包和离线依赖不属于客户输入。
+
+该文件只作为旧架构背景资料。当前制包、认证、签名和发布命令以 [`docs/runbooks/taiji-kylin-uos-offline-delivery.md`](runbooks/taiji-kylin-uos-offline-delivery.md) 和 [`taijiagent 打包交付/操作说明.md`](../taijiagent%20打包交付/操作说明.md) 为准。
 
 ## 当前实现
 

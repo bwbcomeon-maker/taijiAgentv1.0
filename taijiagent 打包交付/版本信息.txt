@@ -4,20 +4,19 @@
 源码包：taiji-agentv1.0-kylin-build-src-<完整提交绑定的短标识>.tar.gz
 源码 commit：以源码包、SHA256SUMS.txt、构建报告和发布 manifest 的完整 40 位 SHA 为准
 
-目标基线：不得在此文件中预填或猜测。正式制包必须使用真实目标机新采集的
-目标基线/target-baseline.json，并由 taiji-package-manifest.json 记录 profile_id
-及 SHA256。仓库历史文档中的 Kylin V10 SP1、UOS 或 Ubuntu 20.04 记录只可作为
-设计线索，不得作为当前真机证据。
+统一兼容策略：packaging/linux/compatibility-policy.json；不从终端采集 baseline，
+不在 manifest、DEB 文件名或客户目录中写入 profile_id。代表环境只通过
+packaging/linux/certification-matrix.json 和 signed certification-set 形成认证记录。
 
-客户交付形态：每个已验证精确基线只交付一个 .deb 文件，客户终端不执行在线
+客户交付形态：统一兼容范围只交付一个固定 basename 的 .deb 文件，客户终端不执行在线
 下载或源码构建。校验值、构建报告、断网演练和真机验收证据保留在内部发布档案，
 不增加客户安装步骤。
 
 构建失败日志：保存在制包机 `${XDG_STATE_HOME:-~/.local/state}/taiji-agent/build-logs/`，
 不进入只含一个 DEB 的客户目录。
 
-适用前提：Debian-like、x86_64/amd64、apt/dpkg、systemctl 和图形桌面；包内不
-捆绑 glibc。所有声明的系统运行依赖必须在该目标基线采集时已经安装。RPM-only、
+适用前提：Kylin/UOS/openKylin、x86_64/amd64、apt/dpkg、systemctl 和图形桌面；包内不
+捆绑 glibc。所有系统能力必须满足 canonical policy。RPM-only、
 ARM/aarch64、无图形桌面或强隔离环境需要另行制品或现场方案。
 
 状态边界：源码测试、macOS 开发态运行、Ubuntu 容器构建和断网演练都不能替代

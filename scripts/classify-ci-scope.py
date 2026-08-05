@@ -15,6 +15,14 @@ from typing import Iterable
 
 
 SUITES = ("root", "desktop", "docx", "agent", "webui")
+LINUX_PACKAGING_PREFIXES = (
+    "packaging/linux/",
+    "scripts/taiji-",
+    "scripts/assemble-taiji-",
+    "scripts/sign-taiji-",
+    "scripts/validate-taiji-",
+    "taijiagent 打包交付/",
+)
 MODULE_PREFIXES = {
     "desktop": ("apps/taiji-desktop/",),
     "docx": ("hermes-local-lab/sources/docx-engine-v2/",),
@@ -72,6 +80,10 @@ def _is_high_risk(path: str) -> bool:
     )
 
 
+def _is_linux_packaging(path: str) -> bool:
+    return path.startswith(LINUX_PACKAGING_PREFIXES)
+
+
 def classify_paths(paths: Iterable[str], labels: Iterable[str] = ()) -> dict[str, object]:
     changed = sorted({_normalise(path) for path in paths if path.strip()})
     label_set = {
@@ -83,12 +95,17 @@ def classify_paths(paths: Iterable[str], labels: Iterable[str] = ()) -> dict[str
     result: dict[str, object] = {
         "risk": "normal",
         "docs_only": False,
+        "run_linux_packaging": False,
         **{f"run_{suite}": False for suite in SUITES},
     }
 
     high_risk_paths = [path for path in changed if _is_high_risk(path)]
     if "full-ci" in label_set or high_risk_paths:
         result["risk"] = "high"
+        result["run_linux_packaging"] = bool(
+            "full-ci" in label_set
+            or any(_is_linux_packaging(path) for path in high_risk_paths)
+        )
         for suite in SUITES:
             result[f"run_{suite}"] = True
         result["reason"] = "full-ci label" if "full-ci" in label_set else "high-risk path"

@@ -735,7 +735,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("proto.setItem", storage)
         self.assertIn("proto.getItem", storage)
 
-    def test_root_release_check_gate_exists_and_requires_target_evidence(self):
+    def test_root_release_check_gate_exists_and_requires_signed_certification(self):
         release_check = read_text("scripts/taiji-release-check.sh")
         docs = read_text("docs/taiji-sale-readiness.md")
 
@@ -746,16 +746,17 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("check_delivery_artifacts", release_check)
         self.assertIn("run_delivery_preflight", release_check)
         self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS=1", release_check)
-        self.assertIn("TAIJI_TARGET_VERIFICATION_DIR", release_check)
-        self.assertIn("target-verification.json", release_check)
-        self.assertIn("目标机已验证", docs)
+        self.assertIn("CERTIFICATION_SET", release_check)
+        self.assertIn("release-evidence.json", release_check)
+        self.assertIn("认证矩阵", docs)
         self.assertIn("x86_64/amd64", docs)
 
     def test_root_release_check_runs_all_release_evidence_tool_tests(self):
         release_check = read_text("scripts/taiji-release-check.sh")
 
-        self.assertIn("tests.test_offline_rehearsal_producer", release_check)
         self.assertIn("tests.test_target_desktop_acceptance_producer", release_check)
+        self.assertIn("tests.test_certification_set_v1", release_check)
+        self.assertIn("tests.test_release_evidence_assembler_v3", release_check)
         self.assertIn("tests.test_release_evidence_signer_guards", release_check)
         self.assertIn("run_desktop_evidence_tool_tests()", release_check)
         self.assertIn(
@@ -813,19 +814,18 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_release_check_runs_offline_rehearsal_gate_before_target_gate(self):
+    def test_release_check_uses_signed_certification_gate(self):
         release_check = read_text("scripts/taiji-release-check.sh")
         docs = read_text("docs/taiji-sale-readiness.md")
 
-        self.assertIn("TAIJI_OFFLINE_REHEARSAL_DIR", release_check)
-        self.assertIn("offline-install-rehearsal.json", release_check)
-        self.assertIn("check_offline_install_rehearsal", release_check)
+        self.assertIn("check_certification_and_publication", release_check)
+        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", release_check)
+        self.assertIn("TAIJI_PUBLICATION_CHALLENGE", release_check)
         self.assertIn("python3", release_check)
         main = release_check[release_check.index("main() {") :]
-        self.assertLess(
-            main.index("check_offline_install_rehearsal"),
-            main.index("check_target_verification"),
-        )
+        self.assertNotIn("check_offline_install_rehearsal", main)
+        self.assertNotIn("check_target_verification", main)
+        self.assertIn("certification-set.json", docs)
         self.assertIn("observe-single-deb-install.py", docs)
         self.assertIn("人工见证", docs)
         self.assertIn("不能被表述为机器自动识别", docs)
@@ -841,8 +841,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                         "set -euo pipefail",
                         f'export TAIJI_RELEASE_REPO_ROOT="{ROOT}"',
                         f'export TAIJI_DELIVERY_DIR="{tmp_path / "delivery"}"',
-                        f'export TAIJI_OFFLINE_REHEARSAL_DIR="{tmp_path / "offline"}"',
-                        f'export TAIJI_TARGET_VERIFICATION_DIR="{tmp_path / "target"}"',
+                        f'export TAIJI_CERTIFICATION_SET="{tmp_path / "certification-set.json"}"',
+                        f'export TAIJI_RELEASE_EVIDENCE="{tmp_path / "release-evidence.json"}"',
                         f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
                         "check_canonical_source() { :; }",
                         "run_root_tests() { :; }",
@@ -867,13 +867,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         output = result.stdout + result.stderr
         self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("check_offline_install_rehearsal", output)
-        self.assertIn("check_target_verification", output)
-        # The current gate also fails closed when the signed certification
-        # set/publication envelope is absent, so all three evidence layers are
-        # reported without masking either legacy evidence failure.
-        self.assertIn("3 项失败", output)
         self.assertIn("check_certification_and_publication", output)
+        self.assertIn("1 项失败", output)
 
     def test_release_evidence_signer_uses_fixed_offline_trust_anchor(self):
         signer = read_text("scripts/sign-taiji-release-evidence.sh")
@@ -884,7 +879,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("openssl dgst -sha256 -sign", signer)
         self.assertIn("openssl dgst -sha256 -verify", signer)
         self.assertIn('SIGNATURE="${EVIDENCE}.sig"', signer)
-        self.assertIn('--attestation-signature "${evidence}.sig"', release_check)
+        self.assertIn('--attestation-signature "$RELEASE_SIGNATURE"', release_check)
         self.assertIn("EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT", release_check)
         self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", signer)
         self.assertIn("TAIJI_PUBLICATION_CHALLENGE", signer)

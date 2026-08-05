@@ -11,8 +11,6 @@ EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc
 AGENT_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-agent"
 WEBUI_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-webui"
 DELIVERY_DIR="${TAIJI_DELIVERY_DIR:-$ROOT_DIR/taijiagent 打包交付}"
-OFFLINE_REHEARSAL_DIR="${TAIJI_OFFLINE_REHEARSAL_DIR:-$DELIVERY_DIR/offline-install-rehearsal}"
-TARGET_EVIDENCE_DIR="${TAIJI_TARGET_VERIFICATION_DIR:-$DELIVERY_DIR/target-verification}"
 CERTIFICATION_SET="${TAIJI_CERTIFICATION_SET:-$DELIVERY_DIR/certification/certification-set.json}"
 CERTIFICATION_SET_SIGNATURE="${TAIJI_CERTIFICATION_SET_SIGNATURE:-${CERTIFICATION_SET}.sig}"
 RELEASE_EVIDENCE="${TAIJI_RELEASE_EVIDENCE:-$DELIVERY_DIR/release-evidence.json}"
@@ -68,7 +66,6 @@ run_root_tests() {
     tests.test_linux_desktop_packaging_static \
     tests.test_kylin_install_script_simulation \
     tests.test_taiji_license_issuer_gui \
-    tests.test_offline_rehearsal_producer \
     tests.test_target_desktop_acceptance_producer \
     tests.test_release_evidence_signer_guards \
     tests.test_certification_set_v1 \
@@ -148,32 +145,6 @@ check_delivery_artifacts() {
   [ -f "$DELIVERY_DIR/生成的安装包/构建报告.txt" ] || { fail "缺少 生成的安装包/构建报告.txt"; return 1; }
 }
 
-check_offline_install_rehearsal() {
-  local evidence="$OFFLINE_REHEARSAL_DIR/offline-install-rehearsal.json"
-  [ -f "$evidence" ] || {
-    fail "离线安装已演练：未实时验证。缺少 $evidence"
-    return 1
-  }
-  if ! validate_release_evidence offline "$evidence"; then
-    fail "offline-install-rehearsal.json 未通过离线生命周期证据校验"
-    return 1
-  fi
-  ok "离线生命周期演练证据有效：$evidence"
-}
-
-check_target_verification() {
-  local evidence="$TARGET_EVIDENCE_DIR/target-verification.json"
-  [ -f "$evidence" ] || {
-    fail "目标机已验证：未实时验证。缺少 $evidence"
-    return 1
-  }
-  if ! validate_release_evidence target "$evidence"; then
-    fail "target-verification.json 未通过桌面 App 目标机证据校验"
-    return 1
-  fi
-  ok "桌面 App 目标机证据有效：$evidence"
-}
-
 check_certification_and_publication() {
   local commit deb manifest checksum source_archive
   [ -f "$CERTIFICATION_SET" ] && [ ! -L "$CERTIFICATION_SET" ] || { fail "缺少 certification-set.json"; return 1; }
@@ -251,49 +222,6 @@ PY
     --challenge "$PUBLICATION_CHALLENGE" || return 1
 }
 
-validate_release_evidence() {
-  local mode="$1"
-  local evidence="$2"
-  local commit deb package_count challenge source_archive output_dir
-  output_dir="$DELIVERY_DIR/生成的安装包"
-  [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || {
-    printf '缺少可信 Git 边界\n' >&2
-    return 1
-  }
-  commit="$("$TRUSTED_GIT" -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null)" || {
-    printf '无法读取当前源码 commit\n' >&2
-    return 1
-  }
-  package_count="$(find "$output_dir" -maxdepth 1 -type f -name 'taiji-agent_*.deb' 2>/dev/null | wc -l | tr -d ' ')"
-  [ "$package_count" = "1" ] || {
-    printf '当前 DEB 数量必须为 1，实际为 %s\n' "$package_count" >&2
-    return 1
-  }
-  deb="$(find "$output_dir" -maxdepth 1 -type f -name 'taiji-agent_*.deb' | head -n 1)"
-  source_archive="$DELIVERY_DIR/taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
-  if [ "$mode" = "offline" ]; then
-    challenge="${TAIJI_OFFLINE_REHEARSAL_CHALLENGE:-}"
-  else
-    challenge="${TAIJI_TARGET_ACCEPTANCE_CHALLENGE:-}"
-  fi
-  python3 "$EVIDENCE_VALIDATOR" \
-    "$mode" \
-    --evidence "$evidence" \
-    --source-commit "$commit" \
-    --deb "$deb" \
-    --checksum "${deb}.sha256" \
-    --manifest "$output_dir/taiji-package-manifest.json" \
-    --build-marker "$output_dir/.build-success" \
-    --source-archive "$source_archive" \
-    --packages "$DELIVERY_DIR/离线依赖/Packages" \
-    --packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz" \
-    --delivery-dir "$DELIVERY_DIR" \
-    --attestation-signature "${evidence}.sig" \
-    --attestation-public-key "$EVIDENCE_ATTESTATION_PUBLIC_KEY" \
-    --attestation-public-key-fingerprint "$EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT" \
-    --challenge "$challenge"
-}
-
 main() {
   info "check_canonical_source"
   if ! check_canonical_source; then
@@ -309,8 +237,6 @@ main() {
   run_step "run_webui_tests" run_webui_tests
   run_step "run_delivery_preflight" run_delivery_preflight
   run_step "check_delivery_artifacts" check_delivery_artifacts
-  run_step "check_offline_install_rehearsal" check_offline_install_rehearsal
-  run_step "check_target_verification" check_target_verification
   run_step "check_certification_and_publication" check_certification_and_publication
 
   if [ "$failures" -gt 0 ]; then

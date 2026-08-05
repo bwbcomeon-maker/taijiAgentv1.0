@@ -11,7 +11,7 @@ def read_text(path: Path) -> str:
 
 
 class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
-    def test_target_script_runs_only_installed_electron_and_emits_pre_sign_evidence(self):
+    def test_target_script_runs_only_installed_electron_and_emits_unsigned_environment_evidence(self):
         script = read_text(DELIVERY / "04_目标终端_桌面App验收并导出证据.sh")
 
         self.assertIn("TAIJI_TARGET_ACCEPTANCE_CHALLENGE", script)
@@ -36,7 +36,8 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         self.assertIn('-u PYTHONPATH', script)
         self.assertIn('-u NODE_OPTIONS', script)
         self.assertNotIn('TAIJI_VERIFY_DESKTOP_SMOKE=1 /opt/taiji-agent/bin/taiji-native-verify', script)
-        self.assertIn("--pre-sign", script)
+        self.assertNotIn("--pre-sign", script)
+        self.assertNotIn("TAIJI_LEGACY_TARGET_BASELINE_MODE", script)
         self.assertIn("target-verification.json", script)
         self.assertIn("driver-result.json", script)
         self.assertIn("desktop-app.png", script)

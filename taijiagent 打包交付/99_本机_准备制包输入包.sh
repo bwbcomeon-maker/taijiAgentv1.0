@@ -72,6 +72,10 @@ skip_dirs = {
     "构建日志",
     "旧版备份",
     "离线依赖",
+    "目标基线",
+    "target-verification",
+    "offline-install-rehearsal",
+    "certification",
 }
 skip_names = {".DS_Store"}
 

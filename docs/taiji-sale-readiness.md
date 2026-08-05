@@ -13,17 +13,17 @@
 - x86_64/amd64；
 - Debian-like 的 Kylin、UOS、openKylin 类系统；
 - 具备图形桌面、`dpkg`、`apt`、`systemctl`、普通登录用户和受控管理员授权；
-- 每个制品只支持其 manifest 绑定的精确 `target-baseline.json`；
-- 系统运行依赖必须已存在于该目标基线，产品包不捆绑或替换 glibc。
+- 每个制品遵循源码受控的 `packaging/linux/compatibility-policy.json`，代表环境由认证矩阵验证；
+- 系统能力必须满足 policy 下限，产品包不捆绑或替换 glibc。
 
-当前不承诺 RPM-only、ARM/aarch64、无图形桌面、依赖集合不同于目标基线或现场策略禁止 Electron/loopback/桌面安装器的终端。支持另一个系统版本时，必须重新采集基线、重新构建、重新演练并重新验收。
+当前不承诺 RPM-only、ARM/aarch64、无图形桌面或现场策略禁止 Electron/loopback/桌面安装器的终端。支持矩阵或 policy 变化时，重新构建、重新演练并重新跑六正六负认证矩阵；不要求每台终端采集基线。
 
 ## 两类目录不能混用
 
 内部发布档案和客户安装目录是两个不同合同：
 
-1. **内部完整交付目录**用于制包、断网生命周期演练、目标机验收、签名和审计。它包含源码身份、manifest、目标基线、离线演练输入、验收工具、签名证据和构建报告，不直接交给客户安装。
-2. **客户安装目录**由 `packaging/linux/deb/publish-single-deb.sh` 在所有门禁通过后生成，必须且只能包含一个与内部候选逐字节、SHA256 一致的 DEB。真机验收候选使用 manifest basename；发布器可在最终客户 basename 中受控加入 profile_id，并在 receipt 中同时绑定源/目标名称与同一 hash。客户终端不下载依赖、不执行源码构建，也不需要第二个安装文件。
+1. **内部完整交付目录**用于制包、断网生命周期演练、目标机验收、签名和审计。它包含源码身份、manifest、认证记录、验收工具、签名证据和构建报告，不直接交给客户安装。
+2. **客户安装目录**由 `packaging/linux/deb/publish-single-deb.sh` 在所有门禁通过后生成，必须且只能包含 `taiji-agent_${VERSION}_amd64.deb` 一个与内部候选逐字节、SHA256 一致的 DEB。客户终端不下载依赖、不执行源码构建，也不需要第二个安装文件。
 
 内部 Docker/VM 演练仍可使用内部完整目录中的本地 APT 仓库完成安装、卸载和重装；这不改变客户目录“仅一个 DEB”的合同，也不能替代真实目标机双击安装。
 
@@ -32,9 +32,9 @@
 | 标签 | 最低证据 | 明确边界 |
 | --- | --- | --- |
 | 源码包已准备 | 正式 `main` 当前 commit 的唯一源码包、basename/hash 和源码发布预检通过 | 不代表生成了 Linux DEB |
-| 制包机已构建 | Linux amd64 制包机使用真实目标基线和已批准维护人生成 DEB、sidecar、manifest、报告和 `.build-success`，正式预检通过 | 不代表离线安装成功 |
+| 制包机已构建 | Linux amd64 制包机依据 canonical policy 生成 DEB、sidecar、manifest、报告和 `.build-success`，正式预检通过 | 不代表离线安装成功 |
 | 离线安装已演练 | 干净 Linux amd64 容器、VM 或 chroot 在断网状态下只使用内部本地制品完成安装、诊断、卸载和重装，并生成当前产物绑定证据 | 不代表麒麟/UOS 桌面已通过 |
-| 目标机已验证 | 真实 Kylin/UOS/openKylin x86_64 图形终端完成单 DEB 双击安装、首次配置、安装态 Electron、CLI、真实模型与附件、关窗退出和诊断导出，证据经发布负责人复核并签名 | 只适用于证据绑定的精确系统基线和 DEB 摘要 |
+| 目标机已验证 | 真实 Kylin/UOS/openKylin x86_64 图形终端完成单 DEB 双击安装、首次配置、安装态 Electron、CLI、真实模型与附件、关窗退出和诊断导出，证据经发布负责人复核并签名 | 只适用于认证矩阵绑定的代表类别和 DEB 摘要 |
 
 四级证据必须按顺序形成，不能互相替代。文件存在、测试数量、旧日志、旧截图或手写布尔值都不能升级证据标签。
 
@@ -59,21 +59,20 @@
 Linux 客户单一 DEB 只能按以下顺序产生：
 
 1. 从已复验的正式 `main` 准备唯一源码输入。
-2. 在待支持的真实目标机采集新鲜 `target-baseline.json`，并配置真实、已批准的维护人。
-3. 在兼容 Linux amd64 制包机运行 `00_制包机_生成离线交付包.sh`，再运行 `01_制包机_发布预检.sh`。
-4. 在断网的干净 Linux amd64 环境完成安装 → 卸载 → 重装演练并生成结构化证据。
-5. 在真实目标图形终端完成安装前观察、单 DEB 双击安装人工见证、首次配置和 `04_目标终端_桌面App验收并导出证据.sh`。
-6. 把原始目标证据带回受控发布机复核，使用独立的离线发布私钥签名两类证据。
-7. 使用两次验收开始时保留的原 challenge 执行 `scripts/taiji-release-check.sh`；不得在最终门禁阶段重新生成 challenge。
-8. 执行 `packaging/linux/deb/publish-single-deb.sh`，生成只含一个 DEB 的全新客户目录和内部原子发布回执。
+2. 在兼容 Linux amd64 制包机运行 `00_制包机_生成离线交付包.sh`，再运行 `01_制包机_发布预检.sh`。
+3. 在断网的干净 Linux amd64 环境完成安装 → 卸载 → 重装演练并生成结构化证据。
+4. 在六个正向代表环境和六个负向边界上使用同一 DEB SHA 形成认证记录。
+5. 把认证记录带回受控发布机，先生成并签名 `certification-set.json`，再生成并签名 v3 release evidence。
+6. 使用两次验收开始时保留的独立 challenge 执行 `scripts/taiji-release-check.sh`；不得在最终门禁阶段重新生成 challenge。
+7. 执行 `packaging/linux/deb/publish-single-deb.sh`，生成只含一个固定 basename DEB 的全新客户目录和六文件内部 receipt。
 
 发布私钥不得复制到目标终端、安装包、客户目录或源码仓库。客户目录已存在时发布器拒绝覆盖；门禁或回执生成失败时不得留下看似成功的正式回执。
 
 ## 销售口径
 
-只有四级证据全部绑定同一正式 `main`、产品版本、DEB hash 和目标基线后，才能说：
+只有四级证据全部绑定同一正式 `main`、产品版本、DEB hash 和统一 policy/认证集后，才能说：
 
-- 当前单一 DEB 已在明确的 Kylin/UOS/openKylin x86_64 基线上完成离线双击安装和真实桌面验收；
-- 客户在该精确基线上只需双击一个 DEB，不需要联网下载或额外安装文件。
+- 当前单一 DEB 已在明确的 Kylin/UOS/openKylin x86_64 代表环境矩阵上完成离线双击安装和真实桌面验收；
+- 客户在该统一兼容范围内只需双击一个 DEB，不需要联网下载或额外安装文件。
 
 在此之前必须按实际状态说“分支候选”“源码包已准备”“制包机已构建”或“离线安装已演练”，不能提前说“销售级安装包已完成”。Linux 目标机证据未闭合前，也不能声称 Windows 安装包阶段已开始或已支持 Windows。

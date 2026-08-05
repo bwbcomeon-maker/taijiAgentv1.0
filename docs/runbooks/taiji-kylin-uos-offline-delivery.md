@@ -6,7 +6,7 @@
 
 本文面向研发、发布负责人和现场交付人员。目标终端操作员使用随交付目录提供的 [`操作说明.md`](../../taijiagent%20打包交付/操作说明.md)；本手册负责解释为什么这样做、Docker 能证明什么、哪些结论必须回真实 Kylin/UOS 终端验证。
 
-本文不是某个 commit 的发布证明。最终发布身份必须由当前交付目录中的 `taiji-package-manifest.json`、`.build-success`、各级 SHA256、断网演练证据、目标机证据和签名共同确定。
+本文不是某个 commit 的发布证明。最终发布身份必须由当前交付目录中的 `taiji-package-manifest.json`、`.build-success`、各级 SHA256、断网演练证据、认证集、v3 发布回执和签名共同确定。
 
 ## 2. 支持矩阵
 
@@ -16,7 +16,7 @@
 - Debian-like Kylin、UOS、openKylin 类系统。
 - `apt-get`、`apt-cache`、`dpkg`、`systemctl` 和 `sudo` 可用。
 - 具备图形桌面会话，能够启动 Electron 应用。
-- 内部断网演练和真机验收使用完整重建的 `taijiagent 打包交付/` 工作区；门禁通过后客户只使用唯一目标绑定 DEB。
+- 内部断网演练和真机验收使用完整重建的 `taijiagent 打包交付/` 工作区；门禁通过后客户只使用唯一统一 basename DEB。
 
 上述是产品设计与制品约束，不等于所有目标发行版都已实测支持。某个 Kylin/UOS/openKylin 版本只有取得与当前产物绑定的真实目标机证据后，才能写成该版本“已验证”。
 
@@ -49,14 +49,14 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 
 单一 DEB 不是跨发行版通用包。必须遵守以下边界：
 
-- 每个精确基线先在真实目标机运行 `packaging/linux/capture-target-baseline.sh`，生成当轮 `target-baseline.json` 及摘要。
-- 基线记录发行版 ID/版本/变体/build ID、`amd64/x86_64`、glibc 版本，以及当前 `runtime-depends.txt` 中每项系统依赖的已安装状态和版本；不采集主机名、用户名、IP、序列号或客户凭据。
-- 正式构建缺少基线、基线超过 30 天、依赖契约变化、任一依赖未安装、架构不符或仍使用占位维护人邮箱时必须失败。
-- DEB 内嵌与构建输入逐字节一致的 `target-baseline.json`，`preinst` 再核对目标系统身份、架构和 glibc 下限。包内不捆绑 glibc，也不以复制系统核心库的方式绕过兼容性问题。
+- 统一包由源码受控的 `packaging/linux/compatibility-policy.json` 定义支持架构、系统家族、glibc/内核下限和最小系统能力；不从每台终端采集 baseline，也不按 profile 生成 DEB。
+- `packaging/linux/certification-matrix.json` 固定六个正向类别和六个负向边界；代表环境记录只绑定同一候选 DEB/policy/source SHA。
+- 正式构建只接受 canonical policy，policy、Electron、Node、Python/native wheel 或生命周期变化后重新跑完整矩阵。
+- DEB 内嵌 policy 和 ABI 报告，`preinst` 按能力合同做本地 `COMPATIBLE/BLOCKED` 预检；不捆绑 glibc，也不替换系统核心库。
 - `packaging/linux/deb/publish-single-deb.sh` 只把经过审计的同一 DEB 字节复制到一个全新客户目录，并验证该目录恰好只有一个文件；摘要和 publication receipt 写入内部证据目录。
-- 只有该 DEB 在对应 Kylin/UOS 真实图形终端完成双击安装、首次配置、真实业务流、关闭、卸载/重装和适用的升级验收后，才能使用“目标机已验证”。
+- 只有同一 DEB 在矩阵代表环境完成双击安装、首次配置、真实业务流、关闭、卸载/重装和适用升级验收，并形成 signed certification set 后，才能使用“目标机已验证”。
 
-如需支持另一个 Kylin/UOS 版本或不同依赖集合，重新采集、重新构建、重新演练和重新验收，不能从相近品牌或旧截图外推。
+如需扩大 Kylin/UOS/openKylin 版本或策略范围，更新 policy/matrix 后重新构建、重新演练和重新验收，不能从相近品牌或旧截图外推。
 
 ## 4. 四类环境的职责
 
@@ -69,39 +69,17 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 
 ## 5. 标准交付链
 
-### 5.0 冻结维护人身份并采集目标基线
+### 5.0 冻结 canonical policy 和认证矩阵
 
-正式构建前必须先完成两个外部输入，缺一项就保持失败，不得使用占位值绕过。
-
-第一项是把已经审批的真实售后身份写入正式源码：
+正式构建前只需要复核源码中的 canonical policy 和 matrix，不需要向每台终端收集 baseline：
 
 ```bash
-cp packaging/linux/approved-maintainer.example.json \
-  packaging/linux/approved-maintainer.json
-# 编辑 maintainer 为真实且已审批的“显示名 <售后邮箱>”，然后纳入正式 main。
-python3 packaging/linux/validate-approved-maintainer.py \
-  --file packaging/linux/approved-maintainer.json \
-  --print
+python3 packaging/linux/compatibility_policy.py validate \
+  --policy packaging/linux/compatibility-policy.json --print-sha256
+python3 -m unittest tests.test_certification_matrix_contract
 ```
 
-`approved-maintainer.example.json` 故意包含无效占位邮箱，只能作为结构模板。正式文件、构建环境变量、DEB `Maintainer` 和最终 publication receipt 必须逐字一致。
-
-第二项是在待支持的真实 Kylin/UOS x86_64 终端采集基线。把当前正式源码中的以下三个文件按原目录结构复制到临时采集目录：
-
-```text
-packaging/linux/capture-target-baseline.sh
-packaging/linux/target_baseline.py
-packaging/linux/deb/runtime-depends.txt
-```
-
-在目标机用明确的绝对路径执行：
-
-```bash
-/bin/bash -p /绝对路径/packaging/linux/capture-target-baseline.sh \
-  /绝对路径/target-baseline.json
-```
-
-将生成的 `target-baseline.json` 复制回正式发布工作区的 `taijiagent 打包交付/目标基线/target-baseline.json`，并设置为仅当前发布用户可写。采集脚本会同时生成 `.sha256` 便于传输核对；正式门禁以 JSON 的实际 SHA256、依赖契约和最长 30 天时效为准。依赖契约、目标系统或正式源码变化后必须重新采集。
+policy 是唯一 Maintainer、最小系统能力和 ELF ABI 来源；matrix 固定六个正向类别和六个负向边界。目标终端执行的是 `04_目标终端_桌面App验收并导出证据.sh`，输出环境记录时绑定当前候选 DEB、policy SHA 和 source commit，不回写或生成新的 DEB。
 
 ### 5.1 准备制包机输入包
 
@@ -118,7 +96,6 @@ bash "taijiagent 打包交付/99_本机_准备制包输入包.sh"
 解压输入包后进入 `taijiagent 打包交付/`：
 
 ```bash
-export TAIJI_PACKAGE_MAINTAINER="<与正式源码 approved-maintainer.json 完全一致的真实身份>"
 bash ./00_制包机_生成离线交付包.sh
 ```
 
@@ -156,7 +133,7 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 真实验收必须覆盖两条路径，但不能在同一系统状态中混跑：
 
-1. **客户单 DEB 路径是 `04` 的前置路径。**在与基线一致、没有 `taiji-agent` dpkg 记录且当前用户没有太极 XDG/Electron 状态的干净图形终端，准备一个只有 manifest 同名候选 DEB 的实体目录。先启动 `验收工具/observe-single-deb-install.py observe`，再关闭全部非 loopback 网络并从文件管理器双击 DEB，由系统图形包安装器完成安装。观察器必须从安装前持续存活到 `install ok installed`。
+1. **客户单 DEB 路径是 `04` 的前置路径。**在符合 canonical policy、没有 `taiji-agent` dpkg 记录且当前用户没有太极 XDG/Electron 状态的干净图形终端，准备一个只有 manifest 同名候选 DEB 的实体目录。先启动 `验收工具/observe-single-deb-install.py observe`，再关闭全部非 loopback 网络并从文件管理器双击 DEB，由系统图形包安装器完成安装。观察器必须从安装前持续存活到 `install ok installed`。
 2. **内部生命周期路径使用另一个干净环境或另一个恢复点。**完整工作区中的 `02_目标终端_安装并验证.sh` 用于 root staging、本地离线仓库、诊断、升级/同版本重装等验证。不得在准备运行 `04` 的同一目标状态上先执行 `02`，否则安装前观察合同已经失效。
 
 单 DEB 路径的命令、人工见证和首次配置顺序见第 10 节。机器观察记录替代旧的事后自报环境变量；`04` 不接受 `TAIJI_TARGET_INSTALL_METHOD`、`TAIJI_TARGET_INSTALL_NETWORK`、`TAIJI_TARGET_DPKG_STATUS_BEFORE` 或 `TAIJI_TARGET_FIRST_LAUNCH`。
@@ -165,16 +142,16 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 ### 5.5 签名与最终放行
 
-断网演练和目标机验收使用不同 challenge。两类证据复制回受控发布机后，由发布负责人检查原始会话、截图和诊断内容，再用独立离线私钥签名。最终门禁必须复用当轮原 challenge，不能重新生成：
+断网演练和代表环境验收使用不同 challenge。各环境记录聚合为 certification set 后，发布负责人检查原始会话、截图和诊断内容，再用独立离线私钥签名；发布回执另用独立 challenge。最终门禁必须复用当轮原 challenge，不能重新生成：
 
 ```bash
-export TAIJI_OFFLINE_REHEARSAL_CHALLENGE="<当轮断网演练原值>"
-export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="<当轮真机验收原值>"
+export TAIJI_CERTIFICATION_CHALLENGE="<当轮认证集原值>"
+export TAIJI_PUBLICATION_CHALLENGE="<当轮发布回执原值>"
 bash scripts/sign-taiji-release-evidence.sh \
-  "taijiagent 打包交付/offline-install-rehearsal/offline-install-rehearsal.json" \
+  "taijiagent 打包交付/certification/certification-set.json" \
   "/受控离线路径/offline-release-private-key.pem"
 bash scripts/sign-taiji-release-evidence.sh \
-  "taijiagent 打包交付/target-verification/target-verification.json" \
+  "taijiagent 打包交付/release-evidence.json" \
   "/受控离线路径/offline-release-private-key.pem"
 bash scripts/taiji-release-check.sh
 ```
@@ -185,11 +162,17 @@ bash scripts/taiji-release-check.sh
 mkdir -p customer-output internal-release-receipts
 bash packaging/linux/deb/publish-single-deb.sh \
   --delivery-dir "$PWD/taijiagent 打包交付" \
+  --candidate-deb "$PWD/taijiagent 打包交付/生成的安装包/taiji-agent_<version>_amd64.deb" \
+  --policy "$PWD/packaging/linux/compatibility-policy.json" \
+  --certification-set "$PWD/taijiagent 打包交付/certification/certification-set.json" \
+  --certification-signature "$PWD/taijiagent 打包交付/certification/certification-set.json.sig" \
+  --release-evidence "$PWD/taijiagent 打包交付/release-evidence.json" \
+  --release-signature "$PWD/taijiagent 打包交付/release-evidence.json.sig" \
   --output-dir "$PWD/customer-output/taiji-agent-linux-amd64" \
   --receipt-root "$PWD/internal-release-receipts/single-deb"
 ```
 
-发布脚本会先快照候选 DEB，再执行正式 `01`、完整 release-check、维护人核对、目标基线核对和双证据绑定；最后原子生成新客户目录并复核其中恰好一个、字节不变的 `.deb`。客户只收到该目录中的 DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
+发布脚本会先快照候选 DEB、policy 和两组 signed evidence，再执行正式 release-check；最后以不可替换 rename 原子生成新客户目录，并把 `release-evidence.json`、两组签名、policy 和 `deb.sha256` 六个文件归档到内部 receipt。客户只收到该目录中的固定 basename DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
 
 ## 6. 完整离线交付契约
 
@@ -350,9 +333,9 @@ printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\n' "${DISPLAY:-}" "${WAYLAND_DISPLAY:-}"
 同时确认磁盘、内存、桌面类型、管理员能力、kysec/杀软/白名单策略和模型访问条件。该环境不得先执行 `02`；生命周期验收应使用另一个 VM/快照/终端。候选目录只能有 manifest 指定 basename 的单个 DEB。
 
 ```bash
-export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="$(openssl rand -hex 32)"
+export TAIJI_CERTIFICATION_CHALLENGE="$(openssl rand -hex 32)"
 export TAIJI_SINGLE_DEB_CUSTOMER_DIR="/只有manifest同名候选DEB的绝对目录"
-export TAIJI_INSTALL_EVIDENCE_DIR="$PWD/install-observation-$TAIJI_TARGET_ACCEPTANCE_CHALLENGE"
+export TAIJI_INSTALL_EVIDENCE_DIR="$PWD/install-observation-$TAIJI_CERTIFICATION_CHALLENGE"
 mkdir -m 0700 "$TAIJI_INSTALL_EVIDENCE_DIR"
 ```
 
@@ -366,7 +349,7 @@ challenge 必须由发布负责人当轮生成并保存；安装观察、人工�
 /usr/bin/python3 -B ./验收工具/observe-single-deb-install.py observe \
   --customer-dir "$TAIJI_SINGLE_DEB_CUSTOMER_DIR" \
   --manifest "$PWD/生成的安装包/taiji-package-manifest.json" \
-  --challenge "$TAIJI_TARGET_ACCEPTANCE_CHALLENGE" \
+  --challenge "$TAIJI_CERTIFICATION_CHALLENGE" \
   --output-dir "$TAIJI_INSTALL_EVIDENCE_DIR"
 ```
 
@@ -378,7 +361,7 @@ challenge 必须由发布负责人当轮生成并保存；安装观察、人工�
 /usr/bin/python3 -B ./验收工具/observe-single-deb-install.py attest \
   --observation "$TAIJI_INSTALL_EVIDENCE_DIR/single-deb-install-observation.json" \
   --graphical-evidence "/绝对路径/系统图形安装器成功界面.png" \
-  --challenge "$TAIJI_TARGET_ACCEPTANCE_CHALLENGE" \
+  --challenge "$TAIJI_CERTIFICATION_CHALLENGE" \
   --operator-id "<受控操作员编号>" \
   --confirmation "I-observed-desktop-double-click-and-system-installer" \
   --output-dir "$TAIJI_INSTALL_EVIDENCE_DIR"
@@ -419,7 +402,7 @@ bash ./04_目标终端_桌面App验收并导出证据.sh
 - 若交付包含 DOCX 结果，使用目标环境的 WPS/Word 完成人工视觉检查。
 - 卸载、同版本重装、旧版升级和异常中断恢复按本次交付范围分别验收。
 
-`02_目标终端_安装并验证.sh` 的内部生命周期检查在独立环境执行；不要在上述 `04` 单 DEB 安装观察之前运行。最终客户目录由 publisher 在双签名门禁后生成，允许受控加入 profile_id 到 basename，但输出 DEB 必须与本节已验收内部候选逐字节、SHA256 完全一致，receipt 同时绑定两端名称与摘要。
+`02_目标终端_安装并验证.sh` 的内部生命周期检查在独立环境执行；不要在上述 `04` 单 DEB 安装观察之前运行。最终客户目录由 publisher 在 certification-set 与 v3 双签名门禁后生成，basename 固定为 `taiji-agent_${VERSION}_amd64.deb`，输出 DEB 必须与本节已认证候选逐字节、SHA256 完全一致，receipt 只归档六个白名单文件。
 
 ## 11. 一次性诊断包流程
 
