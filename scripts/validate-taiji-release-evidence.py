@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -14,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import zlib
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +27,7 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TARGET_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+POLICY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,127}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 INCIDENT_RE = re.compile(r"^inc-[0-9a-f]{12,32}$")
@@ -39,6 +43,19 @@ PUBLIC_VERSION_RE = re.compile(
 )
 MAX_JSON_BYTES = 1024 * 1024
 MAX_EVIDENCE_BYTES = 32 * 1024 * 1024
+PACKAGE_MANIFEST_SCHEMA_V3 = "taiji-package-manifest/v3"
+RELEASE_EVIDENCE_SCHEMA_V3 = "taiji-release-evidence/v3"
+CANONICAL_POLICY_ID = "taiji-linux-amd64-deb-v1"
+# Fallback for a validator copied into a target delivery directory.  When the
+# checked-in policy is available, ``canonical_policy_identity`` recomputes the
+# value through compatibility_policy.py instead of trusting this constant.
+CANONICAL_POLICY_SHA256 = "7956044933d4add977b3c84e24b607120cfd285e3e99f1ce38431e6bd2ee163e"
+CANONICAL_POLICY_PATH = (
+    Path(__file__).resolve().parents[1] / "packaging/linux/compatibility-policy.json"
+)
+CANONICAL_POLICY_HELPER_PATH = (
+    Path(__file__).resolve().parents[1] / "packaging/linux/compatibility_policy.py"
+)
 ELECTRON_PATH = "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
 DRIVER_RESULT_BASENAME = "desktop-driver-result.json"
 SCREENSHOT_BASENAME = "desktop-app.png"
@@ -247,6 +264,60 @@ INSTALL_METHOD_ATTESTATION_KEYS = {
 
 class EvidenceError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class BuildBinding:
+    """Immutable v3 identity of the exact candidate DEB under review."""
+
+    # Qualify the built-in type names so this module remains importable by
+    # legacy importlib callers that do not register the module in sys.modules.
+    # This matters on Python 3.14 when postponed annotations are inspected by
+    # dataclasses; typing.get_type_hints still resolves these to ``str``.
+    source_commit: builtins.str
+    version: builtins.str
+    architecture: builtins.str
+    deb_basename: builtins.str
+    deb_sha256: builtins.str
+    compatibility_policy_id: builtins.str
+    compatibility_policy_sha256: builtins.str
+    electron_executable_sha256: builtins.str
+    desktop_entry_sha256: builtins.str
+
+
+def canonical_policy_identity() -> tuple[str, str]:
+    """Return the checked-in policy identity, with a delivery-copy fallback.
+
+    The validator is copied into the offline delivery directory for target
+    verification, where the source checkout is intentionally absent.  In the
+    source checkout we always use the canonical policy helper and bytes; the
+    fallback is the immutable identity of that same checked-in contract.
+    """
+
+    if CANONICAL_POLICY_PATH.is_file() and CANONICAL_POLICY_HELPER_PATH.is_file():
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "taiji_release_evidence_compatibility_policy",
+                CANONICAL_POLICY_HELPER_PATH,
+            )
+            if spec is None or spec.loader is None:
+                raise EvidenceError("无法加载 canonical compatibility policy helper")
+            helper = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(helper)
+            policy = helper.load_and_validate(CANONICAL_POLICY_PATH)
+            return policy["policy_id"], helper.canonical_sha256(policy)
+        except (EvidenceError, OSError, KeyError, TypeError, ValueError) as exc:
+            raise EvidenceError(f"canonical compatibility policy 无法验证: {exc}") from exc
+    return CANONICAL_POLICY_ID, CANONICAL_POLICY_SHA256
+
+
+def reject_target_baseline_fields(data: dict[str, Any], label: str) -> None:
+    forbidden = {"target_baseline_profile_id", "target_baseline_sha256"}
+    present = sorted(forbidden.intersection(data))
+    if present:
+        raise EvidenceError(
+            f"{label} 属于当前 v3 发布路径，禁止 target baseline 字段: {', '.join(present)}"
+        )
 
 
 def require_trusted_ancestor_chain(directory: Path, label: str) -> None:
@@ -668,7 +739,96 @@ def parse_marker(path: Path) -> dict[str, str]:
     return result
 
 
-def validate_build_binding(
+def _validate_checksum_sidecar(args: argparse.Namespace, deb_hash: str) -> None:
+    checksum_path = getattr(args, "checksum", None)
+    if checksum_path is None:
+        return
+    checksum_path = Path(checksum_path)
+    checksum_payload, _ = read_regular_bytes(checksum_path, "DEB SHA256 sidecar")
+    try:
+        checksum_text = checksum_payload.decode("ascii")
+    except UnicodeError as exc:
+        raise EvidenceError("DEB SHA256 sidecar 必须是 ASCII") from exc
+    match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?", checksum_text)
+    if not match or match.group(1) != deb_hash or match.group(2) != Path(args.deb).name:
+        raise EvidenceError("DEB SHA256 sidecar 未准确绑定当前 DEB basename 和内容")
+
+
+def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
+    source_commit = getattr(args, "source_commit", "")
+    if not FULL_COMMIT_RE.fullmatch(source_commit):
+        raise EvidenceError(f"当前源码 commit 格式不合法: {source_commit!r}")
+    deb_path = Path(args.deb)
+    deb_hash, _ = sha256_regular_file(deb_path, "当前 DEB")
+    _validate_checksum_sidecar(args, deb_hash)
+
+    manifest = load_json(Path(args.manifest), "发布 manifest")
+    reject_target_baseline_fields(manifest, "发布 manifest")
+    if manifest.get("schema") != PACKAGE_MANIFEST_SCHEMA_V3:
+        if manifest.get("schema_version") == 2:
+            raise EvidenceError(
+                "当前发布入口只接受 taiji-package-manifest/v3；历史 v2 必须显式 --legacy-v2-read-only"
+            )
+        raise EvidenceError("销售发布门禁强制 manifest schema=taiji-package-manifest/v3")
+
+    required = {
+        "schema": PACKAGE_MANIFEST_SCHEMA_V3,
+        "package": "taiji-agent",
+        "source_commit": source_commit,
+        "deb_basename": deb_path.name,
+        "deb_sha256": deb_hash,
+        "architecture": "amd64",
+    }
+    for key, expected in required.items():
+        if key not in manifest:
+            raise EvidenceError(f"发布 manifest 缺少字段: {key}")
+        require_exact(manifest, key, expected)
+    version = require_nonempty_string(manifest, "version")
+    if deb_path.name != f"taiji-agent_{version}_amd64.deb":
+        raise EvidenceError("发布 manifest version 与 DEB basename 不一致")
+    policy_id = require_nonempty_string(manifest, "compatibility_policy_id")
+    if not POLICY_ID_RE.fullmatch(policy_id):
+        raise EvidenceError("发布 manifest compatibility_policy_id 格式不合法")
+    policy_sha256 = validate_sha256(
+        manifest.get("compatibility_policy_sha256"),
+        "compatibility_policy_sha256",
+    )
+    expected_policy_id, expected_policy_sha256 = canonical_policy_identity()
+    if policy_id != expected_policy_id:
+        raise EvidenceError(
+            "发布 manifest compatibility_policy_id 与当前 canonical policy 不一致"
+        )
+    if policy_sha256 != expected_policy_sha256:
+        raise EvidenceError(
+            "发布 manifest compatibility_policy_sha256 与当前 canonical policy 不一致"
+        )
+    electron_hash = validate_sha256(
+        manifest.get("electron_executable_sha256"),
+        "electron_executable_sha256",
+    )
+    desktop_hash = validate_sha256(
+        manifest.get("desktop_entry_sha256"),
+        "desktop_entry_sha256",
+    )
+    # The ABI report is part of the v3 manifest binding.  It is deliberately
+    # checked even though it is not a BuildBinding field: the report hash must
+    # be a well-formed immutable release input before later certification work.
+    if "elf_abi_audit_sha256" in manifest:
+        validate_sha256(manifest["elf_abi_audit_sha256"], "elf_abi_audit_sha256")
+    return BuildBinding(
+        source_commit=source_commit,
+        version=version,
+        architecture="amd64",
+        deb_basename=deb_path.name,
+        deb_sha256=deb_hash,
+        compatibility_policy_id=policy_id,
+        compatibility_policy_sha256=policy_sha256,
+        electron_executable_sha256=electron_hash,
+        desktop_entry_sha256=desktop_hash,
+    )
+
+
+def _validate_v2_build_binding(
     args: argparse.Namespace,
 ) -> tuple[str, str, str, str, str, str, str]:
     if not FULL_COMMIT_RE.fullmatch(args.source_commit):
@@ -754,6 +914,98 @@ def validate_build_binding(
         target_baseline_profile_id,
         target_baseline_sha256,
     )
+
+
+def _validate_v2_read_only_binding(
+    args: argparse.Namespace,
+) -> tuple[str, str, str, str, str, str, str]:
+    """Small, self-contained v2 history binding used by the read-only CLI."""
+
+    # When the historical delivery still carries the complete v2 binding
+    # inputs, retain the old source/marker/offline-repository checks.  Minimal
+    # callers may inspect a copied historical manifest without those files,
+    # but they still receive the explicit read-only result below.
+    legacy_paths = (
+        "checksum",
+        "build_marker",
+        "source_archive",
+        "packages",
+        "packages_gz",
+        "delivery_dir",
+    )
+    if all(getattr(args, name, None) is not None for name in legacy_paths):
+        return _validate_v2_build_binding(args)
+
+    source_commit = getattr(args, "source_commit", "")
+    if not FULL_COMMIT_RE.fullmatch(source_commit):
+        raise EvidenceError(f"历史 v2 source commit 格式不合法: {source_commit!r}")
+    deb_path = Path(args.deb)
+    deb_hash, _ = sha256_regular_file(deb_path, "当前 DEB")
+    _validate_checksum_sidecar(args, deb_hash)
+    manifest = load_json(Path(args.manifest), "历史 v2 发布 manifest")
+    if manifest.get("schema_version") != 2:
+        raise EvidenceError("历史 v2 manifest 必须是 schema_version=2")
+    required = {
+        "source_commit": source_commit,
+        "deb": deb_path.name,
+        "deb_sha256": deb_hash,
+    }
+    for key, expected in required.items():
+        if key not in manifest:
+            raise EvidenceError(f"历史 v2 manifest 缺少字段: {key}")
+        require_exact(manifest, key, expected)
+    version = require_nonempty_string(manifest, "version")
+    if deb_path.name != f"taiji-agent_{version}_amd64.deb":
+        raise EvidenceError("历史 v2 manifest version 与 DEB basename 不一致")
+    profile_id = require_nonempty_string(manifest, "target_baseline_profile_id")
+    if not TARGET_PROFILE_ID_RE.fullmatch(profile_id):
+        raise EvidenceError("历史 v2 target_baseline_profile_id 格式不合法")
+    profile_sha = validate_sha256(
+        manifest.get("target_baseline_sha256"), "target_baseline_sha256"
+    )
+    electron_hash = validate_sha256(
+        manifest.get("electron_executable_sha256"),
+        "electron_executable_sha256",
+    )
+    desktop_hash = validate_sha256(
+        manifest.get("desktop_entry_sha256"),
+        "desktop_entry_sha256",
+    )
+    return (
+        deb_hash,
+        version,
+        "legacy-v2-read-only",
+        electron_hash,
+        desktop_hash,
+        profile_id,
+        profile_sha,
+    )
+
+
+def validate_build_binding(
+    args: argparse.Namespace,
+    *,
+    legacy_v2_read_only: bool = False,
+) -> BuildBinding | tuple[str, str, str, str, str, str, str]:
+    """Validate the immutable build identity.
+
+    v3 is the only default/current path and returns the named frozen
+    ``BuildBinding`` contract.  The old tuple is retained solely for callers
+    that explicitly request historical v2 read-only inspection.
+    """
+
+    manifest = load_json(Path(args.manifest), "发布 manifest")
+    if manifest.get("schema") == PACKAGE_MANIFEST_SCHEMA_V3:
+        if legacy_v2_read_only:
+            raise EvidenceError("--legacy-v2-read-only 只能检查 manifest schema_version=2")
+        return _validate_v3_build_binding(args)
+    if manifest.get("schema_version") == 2:
+        if not legacy_v2_read_only:
+            raise EvidenceError(
+                "当前发布入口拒绝 schema_version=2 v2 证据；历史 v2 只能显式使用 --legacy-v2-read-only"
+            )
+        return _validate_v2_read_only_binding(args)
+    raise EvidenceError("发布 manifest 不是受支持的 v3 合同或显式 v2 历史合同")
 
 
 def validate_artifact_binding(
@@ -1395,24 +1647,141 @@ def validate_target(
     validate_support_bundle(diagnostic_payload)
 
 
+RELEASE_EVIDENCE_V3_KEYS = {
+    "schema",
+    "evidence_type",
+    "generated_at_utc",
+    "challenge_nonce",
+    "source_commit",
+    "version",
+    "architecture",
+    "deb_basename",
+    "deb_sha256",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
+    "certification_set_basename",
+    "certification_set_sha256",
+    "certification_set_signature_basename",
+    "certification_set_signature_sha256",
+    "maintainer",
+    "customer_filename",
+    "customer_folder_contract",
+    "signing_public_key_fingerprint",
+    "formal_gates",
+}
+
+
+def validate_release_evidence_v3(
+    data: dict[str, Any], args: argparse.Namespace, binding: BuildBinding
+) -> None:
+    """Validate the current publication evidence envelope.
+
+    Certification-set semantics are intentionally left to the later
+    certification task.  This gate nevertheless freezes every candidate DEB
+    and policy identity and rejects all target-bound v2 fields now.
+    """
+
+    require_exact_keys(data, RELEASE_EVIDENCE_V3_KEYS, "release evidence v3")
+    reject_target_baseline_fields(data, "release evidence v3")
+    require_exact(data, "schema", RELEASE_EVIDENCE_SCHEMA_V3)
+    require_exact(data, "evidence_type", "single-deb-publication")
+    validate_fresh_timestamp(data["generated_at_utc"], "generated_at_utc")
+    validate_challenge(data["challenge_nonce"], args.challenge or "")
+    comparisons = {
+        "source_commit": binding.source_commit,
+        "version": binding.version,
+        "architecture": binding.architecture,
+        "deb_basename": binding.deb_basename,
+        "deb_sha256": binding.deb_sha256,
+        "compatibility_policy_id": binding.compatibility_policy_id,
+        "compatibility_policy_sha256": binding.compatibility_policy_sha256,
+        "customer_filename": binding.deb_basename,
+        "customer_folder_contract": "exactly-one-deb",
+    }
+    for key, expected in comparisons.items():
+        require_exact(data, key, expected)
+    validate_sha256(data["deb_sha256"], "deb_sha256")
+    validate_sha256(data["compatibility_policy_sha256"], "compatibility_policy_sha256")
+    if not POLICY_ID_RE.fullmatch(data["compatibility_policy_id"]):
+        raise EvidenceError("release evidence v3 compatibility_policy_id 格式不合法")
+    expected_policy_id, expected_policy_sha256 = canonical_policy_identity()
+    require_exact(data, "compatibility_policy_id", expected_policy_id)
+    require_exact(data, "compatibility_policy_sha256", expected_policy_sha256)
+    for key in (
+        "certification_set_sha256",
+        "certification_set_signature_sha256",
+        "signing_public_key_fingerprint",
+    ):
+        validate_sha256(data[key], key)
+    for key in (
+        "certification_set_basename",
+        "certification_set_signature_basename",
+        "maintainer",
+    ):
+        require_nonempty_string(data, key)
+    formal_gates = data["formal_gates"]
+    if type(formal_gates) is not dict or not formal_gates:
+        raise EvidenceError("release evidence v3 formal_gates 必须是非空 object")
+
+
+def validate_legacy_v2_read_only(
+    data: dict[str, Any],
+    args: argparse.Namespace,
+    binding: tuple[str, str, str, str, str, str, str],
+) -> None:
+    """Perform a deliberately isolated, non-publishing v2 history check."""
+
+    if data.get("schema_version") != 2:
+        raise EvidenceError("--legacy-v2-read-only 只接受 schema_version=2 历史证据")
+    required = {
+        "source_commit",
+        "deb_basename",
+        "deb_sha256",
+        "target_baseline_profile_id",
+        "target_baseline_sha256",
+    }
+    missing = sorted(required - data.keys())
+    if missing:
+        raise EvidenceError(
+            f"历史 v2 证据缺少绑定字段: {', '.join(missing)}"
+        )
+    if data["source_commit"] != args.source_commit:
+        raise EvidenceError("历史 v2 证据 source_commit 与当前输入不一致")
+    if data["deb_basename"] != Path(args.deb).name:
+        raise EvidenceError("历史 v2 证据 deb_basename 与当前 DEB 不一致")
+    deb_hash, _ = sha256_regular_file(Path(args.deb), "当前 DEB")
+    require_exact(data, "deb_sha256", deb_hash)
+    if type(binding) is not tuple or len(binding) != 7:
+        raise EvidenceError("历史 v2 build binding 返回结构不合法")
+    expected_profile_id = binding[5]
+    expected_profile_sha256 = binding[6]
+    require_exact(data, "target_baseline_profile_id", expected_profile_id)
+    require_exact(data, "target_baseline_sha256", expected_profile_sha256)
+    validate_sha256(data["target_baseline_sha256"], "target_baseline_sha256")
+    profile_id = data["target_baseline_profile_id"]
+    if type(profile_id) is not str or not TARGET_PROFILE_ID_RE.fullmatch(profile_id):
+        raise EvidenceError("历史 v2 target_baseline_profile_id 格式不合法")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("offline", "target"))
+    parser.add_argument("mode", choices=("offline", "target", "release"))
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--deb", required=True, type=Path)
-    parser.add_argument("--checksum", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
-    parser.add_argument("--build-marker", required=True, type=Path)
-    parser.add_argument("--source-archive", required=True, type=Path)
-    parser.add_argument("--packages", required=True, type=Path)
-    parser.add_argument("--packages-gz", required=True, type=Path)
-    parser.add_argument("--delivery-dir", required=True, type=Path)
+    parser.add_argument("--checksum", type=Path)
+    parser.add_argument("--build-marker", type=Path)
+    parser.add_argument("--source-archive", type=Path)
+    parser.add_argument("--packages", type=Path)
+    parser.add_argument("--packages-gz", type=Path)
+    parser.add_argument("--delivery-dir", type=Path)
     parser.add_argument("--attestation-signature", type=Path)
-    parser.add_argument("--attestation-public-key", required=True, type=Path)
-    parser.add_argument("--attestation-public-key-fingerprint", required=True)
-    parser.add_argument("--challenge", required=True)
+    parser.add_argument("--attestation-public-key", type=Path)
+    parser.add_argument("--attestation-public-key-fingerprint")
+    parser.add_argument("--challenge", default="")
     parser.add_argument("--pre-sign", action="store_true")
+    parser.add_argument("--legacy-v2-read-only", action="store_true")
     return parser.parse_args()
 
 
@@ -1422,42 +1791,40 @@ def main() -> int:
         require_safe_parent(args.evidence, "证据 JSON")
         evidence_payload, _ = read_regular_bytes(args.evidence, "证据 JSON")
         data = parse_json_bytes(evidence_payload, "证据 JSON")
+        manifest = load_json(Path(args.manifest), "发布 manifest")
+        if args.legacy_v2_read_only:
+            if args.pre_sign:
+                raise EvidenceError(
+                    "--legacy-v2-read-only 与 --pre-sign 互斥；历史 v2 不能进入签名前门禁"
+                )
+            if manifest.get("schema_version") != 2:
+                raise EvidenceError("--legacy-v2-read-only 只接受 manifest schema_version=2")
+            legacy_binding = validate_build_binding(args, legacy_v2_read_only=True)
+            validate_legacy_v2_read_only(data, args, legacy_binding)
+            if args.attestation_signature is not None:
+                if args.attestation_public_key is None or not args.attestation_public_key_fingerprint:
+                    raise EvidenceError("历史 v2 detached signature 缺少验签公钥参数")
+                validate_attestation(args, evidence_payload)
+            print(f"LEGACY_READ_ONLY\t{args.mode}\t{args.evidence}")
+            return 0
+
+        if data.get("schema_version") == 2 or manifest.get("schema_version") == 2:
+            raise EvidenceError(
+                "当前验证入口正式只接受 release evidence schema v3；v2 只能显式 --legacy-v2-read-only"
+            )
         if not args.pre_sign:
             if args.attestation_signature is None:
                 raise EvidenceError("发布证据缺少 detached signature")
+            if args.attestation_public_key is None or not args.attestation_public_key_fingerprint:
+                raise EvidenceError("发布证据 detached signature 缺少验签公钥参数")
             validate_attestation(args, evidence_payload)
-        (
-            deb_hash,
-            version,
-            release_artifacts_hash,
-            electron_executable_hash,
-            desktop_entry_hash,
-            target_baseline_profile_id,
-            target_baseline_sha256,
-        ) = validate_build_binding(args)
-        if args.mode == "offline":
-            validate_offline(
-                data,
-                args.evidence,
-                args,
-                deb_hash,
-                release_artifacts_hash,
-                target_baseline_profile_id,
-                target_baseline_sha256,
-            )
+        binding = validate_build_binding(args)
+        if not isinstance(binding, BuildBinding):
+            raise EvidenceError("当前发布路径未返回 v3 BuildBinding")
+        if data.get("schema") == RELEASE_EVIDENCE_SCHEMA_V3 or args.mode == "release":
+            validate_release_evidence_v3(data, args, binding)
         else:
-            validate_target(
-                data,
-                args.evidence,
-                args,
-                deb_hash,
-                version,
-                release_artifacts_hash,
-                electron_executable_hash,
-                desktop_entry_hash,
-                target_baseline_profile_id,
-                target_baseline_sha256,
-            )
+            raise EvidenceError("当前验证入口只接受 release evidence schema v3")
     except (EvidenceError, OSError, KeyError, TypeError, ValueError) as exc:
         print(f"release-evidence-invalid: {exc}", file=sys.stderr)
         return 1

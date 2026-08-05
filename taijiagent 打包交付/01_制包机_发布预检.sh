@@ -193,7 +193,7 @@ for path in entries.values():
 PY
 }
 verify_target_acceptance_toolchain() {
-  local script source_script
+  local name script source_script
   [ "$REQUIRE_ARTIFACTS" = 1 ] || return 0
   local -a files=(
     "04_目标终端_桌面App验收并导出证据.sh"
@@ -203,21 +203,22 @@ verify_target_acceptance_toolchain() {
     "validate-taiji-release-evidence.py"
     "signing-public.pem"
   )
-  for script in "${files[@]}"; do
+  for name in "${files[@]}"; do
+    script="$SCRIPT_DIR/验收工具/$name"
     source_script="$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh"
-    case "$script" in
+    case "$name" in
       run-installed-electron-acceptance.js|assemble-target-evidence.py|observe-single-deb-install.py)
-        source_script="$REPO_ROOT/tools/taiji-desktop-acceptance/$script"
+        source_script="$REPO_ROOT/tools/taiji-desktop-acceptance/$name"
         ;;
       validate-taiji-release-evidence.py)
-        source_script="$REPO_ROOT/scripts/$script"
+        source_script="$REPO_ROOT/scripts/$name"
         ;;
       signing-public.pem)
-        source_script="$REPO_ROOT/tools/taiji-release-evidence/$script"
+        source_script="$REPO_ROOT/tools/taiji-release-evidence/$name"
         ;;
     esac
-    [ -f "$SCRIPT_DIR/验收工具/$script" ] && [ -f "$source_script" ] || fail "缺少目标终端验收工具：$script"
-    cmp -s "$SCRIPT_DIR/验收工具/$script" "$source_script" || fail "目标终端验收工具与源码不一致：$script"
+    [ -f "$script" ] && [ ! -L "$script" ] && [ -f "$source_script" ] && [ ! -L "$source_script" ] || fail "缺少或不安全的目标终端验收工具：$name"
+    cmp -s "$script" "$source_script" || fail "目标终端验收工具与源码不一致：$name"
   done
 }
 check_delivery_artifacts() {

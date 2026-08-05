@@ -172,7 +172,10 @@ def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, 
         delivery_dir=delivery,
     )
     try:
-        binding = validator.validate_build_binding(binding_args)
+        binding = validator.validate_build_binding(
+            binding_args,
+            legacy_v2_read_only=True,
+        )
     except Exception as exc:
         raise ProducerError(f"交付物与当前源码/manifest 绑定校验失败：{exc}") from exc
     if type(binding) is not tuple or len(binding) != 7:
@@ -397,7 +400,9 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def validate_pre_sign(evidence: Path, release: dict[str, Any], challenge: str, delivery: Path) -> None:
+def validate_legacy_read_only(
+    evidence: Path, release: dict[str, Any], challenge: str, delivery: Path
+) -> None:
     args = [
         sys.executable,
         str(VALIDATOR),
@@ -428,7 +433,7 @@ def validate_pre_sign(evidence: Path, release: dict[str, Any], challenge: str, d
         PUBLIC_KEY_FINGERPRINT,
         "--challenge",
         challenge,
-        "--pre-sign",
+        "--legacy-v2-read-only",
     ]
     run_command(args)
 
@@ -497,7 +502,7 @@ def produce(delivery_arg: Path, output_arg: Path, image: str, challenge: str) ->
         }
         evidence_path = output / EVIDENCE_BASENAME
         atomic_write_json(evidence_path, evidence)
-        validate_pre_sign(evidence_path, release, challenge, delivery)
+        validate_legacy_read_only(evidence_path, release, challenge, delivery)
         published = True
         return evidence_path
     finally:
