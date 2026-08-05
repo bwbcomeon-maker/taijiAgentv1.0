@@ -59,6 +59,8 @@ initialize_build_logging() {
   esac
   mkdir -p "$LOG_DIR" "$OUTPUT_DIR" \
     || { printf '[FAIL] 无法创建制包日志或交付产物目录\n' >&2; exit 1; }
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] \
+    || { printf '[FAIL] 生成的安装包目录必须是真实目录：%s\n' "$OUTPUT_DIR" >&2; exit 1; }
   [ -d "$LOG_DIR" ] && [ ! -L "$LOG_DIR" ] \
     || { printf '[FAIL] 制包日志目录不是可信实体目录：%s\n' "$LOG_DIR" >&2; exit 1; }
   chmod 0700 "$LOG_DIR" \
