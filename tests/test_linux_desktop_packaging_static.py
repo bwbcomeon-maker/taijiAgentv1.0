@@ -23,6 +23,13 @@ def read_text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def build_function_source(name: str, next_name: str) -> str:
+    build = read_text("packaging/linux/deb/build-deb.sh")
+    start = build.index(f"{name}() {{")
+    end = build.index(f"\n}}\n\n{next_name}", start) + len("\n}")
+    return build[start:end]
+
+
 def write_target_baseline_fixture(profile_path: Path, depends_path: Path):
     module_path = ROOT / "packaging/linux/target_baseline.py"
     spec = importlib.util.spec_from_file_location("taiji_target_baseline_fixture", module_path)
@@ -2388,6 +2395,119 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("-name '*.key'", build)
         self.assertIn("-name '.env'", build)
         self.assertNotIn("-name '*.pem' -o -name 'id_rsa'", build)
+        self.assertNotIn("xargs -0 -r grep", build)
+        self.assertNotIn('strings "$OUT_DEB" | grep', build)
+        self.assertNotIn("grep -q .", build)
+        self.assertIn("Cannot inspect package key file", build)
+        self.assertIn("Cannot inspect package text file", build)
+        self.assertIn("Cannot inspect DEB archive metadata marker", build)
+
+    def test_security_scans_fail_closed_for_first_hit_and_large_batches(self):
+        private_scan = build_function_source("scan_private_key_material", "scan_product_privacy")
+        privacy_scan = build_function_source("scan_product_privacy", "scan_package_tree")
+
+        def run_scan(function_source: str, root: Path, call: str, tmp_dir: Path, *, fake_grep: bool = False):
+            script = [
+                "set -euo pipefail",
+                'fail() { printf \'%s\\n\' "$*" >&2; exit 42; }',
+            ]
+            if fake_grep:
+                script.append("grep() { return 2; }")
+            script.extend([function_source, call])
+            env = {
+                **os.environ,
+                "INSTALL_ROOT": str(root),
+                "AGENT_RUNTIME": str(root / "runtime/agent"),
+                "BUILD_ROOT": str(root / "build"),
+                "PKG_ROOT": str(root),
+                "TMPDIR": str(tmp_dir),
+            }
+            return subprocess.run(
+                ["bash", "-c", "\n".join(script)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory(prefix="taiji-security-scan-") as temp_dir:
+            temp_root = Path(temp_dir)
+            install_root = temp_root / "install"
+            scan_tmp = temp_root / "tmp"
+            install_root.mkdir()
+            scan_tmp.mkdir()
+            (install_root / "0000-public.pem").write_text(
+                "-----BEGIN PRIVATE KEY-----\n", encoding="utf-8"
+            )
+            for index in range(3000):
+                (install_root / f"{index + 1000:04d}-public.pem").write_text(
+                    "public certificate\n", encoding="utf-8"
+                )
+            private_hit = run_scan(private_scan, install_root, "scan_private_key_material", scan_tmp)
+            self.assertNotEqual(private_hit.returncode, 0)
+            self.assertIn("private key", private_hit.stderr.lower())
+
+            (install_root / "0000-public.pem").write_text("public certificate\n", encoding="utf-8")
+            (install_root / ".env").write_text("TOKEN=fixture\n", encoding="utf-8")
+            secret_hit = run_scan(private_scan, install_root, "scan_private_key_material", scan_tmp)
+            self.assertNotEqual(secret_hit.returncode, 0)
+            self.assertIn("secret-shaped", secret_hit.stderr.lower())
+
+            (install_root / ".env").unlink()
+            (install_root / "0000-text.txt").write_text("hermes legacy marker\n", encoding="utf-8")
+            for index in range(3000):
+                (install_root / f"{index + 1000:04d}-text.txt").write_text(
+                    "taiji product text\n", encoding="utf-8"
+                )
+            privacy_hit = run_scan(privacy_scan, install_root, "scan_product_privacy", scan_tmp)
+            self.assertNotEqual(privacy_hit.returncode, 0)
+            self.assertIn("legacy product", privacy_hit.stderr.lower())
+
+    def test_security_scans_fail_closed_on_reader_errors(self):
+        private_scan = build_function_source("scan_private_key_material", "scan_product_privacy")
+        privacy_scan = build_function_source("scan_product_privacy", "scan_package_tree")
+
+        def run_scan(function_source: str, root: Path, call: str, tmp_dir: Path):
+            script = "\n".join(
+                [
+                    "set -euo pipefail",
+                    'fail() { printf \'%s\\n\' "$*" >&2; exit 42; }',
+                    "grep() { return 2; }",
+                    function_source,
+                    call,
+                ]
+            )
+            return subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    **os.environ,
+                    "INSTALL_ROOT": str(root),
+                    "AGENT_RUNTIME": str(root / "runtime/agent"),
+                    "BUILD_ROOT": str(root / "build"),
+                    "PKG_ROOT": str(root),
+                    "TMPDIR": str(tmp_dir),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory(prefix="taiji-security-scan-errors-") as temp_dir:
+            temp_root = Path(temp_dir)
+            install_root = temp_root / "install"
+            scan_tmp = temp_root / "tmp"
+            install_root.mkdir()
+            scan_tmp.mkdir()
+            (install_root / "public.pem").write_text("public certificate\n", encoding="utf-8")
+            private_error = run_scan(private_scan, install_root, "scan_private_key_material", scan_tmp)
+            self.assertNotEqual(private_error.returncode, 0)
+            self.assertIn("cannot inspect package key", private_error.stderr.lower())
+
+            (install_root / "public.pem").unlink()
+            (install_root / "text.txt").write_text("taiji product text\n", encoding="utf-8")
+            privacy_error = run_scan(privacy_scan, install_root, "scan_product_privacy", scan_tmp)
+            self.assertNotEqual(privacy_error.returncode, 0)
+            self.assertIn("cannot inspect package text", privacy_error.stderr.lower())
 
     def test_postinst_repairs_electron_chrome_sandbox_permissions(self):
         postinst = read_text("packaging/linux/deb/postinst")

@@ -125,7 +125,11 @@ verify_linux_electron_runtime() {
   electron_file="$(file "$ELECTRON_BIN")"
   case "$electron_file" in *ELF*64-bit*x86-64*|*ELF*64-bit*X86-64*|*ELF*64-bit*80386*) ;; *) fail "Electron runtime is not Linux x86_64: $electron_file" ;; esac
   ldd_output="$(ldd "$ELECTRON_BIN" 2>&1 || true)"
-  printf '%s\n' "$ldd_output" | grep -q 'not found' && fail "Electron runtime has missing shared libraries" || true
+  if printf '%s\n' "$ldd_output" | grep -F 'not found' >/dev/null; then
+    fail "Electron runtime has missing shared libraries"
+  else
+    [ "$?" -eq 1 ] || fail "Cannot inspect Electron runtime shared-library output"
+  fi
 }
 
 validate_packaged_config_template() {
@@ -218,27 +222,73 @@ stage_python_runtime() {
 }
 
 scan_private_key_material() {
-  if find "$INSTALL_ROOT" \( -name '.env' -o -name '*.jwt' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.key' \) | grep -q .; then
-    fail "Package tree contains secret-shaped files"
+  local secret_path private_list private_path grep_status
+  if secret_path="$(find "$INSTALL_ROOT" \( -name '.env' -o -name '*.jwt' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.key' \) -print -quit)"; then
+    :
+  else
+    fail "Cannot scan package tree for secret-shaped files"
   fi
-  if find "$INSTALL_ROOT" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \) -print0 | xargs -0 -r grep -Iq 'BEGIN .*PRIVATE KEY'; then
-    fail "Package tree contains private key material"
+  [ -z "$secret_path" ] || fail "Package tree contains secret-shaped files: $secret_path"
+
+  private_list="$(mktemp "${TMPDIR:-/tmp}/taiji-private-key-scan.XXXXXX")" \
+    || fail "Cannot allocate private-key scan list"
+  if ! find "$INSTALL_ROOT" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \) -print0 > "$private_list"; then
+    rm -f -- "$private_list"
+    fail "Cannot enumerate package public-key files"
   fi
+  while IFS= read -r -d '' private_path; do
+    if grep -Iq 'BEGIN .*PRIVATE KEY' -- "$private_path"; then
+      rm -f -- "$private_list"
+      fail "Package tree contains private key material: $private_path"
+    else
+      grep_status=$?
+      if [ "$grep_status" -ne 1 ]; then
+        rm -f -- "$private_list"
+        fail "Cannot inspect package key file: $private_path"
+      fi
+    fi
+  done < "$private_list"
+  rm -f -- "$private_list"
 }
 
 scan_product_privacy() {
-  local name_hits text_hits
-  name_hits="$(find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -iname '*hermes*' -print)"
-  [ -z "$name_hits" ] || fail "Package tree contains legacy product names in visible paths"
-  text_hits="$(find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -type f ! -name '*.pyc' ! -name '*.so' ! -name '*.png' ! -name '*.jpg' ! -name '*.jpeg' ! -name '*.gif' -print0 | xargs -0 -r grep -I -n -E 'hermes|Hermes|HERMES_|hermes_cli|hermes-agent|hermes-webui|hermes-home' 2>/dev/null || true)"
-  [ -z "$text_hits" ] || fail "Package tree contains legacy product names in text files"
+  local name_hit privacy_list privacy_path grep_status
+  if name_hit="$(find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -iname '*hermes*' -print -quit)"; then
+    :
+  else
+    fail "Cannot scan package tree for legacy product names"
+  fi
+  [ -z "$name_hit" ] || fail "Package tree contains legacy product names in visible paths: $name_hit"
+
+  privacy_list="$(mktemp "${TMPDIR:-/tmp}/taiji-privacy-scan.XXXXXX")" \
+    || fail "Cannot allocate privacy scan list"
+  if ! find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -type f ! -name '*.pyc' ! -name '*.so' ! -name '*.png' ! -name '*.jpg' ! -name '*.jpeg' ! -name '*.gif' -print0 > "$privacy_list"; then
+    rm -f -- "$privacy_list"
+    fail "Cannot enumerate package text files for privacy scan"
+  fi
+  while IFS= read -r -d '' privacy_path; do
+    if grep -I -n -E 'hermes|Hermes|HERMES_|hermes_cli|hermes-agent|hermes-webui|hermes-home' -- "$privacy_path" >/dev/null; then
+      rm -f -- "$privacy_list"
+      fail "Package tree contains legacy product names in text files: $privacy_path"
+    else
+      grep_status=$?
+      if [ "$grep_status" -ne 1 ]; then
+        rm -f -- "$privacy_list"
+        fail "Cannot inspect package text file: $privacy_path"
+      fi
+    fi
+  done < "$privacy_list"
+  rm -f -- "$privacy_list"
 }
 
 scan_package_tree() {
-  if find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) | grep -q .; then
-    find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) >&2
-    fail "Package tree contains forbidden cache metadata"
+  local forbidden_path
+  if forbidden_path="$(find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) -print -quit)"; then
+    :
+  else
+    fail "Cannot scan package tree for forbidden cache metadata"
   fi
+  [ -z "$forbidden_path" ] || fail "Package tree contains forbidden cache metadata: $forbidden_path"
   scan_private_key_material
   scan_product_privacy
 }
@@ -246,8 +296,11 @@ scan_package_tree() {
 scan_webui_offline_assets() {
   local static_dir="$SOURCE_WEB_DIR/static" required missing="" cdn_hits
   [ -d "$static_dir" ] || fail "Missing WebUI static directory: $static_dir"
-  cdn_hits="$(grep -RInE 'cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com' "$static_dir" --include='*.html' --include='*.js' --include='*.css' --include='*.mjs' 2>/dev/null || true)"
-  [ -z "$cdn_hits" ] || fail "WebUI static assets still depend on CDN"
+  if cdn_hits="$(grep -RInE 'cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com' "$static_dir" --include='*.html' --include='*.js' --include='*.css' --include='*.mjs')"; then
+    [ -z "$cdn_hits" ] || fail "WebUI static assets still depend on CDN"
+  else
+    [ "$?" -eq 1 ] || fail "Cannot scan WebUI static assets for CDN references"
+  fi
   for required in "vendor/xterm/5.3.0/xterm.css" "vendor/xterm/5.3.0/xterm.js" "vendor/xterm-addon-fit/0.8.0/xterm-addon-fit.js" "vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js" "vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css" "vendor/prismjs/1.29.0/themes/prism.min.css" "vendor/prismjs/1.29.0/prism.min.js" "vendor/pdfjs-dist/4.9.155/pdf.min.mjs" "vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs" "vendor/mermaid/10.9.3/mermaid.min.js"; do
     [ -f "$static_dir/$required" ] || missing="$missing$static_dir/$required"$'\n'
   done
@@ -262,10 +315,25 @@ archive_old_packages() {
 scan_deb_release_artifact() {
   dpkg-deb -I "$OUT_DEB" >/dev/null
   dpkg-deb -c "$OUT_DEB" >/dev/null
-  local marker
+  local marker strings_dump
+  strings_dump="$(mktemp "${TMPDIR:-/tmp}/taiji-deb-strings.XXXXXX")" \
+    || fail "Cannot allocate DEB metadata scan buffer"
+  if ! strings "$OUT_DEB" > "$strings_dump"; then
+    rm -f -- "$strings_dump"
+    fail "Cannot inspect DEB archive metadata"
+  fi
   for marker in LIBARCHIVE.xattr com.apple.provenance PaxHeaders SCHILY.xattr; do
-    strings "$OUT_DEB" | grep -F "$marker" >/dev/null && fail "DEB contains forbidden archive metadata marker: $marker" || true
+    if grep -F "$marker" "$strings_dump" >/dev/null; then
+      rm -f -- "$strings_dump"
+      fail "DEB contains forbidden archive metadata marker: $marker"
+    else
+      [ "$?" -eq 1 ] || {
+        rm -f -- "$strings_dump"
+        fail "Cannot inspect DEB archive metadata marker: $marker"
+      }
+    fi
   done
+  rm -f -- "$strings_dump"
 }
 
 audit_deb_payload() {
