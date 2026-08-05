@@ -22,6 +22,9 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         self.assertIn("run-installed-electron-acceptance.js", script)
         self.assertIn("assemble-target-evidence.py", script)
         self.assertIn("observe-single-deb-install.py", script)
+        self.assertIn("certification-matrix.json", script)
+        self.assertIn("TAIJI_CERTIFICATION_CATEGORY_ID", script)
+        self.assertIn("environment-evidence.json", script)
         self.assertIn("validate-taiji-release-evidence.py", script)
         self.assertIn('/opt/taiji-agent/bin/taiji-native-verify', script)
         self.assertIn('TAIJI_AGENT_ROOT="/opt/taiji-agent"', script)
@@ -67,9 +70,13 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
             "TAIJI_SINGLE_DEB_INSTALL_OBSERVATION",
             "TAIJI_SINGLE_DEB_METHOD_ATTESTATION",
             "TAIJI_SINGLE_DEB_GRAPHICAL_INSTALLER_EVIDENCE",
+            "TAIJI_CERTIFICATION_CATEGORY_ID",
             "--install-observation",
             "--install-method-attestation",
             "--graphical-installer-evidence",
+            "--matrix",
+            "--category-id",
+            "--environment-record",
             "/usr/bin/python3 -B",
         ):
             self.assertIn(required, script)
@@ -96,6 +103,7 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
             "run-installed-electron-acceptance.js",
             "assemble-target-evidence.py",
             "observe-single-deb-install.py",
+            "certification-matrix.json",
             "validate-taiji-release-evidence.py",
             "signing-public.pem",
         ):

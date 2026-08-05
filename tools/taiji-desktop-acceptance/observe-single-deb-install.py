@@ -27,14 +27,36 @@ from pathlib import Path
 
 OBSERVATION_SCHEMA = "taiji.single-deb-install-observation.v1"
 ATTESTATION_SCHEMA = "taiji.single-deb-install-method-attestation.v1"
+ENVIRONMENT_RECORD_SCHEMA = "taiji-linux-environment-evidence/v1"
+CERTIFICATION_MATRIX_SCHEMA = "taiji-linux-certification-matrix/v1"
+CERTIFICATION_POLICY_ID = "taiji-linux-amd64-deb-v1"
 OBSERVATION_BASENAME = "single-deb-install-observation.json"
 ATTESTATION_BASENAME = "single-deb-install-method-attestation.json"
+ENVIRONMENT_RECORD_BASENAME = "environment-evidence.json"
 GRAPHICAL_EVIDENCE_BASENAME = "single-deb-graphical-installer.png"
 PACKAGE_NAME = "taiji-agent"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{7,127}$")
+VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
+
+POSITIVE_CATEGORY_IDS = {
+    "kylin-min-ukui",
+    "kylin-current-standard",
+    "kylin-hardened",
+    "uos-min-dde",
+    "uos-current-or-hardened",
+    "openkylin-current",
+}
+NEGATIVE_CATEGORY_IDS = {
+    "arm-blocked",
+    "rpm-only-blocked",
+    "glibc-below-min-blocked",
+    "missing-core-capability-blocked",
+    "no-admin-blocked",
+    "no-graphical-desktop-blocked",
+}
 
 
 class ObservationError(RuntimeError):
@@ -169,6 +191,120 @@ def _read_manifest(path):
     if not isinstance(value["target_baseline_profile_id"], str) or not PROFILE_RE.fullmatch(value["target_baseline_profile_id"]):
         raise ObservationError("package manifest target_baseline_profile_id is invalid")
     return value
+
+
+def _read_certification_matrix(path):
+    """Load the release-owned closed category matrix without external modules."""
+    matrix = _load_json(path, "certification matrix")
+    if matrix.get("schema") != CERTIFICATION_MATRIX_SCHEMA:
+        raise ObservationError("certification matrix schema is invalid")
+    if matrix.get("architecture") != "amd64":
+        raise ObservationError("certification matrix architecture must be amd64")
+    if matrix.get("compatibility_policy_id") != CERTIFICATION_POLICY_ID:
+        raise ObservationError("certification matrix compatibility policy is invalid")
+    positives = matrix.get("positive_categories")
+    negatives = matrix.get("negative_boundaries")
+    if not isinstance(positives, list) or not isinstance(negatives, list):
+        raise ObservationError("certification matrix category lists are invalid")
+    positive_ids = [item.get("id") for item in positives if isinstance(item, dict)]
+    negative_ids = [item.get("id") for item in negatives if isinstance(item, dict)]
+    if len(positive_ids) != 6 or set(positive_ids) != POSITIVE_CATEGORY_IDS:
+        raise ObservationError("certification matrix positive categories are incomplete")
+    if len(negative_ids) != 6 or set(negative_ids) != NEGATIVE_CATEGORY_IDS:
+        raise ObservationError("certification matrix negative boundaries are incomplete")
+    return matrix
+
+
+def _read_canonical_manifest(path):
+    manifest_path = Path(path)
+    if not manifest_path.is_absolute() or manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ObservationError("manifest must be an absolute regular file")
+    value = _load_json(manifest_path, "package manifest")
+    if value.get("schema") != "taiji-package-manifest/v3":
+        raise ObservationError("canonical target acceptance requires manifest schema taiji-package-manifest/v3")
+    required = {
+        "package", "version", "architecture", "source_commit", "deb_basename", "deb_sha256",
+        "compatibility_policy_id", "compatibility_policy_sha256",
+    }
+    missing = sorted(required - set(value))
+    if missing:
+        raise ObservationError("package manifest is missing canonical fields: %s" % missing)
+    if value.get("package") != PACKAGE_NAME or value.get("architecture") != "amd64":
+        raise ObservationError("package manifest package or architecture is invalid")
+    if not isinstance(value["source_commit"], str) or not COMMIT_RE.fullmatch(value["source_commit"]):
+        raise ObservationError("package manifest source_commit is invalid")
+    if not isinstance(value["version"], str) or not VERSION_RE.fullmatch(value["version"]):
+        raise ObservationError("package manifest version is invalid")
+    expected_deb = "taiji-agent_%s_amd64.deb" % value["version"]
+    if value["deb_basename"] != expected_deb:
+        raise ObservationError("package manifest deb/version mismatch")
+    for key in ("deb_sha256", "compatibility_policy_sha256"):
+        if not isinstance(value[key], str) or not HEX64_RE.fullmatch(value[key]):
+            raise ObservationError("package manifest %s is invalid" % key)
+    if value["compatibility_policy_id"] != CERTIFICATION_POLICY_ID:
+        raise ObservationError("package manifest compatibility policy is invalid")
+    return value
+
+
+def _canonical_environment_record(
+    *,
+    category_id,
+    matrix,
+    manifest,
+    observation,
+    os_id,
+    os_version,
+    desktop_environment,
+):
+    categories = {
+        item["id"]: item
+        for item in matrix["positive_categories"] + matrix["negative_boundaries"]
+    }
+    category = categories.get(category_id)
+    if category is None:
+        raise ObservationError("category_id is not in the certification matrix")
+    if category["kind"] != "positive":
+        raise ObservationError("single-DEB installation observation cannot certify a negative boundary")
+    if not isinstance(os_id, str) or not re.fullmatch(r"[a-z0-9._-]{2,32}", os_id):
+        raise ObservationError("canonical environment os_id is invalid")
+    if os_id not in category.get("os_ids", []):
+        raise ObservationError("canonical environment os_id does not match the selected category")
+    if not isinstance(os_version, str) or not os_version.strip() or len(os_version) > 128:
+        raise ObservationError("canonical environment os_version is invalid")
+    if not isinstance(desktop_environment, str) or not desktop_environment.strip() or len(desktop_environment) > 128:
+        raise ObservationError("canonical environment desktop_environment is invalid")
+    if not observation.get("first_launch_eligible"):
+        raise ObservationError("canonical environment is not eligible for first launch")
+    return {
+        "schema": ENVIRONMENT_RECORD_SCHEMA,
+        "category_id": category_id,
+        "category_kind": "positive",
+        "compatibility": "COMPATIBLE",
+        "source_commit": manifest["source_commit"],
+        "version": manifest["version"],
+        "architecture": "amd64",
+        "deb_basename": manifest["deb_basename"],
+        "deb_sha256": manifest["deb_sha256"],
+        "compatibility_policy_id": manifest["compatibility_policy_id"],
+        "compatibility_policy_sha256": manifest["compatibility_policy_sha256"],
+        "os_id": os_id,
+        "os_version": os_version.strip(),
+        "desktop_environment": desktop_environment.strip(),
+        "security_facts": {
+            "administrator_available": bool(os.geteuid() == 0 or any(
+                Path(command).is_file() for command in ("/usr/bin/pkexec", "/usr/bin/sudo", "/bin/sudo")
+            )),
+            "business_data_mutation": False,
+            "graphical_desktop": True,
+            "network_observation": observation["network_observation"],
+            "package_manager": "dpkg",
+        },
+        "checks": {
+            "preflight": "PASS",
+            "install": "PASS",
+        },
+        "attachments": [],
+    }
 
 
 def _open_candidate_directory(customer_dir):
@@ -542,6 +678,129 @@ def observe_install(customer_dir, manifest_path, challenge, user_state_paths, ru
     }
 
 
+def observe_environment_install(
+    customer_dir,
+    manifest_path,
+    matrix_path,
+    category_id,
+    challenge,
+    user_state_paths,
+    runtime,
+    timeout_seconds,
+    poll_interval_seconds,
+    os_id,
+    os_version,
+    desktop_environment,
+):
+    """Observe a canonical v3 installation and emit one category-bound record.
+
+    This deliberately reuses the same continuous absent-to-installed checks as
+    the legacy observer, but its output has no target-baseline/profile fields.
+    A local record reports compatibility facts only; certification is decided
+    later by the complete certification-set validator.
+    """
+    _validate_challenge(challenge)
+    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+        raise ObservationError("timeout_seconds must be positive")
+    if not isinstance(poll_interval_seconds, (int, float)) or poll_interval_seconds <= 0:
+        raise ObservationError("poll_interval_seconds must be positive")
+    matrix = _read_certification_matrix(matrix_path)
+    manifest = _read_canonical_manifest(manifest_path)
+    candidate, metadata, digest, candidate_directory_identity = _single_candidate(
+        customer_dir,
+        manifest["deb_basename"],
+        manifest["deb_sha256"],
+    )
+    identity = _candidate_identity(candidate, metadata, digest)
+    target_uid, canonical_home_fingerprint, user_state_paths_fingerprint = (
+        user_context_fingerprints(challenge, user_state_paths)
+    )
+    _assert_user_state_absent(user_state_paths)
+    machine_id, boot_id = runtime.identity()
+    status_before = runtime.package_status()
+    if status_before is not None:
+        raise ObservationError("observer must start before the package is installed and before any dpkg package record exists")
+    if not runtime.network_is_offline():
+        raise ObservationError("non-loopback network is available before installation")
+    started_utc = runtime.utc_now()
+    deadline = runtime.monotonic() + timeout_seconds
+    samples = 1
+    transitions = ["not-installed"]
+    current_status = status_before
+    while current_status != "install ok installed":
+        if runtime.monotonic() >= deadline:
+            raise ObservationError("timed out before dpkg reported install ok installed")
+        runtime.sleep(poll_interval_seconds)
+        current_machine, current_boot = runtime.identity()
+        if (current_machine, current_boot) != (machine_id, boot_id):
+            raise ObservationError("machine or boot identity changed during observation")
+        _assert_user_state_absent(user_state_paths)
+        _assert_candidate_unchanged(customer_dir, manifest["deb_basename"], candidate_directory_identity, identity)
+        if not runtime.network_is_offline():
+            raise ObservationError("non-loopback network became available during installation")
+        samples += 1
+        current_status = runtime.package_status()
+        status_label = current_status if current_status is not None else "not-installed"
+        if status_label != transitions[-1]:
+            transitions.append(status_label)
+    _assert_user_state_absent(user_state_paths)
+    _assert_candidate_unchanged(customer_dir, manifest["deb_basename"], candidate_directory_identity, identity)
+    final_machine, final_boot = runtime.identity()
+    if (final_machine, final_boot) != (machine_id, boot_id):
+        raise ObservationError("machine or boot identity changed at installation completion")
+    if not runtime.network_is_offline():
+        raise ObservationError("non-loopback network became available at installation completion")
+    if user_context_fingerprints(challenge, user_state_paths) != (
+        target_uid,
+        canonical_home_fingerprint,
+        user_state_paths_fingerprint,
+    ):
+        raise ObservationError("uid, canonical home, or user state paths changed during observation")
+    samples += 1
+    if _sha256_path(candidate) != manifest["deb_sha256"]:
+        raise ObservationError("candidate DEB changed during observation")
+    completed_utc = runtime.utc_now()
+    observation = {
+        "schema": "taiji.single-deb-install-observation/v2",
+        "generated_at_utc": _utc_text(completed_utc),
+        "started_at_utc": _utc_text(started_utc),
+        "completed_at_utc": _utc_text(completed_utc),
+        "challenge_nonce": challenge,
+        "machine_fingerprint_sha256": _fingerprint(challenge, machine_id),
+        "boot_fingerprint_sha256": _fingerprint(challenge, boot_id),
+        "target_uid": target_uid,
+        "canonical_home_fingerprint_sha256": canonical_home_fingerprint,
+        "user_state_paths_fingerprint_sha256": user_state_paths_fingerprint,
+        "source_commit": manifest["source_commit"],
+        "manifest_sha256": _sha256_path(manifest_path),
+        "deb_observed_basename": candidate.name,
+        "deb_sha256": digest,
+        "candidate_file_count": 1,
+        "additional_install_files_observed": False,
+        "package_status_before": "not-installed",
+        "package_status_after": "install ok installed",
+        "package_status_transitions": transitions,
+        "network_observation": "continuous-process-sampling-no-non-loopback-up",
+        "network_sample_interval_ms": int(round(poll_interval_seconds * 1000)),
+        "network_sample_count": samples,
+        "user_state_before": "absent",
+        "user_state_after_install_before_first_launch": "absent",
+        "first_launch_eligible": True,
+        "installation_method_machine_observed": False,
+        "observation_process_continuous": True,
+    }
+    record = _canonical_environment_record(
+        category_id=category_id,
+        matrix=matrix,
+        manifest=manifest,
+        observation=observation,
+        os_id=os_id,
+        os_version=os_version,
+        desktop_environment=desktop_environment,
+    )
+    return observation, record
+
+
 OBSERVATION_KEYS = {
     "schema", "generated_at_utc", "started_at_utc", "completed_at_utc", "challenge_nonce",
     "machine_fingerprint_sha256", "boot_fingerprint_sha256", "source_commit", "manifest_sha256",
@@ -552,6 +811,10 @@ OBSERVATION_KEYS = {
     "network_sample_interval_ms", "network_sample_count", "user_state_before",
     "user_state_after_install_before_first_launch", "first_launch_eligible",
     "installation_method_machine_observed", "observation_process_continuous",
+}
+
+CANONICAL_OBSERVATION_KEYS = OBSERVATION_KEYS - {
+    "target_baseline_profile_id", "target_baseline_sha256",
 }
 
 ATTESTATION_KEYS = {
@@ -644,9 +907,11 @@ def _validate_png_structure(payload):
         raise ObservationError("graphical installer evidence PNG is incomplete")
 
 
-def _validate_observation_identity(observation, challenge, runtime, user_state_paths=None):
-    _require_exact_keys(observation, OBSERVATION_KEYS, "install observation")
-    if observation.get("schema") != OBSERVATION_SCHEMA:
+def _validate_observation_identity(observation, challenge, runtime, user_state_paths=None, canonical=False):
+    expected_keys = CANONICAL_OBSERVATION_KEYS if canonical else OBSERVATION_KEYS
+    _require_exact_keys(observation, expected_keys, "install observation")
+    expected_schema = "taiji.single-deb-install-observation/v2" if canonical else OBSERVATION_SCHEMA
+    if observation.get("schema") != expected_schema:
         raise ObservationError("install observation schema is invalid")
     if observation.get("challenge_nonce") != challenge:
         raise ObservationError("install observation challenge does not match")
@@ -726,6 +991,7 @@ def verify_method_attestation(
     challenge,
     runtime,
     user_state_paths=None,
+    canonical=False,
 ):
     _validate_challenge(challenge)
     attestation = _load_json(attestation_path, "install method attestation")
@@ -736,6 +1002,7 @@ def verify_method_attestation(
         challenge,
         runtime,
         user_state_paths=user_state_paths,
+        canonical=canonical,
     )
     evidence = _validate_png_evidence(graphical_evidence_path)
     fixed = {
@@ -851,6 +1118,84 @@ def verify_observation(
     return observation
 
 
+def verify_environment_observation(
+    observation_path,
+    environment_record_path,
+    matrix_path,
+    category_id,
+    manifest_path,
+    deb_path,
+    challenge,
+    runtime,
+    max_age_seconds=86400,
+    user_state_paths=None,
+):
+    """Verify the canonical no-target-baseline observation and record."""
+    _validate_challenge(challenge)
+    matrix = _read_certification_matrix(matrix_path)
+    manifest = _read_canonical_manifest(manifest_path)
+    observation = _load_json(observation_path, "canonical install observation")
+    _validate_observation_identity(
+        observation,
+        challenge,
+        runtime,
+        user_state_paths=user_state_paths,
+        canonical=True,
+    )
+    record = _load_json(environment_record_path, "environment evidence record")
+    expected = _canonical_environment_record(
+        category_id=category_id,
+        matrix=matrix,
+        manifest=manifest,
+        observation=observation,
+        os_id=record.get("os_id"),
+        os_version=record.get("os_version"),
+        desktop_environment=record.get("desktop_environment"),
+    )
+    _require_exact_keys(record, expected.keys(), "environment evidence record")
+    if record != expected:
+        raise ObservationError("environment evidence record does not match canonical observation facts")
+    started = _parse_utc(observation["started_at_utc"], "install observation started_at_utc")
+    completed = _parse_utc(observation["completed_at_utc"], "install observation completed_at_utc")
+    generated = _parse_utc(observation["generated_at_utc"], "install observation generated_at_utc")
+    now = runtime.utc_now()
+    if not started <= completed <= generated <= now:
+        raise ObservationError("canonical install observation timestamps are not ordered")
+    if (now - completed).total_seconds() > max_age_seconds:
+        raise ObservationError("canonical install observation is too old")
+    if runtime.package_status() != "install ok installed":
+        raise ObservationError("taiji-agent is not currently installed")
+    deb = Path(deb_path)
+    if not deb.is_absolute() or deb.is_symlink() or not deb.is_file():
+        raise ObservationError("candidate DEB must remain an absolute regular file")
+    if deb.name != manifest["deb_basename"]:
+        raise ObservationError("current candidate does not match the canonical manifest DEB basename")
+    deb_hash = _sha256_path(deb)
+    for key, expected_value in {
+        "source_commit": manifest["source_commit"],
+        "manifest_sha256": _sha256_path(manifest_path),
+        "deb_sha256": manifest["deb_sha256"],
+        "candidate_file_count": 1,
+        "additional_install_files_observed": False,
+        "package_status_before": "not-installed",
+        "package_status_after": "install ok installed",
+        "network_observation": "continuous-process-sampling-no-non-loopback-up",
+        "user_state_before": "absent",
+        "user_state_after_install_before_first_launch": "absent",
+        "first_launch_eligible": True,
+        "installation_method_machine_observed": False,
+        "observation_process_continuous": True,
+    }.items():
+        if observation.get(key) != expected_value:
+            raise ObservationError("canonical install observation %s does not match" % key)
+    if observation["deb_sha256"] != deb_hash or record["deb_sha256"] != deb_hash:
+        raise ObservationError("canonical install observation DEB hash does not match current candidate")
+    transitions = observation["package_status_transitions"]
+    if not isinstance(transitions, list) or not transitions or transitions[0] != "not-installed" or transitions[-1] != "install ok installed":
+        raise ObservationError("canonical install observation package transitions are invalid")
+    return record
+
+
 def _atomic_json(output_path, value):
     output_path = Path(output_path)
     parent_descriptor = _open_safe_output_parent(output_path.parent)
@@ -925,7 +1270,10 @@ def _require_observation_only_output_directory(directory, observation_path):
         raise ObservationError("attestation output directory must contain the observation")
     descriptor = _open_safe_output_parent(directory)
     try:
-        if set(os.listdir(descriptor)) != {OBSERVATION_BASENAME}:
+        allowed = {OBSERVATION_BASENAME}
+        if Path(directory, ENVIRONMENT_RECORD_BASENAME).is_file():
+            allowed.add(ENVIRONMENT_RECORD_BASENAME)
+        if set(os.listdir(descriptor)) != allowed:
             raise ObservationError("attestation output directory must contain only the fixed observation file")
     finally:
         os.close(descriptor)
@@ -990,6 +1338,11 @@ def _build_parser():
     observe.add_argument("--manifest", required=True)
     observe.add_argument("--challenge", required=True)
     observe.add_argument("--output-dir", required=True)
+    observe.add_argument("--matrix")
+    observe.add_argument("--category-id")
+    observe.add_argument("--os-id")
+    observe.add_argument("--os-version")
+    observe.add_argument("--desktop-environment")
     observe.add_argument("--timeout-seconds", type=int, default=900)
     observe.add_argument("--poll-interval-ms", type=int, default=250)
 
@@ -1008,6 +1361,9 @@ def _build_parser():
     verify.add_argument("--attestation", required=True)
     verify.add_argument("--graphical-evidence", required=True)
     verify.add_argument("--challenge", required=True)
+    verify.add_argument("--matrix")
+    verify.add_argument("--category-id")
+    verify.add_argument("--environment-record")
     return parser
 
 
@@ -1025,6 +1381,37 @@ def main(argv=None):
         if args.poll_interval_ms < 100 or args.poll_interval_ms > 1000:
             raise ObservationError("--poll-interval-ms must be between 100 and 1000")
         _require_empty_safe_output_directory(output_dir)
+        canonical = bool(args.matrix or args.category_id)
+        if canonical and (not args.matrix or not args.category_id):
+            raise ObservationError("--matrix and --category-id must be supplied together for canonical mode")
+        if canonical:
+            if not args.os_id or not args.os_version or not args.desktop_environment:
+                raise ObservationError("canonical mode requires --os-id, --os-version, and --desktop-environment")
+            observation, record = observe_environment_install(
+                customer_dir=customer_dir,
+                manifest_path=manifest,
+                matrix_path=Path(args.matrix),
+                category_id=args.category_id,
+                challenge=args.challenge,
+                user_state_paths=default_user_state_paths(),
+                runtime=runtime,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval_seconds=args.poll_interval_ms / 1000.0,
+                os_id=args.os_id,
+                os_version=args.os_version,
+                desktop_environment=args.desktop_environment,
+            )
+            output = output_dir / OBSERVATION_BASENAME
+            record_output = output_dir / ENVIRONMENT_RECORD_BASENAME
+            _atomic_json(output, observation)
+            _atomic_json(record_output, record)
+            print(json.dumps({
+                "status": "taiji-linux-environment-observed",
+                "observation": str(output),
+                "environment_record": str(record_output),
+                "category_id": args.category_id,
+            }, sort_keys=True))
+            return 0
         payload = observe_install(
             customer_dir=customer_dir,
             manifest_path=manifest,
@@ -1072,19 +1459,37 @@ def main(argv=None):
             "graphical_installer_evidence": str(copied_evidence),
         }, sort_keys=True))
         return 0
-    observation = verify_observation(
-        Path(args.observation),
-        manifest_path=Path(args.manifest),
-        deb_path=Path(args.deb),
-        challenge=args.challenge,
-        runtime=runtime,
-    )
+    canonical = bool(args.matrix or args.category_id or args.environment_record)
+    if canonical and (not args.matrix or not args.category_id or not args.environment_record):
+        raise ObservationError(
+            "canonical verify requires --matrix, --category-id, and --environment-record"
+        )
+    if canonical:
+        observation = verify_environment_observation(
+            Path(args.observation),
+            environment_record_path=Path(args.environment_record),
+            matrix_path=Path(args.matrix),
+            category_id=args.category_id,
+            manifest_path=Path(args.manifest),
+            deb_path=Path(args.deb),
+            challenge=args.challenge,
+            runtime=runtime,
+        )
+    else:
+        observation = verify_observation(
+            Path(args.observation),
+            manifest_path=Path(args.manifest),
+            deb_path=Path(args.deb),
+            challenge=args.challenge,
+            runtime=runtime,
+        )
     verify_method_attestation(
         attestation_path=Path(args.attestation),
         observation_path=Path(args.observation),
         graphical_evidence_path=Path(args.graphical_evidence),
         challenge=args.challenge,
         runtime=runtime,
+        canonical=canonical,
     )
     print(json.dumps({
         "status": "taiji-single-deb-install-evidence-valid",

@@ -40,7 +40,8 @@ const SUPPORT_BUNDLE_BASENAME = "taiji-support-bundle.json";
 const FIXTURE_BASENAME = "taiji-attachment-probe.txt";
 
 function parseArgs(argv) {
-  const allowed = new Set(["--electron", "--app-dir", "--output-dir", "--session-id", "--challenge", "--timeout-ms"]);
+  const allowed = new Set(["--electron", "--app-dir", "--output-dir", "--session-id", "--challenge", "--timeout-ms", "--matrix", "--category-id"]);
+  const required = new Set(["--electron", "--app-dir", "--output-dir", "--session-id", "--challenge", "--timeout-ms"]);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
@@ -50,8 +51,11 @@ function parseArgs(argv) {
     if (typeof value !== "string" || !value) throw new Error(`missing value for ${key}`);
     values.set(key, value);
   }
-  for (const key of allowed) {
+  for (const key of required) {
     if (!values.has(key)) throw new Error(`missing required argument: ${key}`);
+  }
+  if (values.has("--matrix") !== values.has("--category-id")) {
+    throw new Error("--matrix and --category-id must be supplied together");
   }
 
   const electron = values.get("--electron");
@@ -60,6 +64,8 @@ function parseArgs(argv) {
   const sessionId = values.get("--session-id");
   const challenge = values.get("--challenge");
   const timeoutMs = Number(values.get("--timeout-ms"));
+  const matrix = values.get("--matrix") || null;
+  const categoryId = values.get("--category-id") || null;
   if (electron !== ELECTRON_PATH) throw new Error(`--electron must use the fixed installed Electron path: ${ELECTRON_PATH}`);
   if (appDir !== APP_DIR) throw new Error(`--app-dir must use the fixed installed App path: ${APP_DIR}`);
   if (!path.isAbsolute(outputDir) || path.resolve(outputDir) !== outputDir) {
@@ -70,7 +76,13 @@ function parseArgs(argv) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 30000 || timeoutMs > 1800000) {
     throw new Error("--timeout-ms must be an integer between 30000 and 1800000");
   }
-  return { electron, appDir, outputDir, sessionId, challenge, timeoutMs };
+  if (matrix !== null && (!path.isAbsolute(matrix) || path.resolve(matrix) !== matrix)) {
+    throw new Error("--matrix must be a normalized absolute path");
+  }
+  if (categoryId !== null && !/^[a-z0-9][a-z0-9-]{2,63}$/.test(categoryId)) {
+    throw new Error("--category-id has an invalid format");
+  }
+  return { electron, appDir, outputDir, sessionId, challenge, timeoutMs, matrix, categoryId };
 }
 
 function buildElectronArgs(port) {

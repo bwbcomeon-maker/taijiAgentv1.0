@@ -87,6 +87,20 @@ test("parseArgs accepts only the fixed installed Electron and App paths", () => 
   assert.equal(args.timeoutMs, 600000);
 });
 
+test("parseArgs binds canonical certification category metadata when supplied", () => {
+  const args = parseArgs([
+    ...validArgv(),
+    "--matrix", "/opt/taiji-agent/certification-matrix.json",
+    "--category-id", "kylin-current-standard",
+  ]);
+  assert.equal(args.matrix, "/opt/taiji-agent/certification-matrix.json");
+  assert.equal(args.categoryId, "kylin-current-standard");
+  assert.throws(
+    () => parseArgs([...validArgv(), "--category-id", "kylin-current-standard"]),
+    /supplied together/,
+  );
+});
+
 test("parseArgs rejects alternate executables, relative output and unknown flags", () => {
   assert.throws(() => parseArgs(validArgv({ electron: "/tmp/electron" })), /fixed installed Electron path/);
   assert.throws(() => parseArgs(validArgv({ outputDir: "relative/evidence" })), /absolute path/);

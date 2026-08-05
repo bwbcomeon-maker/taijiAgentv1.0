@@ -451,6 +451,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         "验收工具/run-installed-electron-acceptance.js",
         "验收工具/assemble-target-evidence.py",
         "验收工具/observe-single-deb-install.py",
+        "验收工具/certification-matrix.json",
         "验收工具/validate-taiji-release-evidence.py",
         "验收工具/signing-public.pem",
     }

@@ -200,6 +200,7 @@ verify_target_acceptance_toolchain() {
     "run-installed-electron-acceptance.js"
     "assemble-target-evidence.py"
     "observe-single-deb-install.py"
+    "certification-matrix.json"
     "validate-taiji-release-evidence.py"
     "signing-public.pem"
     "management/taiji-silent-deploy.sh"
@@ -216,6 +217,9 @@ verify_target_acceptance_toolchain() {
     case "$name" in
       run-installed-electron-acceptance.js|assemble-target-evidence.py|observe-single-deb-install.py)
         source_script="$REPO_ROOT/tools/taiji-desktop-acceptance/$name"
+        ;;
+      certification-matrix.json)
+        source_script="$REPO_ROOT/packaging/linux/certification-matrix.json"
         ;;
       validate-taiji-release-evidence.py)
         source_script="$REPO_ROOT/scripts/$name"

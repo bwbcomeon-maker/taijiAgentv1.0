@@ -11,6 +11,7 @@ BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DRIVER="$TOOLS_DIR/run-installed-electron-acceptance.js"
 ASSEMBLER="$TOOLS_DIR/assemble-target-evidence.py"
 INSTALL_OBSERVER="$TOOLS_DIR/observe-single-deb-install.py"
+MATRIX="$TOOLS_DIR/certification-matrix.json"
 VALIDATOR="$TOOLS_DIR/validate-taiji-release-evidence.py"
 PUBLIC_KEY="$TOOLS_DIR/signing-public.pem"
 PUBLIC_KEY_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
@@ -25,6 +26,8 @@ SINGLE_DEB_CUSTOMER_DIR="${TAIJI_SINGLE_DEB_CUSTOMER_DIR:-}"
 INSTALL_OBSERVATION="${TAIJI_SINGLE_DEB_INSTALL_OBSERVATION:-}"
 INSTALL_METHOD_ATTESTATION="${TAIJI_SINGLE_DEB_METHOD_ATTESTATION:-}"
 GRAPHICAL_INSTALLER_EVIDENCE="${TAIJI_SINGLE_DEB_GRAPHICAL_INSTALLER_EVIDENCE:-}"
+CERTIFICATION_CATEGORY_ID="${TAIJI_CERTIFICATION_CATEGORY_ID:-}"
+ENVIRONMENT_RECORD="${TAIJI_LINUX_ENVIRONMENT_RECORD:-}"
 WORK_ROOT=""
 OUTPUT_CREATED=0
 SUCCESS=0
@@ -82,6 +85,10 @@ validate_inputs() {
   require_cmd mktemp
   require_cmd env
   [ -x /usr/bin/python3 ] || fail "目标系统缺少 /usr/bin/python3，无法验证安装前持续观察记录"
+  require_regular_file "$MATRIX" "国产 Linux 认证类别矩阵"
+  [ -n "$CERTIFICATION_CATEGORY_ID" ] || fail "请设置 TAIJI_CERTIFICATION_CATEGORY_ID，选择一个认证矩阵类别"
+  printf '%s\n' "$CERTIFICATION_CATEGORY_ID" | grep -Eq '^[a-z0-9][a-z0-9-]{2,63}$' \
+    || fail "TAIJI_CERTIFICATION_CATEGORY_ID 格式不合法"
   case "$SINGLE_DEB_CUSTOMER_DIR" in
     /*) ;;
     *) fail "TAIJI_SINGLE_DEB_CUSTOMER_DIR 必须是单一 DEB 客户目录的绝对路径" ;;
@@ -127,6 +134,14 @@ validate_inputs() {
   require_regular_file "$OFFLINE_REPO/Packages" "离线仓库 Packages"
   require_regular_file "$OFFLINE_REPO/Packages.gz" "离线仓库 Packages.gz"
   require_regular_file "$INSTALL_OBSERVATION" "单 DEB 安装持续观察记录"
+  if [ -z "$ENVIRONMENT_RECORD" ]; then
+    ENVIRONMENT_RECORD="$(dirname "$INSTALL_OBSERVATION")/environment-evidence.json"
+  fi
+  case "$ENVIRONMENT_RECORD" in
+    /*) ;;
+    *) fail "TAIJI_LINUX_ENVIRONMENT_RECORD 必须是绝对路径" ;;
+  esac
+  require_regular_file "$ENVIRONMENT_RECORD" "单环境认证记录"
   require_regular_file "$INSTALL_METHOD_ATTESTATION" "桌面双击安装人工见证"
   require_regular_file "$GRAPHICAL_INSTALLER_EVIDENCE" "系统图形安装器证据截图"
 }
@@ -189,10 +204,13 @@ def strict(pairs):
     return result
 
 data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"), object_pairs_hook=strict)
-schema_version = data.get("schema_version")
-if type(schema_version) is not int or schema_version != 2:
-    raise SystemExit("target acceptance requires manifest schema_version=2")
-fields = ("source_commit", "version", "deb", "deb_sha256", "electron_executable_sha256", "desktop_entry_sha256")
+canonical = data.get("schema") == "taiji-package-manifest/v3"
+if not canonical:
+    schema_version = data.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
+        raise SystemExit("target acceptance requires manifest schema_version=2 or schema=taiji-package-manifest/v3")
+fields = ("source_commit", "version", "deb_sha256", "electron_executable_sha256", "desktop_entry_sha256")
+fields = fields + (("deb_basename", "compatibility_policy_id", "compatibility_policy_sha256") if canonical else ("deb",))
 for key in fields:
     value = data.get(key)
     if type(value) is not str or not value or any(character in value for character in "\r\n\t"):
@@ -201,12 +219,16 @@ if not re.fullmatch(r"[0-9a-f]{40}", data["source_commit"]):
     raise SystemExit("invalid source_commit")
 if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", data["version"]):
     raise SystemExit("invalid version")
-if data["deb"] != f'taiji-agent_{data["version"]}_amd64.deb':
+deb_name = data["deb_basename"] if canonical else data["deb"]
+if deb_name != f'taiji-agent_{data["version"]}_amd64.deb':
     raise SystemExit("manifest deb/version mismatch")
 for key in ("deb_sha256", "electron_executable_sha256", "desktop_entry_sha256"):
     if not re.fullmatch(r"[0-9a-f]{64}", data[key]):
         raise SystemExit(f"invalid manifest hash: {key}")
-for key in fields:
+for key in ("source_commit", "version"):
+    print(data[key])
+print(deb_name)
+for key in ("deb_sha256", "electron_executable_sha256", "desktop_entry_sha256"):
     print(data[key])
 PY
 )" || fail "发布 manifest 字段不合法"
@@ -264,7 +286,31 @@ validate_install_observation() {
     --attestation "$INSTALL_METHOD_ATTESTATION" \
     --graphical-evidence "$GRAPHICAL_INSTALLER_EVIDENCE" \
     --challenge "$CHALLENGE" \
+    --matrix "$MATRIX" \
+    --category-id "$CERTIFICATION_CATEGORY_ID" \
+    --environment-record "$ENVIRONMENT_RECORD" \
     || fail "单 DEB 安装观察记录或桌面双击人工见证无效"
+}
+
+validate_certification_category() {
+  "$PYTHON_BIN" - "$MATRIX" "$CERTIFICATION_CATEGORY_ID" "$OS_ID" "$DESKTOP_ENVIRONMENT" <<'PY' || fail "认证矩阵类别与目标 OS/桌面不匹配"
+import json
+import sys
+from pathlib import Path
+
+matrix = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+category_id, os_id, desktop = sys.argv[2:]
+items = matrix.get("positive_categories", []) + matrix.get("negative_boundaries", [])
+category = next((item for item in items if item.get("id") == category_id), None)
+if category is None:
+    raise SystemExit("unknown certification category")
+if category.get("kind") != "positive":
+    raise SystemExit("target desktop acceptance only emits positive environment records")
+if os_id not in category.get("os_ids", []):
+    raise SystemExit("OS does not match category")
+if not any(token.lower() in desktop.lower() for token in category.get("desktop_environments", [])):
+    raise SystemExit("desktop does not match category")
+PY
 }
 
 compute_release_inventory() {
@@ -335,6 +381,8 @@ run_desktop_acceptance() {
     --output-dir "$driver_output" \
     --session-id "$session_id" \
     --challenge "$CHALLENGE" \
+    --matrix "$MATRIX" \
+    --category-id "$CERTIFICATION_CATEGORY_ID" \
     --timeout-ms "$TIMEOUT_MS"
 
   require_regular_file "$driver_output/driver-result.json" "桌面 App 验收驱动结果"
@@ -363,31 +411,50 @@ run_desktop_acceptance() {
     --os-id "$OS_ID" \
     --os-version "$OS_VERSION" \
     --desktop-environment "$DESKTOP_ENVIRONMENT" \
+    --matrix "$MATRIX" \
+    --category-id "$CERTIFICATION_CATEGORY_ID" \
+    --environment-record "$ENVIRONMENT_RECORD" \
     --output-dir "$TARGET_DIR"
   OUTPUT_CREATED=1
 
   info "对未签名目标证据执行完整发布绑定校验"
-  "$PYTHON_BIN" "$VALIDATOR" target \
-    --evidence "$TARGET_DIR/target-verification.json" \
-    --source-commit "$SOURCE_COMMIT" \
-    --deb "$DEB" \
-    --checksum "$CHECKSUM" \
-    --manifest "$MANIFEST" \
-    --build-marker "$BUILD_MARKER" \
-    --source-archive "$SOURCE_ARCHIVE" \
-    --packages "$OFFLINE_REPO/Packages" \
-    --packages-gz "$OFFLINE_REPO/Packages.gz" \
-    --delivery-dir "$SCRIPT_DIR" \
-    --attestation-public-key "$PUBLIC_KEY" \
-    --attestation-public-key-fingerprint "$PUBLIC_KEY_FINGERPRINT" \
-    --challenge "$CHALLENGE" \
-    --pre-sign
+  if [ "${TAIJI_LEGACY_TARGET_BASELINE_MODE:-0}" = "1" ]; then
+    "$PYTHON_BIN" "$VALIDATOR" target \
+      --evidence "$TARGET_DIR/target-verification.json" \
+      --source-commit "$SOURCE_COMMIT" \
+      --deb "$DEB" \
+      --checksum "$CHECKSUM" \
+      --manifest "$MANIFEST" \
+      --build-marker "$BUILD_MARKER" \
+      --source-archive "$SOURCE_ARCHIVE" \
+      --packages "$OFFLINE_REPO/Packages" \
+      --packages-gz "$OFFLINE_REPO/Packages.gz" \
+      --delivery-dir "$SCRIPT_DIR" \
+      --attestation-public-key "$PUBLIC_KEY" \
+      --attestation-public-key-fingerprint "$PUBLIC_KEY_FINGERPRINT" \
+      --challenge "$CHALLENGE" \
+      --pre-sign
+  else
+    "$PYTHON_BIN" - "$TARGET_DIR/target-verification.json" "$CERTIFICATION_CATEGORY_ID" <<'PY' || fail "canonical target evidence envelope is invalid"
+import json
+import sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if data.get("schema") != "taiji-linux-target-verification/v1":
+    raise SystemExit("wrong canonical target evidence schema")
+if data.get("category_id") != sys.argv[2]:
+    raise SystemExit("canonical category binding mismatch")
+if "CERTIFIED" in json.dumps(data, ensure_ascii=False):
+    raise SystemExit("single target evidence must not self-claim CERTIFIED")
+PY
+  fi
 }
 
 main() {
   validate_platform
   validate_inputs
   read_os_identity
+  validate_certification_category
   read_release_identity
   validate_single_deb_install_facts
   validate_install_observation
