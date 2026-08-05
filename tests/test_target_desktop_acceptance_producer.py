@@ -104,6 +104,7 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
             "assemble-target-evidence.py",
             "observe-single-deb-install.py",
             "certification-matrix.json",
+            "assemble-taiji-certification-set.py",
             "validate-taiji-release-evidence.py",
             "signing-public.pem",
         ):

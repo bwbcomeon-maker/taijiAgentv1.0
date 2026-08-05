@@ -826,6 +826,7 @@ stage_target_acceptance_tools() {
   local assembler="$SRC_DIR/tools/taiji-desktop-acceptance/assemble-target-evidence.py"
   local install_observer="$SRC_DIR/tools/taiji-desktop-acceptance/observe-single-deb-install.py"
   local certification_matrix="$SRC_DIR/packaging/linux/certification-matrix.json"
+  local certification_set_assembler="$SRC_DIR/scripts/assemble-taiji-certification-set.py"
   local validator="$SRC_DIR/scripts/validate-taiji-release-evidence.py"
   local public_key="$SRC_DIR/tools/taiji-release-evidence/signing-public.pem"
   local public_fingerprint expected_fingerprint
@@ -836,10 +837,11 @@ stage_target_acceptance_tools() {
   [ -f "$assembler" ] && [ ! -L "$assembler" ] || fail "源码缺少目标证据组装器：$assembler"
   [ -f "$install_observer" ] && [ ! -L "$install_observer" ] || fail "源码缺少单 DEB 安装前观察器：$install_observer"
   [ -f "$certification_matrix" ] && [ ! -L "$certification_matrix" ] || fail "源码缺少认证类别矩阵：$certification_matrix"
+  [ -f "$certification_set_assembler" ] && [ ! -L "$certification_set_assembler" ] || fail "源码缺少认证集组装器：$certification_set_assembler"
   [ -f "$validator" ] && [ ! -L "$validator" ] || fail "源码缺少发布证据校验器：$validator"
   [ -f "$public_key" ] && [ ! -L "$public_key" ] || fail "源码缺少发布证据验签公钥：$public_key"
   node --check "$driver" >/dev/null || fail "桌面 App 验收驱动 JavaScript 语法检查失败"
-  python3 - "$assembler" "$install_observer" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
+  python3 - "$assembler" "$install_observer" "$validator" "$certification_set_assembler" <<'PY' || fail "目标证据 Python 工具语法检查失败"
 import sys
 from pathlib import Path
 
@@ -856,6 +858,7 @@ PY
   install -m 0644 "$assembler" "$target/assemble-target-evidence.py"
   install -m 0644 "$install_observer" "$target/observe-single-deb-install.py"
   install -m 0644 "$certification_matrix" "$target/certification-matrix.json"
+  install -m 0755 "$certification_set_assembler" "$target/assemble-taiji-certification-set.py"
   install -m 0644 "$validator" "$target/validate-taiji-release-evidence.py"
   install -m 0644 "$public_key" "$target/signing-public.pem"
   # These are management-plane helpers for the copied 02 wrapper.  They are

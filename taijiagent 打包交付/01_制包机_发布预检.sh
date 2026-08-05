@@ -201,6 +201,7 @@ verify_target_acceptance_toolchain() {
     "assemble-target-evidence.py"
     "observe-single-deb-install.py"
     "certification-matrix.json"
+    "assemble-taiji-certification-set.py"
     "validate-taiji-release-evidence.py"
     "signing-public.pem"
     "management/taiji-silent-deploy.sh"
@@ -220,6 +221,9 @@ verify_target_acceptance_toolchain() {
         ;;
       certification-matrix.json)
         source_script="$REPO_ROOT/packaging/linux/certification-matrix.json"
+        ;;
+      assemble-taiji-certification-set.py)
+        source_script="$REPO_ROOT/scripts/assemble-taiji-certification-set.py"
         ;;
       validate-taiji-release-evidence.py)
         source_script="$REPO_ROOT/scripts/$name"
