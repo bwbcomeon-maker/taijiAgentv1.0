@@ -1,0 +1,3 @@
+Version needs section '.gnu.version_r' contains 1 entry:
+  0x0010: Version: 1  File: libc.so.6  Cnt: 1
+  0x0020:   Name: GLIBC_2.35  Flags: none  Version: 2

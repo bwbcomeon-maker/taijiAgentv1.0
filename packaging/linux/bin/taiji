@@ -41,6 +41,7 @@ RUNTIME_ENV="$APP_ROOT/scripts/runtime-env.sh"
 TAIJI_LAUNCH_PROFILE="installed-production"
 TAIJI_AGENT_ROOT="$APP_ROOT"
 TAIJI_AGENT_USE_USER_DIRS="1"
+TAIJI_PRIVATE_LIBRARY_DIR="$APP_ROOT/runtime/lib"
 export TAIJI_LAUNCH_PROFILE TAIJI_AGENT_ROOT TAIJI_AGENT_USE_USER_DIRS
 
 print_taiji_version() {
@@ -84,4 +85,10 @@ if [ ! -x "$TAIJI_PYTHON" ]; then
 fi
 
 cd "$APP_ROOT/runtime/agent"
+if [ -d "$TAIJI_PRIVATE_LIBRARY_DIR" ] && [ ! -L "$TAIJI_PRIVATE_LIBRARY_DIR" ]; then
+  # Scope the fixed search path to this Taiji child process only; never edit
+  # the host's global loader configuration.
+  LD_LIBRARY_PATH="$TAIJI_PRIVATE_LIBRARY_DIR"
+  export LD_LIBRARY_PATH
+fi
 exec "$TAIJI_PYTHON" -m taiji_runtime.main "$@"

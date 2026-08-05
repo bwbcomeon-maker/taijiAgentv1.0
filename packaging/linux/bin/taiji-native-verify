@@ -46,6 +46,7 @@ fi
 
 TAIJI_LAUNCH_PROFILE="installed-production"
 TAIJI_AGENT_ROOT="$APP_ROOT"
+TAIJI_PRIVATE_LIBRARY_DIR="$APP_ROOT/runtime/lib"
 case "${1:-}" in
   --system-only)
     shift
@@ -74,4 +75,10 @@ case "${1:-}" in
     ;;
 esac
 export TAIJI_LAUNCH_PROFILE TAIJI_AGENT_ROOT
+if [ -d "$TAIJI_PRIVATE_LIBRARY_DIR" ] && [ ! -L "$TAIJI_PRIVATE_LIBRARY_DIR" ]; then
+  # Scope the fixed search path to this Taiji child process only; never edit
+  # the host's global loader configuration.
+  LD_LIBRARY_PATH="$TAIJI_PRIVATE_LIBRARY_DIR"
+  export LD_LIBRARY_PATH
+fi
 exec /bin/bash --noprofile --norc -p "$VERIFY_SCRIPT" "$@"
