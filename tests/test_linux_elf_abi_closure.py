@@ -321,6 +321,11 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(self.audit.ElfAuditError, "malformed"):
             self.audit.parse_readelf_dynamic(malformed)
+        for runpath in ("$ORIGIN:", ":$ORIGIN", "$ORIGIN::foo"):
+            with self.subTest(runpath=runpath), self.assertRaisesRegex(self.audit.ElfAuditError, "malformed"):
+                self.audit.parse_readelf_dynamic(
+                    f"0x000000000000001d (RUNPATH) Library runpath: [{runpath}]"
+                )
 
     def test_report_writes_are_private_and_leave_no_predictable_temp_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -331,6 +336,16 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
                 self.assertEqual(list(directory.glob(f".{report_path.name}.tmp-*")), [])
                 self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["schema"], "fixture")
+            outside = directory / "outside"
+            outside.mkdir()
+            linked_parent = directory / "linked-reports"
+            linked_parent.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(self.audit.ElfAuditError, "report directory"):
+                self.audit.write_report(linked_parent / "audit.json", {"schema": "fixture"})
+            with self.assertRaisesRegex(self.stager.StageError, "report directory"):
+                self.stager.write_report(linked_parent / "stage.json", {"schema": "fixture"})
+            self.assertFalse((outside / "audit.json").exists())
+            self.assertFalse((outside / "stage.json").exists())
 
     def test_rejects_payload_symlink_that_escapes_audit_root(self):
         with tempfile.TemporaryDirectory() as temp_dir:

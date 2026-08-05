@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -298,11 +299,69 @@ def stage_private_libraries(root: Path, policy: dict[str, Any], sysroot: Path) -
     return report
 
 
-def write_report(path: Path, report: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+def _assert_report_parent_safe(path: Path) -> None:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise StageError(f"cannot inspect report directory: {current}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            if metadata.st_uid != 0:
+                raise StageError(f"report directory contains untrusted symlink: {current}")
+            try:
+                current = current.resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                raise StageError(f"cannot resolve report directory symlink: {current}") from exc
+
+
+def _open_report_directory(path: Path) -> int:
     try:
+        path.mkdir(parents=True, exist_ok=True)
+        _assert_report_parent_safe(path)
+        raw_path = Path(os.path.abspath(path))
+        canonical_path = Path(os.path.realpath(raw_path))
+        if raw_path != canonical_path and not (
+            str(raw_path).startswith("/var/")
+            and str(canonical_path).startswith("/private/var/")
+        ):
+            raise StageError(f"report directory resolves through symlink: {path}")
+        return os.open(
+            canonical_path,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except StageError:
+        raise
+    except OSError as exc:
+        raise StageError(f"cannot open report directory safely: {path}") from exc
+
+
+def write_report(path: Path, report: dict[str, Any]) -> None:
+    directory_fd = _open_report_directory(path.parent)
+    descriptor = -1
+    temporary_name: str | None = None
+    try:
+        for _ in range(8):
+            candidate = f".{path.name}.{secrets.token_hex(12)}"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                temporary_name = candidate
+                break
+            except FileExistsError:
+                continue
+        if descriptor < 0 or temporary_name is None:
+            raise StageError("cannot allocate a private report temporary file")
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             descriptor = -1
@@ -310,20 +369,25 @@ def write_report(path: Path, report: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        os.replace(temporary_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary_name = None
         try:
-            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            os.fsync(directory_fd)
         except OSError:
-            directory_fd = -1
-        if directory_fd >= 0:
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            pass
+    except StageError:
+        raise
+    except OSError as exc:
+        raise StageError(f"atomic report write failed: {path}") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        temporary.unlink(missing_ok=True)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
 
 
 def main(argv: list[str] | None = None) -> int:
