@@ -794,7 +794,7 @@ build_glibc() {
 write_build_report() {
   local source_name deb_name source_line deb_line
   require_candidate_deb_fixed
-  source_name="$(basename "$SOURCE_ARCHIVE")"
+  source_name="$(basename "$SRC_ARCHIVE")"
   deb_name="taiji-agent_$VERSION"_amd64.deb
   source_line="$(cd "$SCRIPT_DIR" && sha256sum "$source_name")"
   deb_line="$(cd "$OUTPUT_DIR" && sha256sum "$deb_name")"

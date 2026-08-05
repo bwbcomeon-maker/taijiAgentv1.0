@@ -37,6 +37,13 @@ class SingleDebSalesContractTest(unittest.TestCase):
         self.assertIn('validate --policy "$POLICY_FILE" --print-sha256', builder)
         self.assertIn('validate --policy "$POLICY_FILE" --print-maintainer', builder)
         self.assertIn("load_source_controlled_policy", builder)
+        self.assertIn('source_name="$(basename "$SRC_ARCHIVE")"', builder)
+        # The canonical source archive variable is SRC_ARCHIVE.  The
+        # operator-facing TAIJI_SOURCE_ARCHIVE environment variable is still
+        # a supported override, so only reject a stale standalone variable or
+        # an undefined expansion in the report path.
+        self.assertNotRegex(builder, re.compile(r"(?m)^SOURCE_ARCHIVE="))
+        self.assertNotIn('"$SOURCE_ARCHIVE"', builder)
 
         for forbidden in (
             "TAIJI_TARGET_BASELINE_FILE",
