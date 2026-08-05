@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# Build an offline-first Taiji Agent DEB package.
-#
-# Run this on Linux x86_64/amd64 only. The script deliberately refuses to build
-# final packages on macOS so Apple metadata and wrong Electron binaries cannot
-# enter the release artifact.
+# Build the single policy-bound offline Taiji Agent amd64 DEB.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,28 +12,24 @@ ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/electron"
 DESKTOP_FILE="$REPO_ROOT/packaging/linux/taiji-agent.desktop"
 DEFAULT_CONFIG="$LAB_DIR/config/taiji-default-config.yaml"
 VERSION_FILE="$REPO_ROOT/VERSION"
+POLICY_FILE="$REPO_ROOT/packaging/linux/compatibility-policy.json"
+POLICY_HELPER="$REPO_ROOT/packaging/linux/compatibility_policy.py"
 PAYLOAD_CONTRACT="$REPO_ROOT/packaging/linux/payload-contract.json"
 PAYLOAD_VERIFIER="$REPO_ROOT/packaging/linux/verify-payload.py"
 RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-runtime-components.py"
 PYTHON_RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-python-runtime.py"
 ELECTRON_RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-electron-runtime.py"
 DESKTOP_JS_STAGER="$REPO_ROOT/packaging/linux/stage-desktop-js-closure.js"
-TARGET_BASELINE_TOOL="$REPO_ROOT/packaging/linux/target_baseline.py"
-APPROVED_MAINTAINER_FILE="$REPO_ROOT/packaging/linux/approved-maintainer.json"
-APPROVED_MAINTAINER_VALIDATOR="$REPO_ROOT/packaging/linux/validate-approved-maintainer.py"
-RUNTIME_DEPENDS_FILE="$SCRIPT_DIR/runtime-depends.txt"
+PRIVATE_LIB_STAGER="$REPO_ROOT/packaging/linux/stage-private-libraries.py"
+ELF_AUDITOR="$REPO_ROOT/packaging/linux/audit-elf-closure.py"
 PREINST_RENDERER="$SCRIPT_DIR/render-preinst.py"
 TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
-TARGET_BASELINE_FILE="${TAIJI_TARGET_BASELINE_FILE:-}"
-TARGET_BASELINE_MAX_AGE_DAYS="${TAIJI_TARGET_BASELINE_MAX_AGE_DAYS:-30}"
-PACKAGE_MAINTAINER="${TAIJI_PACKAGE_MAINTAINER:-}"
-TARGET_BASELINE_SNAPSHOT=""
-TARGET_BASELINE_PROFILE_ID=""
-TARGET_BASELINE_SHA256=""
-TARGET_BASELINE_GLIBC_MIN=""
 PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
+PRIVATE_LIBRARY_SYSROOT="${TAIJI_PRIVATE_LIBRARY_SYSROOT:-/usr/lib/x86_64-linux-gnu}"
+SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
 PACKAGED_NODE_VERSION="22.23.1"
 ISSUER_PUBLIC_KEY_FINGERPRINT="2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
+
 [ -f "$VERSION_FILE" ] || { echo "Missing product VERSION: $VERSION_FILE" >&2; exit 1; }
 VERSION="$(tr -d '\r\n' < "$VERSION_FILE")"
 printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
@@ -45,11 +37,11 @@ printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9]
   exit 1
 }
 if [ -n "${TAIJI_AGENT_VERSION:-}" ] && [ "$TAIJI_AGENT_VERSION" != "$VERSION" ]; then
-  echo "TAIJI_AGENT_VERSION must match root VERSION ($VERSION), got: $TAIJI_AGENT_VERSION" >&2
+  echo "TAIJI_AGENT_VERSION must match root VERSION ($VERSION)" >&2
   exit 1
 fi
+
 ARCH="amd64"
-SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
 BUILD_ROOT="$REPO_ROOT/runtime/package-build/deb"
 PKG_ROOT="$BUILD_ROOT/root"
 INSTALL_ROOT="$PKG_ROOT/opt/taiji-agent"
@@ -59,236 +51,95 @@ DESKTOP_RUNTIME="$INSTALL_ROOT/apps/taiji-desktop"
 OUT_DIR="$REPO_ROOT/packages/麒麟操作系统安装包"
 OUT_DEB="$OUT_DIR/taiji-agent_${VERSION}_${ARCH}.deb"
 ARCHIVE_DIR="$OUT_DIR/旧版本归档"
-DEB_DEPENDS=""
+POLICY_INSTALL_PATH="$INSTALL_ROOT/resources/linux-compatibility-policy.json"
+ABI_REPORT_PATH="$INSTALL_ROOT/resources/elf-abi-audit.json"
+ABI_BUILD_REPORT="$BUILD_ROOT/elf-abi-audit.json"
+PRIVATE_STAGE_REPORT="$BUILD_ROOT/private-library-stage.json"
+MANIFEST_PATH="$OUT_DIR/taiji-package-manifest.json"
+POLICY_SHA256=""
+POLICY_ID=""
+TAIJI_PACKAGE_NAME=""
+TAIJI_PACKAGE_ARCHITECTURE=""
+TAIJI_PACKAGE_MAINTAINER=""
+TAIJI_DEBIAN_DEPENDS=""
+TAIJI_GLIBC_MIN=""
 
-fail() {
-  echo "$*" >&2
-  exit 1
-}
+fail() { echo "$*" >&2; exit 1; }
+warn() { echo "Warning: $*" >&2; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
 
-cleanup_target_baseline_snapshot() {
-  if [ -n "${TARGET_BASELINE_SNAPSHOT:-}" ] && [ -f "$TARGET_BASELINE_SNAPSHOT" ] && [ ! -L "$TARGET_BASELINE_SNAPSHOT" ]; then
-    rm -f -- "$TARGET_BASELINE_SNAPSHOT"
-  fi
-}
-trap cleanup_target_baseline_snapshot EXIT HUP INT TERM
-
-validate_sales_release_inputs() {
-  [ -f "$TARGET_BASELINE_TOOL" ] || fail "Missing target baseline validator: $TARGET_BASELINE_TOOL"
-  [ -f "$RUNTIME_DEPENDS_FILE" ] || fail "Missing runtime dependency contract: $RUNTIME_DEPENDS_FILE"
-  [ -f "$PREINST_RENDERER" ] || fail "Missing target-bound preinst renderer: $PREINST_RENDERER"
-  [ -n "$TARGET_BASELINE_FILE" ] \
-    || fail "TAIJI_TARGET_BASELINE_FILE is required; a sales DEB cannot be built without current target evidence."
-  [ -f "$TARGET_BASELINE_FILE" ] && [ ! -L "$TARGET_BASELINE_FILE" ] \
-    || fail "TAIJI_TARGET_BASELINE_FILE must be a regular non-symlink file."
-  [ "$(stat -c '%h' -- "$TARGET_BASELINE_FILE")" = "1" ] \
-    || fail "TAIJI_TARGET_BASELINE_FILE must have exactly one hard link."
-  printf '%s\n' "$TARGET_BASELINE_MAX_AGE_DAYS" | grep -Eq '^[1-9][0-9]?$' \
-    || fail "TAIJI_TARGET_BASELINE_MAX_AGE_DAYS must be between 1 and 99."
-
-  [ -n "$PACKAGE_MAINTAINER" ] \
-    || fail "TAIJI_PACKAGE_MAINTAINER is required and must match the approved formal-source release contact."
-  [ -f "$APPROVED_MAINTAINER_VALIDATOR" ] && [ ! -L "$APPROVED_MAINTAINER_VALIDATOR" ] \
-    || fail "Missing approved maintainer validator: $APPROVED_MAINTAINER_VALIDATOR"
-  [ -f "$APPROVED_MAINTAINER_FILE" ] && [ ! -L "$APPROVED_MAINTAINER_FILE" ] \
-    || fail "Missing approved formal-source maintainer: $APPROVED_MAINTAINER_FILE"
-  python3 "$APPROVED_MAINTAINER_VALIDATOR" \
-    --file "$APPROVED_MAINTAINER_FILE" \
-    --expect "$PACKAGE_MAINTAINER" \
-    || fail "TAIJI_PACKAGE_MAINTAINER is not the identity approved in formal source."
-
-  TARGET_BASELINE_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/taiji-target-baseline.XXXXXX.json")"
-  chmod 0600 "$TARGET_BASELINE_SNAPSHOT"
-  cp -- "$TARGET_BASELINE_FILE" "$TARGET_BASELINE_SNAPSHOT"
-  [ "$(sha256sum "$TARGET_BASELINE_FILE" | awk '{print $1}')" = "$(sha256sum "$TARGET_BASELINE_SNAPSHOT" | awk '{print $1}')" ] \
-    || fail "Target baseline changed while it was being snapshotted."
-
-  python3 "$TARGET_BASELINE_TOOL" validate \
-    --profile "$TARGET_BASELINE_SNAPSHOT" \
-    --depends-file "$RUNTIME_DEPENDS_FILE" \
-    --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS" >/dev/null
-  TARGET_BASELINE_PROFILE_ID="$(python3 - "$TARGET_BASELINE_SNAPSHOT" <<'PY'
-import json
-import sys
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    print(json.load(handle)["profile_id"])
-PY
-)"
-  TARGET_BASELINE_GLIBC_MIN="$(python3 - "$TARGET_BASELINE_SNAPSHOT" <<'PY'
-import json
-import sys
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    print(json.load(handle)["glibc"]["version"])
-PY
-)"
-  TARGET_BASELINE_SHA256="$(sha256sum "$TARGET_BASELINE_SNAPSHOT" | awk '{print $1}')"
-  printf '%s\n' "$TARGET_BASELINE_PROFILE_ID" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$' \
-    || fail "Validated target baseline returned an unsafe profile_id."
-  printf '%s\n' "$TARGET_BASELINE_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
-    || fail "Validated target baseline returned an unsafe SHA256."
-
-  DEB_DEPENDS="$(
-    python3 "$TARGET_BASELINE_TOOL" render-depends \
-      --profile "$TARGET_BASELINE_SNAPSHOT" \
-      --depends-file "$RUNTIME_DEPENDS_FILE" \
-      --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS"
-  )" || fail "Cannot render versioned runtime dependencies from the target baseline."
-  [ -n "$DEB_DEPENDS" ] || fail "Versioned runtime dependency contract is empty."
-
-  build_glibc="$(ldd --version 2>&1 | awk 'NR == 1 { print }' | grep -Eo '[0-9]+(\.[0-9]+)+' | tail -n 1)"
-  [ -n "$build_glibc" ] || fail "Cannot determine Linux build-host glibc version."
-  dpkg --compare-versions "$build_glibc" le "$TARGET_BASELINE_GLIBC_MIN" \
-    || fail "Build-host glibc $build_glibc is newer than target baseline $TARGET_BASELINE_GLIBC_MIN."
-}
-
-[ -n "$PACKAGED_NODE_ROOT" ] || fail "TAIJI_PACKAGED_NODE_ROOT is required; system Node and source-tree fallback are not release inputs."
-[ -f "$RUNTIME_STAGER" ] || fail "Missing runtime component stager: $RUNTIME_STAGER"
-[ -f "$PYTHON_RUNTIME_STAGER" ] || fail "Missing Python runtime stager: $PYTHON_RUNTIME_STAGER"
-[ -f "$ELECTRON_RUNTIME_STAGER" ] || fail "Missing Electron runtime stager: $ELECTRON_RUNTIME_STAGER"
-
-warn() {
-  echo "Warning: $*" >&2
-}
-
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    fail "Missing required command: $1"
-  fi
+load_policy_contract() {
+  [ -f "$POLICY_FILE" ] && [ ! -L "$POLICY_FILE" ] || fail "Missing compatibility policy: $POLICY_FILE"
+  [ -f "$POLICY_HELPER" ] && [ ! -L "$POLICY_HELPER" ] || fail "Missing compatibility policy helper: $POLICY_HELPER"
+  eval "$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-shell)"
+  POLICY_SHA256="$TAIJI_POLICY_SHA256"
+  POLICY_ID="$TAIJI_POLICY_ID"
+  TAIJI_PACKAGE_NAME="$TAIJI_PACKAGE_NAME"
+  TAIJI_PACKAGE_ARCHITECTURE="$TAIJI_PACKAGE_ARCHITECTURE"
+  TAIJI_PACKAGE_MAINTAINER="$TAIJI_PACKAGE_MAINTAINER"
+  TAIJI_DEBIAN_DEPENDS="$TAIJI_DEBIAN_DEPENDS"
+  TAIJI_GLIBC_MIN="$TAIJI_GLIBC_MIN"
+  [ "$TAIJI_PACKAGE_NAME" = "taiji-agent" ] || fail "unexpected package name from policy"
+  [ "$TAIJI_PACKAGE_ARCHITECTURE" = "amd64" ] || fail "unexpected package architecture from policy"
+  [ "$POLICY_ID" = "taiji-linux-amd64-deb-v1" ] || fail "unexpected compatibility policy id"
 }
 
 resolve_source_commit() {
-  local git_commit=""
-  if command -v git >/dev/null 2>&1; then
-    [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] \
-      || fail "Missing trusted Git boundary: $TRUSTED_GIT"
-    git_commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
-  fi
+  local git_commit
+  [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "Missing trusted Git boundary: $TRUSTED_GIT"
+  git_commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
   if [ -n "$git_commit" ]; then
     if [ -n "$SOURCE_COMMIT" ] && [ "$SOURCE_COMMIT" != "$git_commit" ]; then
-      fail "TAIJI_SOURCE_COMMIT does not exactly match the source Git HEAD."
+      fail "TAIJI_SOURCE_COMMIT does not exactly match source Git HEAD"
     fi
     SOURCE_COMMIT="$git_commit"
   fi
-  printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
-    || fail "A full 40-character lowercase hexadecimal TAIJI_SOURCE_COMMIT is required."
+  printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || fail "A full source commit is required"
 }
 
-write_desktop_release_manifest() {
-  cat > "$INSTALL_ROOT/resources/taiji-release-manifest.json" <<MANIFEST
-{
-  "schema": "taiji-release-manifest/v1",
-  "platform": "linux",
-  "arch": "amd64",
-  "version": "$VERSION",
-  "commit": "$SOURCE_COMMIT",
-  "targetBaselineProfile": "$TARGET_BASELINE_PROFILE_ID",
-  "targetBaselineSha256": "$TARGET_BASELINE_SHA256",
-  "installRoot": "/opt/taiji-agent"
-}
-MANIFEST
-  chmod 0644 "$INSTALL_ROOT/resources/taiji-release-manifest.json"
-}
-
-verify_linux_electron_runtime() {
-  if [ ! -x "$ELECTRON_BIN" ]; then
-    fail "Missing Linux Electron runtime. Run npm ci inside apps/taiji-desktop on this Linux build host first."
-  fi
-
-  electron_file="$(file "$ELECTRON_BIN")"
-  case "$electron_file" in
-    *ELF*64-bit*x86-64*|*ELF*64-bit*X86-64*|*ELF*64-bit*80386*)
-      ;;
-    *)
-      echo "$electron_file" >&2
-      fail "Electron runtime is not a Linux x86_64 ELF binary. Re-run npm ci on Linux amd64."
-      ;;
-  esac
-
-  ldd_output="$(ldd "$ELECTRON_BIN" 2>&1 || true)"
-  if printf '%s\n' "$ldd_output" | grep -q 'not found'; then
-    echo "$ldd_output" >&2
-    fail "Electron runtime has missing shared libraries; add them to DEB Depends or the offline dependency bundle before release."
-  fi
+validate_build_host_glibc() {
+  local build_glibc
+  build_glibc="$(ldd --version 2>&1 | awk 'NR == 1 { print }' | grep -Eo '[0-9]+(\.[0-9]+)+' | tail -n 1)"
+  [ -n "$build_glibc" ] || fail "Cannot determine Linux build-host glibc version"
+  dpkg --compare-versions "$build_glibc" le "$TAIJI_GLIBC_MIN" || fail "Build-host glibc $build_glibc exceeds policy $TAIJI_GLIBC_MIN"
 }
 
 validate_desktop_entry() {
   local desktop="$1"
   if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "$desktop"
-    return
+  else
+    warn "desktop-file-validate not found; using structural checks"
+    grep -qx 'Type=Application' "$desktop" || fail "Desktop entry missing Type=Application"
+    grep -qx 'Name=太极 Agent' "$desktop" || fail "Desktop entry missing expected Name"
+    grep -qx 'Exec=/usr/bin/taiji-agent' "$desktop" || fail "Desktop entry missing expected Exec"
+    grep -qx 'Icon=taiji-agent' "$desktop" || fail "Desktop entry missing expected Icon"
+    grep -qx 'Terminal=false' "$desktop" || fail "Desktop entry must not require a terminal"
   fi
-  warn "desktop-file-validate not found; using structural desktop entry checks"
-  grep -qx 'Type=Application' "$desktop" || fail "Desktop entry missing Type=Application"
-  grep -qx 'Name=太极 Agent' "$desktop" || fail "Desktop entry missing expected Name"
-  grep -qx 'Exec=/usr/bin/taiji-agent' "$desktop" || fail "Desktop entry missing expected Exec"
-  grep -qx 'Icon=taiji-agent' "$desktop" || fail "Desktop entry missing expected Icon"
-  grep -qx 'Terminal=false' "$desktop" || fail "Desktop entry must not require a terminal"
 }
 
-archive_old_packages() {
-  mkdir -p "$ARCHIVE_DIR"
-  find "$OUT_DIR" -maxdepth 1 -type f \( -name 'taiji-agent_*_amd64.deb' -o -name 'taiji-agent_*_amd64.deb.sha256' \) \
-    ! -name "$(basename "$OUT_DEB")" \
-    ! -name "$(basename "$OUT_DEB").sha256" \
-    -exec mv {} "$ARCHIVE_DIR"/ \;
-}
-
-scan_private_key_material() {
-  if find "$INSTALL_ROOT" \( -name '.env' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.key' \) | grep -q .; then
-    echo "Package tree contains local secrets or private-key shaped files; refusing release." >&2
-    find "$INSTALL_ROOT" \( -name '.env' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.key' \) >&2
-    exit 1
-  fi
-
-  if find "$INSTALL_ROOT" \( -name 'license.jwt' -o -name '*.jwt' \) | grep -q .; then
-    echo "Package tree contains customer license files; refusing release." >&2
-    find "$INSTALL_ROOT" \( -name 'license.jwt' -o -name '*.jwt' \) >&2
-    exit 1
-  fi
-
-  private_key_paths=""
-  while IFS= read -r -d '' candidate; do
-    if grep -Eq 'BEGIN .*PRIVATE KEY' "$candidate" 2>/dev/null; then
-      private_key_paths="${private_key_paths}${candidate}"$'\n'
-    fi
-  done < <(find "$INSTALL_ROOT" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \) -print0)
-
-  if [ -n "$private_key_paths" ]; then
-    echo "Package tree contains private key material; refusing release." >&2
-    printf '%s' "$private_key_paths" >&2
-    exit 1
-  fi
+verify_linux_electron_runtime() {
+  [ -x "$ELECTRON_BIN" ] || fail "Missing Linux Electron runtime"
+  local electron_file ldd_output
+  electron_file="$(file "$ELECTRON_BIN")"
+  case "$electron_file" in *ELF*64-bit*x86-64*|*ELF*64-bit*X86-64*|*ELF*64-bit*80386*) ;; *) fail "Electron runtime is not Linux x86_64: $electron_file" ;; esac
+  ldd_output="$(ldd "$ELECTRON_BIN" 2>&1 || true)"
+  printf '%s\n' "$ldd_output" | grep -q 'not found' && fail "Electron runtime has missing shared libraries" || true
 }
 
 validate_packaged_config_template() {
-  if [ ! -f "$DEFAULT_CONFIG" ]; then
-    fail "Missing packaged default config template: $DEFAULT_CONFIG"
-  fi
+  [ -f "$DEFAULT_CONFIG" ] || fail "Missing packaged default config template: $DEFAULT_CONFIG"
   "$SOURCE_AGENT_PYTHON" - "$DEFAULT_CONFIG" <<'PY'
 import sys
 from pathlib import Path
-
 import yaml
-
 path = Path(sys.argv[1])
 data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-sensitive_keys = (
-    "api_key",
-    "apikey",
-    "token",
-    "secret",
-    "password",
-    "private_key",
-    "wechat",
-    "weixin",
-    "corpsecret",
-)
-
+markers = ("api_key", "apikey", "token", "secret", "password", "private_key", "wechat", "weixin", "corpsecret")
 def scan(value, prefix=""):
     if isinstance(value, dict):
         for key, child in value.items():
-            key_text = str(key).strip().lower()
-            if any(marker in key_text for marker in sensitive_keys):
+            if any(marker in str(key).lower() for marker in markers):
                 raise SystemExit(f"sensitive key in packaged default config: {prefix}{key}")
             scan(child, f"{prefix}{key}.")
     elif isinstance(value, list):
@@ -296,22 +147,15 @@ def scan(value, prefix=""):
             scan(child, f"{prefix}{idx}.")
     elif isinstance(value, str) and "BEGIN " in value and "PRIVATE KEY" in value:
         raise SystemExit(f"private key shaped value in packaged default config: {prefix.rstrip('.')}")
-
 scan(data)
-required = [
-    ("model", "provider"),
-    ("model", "default"),
-    ("webui", "feature_visibility"),
-]
-for parent, key in required:
+for parent, key in (("model", "provider"), ("model", "default"), ("webui", "feature_visibility")):
     if not isinstance(data.get(parent), dict) or key not in data[parent]:
         raise SystemExit(f"missing {parent}.{key} in packaged default config")
 PY
 }
 
 compile_sourceless_python() {
-  local target="$1"
-  local python_bin="$2"
+  local target="$1" python_bin="$2"
   find "$target" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
   "$python_bin" -m compileall -q -b "$target"
   find "$target" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
@@ -319,50 +163,21 @@ compile_sourceless_python() {
 }
 
 rename_internal_agent_modules() {
-  if [ -d "$AGENT_RUNTIME/hermes_cli" ]; then
-    mv "$AGENT_RUNTIME/hermes_cli" "$AGENT_RUNTIME/taiji_cli"
-  fi
-
+  [ -d "$AGENT_RUNTIME/hermes_cli" ] && mv "$AGENT_RUNTIME/hermes_cli" "$AGENT_RUNTIME/taiji_cli" || true
   local source target
   for source in "$AGENT_RUNTIME"/hermes_*.py; do
     [ -e "$source" ] || continue
-    target="$AGENT_RUNTIME/taiji_${source##*/hermes_}"
+    target="$AGENT_RUNTIME/taiji_$(basename "$source" | sed 's/^hermes_//')"
     mv "$source" "$target"
   done
-
-  if [ -f "$AGENT_RUNTIME/agent/transports/hermes_tools_mcp_server.py" ]; then
-    mv "$AGENT_RUNTIME/agent/transports/hermes_tools_mcp_server.py" \
-      "$AGENT_RUNTIME/agent/transports/taiji_tools_mcp_server.py"
-  fi
-  if [ -f "$AGENT_RUNTIME/agent/transports/hermes_tools_profile_env.py" ]; then
-    mv "$AGENT_RUNTIME/agent/transports/hermes_tools_profile_env.py" \
-      "$AGENT_RUNTIME/agent/transports/taiji_tools_profile_env.py"
-  fi
-
-  rm -rf \
-    "$AGENT_RUNTIME/hermes" \
-    "$AGENT_RUNTIME/hermes-agent" \
-    "$AGENT_RUNTIME/hermes_agent.egg-info" \
-    "$AGENT_RUNTIME/.hermes" \
-    "$AGENT_RUNTIME/setup-hermes.sh" \
-    "$AGENT_RUNTIME/HERMES.md" \
-    "$AGENT_RUNTIME/hermes-already-has-routines.md"
+  [ -f "$AGENT_RUNTIME/agent/transports/hermes_tools_mcp_server.py" ] && mv "$AGENT_RUNTIME/agent/transports/hermes_tools_mcp_server.py" "$AGENT_RUNTIME/agent/transports/taiji_tools_mcp_server.py" || true
+  [ -f "$AGENT_RUNTIME/agent/transports/hermes_tools_profile_env.py" ] && mv "$AGENT_RUNTIME/agent/transports/hermes_tools_profile_env.py" "$AGENT_RUNTIME/agent/transports/taiji_tools_profile_env.py" || true
+  rm -rf "$AGENT_RUNTIME/hermes" "$AGENT_RUNTIME/hermes-agent" "$AGENT_RUNTIME/hermes_agent.egg-info" "$AGENT_RUNTIME/.hermes" "$AGENT_RUNTIME/setup-hermes.sh" "$AGENT_RUNTIME/HERMES.md" "$AGENT_RUNTIME/hermes-already-has-routines.md"
 }
 
 rewrite_product_text_tokens() {
   local target="$1"
-  find "$target" -type f ! -path '*/venv/*' \( \
-    -name '*.py' -o \
-    -name '*.js' -o \
-    -name '*.css' -o \
-    -name '*.html' -o \
-    -name '*.json' -o \
-    -name '*.yaml' -o \
-    -name '*.yml' -o \
-    -name '*.toml' -o \
-    -name '*.txt' -o \
-    -name '*.md' \
-  \) -print0 | xargs -0 -r perl -pi -e 's/HERMES_/TAIJI_/g; s/HERMES/TAIJI/g; s/Hermes/Taiji/g; s/hermes/taiji/g'
+  find "$target" -type f ! -path '*/venv/*' \( -name '*.py' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' -o -name '*.toml' -o -name '*.txt' -o -name '*.md' \) -print0 | xargs -0 -r perl -pi -e 's/HERMES_/TAIJI_/g; s/HERMES/TAIJI/g; s/Hermes/Taiji/g; s/hermes/taiji/g'
 }
 
 write_packaged_webui_version() {
@@ -370,23 +185,9 @@ write_packaged_webui_version() {
   base="${TAIJI_WEBUI_VERSION:-}"
   if [ -z "$base" ] && command -v git >/dev/null 2>&1; then
     base="$("$TRUSTED_GIT" -C "$SOURCE_WEB_DIR" describe --tags --always 2>/dev/null || true)"
-    if [ -z "$base" ]; then
-      base="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
-    fi
   fi
-  if [ -z "$base" ]; then
-    base="taiji-webui"
-  fi
-  digest="$(
-    find "$WEB_RUNTIME" -type f \
-      ! -name '_version.txt' \
-      ! -name '*.pyc' \
-      -print0 \
-      | sort -z \
-      | xargs -0 sha256sum \
-      | sha256sum \
-      | awk '{print substr($1,1,12)}'
-  )"
+  [ -n "$base" ] || base="taiji-webui"
+  digest="$(find "$WEB_RUNTIME" -type f ! -name '_version.txt' ! -name '*.pyc' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print substr($1,1,12)}')"
   mkdir -p "$WEB_RUNTIME/api"
   printf '%s-pkg.%s\n' "$base" "$digest" > "$WEB_RUNTIME/api/_version.txt"
 }
@@ -403,339 +204,160 @@ PROFILE
 
 stage_python_runtime() {
   mkdir -p "$AGENT_RUNTIME" "$WEB_RUNTIME"
-
-  rsync -a \
-    --exclude '.git' \
-    --exclude '.github' \
-    --exclude '.DS_Store' \
-    --exclude '._*' \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    --exclude '.env' \
-    --exclude '.env.example' \
-    --exclude '*.example' \
-    --exclude '.envrc' \
-    --exclude '.dockerignore' \
-    --exclude '.gitattributes' \
-    --exclude '.gitignore' \
-    --exclude '.hadolint.yaml' \
-    --exclude '.mailmap' \
-    --exclude 'license.jwt' \
-    --exclude '*.jwt' \
-    --exclude '.pytest_cache' \
-    --exclude '.playwright-mcp' \
-    --exclude 'docs' \
-    --exclude 'tests' \
-    --exclude 'website' \
-    --exclude 'articles' \
-    --exclude 'demos' \
-    --exclude 'datagen-config-examples' \
-    --exclude 'docker' \
-    --exclude 'nix' \
-    --exclude 'packaging' \
-    --exclude 'plugins/hermes-achievements' \
-    --exclude 'plugins/kanban/systemd' \
-    --exclude 'plugins/security-guidance' \
-    --exclude 'skills' \
-    --exclude 'scripts' \
-    --exclude 'optional-skills' \
-    --exclude 'optional-mcps' \
-    --exclude 'locales' \
-    --exclude 'ui-tui' \
-    --exclude 'web' \
-    --exclude 'venv' \
-    --exclude 'Dockerfile' \
-    --exclude 'docker-compose*' \
-    --exclude 'flake.*' \
-    --exclude 'MANIFEST.in' \
-    --exclude 'uv.lock' \
-    --exclude 'package*.json' \
-    --exclude 'pyproject.toml' \
-    --exclude 'LICENSE' \
-    --exclude '*.md' \
-    "$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/
-
+  rsync -a --exclude '.git' --exclude '.github' --exclude '.DS_Store' --exclude '._*' --exclude '__pycache__' --exclude '*.pyc' --exclude '.env' --exclude '.env.example' --exclude '.env.docker.example' --exclude '*.example' --exclude '.envrc' --exclude '.dockerignore' --exclude '.gitattributes' --exclude '.gitignore' --exclude '.hadolint.yaml' --exclude '.mailmap' --exclude 'license.jwt' --exclude '*.jwt' --exclude '.pytest_cache' --exclude '.playwright-mcp' --exclude 'docs' --exclude 'tests' --exclude 'website' --exclude 'articles' --exclude 'demos' --exclude 'datagen-config-examples' --exclude 'docker' --exclude 'nix' --exclude 'packaging' --exclude 'plugins/hermes-achievements' --exclude 'plugins/kanban/systemd' --exclude 'plugins/security-guidance' --exclude 'skills' --exclude 'scripts' --exclude 'optional-skills' --exclude 'optional-mcps' --exclude 'locales' --exclude 'ui-tui' --exclude 'web' --exclude 'venv' --exclude 'Dockerfile' --exclude 'docker-compose*' --exclude 'flake.*' --exclude 'MANIFEST.in' --exclude 'uv.lock' --exclude 'package*.json' --exclude 'pyproject.toml' --exclude 'LICENSE' --exclude '*.md' "$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/
   rename_internal_agent_modules
   rewrite_product_text_tokens "$AGENT_RUNTIME"
-
-  python3 "$PYTHON_RUNTIME_STAGER" \
-    --source-venv "$SOURCE_AGENT_DIR/venv" \
-    --destination "$AGENT_RUNTIME/venv" \
-    --require-linux-x86-64 \
-    --smoke-import yaml \
-    --smoke-import fastapi \
-    --smoke-import uvicorn \
-    --smoke-import httpx \
-    --smoke-import pydantic
-
-  rsync -a \
-    --exclude '.git' \
-    --exclude '.DS_Store' \
-    --exclude '._*' \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    --exclude '.env' \
-    --exclude '.env.example' \
-    --exclude '.env.docker.example' \
-    --exclude '*.example' \
-    --exclude '.dockerignore' \
-    --exclude '.gitignore' \
-    --exclude 'license.jwt' \
-    --exclude '*.jwt' \
-    --exclude '.pytest_cache' \
-    --exclude '.github' \
-    --exclude 'docs' \
-    --exclude 'reports' \
-    --exclude 'scripts' \
-    --exclude 'ctl.sh' \
-    --exclude 'start.sh' \
-    --exclude 'docker_init.bash' \
-    --exclude 'docker*' \
-    --exclude '*compose*' \
-    --exclude 'start.ps1' \
-    --exclude 'pyproject.toml' \
-    --exclude 'eslint*' \
-    --exclude 'package*.json' \
-    --exclude 'tests' \
-    --exclude 'node_modules' \
-    --exclude 'Dockerfile' \
-    --exclude 'LICENSE' \
-    --exclude '*.md' \
-    "$SOURCE_WEB_DIR"/ "$WEB_RUNTIME"/
-
+  python3 "$PYTHON_RUNTIME_STAGER" --source-venv "$SOURCE_AGENT_DIR/venv" --destination "$AGENT_RUNTIME/venv" --require-linux-x86-64 --smoke-import yaml --smoke-import fastapi --smoke-import uvicorn --smoke-import httpx --smoke-import pydantic
+  rsync -a --exclude '.git' --exclude '.DS_Store' --exclude '._*' --exclude '__pycache__' --exclude '*.pyc' --exclude '.env' --exclude '.env.example' --exclude '.env.docker.example' --exclude '*.example' --exclude 'docs' --exclude 'reports' --exclude 'scripts' --exclude 'ctl.sh' --exclude 'start.sh' --exclude 'docker_init.bash' --exclude 'docker*' --exclude '*compose*' --exclude 'start.ps1' --exclude 'eslint*' --exclude 'tests' --exclude 'node_modules' --exclude 'Dockerfile' --exclude 'package*.json' --exclude 'pyproject.toml' --exclude 'LICENSE' --exclude '*.md' "$SOURCE_WEB_DIR"/ "$WEB_RUNTIME"/
   rewrite_product_text_tokens "$WEB_RUNTIME"
   write_packaged_webui_version
   write_installed_runtime_profile
-
   compile_sourceless_python "$AGENT_RUNTIME" "$SOURCE_AGENT_PYTHON"
   compile_sourceless_python "$WEB_RUNTIME" "$SOURCE_AGENT_PYTHON"
 }
 
-scan_product_privacy() {
-  local name_hits text_hits
-  name_hits="$(find "$INSTALL_ROOT" \
-    -path "$INSTALL_ROOT/licenses" -prune -o \
-    -path "$INSTALL_ROOT/licenses/*" -prune -o \
-    -path "$AGENT_RUNTIME/venv/lib*" -prune -o \
-    -iname '*hermes*' -print)"
-  if [ -n "$name_hits" ]; then
-    echo "Package tree contains legacy product names in visible paths; refusing release." >&2
-    printf '%s\n' "$name_hits" >&2
-    exit 1
+scan_private_key_material() {
+  if find "$INSTALL_ROOT" \( -name '.env' -o -name '*.jwt' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.key' \) | grep -q .; then
+    fail "Package tree contains secret-shaped files"
   fi
-
-  text_hits="$(find "$INSTALL_ROOT" \
-    -path "$INSTALL_ROOT/licenses" -prune -o \
-    -path "$INSTALL_ROOT/licenses/*" -prune -o \
-    -path "$AGENT_RUNTIME/venv/lib*" -prune -o \
-    -type f \
-    ! -name '*.pyc' \
-    ! -name '*.so' \
-    ! -name '*.png' \
-    ! -name '*.jpg' \
-    ! -name '*.jpeg' \
-    ! -name '*.gif' \
-    -print0 | xargs -0 -r grep -I -n -E 'hermes|Hermes|HERMES_|hermes_cli|hermes-agent|hermes-webui|hermes-home' 2>/dev/null || true)"
-  if [ -n "$text_hits" ]; then
-    echo "Package tree contains legacy product names in text files; refusing release." >&2
-    printf '%s\n' "$text_hits" >&2
-    exit 1
+  if find "$INSTALL_ROOT" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \) -print0 | xargs -0 -r grep -Iq 'BEGIN .*PRIVATE KEY'; then
+    fail "Package tree contains private key material"
   fi
 }
 
-scan_webui_offline_assets() {
-  local static_dir required missing cdn_hits
-  static_dir="$SOURCE_WEB_DIR/static"
-  [ -d "$static_dir" ] || fail "Missing WebUI static directory: $static_dir"
-
-  cdn_hits="$(grep -RInE 'cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com' "$static_dir" \
-    --include='*.html' \
-    --include='*.js' \
-    --include='*.css' \
-    --include='*.mjs' 2>/dev/null || true)"
-  if [ -n "$cdn_hits" ]; then
-    printf '%s\n' "$cdn_hits" >&2
-    fail "WebUI static assets still depend on CDN; vendor them under static/vendor before building an offline package."
-  fi
-
-  for required in \
-    "vendor/xterm/5.3.0/xterm.css" \
-    "vendor/xterm/5.3.0/xterm.js" \
-    "vendor/xterm-addon-fit/0.8.0/xterm-addon-fit.js" \
-    "vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js" \
-    "vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css" \
-    "vendor/prismjs/1.29.0/themes/prism.min.css" \
-    "vendor/prismjs/1.29.0/prism.min.js" \
-    "vendor/pdfjs-dist/4.9.155/pdf.min.mjs" \
-    "vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs" \
-    "vendor/mermaid/10.9.3/mermaid.min.js"; do
-    if [ ! -f "$static_dir/$required" ]; then
-      missing="${missing:-}${static_dir}/${required}"$'\n'
-    fi
-  done
-  if [ -n "${missing:-}" ]; then
-    printf '%s' "$missing" >&2
-    fail "WebUI offline vendor assets are incomplete."
-  fi
+scan_product_privacy() {
+  local name_hits text_hits
+  name_hits="$(find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -iname '*hermes*' -print)"
+  [ -z "$name_hits" ] || fail "Package tree contains legacy product names in visible paths"
+  text_hits="$(find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -type f ! -name '*.pyc' ! -name '*.so' ! -name '*.png' ! -name '*.jpg' ! -name '*.jpeg' ! -name '*.gif' -print0 | xargs -0 -r grep -I -n -E 'hermes|Hermes|HERMES_|hermes_cli|hermes-agent|hermes-webui|hermes-home' 2>/dev/null || true)"
+  [ -z "$text_hits" ] || fail "Package tree contains legacy product names in text files"
 }
 
 scan_package_tree() {
   if find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) | grep -q .; then
-    echo "Package tree contains macOS/Python cache metadata; clean before release." >&2
     find "$PKG_ROOT" \( -name '.DS_Store' -o -name '._*' -o -name '__pycache__' \) >&2
-    exit 1
+    fail "Package tree contains forbidden cache metadata"
   fi
-
   scan_private_key_material
   scan_product_privacy
+}
+
+scan_webui_offline_assets() {
+  local static_dir="$SOURCE_WEB_DIR/static" required missing="" cdn_hits
+  [ -d "$static_dir" ] || fail "Missing WebUI static directory: $static_dir"
+  cdn_hits="$(grep -RInE 'cdn\.jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com' "$static_dir" --include='*.html' --include='*.js' --include='*.css' --include='*.mjs' 2>/dev/null || true)"
+  [ -z "$cdn_hits" ] || fail "WebUI static assets still depend on CDN"
+  for required in "vendor/xterm/5.3.0/xterm.css" "vendor/xterm/5.3.0/xterm.js" "vendor/xterm-addon-fit/0.8.0/xterm-addon-fit.js" "vendor/xterm-addon-web-links/0.9.0/xterm-addon-web-links.js" "vendor/prismjs/1.29.0/themes/prism-tomorrow.min.css" "vendor/prismjs/1.29.0/themes/prism.min.css" "vendor/prismjs/1.29.0/prism.min.js" "vendor/pdfjs-dist/4.9.155/pdf.min.mjs" "vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs" "vendor/mermaid/10.9.3/mermaid.min.js"; do
+    [ -f "$static_dir/$required" ] || missing="$missing$static_dir/$required"$'\n'
+  done
+  [ -z "$missing" ] || { printf '%s' "$missing" >&2; fail "WebUI offline vendor assets are incomplete"; }
+}
+
+archive_old_packages() {
+  mkdir -p "$ARCHIVE_DIR"
+  find "$OUT_DIR" -maxdepth 1 -type f \( -name 'taiji-agent_*_amd64.deb' -o -name 'taiji-agent_*_amd64.deb.sha256' \) ! -name "$(basename "$OUT_DEB")" ! -name "$(basename "$OUT_DEB").sha256" -exec mv {} "$ARCHIVE_DIR"/ \;
 }
 
 scan_deb_release_artifact() {
   dpkg-deb -I "$OUT_DEB" >/dev/null
   dpkg-deb -c "$OUT_DEB" >/dev/null
-
-  local pattern
-  for pattern in LIBARCHIVE.xattr com.apple.provenance PaxHeaders SCHILY.xattr; do
-    if strings "$OUT_DEB" | grep -F "$pattern" >/dev/null; then
-      fail "DEB contains forbidden archive metadata marker: $pattern"
-    fi
+  local marker
+  for marker in LIBARCHIVE.xattr com.apple.provenance PaxHeaders SCHILY.xattr; do
+    strings "$OUT_DEB" | grep -F "$marker" >/dev/null && fail "DEB contains forbidden archive metadata marker: $marker" || true
   done
 }
 
 audit_deb_payload() {
-  local contents required missing audit_root control_root
-  contents="$BUILD_ROOT/deb-contents.txt"
+  local contents="$BUILD_ROOT/deb-contents.txt" audit_root="$BUILD_ROOT/deb-audit-root" control_root="$BUILD_ROOT/deb-audit-control" extracted_abi="$BUILD_ROOT/extracted-elf-abi-audit.json" required missing=""
   dpkg-deb -c "$OUT_DEB" > "$contents"
-  for required in \
-    "./opt/taiji-agent/runtime/agent/venv/bin/python" \
-    "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" \
-    "./opt/taiji-agent/apps/taiji-desktop/src/main.js" \
-    "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" \
-    "./opt/taiji-agent/apps/taiji-desktop/src/external-link-policy.js" \
-    "./opt/taiji-agent/apps/taiji-desktop/src/launch-profile.js" \
-    "./opt/taiji-agent/resources/taiji-release-manifest.json" \
-    "./opt/taiji-agent/resources/target-baseline.json" \
-    "./opt/taiji-agent/runtime/web/server.pyc" \
-    "./opt/taiji-agent/scripts/taiji-native-verify" \
-    "./usr/share/applications/taiji-agent.desktop" \
-    "./usr/bin/taiji" \
-    "./usr/bin/taiji-agent"; do
-    if ! grep -F "$required" "$contents" >/dev/null; then
-      missing="${missing:-}${required}"$'\n'
-    fi
+  for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./usr/share/applications/taiji-agent.desktop" "./usr/bin/taiji" "./usr/bin/taiji-agent"; do
+    grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
   done
-  if [ -n "${missing:-}" ]; then
-    printf '%s' "$missing" >&2
-    fail "DEB payload is missing required runtime paths."
-  fi
-  if ! awk '
-    $1 == "-rw-r--r--" && $2 == "root/root" &&
-    $NF == "./opt/taiji-agent/resources/taiji-release-manifest.json" { found = 1 }
-    END { exit(found ? 0 : 1) }
-  ' "$contents"; then
-    fail "DEB release manifest must be root-owned and mode 0644."
-  fi
-  if ! awk '
-    $1 == "-rw-r--r--" && $2 == "root/root" &&
-    $NF == "./opt/taiji-agent/resources/target-baseline.json" { found = 1 }
-    END { exit(found ? 0 : 1) }
-  ' "$contents"; then
-    fail "DEB target baseline must be root-owned and mode 0644."
-  fi
-
-  audit_root="$BUILD_ROOT/deb-audit-root"
-  control_root="$BUILD_ROOT/deb-audit-control"
+  [ -z "$missing" ] || { printf '%s' "$missing" >&2; fail "DEB payload is missing required runtime paths"; }
   rm -rf "$audit_root" "$control_root"
   mkdir -p "$audit_root" "$control_root"
   dpkg-deb -x "$OUT_DEB" "$audit_root"
   dpkg-deb -e "$OUT_DEB" "$control_root"
-  cmp -s "$TARGET_BASELINE_SNAPSHOT" "$audit_root/opt/taiji-agent/resources/target-baseline.json" \
-    || fail "DEB target baseline is not byte-identical to the validated release input."
-  grep -F "$TARGET_BASELINE_PROFILE_ID" "$control_root/preinst" >/dev/null \
-    || fail "DEB preinst is not bound to the validated target profile."
-  if grep -F '@@TAIJI_BASELINE_' "$control_root/preinst" >/dev/null; then
-    fail "DEB preinst still contains unrendered target baseline tokens."
-  fi
+  cmp -s "$POLICY_FILE" "$audit_root/opt/taiji-agent/resources/linux-compatibility-policy.json" || fail "DEB policy is not byte-identical"
+  cmp -s "$ABI_BUILD_REPORT" "$audit_root/opt/taiji-agent/resources/elf-abi-audit.json" || fail "DEB ABI report changed during packaging"
+  grep -F "$POLICY_SHA256" "$control_root/preinst" >/dev/null || fail "DEB preinst policy hash mismatch"
+  grep -F "$POLICY_ID" "$control_root/preinst" >/dev/null || fail "DEB preinst policy id mismatch"
   bash -n "$control_root/preinst"
+  [ "$(dpkg-deb -f "$OUT_DEB" Package)" = "$TAIJI_PACKAGE_NAME" ] || fail "DEB package identity mismatch"
+  [ "$(dpkg-deb -f "$OUT_DEB" Architecture)" = "$TAIJI_PACKAGE_ARCHITECTURE" ] || fail "DEB architecture mismatch"
+  [ "$(dpkg-deb -f "$OUT_DEB" Maintainer)" = "$TAIJI_PACKAGE_MAINTAINER" ] || fail "DEB maintainer mismatch"
+  [ "$(dpkg-deb -f "$OUT_DEB" Depends)" = "$TAIJI_DEBIAN_DEPENDS" ] || fail "DEB Depends mismatch"
+  python3 "$PAYLOAD_VERIFIER" --root "$audit_root" >/dev/null
+  python3 "$ELF_AUDITOR" --root "$audit_root" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$extracted_abi" >/dev/null
+  cmp -s "$ABI_BUILD_REPORT" "$extracted_abi" || fail "ELF ABI audit changed after DEB extraction"
 }
 
-if [ "$(uname -s)" != "Linux" ]; then
-  echo "Refusing to build final DEB on $(uname -s). Use Linux x86_64/amd64." >&2
-  exit 1
-fi
+write_package_manifest() {
+  local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 built_at_utc out_deb_name
+  out_deb_name="$(basename "$OUT_DEB")"
+  deb_sha256="$(sha256sum "$OUT_DEB" | awk '{print $1}')"
+  electron_sha256="$(sha256sum "$DESKTOP_RUNTIME/node_modules/electron/dist/electron" | awk '{print $1}')"
+  desktop_sha256="$(sha256sum "$DESKTOP_FILE" | awk '{print $1}')"
+  abi_sha256="$(sha256sum "$ABI_REPORT_PATH" | awk '{print $1}')"
+  built_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  cat > "$MANIFEST_PATH" <<MANIFEST
+{
+  "schema": "taiji-package-manifest/v3",
+  "package": "$TAIJI_PACKAGE_NAME",
+  "version": "$VERSION",
+  "architecture": "$TAIJI_PACKAGE_ARCHITECTURE",
+  "source_commit": "$SOURCE_COMMIT",
+  "deb_basename": "$(basename "$OUT_DEB")",
+  "deb_sha256": "$deb_sha256",
+  "maintainer": "$TAIJI_PACKAGE_MAINTAINER",
+  "compatibility_policy_id": "$POLICY_ID",
+  "compatibility_policy_sha256": "$POLICY_SHA256",
+  "elf_abi_audit_basename": "elf-abi-audit.json",
+  "elf_abi_audit_sha256": "$abi_sha256",
+  "electron_executable_sha256": "$electron_sha256",
+  "desktop_entry_sha256": "$desktop_sha256",
+  "built_at_utc": "$built_at_utc"
+}
+MANIFEST
+  chmod 0644 "$MANIFEST_PATH"
+  (cd "$OUT_DIR" && sha256sum "$out_deb_name" > "$out_deb_name.sha256")
+}
 
-case "$(uname -m)" in
-  x86_64|amd64) ;;
-  *)
-    echo "Refusing to build Hygon/UOS package on non-x86_64 host: $(uname -m)" >&2
-    exit 1
-    ;;
-esac
-
-for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp; do
-  require_cmd "$cmd"
-done
+if [ "$(uname -s)" != "Linux" ]; then fail "Refusing to build final DEB on non-Linux host"; fi
+case "$(uname -m)" in x86_64|amd64) ;; *) fail "Refusing to build on non-x86_64 host: $(uname -m)" ;; esac
+for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp readelf date; do require_cmd "$cmd"; done
+load_policy_contract
 resolve_source_commit
-validate_sales_release_inputs
-
-if [ -n "${TAIJI_LICENSE_PRIVATE_KEY:-}" ] || [ -n "${TAIJI_LICENSE_PRIVATE_KEY_FILE:-}" ]; then
-  warn "license signing private-key environment variables are ignored by package builds"
-fi
-
+validate_build_host_glibc
+[ -n "$PACKAGED_NODE_ROOT" ] || fail "TAIJI_PACKAGED_NODE_ROOT is required for the verified offline Node runtime"
+[ -d "$PRIVATE_LIBRARY_SYSROOT" ] || fail "Private-library sysroot is missing: $PRIVATE_LIBRARY_SYSROOT"
+for component in "$RUNTIME_STAGER" "$PYTHON_RUNTIME_STAGER" "$ELECTRON_RUNTIME_STAGER" "$DESKTOP_JS_STAGER" "$PRIVATE_LIB_STAGER" "$ELF_AUDITOR" "$PREINST_RENDERER"; do [ -f "$component" ] || fail "Missing packaging component: $component"; done
 SOURCE_AGENT_PYTHON="$SOURCE_AGENT_DIR/venv/bin/python"
-if [ ! -x "$SOURCE_AGENT_PYTHON" ]; then
-  echo "Missing Linux Agent venv. Run hermes-local-lab/scripts/setup-local.sh on this Linux build host first." >&2
-  exit 1
-fi
-if ! (cd "$SOURCE_AGENT_DIR" && "$SOURCE_AGENT_PYTHON" -m taiji_runtime.main --help >/dev/null 2>&1); then
-  echo "Linux Agent venv module entrypoint failed. Re-run hermes-local-lab/scripts/setup-local.sh on this Linux build host." >&2
-  exit 1
-fi
-
+[ -x "$SOURCE_AGENT_PYTHON" ] || fail "Missing Linux Agent venv: $SOURCE_AGENT_PYTHON"
+(cd "$SOURCE_AGENT_DIR" && "$SOURCE_AGENT_PYTHON" -m taiji_runtime.main --help >/dev/null 2>&1) || fail "Linux Agent venv module entrypoint failed"
 verify_linux_electron_runtime
 validate_desktop_entry "$DESKTOP_FILE"
 validate_packaged_config_template
 scan_webui_offline_assets
 
 rm -rf "$BUILD_ROOT"
-mkdir -p \
-  "$INSTALL_ROOT" \
-  "$INSTALL_ROOT/bin" \
-  "$INSTALL_ROOT/config" \
-  "$INSTALL_ROOT/licenses" \
-  "$INSTALL_ROOT/resources/icons" \
-  "$INSTALL_ROOT/scripts" \
-  "$AGENT_RUNTIME" \
-  "$WEB_RUNTIME" \
-  "$PKG_ROOT/DEBIAN" \
-  "$PKG_ROOT/usr/bin" \
-  "$PKG_ROOT/usr/share/applications" \
-  "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps" \
-  "$OUT_DIR"
+mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/config" "$INSTALL_ROOT/licenses" "$INSTALL_ROOT/resources/icons" "$INSTALL_ROOT/scripts" "$INSTALL_ROOT/runtime/lib" "$AGENT_RUNTIME" "$WEB_RUNTIME" "$PKG_ROOT/DEBIAN" "$PKG_ROOT/usr/bin" "$PKG_ROOT/usr/share/applications" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps" "$OUT_DIR"
 chmod 0755 "$PKG_ROOT/opt" "$INSTALL_ROOT"
 chmod 0755 "$INSTALL_ROOT/resources"
+chmod 0755 "$INSTALL_ROOT/runtime/lib"
 archive_old_packages
-
 stage_python_runtime
 install -m 0644 "$VERSION_FILE" "$INSTALL_ROOT/VERSION"
-printf '%s\n' "$("$SOURCE_AGENT_PYTHON" -c 'import platform; print(platform.python_version())')" \
-  > "$AGENT_RUNTIME/PYTHON_VERSION"
+printf '%s\n' "$("$SOURCE_AGENT_PYTHON" -c 'import platform; print(platform.python_version())')" > "$AGENT_RUNTIME/PYTHON_VERSION"
 chmod 0644 "$AGENT_RUNTIME/PYTHON_VERSION"
 printf '%s\n' "$VERSION" > "$WEB_RUNTIME/PRODUCT_VERSION"
 chmod 0644 "$WEB_RUNTIME/PRODUCT_VERSION"
 install -m 0644 "$PAYLOAD_CONTRACT" "$INSTALL_ROOT/resources/payload-contract.json"
-install -m 0644 "$TARGET_BASELINE_SNAPSHOT" "$INSTALL_ROOT/resources/target-baseline.json"
-write_desktop_release_manifest
-python3 "$RUNTIME_STAGER" \
-  --repo-root "$REPO_ROOT" \
-  --install-root "$INSTALL_ROOT" \
-  --node-root "$PACKAGED_NODE_ROOT" \
-  --public-key-fingerprint "$ISSUER_PUBLIC_KEY_FINGERPRINT"
+install -m 0644 "$POLICY_FILE" "$POLICY_INSTALL_PATH"
+python3 "$RUNTIME_STAGER" --repo-root "$REPO_ROOT" --install-root "$INSTALL_ROOT" --node-root "$PACKAGED_NODE_ROOT" --public-key-fingerprint "$ISSUER_PUBLIC_KEY_FINGERPRINT"
 chmod 0755 "$INSTALL_ROOT/resources/license"
-if [ "$("$INSTALL_ROOT/runtime/node/bin/node" --version)" != "v$PACKAGED_NODE_VERSION" ]; then
-  fail "Staged Node runtime did not execute as v$PACKAGED_NODE_VERSION on the Linux build host."
-fi
-
+[ "$("$INSTALL_ROOT/runtime/node/bin/node" --version)" = "v$PACKAGED_NODE_VERSION" ] || fail "Staged Node runtime version mismatch"
+python3 "$PRIVATE_LIB_STAGER" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$PRIVATE_STAGE_REPORT" >/dev/null
 rsync -a "$LAB_DIR/config"/ "$INSTALL_ROOT/config"/
 install -m 0755 "$LAB_DIR/scripts/runtime-env.sh" "$INSTALL_ROOT/scripts/runtime-env.sh"
 install -m 0755 "$LAB_DIR/scripts/start-agent.sh" "$INSTALL_ROOT/scripts/start-agent.sh"
@@ -746,26 +368,12 @@ install -m 0755 "$LAB_DIR/scripts/taiji-native-verify" "$INSTALL_ROOT/scripts/ta
 install -m 0755 "$LAB_DIR/scripts/taiji-agent-diagnose" "$INSTALL_ROOT/scripts/taiji-agent-diagnose"
 install -m 0644 "$LAB_DIR/scripts/sync-packaged-config.py" "$INSTALL_ROOT/scripts/sync-packaged-config.py"
 rewrite_product_text_tokens "$INSTALL_ROOT/scripts"
-
-if [ -f "$SOURCE_AGENT_DIR/LICENSE" ]; then
-  install -m 0644 "$SOURCE_AGENT_DIR/LICENSE" "$INSTALL_ROOT/licenses/agent-runtime.LICENSE"
-fi
-if [ -f "$SOURCE_WEB_DIR/LICENSE" ]; then
-  install -m 0644 "$SOURCE_WEB_DIR/LICENSE" "$INSTALL_ROOT/licenses/web-runtime.LICENSE"
-fi
-
+[ -f "$SOURCE_AGENT_DIR/LICENSE" ] && install -m 0644 "$SOURCE_AGENT_DIR/LICENSE" "$INSTALL_ROOT/licenses/agent-runtime.LICENSE" || true
+[ -f "$SOURCE_WEB_DIR/LICENSE" ] && install -m 0644 "$SOURCE_WEB_DIR/LICENSE" "$INSTALL_ROOT/licenses/web-runtime.LICENSE" || true
 mkdir -p "$DESKTOP_RUNTIME/src" "$DESKTOP_RUNTIME/node_modules"
 install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"
-node "$DESKTOP_JS_STAGER" \
-  --source "$APP_DIR/src" \
-  --destination "$DESKTOP_RUNTIME/src" \
-  --entry main.js \
-  --entry preload.js
-python3 "$ELECTRON_RUNTIME_STAGER" \
-  --source "$APP_DIR/node_modules/electron" \
-  --destination "$DESKTOP_RUNTIME/node_modules/electron" \
-  --require-linux-x86-64
-
+node "$DESKTOP_JS_STAGER" --source "$APP_DIR/src" --destination "$DESKTOP_RUNTIME/src" --entry main.js --entry preload.js
+python3 "$ELECTRON_RUNTIME_STAGER" --source "$APP_DIR/node_modules/electron" --destination "$DESKTOP_RUNTIME/node_modules/electron" --require-linux-x86-64
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/taiji-agent"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-diagnose" "$PKG_ROOT/usr/bin/taiji-agent-diagnose"
@@ -773,38 +381,31 @@ install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-native-verify" "$INSTALL_R
 install -m 0644 "$DESKTOP_FILE" "$PKG_ROOT/usr/share/applications/taiji-agent.desktop"
 install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
 install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$INSTALL_ROOT/resources/icons/taiji-agent.png"
-python3 "$PREINST_RENDERER" \
-  --template "$SCRIPT_DIR/preinst" \
-  --profile "$TARGET_BASELINE_SNAPSHOT" \
-  --depends-file "$RUNTIME_DEPENDS_FILE" \
-  --output "$PKG_ROOT/DEBIAN/preinst" \
-  --max-age-days "$TARGET_BASELINE_MAX_AGE_DAYS"
+python3 "$ELF_AUDITOR" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$ABI_BUILD_REPORT" >/dev/null
+install -m 0644 "$ABI_BUILD_REPORT" "$ABI_REPORT_PATH"
+python3 "$PREINST_RENDERER" --template "$SCRIPT_DIR/preinst" --policy "$POLICY_FILE" --output "$PKG_ROOT/DEBIAN/preinst"
 install -m 0755 "$SCRIPT_DIR/postinst" "$PKG_ROOT/DEBIAN/postinst"
 install -m 0755 "$SCRIPT_DIR/prerm" "$PKG_ROOT/DEBIAN/prerm"
 install -m 0755 "$SCRIPT_DIR/postrm" "$PKG_ROOT/DEBIAN/postrm"
-
 installed_size="$(du -sk "$PKG_ROOT" | awk '{print $1}')"
 cat > "$PKG_ROOT/DEBIAN/control" <<CONTROL
-Package: taiji-agent
+Package: $TAIJI_PACKAGE_NAME
 Version: $VERSION
 Section: utils
 Priority: optional
-Architecture: $ARCH
+Architecture: $TAIJI_PACKAGE_ARCHITECTURE
 Installed-Size: $installed_size
-Maintainer: $PACKAGE_MAINTAINER
-Depends: $DEB_DEPENDS
+Maintainer: $TAIJI_PACKAGE_MAINTAINER
+Depends: $TAIJI_DEBIAN_DEPENDS
 Description: Taiji Agent local desktop app
  Local desktop shell and offline runtime for Taiji Agent WebUI and Agent API.
 CONTROL
-
-python3 "$PAYLOAD_VERIFIER" --root "$PKG_ROOT"
+python3 "$PAYLOAD_VERIFIER" --root "$PKG_ROOT" >/dev/null
 scan_package_tree
-
-dpkg-deb --root-owner-group -Zxz --build "$PKG_ROOT" "$OUT_DEB"
+dpkg-deb --root-owner-group -Zxz --build "$PKG_ROOT" "$OUT_DEB" >/dev/null
 scan_deb_release_artifact
 audit_deb_payload
-out_deb_name="$(basename "$OUT_DEB")"
-(cd "$OUT_DIR" && sha256sum "$out_deb_name" > "$out_deb_name.sha256")
-
+write_package_manifest
 echo "Built: $OUT_DEB"
 echo "Checksum: $OUT_DEB.sha256"
+echo "Manifest: $MANIFEST_PATH"

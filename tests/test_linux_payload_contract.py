@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -53,6 +54,36 @@ class LinuxPayloadContractTest(unittest.TestCase):
         contract = json.loads(CONTRACT_FILE.read_text(encoding="utf-8"))
         self._write(root, contract["product_version"]["source"], VERSION_FILE.read_text(encoding="utf-8"))
         self._write(root, EMBEDDED_CONTRACT.as_posix(), json.dumps(contract, ensure_ascii=False) + "\n")
+
+        policy = json.loads(
+            (ROOT / "packaging/linux/compatibility-policy.json").read_text(encoding="utf-8")
+        )
+        policy_bytes = (
+            json.dumps(policy, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        policy_target = root / "opt/taiji-agent/resources/linux-compatibility-policy.json"
+        policy_target.parent.mkdir(parents=True, exist_ok=True)
+        policy_target.write_bytes(policy_bytes)
+        policy_target.chmod(0o644)
+        audit_target = root / "opt/taiji-agent/resources/elf-abi-audit.json"
+        audit_target.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-elf-abi-audit/v1",
+                    "policy_id": policy["policy_id"],
+                    "compatibility_policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+                    "max_required_versions": policy["elf"]["maximum_symbol_versions"],
+                    "external_sonames": [],
+                    "private_sonames": [],
+                    "files": [],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        audit_target.chmod(0o644)
 
         for component in contract["components"]:
             target = root / component["path"]

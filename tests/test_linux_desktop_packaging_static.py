@@ -221,20 +221,24 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         )
         self.assertIn('--entry main.js', build)
         self.assertIn('--entry preload.js', build)
-        self.assertIn('"$INSTALL_ROOT/resources/taiji-release-manifest.json"', build)
+        self.assertIn('POLICY_FILE="$REPO_ROOT/packaging/linux/compatibility-policy.json"', build)
+        self.assertIn('POLICY_INSTALL_PATH="$INSTALL_ROOT/resources/linux-compatibility-policy.json"', build)
+        self.assertIn('ABI_REPORT_PATH="$INSTALL_ROOT/resources/elf-abi-audit.json"', build)
+        self.assertIn('write_package_manifest', build)
         for field in (
-            '"schema": "taiji-release-manifest/v1"',
-            '"platform": "linux"',
-            '"arch": "amd64"',
-            '"version": "$VERSION"',
-            '"commit": "$SOURCE_COMMIT"',
-            '"installRoot": "/opt/taiji-agent"',
+            '"schema": "taiji-package-manifest/v3"',
+            '"package": "$TAIJI_PACKAGE_NAME"',
+            '"architecture": "$TAIJI_PACKAGE_ARCHITECTURE"',
+            '"source_commit": "$SOURCE_COMMIT"',
+            '"compatibility_policy_id": "$POLICY_ID"',
+            '"compatibility_policy_sha256": "$POLICY_SHA256"',
+            '"elf_abi_audit_basename": "elf-abi-audit.json"',
         ):
             self.assertIn(field, build)
         self.assertIn('TAIJI_SOURCE_COMMIT="$source_commit"', offline_builder)
         self.assertIn('printf \'  "schema_version": 2,\\n\'', offline_builder)
         self.assertIn("^[0-9a-f]{40}$", build)
-        self.assertIn('DEB release manifest must be root-owned and mode 0644.', build)
+        self.assertIn('dpkg-deb --root-owner-group', build)
         self.assertIn("^[0-9a-f]{40}$", offline_builder)
         for source in (offline_builder, input_builder, release_preflight):
             self.assertIn("rev-parse HEAD", source)
@@ -255,35 +259,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
     def test_deb_declares_electron_runtime_libraries_from_canonical_contract(self):
         build = read_text("packaging/linux/deb/build-deb.sh")
-        dependency_contract = read_text(
-            "packaging/linux/deb/runtime-depends.txt"
-        ).splitlines()
-
-        expected_deps = (
-            "libx11-6",
-            "libxcomposite1",
-            "libxdamage1",
-            "libxext6",
-            "libxfixes3",
-            "libxrandr2",
-            "libxrender1",
-            "libxshmfence1",
-            "libxcb1",
-            "libcups2",
-            "libdbus-1-3",
-            "libglib2.0-0",
-            "libatk1.0-0",
-            "libatspi2.0-0",
-        )
-        for dep in expected_deps:
-            self.assertIn(dep, dependency_contract)
-        self.assertIn(
-            'RUNTIME_DEPENDS_FILE="$SCRIPT_DIR/runtime-depends.txt"', build
-        )
-        self.assertIn('python3 "$TARGET_BASELINE_TOOL" render-depends', build)
-        self.assertIn('--profile "$TARGET_BASELINE_SNAPSHOT"', build)
-        self.assertIn('--depends-file "$RUNTIME_DEPENDS_FILE"', build)
-        self.assertNotIn('DEB_DEPENDS="$(awk ', build)
+        policy = json.loads(read_text("packaging/linux/compatibility-policy.json"))
+        self.assertEqual(policy["debian"]["depends"], ["ca-certificates", "libc6 (>= 2.31)"])
+        self.assertIn('POLICY_HELPER="$REPO_ROOT/packaging/linux/compatibility_policy.py"', build)
+        self.assertIn('eval "$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-shell)"', build)
+        self.assertIn('Depends: $TAIJI_DEBIAN_DEPENDS', build)
+        self.assertNotIn("runtime-depends.txt", build)
+        self.assertNotIn("render-depends", build)
 
     def test_native_verify_checks_packaged_electron_runtime(self):
         verify = read_text("hermes-local-lab/scripts/taiji-native-verify")
@@ -2211,7 +2193,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertIn("scan_private_key_material", build)
         self.assertIn("license.jwt", build)
-        self.assertIn("TAIJI_LICENSE_PRIVATE_KEY", build)
+        self.assertNotIn("TAIJI_LICENSE_PRIVATE_KEY", build)
         self.assertNotIn("cp \"$ROOT_DIR/license.jwt\"", build)
         self.assertNotIn("BEGIN RSA PRIVATE KEY", build)
         self.assertNotIn("taiji-license-issuer", build)
@@ -2509,23 +2491,32 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_builder_installs_declared_deb_runtime_dependencies_for_ldd_audit(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         deb_builder = read_text("packaging/linux/deb/build-deb.sh")
-        declared = read_text("packaging/linux/deb/runtime-depends.txt").splitlines()
+        policy = json.loads(read_text("packaging/linux/compatibility-policy.json"))
         install_body = builder[
             builder.index("install_build_dependencies() {") : builder.index("source_lab_dir() {")
         ]
 
-        self.assertIn(
-            'RUNTIME_DEPENDS_FILE="$SCRIPT_DIR/runtime-depends.txt"', deb_builder
+        self.assertEqual(
+            policy["debian"]["depends"],
+            ["ca-certificates", "libc6 (>= 2.31)"],
         )
-        self.assertIn('python3 "$TARGET_BASELINE_TOOL" render-depends', deb_builder)
-        self.assertIn('--profile "$TARGET_BASELINE_SNAPSHOT"', deb_builder)
-        self.assertIn('--depends-file "$RUNTIME_DEPENDS_FILE"', deb_builder)
+        self.assertIn(
+            'POLICY_HELPER="$REPO_ROOT/packaging/linux/compatibility_policy.py"',
+            deb_builder,
+        )
+        self.assertIn(
+            'eval "$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-shell)"',
+            deb_builder,
+        )
+        self.assertIn("Depends: $TAIJI_DEBIAN_DEPENDS", deb_builder)
+        self.assertNotIn("runtime-depends.txt", deb_builder)
+        self.assertNotIn("render-depends", deb_builder)
         self.assertNotIn('DEB_DEPENDS="$(awk ', deb_builder)
         self.assertNotRegex(
             deb_builder, re.compile(r'^DEB_DEPENDS="libc6,', re.MULTILINE)
         )
 
-        for package in declared:
+        for package in ("dpkg-dev", "python3", "rsync"):
             with self.subTest(package=package):
                 self.assertIn(package, install_body)
 

@@ -7,6 +7,38 @@
   },
   "components": [
     {
+      "id": "compatibility_policy",
+      "path": "opt/taiji-agent/resources/linux-compatibility-policy.json",
+      "type": "file",
+      "mode": "0644",
+      "version": {
+        "kind": "compatibility_policy",
+        "policy_id": "taiji-linux-amd64-deb-v1",
+        "schema": "taiji-linux-compatibility-policy/v1"
+      }
+    },
+    {
+      "id": "elf_abi_audit",
+      "path": "opt/taiji-agent/resources/elf-abi-audit.json",
+      "type": "file",
+      "mode": "0644",
+      "version": {
+        "kind": "elf_abi_audit",
+        "schema": "taiji-elf-abi-audit/v1",
+        "policy_id": "taiji-linux-amd64-deb-v1"
+      }
+    },
+    {
+      "id": "private_runtime_library_dir",
+      "path": "opt/taiji-agent/runtime/lib",
+      "type": "directory",
+      "mode": "0755",
+      "version": {
+        "kind": "literal",
+        "value": "policy-bound"
+      }
+    },
+    {
       "id": "product_version",
       "path": "opt/taiji-agent/VERSION",
       "type": "file",

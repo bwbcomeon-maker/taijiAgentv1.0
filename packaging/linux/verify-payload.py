@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import posixpath
@@ -16,7 +17,9 @@ from typing import Any
 
 SCHEMA_VERSION = "taiji-payload-contract/v1"
 EMBEDDED_CONTRACT = "opt/taiji-agent/resources/payload-contract.json"
-TRUSTED_CONTRACT_SHA256 = "266c7bf6dbf6b4268827f58258cd42b484e0a6de15681995c606cf4a272e6e50"
+TRUSTED_CONTRACT_SHA256 = "3291adff614f3a7159fb7391cad08a4cc4e5f473c45ad8e4d234da91f38e3d18"
+COMPATIBILITY_POLICY_SCHEMA = "taiji-linux-compatibility-policy/v1"
+ELF_ABI_AUDIT_SCHEMA = "taiji-elf-abi-audit/v1"
 FORBIDDEN_PROFILE_MARKER = b"source-development"
 READ_CHUNK_SIZE = 1024 * 1024
 SYMLINK_POLICY = "relative-internal-existing-targets-without-symlink-components"
@@ -269,6 +272,78 @@ def json_field(value: Any, field: object, *, label: str) -> Any:
     return current
 
 
+def load_compatibility_policy_module() -> Any:
+    helper = Path(__file__).with_name("compatibility_policy.py")
+    spec = importlib.util.spec_from_file_location("taiji_payload_compatibility_policy", helper)
+    if spec is None or spec.loader is None:
+        raise PayloadContractError(f"cannot load compatibility policy helper: {helper}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def verify_compatibility_policy(path: Path, version: dict[str, Any], component_id: str) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise PayloadContractError(f"cannot read component {component_id} policy") from exc
+    module = load_compatibility_policy_module()
+    try:
+        policy = module.load_and_validate(path)
+    except Exception as exc:
+        raise PayloadContractError(f"component {component_id} is not the canonical compatibility policy") from exc
+    if policy.get("schema") != version.get("schema") or policy.get("schema") != COMPATIBILITY_POLICY_SCHEMA:
+        raise PayloadContractError(f"component {component_id} has an unexpected compatibility policy schema")
+    if policy.get("policy_id") != version.get("policy_id"):
+        raise PayloadContractError(f"component {component_id} has an unexpected compatibility policy id")
+    if raw != module.canonical_bytes(policy):
+        raise PayloadContractError(f"component {component_id} is not byte-identical canonical JSON")
+    return module.canonical_sha256(policy)
+
+
+def verify_elf_abi_audit(
+    root: Path,
+    path: Path,
+    version: dict[str, Any],
+    component_id: str,
+) -> str:
+    report = read_json(path, label=f"component {component_id}")
+    if not isinstance(report, dict):
+        raise PayloadContractError(f"component {component_id} must be an object")
+    if report.get("schema") != version.get("schema") or report.get("schema") != ELF_ABI_AUDIT_SCHEMA:
+        raise PayloadContractError(f"component {component_id} has an unexpected ELF ABI audit schema")
+    if report.get("policy_id") != version.get("policy_id"):
+        raise PayloadContractError(f"component {component_id} is bound to the wrong compatibility policy")
+    policy_path = payload_path(
+        root,
+        "opt/taiji-agent/resources/linux-compatibility-policy.json",
+        label="embedded compatibility policy",
+    )
+    try:
+        policy = read_json(policy_path, label="embedded compatibility policy")
+        expected_policy_sha = hashlib.sha256(
+            (
+                json.dumps(
+                    policy,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+        ).hexdigest()
+    except (OSError, TypeError, ValueError) as exc:
+        raise PayloadContractError("cannot load the embedded compatibility policy for ABI audit") from exc
+    if not isinstance(policy, dict) or policy.get("schema") != COMPATIBILITY_POLICY_SCHEMA:
+        raise PayloadContractError("embedded compatibility policy has an unexpected schema")
+    if report.get("compatibility_policy_sha256") != expected_policy_sha:
+        raise PayloadContractError(f"component {component_id} is bound to the wrong compatibility policy hash")
+    files = report.get("files")
+    if not isinstance(files, list):
+        raise PayloadContractError(f"component {component_id} files must be an array")
+    return str(report["compatibility_policy_sha256"])
+
+
 def verify_type_and_mode(root: Path, component: dict[str, Any]) -> None:
     component_id = str(component.get("id") or "")
     target = payload_path(root, component.get("path"), label=f"component {component_id}")
@@ -291,7 +366,13 @@ def verify_type_and_mode(root: Path, component: dict[str, Any]) -> None:
         )
 
 
-def resolve_component_version(root: Path, version: dict[str, Any], product_version: str, component_id: str) -> Any:
+def resolve_component_version(
+    root: Path,
+    version: dict[str, Any],
+    product_version: str,
+    component_id: str,
+    component_path: object = None,
+) -> Any:
     kind = version.get("kind")
     if kind == "product":
         actual: Any = product_version
@@ -325,6 +406,20 @@ def resolve_component_version(root: Path, version: dict[str, Any], product_versi
                 f"component {component_id} is not a valid public key"
             )
         actual = hashlib.sha256(completed.stdout).hexdigest()
+    elif kind == "compatibility_policy":
+        source = payload_path(
+            root,
+            version.get("path") or component_path or "",
+            label=f"component {component_id} policy",
+        )
+        actual = verify_compatibility_policy(source, version, component_id)
+    elif kind == "elf_abi_audit":
+        source = payload_path(
+            root,
+            version.get("path") or component_path or "",
+            label=f"component {component_id} audit",
+        )
+        actual = verify_elf_abi_audit(root, source, version, component_id)
     else:
         raise PayloadContractError(f"component {component_id} has unsupported version kind {kind}")
 
@@ -389,7 +484,13 @@ def verify_payload(root: Path) -> dict[str, Any]:
         version = component.get("version")
         if not isinstance(version, dict):
             raise PayloadContractError(f"component {component_id} version must be an object")
-        resolve_component_version(root, version, product_version, component_id)
+        resolve_component_version(
+            root,
+            version,
+            product_version,
+            component_id,
+            component.get("path"),
+        )
         checked.append(component_id)
 
     if canonical_json_sha256(contract) != TRUSTED_CONTRACT_SHA256:
