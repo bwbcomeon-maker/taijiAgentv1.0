@@ -393,6 +393,8 @@ MANIFEST
 }
 
 write_launch_manifest() {
+  local manifest_install_root="/opt/${INSTALL_ROOT##*/}"
+  [ "$manifest_install_root" = "/opt/taiji-agent" ] || fail "Unexpected launch manifest install root: $manifest_install_root"
   cat > "$LAUNCH_MANIFEST_PATH" <<MANIFEST
 {
   "schema": "taiji-release-manifest/v1",
@@ -400,7 +402,7 @@ write_launch_manifest() {
   "arch": "$TAIJI_PACKAGE_ARCHITECTURE",
   "version": "$VERSION",
   "commit": "$SOURCE_COMMIT",
-  "installRoot": "$TAIJI_INSTALL_ROOT"
+  "installRoot": "$manifest_install_root"
 }
 MANIFEST
   chmod 0644 "$LAUNCH_MANIFEST_PATH"

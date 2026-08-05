@@ -2507,6 +2507,43 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertNotEqual(privacy_error.returncode, 0)
             self.assertIn("cannot inspect package text", privacy_error.stderr.lower())
 
+    def test_write_launch_manifest_is_nounset_safe_and_uses_fixed_install_root(self):
+        manifest_function = build_function_source("write_launch_manifest", "if [ \"$(uname -s)\"")
+        with tempfile.TemporaryDirectory(prefix="taiji-launch-manifest-shell-") as temp_dir:
+            temp_root = Path(temp_dir)
+            install_root = temp_root / "staging/opt/taiji-agent"
+            manifest_path = temp_root / "resources/taiji-release-manifest.json"
+            install_root.mkdir(parents=True)
+            manifest_path.parent.mkdir(parents=True)
+            script = "\n".join(
+                [
+                    "set -euo pipefail",
+                    'fail() { printf \'%s\\n\' "$*" >&2; exit 42; }',
+                    manifest_function,
+                    "write_launch_manifest",
+                ]
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    **os.environ,
+                    "INSTALL_ROOT": str(install_root),
+                    "LAUNCH_MANIFEST_PATH": str(manifest_path),
+                    "TAIJI_PACKAGE_ARCHITECTURE": "amd64",
+                    "VERSION": "1.0.0",
+                    "SOURCE_COMMIT": "0123456789abcdef0123456789abcdef01234567",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(manifest_path.stat().st_mode & 0o777, 0o644)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["installRoot"], "/opt/taiji-agent")
+            self.assertEqual(manifest["arch"], "amd64")
+            self.assertEqual(manifest["version"], "1.0.0")
+
     def test_postinst_repairs_electron_chrome_sandbox_permissions(self):
         postinst = read_text("packaging/linux/deb/postinst")
 
