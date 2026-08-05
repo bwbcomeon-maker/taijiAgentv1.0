@@ -1594,22 +1594,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_delivery_install_script_uses_native_managed_upgrade_and_allowlisted_legacy_migration(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
-        self.assertIn("taiji-agent-webui.service", install)
-        self.assertIn("taiji-agent-gateway.service", install)
-        self.assertIn("clean_reinstall_legacy_package", install)
-        self.assertIn("systemctl disable", install)
-        self.assertIn("受 dpkg 管理的 taiji-agent", install)
-        self.assertIn("不受 dpkg 管理的旧版 taiji-agent 残留", install)
-        self.assertNotIn("apt-mark unhold taiji-agent", install)
-        self.assertNotIn("apt-get purge -y taiji-agent", install)
-        self.assertNotIn("dpkg --remove --force-remove-reinstreq taiji-agent", install)
-        self.assertNotIn("dpkg --purge --force-all taiji-agent", install)
-        self.assertNotIn("pgrep -f", install)
-        self.assertIn('readlink -f -- "$proc_dir/exe"', install)
-        self.assertIn("check_port_conflict", install)
-        self.assertIn("--reinstall --allow-downgrades --allow-change-held-packages", install)
-        self.assertIn("新版桌面端会自动选择空闲端口", install)
-        self.assertIn("03_目标终端_导出诊断报告.sh", install)
+        self.assertIn("taiji-silent-deploy.sh", install)
+        self.assertIn("TAIJI_OPERATION", install)
+        self.assertIn("TAIJI_PREVIOUS_VERSION", install)
+        self.assertIn("TAIJI_PREVIOUS_MANIFEST", install)
+        self.assertNotIn("apt-get", install)
+        self.assertNotIn("ONLINE_OK", install)
+        self.assertNotIn("taiji-agent-webui.service", install)
+        self.assertNotIn("taiji-agent-gateway.service", install)
 
     def test_builder_preserves_noninteractive_apt_environment_across_sudo(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -1707,7 +1699,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         prepare = read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh")
         docs = read_text("taijiagent 打包交付/操作说明.md")
 
-        for script in (builder, install):
+        for script in (builder,):
             self.assertIn("write_failure_diagnostic", script)
             self.assertIn("failure_next_steps", script)
             self.assertIn("write_environment_snapshot", script)
@@ -1716,6 +1708,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertIn("require_admin_capability", script)
             self.assertIn("sudo -v", script)
             self.assertIn("sudo -n true", script)
+
+        self.assertIn("require_file", install)
+        self.assertIn("TAIJI_RECEIPT_PATH", install)
+        self.assertIn("安装回执", install)
 
         self.assertIn("taijiagent-制包机输入-", prepare)
         self.assertIn("tarfile.USTAR_FORMAT", prepare)
@@ -1791,32 +1787,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_install_script_requires_explicit_headless_rehearsal_mode(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
-        self.assertIn('TAIJI_ALLOW_HEADLESS_REHEARSAL="${TAIJI_ALLOW_HEADLESS_REHEARSAL:-0}"', install)
-        self.assertIn('TAIJI_ALLOW_HEADLESS_REHEARSAL=1', install)
-        self.assertIn("仅离线安装演练，不是桌面 App/目标机验证", install)
-        self.assertIn("真实模型对话和目标机验证：未验证", install)
+        self.assertIn('ADMISSION_MODE="${TAIJI_ADMISSION_MODE:-certification}"', install)
+        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", install)
+        self.assertIn("TAIJI_RECEIPT_PATH", install)
+        self.assertNotIn("TAIJI_ALLOW_HEADLESS_REHEARSAL", install)
+        self.assertNotIn("apt-get", install)
+        self.assertNotIn("ONLINE_OK", install)
 
         main = install[install.index("main() {") :]
-        self.assertLess(
-            main.index("require_desktop_session_or_rehearsal"),
-            main.index("validate_install_inputs"),
-        )
-        self.assertLess(
-            main.index("validate_install_inputs"),
-            main.index("require_admin_capability"),
-        )
-        self.assertLess(
-            main.index("require_admin_capability"),
-            main.index('set_stage "安装太极 Agent"'),
-        )
-        self.assertIn("不要使用 sudo bash", install)
-        root_guard = install.index('if [ "$EUID" -eq 0 ]; then')
-        self.assertLess(root_guard, install.index('mkdir -p "$LOG_DIR"'))
-        self.assertLess(root_guard, install.index('exec > >(tee -a "$LOG_FILE") 2>&1'))
-        verify = install[
-            install.index("verify_installation() {") : install.index("main() {")
-        ]
-        self.assertNotIn('TAIJI_ALLOW_HEADLESS_REHEARSAL" != "1"', verify)
+        self.assertLess(main.index('require_file "$SILENT_DEPLOY"'), main.index("select_deb"))
+        self.assertLess(main.index("select_deb"), main.index("build_args"))
 
     def test_offline_builder_uses_ascii_tmp_build_root_and_repairs_source_permissions(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -2172,29 +2152,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, install)
 
-        prepare = install[
-            install.index("prepare_legacy_replacement()"):
-            install.index("install_package()", install.index("prepare_legacy_replacement()"))
-        ]
-        self.assertLess(prepare.index("dpkg_has_taiji_state"), prepare.index("legacy_installation_detected"))
-        self.assertIn("原生升级/重装路径", prepare)
-        self.assertLess(prepare.index("check_port_conflict \"安装前\""), prepare.index("clean_reinstall_legacy_package"))
-        self.assertLess(prepare.index("clean_reinstall_legacy_package"), prepare.index("check_port_conflict \"安装前清理后\""))
-
-        clean = install[
-            install.index("clean_reinstall_legacy_package()"):
-            install.index("install_package()", install.index("clean_reinstall_legacy_package()"))
-        ]
-        self.assertLess(clean.index("stop_and_disable_legacy_services"), clean.index("stop_legacy_processes"))
-        self.assertLess(clean.index("stop_legacy_processes"), clean.index("remove_legacy_files"))
-        self.assertLess(clean.index("remove_legacy_files"), clean.index("systemctl daemon-reload"))
-        self.assertNotIn("purge_legacy_package_state", install)
+        self.assertNotIn("prepare_legacy_replacement", install)
+        self.assertNotIn("clean_reinstall_legacy_package", install)
         self.assertNotIn("dpkg --purge", install)
-        remove_files = install[
-            install.index("remove_legacy_files()"):
-            install.index("pid_uses_taiji_install_root()", install.index("remove_legacy_files()"))
-        ]
-        self.assertIn("remove_legacy_path /opt/taiji-agent", remove_files)
+        self.assertIn("taiji-silent-deploy.sh", install)
+        self.assertIn("deployment-admission", read_text("packaging/linux/deployment_receipt.py"))
 
     def test_diagnose_entrypoints_are_packaged_and_delivery_script_exists(self):
         build = read_text("packaging/linux/deb/build-deb.sh")

@@ -1,937 +1,138 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [ "$EUID" -eq 0 ]; then
-  printf '[FAIL] 请以普通桌面用户运行此脚本，不要使用 sudo bash；脚本会在需要时单独调用 sudo。\n' >&2
-  exit 1
+# 这是制包/认证管理面的薄封装。它不复制任何管理脚本到客户目录，
+# 不维护 apt 源，也不提供在线回退；客户交付物仍然只有固定的单一 DEB。
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SOURCE_SILENT_DEPLOY="$SCRIPT_DIR/../packaging/linux/deb/taiji-silent-deploy.sh"
+DELIVERY_SILENT_DEPLOY="$SCRIPT_DIR/验收工具/management/taiji-silent-deploy.sh"
+if [ -f "$DELIVERY_SILENT_DEPLOY" ]; then
+  SILENT_DEPLOY="$DELIVERY_SILENT_DEPLOY"
+else
+  SILENT_DEPLOY="$SOURCE_SILENT_DEPLOY"
+fi
+OUTPUT_DIR="${TAIJI_OUTPUT_DIR:-$SCRIPT_DIR/生成的安装包}"
+RECEIPT_PATH="${TAIJI_RECEIPT_PATH:-$SCRIPT_DIR/安装回执.json}"
+ADMISSION_MODE="${TAIJI_ADMISSION_MODE:-certification}"
+OPERATION="${TAIJI_OPERATION:-fresh_install}"
+MANIFEST_PATH="${TAIJI_BUILD_MANIFEST:-$OUTPUT_DIR/taiji-package-manifest.json}"
+SOURCE_POLICY_PATH="$SCRIPT_DIR/../packaging/linux/compatibility-policy.json"
+DELIVERY_POLICY_PATH="$SCRIPT_DIR/验收工具/management/compatibility-policy.json"
+if [ -f "$DELIVERY_POLICY_PATH" ]; then
+  POLICY_PATH="${TAIJI_POLICY_PATH:-$DELIVERY_POLICY_PATH}"
+else
+  POLICY_PATH="${TAIJI_POLICY_PATH:-$SOURCE_POLICY_PATH}"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
-OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
-LOG_DIR="$SCRIPT_DIR/构建日志"
-BUILD_MARKER="$OUTPUT_DIR/.build-success"
-DEB_PATH=""
-CHECKSUM_PATH=""
-MANIFEST_PATH=""
-ROOT_INSTALL_STAGING=""
-STAGED_BUILD_MARKER=""
-STAGED_DEB_PATH=""
-STAGED_CHECKSUM_PATH=""
-STAGED_MANIFEST_PATH=""
-OFFLINE_APT_REPO_SOURCE=""
-OFFLINE_APT_SOURCE_FILE=""
-OFFLINE_APT_LISTS_DIR=""
-EXPECTED_DEB_NAME=""
-EXPECTED_CHECKSUM_NAME=""
-EXPECTED_MANIFEST_NAME=""
-EXPECTED_DEB_SHA256=""
-EXPECTED_PACKAGES_SHA256=""
-EXPECTED_PACKAGES_GZ_SHA256=""
-EXPECTED_BUILD_MARKER_FILE_SHA256=""
-EXPECTED_CHECKSUM_FILE_SHA256=""
-EXPECTED_MANIFEST_FILE_SHA256=""
-INSTALL_INPUTS_VALIDATED=0
-STAGED_OFFLINE_REPO_AVAILABLE=0
-OFFLINE_REPO_STAGE_FILES=()
-OFFLINE_REPO_STAGE_SHA256=()
-ONLINE_OK="${ONLINE_OK:-0}"
-TAIJI_ALLOW_HEADLESS_REHEARSAL="${TAIJI_ALLOW_HEADLESS_REHEARSAL:-0}"
-
-LEGACY_SERVICES=(
-  "taiji-agent-webui.service"
-  "taiji-agent-gateway.service"
-)
-
-CONFLICT_PORTS=(8787 18642 18787)
-
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/02_install_$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "$LOG_FILE") 2>&1
-FAILURE_REPORTED=0
-CURRENT_STAGE="初始化"
-
-ok() { printf '[OK] %s\n' "$*"; }
-info() { printf '[INFO] %s\n' "$*"; }
-warn() { printf '[WARN] %s\n' "$*" >&2; }
-have() { command -v "$1" >/dev/null 2>&1; }
-set_stage() { CURRENT_STAGE="$1"; info "阶段：$CURRENT_STAGE"; }
-
-safe_cmd_path() {
-  command -v "$1" 2>/dev/null || printf 'missing'
-}
-
-write_environment_snapshot() {
-  local out="$1" cmd
-  {
-    printf '## 环境\n'
-    printf 'script=%s\n' "$0"
-    printf 'stage=%s\n' "${CURRENT_STAGE:-unknown}"
-    printf 'cwd=%s\n' "$(pwd)"
-    printf 'uname=%s\n' "$(uname -a 2>/dev/null || true)"
-    if [ -f /etc/os-release ]; then
-      printf -- '-- /etc/os-release --\n'
-      sed -n '1,40p' /etc/os-release
-    fi
-    printf 'arch=%s\n' "$(uname -m 2>/dev/null || true)"
-    printf 'dpkg_arch=%s\n' "$(dpkg --print-architecture 2>/dev/null || true)"
-    for cmd in sudo apt-get dpkg dpkg-query apt-mark sha256sum mktemp systemctl pgrep ps lsof taiji taiji-agent; do
-      printf 'cmd.%s=%s\n' "$cmd" "$(safe_cmd_path "$cmd")"
-    done
-    printf 'ONLINE_OK=%s\n' "$ONLINE_OK"
-    printf 'TAIJI_ALLOW_HEADLESS_REHEARSAL=%s\n' "$TAIJI_ALLOW_HEADLESS_REHEARSAL"
-    printf 'DISPLAY=%s\n' "${DISPLAY:-}"
-    printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY:-}"
-    printf '\n## 交付产物\n'
-    find "$SCRIPT_DIR" -maxdepth 2 \( -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name 'taiji-agent_*_amd64.deb' -o -name 'taiji-agent_*_amd64.deb.sha256' -o -name 'Packages' -o -name 'Packages.gz' -o -name 'SHA256SUMS.txt' \) -print 2>/dev/null | sort
-    printf '\n## 包和服务状态\n'
-    dpkg-query -W -f='${db:Status-Abbrev} ${Package} ${Version}\n' taiji-agent 2>/dev/null || true
-    systemctl status taiji-agent-webui.service --no-pager 2>/dev/null | sed -n '1,60p' || true
-    systemctl status taiji-agent-gateway.service --no-pager 2>/dev/null | sed -n '1,60p' || true
-    printf '\n## 端口占用\n'
-    for port in "${CONFLICT_PORTS[@]}"; do
-      lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
-    done
-    printf '\n## 最新日志\n'
-    [ -f "$LOG_FILE" ] && tail -n 180 "$LOG_FILE"
-  } >> "$out" 2>&1 || true
-}
-
-failure_next_steps() {
-  local reason="${1:-}"
-  if [ "${CURRENT_STAGE:-}" = "安装太极 Agent" ] && dpkg_has_taiji_state; then
-    printf 'next=保留现有 dpkg 状态，不要手工删除 /opt/taiji-agent。先用 sudo dpkg --audit 确认状态；若显示未配置完成，修复诊断中的根因后执行 sudo dpkg --configure taiji-agent 重试\n'
-    return 0
-  fi
-  case "$reason" in
-    *"只能在 Linux"*|*"不是 x86_64/amd64"*|*"缺少 apt-get"*|*"缺少 dpkg"*)
-      printf 'next=当前目标机不在 DEB 支持矩阵内；需要 Linux x86_64/amd64 + apt/dpkg + 图形桌面，RPM/.run 需单独制品\n'
-      ;;
-    *"离线 apt 仓库索引"*|*"无法下载 file:"*|*"无法找到文件"*"Packages"*)
-      printf 'next=离线 apt 仓库索引不可读。新版安装脚本会在 root 所有的 /var/tmp staging 中同时准备 Packages 和 Packages.gz；请使用最新交付目录重试\n'
-      ;;
-    *"管理员权限"*|*"sudo -v"*)
-      printf 'next=先执行 sudo -v，确认当前用户具备管理员权限后重试安装脚本\n'
-      ;;
-    *"缺少离线依赖仓库"*)
-      printf 'next=完全离线安装必须同时包含 离线依赖/Packages 与 Packages.gz；若明确允许在线源，设置 ONLINE_OK=1 后重试但不能算离线验收\n'
-      ;;
-    *"构建成功标记"*|*"manifest"*|*"安装包与构建成功标记"*|*"Packages.gz"*)
-      printf 'next=回到制包机重新执行 bash ./00_制包机_生成离线交付包.sh，并完整拷贝 生成的安装包/ 与 离线依赖/\n'
-      ;;
-    *"旧版后台服务仍"*)
-      printf 'next=查看诊断中的 systemctl 状态，保留 dpkg 包状态和 /opt/taiji-agent，处理确切的旧服务后重试\n'
-      ;;
-    *"TAIJI_ALLOW_HEADLESS_REHEARSAL=1"*)
-      printf 'next=请在图形桌面终端中重跑脚本；只有不带桌面验收的离线安装演练才能显式设置 TAIJI_ALLOW_HEADLESS_REHEARSAL=1\n'
-      ;;
-    *"taiji-native-verify"*|*"taiji 命令"*|*"taiji-agent 桌面启动"*)
-      printf 'next=安装已进入运行态验证阶段，优先查看 /opt/taiji-agent 与诊断报告定位缺失运行时或入口\n'
-      ;;
-    *)
-      printf 'next=查看本诊断文件和主日志，按最后一个 [FAIL]/命令错误继续定位\n'
-      ;;
-  esac
-}
-
-write_failure_diagnostic() {
-  local code="${1:-1}" reason="${2:-unknown}" diag
-  [ "${FAILURE_REPORTED:-0}" = "1" ] && return 0
-  FAILURE_REPORTED=1
-  set +e
-  diag="$LOG_DIR/失败诊断-$(date +%Y%m%d_%H%M%S).txt"
-  {
-    printf '太极 Agent 目标机安装失败诊断\n'
-    printf 'time=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
-    printf 'exit_code=%s\n' "$code"
-    printf 'reason=%s\n' "$reason"
-    failure_next_steps "$reason"
-    printf '\n'
-  } > "$diag"
-  write_environment_snapshot "$diag"
-  printf '[FAIL] 已生成失败诊断：%s\n' "$diag" >&2
-  set -e
-}
-
 fail() {
-  local msg="$*"
-  printf '[FAIL] %s\n' "$msg" >&2
-  write_failure_diagnostic 1 "$msg"
+  printf '[FAIL] %s\n' "$*" >&2
   exit 1
 }
 
-on_error() {
-  local code="$1" command_text="${2:-unknown}"
-  write_failure_diagnostic "$code" "命令失败：$command_text"
-  printf '\n[FAIL] 安装验证中断，请查看日志：%s\n' "$LOG_FILE" >&2
-  exit "$code"
+require_file() {
+  [ -f "$1" ] || fail "缺少交付文件：$1"
+  [ ! -L "$1" ] || fail "交付文件不能是符号链接：$1"
 }
 
-require_cmd() { have "$1" || fail "缺少命令：$1"; }
-
-cleanup_offline_apt_repo_mount() {
-  if [ -n "${ROOT_INSTALL_STAGING:-}" ]; then
-    if sudo rm -rf -- "$ROOT_INSTALL_STAGING" >/dev/null 2>&1; then
-      ROOT_INSTALL_STAGING=""
-      return 0
-    fi
-    printf '[FAIL] root staging 清理失败，残留路径：%s\n' "$ROOT_INSTALL_STAGING" >&2
-    return 1
-  fi
+select_deb() {
+  local -a candidates=()
+  [ -d "$OUTPUT_DIR" ] || fail "缺少生成的安装包目录：$OUTPUT_DIR"
+  while IFS= read -r -d '' candidate; do
+    candidates+=("$candidate")
+  done < <(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' -print0)
+  [ "${#candidates[@]}" -eq 1 ] || fail "生成的安装包必须恰好包含一个 amd64 DEB（实际 ${#candidates[@]} 个）"
+  DEB_PATH="${candidates[0]}"
+  require_file "$DEB_PATH"
+  CHECKSUM_PATH="$DEB_PATH.sha256"
+  require_file "$CHECKSUM_PATH"
 }
 
-on_exit() {
-  local exit_code="$?" cleanup_code=0
-  trap - EXIT
-  cleanup_offline_apt_repo_mount || cleanup_code="$?"
-  if [ "$exit_code" -eq 0 ] && [ "$cleanup_code" -ne 0 ]; then
-    exit_code="$cleanup_code"
-  fi
-  exit "$exit_code"
+read_manifest_value() {
+  python3 - "$MANIFEST_PATH" "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = manifest.get(sys.argv[2])
+if not isinstance(value, str) or not value:
+    raise SystemExit(2)
+print(value)
+PY
 }
 
-trap on_exit EXIT
-trap 'on_error "$?" "$BASH_COMMAND"' ERR
-
-require_admin_capability() {
-  require_cmd sudo
-  if sudo -n true >/dev/null 2>&1; then
-    ok "管理员权限预检通过：sudo 已可用"
-    return
-  fi
-  info "需要管理员权限预检。这里可能需要输入 sudo 密码。"
-  sudo -v || fail "管理员权限预检失败：当前用户不能执行 sudo，无法安装太极 Agent"
-  ok "管理员权限预检通过"
-}
-
-user_file_sha256() {
-  sha256sum "$1" | awk '{print $1}'
-}
-
-validate_user_source_file() {
-  local path="$1" label="$2" links
-  [ ! -L "$path" ] || fail "$label 不能是符号链接：$path"
-  [ -f "$path" ] || fail "$label 不是普通文件：$path"
-  [ -r "$path" ] || fail "$label 当前用户不可读：$path"
-  links="$(stat -c '%h' -- "$path" 2>/dev/null)" || fail "无法读取 $label 的硬链接计数：$path"
-  [ "$links" = "1" ] || fail "$label 不能是硬链接（link_count=${links}）：$path"
-}
-
-validate_deb_basename() {
-  local name="$1"
-  [[ "$name" =~ ^taiji-agent_[A-Za-z0-9.+:~_-]+_amd64\.deb$ ]] || fail "DEB 文件名不合法，必须是纯 basename 且符合 taiji-agent_*_amd64.deb：$name"
-}
-
-validate_offline_repo_deb_basename() {
-  local name="$1"
-  case "$name" in
-    *..*) fail "离线仓库 DEB 文件名不合法，不能包含 ..：$name" ;;
-  esac
-  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9.+%:~_-]*_(amd64|all)\.deb$ ]] || fail "离线仓库 DEB 文件名不合法：$name"
-}
-
-validate_fixed_basename() {
-  local actual="$1" expected="$2" label="$3"
-  [ "$actual" = "$expected" ] || fail "$label 文件名不合法，必须是纯 basename：$expected"
-}
-
-marker_value() {
-  local key="${1:-}" marker_path="${2:-$BUILD_MARKER}"
-  [ -n "$key" ] || return 1
-  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$marker_path"
-}
-
-json_string_value() {
-  local key="$1" path="$2"
-  sed -nE 's/^[[:space:]]*"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$path" | head -1
-}
-
-validate_release_manifest() {
-  local deb_name checksum_name expected_sha manifest_name marker_packages_sha marker_packages_gz_sha
-  local manifest_deb manifest_checksum manifest_deb_sha manifest_packages_sha manifest_packages_gz_sha
-  local actual_packages_sha actual_packages_gz_sha manifest_sha_before manifest_sha_after
-  deb_name="$(marker_value deb)"
-  checksum_name="$(marker_value checksum)"
-  expected_sha="$(marker_value deb_sha256)"
-  manifest_name="$(marker_value manifest)"
-  marker_packages_sha="$(marker_value packages_sha256)"
-  marker_packages_gz_sha="$(marker_value packages_gz_sha256)"
-
-  [ -n "$manifest_name" ] || fail "构建成功标记缺少 manifest 字段，请重新执行制包脚本"
-  [ -n "$marker_packages_sha" ] || fail "构建成功标记缺少 packages_sha256 字段，请重新执行制包脚本"
-  [ -n "$marker_packages_gz_sha" ] || fail "构建成功标记缺少 packages_gz_sha256 字段，请重新执行制包脚本"
-  validate_fixed_basename "$manifest_name" "taiji-package-manifest.json" "manifest"
-  [[ "$marker_packages_sha" =~ ^[0-9a-f]{64}$ ]] || fail "构建成功标记的 packages_sha256 格式不合法"
-  [[ "$marker_packages_gz_sha" =~ ^[0-9a-f]{64}$ ]] || fail "构建成功标记的 packages_gz_sha256 格式不合法"
-  MANIFEST_PATH="$OUTPUT_DIR/$manifest_name"
-  validate_user_source_file "$MANIFEST_PATH" "发布 manifest"
-  manifest_sha_before="$(user_file_sha256 "$MANIFEST_PATH")"
-
-  manifest_deb="$(json_string_value deb "$MANIFEST_PATH")"
-  manifest_checksum="$(json_string_value checksum "$MANIFEST_PATH")"
-  manifest_deb_sha="$(json_string_value deb_sha256 "$MANIFEST_PATH")"
-  manifest_packages_sha="$(json_string_value packages_sha256 "$MANIFEST_PATH")"
-  manifest_packages_gz_sha="$(json_string_value packages_gz_sha256 "$MANIFEST_PATH")"
-  [ "$manifest_deb" = "$deb_name" ] || fail "manifest 与构建标记的 DEB 名称不一致"
-  [ "$manifest_checksum" = "$checksum_name" ] || fail "manifest 与构建标记的校验文件名称不一致"
-  [ "$manifest_deb_sha" = "$expected_sha" ] || fail "manifest 与构建标记的 DEB SHA256 不一致"
-  [ -n "$manifest_packages_sha" ] || fail "manifest 缺少 packages_sha256 字段"
-  [ -n "$manifest_packages_gz_sha" ] || fail "manifest 缺少 packages_gz_sha256 字段"
-  [ "$manifest_packages_sha" = "$marker_packages_sha" ] || fail "manifest 与构建标记的 Packages SHA256 不一致"
-  [ "$manifest_packages_gz_sha" = "$marker_packages_gz_sha" ] || fail "manifest 与构建标记的 Packages.gz SHA256 不一致"
-
-  if offline_repo_available; then
-    validate_user_source_file "$OFFLINE_REPO/Packages" "离线依赖/Packages"
-    validate_user_source_file "$OFFLINE_REPO/Packages.gz" "离线依赖/Packages.gz"
-    actual_packages_sha="$(user_file_sha256 "$OFFLINE_REPO/Packages")"
-    actual_packages_gz_sha="$(user_file_sha256 "$OFFLINE_REPO/Packages.gz")"
-    [ "$actual_packages_sha" = "$manifest_packages_sha" ] || fail "离线依赖/Packages 与 manifest 不匹配"
-    [ "$actual_packages_gz_sha" = "$manifest_packages_gz_sha" ] || fail "离线依赖/Packages.gz 与 manifest 不匹配"
-  fi
-  manifest_sha_after="$(user_file_sha256 "$MANIFEST_PATH")"
-  [ "$manifest_sha_after" = "$manifest_sha_before" ] || fail "发布 manifest 在校验期间发生变化，请停止安装并重新复制交付目录"
-  EXPECTED_MANIFEST_NAME="$manifest_name"
-  EXPECTED_MANIFEST_FILE_SHA256="$manifest_sha_before"
-  EXPECTED_PACKAGES_SHA256="$manifest_packages_sha"
-  EXPECTED_PACKAGES_GZ_SHA256="$manifest_packages_gz_sha"
-  ok "发布 manifest 有效：$manifest_name"
-}
-
-validate_build_marker() {
-  local deb_name checksum_name expected_sha actual_sha marker_sha_before marker_sha_after
-  validate_user_source_file "$BUILD_MARKER" "构建成功标记"
-  marker_sha_before="$(user_file_sha256 "$BUILD_MARKER")"
-
-  deb_name="$(marker_value deb)"
-  checksum_name="$(marker_value checksum)"
-  expected_sha="$(marker_value deb_sha256)"
-  [ -n "$deb_name" ] || fail "构建成功标记缺少 deb 字段，请重新执行构建脚本"
-  [ -n "$checksum_name" ] || fail "构建成功标记缺少 checksum 字段，请重新执行构建脚本"
-  [ -n "$expected_sha" ] || fail "构建成功标记缺少 deb_sha256 字段，请重新执行构建脚本"
-  validate_deb_basename "$deb_name"
-  validate_fixed_basename "$checksum_name" "${deb_name}.sha256" "DEB SHA256 sidecar"
-  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || fail "构建成功标记的 deb_sha256 格式不合法"
-
-  DEB_PATH="$OUTPUT_DIR/$deb_name"
-  CHECKSUM_PATH="$OUTPUT_DIR/$checksum_name"
-  validate_user_source_file "$DEB_PATH" "DEB 安装包"
-  validate_user_source_file "$CHECKSUM_PATH" "DEB SHA256 sidecar"
-
-  actual_sha="$(user_file_sha256 "$DEB_PATH")"
-  [ "$actual_sha" = "$expected_sha" ] || fail "安装包与构建成功标记不匹配，请重新执行构建脚本"
-  validate_release_manifest
-  marker_sha_after="$(user_file_sha256 "$BUILD_MARKER")"
-  [ "$marker_sha_after" = "$marker_sha_before" ] || fail "构建成功标记在校验期间发生变化，请停止安装并重新复制交付目录"
-  EXPECTED_DEB_NAME="$deb_name"
-  EXPECTED_CHECKSUM_NAME="$checksum_name"
-  EXPECTED_DEB_SHA256="$expected_sha"
-  EXPECTED_BUILD_MARKER_FILE_SHA256="$marker_sha_before"
-  ok "构建成功标记有效：$deb_name"
-}
-
-verify_deb_checksum() {
-  local actual_sha checksum_file_sha checksum_file_target checksum_sha_before checksum_sha_after
-  [ -n "${DEB_PATH:-}" ] || fail "内部错误：DEB_PATH 未设置"
-  [ -n "${EXPECTED_DEB_SHA256:-}" ] || fail "内部错误：EXPECTED_DEB_SHA256 未设置"
-  validate_user_source_file "$DEB_PATH" "DEB 安装包"
-  validate_user_source_file "$CHECKSUM_PATH" "DEB SHA256 sidecar"
-  actual_sha="$(user_file_sha256 "$DEB_PATH")"
-  [ "$actual_sha" = "$EXPECTED_DEB_SHA256" ] || fail "安装包 SHA256 不匹配：$(basename "$DEB_PATH")"
-
-  checksum_sha_before="$(user_file_sha256 "$CHECKSUM_PATH")"
-  checksum_file_sha="$(awk 'NR == 1 { print $1; exit }' "$CHECKSUM_PATH")"
-  checksum_file_target="$(awk 'NR == 1 { $1 = ""; sub(/^[ \t]+\*?/, ""); print; exit }' "$CHECKSUM_PATH")"
-  [[ "$checksum_file_sha" =~ ^[0-9a-f]{64}$ ]] || fail "校验文件 SHA256 格式不合法：$(basename "$CHECKSUM_PATH")"
-  [ "$checksum_file_sha" = "$EXPECTED_DEB_SHA256" ] || fail "校验文件 SHA256 与构建成功标记不一致：$(basename "$CHECKSUM_PATH")"
-  [ -n "${checksum_file_target:-}" ] || fail "校验文件缺少 DEB 文件名：$(basename "$CHECKSUM_PATH")"
-  [ "$(basename "$checksum_file_target")" = "$(basename "$DEB_PATH")" ] || fail "校验文件指向的安装包名称不一致：$checksum_file_target"
-  checksum_sha_after="$(user_file_sha256 "$CHECKSUM_PATH")"
-  [ "$checksum_sha_after" = "$checksum_sha_before" ] || fail "DEB SHA256 sidecar 在校验期间发生变化"
-  EXPECTED_CHECKSUM_FILE_SHA256="$checksum_sha_before"
-  ok "安装包 SHA256 校验通过：$(basename "$DEB_PATH")"
-}
-
-preflight() {
-  [ "$(uname -s)" = "Linux" ] || fail "只能在 Linux 目标终端安装，当前为：$(uname -s)"
-  case "$(uname -m)" in
-    x86_64|amd64) ok "CPU 架构符合：$(uname -m)" ;;
-    *) fail "当前 CPU 架构不是 x86_64/amd64：$(uname -m)" ;;
-  esac
-  [ "$(id -u)" -ne 0 ] || fail "请以普通桌面用户运行此脚本，不要使用 sudo bash；脚本会在需要时单独调用 sudo。"
-  have apt-get || fail "缺少 apt-get"
-  have dpkg || fail "缺少 dpkg"
-  have sha256sum || fail "缺少 sha256sum"
-  have gzip || fail "缺少 gzip"
-  require_cmd mktemp
-  require_cmd stat
-  require_cmd find
-  require_cmd getent
-  require_cmd systemctl
-  require_cmd ps
-  require_cmd lsof
-}
-
-require_desktop_session_or_rehearsal() {
-  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$TAIJI_ALLOW_HEADLESS_REHEARSAL" != "1" ]; then
-    fail "未检测到图形桌面会话；桌面 App/目标机验证必须在 DISPLAY 或 WAYLAND_DISPLAY 可用时执行。如果只做离线安装演练，可显式设置 TAIJI_ALLOW_HEADLESS_REHEARSAL=1。"
-  fi
-}
-
-dpkg_has_taiji_state() {
-  dpkg-query -W -f='${db:Status-Abbrev}' taiji-agent >/dev/null 2>&1
-}
-
-path_exists() {
-  [ -e "$1" ] || [ -L "$1" ]
-}
-
-service_has_legacy_state() {
-  local svc="$1"
-  systemctl is-active "$svc" >/dev/null 2>&1 && return 0
-  systemctl is-enabled "$svc" >/dev/null 2>&1 && return 0
-  systemctl list-unit-files "$svc" --no-legend 2>/dev/null | grep -q "$svc" && return 0
-  systemctl status "$svc" --no-pager >/dev/null 2>&1 && return 0
-  return 1
-}
-
-launcher_owned_by_taiji() {
-  local path="$1" target
-  path_exists "$path" || return 1
-  if [ -L "$path" ]; then
-    target="$(readlink "$path" 2>/dev/null || true)"
-    case "$target" in
-      *"/opt/taiji-agent"*) return 0 ;;
-      *) return 1 ;;
-    esac
-  fi
-  grep -q '/opt/taiji-agent' "$path" 2>/dev/null
-}
-
-legacy_installation_detected() {
-  path_exists /opt/taiji-agent && return 0
-  path_exists /etc/default/taiji-agent && return 0
-  launcher_owned_by_taiji /usr/bin/taiji && return 0
-  launcher_owned_by_taiji /usr/bin/taiji-agent && return 0
-  local svc
-  for svc in "${LEGACY_SERVICES[@]}"; do
-    service_has_legacy_state "$svc" && return 0
-  done
-  return 1
-}
-
-is_whitelisted_legacy_path() {
-  case "$1" in
-    /opt/taiji-agent|\
-    /etc/default/taiji-agent|\
-    /etc/sysconfig/taiji-agent|\
-    /usr/bin/taiji|\
-    /usr/bin/taiji-agent|\
-    /usr/local/bin/taiji|\
-    /usr/share/applications/taiji-agent.desktop|\
-    /usr/share/icons/hicolor/512x512/apps/taiji-agent.png|\
-    /lib/systemd/system/taiji-agent-webui.service|\
-    /lib/systemd/system/taiji-agent-gateway.service|\
-    /usr/lib/systemd/system/taiji-agent-webui.service|\
-    /usr/lib/systemd/system/taiji-agent-gateway.service|\
-    /etc/systemd/system/taiji-agent-webui.service|\
-    /etc/systemd/system/taiji-agent-gateway.service|\
-    /etc/systemd/system/multi-user.target.wants/taiji-agent-webui.service|\
-    /etc/systemd/system/multi-user.target.wants/taiji-agent-gateway.service)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-remove_legacy_path() {
-  local path="$1"
-  is_whitelisted_legacy_path "$path" || fail "拒绝删除非白名单路径：$path"
-  path_exists "$path" || return 0
-  info "清理旧版路径：$path"
-  sudo rm -rf -- "$path"
-}
-
-remove_taiji_launcher_if_owned() {
-  local path="$1"
-  launcher_owned_by_taiji "$path" || return 0
-  remove_legacy_path "$path"
-}
-
-stop_and_disable_legacy_services() {
-  info "停止并禁用旧版后台服务"
-  local svc
-  for svc in "${LEGACY_SERVICES[@]}"; do
-    sudo systemctl stop "$svc" >/dev/null 2>&1 || true
-    sudo systemctl disable "$svc" >/dev/null 2>&1 || true
-    sudo systemctl reset-failed "$svc" >/dev/null 2>&1 || true
-  done
-}
-
-stop_legacy_processes() {
-  info "停止由 /opt/taiji-agent 内可执行文件启动的旧进程"
-  local proc_dir pid executable pids=""
-  for proc_dir in /proc/[0-9]*; do
-    [ -d "$proc_dir" ] || continue
-    pid="${proc_dir##*/}"
-    [ "$pid" != "$$" ] || continue
-    executable="$(readlink -f -- "$proc_dir/exe" 2>/dev/null || true)"
-    case "$executable" in
-      /opt/taiji-agent/*) pids="${pids}${pid}"$'\n' ;;
-    esac
-  done
-
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    executable="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)"
-    case "$executable" in
-      /opt/taiji-agent/*)
-        warn "停止旧版进程 pid=$pid executable=$executable"
-        sudo kill -TERM "$pid" >/dev/null 2>&1 || true
-        ;;
-    esac
-  done <<< "$pids"
-
-  sleep 1
-
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    executable="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)"
-    case "$executable" in
-      /opt/taiji-agent/*)
-        warn "强制停止旧版进程 pid=$pid executable=$executable"
-        sudo kill -KILL "$pid" >/dev/null 2>&1 || true
-        ;;
-    esac
-  done <<< "$pids"
-}
-
-remove_legacy_files() {
-  info "清理旧版系统入口和安装目录"
-  remove_taiji_launcher_if_owned /usr/bin/taiji
-  remove_taiji_launcher_if_owned /usr/bin/taiji-agent
-  remove_taiji_launcher_if_owned /usr/local/bin/taiji
-  remove_legacy_path /etc/default/taiji-agent
-  remove_legacy_path /etc/sysconfig/taiji-agent
-  remove_legacy_path /etc/systemd/system/multi-user.target.wants/taiji-agent-webui.service
-  remove_legacy_path /etc/systemd/system/multi-user.target.wants/taiji-agent-gateway.service
-  remove_legacy_path /etc/systemd/system/taiji-agent-webui.service
-  remove_legacy_path /etc/systemd/system/taiji-agent-gateway.service
-  remove_legacy_path /lib/systemd/system/taiji-agent-webui.service
-  remove_legacy_path /lib/systemd/system/taiji-agent-gateway.service
-  remove_legacy_path /usr/lib/systemd/system/taiji-agent-webui.service
-  remove_legacy_path /usr/lib/systemd/system/taiji-agent-gateway.service
-  remove_legacy_path /usr/share/applications/taiji-agent.desktop
-  remove_legacy_path /usr/share/icons/hicolor/512x512/apps/taiji-agent.png
-  remove_legacy_path /opt/taiji-agent
-}
-
-pid_uses_taiji_install_root() {
-  local pid="$1" cmdline
-  cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-  case "$cmdline" in
-    *"/opt/taiji-agent"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-check_port_conflict() {
-  local phase="$1" port pids pid offenders cmdline
-  for port in "${CONFLICT_PORTS[@]}"; do
-    pids="$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
-    [ -n "$pids" ] || continue
-    offenders=""
-    for pid in $pids; do
-      if pid_uses_taiji_install_root "$pid"; then
-        if [ "$phase" = "安装前" ]; then
-          warn "${phase}：端口 $port 被旧版太极 Agent 进程占用，稍后会自动清理。"
-        else
-          cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-          offenders="${offenders}pid=$pid $cmdline"$'\n'
-        fi
-      else
-        cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-        offenders="${offenders}pid=$pid $cmdline"$'\n'
-      fi
-    done
-    if [ -n "$offenders" ]; then
-      printf '%s' "$offenders" >&2
-      warn "${phase}：端口 $port 被非预期进程占用。新版桌面端会自动选择空闲端口，安装继续；请在诊断报告中保留该信息。"
-    fi
-  done
-  return 0
-}
-
-verify_legacy_services_inactive() {
-  local svc
-  for svc in "${LEGACY_SERVICES[@]}"; do
-    if systemctl is-active "$svc" >/dev/null 2>&1; then
-      fail "旧版后台服务仍在运行：$svc"
-    fi
-    if systemctl is-enabled "$svc" >/dev/null 2>&1; then
-      fail "旧版后台服务仍处于开机启用状态：$svc"
-    fi
-  done
-}
-
-clean_reinstall_legacy_package() {
-  dpkg_has_taiji_state && fail "内部错误：受 dpkg 管理的安装不得进入 legacy 清理路径"
-  stop_and_disable_legacy_services
-  stop_legacy_processes
-  remove_legacy_files
-  sudo systemctl daemon-reload >/dev/null 2>&1 || true
-}
-
-prepare_legacy_replacement() {
-  check_port_conflict "安装前" || fail "安装前端口检查未通过，未执行旧版替换。"
-  if dpkg_has_taiji_state; then
-    ok "检测到受 dpkg 管理的 taiji-agent；保留现有安装并走原生升级/重装路径"
-    return 0
-  fi
-  if ! legacy_installation_detected; then
-    ok "未检测到旧版 taiji-agent WebUI 安装残留"
-    return 0
-  fi
-
-  warn "检测到不受 dpkg 管理的旧版 taiji-agent 残留，将按明确白名单迁移后安装新版。"
-  warn "仅会清理白名单内的旧 /opt 安装、系统服务和入口；用户 XDG 配置、模型 Key 与历史会话不在清理范围。"
-  clean_reinstall_legacy_package
-  check_port_conflict "安装前清理后" || fail "安装前清理后端口检查未通过，已停止安装。"
-  verify_legacy_services_inactive
-  ok "旧版 taiji-agent 已彻底清理完成"
-}
-
-install_trial_license() {
-  local source="${TAIJI_LICENSE_SOURCE:-}" candidates=()
-  if [ -n "$source" ] && [ ! -f "$source" ]; then
-    fail "指定的授权文件不存在：$source"
-  fi
-  if [ -z "$source" ] && [ -f "$SCRIPT_DIR/license.jwt" ]; then
-    source="$SCRIPT_DIR/license.jwt"
-  fi
-  if [ -z "$source" ]; then
-    shopt -s nullglob
-    candidates=("$SCRIPT_DIR"/taiji-license-*.jwt)
-    shopt -u nullglob
-    if [ "${#candidates[@]}" -eq 1 ]; then
-      source="${candidates[0]}"
-    elif [ "${#candidates[@]}" -gt 1 ]; then
-      printf '[FAIL] 检测到多个候选授权文件，请设置 TAIJI_LICENSE_SOURCE 指定其中一个：\n' >&2
-      printf '  %s\n' "${candidates[@]}" >&2
-      fail "检测到多个候选授权文件，请设置 TAIJI_LICENSE_SOURCE 指定其中一个"
-    fi
-  fi
-  if [ -z "$source" ]; then
-    warn "未发现预置授权文件 license.jwt 或 taiji-license-*.jwt；应用可安装，但试用授权状态会显示为缺失。"
-    return 0
-  fi
-
-  local account_home="$HOME"
-  local detected_home=""
-  if command -v getent >/dev/null 2>&1; then
-    detected_home="$(getent passwd "$(id -u)" 2>/dev/null | awk -F: 'NR==1 {print $6}')"
-    if [ -n "$detected_home" ]; then
-      account_home="$detected_home"
-    fi
-  fi
-  local config_home="$account_home/.config"
-  local target_dir="$config_home/taiji-agent/licenses"
-  local target="$target_dir/active-license.jwt"
-  mkdir -p "$target_dir"
-  chmod 0700 "$target_dir" || true
-  install -m 0600 "$source" "$target"
-  ok "已安装试用授权：$(basename "$source") -> licenses/active-license.jwt"
-}
-
-offline_repo_available() {
-  [ -d "$OFFLINE_REPO" ] && [ -f "$OFFLINE_REPO/Packages" ] && [ -f "$OFFLINE_REPO/Packages.gz" ]
-}
-
-validate_offline_repo_requirement() {
-  if offline_repo_available; then
-    ok "完全离线发布包依赖仓库有效：$OFFLINE_REPO/Packages.gz"
-    return 0
-  fi
-  if [ "$ONLINE_OK" = "1" ]; then
-    warn "ONLINE_OK=1：未检测到离线依赖仓库，将显式允许使用目标机系统已配置软件源安装。"
-    return 0
-  fi
-  fail "缺少离线依赖仓库：完全离线发布包必须同时包含 $OFFLINE_REPO/Packages 与 Packages.gz；如明确允许目标机在线源，请设置 ONLINE_OK=1 后重试。"
-}
-
-validate_offline_repo_contents() {
-  local file name actual_sha
-  OFFLINE_REPO_STAGE_FILES=()
-  OFFLINE_REPO_STAGE_SHA256=()
-  offline_repo_available || return 0
-
-  while IFS= read -r -d '' file; do
-    name="${file##*/}"
-    case "$name" in
-      Packages)
-        validate_user_source_file "$file" "离线仓库文件 $name"
-        actual_sha="$(user_file_sha256 "$file")"
-        [ "$actual_sha" = "$EXPECTED_PACKAGES_SHA256" ] || fail "离线依赖/Packages 与 manifest 不匹配"
-        OFFLINE_REPO_STAGE_FILES+=("$file")
-        OFFLINE_REPO_STAGE_SHA256+=("$EXPECTED_PACKAGES_SHA256")
-        ;;
-      Packages.gz)
-        validate_user_source_file "$file" "离线仓库文件 $name"
-        actual_sha="$(user_file_sha256 "$file")"
-        [ "$actual_sha" = "$EXPECTED_PACKAGES_GZ_SHA256" ] || fail "离线依赖/Packages.gz 与 manifest 不匹配"
-        OFFLINE_REPO_STAGE_FILES+=("$file")
-        OFFLINE_REPO_STAGE_SHA256+=("$EXPECTED_PACKAGES_GZ_SHA256")
-        ;;
-      *.deb)
-        validate_offline_repo_deb_basename "$name"
-        validate_user_source_file "$file" "离线仓库文件 $name"
-        OFFLINE_REPO_STAGE_FILES+=("$file")
-        OFFLINE_REPO_STAGE_SHA256+=("$(user_file_sha256 "$file")")
-        ;;
-      runtime-dependencies.txt|SHA256SUMS.txt)
-        validate_user_source_file "$file" "离线仓库元数据 $name"
-        ;;
-      *)
-        fail "离线依赖目录包含未允许的文件或目录：${name}；只允许 Packages、Packages.gz、*.deb、runtime-dependencies.txt、SHA256SUMS.txt"
-        ;;
-    esac
-  done < <(find "$OFFLINE_REPO" -mindepth 1 -maxdepth 1 -print0)
-}
-
-offline_repo_staged_expected_sha() {
-  local index="$1" name
-  name="${OFFLINE_REPO_STAGE_FILES[$index]##*/}"
-  case "$name" in
-    Packages) printf '%s\n' "$EXPECTED_PACKAGES_SHA256" ;;
-    Packages.gz) printf '%s\n' "$EXPECTED_PACKAGES_GZ_SHA256" ;;
-    *) printf '%s\n' "${OFFLINE_REPO_STAGE_SHA256[$index]}" ;;
-  esac
-}
-
-validate_install_inputs() {
-  validate_build_marker
-  info "校验安装包"
-  verify_deb_checksum
-  validate_offline_repo_requirement
-  validate_offline_repo_contents
-  INSTALL_INPUTS_VALIDATED=1
-  ok "交付物已在普通用户权限下完成校验"
-}
-
-staged_offline_repo_available() {
-  [ "$STAGED_OFFLINE_REPO_AVAILABLE" = "1" ] && \
-    [ -n "${OFFLINE_APT_REPO_SOURCE:-}" ] && \
-    [ -f "$OFFLINE_APT_REPO_SOURCE/Packages" ] && \
-    [ -f "$OFFLINE_APT_REPO_SOURCE/Packages.gz" ]
-}
-
-root_file_sha256() {
-  sudo sha256sum -- "$1" | awk '{print $1}'
-}
-
-verify_private_staged_file() {
-  local path="$1" expected_sha="$2" label="$3" metadata actual_sha
-  sudo test -f "$path" || fail "root staging 中 $label 不是普通文件"
-  sudo test ! -L "$path" || fail "root staging 中 $label 不能是符号链接"
-  metadata="$(sudo stat -c '%u:%g:%a:%h' -- "$path")" || fail "无法读取 root staging 中 $label 的元数据"
-  [ "$metadata" = "0:0:600:1" ] || fail "root staging 中 $label 的 owner/mode/link_count 不安全：$metadata"
-  actual_sha="$(root_file_sha256 "$path")"
-  [ "$actual_sha" = "$expected_sha" ] || fail "root staging 中 $label SHA256 重校验失败"
-}
-
-copy_user_file_to_private_root_stage() {
-  local source="$1" destination="$2" expected_sha="$3" label="$4" current_sha
-  validate_user_source_file "$source" "$label"
-  current_sha="$(user_file_sha256 "$source")"
-  [ "$current_sha" = "$expected_sha" ] || fail "$label 在普通用户校验后发生变化，已停止安装"
-  sudo install -o root -g root -m 0600 /dev/null "$destination"
-  if ! cat -- "$source" | sudo tee -- "$destination" >/dev/null; then
-    fail "$label 复制到 root staging 失败"
-  fi
-  sudo chown root:root "$destination"
-  sudo chmod 0600 "$destination"
-  verify_private_staged_file "$destination" "$expected_sha" "$label"
-}
-
-verify_staged_install_inputs() {
-  local index source destination expected_sha
-  verify_private_staged_file "$STAGED_BUILD_MARKER" "$EXPECTED_BUILD_MARKER_FILE_SHA256" "构建成功标记"
-  verify_private_staged_file "$STAGED_DEB_PATH" "$EXPECTED_DEB_SHA256" "$EXPECTED_DEB_NAME"
-  verify_private_staged_file "$STAGED_CHECKSUM_PATH" "$EXPECTED_CHECKSUM_FILE_SHA256" "$EXPECTED_CHECKSUM_NAME"
-  verify_private_staged_file "$STAGED_MANIFEST_PATH" "$EXPECTED_MANIFEST_FILE_SHA256" "$EXPECTED_MANIFEST_NAME"
-
-  for index in "${!OFFLINE_REPO_STAGE_FILES[@]}"; do
-    source="${OFFLINE_REPO_STAGE_FILES[$index]}"
-    destination="$ROOT_INSTALL_STAGING/repo/${source##*/}"
-    expected_sha="$(offline_repo_staged_expected_sha "$index")"
-    verify_private_staged_file "$destination" "$expected_sha" "${source##*/}"
-  done
-  ok "root staging 安装输入 SHA256 与私有权限重校验通过"
-}
-
-publish_staged_install_inputs() {
-  local index source
-  getent passwd _apt >/dev/null 2>&1 || fail "目标机缺少 _apt 系统账号，拒绝以 unsandboxed root 模式继续"
-  sudo chown -R root:root "$ROOT_INSTALL_STAGING"
-  sudo chmod 0755 "$ROOT_INSTALL_STAGING" "$ROOT_INSTALL_STAGING/package"
-  sudo chmod 0644 "$STAGED_DEB_PATH"
-
-  if [ "$STAGED_OFFLINE_REPO_AVAILABLE" = "1" ]; then
-    sudo chmod 0755 "$ROOT_INSTALL_STAGING/repo" "$ROOT_INSTALL_STAGING/apt-lists"
-    for index in "${!OFFLINE_REPO_STAGE_FILES[@]}"; do
-      source="${OFFLINE_REPO_STAGE_FILES[$index]}"
-      sudo chmod 0644 "$ROOT_INSTALL_STAGING/repo/${source##*/}"
-    done
-    sudo chmod 0644 "$OFFLINE_APT_SOURCE_FILE"
-    sudo chown _apt:root "$ROOT_INSTALL_STAGING/apt-lists/partial"
-    sudo chmod 0700 "$ROOT_INSTALL_STAGING/apt-lists/partial"
-  fi
-  ok "root staging 已冻结并按 apt 最小权限发布"
-}
-
-stage_privileged_install_inputs() {
-  local index source destination expected_sha
-  [ "$INSTALL_INPUTS_VALIDATED" = "1" ] || fail "内部错误：交付物尚未在普通用户权限下校验"
-  ROOT_INSTALL_STAGING="$(sudo mktemp -d "/var/tmp/taiji-agent-install.XXXXXX")"
-  [ -n "$ROOT_INSTALL_STAGING" ] || fail "无法创建 root 安装 staging 目录"
-  sudo chown root:root "$ROOT_INSTALL_STAGING"
-  sudo chmod 0700 "$ROOT_INSTALL_STAGING"
-  sudo mkdir -p -m 0700 "$ROOT_INSTALL_STAGING/package"
-
-  STAGED_BUILD_MARKER="$ROOT_INSTALL_STAGING/package/.build-success"
-  STAGED_DEB_PATH="$ROOT_INSTALL_STAGING/package/$EXPECTED_DEB_NAME"
-  STAGED_CHECKSUM_PATH="$ROOT_INSTALL_STAGING/package/$EXPECTED_CHECKSUM_NAME"
-  STAGED_MANIFEST_PATH="$ROOT_INSTALL_STAGING/package/$EXPECTED_MANIFEST_NAME"
-  copy_user_file_to_private_root_stage "$BUILD_MARKER" "$STAGED_BUILD_MARKER" "$EXPECTED_BUILD_MARKER_FILE_SHA256" "构建成功标记"
-  copy_user_file_to_private_root_stage "$DEB_PATH" "$STAGED_DEB_PATH" "$EXPECTED_DEB_SHA256" "$EXPECTED_DEB_NAME"
-  copy_user_file_to_private_root_stage "$CHECKSUM_PATH" "$STAGED_CHECKSUM_PATH" "$EXPECTED_CHECKSUM_FILE_SHA256" "$EXPECTED_CHECKSUM_NAME"
-  copy_user_file_to_private_root_stage "$MANIFEST_PATH" "$STAGED_MANIFEST_PATH" "$EXPECTED_MANIFEST_FILE_SHA256" "$EXPECTED_MANIFEST_NAME"
-
-  if offline_repo_available; then
-    sudo mkdir -p -m 0700 "$ROOT_INSTALL_STAGING/repo" "$ROOT_INSTALL_STAGING/apt-lists" "$ROOT_INSTALL_STAGING/apt-lists/partial"
-    for index in "${!OFFLINE_REPO_STAGE_FILES[@]}"; do
-      source="${OFFLINE_REPO_STAGE_FILES[$index]}"
-      destination="$ROOT_INSTALL_STAGING/repo/${source##*/}"
-      expected_sha="$(offline_repo_staged_expected_sha "$index")"
-      copy_user_file_to_private_root_stage "$source" "$destination" "$expected_sha" "${source##*/}"
-    done
-    OFFLINE_APT_REPO_SOURCE="$ROOT_INSTALL_STAGING/repo"
-    OFFLINE_APT_SOURCE_FILE="$ROOT_INSTALL_STAGING/taiji-agent-offline.list"
-    OFFLINE_APT_LISTS_DIR="$ROOT_INSTALL_STAGING/apt-lists"
-    sudo install -o root -g root -m 0600 /dev/null "$OFFLINE_APT_SOURCE_FILE"
-    printf 'deb [trusted=yes] file:%s ./\n' "$OFFLINE_APT_REPO_SOURCE" | sudo tee -- "$OFFLINE_APT_SOURCE_FILE" >/dev/null
-    sudo chown root:root "$OFFLINE_APT_SOURCE_FILE"
-    sudo chmod 0600 "$OFFLINE_APT_SOURCE_FILE"
-    STAGED_OFFLINE_REPO_AVAILABLE=1
-  fi
-
-  verify_staged_install_inputs
-  publish_staged_install_inputs
-}
-
-install_taiji_package() {
-  [ -n "${STAGED_DEB_PATH:-}" ] || fail "内部错误：root staging DEB 未设置"
-  if staged_offline_repo_available; then
-    info "使用 root staging 离线依赖仓库：$OFFLINE_APT_REPO_SOURCE"
-    local source_file lists_dir
-    source_file="$ROOT_INSTALL_STAGING/taiji-agent-offline.list"
-    lists_dir="$ROOT_INSTALL_STAGING/apt-lists"
-    local apt_opts=(
-      -o "Dir::Etc::sourcelist=$source_file"
-      -o "Dir::Etc::sourceparts=-"
-      -o "APT::Get::List-Cleanup=0"
-      -o "Dir::State::Lists=$lists_dir"
+build_args() {
+  local expected_version expected_sha actual_sha sidecar_sha sidecar_name challenge
+  expected_version="$(read_manifest_value version)" || fail "manifest 缺少 version"
+  expected_sha="$(read_manifest_value deb_sha256)" || fail "manifest 缺少 deb_sha256"
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || fail "manifest deb_sha256 格式不合法"
+  actual_sha="$(sha256sum -- "$DEB_PATH" | awk '{print $1}')" || fail "无法计算 DEB SHA256"
+  [ "$actual_sha" = "$expected_sha" ] || fail "DEB SHA256 与 manifest 不一致"
+  sidecar_sha="$(awk 'NR == 1 { print $1; exit }' "$CHECKSUM_PATH")"
+  sidecar_name="$(awk 'NR == 1 { $1 = ""; sub(/^[ \t]+\*?/, ""); print; exit }' "$CHECKSUM_PATH")"
+  [ "$sidecar_sha" = "$expected_sha" ] || fail "DEB SHA256 sidecar 与 manifest 不一致"
+  [ "$(basename -- "$sidecar_name")" = "$(basename -- "$DEB_PATH")" ] || fail "DEB SHA256 sidecar 文件名不匹配"
+  challenge="${TAIJI_CERTIFICATION_CHALLENGE:-}"
+  DEPLOY_ARGS=(
+    --deb "$DEB_PATH"
+    --expected-version "$expected_version"
+    --expected-sha256 "$expected_sha"
+    --admission-mode "$ADMISSION_MODE"
+    --operation "$OPERATION"
+    --receipt "$RECEIPT_PATH"
+    --build-manifest "$MANIFEST_PATH"
+    --policy "$POLICY_PATH"
+  )
+  if [ "$ADMISSION_MODE" = "certification" ]; then
+    [ -n "$challenge" ] || fail "认证演练必须显式提供一次性 TAIJI_CERTIFICATION_CHALLENGE"
+    DEPLOY_ARGS+=(--certification-challenge "$challenge")
+  elif [ "$ADMISSION_MODE" = "release" ]; then
+    [ -n "${TAIJI_RELEASE_EVIDENCE:-}" ] || fail "release 模式缺少 TAIJI_RELEASE_EVIDENCE"
+    [ -n "${TAIJI_RELEASE_SIGNATURE:-}" ] || fail "release 模式缺少 TAIJI_RELEASE_SIGNATURE"
+    DEPLOY_ARGS+=(
+      --release-evidence "$TAIJI_RELEASE_EVIDENCE"
+      --release-signature "$TAIJI_RELEASE_SIGNATURE"
     )
-    # apt-get update is scoped to the local file: source through the options below.
-    if ! sudo apt-get "${apt_opts[@]}" update; then
-      fail "离线 apt 仓库索引更新失败：apt-get update 无法读取本地 Packages/Packages.gz"
-    fi
-    sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get \
-      "${apt_opts[@]}" \
-      install -y --reinstall --allow-downgrades --allow-change-held-packages "$STAGED_DEB_PATH"
-    return
-  fi
-
-  [ "$ONLINE_OK" = "1" ] || fail "缺少离线依赖仓库：必须同时包含 $OFFLINE_REPO/Packages 与 Packages.gz。完全离线发布包不能回退到目标机在线源。"
-  warn "ONLINE_OK=1：使用系统已配置软件源安装；这不是完全离线发布包验收路径。"
-  sudo apt-get install -y --reinstall --allow-downgrades --allow-change-held-packages "$STAGED_DEB_PATH"
-}
-
-install_package() {
-  [ "$INSTALL_INPUTS_VALIDATED" = "1" ] || fail "内部错误：交付物尚未校验，拒绝进入安装阶段"
-  stage_privileged_install_inputs
-
-  prepare_legacy_replacement
-
-  current_version="$(dpkg-query -W -f='${Version}' taiji-agent 2>/dev/null || true)"
-  held_packages="$(apt-mark showhold 2>/dev/null | awk '$0 == "taiji-agent" { print; exit }' || true)"
-  if [ -n "$current_version" ]; then
-    warn "检测到已安装版本：taiji-agent ${current_version}，本脚本将自动用当前生成的安装包覆盖安装。"
-  fi
-  if [ -n "$held_packages" ]; then
-    warn "检测到 taiji-agent 处于 hold 状态，本脚本将允许本次安装替换该包。"
-  fi
-
-  info "安装太极 Agent。这里可能需要输入 sudo 密码。"
-  install_taiji_package
-  install_trial_license
-  # Old package generations used these exact background services.  Stopping
-  # and disabling the two known units is non-destructive and prevents a stale
-  # browser-only runtime from surviving a native dpkg upgrade.
-  stop_and_disable_legacy_services
-  check_port_conflict "安装后" || fail "安装后端口检查未通过。"
-  verify_legacy_services_inactive
-}
-
-verify_installation() {
-  info "运行安装态诊断"
-  [ -x /opt/taiji-agent/bin/taiji-native-verify ] || fail "未找到 /opt/taiji-agent/bin/taiji-native-verify"
-  /opt/taiji-agent/bin/taiji-native-verify
-
-  if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    info "运行 Electron 图形 smoke test"
-    TAIJI_VERIFY_DESKTOP_SMOKE=1 /opt/taiji-agent/bin/taiji-native-verify
   else
-    warn "TAIJI_ALLOW_HEADLESS_REHEARSAL=1：跳过 Electron smoke test，本轮只能记录为离线安装演练。"
+    fail "不支持的 admission mode：$ADMISSION_MODE"
   fi
-
-  if have taiji; then
-    taiji --help >/dev/null
-    ok "taiji 命令可用"
-  else
-    fail "taiji 命令不可用"
+  if [ -n "${TAIJI_BUSINESS_USER:-}" ]; then
+    DEPLOY_ARGS+=(--business-user "$TAIJI_BUSINESS_USER")
   fi
-
-  if have taiji-agent; then
-    ok "taiji-agent 桌面启动命令可用：$(command -v taiji-agent)"
-  else
-    fail "taiji-agent 桌面启动命令不可用"
+  if [ -n "${TAIJI_PREVIOUS_DEB:-}" ]; then
+    DEPLOY_ARGS+=(--previous-deb "$TAIJI_PREVIOUS_DEB")
+  fi
+  if [ -n "${TAIJI_PREVIOUS_SHA256:-}" ]; then
+    DEPLOY_ARGS+=(--previous-sha256 "$TAIJI_PREVIOUS_SHA256")
+  fi
+  if [ "$OPERATION" = "rollback" ]; then
+    [ -n "${TAIJI_PREVIOUS_VERSION:-}" ] || fail "rollback 模式缺少 TAIJI_PREVIOUS_VERSION"
+    [ -n "${TAIJI_PREVIOUS_MANIFEST:-}" ] || fail "rollback 模式缺少 TAIJI_PREVIOUS_MANIFEST"
+    DEPLOY_ARGS+=(
+      --previous-version "$TAIJI_PREVIOUS_VERSION"
+      --previous-manifest "$TAIJI_PREVIOUS_MANIFEST"
+    )
+  elif [ -n "${TAIJI_PREVIOUS_VERSION:-}${TAIJI_PREVIOUS_MANIFEST:-}" ]; then
+    fail "previous candidate 只允许用于 rollback"
   fi
 }
 
 main() {
-  set_stage "目标机预检"
-  preflight
-  require_desktop_session_or_rehearsal
-  set_stage "交付物校验"
-  validate_install_inputs
-  require_admin_capability
-  set_stage "安装太极 Agent"
-  install_package
-  set_stage "安装后验证"
-  verify_installation
-  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    printf '\n[PARTIAL] 仅离线安装演练，不是桌面 App/目标机验证。\n'
-    printf '已执行：安装态非 GUI 诊断和 CLI 入口检查。\n'
-    printf '未执行：Electron 桌面 App、真实模型对话和目标机验证：未验证。\n'
-  else
-    printf '\n[OK] 安装验证命令已执行完毕。\n'
-    printf '请从开始菜单搜索并打开：太极 Agent\n'
-    printf '打开后先确认首屏，再配置模型并发送一句测试消息。\n'
+  require_file "$SILENT_DEPLOY"
+  require_file "$MANIFEST_PATH"
+  require_file "$POLICY_PATH"
+  select_deb
+  build_args
+  mkdir -p -- "$(dirname -- "$RECEIPT_PATH")"
+  if [ "$(id -u)" -eq 0 ]; then
+    exec bash "$SILENT_DEPLOY" "${DEPLOY_ARGS[@]}"
   fi
-  printf '如果页面或功能异常，请执行：bash ./03_目标终端_导出诊断报告.sh\n'
-  printf '\n日志：%s\n' "$LOG_FILE"
+  # The management wrapper is the only place that requests elevation.  The
+  # silent deployer itself runs as root and always writes a 0600 receipt.
+  exec sudo env \
+    "TAIJI_DEPLOYMENT_CHALLENGE_DIR=${TAIJI_DEPLOYMENT_CHALLENGE_DIR:-/var/lib/taiji-agent/admission-challenges}" \
+    "TAIJI_RELEASE_PUBLIC_KEY=${TAIJI_RELEASE_PUBLIC_KEY:-}" \
+    bash "$SILENT_DEPLOY" "${DEPLOY_ARGS[@]}"
 }
 
 main "$@"

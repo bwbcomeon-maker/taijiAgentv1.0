@@ -821,6 +821,7 @@ write_build_report() {
 stage_target_acceptance_tools() {
   require_candidate_deb_fixed
   local target="$SCRIPT_DIR/验收工具"
+  local management="$target/management"
   local driver="$SRC_DIR/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
   local assembler="$SRC_DIR/tools/taiji-desktop-acceptance/assemble-target-evidence.py"
   local install_observer="$SRC_DIR/tools/taiji-desktop-acceptance/observe-single-deb-install.py"
@@ -854,6 +855,16 @@ PY
   install -m 0644 "$install_observer" "$target/observe-single-deb-install.py"
   install -m 0644 "$validator" "$target/validate-taiji-release-evidence.py"
   install -m 0644 "$public_key" "$target/signing-public.pem"
+  # These are management-plane helpers for the copied 02 wrapper.  They are
+  # deliberately outside the customer DEB and are never staged into
+  # 生成的安装包/; a delivery directory can therefore run 02 without a
+  # source checkout while keeping the customer payload a single DEB.
+  install -d -m 0755 "$management"
+  install -m 0755 "$SRC_DIR/packaging/linux/deb/taiji-silent-deploy.sh" "$management/taiji-silent-deploy.sh"
+  install -m 0644 "$SRC_DIR/packaging/linux/deployment_receipt.py" "$management/deployment_receipt.py"
+  install -m 0644 "$SRC_DIR/packaging/linux/compatibility_policy.py" "$management/compatibility_policy.py"
+  install -m 0644 "$SRC_DIR/packaging/linux/compatibility-policy.json" "$management/compatibility-policy.json"
+  install -m 0644 "$SRC_DIR/scripts/validate-taiji-release-evidence.py" "$management/validate-taiji-release-evidence.py"
   ok "目标终端桌面 App 验收工具已收集：$target"
 }
 

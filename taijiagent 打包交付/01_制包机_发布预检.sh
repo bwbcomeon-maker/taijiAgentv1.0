@@ -202,6 +202,11 @@ verify_target_acceptance_toolchain() {
     "observe-single-deb-install.py"
     "validate-taiji-release-evidence.py"
     "signing-public.pem"
+    "management/taiji-silent-deploy.sh"
+    "management/deployment_receipt.py"
+    "management/compatibility_policy.py"
+    "management/compatibility-policy.json"
+    "management/validate-taiji-release-evidence.py"
   )
   for name in "${files[@]}"; do
     script="$SCRIPT_DIR/验收工具/$name"
@@ -215,6 +220,21 @@ verify_target_acceptance_toolchain() {
         ;;
       signing-public.pem)
         source_script="$REPO_ROOT/tools/taiji-release-evidence/$name"
+        ;;
+      management/taiji-silent-deploy.sh)
+        source_script="$REPO_ROOT/packaging/linux/deb/taiji-silent-deploy.sh"
+        ;;
+      management/deployment_receipt.py)
+        source_script="$REPO_ROOT/packaging/linux/deployment_receipt.py"
+        ;;
+      management/compatibility_policy.py)
+        source_script="$REPO_ROOT/packaging/linux/compatibility_policy.py"
+        ;;
+      management/compatibility-policy.json)
+        source_script="$REPO_ROOT/packaging/linux/compatibility-policy.json"
+        ;;
+      management/validate-taiji-release-evidence.py)
+        source_script="$REPO_ROOT/scripts/validate-taiji-release-evidence.py"
         ;;
     esac
     [ -f "$script" ] && [ ! -L "$script" ] && [ -f "$source_script" ] && [ ! -L "$source_script" ] || fail "缺少或不安全的目标终端验收工具：$name"
