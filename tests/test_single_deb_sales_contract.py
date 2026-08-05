@@ -5,16 +5,22 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BUILDER_PATH = ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
+PREFLIGHT_PATH = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 class SingleDebSalesContractTest(unittest.TestCase):
     def test_release_version_is_consistently_1_0_0(self):
-        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        version = read(ROOT / "VERSION").strip()
         desktop_package = json.loads(
-            (ROOT / "apps/taiji-desktop/package.json").read_text(encoding="utf-8")
+            read(ROOT / "apps/taiji-desktop/package.json")
         )
         desktop_lock = json.loads(
-            (ROOT / "apps/taiji-desktop/package-lock.json").read_text(encoding="utf-8")
+            read(ROOT / "apps/taiji-desktop/package-lock.json")
         )
 
         self.assertEqual(version, "1.0.0")
@@ -22,163 +28,114 @@ class SingleDebSalesContractTest(unittest.TestCase):
         self.assertEqual(desktop_lock["version"], version)
         self.assertEqual(desktop_lock["packages"][""]["version"], version)
 
-    def test_deb_build_is_bound_to_fresh_target_profile_and_real_maintainer(self):
-        build = (ROOT / "packaging/linux/deb/build-deb.sh").read_text(encoding="utf-8")
+    def test_builder_uses_only_source_controlled_policy(self):
+        builder = read(BUILDER_PATH)
 
-        for required in (
+        self.assertIn('POLICY_FILE="$SRC_DIR/packaging/linux/compatibility-policy.json"', builder)
+        self.assertIn('POLICY_HELPER="$SRC_DIR/packaging/linux/compatibility_policy.py"', builder)
+        self.assertIn('validate --policy "$POLICY_FILE" --print-id', builder)
+        self.assertIn('validate --policy "$POLICY_FILE" --print-sha256', builder)
+        self.assertIn('validate --policy "$POLICY_FILE" --print-maintainer', builder)
+        self.assertIn("load_source_controlled_policy", builder)
+
+        for forbidden in (
             "TAIJI_TARGET_BASELINE_FILE",
-            "target_baseline.py",
-            "runtime-depends.txt",
-            "render-preinst.py",
-            "--max-age-days",
+            "TARGET_BASELINE_FILE",
+            "target_baseline",
+            "target-baseline",
+            "runtime-depends",
+            "approved-maintainer",
             "TAIJI_PACKAGE_MAINTAINER",
-            "approved-maintainer.json",
-            "validate-approved-maintainer.py",
-            '--expect "$PACKAGE_MAINTAINER"',
-            "target-baseline.json",
         ):
-            self.assertIn(required, build)
-        self.assertNotIn(
-            "Maintainer: Taiji Agent Team <support@example.invalid>", build
+            self.assertNotIn(forbidden, builder)
+
+    def test_builder_has_no_baseline_or_maintainer_input(self):
+        builder = read(BUILDER_PATH)
+
+        # Maintainer is read from the canonical policy and is not an input
+        # supplied by a target machine, environment variable, or operator file.
+        self.assertIn("POLICY_MAINTAINER", builder)
+        self.assertNotRegex(builder, re.compile(r"TAIJI_PACKAGE_MAINTAINER|PACKAGE_MAINTAINER"))
+        self.assertNotRegex(builder, re.compile(r"TARGET_BASELINE|target_baseline|target-baseline"))
+        self.assertNotRegex(builder, re.compile(r"--max-age-days|profile_id"))
+
+    def test_marker_report_and_manifest_bind_policy_and_abi_audit(self):
+        builder = read(BUILDER_PATH)
+        preflight = read(PREFLIGHT_PATH)
+        build = read(ROOT / "packaging/linux/deb/build-deb.sh")
+
+        marker_keys = (
+            "version", "source_archive", "source_sha256", "source_commit",
+            "deb", "deb_sha256", "checksum", "built_at_utc", "manifest",
+            "compatibility_policy_id", "compatibility_policy_sha256",
+            "elf_abi_audit_sha256", "maintainer",
         )
-        self.assertRegex(
-            build,
-            re.compile(r'install\s+-m\s+0644[^\n]+target-baseline\.json'),
-        )
-        self.assertIn('"targetBaselineProfile"', build)
-        self.assertIn('"targetBaselineSha256"', build)
+        for key in marker_keys:
+            self.assertIn(f'printf \'{key}=', builder)
+        self.assertIn("compatibility policy SHA256", builder)
+        self.assertIn("ELF ABI audit SHA256", builder)
+        self.assertIn('"schema": "taiji-package-manifest/v3"', build)
+        self.assertIn('"compatibility_policy_id": "$POLICY_ID"', build)
+        self.assertIn('"compatibility_policy_sha256": "$POLICY_SHA256"', build)
+        self.assertIn('"elf_abi_audit_sha256"', build)
 
-    def test_build_uses_one_canonical_runtime_dependency_contract(self):
-        build = (ROOT / "packaging/linux/deb/build-deb.sh").read_text(encoding="utf-8")
-        dependencies = (
-            ROOT / "packaging/linux/deb/runtime-depends.txt"
-        ).read_text(encoding="utf-8").splitlines()
+        self.assertIn("required = {", preflight)
+        self.assertIn('"compatibility_policy_id"', preflight)
+        self.assertIn('"compatibility_policy_sha256"', preflight)
+        self.assertIn('"elf_abi_audit_sha256"', preflight)
+        self.assertIn("verify_marker_and_manifest", preflight)
+        self.assertIn("verify_deb_payload", preflight)
+        self.assertIn('cmp -s "$POLICY_FILE" "$embedded_policy"', preflight)
 
-        self.assertIn("RUNTIME_DEPENDS_FILE", build)
-        self.assertNotRegex(build, re.compile(r'^DEB_DEPENDS="libc6,', re.MULTILINE))
-        self.assertEqual(dependencies, sorted(set(dependencies)))
-        self.assertGreaterEqual(len(dependencies), 30)
+    def test_preflight_rejects_policy_or_audit_hash_drift(self):
+        preflight = read(PREFLIGHT_PATH)
 
-    def test_release_chain_requires_and_records_the_same_target_profile(self):
-        builder = (
-            ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
-        ).read_text(encoding="utf-8")
-        preflight = (
-            ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
-        ).read_text(encoding="utf-8")
-        version_info = (
-            ROOT / "taijiagent 打包交付/版本信息.txt"
-        ).read_text(encoding="utf-8")
+        for drift_guard in (
+            "marker policy binding mismatch",
+            "manifest binding mismatch",
+            "DEB embedded policy 与源码 policy 不一致",
+            "DEB embedded ABI audit 与 marker 不一致",
+            "compatibility_policy_sha256",
+            "elf_abi_audit_sha256",
+        ):
+            self.assertIn(drift_guard, preflight)
+        self.assertIn("sha256sum \"$abi\"", preflight)
+        self.assertIn("cmp -s \"$POLICY_FILE\" \"$embedded_policy\"", preflight)
+        self.assertIn("verify_package_output_allowlist", preflight)
 
+    def test_customer_contract_has_no_second_deb_or_offline_repo(self):
+        builder = read(BUILDER_PATH)
+        preflight = read(PREFLIGHT_PATH)
+
+        self.assertIn("只交付一个逐字节固定的 amd64 DEB", builder)
+        self.assertIn("必须且只能有一个 amd64 DEB", preflight)
+        self.assertIn("verify_package_output_allowlist", preflight)
+        self.assertIn("expected = {name, name + \".sha256\", \".build-success\", \"taiji-package-manifest.json\", \"构建报告.txt\"}", preflight)
         for source in (builder, preflight):
-            self.assertIn("target-baseline.json", source)
-            self.assertIn("target_baseline.py", source)
-            self.assertIn("profile_id", source)
-            self.assertIn("target_baseline_sha256", source)
-            self.assertIn("--max-age-days", source)
-        self.assertIn(
-            'TARGET_BASELINE_FILE="$SCRIPT_DIR/目标基线/target-baseline.json"',
-            builder,
-        )
-        self.assertIn('PACKAGE_MAINTAINER="${TAIJI_PACKAGE_MAINTAINER:-}"', builder)
-        self.assertIn('TAIJI_TARGET_BASELINE_FILE="$TARGET_BASELINE_SNAPSHOT"', builder)
-        self.assertIn('TAIJI_PACKAGE_MAINTAINER="$PACKAGE_MAINTAINER"', builder)
-        self.assertIn("target_baseline_profile_id=", builder)
-        self.assertIn('"target_baseline_profile_id"', builder)
-        self.assertIn(
-            'TARGET_BASELINE_FILE="$SCRIPT_DIR/目标基线/target-baseline.json"',
-            preflight,
-        )
-        self.assertIn("verify_target_baseline_binding", preflight)
-        self.assertIn(
-            "opt/taiji-agent/resources/target-baseline.json", preflight
-        )
-        self.assertIn("cmp -s", preflight)
-        self.assertIn("targetBaselineProfile", preflight)
-        self.assertIn("targetBaselineSha256", preflight)
-        self.assertNotIn("本轮目标系统：Kylin V10 SP1", version_info)
-        self.assertIn("目标基线", version_info)
-        self.assertIn("不得作为当前真机证据", version_info)
+            for forbidden in (
+                "dpkg-scanpackages",
+                "Packages.gz",
+                "apt-get download",
+                "OFFLINE_REPO",
+                "build_offline_dependency_repo",
+                "target_baseline",
+                "target-baseline",
+            ):
+                self.assertNotIn(forbidden, source)
 
-    def test_customer_publisher_outputs_only_one_bit_identical_deb(self):
-        publisher = (
-            ROOT / "packaging/linux/deb/publish-single-deb.sh"
-        ).read_text(encoding="utf-8")
+    def test_builder_does_not_download_runtime_dependencies_after_candidate_is_fixed(self):
+        builder = read(BUILDER_PATH)
+        main = builder[builder.index("main() {"):]
 
-        for required in (
-            "target_baseline.py",
-            "--max-age-days",
-            "dpkg-deb",
-            "target-baseline.json",
-            "sha256sum",
-            "find",
-            "exactly one",
-        ):
-            self.assertIn(required, publisher)
-        self.assertNotIn("apt-get download", publisher)
-        self.assertNotIn("离线依赖", publisher)
-
-    def test_runbook_keeps_single_deb_claim_at_exact_baseline_evidence_level(self):
-        runbook = (
-            ROOT / "docs/runbooks/taiji-kylin-uos-offline-delivery.md"
-        ).read_text(encoding="utf-8")
-
-        for required in (
-            "单一 DEB",
-            "target-baseline.json",
-            "每个精确基线",
-            "只交付一个 `.deb`",
-            "不捆绑 glibc",
-            "目标机已验证",
-        ):
-            self.assertIn(required, runbook)
-        self.assertNotIn("一个 DEB 通吃所有国产 Linux", runbook)
-
-    def test_sales_readiness_separates_internal_archive_from_customer_single_deb(self):
-        readiness = (ROOT / "docs/taiji-sale-readiness.md").read_text(
-            encoding="utf-8"
-        )
-
-        for required in (
-            "内部完整交付目录",
-            "客户安装目录",
-            "必须且只能包含一个",
-            "observe-single-deb-install.py",
-            "人工见证不能被表述为机器自动识别",
-            "Windows 安装包必须在第一阶段",
-            "publish-single-deb.sh",
-        ):
-            self.assertIn(required, readiness)
-        for stale_claim in (
-            "交付完整离线 DEB 目录，而不是只拷贝单个 .deb",
-            "0.1.0-preview",
-            "TAIJI_TARGET_INSTALL_METHOD",
-            "TAIJI_TARGET_DPKG_STATUS_BEFORE",
-            "TAIJI_TARGET_FIRST_LAUNCH",
-        ):
-            self.assertNotIn(stale_claim, readiness)
-
-    def test_release_metadata_distinguishes_internal_rehearsal_from_customer_install(self):
-        builder = (
-            ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
-        ).read_text(encoding="utf-8")
-
-        for required in (
-            "Internal rehearsal archive",
-            "Customer installation: exactly one bit-identical DEB",
-            "内部演练边界",
-            "不作为客户安装目录",
-            "客户销售边界",
-            "只交付一个与目标基线绑定、逐字节一致的 DEB",
-        ):
-            self.assertIn(required, builder)
-        for contradictory_claim in (
-            "Complete delivery directory with generated DEB and local offline apt repository",
-            "Offline installations missing 离线依赖/Packages or Packages.gz",
-            "必须同时包含离线依赖/Packages 与 Packages.gz",
-            "目标机离线仓库：离线依赖/Packages 与 Packages.gz",
-        ):
-            self.assertNotIn(contradictory_claim, builder)
+        self.assertIn("CANDIDATE_DEB_FIXED=0", builder)
+        self.assertIn("CANDIDATE_DEB_FIXED=1", builder)
+        self.assertIn("require_candidate_deb_fixed", builder)
+        self.assertLess(main.index("collect_artifacts"), main.index("write_build_report"))
+        self.assertLess(main.index("collect_artifacts"), main.index("stage_target_acceptance_tools"))
+        post_candidate = main[main.index("write_build_report"):]
+        for network_or_runtime_download in ("curl_download", "npm ci", "apt-get -y --download-only", "apt-get download"):
+            self.assertNotIn(network_or_runtime_download, post_candidate)
+        self.assertIn("候选 DEB 固定后不再下载运行时依赖", builder)
 
 
 if __name__ == "__main__":

@@ -245,7 +245,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         ):
             self.assertIn(field, build)
         self.assertIn('TAIJI_SOURCE_COMMIT="$source_commit"', offline_builder)
-        self.assertIn('printf \'  "schema_version": 2,\\n\'', offline_builder)
+        self.assertIn('POLICY_FILE="$SRC_DIR/packaging/linux/compatibility-policy.json"', offline_builder)
+        self.assertIn("load_source_controlled_policy", offline_builder)
+        self.assertIn("CANDIDATE_DEB_FIXED=1", offline_builder)
+        self.assertNotIn('"schema_version": 2', offline_builder)
+        self.assertNotIn("target_baseline", offline_builder)
+        self.assertNotIn("target-baseline", offline_builder)
         self.assertIn("^[0-9a-f]{40}$", build)
         self.assertIn('dpkg-deb --root-owner-group', build)
         self.assertIn("^[0-9a-f]{40}$", offline_builder)
@@ -297,6 +302,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("/api/settings", verify)
 
     def test_native_verify_closed_health_ports_do_not_abort_under_inherited_errexit(self):
+        if importlib.util.find_spec("yaml") is None:
+            self.skipTest("PyYAML is not installed in this test environment")
         env = os.environ.copy()
         env.update(
             {
@@ -1893,43 +1900,6 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             signer.index('mv -f "$tmp_signature" "$SIGNATURE"'),
         )
 
-    def test_release_preflight_rebuilds_source_and_semantically_checks_offline_repo(self):
-        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
-
-        self.assertIn("check_source_archive_matches_git_head", preflight)
-        self.assertIn('"$TRUSTED_GIT" -C "$REPO_ROOT" archive', preflight)
-        self.assertIn('gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" -', preflight)
-        self.assertNotIn('cmp -s "$expected_archive" "$SOURCE_ARCHIVE"', preflight)
-        self.assertIn("verify_offline_repository_integrity", preflight)
-        self.assertIn('gzip -t "$OFFLINE_REPO/Packages.gz"', preflight)
-        self.assertIn('gzip -dc "$OFFLINE_REPO/Packages.gz" | cmp -s - "$OFFLINE_REPO/Packages"', preflight)
-        self.assertIn("Packages index does not exactly cover repository DEBs", preflight)
-        self.assertIn('dpkg-deb --info "$repo_deb"', preflight)
-        self.assertIn('["dpkg-deb", "-f", str(package_path), field]', preflight)
-        self.assertIn("offline taiji-agent DEB does not match release DEB", preflight)
-        self.assertIn("electron_executable_sha256", preflight)
-        self.assertIn("desktop_entry_sha256", preflight)
-
-        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
-        self.assertIn('"electron_executable_sha256"', builder)
-        self.assertIn('"desktop_entry_sha256"', builder)
-        self.assertIn("cleanup_delivery_build_cache", builder)
-        self.assertIn("cleanup_temporary_build_root", builder)
-        self.assertIn("umask 022", builder)
-        self.assertIn("normalize_delivery_permissions", builder)
-        self.assertIn("-type f -links +1", builder)
-        self.assertIn('find "$SCRIPT_DIR" -xdev -mindepth 1 \\( -type d -o -type f \\) -exec chmod go-w', builder)
-        self.assertLess(
-            builder.index("cleanup_delivery_build_cache", builder.index("main() {")),
-            builder.index("最终发布预检", builder.index("main() {")),
-        )
-        self.assertGreater(
-            builder.index("cleanup_temporary_build_root", builder.index("main() {")),
-            builder.index("run_release_preflight", builder.index("最终发布预检")),
-        )
-        self.assertIn("validate_build_root_location", builder)
-        self.assertIn("umask 022", read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh"))
-
     def test_release_preflight_accepts_same_git_archive_from_a_different_gzip_encoder(self):
         if not all(shutil.which(command) for command in ("git", "gzip", "sha256sum")):
             self.skipTest("git, gzip, and sha256sum are required by release preflight")
@@ -2013,7 +1983,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 0,
                 msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
             )
-            self.assertIn("源码包归档内容与当前 git HEAD", result.stdout)
+            self.assertIn("源码包归档与当前 Git HEAD 一致", result.stdout)
 
             tampered_payload = gzip.compress(
                 tar_payload + b"not part of git archive\n",
@@ -2034,7 +2004,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("源码包归档内容与当前 git HEAD 不一致", rejected.stderr)
+            self.assertIn("源码包归档内容与当前 Git HEAD 不一致", rejected.stderr)
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
@@ -2644,32 +2614,6 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("新版桌面端会自动选择空闲端口", install)
         self.assertIn("03_目标终端_导出诊断报告.sh", install)
 
-    def test_delivery_install_script_supports_fully_offline_local_apt_repo(self):
-        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
-        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
-
-        self.assertIn("OFFLINE_REPO", install)
-        self.assertIn("Packages.gz", install)
-        self.assertIn("file:", install)
-        self.assertIn("Dir::Etc::sourcelist", install)
-        self.assertIn("install_taiji_package", install)
-        self.assertIn("stage_privileged_install_inputs", install)
-        self.assertIn("/var/tmp/taiji-agent-install.XXXXXX", install)
-        self.assertIn('cat -- "$source" | sudo tee -- "$destination" >/dev/null', install)
-        self.assertNotIn('sudo install -m 0644 "$file"', install)
-        self.assertIn('sudo mkdir -p -m 0700', install)
-        self.assertIn("OFFLINE_APT_REPO_SOURCE", install)
-        self.assertNotIn('ln -s "$repo_path"', install)
-        self.assertNotIn('printf \'deb [trusted=yes] file:%s ./\\n\' "$repo_path"', install)
-        self.assertIn("apt-get update", install)
-        self.assertIn("dpkg-scanpackages", builder)
-        self.assertIn("dpkg-scanpackages . /dev/null > Packages", builder)
-        self.assertIn("gzip -9c Packages > Packages.gz", builder)
-        self.assertIn("apt-get -y --download-only", builder)
-        self.assertIn("Dir::State::status", builder)
-        self.assertIn("build_offline_dependency_repo", builder)
-        self.assertIn("git archive", builder)
-
     def test_builder_preserves_noninteractive_apt_environment_across_sudo(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
@@ -2714,248 +2658,6 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(package, install_body)
 
-    def test_builder_reads_dependency_fields_separately_and_normalizes_them(self):
-        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
-        helper = builder[
-            builder.index("normalize_dependency_names() {") :
-            builder.index("download_resolved_runtime_dependencies() {")
-        ]
-
-        self.assertIn('dpkg-deb -f "$1" Depends', helper)
-        self.assertIn('dpkg-deb -f "$1" Pre-Depends', helper)
-        self.assertNotIn('dpkg-deb -f "$1" Depends Pre-Depends', helper)
-
-        result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                "set -euo pipefail\n"
-                "dpkg-deb() {\n"
-                "  [ \"$1\" = \"-f\" ] || return 2\n"
-                "  case \"$3\" in\n"
-                "    Depends) printf '%s\\n' 'libc6 (>= 2.31), libgtk-3-0 | libgtk-4-1, libsecret-1-0:any [amd64]' ;;\n"
-                "    Pre-Depends) printf '%s\\n' 'dpkg (>= 1.20)' ;;\n"
-                "    *) return 2 ;;\n"
-                "  esac\n"
-                "}\n"
-                f"{helper}\n"
-                "package_names_from_depends fixture.deb\n",
-            ],
-            capture_output=True,
-            text=True,
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            result.stdout.splitlines(),
-            ["dpkg", "libc6", "libgtk-3-0", "libsecret-1-0"],
-        )
-
-    def test_builder_uses_apt_solver_with_empty_status_and_inventories_real_packages(self):
-        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
-        helpers = builder[
-            builder.index("download_resolved_runtime_dependencies() {") :
-            builder.index("validate_runtime_dependency_closure() {")
-        ]
-
-        self.assertNotIn("apt-rdepends", helpers)
-        with tempfile.TemporaryDirectory(prefix="taiji-apt-solver-test.") as temp_dir:
-            temp_path = Path(temp_dir)
-            repo = temp_path / "repo"
-            status = temp_path / "empty-status"
-            inventory = temp_path / "runtime-dependencies.txt"
-            apt_log = temp_path / "apt-get.log"
-            result = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    "set -euo pipefail\n"
-                    "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
-                    "apt-get() {\n"
-                    "  printf '%s\\n' \"$@\" > \"$TAIJI_TEST_APT_LOG\"\n"
-                    "  cache= status=\n"
-                    "  for arg in \"$@\"; do\n"
-                    "    case \"$arg\" in\n"
-                    "      Dir::Cache::archives=*) cache=${arg#*=} ;;\n"
-                    "      Dir::State::status=*) status=${arg#*=} ;;\n"
-                    "    esac\n"
-                    "  done\n"
-                    "  [ -n \"$cache\" ] && [ -f \"$status\" ] && [ ! -s \"$status\" ] || return 9\n"
-                    "  printf fake > \"$cache/libc6_2.31_amd64.deb\"\n"
-                    "  printf fake > \"$cache/dbus-user-session_1.0_amd64.deb\"\n"
-                    "}\n"
-                    "dpkg-deb() {\n"
-                    "  [ \"$1\" = -f ] && [ \"$3\" = Package ] || return 2\n"
-                    "  case \"${2##*/}\" in\n"
-                    "    libc6_*) printf 'libc6\\n' ;;\n"
-                    "    dbus-user-session_*) printf 'dbus-user-session\\n' ;;\n"
-                    "    *) return 2 ;;\n"
-                    "  esac\n"
-                    "}\n"
-                    f"{helpers}\n"
-                    "download_resolved_runtime_dependencies fixture.deb \"$1\" \"$2\"\n"
-                    "write_runtime_dependency_inventory \"$1\" taiji-agent_fixture_amd64.deb \"$3\"\n",
-                    "apt-solver-test",
-                    str(repo),
-                    str(status),
-                    str(inventory),
-                ],
-                env={**os.environ, "TAIJI_TEST_APT_LOG": str(apt_log)},
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                inventory.read_text(encoding="utf-8").splitlines(),
-                ["dbus-user-session", "libc6"],
-            )
-            apt_args = apt_log.read_text(encoding="utf-8").splitlines()
-            self.assertIn("--download-only", apt_args)
-            self.assertIn(f"Dir::State::status={status}", apt_args)
-            self.assertIn(f"Dir::Cache::archives={repo}", apt_args)
-            self.assertIn("install", apt_args)
-            self.assertIn("fixture.deb", apt_args)
-
-    def test_builder_fails_closed_when_dependency_closure_is_empty_or_incomplete(self):
-        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
-        helper = builder[
-            builder.index("validate_runtime_dependency_closure() {") :
-            builder.index("build_offline_dependency_repo() {")
-        ]
-        repo = builder[
-            builder.index("build_offline_dependency_repo() {") :
-            builder.index("build_glibc() {")
-        ]
-
-        self.assertIn('direct_dependencies_file="$BUILD_ROOT/direct-runtime-dependencies.txt"', repo)
-        self.assertIn(
-            'validate_runtime_dependency_closure "$direct_dependencies_file" "$OFFLINE_REPO/runtime-dependencies.txt"',
-            repo,
-        )
-
-        cases = (
-            ("valid", "libc6\nlibgtk-3-0\n", "coreutils\nlibc6\nlibgtk-3-0\n", True),
-            ("empty-direct", "", "libc6\n", False),
-            ("empty-recursive", "libc6\n", "", False),
-            ("missing-direct", "libc6\nlibgtk-3-0\n", "libc6\n", False),
-        )
-        with tempfile.TemporaryDirectory(prefix="taiji-dependency-closure-test.") as temp_dir:
-            temp_path = Path(temp_dir)
-            for name, direct_payload, recursive_payload, should_pass in cases:
-                with self.subTest(name=name):
-                    direct_file = temp_path / f"{name}.direct"
-                    recursive_file = temp_path / f"{name}.recursive"
-                    direct_file.write_text(direct_payload, encoding="utf-8")
-                    recursive_file.write_text(recursive_payload, encoding="utf-8")
-                    result = subprocess.run(
-                        [
-                            "bash",
-                            "-c",
-                            "set -euo pipefail\n"
-                            "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
-                            f"{helper}\n"
-                            "validate_runtime_dependency_closure \"$1\" \"$2\"\n",
-                            "closure-test",
-                            str(direct_file),
-                            str(recursive_file),
-                        ],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if should_pass:
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                    else:
-                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_release_manifest_cleanup_handles_readonly_payload_directories(self):
-        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
-
-        cleanup = builder[
-            builder.index("cleanup_release_manifest_payload() {") : builder.index("write_release_manifest() {")
-        ]
-        self.assertIn('find "$root" -type d -exec chmod u+w {} +', cleanup)
-        self.assertIn('rm -rf -- "$root"', cleanup)
-        manifest = builder[
-            builder.index("write_release_manifest() {") : builder.index("write_build_report() {")
-        ]
-        self.assertGreaterEqual(manifest.count('cleanup_release_manifest_payload "$payload_root"'), 3)
-        self.assertNotIn('rm -rf "$payload_root"', manifest)
-
-        with tempfile.TemporaryDirectory(prefix="taiji-release-manifest.", dir="/tmp") as tmp:
-            root = Path(tmp)
-            readonly = root / "opt/taiji-agent/runtime/templates/general-proposal"
-            readonly.mkdir(parents=True)
-            (readonly / "manifest.json").write_text("{}", encoding="utf-8")
-            for directory in [readonly, *readonly.parents]:
-                if directory == root.parent:
-                    break
-                directory.chmod(0o555)
-            shell = "\n".join(
-                [
-                    "set -euo pipefail",
-                    "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
-                    cleanup,
-                    'cleanup_release_manifest_payload "$1"',
-                ]
-            )
-            completed = subprocess.run(
-                ["bash", "-c", shell, "cleanup-test", str(root)],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertFalse(root.exists())
-
-    def test_release_preflight_cleanup_handles_readonly_payload_directories(self):
-        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
-        cleanup = preflight[
-            preflight.index("cleanup_payload_verification_root() {") :
-            preflight.index("verify_assembled_deb_payload() {")
-        ]
-        verifier = preflight[
-            preflight.index("verify_assembled_deb_payload() {") :
-            preflight.index("verify_deb_checksum_sidecar() {")
-        ]
-
-        self.assertIn('/tmp/taiji-payload-verify.*', cleanup)
-        self.assertIn('find "$root" -xdev -type d -exec chmod u+w {} +', cleanup)
-        self.assertIn('rm -rf -- "$root"', cleanup)
-        self.assertGreaterEqual(
-            verifier.count('cleanup_payload_verification_root "$payload_root"'),
-            2,
-        )
-        self.assertNotIn('rm -rf "$payload_root"', verifier)
-
-        with tempfile.TemporaryDirectory(prefix="taiji-payload-verify.", dir="/tmp") as temp_dir:
-            root = Path(temp_dir)
-            readonly = root / "opt/taiji-agent/runtime/templates/general-proposal"
-            readonly.mkdir(parents=True)
-            (readonly / "manifest.json").write_text("{}", encoding="utf-8")
-            for directory in [readonly, *readonly.parents]:
-                if directory == root.parent:
-                    break
-                directory.chmod(0o555)
-            shell = "\n".join(
-                [
-                    "set -euo pipefail",
-                    "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
-                    cleanup,
-                    'cleanup_payload_verification_root "$1"',
-                ]
-            )
-            completed = subprocess.run(
-                ["bash", "-c", shell, "cleanup-test", str(root)],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertFalse(root.exists())
-
     def test_delivery_release_preflight_is_a_hard_gate(self):
         preflight_path = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         self.assertTrue(preflight_path.exists())
@@ -2989,9 +2691,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("taiji-agentv1.0-kylin-build-src-*.tar.gz", preflight)
         self.assertIn("SHA256SUMS.txt", preflight)
         self.assertIn("生成的安装包", preflight)
-        self.assertIn("离线依赖", preflight)
-        self.assertIn('缺少离线依赖/Packages"', preflight)
-        self.assertIn("Packages.gz", preflight)
+        self.assertIn("canonical compatibility policy", preflight)
+        self.assertIn("verify_marker_and_manifest", preflight)
+        self.assertIn("verify_deb_payload", preflight)
+        self.assertIn("verify_package_output_allowlist", preflight)
+        self.assertNotIn("Packages.gz", preflight)
         self.assertIn("taiji-package-manifest.json", preflight)
         self.assertIn("__MACOSX", preflight)
         self.assertIn(".DS_Store", preflight)
@@ -3065,424 +2769,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertFalse((delivery / ".DS_Store").exists())
             self.assertFalse(apple_dir.exists())
 
-    def _run_release_preflight_artifact_gate(
-        self,
-        sidecar_mode,
-        tampered_acceptance_tool=None,
-        extra_output_case=None,
-        dependency_repo_mode="valid",
-        target_binding_mode="valid",
-    ):
-        source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            delivery = tmp_path / "taijiagent 打包交付"
-            output_dir = delivery / "生成的安装包"
-            offline_repo = delivery / "离线依赖"
-            fake_bin = tmp_path / "bin"
-            repo_root = tmp_path / "repo"
-            verifier = repo_root / "packaging/linux/verify-payload.py"
-            for directory in (delivery, output_dir, offline_repo, fake_bin, verifier.parent):
-                directory.mkdir(parents=True, exist_ok=True)
-
-            target_baseline_tool = repo_root / "packaging/linux/target_baseline.py"
-            runtime_depends = repo_root / "packaging/linux/deb/runtime-depends.txt"
-            approved_maintainer_validator = (
-                repo_root / "packaging/linux/validate-approved-maintainer.py"
-            )
-            approved_maintainer_file = (
-                repo_root / "packaging/linux/approved-maintainer.json"
-            )
-            runtime_depends.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / "packaging/linux/target_baseline.py", target_baseline_tool)
-            shutil.copy2(ROOT / "packaging/linux/deb/runtime-depends.txt", runtime_depends)
-            shutil.copy2(
-                ROOT / "packaging/linux/validate-approved-maintainer.py",
-                approved_maintainer_validator,
-            )
-            approved_maintainer_file.write_text(
-                json.dumps(
-                    {
-                        "schema": "taiji-approved-maintainer/v1",
-                        "maintainer": "Acme Product Support <support@acme.cn>",
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            approved_maintainer_file.chmod(0o644)
-            target_baseline = delivery / "目标基线/target-baseline.json"
-            target_profile_id, target_baseline_sha256 = write_target_baseline_fixture(
-                target_baseline, runtime_depends
-            )
-            embedded_target_baseline = target_baseline
-            if target_binding_mode == "missing":
-                target_baseline.unlink()
-            elif target_binding_mode == "stale":
-                stale_profile = json.loads(target_baseline.read_text(encoding="utf-8"))
-                stale_profile["captured_at_utc"] = "2000-01-01T00:00:00Z"
-                target_baseline.write_text(
-                    json.dumps(stale_profile, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                target_baseline_sha256 = hashlib.sha256(
-                    target_baseline.read_bytes()
-                ).hexdigest()
-            elif target_binding_mode == "embedded_mismatch":
-                embedded_target_baseline = tmp_path / "tampered-target-baseline.json"
-                embedded_target_baseline.write_bytes(
-                    target_baseline.read_bytes() + b"\n"
-                )
-            elif target_binding_mode not in {
-                "valid",
-                "manifest_mismatch",
-                "marker_mismatch",
-            }:
-                raise AssertionError(
-                    f"unknown target binding mode: {target_binding_mode}"
-                )
-
-            script = delivery / "01_制包机_发布预检.sh"
-            shutil.copy2(source_script, script)
-            target_script_relative = Path("taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh")
-            source_target_script = repo_root / target_script_relative
-            source_target_script.parent.mkdir(parents=True, exist_ok=True)
-            source_target_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-            source_target_script.chmod(0o755)
-            target_script = delivery / source_target_script.name
-            shutil.copy2(source_target_script, target_script)
-            acceptance_tools = delivery / "验收工具"
-            acceptance_tools.mkdir()
-            acceptance_sources = {
-                "run-installed-electron-acceptance.js": Path(
-                    "tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
-                ),
-                "assemble-target-evidence.py": Path(
-                    "tools/taiji-desktop-acceptance/assemble-target-evidence.py"
-                ),
-                "observe-single-deb-install.py": Path(
-                    "tools/taiji-desktop-acceptance/observe-single-deb-install.py"
-                ),
-                "validate-taiji-release-evidence.py": Path(
-                    "scripts/validate-taiji-release-evidence.py"
-                ),
-                "signing-public.pem": Path("tools/taiji-release-evidence/signing-public.pem"),
-            }
-            for filename, relative_source in acceptance_sources.items():
-                source = repo_root / relative_source
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / relative_source, source)
-                shutil.copy2(source, acceptance_tools / filename)
-            if tampered_acceptance_tool is not None:
-                tamper_target = (
-                    target_script
-                    if tampered_acceptance_tool == target_script.name
-                    else acceptance_tools / tampered_acceptance_tool
-                )
-                with tamper_target.open("a", encoding="utf-8") as handle:
-                    if tampered_acceptance_tool.endswith(".js"):
-                        handle.write("\n// bytewise tamper that preserves existing semantic checks\n")
-                    elif tampered_acceptance_tool.endswith(".py"):
-                        handle.write("\n# bytewise tamper that preserves existing semantic checks\n")
-                    else:
-                        handle.write("\n")
-
-            archive = delivery / "taiji-agentv1.0-kylin-build-src-test.tar.gz"
-            archive.write_bytes(b"fake source archive\n")
-            archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            (delivery / "SHA256SUMS.txt").write_text(
-                f"{archive_digest}  {archive.name}\n",
-                encoding="utf-8",
-            )
-
-            deb = output_dir / "taiji-agent_1.0.0_amd64.deb"
-            deb.write_bytes(b"fake deb payload\n")
-            deb_digest = hashlib.sha256(deb.read_bytes()).hexdigest()
-            sidecar = Path(f"{deb}.sha256")
-            sidecar_contents = {
-                "valid": f"{deb_digest}  {deb.name}\n",
-                "hash_mismatch": f"{'0' * 64}  {deb.name}\n",
-                "basename_mismatch": f"{deb_digest}  another-package.deb\n",
-                "missing": None,
-            }
-            contents = sidecar_contents[sidecar_mode]
-            if contents is not None:
-                sidecar.write_text(contents, encoding="utf-8")
-
-            electron_payload = b"fake electron\n"
-            desktop_payload = b"fake desktop\n"
-            (output_dir / ".build-success").write_text(
-                "version=1.0.0\n"
-                f"target_baseline_profile_id={'wrong-profile' if target_binding_mode == 'marker_mismatch' else target_profile_id}\n"
-                f"target_baseline_sha256={target_baseline_sha256}\n",
-                encoding="utf-8",
-            )
-            (output_dir / "taiji-package-manifest.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": 2,
-                        "electron_executable_sha256": hashlib.sha256(electron_payload).hexdigest(),
-                        "desktop_entry_sha256": hashlib.sha256(desktop_payload).hexdigest(),
-                        "target_baseline_profile_id": target_profile_id,
-                        "target_baseline_sha256": (
-                            "0" * 64
-                            if target_binding_mode == "manifest_mismatch"
-                            else target_baseline_sha256
-                        ),
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            (output_dir / "构建报告.txt").write_text("ok\n", encoding="utf-8")
-            if extra_output_case == "old_deb":
-                (output_dir / "old.deb").write_bytes(b"stale deb\n")
-            elif extra_output_case == "extra_sidecar":
-                (output_dir / "old.deb.sha256").write_text("stale\n", encoding="utf-8")
-            elif extra_output_case == "zip":
-                (output_dir / "historical-build.zip").write_bytes(b"stale zip\n")
-            elif extra_output_case == "nested_history":
-                historical = output_dir / "history"
-                historical.mkdir()
-                (historical / "old.deb").write_bytes(b"stale nested deb\n")
-            elif extra_output_case == "extra_file":
-                (output_dir / "notes.txt").write_text("unexpected\n", encoding="utf-8")
-            elif extra_output_case == "symlink":
-                external_sidecar = tmp_path / "external-sidecar"
-                shutil.copy2(sidecar, external_sidecar)
-                sidecar.unlink()
-                sidecar.symlink_to(external_sidecar)
-            elif extra_output_case == "hardlink":
-                os.link(deb, tmp_path / "external-deb-hardlink")
-            elif extra_output_case == "fifo":
-                os.mkfifo(output_dir / "package-fifo")
-            elif extra_output_case is not None:
-                raise AssertionError(f"unknown extra output case: {extra_output_case}")
-            repo_deb = offline_repo / deb.name
-            repo_deb.write_bytes(deb.read_bytes())
-            taiji_packages_payload = (
-                "Package: taiji-agent\n"
-                "Version: 1.0.0\n"
-                "Architecture: amd64\n"
-                f"Filename: ./{repo_deb.name}\n"
-                f"Size: {repo_deb.stat().st_size}\n"
-                f"SHA256: {deb_digest}\n\n"
-            ).encode("utf-8")
-            dependency_deb = offline_repo / "dependency-fixture_1.0_amd64.deb"
-            if dependency_repo_mode == "valid":
-                dependency_deb.write_bytes(b"fake dependency payload\n")
-                dependency_digest = hashlib.sha256(dependency_deb.read_bytes()).hexdigest()
-                dependency_packages_payload = (
-                    "Package: dependency-fixture\n"
-                    "Version: 1.0\n"
-                    "Architecture: amd64\n"
-                    f"Filename: ./{dependency_deb.name}\n"
-                    f"Size: {dependency_deb.stat().st_size}\n"
-                    f"SHA256: {dependency_digest}\n\n"
-                ).encode("utf-8")
-                packages_payload = taiji_packages_payload + dependency_packages_payload
-                runtime_dependencies = "dependency-fixture\n"
-            elif dependency_repo_mode == "empty":
-                packages_payload = taiji_packages_payload
-                runtime_dependencies = ""
-            else:
-                raise AssertionError(f"unknown dependency_repo_mode: {dependency_repo_mode}")
-            (offline_repo / "Packages").write_bytes(packages_payload)
-            (offline_repo / "Packages.gz").write_bytes(gzip.compress(packages_payload))
-            (offline_repo / "runtime-dependencies.txt").write_text(
-                runtime_dependencies,
-                encoding="utf-8",
-            )
-            checksum_lines = []
-            for path in sorted(offline_repo.iterdir()):
-                if path.name == "SHA256SUMS.txt":
-                    continue
-                checksum_lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
-            (offline_repo / "SHA256SUMS.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
-            verifier.write_text("raise SystemExit(0)\n", encoding="utf-8")
-
-            unpack_log = tmp_path / "dpkg-deb.log"
-            fake_dpkg_deb = fake_bin / "dpkg-deb"
-            fake_dpkg_deb.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -eu\n"
-                "printf '%s\\n' \"$*\" >> \"$TAIJI_TEST_DPKG_LOG\"\n"
-                "if [ \"${1:-}\" = \"--info\" ]; then exit 0; fi\n"
-                "if [ \"${1:-}\" = \"-f\" ]; then\n"
-                "  package_name=taiji-agent\n"
-                "  package_version=1.0.0\n"
-                "  case \"${2##*/}\" in\n"
-                "    dependency-fixture_*) package_name=dependency-fixture; package_version=1.0 ;;\n"
-                "  esac\n"
-                "  case \"${3:-}\" in\n"
-                "    Package) printf '%s\\n' \"$package_name\" ;;\n"
-                "    Version) printf '%s\\n' \"$package_version\" ;;\n"
-                "    Architecture) printf 'amd64\\n' ;;\n"
-                "    Maintainer) printf 'Acme Product Support <support@acme.cn>\\n' ;;\n"
-                "    Depends) [ \"$package_name\" != taiji-agent ] || printf 'dependency-fixture (>= 1.0)\\n' ;;\n"
-                "    Pre-Depends) : ;;\n"
-                "    *) exit 2 ;;\n"
-                "  esac\n"
-                "  exit 0\n"
-                "fi\n"
-                "[ \"${1:-}\" = \"-x\" ] || exit 2\n"
-                "mkdir -p \"$3/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist\" \"$3/opt/taiji-agent/resources\" \"$3/usr/share/applications\"\n"
-                "printf 'fake electron\\n' > \"$3/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron\"\n"
-                "printf 'fake desktop\\n' > \"$3/usr/share/applications/taiji-agent.desktop\"\n"
-                "cp -- \"$TAIJI_TEST_TARGET_BASELINE\" \"$3/opt/taiji-agent/resources/target-baseline.json\"\n"
-                "printf '{\"targetBaselineProfile\":\"%s\",\"targetBaselineSha256\":\"%s\"}\\n' \"$TAIJI_TEST_TARGET_PROFILE_ID\" \"$TAIJI_TEST_TARGET_BASELINE_SHA256\" > \"$3/opt/taiji-agent/resources/taiji-release-manifest.json\"\n",
-                encoding="utf-8",
-            )
-            fake_dpkg_deb.chmod(0o755)
-
-            env = os.environ.copy()
-            env.update(
-                {
-                    "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
-                    "TAIJI_RELEASE_REQUIRE_ARTIFACTS": "1",
-                    "TAIJI_RELEASE_SKIP_GIT_CHECK": "1",
-                    "TAIJI_REPO_ROOT": str(repo_root),
-                    "TAIJI_TEST_DPKG_LOG": str(unpack_log),
-                    "TAIJI_TEST_TARGET_BASELINE": str(embedded_target_baseline),
-                    "TAIJI_TEST_TARGET_PROFILE_ID": target_profile_id,
-                    "TAIJI_TEST_TARGET_BASELINE_SHA256": target_baseline_sha256,
-                }
-            )
-            result = subprocess.run(
-                ["bash", str(script)],
-                cwd=delivery,
-                text=True,
-                capture_output=True,
-                check=False,
-                env=env,
-            )
-            unpack_calls = unpack_log.read_text(encoding="utf-8") if unpack_log.exists() else ""
-
-        return result, unpack_calls
-
-    def test_release_preflight_rejects_every_non_allowlisted_package_output_entry(self):
-        if not shutil.which("sha256sum"):
-            self.skipTest("sha256sum is required by release preflight")
-
-        cases = (
-            "old_deb",
-            "extra_sidecar",
-            "zip",
-            "nested_history",
-            "extra_file",
-            "symlink",
-            "hardlink",
-            "fifo",
-        )
-        for extra_output_case in cases:
-            with self.subTest(extra_output_case=extra_output_case):
-                result, unpack_calls = self._run_release_preflight_artifact_gate(
-                    "valid",
-                    extra_output_case=extra_output_case,
-                )
-                output = result.stdout + result.stderr
-
-                self.assertNotEqual(result.returncode, 0, output)
-                self.assertIn("生成的安装包/ 含不允许的条目", output)
-                self.assertNotIn("-x ", unpack_calls, output)
-
-    def test_release_preflight_rejects_bytewise_modified_staged_acceptance_tool(self):
-        if not shutil.which("sha256sum"):
-            self.skipTest("sha256sum is required by release preflight")
-
-        for filename in (
-            "04_目标终端_桌面App验收并导出证据.sh",
-            "run-installed-electron-acceptance.js",
-            "assemble-target-evidence.py",
-            "observe-single-deb-install.py",
-            "validate-taiji-release-evidence.py",
-            "signing-public.pem",
-        ):
-            with self.subTest(filename=filename):
-                result, unpack_calls = self._run_release_preflight_artifact_gate(
-                    "valid",
-                    tampered_acceptance_tool=filename,
-                )
-                output = result.stdout + result.stderr
-
-                self.assertNotEqual(result.returncode, 0, output)
-                self.assertIn("目标终端验收工具与当前源码不一致", output)
-                self.assertEqual(unpack_calls, "", output)
-
-    def test_release_preflight_rejects_invalid_deb_checksum_sidecars_before_payload_unpack(self):
-        if not shutil.which("sha256sum"):
-            self.skipTest("sha256sum is required by release preflight")
-
-        cases = (
-            ("missing", "缺少 DEB SHA256 sidecar"),
-            ("hash_mismatch", "DEB SHA256 不匹配"),
-            ("basename_mismatch", "DEB SHA256 sidecar 指向的文件不是当前 DEB"),
-        )
-        for sidecar_mode, expected_error in cases:
-            with self.subTest(sidecar_mode=sidecar_mode):
-                result, unpack_calls = self._run_release_preflight_artifact_gate(sidecar_mode)
-                output = result.stdout + result.stderr
-
-                self.assertNotEqual(result.returncode, 0, output)
-                self.assertIn(expected_error, output)
-                self.assertNotIn("-x ", unpack_calls, output)
-
-    def test_release_preflight_accepts_valid_deb_checksum_before_payload_unpack(self):
-        if not shutil.which("sha256sum"):
-            self.skipTest("sha256sum is required by release preflight")
-
-        result, unpack_calls = self._run_release_preflight_artifact_gate("valid")
-        output = result.stdout + result.stderr
-
-        self.assertEqual(result.returncode, 0, output)
-        self.assertIn("DEB SHA256 sidecar 校验通过", output)
-        self.assertIn("-x ", unpack_calls)
-
-    def test_release_preflight_rejects_invalid_target_baseline_bindings(self):
-        if not shutil.which("sha256sum"):
-            self.skipTest("sha256sum is required by release preflight")
-
-        cases = (
-            ("missing", "目标基线缺失或文件身份不安全"),
-            ("stale", "older than 30 days"),
-            ("manifest_mismatch", "manifest/.build-success 与当前目标基线不一致"),
-            ("marker_mismatch", "manifest/.build-success 与当前目标基线不一致"),
-            ("embedded_mismatch", "不是同一字节"),
-        )
-        for target_binding_mode, expected_error in cases:
-            with self.subTest(target_binding_mode=target_binding_mode):
-                result, _ = self._run_release_preflight_artifact_gate(
-                    "valid", target_binding_mode=target_binding_mode
-                )
-                output = result.stdout + result.stderr
-                self.assertNotEqual(result.returncode, 0, output)
-                self.assertIn(expected_error, output)
-
-    def test_release_preflight_rejects_empty_dependency_closure_for_deb_with_depends(self):
-        if not shutil.which("sha256sum"):
-            self.skipTest("sha256sum is required by release preflight")
-
-        result, _ = self._run_release_preflight_artifact_gate(
-            "valid",
-            dependency_repo_mode="empty",
-        )
-        output = result.stdout + result.stderr
-
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("主安装包直接依赖未被 runtime-dependencies.txt 覆盖", output)
-
     def test_offline_builder_generates_manifest_and_does_not_refresh_lock_by_default(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
-        install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
 
         self.assertIn("MANIFEST_FILE", builder)
         self.assertIn("taiji-package-manifest.json", builder)
-        self.assertIn("write_release_manifest", builder)
-        self.assertIn("packages_sha256", builder)
-        self.assertIn("packages_gz_sha256", builder)
-        self.assertIn("build_glibc", builder)
-        self.assertIn("target_matrix", builder)
-        self.assertIn("support_boundary", builder)
+        self.assertIn("collect_artifacts", builder)
+        self.assertIn("compatibility_policy_id", builder)
+        self.assertIn("compatibility_policy_sha256", builder)
+        self.assertIn("elf_abi_audit_sha256", builder)
+        self.assertIn("CANDIDATE_DEB_FIXED", builder)
         self.assertIn("TAIJI_ALLOW_UV_LOCK_REFRESH", builder)
         self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"', builder)
         self.assertIn('run_setup_local "$uv_lock_mode"', builder)
@@ -3490,29 +2786,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("Python 依赖 lock 漂移", builder)
         self.assertNotIn("TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh", builder)
         self.assertNotIn("\n  uv lock\n", builder)
-        self.assertIn('printf \'%s  %s\\n\' "$deb_sha" "$deb_name" > "$OUTPUT_DIR/$checksum_name"', builder)
-
-        manifest_body = builder[
-            builder.index("write_release_manifest() {"):
-            builder.index("write_build_report() {")
-        ]
-        self.assertIn("json_escape", builder)
-        self.assertIn("json_string", builder)
-        self.assertIn("Permission denied by kysec", builder)
-        self.assertLess(builder.index('*"kysec"*'), builder.index('*"源码包"*'))
-        self.assertNotIn('|*"commit"*)', builder)
-        self.assertNotIn("python3 - <<'PY'", manifest_body)
-        self.assertNotIn("Path(os.environ", manifest_body)
-        self.assertNotIn("write_text", manifest_body)
-        self.assertIn('} > "$MANIFEST_FILE"', manifest_body)
-
-        self.assertIn("MANIFEST_PATH", install)
-        self.assertIn("validate_release_manifest", install)
-        self.assertIn("manifest", install)
-        self.assertIn("packages_sha256", install)
-        self.assertIn("packages_gz_sha256", install)
-        self.assertIn("verify_deb_checksum", install)
-        self.assertNotIn('sha256sum -c "$(basename "$CHECKSUM_PATH")"', install)
+        self.assertIn('printf \'%s  %s\\n\' "$deb_sha" "$deb_name"', builder)
+        self.assertNotIn("write_release_manifest", builder)
+        self.assertNotIn("packages_gz_sha256", builder)
+        self.assertNotIn("dpkg-scanpackages", builder)
 
     def test_delivery_install_script_requires_offline_repo_unless_explicitly_online(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
