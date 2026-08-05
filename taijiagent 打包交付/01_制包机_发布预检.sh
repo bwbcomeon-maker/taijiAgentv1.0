@@ -158,18 +158,19 @@ if not re.fullmatch(r"[0-9a-f]{64}", marker["elf_abi_audit_sha256"]):
 PY
 }
 verify_deb_payload() {
-  local deb="$1" root abi embedded_policy abi_sha
-  root="$(mktemp -d /tmp/taiji-release-payload.XXXXXX)"
-  dpkg-deb -x "$deb" "$root" || { rm -rf "$root"; fail "DEB 真实解包失败：$(basename "$deb")"; }
-  embedded_policy="$root/opt/taiji-agent/resources/linux-compatibility-policy.json"
-  abi="$root/opt/taiji-agent/resources/elf-abi-audit.json"
-  [ -f "$embedded_policy" ] && [ ! -L "$embedded_policy" ] || { rm -rf "$root"; fail "DEB 缺少 embedded compatibility policy"; }
-  [ -f "$abi" ] && [ ! -L "$abi" ] || { rm -rf "$root"; fail "DEB 缺少 embedded ELF ABI audit"; }
-  cmp -s "$POLICY_FILE" "$embedded_policy" || { rm -rf "$root"; fail "DEB embedded policy 与源码 policy 不一致"; }
+  local deb="$1" payload_root abi embedded_policy abi_sha
+  payload_root="$(mktemp -d /tmp/taiji-release-payload.XXXXXX)"
+  dpkg-deb -x "$deb" "$payload_root" || { rm -rf "$payload_root"; fail "DEB 真实解包失败：$(basename "$deb")"; }
+  embedded_policy="$payload_root/opt/taiji-agent/resources/linux-compatibility-policy.json"
+  abi="$payload_root/opt/taiji-agent/resources/elf-abi-audit.json"
+  [ -f "$embedded_policy" ] && [ ! -L "$embedded_policy" ] || { rm -rf "$payload_root"; fail "DEB 缺少 embedded compatibility policy"; }
+  [ -f "$abi" ] && [ ! -L "$abi" ] || { rm -rf "$payload_root"; fail "DEB 缺少 embedded ELF ABI audit"; }
+  cmp -s "$POLICY_FILE" "$embedded_policy" || { rm -rf "$payload_root"; fail "DEB embedded policy 与源码 policy 不一致"; }
   abi_sha="$(sha256sum "$abi" | awk '{print $1}')"
-  [ "$abi_sha" = "$(awk -F= '$1==\"elf_abi_audit_sha256\" {print $2}' "$BUILD_MARKER")" ] || { rm -rf "$root"; fail "DEB embedded ABI audit 与 marker 不一致"; }
-  if [ -f "$PAYLOAD_VERIFIER" ]; then python3 "$PAYLOAD_VERIFIER" --root "$root" >/dev/null || { rm -rf "$root"; fail "DEB payload contract 验证失败"; }; fi
-  rm -rf "$root"
+  [ "$abi_sha" = "$(awk -F= '$1==\"elf_abi_audit_sha256\" {print $2}' "$BUILD_MARKER")" ] || { rm -rf "$payload_root"; fail "DEB embedded ABI audit 与 marker 不一致"; }
+  [ -f "$PAYLOAD_VERIFIER" ] && [ ! -L "$PAYLOAD_VERIFIER" ] || { rm -rf "$payload_root"; fail "缺少可信 DEB payload verifier：$PAYLOAD_VERIFIER"; }
+  python3 "$PAYLOAD_VERIFIER" --root "$payload_root" >/dev/null || { rm -rf "$payload_root"; fail "DEB payload contract 验证失败"; }
+  rm -rf "$payload_root"
 }
 verify_package_output_allowlist() {
   local deb="$1" name="$(basename "$deb")"
@@ -221,7 +222,8 @@ verify_target_acceptance_toolchain() {
 check_delivery_artifacts() {
   [ "$REQUIRE_ARTIFACTS" = 1 ] || return 0
   load_policy
-  [ -d "$OUTPUT_DIR" ] && [ -f "$BUILD_MARKER" ] && [ -f "$MANIFEST_FILE" ] && [ -f "$BUILD_REPORT" ] || fail "生成的安装包缺少 marker/manifest/report"
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] && [ -f "$BUILD_MARKER" ] && [ -f "$MANIFEST_FILE" ] && [ -f "$BUILD_REPORT" ] \
+    || fail "生成的安装包目录必须是真实目录且包含 marker/manifest/report"
   local count deb; count="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | wc -l | tr -d ' ')"; [ "$count" = 1 ] || fail "生成的安装包必须且只能有一个 amd64 DEB，当前数量：$count"; deb="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | head -1)"
   verify_marker_and_manifest "$deb"; verify_deb_checksum_sidecar "$deb"; verify_package_output_allowlist "$deb"; verify_deb_payload "$deb"; verify_target_acceptance_toolchain; ok "单一 DEB、policy、manifest、ABI audit 和输出清单验证通过"
 }
