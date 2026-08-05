@@ -1,5 +1,7 @@
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +71,8 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         owner_uid=None,
         effective_uid=None,
         result_path=None,
+        predictable_temp_target=None,
+        fake_mktemp=False,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
         if owner_uid is None:
             owner_uid = os.getuid()
@@ -76,10 +80,28 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             effective_uid = owner_uid
         if result_path is None:
             result_path = root / "var/lib/taiji-agent/preflight.json"
+        fake_bin = ""
+        if fake_mktemp:
+            fake_bin_path = root / ".fake-bin"
+            fake_bin_path.mkdir(parents=True, exist_ok=True)
+            real_mktemp = shutil.which("mktemp") or "/usr/bin/mktemp"
+            fake_mktemp_path = fake_bin_path / "mktemp"
+            fake_mktemp_path.write_text(
+                "#!/bin/sh\n"
+                f"state={shlex.quote(str(root / '.fake-mktemp-used'))}\n"
+                "if [ ! -e \"$state\" ]; then : > \"$state\"; exit 1; fi\n"
+                f"exec {shlex.quote(real_mktemp)} \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_mktemp_path.chmod(0o755)
+            fake_bin = str(fake_bin_path)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
         command = (
             "TAIJI_TEST_EFFECTIVE_UID=\"$9\"; "
             "id() { if [ \"${1:-}\" = \"-u\" ]; then printf '%s' \"$TAIJI_TEST_EFFECTIVE_UID\"; else command id \"$@\"; fi; }; "
+            "if [ -n \"${10:-}\" ]; then ln -s \"${10}\" \"${8}.tmp.$$\"; fi; "
             "source \"$1\"; "
+            "if [ -n \"${11:-}\" ]; then PATH=\"${11}:$PATH\"; export PATH; fi; "
             "verify_compatibility \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\""
         )
         env = {
@@ -101,6 +123,8 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                 str(owner_uid),
                 str(result_path),
                 str(effective_uid),
+                str(predictable_temp_target or ""),
+                fake_bin,
             ],
             text=True,
             capture_output=True,
@@ -221,10 +245,10 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                     (root / "opt/.taiji-noexec").touch()
                 elif marker == "kysec":
                     (root / "etc/kysec").mkdir()
-                else:
-                    (root / "opt").chmod(0o555)
                 rendered = self.render(temp_root)
-                payload = self.assert_blocked(rendered, root, os_release, code)
+                payload = self.assert_blocked(
+                    rendered, root, os_release, code, fake_mktemp=(marker == "sandbox")
+                )
                 self.assertFalse((root / "opt/taiji-agent").exists())
                 self.assertEqual(payload["status"], "BLOCKED")
 
@@ -315,6 +339,22 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             self.assertFalse((root / "home").exists())
             self.assertFalse((root / "root/.config/taiji-agent").exists())
             self.assertFalse((root / "opt/taiji-agent").exists())
+
+            victim = root / "victim.txt"
+            victim.write_text("keep-me\n", encoding="utf-8")
+            result_path = root / "var/lib/taiji-agent/preflight.json"
+            self.assert_blocked(
+                rendered,
+                root,
+                os_release,
+                "TAIJI-LINUX-E003-DPKG",
+                result_path=result_path,
+                predictable_temp_target=victim,
+            )
+            self.assertEqual(victim.read_text(encoding="utf-8"), "keep-me\n")
+            temp_candidates = list(result_path.parent.glob(result_path.name + ".tmp.*"))
+            self.assertTrue(temp_candidates)
+            self.assertTrue(all(path.is_symlink() for path in temp_candidates))
 
 
 if __name__ == "__main__":

@@ -180,7 +180,11 @@ write_preflight_result() {
     failed_json+="]"
   fi
   mkdir -p "$(dirname "$result_path")"
-  tmp_path="${result_path}.tmp.$$"
+  umask 077
+  if ! tmp_path="$(mktemp -- "${result_path}.tmp.XXXXXX" 2>/dev/null)"; then
+    return 1
+  fi
+  [ -n "$tmp_path" ] || return 1
   trap 'rm -f -- "$tmp_path"' RETURN
   (
     umask 077
