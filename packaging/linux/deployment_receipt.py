@@ -81,7 +81,18 @@ SUCCESS_RESULT_FOR_OPERATION = {
     "rollback": "rolled_back",
 }
 ERROR_STAGES = frozenset(
-    {"preflight", "admission", "lock", "verification", "dpkg", "native_verify", "rollback", "internal"}
+    {
+        "preflight",
+        "admission",
+        "lock",
+        "verification",
+        "staging",
+        "dpkg",
+        "native_verify",
+        "rollback",
+        "transaction",
+        "internal",
+    }
 )
 PREFLIGHT_VALUES = frozenset({"PASS", "BLOCKED"})
 NATIVE_VERIFY_VALUES = frozenset({"PASS", "FAIL", "NOT_RUN"})
@@ -149,6 +160,11 @@ def _walk_forbidden(value: Any, path: str = "receipt") -> None:
         for index, child in enumerate(value):
             _walk_forbidden(child, f"{path}[{index}]")
         return
+    # ``error_stage`` is a closed enum.  The literal stage ``dpkg`` is safe
+    # once enum validation accepts it, even though the generic scanner rejects
+    # command tokens in free-form diagnostic strings.
+    if path.endswith(".error_stage") and isinstance(value, str) and value in ERROR_STAGES:
+        return
     if isinstance(value, str) and FORBIDDEN_VALUE_RE.search(value):
         raise ReceiptError(f"{path} contains forbidden diagnostic content")
 
@@ -186,7 +202,13 @@ def validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     if result not in RESULTS:
         raise ReceiptError("unsupported result")
     expected_success = SUCCESS_RESULT_FOR_OPERATION[operation]
-    if result in {"installed", "reinstalled", "upgraded", "rolled_back"} and result != expected_success:
+    allowed_successes = {expected_success}
+    # An upgrade may fail after dpkg mutation and close through the explicit
+    # N-1 recovery path.  That is a successful recovery outcome, but it still
+    # carries the original failure stage/code for support automation.
+    if operation == "upgrade":
+        allowed_successes.add("rolled_back")
+    if result in {"installed", "reinstalled", "upgraded", "rolled_back"} and result not in allowed_successes:
         raise ReceiptError("operation/result combination is invalid")
 
     _require_string(receipt["source_commit"], "source_commit", COMMIT_RE)
@@ -213,9 +235,13 @@ def validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
         raise ReceiptError("invalid native_verify value")
     for field in ("started_at_utc", "finished_at_utc"):
         _require_string(receipt[field], field, TIMESTAMP_RE)
-    _optional_string(receipt["error_stage"], "error_stage")
-    if receipt["error_stage"] is not None and receipt["error_stage"] not in ERROR_STAGES:
-        raise ReceiptError("invalid error_stage value")
+    # Validate the closed enum before the generic diagnostic scanner.  Values
+    # such as the legitimate stage ``dpkg`` intentionally match the scanner's
+    # command-token guard but are safe because they cannot carry free text.
+    error_stage = receipt["error_stage"]
+    if error_stage is not None:
+        if type(error_stage) is not str or error_stage not in ERROR_STAGES:
+            raise ReceiptError("invalid error_stage value")
     _optional_string(receipt["error_code"], "error_code", ERROR_CODE_RE)
     _optional_string(receipt["rollback_transaction_id"], "rollback_transaction_id", TXN_ID_RE)
 
@@ -224,6 +250,9 @@ def validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     if result in {"blocked", "manual_recovery_required"}:
         if receipt["error_stage"] is None or receipt["error_code"] is None:
             raise ReceiptError("failure receipts require error_stage and error_code")
+    elif result == "rolled_back" and operation == "upgrade":
+        if receipt["error_stage"] is None or receipt["error_code"] is None:
+            raise ReceiptError("rolled-back upgrade receipts require recovery cause")
     elif receipt["error_stage"] is not None or receipt["error_code"] is not None:
         raise ReceiptError("successful receipts cannot carry an error")
 

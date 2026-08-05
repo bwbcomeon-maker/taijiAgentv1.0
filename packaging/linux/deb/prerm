@@ -5,6 +5,13 @@ INSTALL_ROOT="/opt/taiji-agent"
 PROC_ROOT="/proc"
 owned_pids=""
 
+# dpkg may invoke prerm for several package actions.  None of them authorizes
+# user-data deletion; unknown actions are ignored rather than guessed.
+case "${1:-remove}" in
+  remove|upgrade|deconfigure|failed-upgrade|abort-upgrade|abort-deconfigure) ;;
+  *) exit 0 ;;
+esac
+
 pid_owned_by_install() {
   local pid="$1" executable
   case "$pid" in

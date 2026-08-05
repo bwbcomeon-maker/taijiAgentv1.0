@@ -204,6 +204,8 @@ verify_target_acceptance_toolchain() {
     "signing-public.pem"
     "management/taiji-silent-deploy.sh"
     "management/deployment_receipt.py"
+    "management/upgrade_transaction.py"
+    "management/upgrade-data-contract.json"
     "management/compatibility_policy.py"
     "management/compatibility-policy.json"
     "management/validate-taiji-release-evidence.py"
@@ -226,6 +228,12 @@ verify_target_acceptance_toolchain() {
         ;;
       management/deployment_receipt.py)
         source_script="$REPO_ROOT/packaging/linux/deployment_receipt.py"
+        ;;
+      management/upgrade_transaction.py)
+        source_script="$REPO_ROOT/packaging/linux/upgrade_transaction.py"
+        ;;
+      management/upgrade-data-contract.json)
+        source_script="$REPO_ROOT/packaging/linux/upgrade-data-contract.json"
         ;;
       management/compatibility_policy.py)
         source_script="$REPO_ROOT/packaging/linux/compatibility_policy.py"

@@ -862,6 +862,8 @@ PY
   install -d -m 0755 "$management"
   install -m 0755 "$SRC_DIR/packaging/linux/deb/taiji-silent-deploy.sh" "$management/taiji-silent-deploy.sh"
   install -m 0644 "$SRC_DIR/packaging/linux/deployment_receipt.py" "$management/deployment_receipt.py"
+  install -m 0644 "$SRC_DIR/packaging/linux/upgrade_transaction.py" "$management/upgrade_transaction.py"
+  install -m 0644 "$SRC_DIR/packaging/linux/upgrade-data-contract.json" "$management/upgrade-data-contract.json"
   install -m 0644 "$SRC_DIR/packaging/linux/compatibility_policy.py" "$management/compatibility_policy.py"
   install -m 0644 "$SRC_DIR/packaging/linux/compatibility-policy.json" "$management/compatibility-policy.json"
   install -m 0644 "$SRC_DIR/scripts/validate-taiji-release-evidence.py" "$management/validate-taiji-release-evidence.py"

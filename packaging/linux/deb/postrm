@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Only the explicit root-owned system allowlist below is eligible for purge.
+# User XDG data is intentionally outside this script's scope and remains
+# available to the transactional management plane.
 tree_contains_mountpoint() {
   local root="$1" entry
   command -v mountpoint >/dev/null 2>&1 || return 0

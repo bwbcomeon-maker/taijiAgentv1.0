@@ -364,12 +364,13 @@ audit_deb_payload() {
 }
 
 write_package_manifest() {
-  local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 built_at_utc out_deb_name
+  local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 upgrade_contract_sha256 built_at_utc out_deb_name
   out_deb_name="$(basename "$OUT_DEB")"
   deb_sha256="$(sha256sum "$OUT_DEB" | awk '{print $1}')"
   electron_sha256="$(sha256sum "$DESKTOP_RUNTIME/node_modules/electron/dist/electron" | awk '{print $1}')"
   desktop_sha256="$(sha256sum "$DESKTOP_FILE" | awk '{print $1}')"
   abi_sha256="$(sha256sum "$ABI_REPORT_PATH" | awk '{print $1}')"
+  upgrade_contract_sha256="$(sha256sum "$REPO_ROOT/packaging/linux/upgrade-data-contract.json" | awk '{print $1}')"
   built_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   cat > "$MANIFEST_PATH" <<MANIFEST
 {
@@ -383,6 +384,8 @@ write_package_manifest() {
   "maintainer": "$TAIJI_PACKAGE_MAINTAINER",
   "compatibility_policy_id": "$POLICY_ID",
   "compatibility_policy_sha256": "$POLICY_SHA256",
+  "upgrade_data_contract_id": "taiji-linux-upgrade-data-v1",
+  "upgrade_data_contract_sha256": "$upgrade_contract_sha256",
   "elf_abi_audit_basename": "elf-abi-audit.json",
   "elf_abi_audit_sha256": "$abi_sha256",
   "electron_executable_sha256": "$electron_sha256",

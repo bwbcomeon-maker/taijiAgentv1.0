@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+if [ "$(uname -s)" = "Linux" ]; then
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin
+  export PATH
+fi
+
 # Management-plane entry point for an already fixed, signed DEB.  This file
 # is intentionally not copied into the customer DEB: the customer install
 # path is the package's preinst/postinst contract, while this command is only
@@ -17,6 +22,10 @@ fi
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
 RECEIPT_HELPER="$LOCAL_MANAGEMENT_ROOT/deployment_receipt.py"
 [ -f "$RECEIPT_HELPER" ] || RECEIPT_HELPER="$REPO_ROOT/packaging/linux/deployment_receipt.py"
+UPGRADE_TRANSACTION_HELPER="$LOCAL_MANAGEMENT_ROOT/upgrade_transaction.py"
+[ -f "$UPGRADE_TRANSACTION_HELPER" ] || UPGRADE_TRANSACTION_HELPER="$REPO_ROOT/packaging/linux/upgrade_transaction.py"
+UPGRADE_CONTRACT_PATH="$LOCAL_MANAGEMENT_ROOT/upgrade-data-contract.json"
+[ -f "$UPGRADE_CONTRACT_PATH" ] || UPGRADE_CONTRACT_PATH="$REPO_ROOT/packaging/linux/upgrade-data-contract.json"
 RELEASE_VALIDATOR="$LOCAL_MANAGEMENT_ROOT/validate-taiji-release-evidence.py"
 [ -f "$RELEASE_VALIDATOR" ] || RELEASE_VALIDATOR="$(cd "$SCRIPT_DIR/.." && pwd -P)/validate-taiji-release-evidence.py"
 [ -f "$RELEASE_VALIDATOR" ] || RELEASE_VALIDATOR="$REPO_ROOT/scripts/validate-taiji-release-evidence.py"
@@ -35,6 +44,7 @@ RELEASE_SIGNATURE=""
 BUSINESS_USER=""
 PREVIOUS_DEB=""
 PREVIOUS_SHA256=""
+PREVIOUS_SIGNATURE=""
 PREVIOUS_VERSION=""
 PREVIOUS_MANIFEST=""
 
@@ -56,9 +66,13 @@ STARTED_AT_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 FINISHED_AT_UTC=""
 LOCK_FD=""
 CHALLENGE_RESERVED=""
+UPGRADE_TRANSACTION_ID=""
+ROLLBACK_TRANSACTION_ID=""
 ADMISSION_CHALLENGE_DIGEST="0000000000000000000000000000000000000000000000000000000000000000"
 STAGING_DIR=""
 STAGED_DEB_PATH=""
+STAGED_PREVIOUS_DEB_PATH=""
+STAGED_PREVIOUS_SIGNATURE_PATH=""
 RECEIPT_DEB_BASENAME=""
 HAS_DEB=0
 HAS_EXPECTED_VERSION=0
@@ -72,7 +86,7 @@ usage: taiji-silent-deploy.sh --deb PATH --expected-version VERSION
   --operation fresh_install|reinstall|upgrade|rollback --receipt PATH
   [--build-manifest PATH --policy PATH --certification-challenge HEX]
   [--release-evidence PATH --release-signature PATH]
-  [--business-user LOGIN] [--previous-deb PATH --previous-sha256 SHA256]
+  [--business-user LOGIN] [--previous-deb PATH --previous-sha256 SHA256 --previous-signature PATH]
   [--previous-version VERSION --previous-manifest PATH]  # rollback only
 EOF
 }
@@ -132,6 +146,9 @@ parse_args() {
       --previous-sha256)
         option_value_required "$@" || return 2
         PREVIOUS_SHA256="$2"; shift 2 ;;
+      --previous-signature)
+        option_value_required "$@" || return 2
+        PREVIOUS_SIGNATURE="$2"; shift 2 ;;
       --previous-version)
         option_value_required "$@" || return 2
         PREVIOUS_VERSION="$2"; shift 2 ;;
@@ -172,14 +189,15 @@ write_receipt() {
   if [[ ! "$receipt_basename" =~ ^taiji-agent_[A-Za-z0-9.+:~_-]+_amd64\.deb$ ]]; then
     receipt_basename="taiji-agent_${EXPECTED_VERSION:-0.0.0}_amd64.deb"
   fi
-  receipt_sha="${PREVIOUS_SHA256:-$EXPECTED_SHA256}"
+  receipt_sha="$EXPECTED_SHA256"
+  [ "$OPERATION" = rollback ] && receipt_sha="$PREVIOUS_SHA256"
   [[ "$receipt_sha" =~ ^[0-9a-f]{64}$ ]] || receipt_sha="0000000000000000000000000000000000000000000000000000000000000000"
   export RECEIPT_HELPER RECEIPT_PATH DEPLOYMENT_ID OPERATION RESULT SOURCE_COMMIT
   export VERSION_BEFORE VERSION_REQUESTED="$EXPECTED_VERSION" VERSION_AFTER ARCHITECTURE="amd64"
   export DEB_BASENAME="$receipt_basename"
   export DEB_SHA256="$receipt_sha"
   export POLICY_ID POLICY_SHA256 PREFLIGHT DPKG_STATUS_BEFORE DPKG_STATUS_AFTER NATIVE_VERIFY
-  export STARTED_AT_UTC FINISHED_AT_UTC ERROR_STAGE ERROR_CODE ROLLBACK_TRANSACTION_ID=""
+  export STARTED_AT_UTC FINISHED_AT_UTC ERROR_STAGE ERROR_CODE ROLLBACK_TRANSACTION_ID
   python3 - "$RECEIPT_HELPER" <<'PY'
 import importlib.util
 import os
@@ -228,8 +246,12 @@ cleanup_staged_deb() {
   # only the exact file and directory we created; never recurse over a caller
   # supplied path.
   [ -z "$STAGED_DEB_PATH" ] || rm -f -- "$STAGED_DEB_PATH" 2>/dev/null || true
+  [ -z "$STAGED_PREVIOUS_DEB_PATH" ] || rm -f -- "$STAGED_PREVIOUS_DEB_PATH" 2>/dev/null || true
+  [ -z "$STAGED_PREVIOUS_SIGNATURE_PATH" ] || rm -f -- "$STAGED_PREVIOUS_SIGNATURE_PATH" 2>/dev/null || true
   rmdir -- "$STAGING_DIR" 2>/dev/null || true
   STAGED_DEB_PATH=""
+  STAGED_PREVIOUS_DEB_PATH=""
+  STAGED_PREVIOUS_SIGNATURE_PATH=""
   STAGING_DIR=""
 }
 
@@ -302,13 +324,17 @@ validate_basic_args() {
     EXPECTED_VERSION="0.0.0"
     blocked preflight VERSION_INVALID 2
   fi
-  if [ "$OPERATION" = rollback ]; then
+  if [ "$OPERATION" = rollback ] || [ "$OPERATION" = upgrade ]; then
     [ -n "$PREVIOUS_DEB" ] || blocked preflight PREVIOUS_DEB_REQUIRED 2
     [[ "${PREVIOUS_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || blocked preflight PREVIOUS_SHA256_INVALID 2
-    [[ "$PREVIOUS_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9.+:~_-]{0,127}$ ]] || blocked preflight PREVIOUS_VERSION_REQUIRED 2
-    [ -n "$PREVIOUS_MANIFEST" ] || blocked admission PREVIOUS_MANIFEST_REQUIRED 2
-    EXPECTED_VERSION="$PREVIOUS_VERSION"
-    BUILD_MANIFEST="$PREVIOUS_MANIFEST"
+    [ -n "$PREVIOUS_SIGNATURE" ] || blocked preflight PREVIOUS_SIGNATURE_REQUIRED 2
+    [ -n "$PREVIOUS_MANIFEST" ] || blocked preflight PREVIOUS_MANIFEST_REQUIRED 2
+    if [ "$OPERATION" = rollback ]; then
+      [[ "$PREVIOUS_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9.+:~_-]{0,127}$ ]] || blocked preflight PREVIOUS_VERSION_REQUIRED 2
+      [ -n "$PREVIOUS_MANIFEST" ] || blocked admission PREVIOUS_MANIFEST_REQUIRED 2
+      EXPECTED_VERSION="$PREVIOUS_VERSION"
+      BUILD_MANIFEST="$PREVIOUS_MANIFEST"
+    fi
   elif [ -n "$PREVIOUS_DEB$PREVIOUS_SHA256$PREVIOUS_VERSION$PREVIOUS_MANIFEST" ]; then
     blocked preflight PREVIOUS_ONLY_ROLLBACK 2
   fi
@@ -384,6 +410,261 @@ validate_candidate_hash_and_version() {
   EXPECTED_SHA256="$expected_sha"
 }
 
+validate_previous_package_for_transaction() {
+  [ "$OPERATION" = upgrade ] || [ "$OPERATION" = rollback ] || return 0
+  validate_regular_file "$PREVIOUS_DEB" PREVIOUS_DEB_NOT_REGULAR
+  local actual
+  actual="$(sha256sum -- "$PREVIOUS_DEB" | awk '{print $1}')" || blocked verification PREVIOUS_DEB_SHA256_READ_FAILED 1
+  [ "$actual" = "$PREVIOUS_SHA256" ] || blocked verification PREVIOUS_DEB_SHA256_MISMATCH 1
+  validate_regular_file "$PREVIOUS_DEB.sha256" PREVIOUS_DEB_SHA256_SIDECAR_NOT_REGULAR
+  validate_regular_file "$PREVIOUS_SIGNATURE" PREVIOUS_SIGNATURE_NOT_REGULAR
+  python3 - "$PREVIOUS_DEB.sha256" "$PREVIOUS_SHA256" "$(basename -- "$PREVIOUS_DEB")" <<'PY' || blocked verification PREVIOUS_DEB_SHA256_SIDECAR_MISMATCH 1
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="ascii")
+if not re.fullmatch(r"[0-9a-f]{64}[ \t]+\*?[^/\s]+\n?", text):
+    raise SystemExit(1)
+parts = text.strip().split()
+if parts[0] != sys.argv[2] or parts[-1].lstrip("*") != sys.argv[3]:
+    raise SystemExit(1)
+PY
+}
+
+validate_previous_data_contract() {
+  [ "$OPERATION" = upgrade ] || [ "$OPERATION" = rollback ] || return 0
+  validate_regular_file "$PREVIOUS_MANIFEST" PREVIOUS_MANIFEST_NOT_REGULAR
+  validate_regular_file "$UPGRADE_CONTRACT_PATH" UPGRADE_DATA_CONTRACT_NOT_REGULAR
+  local contract_sha
+  contract_sha="$(sha256sum -- "$UPGRADE_CONTRACT_PATH" | awk '{print $1}')" || blocked verification UPGRADE_DATA_CONTRACT_SHA256_READ_FAILED 1
+  python3 - "$PREVIOUS_MANIFEST" "$contract_sha" <<'PY' || blocked verification PREVIOUS_DATA_CONTRACT_MISMATCH 1
+import json
+import re
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if manifest.get("schema") != "taiji-package-manifest/v3":
+    raise SystemExit(1)
+if manifest.get("upgrade_data_contract_id") != "taiji-linux-upgrade-data-v1":
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("upgrade_data_contract_sha256", ""))):
+    raise SystemExit(1)
+if manifest["upgrade_data_contract_sha256"] != sys.argv[2]:
+    raise SystemExit(1)
+PY
+}
+
+prepare_upgrade_transaction() {
+  [ "$OPERATION" = upgrade ] || [ "$OPERATION" = rollback ] || return 0
+  [ -f "$UPGRADE_TRANSACTION_HELPER" ] || blocked preflight UPGRADE_TRANSACTION_HELPER_MISSING 1
+  [ -f "$UPGRADE_CONTRACT_PATH" ] || blocked preflight UPGRADE_DATA_CONTRACT_MISSING 1
+  [ -n "$BUSINESS_USER" ] || blocked preflight BUSINESS_USER_REQUIRED 1
+  local transaction_id transaction_previous transaction_previous_sha transaction_signature
+  transaction_previous="$PREVIOUS_DEB"
+  transaction_previous_sha="$PREVIOUS_SHA256"
+  transaction_signature="$STAGED_PREVIOUS_SIGNATURE_PATH"
+  if [ "$OPERATION" = upgrade ]; then
+    [ -n "$STAGED_PREVIOUS_DEB_PATH" ] || blocked preflight STAGED_PREVIOUS_DEB_MISSING 1
+    transaction_previous="$STAGED_PREVIOUS_DEB_PATH"
+  elif [ "$OPERATION" = rollback ]; then
+    # The rollback candidate has already passed the root-only staging and
+    # second-hash checks; use that immutable copy for transaction preflight.
+    transaction_previous="$DEB_PATH"
+  fi
+  [ -n "$transaction_signature" ] || blocked preflight STAGED_PREVIOUS_SIGNATURE_MISSING 1
+  validate_regular_file "$UPGRADE_TRANSACTION_HELPER" UPGRADE_TRANSACTION_HELPER_NOT_REGULAR
+  validate_regular_file "$UPGRADE_CONTRACT_PATH" UPGRADE_DATA_CONTRACT_NOT_REGULAR
+  transaction_id="$(python3 - "$UPGRADE_TRANSACTION_HELPER" "$UPGRADE_CONTRACT_PATH" "$BUSINESS_USER" "$OPERATION" "$DEB_PATH" "$transaction_previous" "$transaction_previous_sha" "$transaction_signature" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+contract_path = Path(sys.argv[2])
+username = sys.argv[3]
+operation = sys.argv[4]
+candidate = Path(sys.argv[5])
+previous = Path(sys.argv[6])
+previous_sha = sys.argv[7]
+previous_signature = Path(sys.argv[8])
+spec = importlib.util.spec_from_file_location("taiji_upgrade_transaction", helper_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("UPGRADE_TRANSACTION_HELPER_INVALID")
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+module.load_contract(contract_path)
+account = module.resolve_account(username)
+transaction = module.UpgradeTransaction.create(
+    Path("/var/lib/taiji-agent/upgrades"), account=account, operation=operation
+)
+transaction.bind_package_artifacts(
+    candidate_deb=candidate,
+    previous_deb=previous,
+    previous_sha256=previous_sha,
+    previous_signature=previous_signature,
+)
+transaction.transition("trusted_staging")
+print(transaction.transaction_id)
+PY
+  )" || blocked preflight UPGRADE_TRANSACTION_PREFLIGHT_FAILED 1
+  UPGRADE_TRANSACTION_ID="$transaction_id"
+  ROLLBACK_TRANSACTION_ID="$transaction_id"
+}
+
+snapshot_upgrade_transaction() {
+  [ -n "$UPGRADE_TRANSACTION_ID" ] || return 0
+  python3 - "$UPGRADE_TRANSACTION_HELPER" "$BUSINESS_USER" "$UPGRADE_TRANSACTION_ID" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+username = sys.argv[2]
+transaction_id = sys.argv[3]
+spec = importlib.util.spec_from_file_location("taiji_upgrade_transaction", helper_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(1)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+account = module.resolve_account(username)
+journal = Path("/var/lib/taiji-agent/upgrades") / transaction_id / "journal.json"
+transaction = module.UpgradeTransaction.resume_for_account(journal, account)
+transaction.prepare_before_package_change()
+PY
+}
+
+finish_upgrade_transaction_success() {
+  [ -n "$UPGRADE_TRANSACTION_ID" ] || return 0
+  python3 - "$UPGRADE_TRANSACTION_HELPER" "$BUSINESS_USER" "$UPGRADE_TRANSACTION_ID" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+username = sys.argv[2]
+transaction_id = sys.argv[3]
+spec = importlib.util.spec_from_file_location("taiji_upgrade_transaction", helper_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(1)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+account = module.resolve_account(username)
+journal = Path("/var/lib/taiji-agent/upgrades") / transaction_id / "journal.json"
+transaction = module.UpgradeTransaction.resume_for_account(journal, account)
+transaction.commit_after_package_change()
+PY
+}
+
+recover_upgrade_transaction() {
+  [ -n "$UPGRADE_TRANSACTION_ID" ] || return 0
+  local recovery_mode="${1:-restore}"
+  python3 - "$UPGRADE_TRANSACTION_HELPER" "$BUSINESS_USER" "$UPGRADE_TRANSACTION_ID" "$recovery_mode" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+username = sys.argv[2]
+transaction_id = sys.argv[3]
+recovery_mode = sys.argv[4]
+spec = importlib.util.spec_from_file_location("taiji_upgrade_transaction", helper_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(1)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+account = module.resolve_account(username)
+journal = Path("/var/lib/taiji-agent/upgrades") / transaction_id / "journal.json"
+transaction = module.UpgradeTransaction.resume_for_account(journal, account)
+rollback_fn = (lambda _path: False) if recovery_mode == "package_failed" else None
+result = transaction._recover(
+    Path("/dev/null"),
+    rollback_install_fn=rollback_fn,
+    error=module.UpgradeError("package_action_failed"),
+    package_restored=recovery_mode == "restore",
+)
+raise SystemExit(0 if result.get("result") == "rolled_back" else 1)
+PY
+}
+
+attempt_upgrade_recovery() {
+  [ -n "$UPGRADE_TRANSACTION_ID" ] || return 1
+  if rollback_previous_package && verify_rollback_package; then
+    recover_upgrade_transaction
+    return $?
+  fi
+  recover_upgrade_transaction package_failed || true
+  return 1
+}
+
+stop_managed_runtime_before_snapshot() {
+  [ "$OPERATION" = upgrade ] || [ "$OPERATION" = rollback ] || return 0
+  local stop_script="/opt/taiji-agent/scripts/stop-all.sh"
+  validate_regular_file "$stop_script" STOP_SCRIPT_NOT_REGULAR
+  if env -i \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    TAIJI_LAUNCH_PROFILE=installed-production \
+    TAIJI_NATIVE_VERIFY_MODE=system-only \
+    TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0 \
+    bash "$stop_script" >/dev/null 2>&1; then
+    for _attempt in 1 2 3 4 5; do
+      local survivors=""
+      while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        [ "$pid" = "$$" ] && continue
+        local proc_exe="/proc/$pid/exe" exe=""
+        if [ -e "$proc_exe" ]; then
+          exe="$(readlink -- "$proc_exe" 2>/dev/null || true)"
+          [ -n "$exe" ] || survivors="${survivors}${pid}"$'\n'
+          case "$exe" in
+            /opt/taiji-agent/*) survivors="${survivors}${pid}"$'\n' ;;
+          esac
+        fi
+      done < <(ps -eo pid=)
+      if [ -z "$survivors" ]; then
+        unset _attempt
+        return 0
+      fi
+      sleep 0.2
+    done
+    unset _attempt
+    recover_upgrade_transaction || true
+    blocked preflight STOP_RUNTIME_SURVIVORS 1
+  fi
+  recover_upgrade_transaction || true
+  blocked preflight STOP_RUNTIME_FAILED 1
+}
+
+rollback_previous_package() {
+  [ "$OPERATION" = upgrade ] || return 1
+  [ -n "$STAGED_PREVIOUS_DEB_PATH" ] || return 1
+  local rollback_rc=0
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a dpkg --install --force-confold -- "$STAGED_PREVIOUS_DEB_PATH" >/dev/null 2>&1 || rollback_rc=$?
+  [ "$rollback_rc" -eq 0 ] || return "$rollback_rc"
+}
+
+verify_rollback_package() {
+  [ "$OPERATION" = upgrade ] || return 0
+  local status version verifier="/opt/taiji-agent/bin/taiji-native-verify"
+  status="$(dpkg-query -W -f='${db:Status-Status}' taiji-agent 2>/dev/null || true)"
+  [ "$status" = installed ] || return 1
+  version="$(dpkg-query -W -f='${Version}' taiji-agent 2>/dev/null || true)"
+  [ "$version" = "$PREVIOUS_VERSION" ] || return 1
+  [ -x "$verifier" ] || return 1
+  env -i \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    TAIJI_LAUNCH_PROFILE=installed-production \
+    TAIJI_NATIVE_VERIFY_MODE=system-only \
+    TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0 \
+    "$verifier" >/dev/null 2>&1
+}
+
 stage_candidate_for_install() {
   local source="$DEB_PATH" expected_sha="$EXPECTED_SHA256" actual package version architecture owner_mode
   validate_regular_file "$source" DEB_NOT_REGULAR
@@ -405,6 +686,60 @@ stage_candidate_for_install() {
   [ "$version" = "$EXPECTED_VERSION" ] || blocked staging STAGED_DEB_VERSION_MISMATCH 1
   [ "$architecture" = "amd64" ] || blocked staging STAGED_DEB_ARCHITECTURE_MISMATCH 1
   DEB_PATH="$STAGED_DEB_PATH"
+}
+
+stage_previous_for_rollback() {
+  [ "$OPERATION" = upgrade ] || [ "$OPERATION" = rollback ] || return 0
+  [ -n "$STAGING_DIR" ] || blocked staging STAGING_DIRECTORY_MISSING 1
+  local source="$PREVIOUS_DEB" expected_sha="$PREVIOUS_SHA256" actual package version architecture owner_mode signature_source manifest_version
+  validate_regular_file "$source" PREVIOUS_DEB_NOT_REGULAR
+  if [ "$OPERATION" = upgrade ]; then
+    STAGED_PREVIOUS_DEB_PATH="$STAGING_DIR/previous-$(basename -- "$source")"
+    signature_source="$PREVIOUS_SIGNATURE"
+  else
+    # For an explicit rollback, stage the N-1 candidate itself and use that
+    # immutable copy as the transaction's trusted previous package.
+    STAGED_PREVIOUS_DEB_PATH="$DEB_PATH"
+    signature_source="$PREVIOUS_SIGNATURE"
+  fi
+  if [ "$OPERATION" = upgrade ]; then
+    install -o 0 -g 0 -m 0600 -- "$source" "$STAGED_PREVIOUS_DEB_PATH" || blocked staging PREVIOUS_STAGING_COPY_FAILED 1
+  fi
+  validate_regular_file "$STAGED_PREVIOUS_DEB_PATH" STAGED_PREVIOUS_DEB_NOT_REGULAR
+  owner_mode="$(stat -c '%u:%g:%a:%h' -- "$STAGED_PREVIOUS_DEB_PATH" 2>/dev/null || printf 'invalid')"
+  [ "$owner_mode" = "0:0:600:1" ] || blocked staging STAGED_PREVIOUS_DEB_OWNERSHIP_INVALID 1
+  actual="$(sha256sum -- "$STAGED_PREVIOUS_DEB_PATH" | awk '{print $1}')" || blocked staging STAGED_PREVIOUS_DEB_SHA256_READ_FAILED 1
+  [ "$actual" = "$expected_sha" ] || blocked staging STAGED_PREVIOUS_DEB_SHA256_MISMATCH 1
+  package="$(dpkg-deb -f "$STAGED_PREVIOUS_DEB_PATH" Package 2>/dev/null || true)"
+  version="$(dpkg-deb -f "$STAGED_PREVIOUS_DEB_PATH" Version 2>/dev/null || true)"
+  architecture="$(dpkg-deb -f "$STAGED_PREVIOUS_DEB_PATH" Architecture 2>/dev/null || true)"
+  [ "$package" = "taiji-agent" ] || blocked staging STAGED_PREVIOUS_DEB_PACKAGE_MISMATCH 1
+  [ "$architecture" = "amd64" ] || blocked staging STAGED_PREVIOUS_DEB_ARCHITECTURE_MISMATCH 1
+  manifest_version="$(python3 - "$PREVIOUS_MANIFEST" <<'PY'
+import json
+import sys
+from pathlib import Path
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("version")
+if not isinstance(value, str) or not value:
+    raise SystemExit(1)
+print(value)
+PY
+  )" || blocked verification PREVIOUS_MANIFEST_VERSION_INVALID 1
+  [ "$version" = "$manifest_version" ] || blocked verification PREVIOUS_VERSION_MANIFEST_MISMATCH 1
+  PREVIOUS_VERSION="$manifest_version"
+  if [ "$OPERATION" = upgrade ]; then
+    dpkg --compare-versions "$EXPECTED_VERSION" gt "$version" || blocked verification PREVIOUS_VERSION_NOT_OLDER 1
+  else
+    [ "$EXPECTED_VERSION" = "$version" ] || blocked verification ROLLBACK_VERSION_MISMATCH 1
+  fi
+  validate_regular_file "$signature_source" PREVIOUS_SIGNATURE_NOT_REGULAR
+  STAGED_PREVIOUS_SIGNATURE_PATH="$STAGING_DIR/previous-$(basename -- "$signature_source")"
+  install -o 0 -g 0 -m 0600 -- "$signature_source" "$STAGED_PREVIOUS_SIGNATURE_PATH" || blocked staging PREVIOUS_SIGNATURE_STAGING_COPY_FAILED 1
+  owner_mode="$(stat -c '%u:%g:%a:%h' -- "$STAGED_PREVIOUS_SIGNATURE_PATH" 2>/dev/null || printf 'invalid')"
+  [ "$owner_mode" = "0:0:600:1" ] || blocked staging STAGED_PREVIOUS_SIGNATURE_OWNERSHIP_INVALID 1
+  [ -n "${TAIJI_RELEASE_PUBLIC_KEY:-}" ] || blocked admission RELEASE_PUBLIC_KEY_REQUIRED 1
+  validate_regular_file "$TAIJI_RELEASE_PUBLIC_KEY" RELEASE_PUBLIC_KEY_NOT_REGULAR
+  openssl dgst -sha256 -verify "$TAIJI_RELEASE_PUBLIC_KEY" -signature "$STAGED_PREVIOUS_SIGNATURE_PATH" "$STAGED_PREVIOUS_DEB_PATH" >/dev/null 2>&1 || blocked admission PREVIOUS_SIGNATURE_INVALID 1
 }
 
 read_manifest_binding() {
@@ -625,7 +960,7 @@ preflight() {
   [ "$(uname -s)" = "Linux" ] || blocked preflight LINUX_REQUIRED 1
   case "$(uname -m)" in x86_64|amd64) ;; *) blocked preflight AMD64_REQUIRED 1 ;; esac
   [ "$(id -u)" -eq 0 ] || blocked preflight ROOT_REQUIRED 1
-  for command_name in python3 sha256sum dpkg dpkg-deb dpkg-query flock stat mktemp install chown; do
+  for command_name in python3 sha256sum dpkg dpkg-deb dpkg-query flock stat mktemp install chown openssl ps readlink; do
     have "$command_name" || blocked preflight "${command_name^^}_MISSING" 1
   done
   [ -r /run/lock ] || blocked preflight LOCK_DIRECTORY_UNAVAILABLE 1
@@ -654,6 +989,12 @@ install_local_deb() {
   DPKG_STATUS_AFTER="$(read_dpkg_status)"
   VERSION_AFTER="$(read_dpkg_version)"
   if [ "$dpkg_rc" -ne 0 ]; then
+    if [ -n "$UPGRADE_TRANSACTION_ID" ] && attempt_upgrade_recovery; then
+      RESULT="rolled_back"
+      ERROR_STAGE="dpkg"
+      ERROR_CODE="DPKG_INSTALL_FAILED_ROLLED_BACK"
+      finish "$dpkg_rc"
+    fi
     manual_recovery dpkg DPKG_INSTALL_FAILED "$dpkg_rc"
   fi
   local verifier="/opt/taiji-agent/bin/taiji-native-verify"
@@ -662,6 +1003,12 @@ install_local_deb() {
       NATIVE_VERIFY="PASS"
     else
       NATIVE_VERIFY="FAIL"
+      if [ -n "$UPGRADE_TRANSACTION_ID" ] && attempt_upgrade_recovery; then
+        RESULT="rolled_back"
+        ERROR_STAGE="native_verify"
+        ERROR_CODE="NATIVE_VERIFY_FAILED_ROLLED_BACK"
+        finish 1
+      fi
       manual_recovery native_verify NATIVE_VERIFY_FAILED 1
     fi
   else
@@ -673,6 +1020,11 @@ install_local_deb() {
     upgrade) RESULT="upgraded" ;;
     rollback) RESULT="rolled_back" ;;
   esac
+  if [ -n "$UPGRADE_TRANSACTION_ID" ]; then
+    if ! finish_upgrade_transaction_success; then
+      manual_recovery transaction UPGRADE_TRANSACTION_COMMIT_FAILED 1
+    fi
+  fi
   ERROR_STAGE=""
   ERROR_CODE=""
   finish 0
@@ -685,8 +1037,17 @@ main() {
   reserve_admission_and_validate
   preflight
   validate_candidate_hash_and_version
+  validate_previous_package_for_transaction
   acquire_lock
   stage_candidate_for_install
+  stage_previous_for_rollback
+  validate_previous_data_contract
+  prepare_upgrade_transaction
+  stop_managed_runtime_before_snapshot
+  if ! snapshot_upgrade_transaction; then
+    recover_upgrade_transaction || true
+    manual_recovery transaction UPGRADE_TRANSACTION_SNAPSHOT_FAILED 1
+  fi
   install_local_deb
 }
 

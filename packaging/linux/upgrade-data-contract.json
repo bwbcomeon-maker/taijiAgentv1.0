@@ -1,0 +1,65 @@
+{
+  "schema": "taiji-linux-upgrade-data-contract/v1",
+  "contract_id": "taiji-linux-upgrade-data-v1",
+  "package": "taiji-agent",
+  "architecture": "amd64",
+  "operations": ["fresh_install", "reinstall", "upgrade", "rollback"],
+  "reinstall": {"replace_user_data": false},
+  "upgrade": {
+    "requires_previous_deb": true,
+    "requires_previous_sha256": true,
+    "requires_backward_compatible_contract": true,
+    "recovery_failure": "manual_recovery_required"
+  },
+  "user_roots": [
+    {"id": "config", "relative": ".config/taiji-agent", "category": "config"},
+    {"id": "data", "relative": ".local/share/taiji-agent", "category": "data"},
+    {"id": "state", "relative": ".local/state/taiji-agent", "category": "state"}
+  ],
+  "artifacts": [
+    {"id": "config", "root": "config", "relative": ".", "category": "config"},
+    {"id": "license", "root": "config", "relative": "licenses", "category": "license"},
+    {"id": "device_identity", "root": "config", "relative": "license-device.json", "category": "device_identity"},
+    {"id": "license_state", "root": "state", "relative": "license-state.json", "category": "license"},
+    {"id": "anti_rollback", "root": "state", "relative": "anti-rollback.json", "category": "anti_rollback"},
+    {"id": "sessions", "root": "data", "relative": "sessions", "category": "sessions"},
+    {"id": "attachments", "root": "data", "relative": "attachments", "category": "attachments"},
+    {"id": "workspace", "root": "data", "relative": "workspace", "category": "workspace"},
+    {"id": "skills", "root": "data", "relative": "skills", "category": "skills"},
+    {"id": "templates", "root": "data", "relative": "docx-engine-v2/installed", "category": "templates"},
+    {"id": "databases", "root": "data", "relative": ".", "category": "databases", "kind": "sqlite"},
+    {"id": "state_databases", "root": "state", "relative": ".", "category": "databases", "kind": "sqlite"}
+  ],
+  "sqlite": {
+    "backup_api": "sqlite3.Connection.backup",
+    "consistency": "logical_rows",
+    "include_wal": true,
+    "discover": [".local/share/taiji-agent", ".local/state/taiji-agent"]
+  },
+  "state_machine": {
+    "states": [
+      "preflight",
+      "trusted_staging",
+      "stopped",
+      "snapshotted",
+      "package_changed",
+      "migrated",
+      "verified",
+      "committed"
+    ],
+    "failure_states": [
+      "rolling_back",
+      "rolled_back",
+      "manual_recovery_required"
+    ]
+  },
+  "security": {
+    "account_source": "getent passwd",
+    "reject_symlinks": true,
+    "reject_mountpoints": true,
+    "reject_hardlinks": true,
+    "require_owner_account": true,
+    "journal_mode": "0600",
+    "private_directory_mode": "0700"
+  }
+}

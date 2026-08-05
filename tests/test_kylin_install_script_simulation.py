@@ -26,7 +26,17 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def test_wrapper_does_not_copy_management_script_into_output(self):
         text = WRAPPER.read_text(encoding="utf-8")
         self.assertNotIn("cp ", text)
-        self.assertNotIn("install ", text)
+        # The wrapper now copies the management plane only into a root-owned
+        # /var/tmp staging directory before elevation; it must never copy
+        # management files into the customer output directory.
+        self.assertIn("mktemp -d /var/tmp/taiji-agent-management.XXXXXX", text)
+        self.assertIn("stage_regular_file", text)
+        self.assertIn("O_NOFOLLOW", text)
+        self.assertIn("sudo env -i", text)
+        self.assertIn("PATH=/usr/sbin:/usr/bin:/sbin:/bin", text)
+        self.assertIn('"$stage/build-manifest.json"', text)
+        self.assertIn('"$stage/previous.deb.sig"', text)
+        self.assertNotIn("$OUTPUT_DIR/management", text)
         self.assertNotIn("离线仓库", text)
 
     def test_silent_deployer_declares_noninteractive_local_dpkg_contract(self):
@@ -42,11 +52,15 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
     def test_dpkg_receives_only_root_owned_staged_copy_after_second_hash(self):
         text = SILENT.read_text(encoding="utf-8")
         self.assertIn("stage_candidate_for_install", text)
+        self.assertIn("stage_previous_for_rollback", text)
         self.assertIn("mktemp -d /var/tmp/taiji-agent-deploy.XXXXXX", text)
         self.assertIn("install -o 0 -g 0 -m 0600", text)
         self.assertIn("STAGED_DEB_SHA256_MISMATCH", text)
+        self.assertIn("STAGED_PREVIOUS_DEB_SHA256_MISMATCH", text)
+        self.assertIn('dpkg --install --force-confold -- "$STAGED_PREVIOUS_DEB_PATH"', text)
         main_body = text[text.index("main()") :]
         self.assertLess(main_body.index("stage_candidate_for_install"), main_body.index("install_local_deb"))
+        self.assertLess(main_body.index("stage_previous_for_rollback"), main_body.index("prepare_upgrade_transaction"))
         self.assertRegex(text, r"actual=\"\$\(sha256sum -- \"\$STAGED_DEB_PATH\"")
 
     def test_wrapper_requires_explicit_challenge_for_certification(self):

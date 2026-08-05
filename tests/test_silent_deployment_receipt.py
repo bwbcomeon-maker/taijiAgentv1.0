@@ -98,6 +98,22 @@ class SilentDeploymentReceiptTest(unittest.TestCase):
             receipt = self._base_receipt(operation=operation, result=result)
             self.assertEqual(module.validate_receipt(receipt), receipt)
 
+    def test_upgrade_rollback_receipt_preserves_recovery_cause(self):
+        module = self._import_receipt()
+        receipt = self._base_receipt(
+            operation="upgrade",
+            result="rolled_back",
+            version_before="1.2.2",
+            version_after="1.2.2",
+            dpkg_status_before="installed",
+            dpkg_status_after="installed",
+            native_verify="FAIL",
+            error_stage="dpkg",
+            error_code="DPKG_INSTALL_FAILED_ROLLED_BACK",
+            rollback_transaction_id="txn-abc",
+        )
+        self.assertEqual(module.validate_receipt(receipt), receipt)
+
     def test_receipt_rejects_extra_and_forbidden_fields(self):
         module = self._import_receipt()
         with self.assertRaises(module.ReceiptError):
