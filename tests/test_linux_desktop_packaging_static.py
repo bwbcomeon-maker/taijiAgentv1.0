@@ -2406,13 +2406,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         private_scan = build_function_source("scan_private_key_material", "scan_product_privacy")
         privacy_scan = build_function_source("scan_product_privacy", "scan_package_tree")
 
-        def run_scan(function_source: str, root: Path, call: str, tmp_dir: Path, *, fake_grep: bool = False):
+        def run_scan(function_source: str, root: Path, call: str, tmp_dir: Path):
             script = [
                 "set -euo pipefail",
                 'fail() { printf \'%s\\n\' "$*" >&2; exit 42; }',
             ]
-            if fake_grep:
-                script.append("grep() { return 2; }")
             script.extend([function_source, call])
             env = {
                 **os.environ,
