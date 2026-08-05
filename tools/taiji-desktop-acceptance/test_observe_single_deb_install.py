@@ -14,6 +14,7 @@ from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent
 OBSERVER = TOOLS_DIR / "observe-single-deb-install.py"
+MATRIX = TOOLS_DIR.parents[1] / "packaging/linux/certification-matrix.json"
 
 
 def png_fixture(width=800, height=600):
@@ -134,6 +135,46 @@ class SingleDebInstallObserverTests(unittest.TestCase):
         self.assertFalse(payload["additional_install_files_observed"])
         self.assertTrue(payload["first_launch_eligible"])
         self.assertFalse(payload["installation_method_machine_observed"])
+
+    def test_canonical_mode_emits_category_bound_environment_record_without_baseline(self):
+        canonical_manifest = self.root / "taiji-package-manifest-v3.json"
+        canonical_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-package-manifest/v3",
+                    "package": "taiji-agent",
+                    "version": "1.0.0",
+                    "architecture": "amd64",
+                    "source_commit": "d" * 40,
+                    "deb_basename": self.deb.name,
+                    "deb_sha256": hashlib.sha256(self.deb.read_bytes()).hexdigest(),
+                    "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                    "compatibility_policy_sha256": "e" * 64,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        observation, record = self.observer.observe_environment_install(
+            customer_dir=self.customer,
+            manifest_path=canonical_manifest,
+            matrix_path=MATRIX,
+            category_id="kylin-current-standard",
+            challenge=self.challenge,
+            user_state_paths=self.user_paths,
+            runtime=FakeRuntime([None, "install ok installed"]),
+            timeout_seconds=10,
+            poll_interval_seconds=0.1,
+            os_id="kylin",
+            os_version="V10",
+            desktop_environment="UKUI",
+        )
+        self.assertEqual(observation["schema"], "taiji.single-deb-install-observation/v2")
+        self.assertEqual(record["schema"], "taiji-linux-environment-evidence/v1")
+        self.assertEqual(record["compatibility"], "COMPATIBLE")
+        self.assertEqual(record["category_id"], "kylin-current-standard")
+        self.assertNotIn("target_baseline_profile_id", record)
+        self.assertNotIn("CERTIFIED", json.dumps(record))
 
     def test_rejects_observer_started_after_package_is_already_installed(self):
         with self.assertRaisesRegex(self.observer.ObservationError, "before the package is installed"):

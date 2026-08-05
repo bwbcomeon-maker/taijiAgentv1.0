@@ -338,6 +338,36 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
                 **kwargs,
             )
 
+    def test_canonical_manifest_binds_v3_policy_without_target_baseline(self) -> None:
+        assembler = load_module(ASSEMBLER, "taiji_target_assembler_canonical_manifest_test")
+        manifest = {
+            "schema": "taiji-package-manifest/v3",
+            "package": "taiji-agent",
+            "architecture": "amd64",
+            "source_commit": self.source_commit,
+            "version": self.version,
+            "deb_basename": self.deb.name,
+            "deb_sha256": sha256(self.deb),
+            "electron_executable_sha256": sha256(self.electron),
+            "desktop_entry_sha256": sha256(self.desktop_entry),
+            "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+            "compatibility_policy_sha256": "c" * 64,
+        }
+        source_commit, version, policy_id, policy_sha = assembler.validate_canonical_manifest(
+            manifest,
+            deb=self.deb,
+            deb_sha256=sha256(self.deb),
+            electron_sha256=sha256(self.electron),
+            desktop_entry_sha256=sha256(self.desktop_entry),
+            installed_version=self.version,
+        )
+        self.assertEqual((source_commit, version, policy_id, policy_sha), (
+            self.source_commit,
+            self.version,
+            "taiji-linux-amd64-deb-v1",
+            "c" * 64,
+        ))
+
     def test_assembler_derives_current_machine_and_boot_fingerprints(self) -> None:
         assembler = load_module(ASSEMBLER, "taiji_target_assembler_current_identity_test")
         machine, boot = assembler.current_target_fingerprints(self.challenge)

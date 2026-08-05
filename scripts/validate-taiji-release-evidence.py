@@ -1671,6 +1671,153 @@ RELEASE_EVIDENCE_V3_KEYS = {
     "formal_gates",
 }
 
+CERTIFICATION_SET_SCHEMA_V1 = "taiji-linux-certification-set/v1"
+CERTIFICATION_SET_KEYS_V1 = {
+    "schema",
+    "generated_at_utc",
+    "challenge_nonce",
+    "source_commit",
+    "version",
+    "architecture",
+    "deb_basename",
+    "deb_sha256",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
+    "certification_profile",
+    "offline_rehearsal",
+    "environments",
+    "negative_boundaries",
+}
+
+
+def _load_environment_contract_for_certification() -> Any:
+    contract_path = Path(__file__).resolve().parents[1] / "tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+    if not contract_path.is_file():
+        contract_path = Path(__file__).resolve().with_name("assemble-target-evidence.py")
+    if not contract_path.is_file():
+        raise EvidenceError("认证集验证缺少环境证据 contract")
+    spec = importlib.util.spec_from_file_location("taiji_release_environment_contract", contract_path)
+    if spec is None or spec.loader is None:
+        raise EvidenceError("无法加载认证集环境证据 contract")
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    return contract
+
+
+def validate_certification_set_v1(
+    data: dict[str, Any],
+    evidence_path: Path,
+    args: argparse.Namespace,
+    binding: BuildBinding,
+) -> None:
+    """Validate the unsigned, closed six-positive/six-negative certification set."""
+    require_exact_keys(data, CERTIFICATION_SET_KEYS_V1, "认证集")
+    require_exact(data, "schema", CERTIFICATION_SET_SCHEMA_V1)
+    validate_fresh_timestamp(data["generated_at_utc"], "认证集 generated_at_utc")
+    validate_challenge(data["challenge_nonce"], args.challenge)
+    for key, expected in {
+        "source_commit": binding.source_commit,
+        "version": binding.version,
+        "architecture": "amd64",
+        "deb_basename": binding.deb_basename,
+        "deb_sha256": binding.deb_sha256,
+        "compatibility_policy_id": binding.compatibility_policy_id,
+        "compatibility_policy_sha256": binding.compatibility_policy_sha256,
+    }.items():
+        require_exact(data, key, expected)
+    validate_sha256(data["deb_sha256"], "认证集 deb_sha256")
+    validate_sha256(data["compatibility_policy_sha256"], "认证集 compatibility_policy_sha256")
+    expected_policy_id, expected_policy_sha = canonical_policy_identity()
+    require_exact(data, "compatibility_policy_id", expected_policy_id)
+    require_exact(data, "compatibility_policy_sha256", expected_policy_sha)
+    profile = data["certification_profile"]
+    if type(profile) is not dict or set(profile) != {
+        "matrix_schema", "matrix_sha256", "positive_category_count", "negative_boundary_count"
+    }:
+        raise EvidenceError("认证集 certification_profile 字段集合不合法")
+    require_exact(profile, "matrix_schema", "taiji-linux-certification-matrix/v1")
+    validate_sha256(profile["matrix_sha256"], "认证集 matrix_sha256")
+    if profile["positive_category_count"] != 6 or profile["negative_boundary_count"] != 6:
+        raise EvidenceError("认证集 certification_profile 必须覆盖六正六负类别")
+    matrix_path = getattr(args, "matrix", None)
+    if matrix_path is None:
+        raise EvidenceError("认证集验证需要 --matrix")
+    matrix_payload, _ = read_regular_bytes(Path(matrix_path), "认证矩阵")
+    if hashlib.sha256(matrix_payload).hexdigest() != profile["matrix_sha256"]:
+        raise EvidenceError("认证集 matrix_sha256 与当前认证矩阵不一致")
+    matrix = parse_json_bytes(matrix_payload, "认证矩阵")
+    contract = _load_environment_contract_for_certification()
+    contract.validate_certification_matrix(matrix)
+    categories = {
+        item["id"]: item for item in matrix["positive_categories"] + matrix["negative_boundaries"]
+    }
+    environments = data["environments"]
+    negative = data["negative_boundaries"]
+    if type(environments) is not list or type(negative) is not list:
+        raise EvidenceError("认证集 environments/negative_boundaries 必须是数组")
+    if len(environments) != 6 or len(negative) != 6:
+        raise EvidenceError("认证集必须包含六个正向和六个负向类别")
+    if {item.get("category_id") for item in environments} != set(matrix["minimum_application_only_categories"]) | {
+        "kylin-min-ukui", "kylin-hardened", "uos-min-dde"
+    }:
+        raise EvidenceError("认证集正向类别集合不完整")
+    if {item.get("category_id") for item in negative} != {
+        item["id"] for item in matrix["negative_boundaries"]
+    }:
+        raise EvidenceError("认证集负向边界集合不完整")
+    record_root = evidence_path.parent / "records"
+    _safe_record_root = record_root
+    if not _safe_record_root.is_dir() or _safe_record_root.is_symlink():
+        raise EvidenceError("认证集 records 目录缺失或不安全")
+
+    def validate_summary(item: Any, expected_kind: str, expected_compatibility: str) -> None:
+        if type(item) is not dict or set(item) != {
+            "category_id", "compatibility", "record_basename", "record_sha256"
+        }:
+            raise EvidenceError("认证集类别摘要字段集合不合法")
+        category_id = item["category_id"]
+        if category_id not in categories or categories[category_id]["kind"] != expected_kind:
+            raise EvidenceError("认证集类别摘要 category_id 不在矩阵中")
+        require_exact(item, "compatibility", expected_compatibility)
+        basename = item["record_basename"]
+        basename_path = Path(basename) if type(basename) is str else Path(".")
+        if (
+            type(basename) is not str
+            or basename_path.is_absolute()
+            or "\\" in basename
+            or ".." in basename_path.parts
+            or len(basename_path.parts) != 3
+            or basename_path.parts[0] != "records"
+            or basename_path.parts[1] != category_id
+            or basename_path.parts[2] != "environment-evidence.json"
+        ):
+            raise EvidenceError("认证集记录 basename 发生路径逃逸")
+        record_path = evidence_path.parent / basename
+        if record_path.resolve().parent.parent != record_root.resolve():
+            raise EvidenceError("认证集记录路径越界")
+        record_payload, record_stat = read_regular_bytes(record_path, "认证集环境记录")
+        require_exact(item, "record_sha256", hashlib.sha256(record_payload).hexdigest())
+        record = parse_json_bytes(record_payload, "认证集环境记录")
+        contract.validate_environment_record(record, matrix)
+        require_exact(record, "category_id", category_id)
+        require_exact(record, "category_kind", expected_kind)
+        if expected_kind == "positive":
+            required = set(categories[category_id]["required_business_checks"]) | set(
+                categories[category_id]["required_lifecycle_checks"]
+            )
+            if any(record["checks"].get(key) != "PASS" for key in required):
+                raise EvidenceError("认证集正向记录必须所有检查 PASS")
+
+    for item in environments:
+        validate_summary(item, "positive", "CERTIFIED")
+    for item in negative:
+        validate_summary(item, "negative", "BLOCKED")
+    offline = data["offline_rehearsal"]
+    if type(offline) is not dict or set(offline) != {"basename", "sha256", "status"}:
+        raise EvidenceError("认证集 offline_rehearsal 字段集合不合法")
+    require_exact(offline, "status", "PASS")
+    validate_sha256(offline["sha256"], "认证集 offline_rehearsal.sha256")
+
 
 def validate_release_evidence_v3(
     data: dict[str, Any], args: argparse.Namespace, binding: BuildBinding
@@ -1766,7 +1913,7 @@ def validate_legacy_v2_read_only(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("offline", "target", "release"))
+    parser.add_argument("mode", choices=("offline", "target", "release", "certification"))
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--deb", required=True, type=Path)
@@ -1783,6 +1930,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--challenge", default="")
     parser.add_argument("--pre-sign", action="store_true")
     parser.add_argument("--legacy-v2-read-only", action="store_true")
+    parser.add_argument("--matrix", type=Path)
     return parser.parse_args()
 
 
@@ -1793,6 +1941,15 @@ def main() -> int:
         evidence_payload, _ = read_regular_bytes(args.evidence, "证据 JSON")
         data = parse_json_bytes(evidence_payload, "证据 JSON")
         manifest = load_json(Path(args.manifest), "发布 manifest")
+        if args.mode == "certification":
+            if args.legacy_v2_read_only or args.pre_sign:
+                raise EvidenceError("认证集不能使用历史 v2 或 --pre-sign 模式")
+            binding = validate_build_binding(args)
+            if not isinstance(binding, BuildBinding):
+                raise EvidenceError("认证集验证未获得 v3 BuildBinding")
+            validate_certification_set_v1(data, args.evidence, args, binding)
+            print(f"certification-set-valid\t{args.evidence}")
+            return 0
         if args.legacy_v2_read_only:
             if args.pre_sign:
                 raise EvidenceError(
