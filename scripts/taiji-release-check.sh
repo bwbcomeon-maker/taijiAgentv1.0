@@ -13,6 +13,25 @@ WEBUI_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-webui"
 DELIVERY_DIR="${TAIJI_DELIVERY_DIR:-$ROOT_DIR/taijiagent 打包交付}"
 OFFLINE_REHEARSAL_DIR="${TAIJI_OFFLINE_REHEARSAL_DIR:-$DELIVERY_DIR/offline-install-rehearsal}"
 TARGET_EVIDENCE_DIR="${TAIJI_TARGET_VERIFICATION_DIR:-$DELIVERY_DIR/target-verification}"
+CERTIFICATION_SET="${TAIJI_CERTIFICATION_SET:-$DELIVERY_DIR/certification/certification-set.json}"
+CERTIFICATION_SET_SIGNATURE="${TAIJI_CERTIFICATION_SET_SIGNATURE:-${CERTIFICATION_SET}.sig}"
+RELEASE_EVIDENCE="${TAIJI_RELEASE_EVIDENCE:-$DELIVERY_DIR/release-evidence.json}"
+RELEASE_SIGNATURE="${TAIJI_RELEASE_SIGNATURE:-${RELEASE_EVIDENCE}.sig}"
+CERTIFICATION_MATRIX="$DELIVERY_DIR/验收工具/certification-matrix.json"
+CERTIFICATION_CHALLENGE="${TAIJI_CERTIFICATION_CHALLENGE:-}"
+PUBLICATION_CHALLENGE="${TAIJI_PUBLICATION_CHALLENGE:-}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --delivery-dir) [ "$#" -ge 2 ] || { printf '%s\n' '--delivery-dir requires a path' >&2; exit 2; }; DELIVERY_DIR="$2"; shift 2 ;;
+    --certification-set) [ "$#" -ge 2 ] || { printf '%s\n' '--certification-set requires a path' >&2; exit 2; }; CERTIFICATION_SET="$2"; shift 2 ;;
+    --certification-signature) [ "$#" -ge 2 ] || { printf '%s\n' '--certification-signature requires a path' >&2; exit 2; }; CERTIFICATION_SET_SIGNATURE="$2"; shift 2 ;;
+    --release-evidence) [ "$#" -ge 2 ] || { printf '%s\n' '--release-evidence requires a path' >&2; exit 2; }; RELEASE_EVIDENCE="$2"; shift 2 ;;
+    --release-signature) [ "$#" -ge 2 ] || { printf '%s\n' '--release-signature requires a path' >&2; exit 2; }; RELEASE_SIGNATURE="$2"; shift 2 ;;
+    *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+CERTIFICATION_MATRIX="$DELIVERY_DIR/验收工具/certification-matrix.json"
 
 failures=0
 
@@ -51,7 +70,10 @@ run_root_tests() {
     tests.test_taiji_license_issuer_gui \
     tests.test_offline_rehearsal_producer \
     tests.test_target_desktop_acceptance_producer \
-    tests.test_release_evidence_signer_guards
+    tests.test_release_evidence_signer_guards \
+    tests.test_certification_set_v1 \
+    tests.test_release_evidence_assembler_v3 \
+    tests.test_release_check_v3
 }
 
 run_desktop_evidence_tool_tests() {
@@ -152,6 +174,83 @@ check_target_verification() {
   ok "桌面 App 目标机证据有效：$evidence"
 }
 
+check_certification_and_publication() {
+  local commit deb manifest checksum source_archive
+  [ -f "$CERTIFICATION_SET" ] && [ ! -L "$CERTIFICATION_SET" ] || { fail "缺少 certification-set.json"; return 1; }
+  [ -f "$CERTIFICATION_SET_SIGNATURE" ] && [ ! -L "$CERTIFICATION_SET_SIGNATURE" ] || { fail "缺少 certification-set.json.sig"; return 1; }
+  [ -f "$RELEASE_EVIDENCE" ] && [ ! -L "$RELEASE_EVIDENCE" ] || { fail "缺少 release-evidence.json"; return 1; }
+  [ -f "$RELEASE_SIGNATURE" ] && [ ! -L "$RELEASE_SIGNATURE" ] || { fail "缺少 release-evidence.json.sig"; return 1; }
+  [ -f "$CERTIFICATION_MATRIX" ] && [ ! -L "$CERTIFICATION_MATRIX" ] || { fail "缺少认证矩阵"; return 1; }
+  printf '%s\n' "$CERTIFICATION_CHALLENGE" | grep -Eq '^[0-9a-f]{64,128}$' || { fail "TAIJI_CERTIFICATION_CHALLENGE 无效"; return 1; }
+  printf '%s\n' "$PUBLICATION_CHALLENGE" | grep -Eq '^[0-9a-f]{64,128}$' || { fail "TAIJI_PUBLICATION_CHALLENGE 无效"; return 1; }
+  [ "$CERTIFICATION_CHALLENGE" != "$PUBLICATION_CHALLENGE" ] || { fail "认证 challenge 与 publication challenge 必须独立"; return 1; }
+  command -v openssl >/dev/null 2>&1 || { fail "缺少 openssl"; return 1; }
+  commit="$($TRUSTED_GIT -C "$ROOT_DIR" rev-parse HEAD)" || return 1
+  deb="$(find "$DELIVERY_DIR/生成的安装包" -maxdepth 1 -type f -name 'taiji-agent_*.deb' | head -n 1)"
+  manifest="$DELIVERY_DIR/生成的安装包/taiji-package-manifest.json"
+  checksum="${deb}.sha256"
+  source_archive="$DELIVERY_DIR/taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
+  openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$CERTIFICATION_SET_SIGNATURE" "$CERTIFICATION_SET" >/dev/null \
+    || { fail "certification-set.json.sig 验签失败"; return 1; }
+  openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$RELEASE_SIGNATURE" "$RELEASE_EVIDENCE" >/dev/null \
+    || { fail "release-evidence.json.sig 验签失败"; return 1; }
+  python3 - "$CERTIFICATION_SET" "$CERTIFICATION_SET_SIGNATURE" "$RELEASE_EVIDENCE" "$deb" "$manifest" <<'PY' || { fail "认证集、v3 回执、DEB 和 policy 摘要不一致"; return 1; }
+import hashlib, json, sys
+from pathlib import Path
+
+cert_path, cert_sig_path, release_path, deb_path, manifest_path = map(Path, sys.argv[1:])
+cert = json.loads(cert_path.read_text(encoding="utf-8"))
+release = json.loads(release_path.read_text(encoding="utf-8"))
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+deb_sha = hashlib.sha256(deb_path.read_bytes()).hexdigest()
+cert_sha = hashlib.sha256(cert_path.read_bytes()).hexdigest()
+cert_sig_sha = hashlib.sha256(cert_sig_path.read_bytes()).hexdigest()
+if manifest.get("schema") != "taiji-package-manifest/v3":
+    raise SystemExit("current release requires manifest v3; schema_version=2 is historical/read-only")
+if release.get("schema") != "taiji-release-evidence/v3":
+    raise SystemExit("current release requires taiji-release-evidence/v3")
+if release.get("certification_set_basename") != cert_path.name or release.get("certification_set_sha256") != cert_sha:
+    raise SystemExit("certification set hash binding mismatch")
+if release.get("certification_set_signature_basename") != cert_sig_path.name or release.get("certification_set_signature_sha256") != cert_sig_sha:
+    raise SystemExit("certification signature hash binding mismatch")
+for key in ("source_commit", "version", "deb_basename", "compatibility_policy_id", "compatibility_policy_sha256"):
+    if cert.get(key) != release.get(key) or release.get(key) != manifest.get({"deb_basename": "deb_basename"}.get(key, key)):
+        raise SystemExit("release identity mismatch: " + key)
+if release.get("deb_sha256") != deb_sha or cert.get("deb_sha256") != deb_sha:
+    raise SystemExit("DEB hash mismatch")
+if release.get("customer_folder_contract") != "exactly-one-deb" or release.get("customer_filename") != deb_path.name:
+    raise SystemExit("customer folder contract mismatch")
+PY
+  python3 "$EVIDENCE_VALIDATOR" certification \
+    --evidence "$CERTIFICATION_SET" \
+    --source-commit "$commit" \
+    --deb "$deb" \
+    --checksum "$checksum" \
+    --manifest "$manifest" \
+    --build-marker "$DELIVERY_DIR/生成的安装包/.build-success" \
+    --source-archive "$source_archive" \
+    --packages "$DELIVERY_DIR/离线依赖/Packages" \
+    --packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz" \
+    --delivery-dir "$DELIVERY_DIR" \
+    --matrix "$CERTIFICATION_MATRIX" \
+    --challenge "$CERTIFICATION_CHALLENGE" || return 1
+  python3 "$EVIDENCE_VALIDATOR" release \
+    --evidence "$RELEASE_EVIDENCE" \
+    --source-commit "$commit" \
+    --deb "$deb" \
+    --checksum "$checksum" \
+    --manifest "$manifest" \
+    --build-marker "$DELIVERY_DIR/生成的安装包/.build-success" \
+    --source-archive "$source_archive" \
+    --packages "$DELIVERY_DIR/离线依赖/Packages" \
+    --packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz" \
+    --delivery-dir "$DELIVERY_DIR" \
+    --attestation-signature "$RELEASE_SIGNATURE" \
+    --attestation-public-key "$EVIDENCE_ATTESTATION_PUBLIC_KEY" \
+    --attestation-public-key-fingerprint "$EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT" \
+    --challenge "$PUBLICATION_CHALLENGE" || return 1
+}
+
 validate_release_evidence() {
   local mode="$1"
   local evidence="$2"
@@ -212,6 +311,7 @@ main() {
   run_step "check_delivery_artifacts" check_delivery_artifacts
   run_step "check_offline_install_rehearsal" check_offline_install_rehearsal
   run_step "check_target_verification" check_target_verification
+  run_step "check_certification_and_publication" check_certification_and_publication
 
   if [ "$failures" -gt 0 ]; then
     printf '\n太极 Agent 销售就绪门禁未通过：%s 项失败。\n' "$failures" >&2

@@ -869,7 +869,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, output)
         self.assertIn("check_offline_install_rehearsal", output)
         self.assertIn("check_target_verification", output)
-        self.assertIn("2 项失败", output)
+        # The current gate also fails closed when the signed certification
+        # set/publication envelope is absent, so all three evidence layers are
+        # reported without masking either legacy evidence failure.
+        self.assertIn("3 项失败", output)
+        self.assertIn("check_certification_and_publication", output)
 
     def test_release_evidence_signer_uses_fixed_offline_trust_anchor(self):
         signer = read_text("scripts/sign-taiji-release-evidence.sh")
@@ -882,22 +886,22 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('SIGNATURE="${EVIDENCE}.sig"', signer)
         self.assertIn('--attestation-signature "${evidence}.sig"', release_check)
         self.assertIn("EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT", release_check)
-        self.assertIn("TAIJI_RELEASE_SKIP_GIT_CHECK=0", signer)
+        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", signer)
+        self.assertIn("TAIJI_PUBLICATION_CHALLENGE", signer)
         self.assertIn("TAIJI_RELEASE_SKIP_GIT_CHECK=0", release_check)
         self.assertIn("st_nlink", signer)
         self.assertIn("stat.S_IMODE", signer)
         self.assertIn("O_EXCL", signer)
         self.assertIn("used-challenges", signer)
-        self.assertIn("TAIJI_OFFLINE_REHEARSAL_CHALLENGE", signer)
-        self.assertIn("TAIJI_TARGET_ACCEPTANCE_CHALLENGE", signer)
+        self.assertNotIn("TAIJI_OFFLINE_REHEARSAL_CHALLENGE", signer)
+        self.assertNotIn("TAIJI_TARGET_ACCEPTANCE_CHALLENGE", signer)
         self.assertIn('"$CHALLENGE" = "$EXPECTED_CHALLENGE"', signer)
         self.assertIn("st_size > 1024 * 1024", signer)
         self.assertIn("O_NOFOLLOW", signer)
-        self.assertIn("os.fsync(state_descriptor)", signer)
-        self.assertLess(
-            signer.index('--attestation-signature "$tmp_signature"'),
-            signer.index('mv -f "$tmp_signature" "$SIGNATURE"'),
-        )
+        self.assertIn("os.fsync(state_fd)", signer)
+        self.assertIn('os.link(source, destination)', signer)
+        self.assertIn('os.unlink(source)', signer)
+        self.assertIn('exit 0', signer)
 
     def test_release_preflight_accepts_same_git_archive_from_a_different_gzip_encoder(self):
         if not all(shutil.which(command) for command in ("git", "gzip", "sha256sum")):

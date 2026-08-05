@@ -15,11 +15,11 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="taiji-signer-guard-")
         self.root = Path(self.temporary.name)
-        self.evidence = self.root / "offline-install-rehearsal.json"
+        self.evidence = self.root / "certification-set.json"
         self.evidence.write_text(
             json.dumps(
                 {
-                    "evidence_type": "offline-install-rehearsal",
+                    "schema": "taiji-linux-certification-set/v1",
                     "challenge_nonce": CHALLENGE,
                 }
             )
@@ -35,7 +35,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
 
     def run_signer(self, challenge: str = CHALLENGE, private_key: Path | None = None):
         env = os.environ.copy()
-        env["TAIJI_OFFLINE_REHEARSAL_CHALLENGE"] = challenge
+        env["TAIJI_CERTIFICATION_CHALLENGE"] = challenge
         return subprocess.run(
             ["bash", str(SIGNER), str(self.evidence), str(private_key or self.private_key)],
             cwd=ROOT,
@@ -80,6 +80,35 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("无法读取发布私钥", result.stderr)
+        self.assert_no_signature()
+
+    def test_rejects_existing_signature_without_overwrite(self) -> None:
+        signature = Path(f"{self.evidence}.sig")
+        signature.write_bytes(b"existing-signature")
+
+        result = self.run_signer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("拒绝覆盖", result.stderr)
+        self.assertEqual(signature.read_bytes(), b"existing-signature")
+
+    def test_rejects_historical_v2_evidence(self) -> None:
+        self.evidence.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "evidence_type": "offline-install-rehearsal",
+                    "challenge_nonce": CHALLENGE,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_signer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("只接受 certification-set v1 或 release-evidence v3", result.stderr)
         self.assert_no_signature()
 
     def test_rejects_non_root_owned_ancestor_symlink_for_private_key(self) -> None:
