@@ -101,12 +101,19 @@ def _destination(root: Path, policy: dict[str, Any]) -> Path:
     ).relative_to(install_root)
 
 
-def _iter_sources(sysroot: Path):
+def _iter_sources(sysroot: Path, policy: dict[str, Any]):
     if not sysroot.is_dir():
         raise StageError(f"private-library sysroot is not a directory: {sysroot}")
+    allowlisted = set(policy["elf"]["allowed_private_sonames"])
     for candidate in sorted(sysroot.rglob("*"), key=lambda item: item.as_posix()):
         try:
-            if candidate.is_symlink() or not candidate.is_file():
+            if candidate.is_symlink():
+                # Let an allowlisted symlink reach validate_source so it is
+                # rejected explicitly instead of being silently ignored.
+                if readelf_soname(candidate) in allowlisted:
+                    yield candidate
+                continue
+            if not candidate.is_file():
                 continue
         except OSError as exc:
             raise StageError(f"cannot inspect private-library source: {candidate}") from exc
@@ -159,7 +166,7 @@ def stage_private_libraries(root: Path, policy: dict[str, Any], sysroot: Path) -
     destination_dir = _destination(root, policy)
     allowlisted = set(policy["elf"]["allowed_private_sonames"])
     candidates: dict[str, list[Path]] = {}
-    for source in _iter_sources(sysroot):
+    for source in _iter_sources(sysroot, policy):
         try:
             soname = readelf_soname(source)
         except OSError:

@@ -217,6 +217,29 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 with mock.patch.object(self.stager, "readelf_soname", return_value=allowed):
                     with self.assertRaises(self.stager.StageError):
                         self.stager.validate_source(candidate, self.policy)
+                if label == "symlink":
+                    stage_root = Path(temp_dir) / "symlink-payload"
+                    stage_sysroot = Path(temp_dir) / "symlink-sysroot"
+                    stage_root.mkdir()
+                    stage_sysroot.mkdir()
+                    target = stage_sysroot / "z-target.so.1"
+                    target.write_bytes(b"private")
+                    link = stage_sysroot / "a-link.so.1"
+                    link.symlink_to(target)
+
+                    def stage_soname(path, *args):
+                        return allowed if Path(path).name in {link.name, target.name} else None
+
+                    def stage_metadata(path):
+                        if Path(path).is_symlink():
+                            return stat.S_IFLNK | 0o777, 0, 1
+                        return stat.S_IFREG | 0o644, 0, 1
+
+                    with mock.patch.object(self.stager, "readelf_soname", side_effect=stage_soname), \
+                            mock.patch.object(self.stager, "source_metadata", side_effect=stage_metadata), \
+                            mock.patch.object(self.stager, "_copy_atomically", return_value="0" * 64):
+                        with self.assertRaises(self.stager.StageError):
+                            self.stager.stage_private_libraries(stage_root, self.policy, stage_sysroot)
                 candidate.unlink()
 
             wrong_owner = sysroot / "wrong-owner.so.1"
