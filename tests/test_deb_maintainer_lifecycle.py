@@ -210,6 +210,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             agent_dir = install_root / "runtime" / "agent"
             webui_dir = install_root / "runtime" / "web"
             web_static_dir = webui_dir / "static"
+            config_dir = install_root / "config"
             python_path = agent_dir / "venv" / "bin" / "python"
             desktop_app = install_root / "apps" / "taiji-desktop"
             electron_path = desktop_app / "node_modules" / "electron" / "dist" / "electron"
@@ -221,6 +222,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             for directory in (
                 wrapper.parent,
                 scripts_dir,
+                config_dir,
                 python_path.parent,
                 web_static_dir,
                 desktop_app / "src",
@@ -259,11 +261,18 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
                 python_path,
                 f"""
                 #!/bin/bash -p
+                if [[ "${{1:-}}" == */sync-packaged-config.py ]]; then
+                  phase="packaged-config-sync"
+                else
+                  phase="runtime-verify"
+                fi
                 {{
+                  printf 'phase=%s\n' "$phase"
                   printf 'home=%s\n' "${{HOME:-unset}}"
                   printf 'user_dirs=%s\n' "${{TAIJI_AGENT_USE_USER_DIRS:-unset}}"
                   printf 'verify_mode=%s\n' "${{TAIJI_NATIVE_VERIFY_MODE:-unset}}"
                   printf 'sync_packaged_config=%s\n' "${{TAIJI_AGENT_SYNC_PACKAGED_CONFIG:-unset}}"
+                  printf 'dont_write_bytecode=%s\n' "${{PYTHONDONTWRITEBYTECODE:-unset}}"
                   printf 'runtime_home=%s\n' "${{TAIJI_RUNTIME_HOME:-unset}}"
                   printf 'workspace=%s\n' "${{TAIJI_WORKSPACE:-unset}}"
                   printf 'config=%s\n' "${{TAIJI_AGENT_CONFIG_DIR:-unset}}"
@@ -276,6 +285,13 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
                 }} >> "{observed_env}"
                 exit 0
                 """,
+            )
+            (config_dir / "taiji-default-config.yaml").write_text(
+                "version: 1\n", encoding="utf-8"
+            )
+            (scripts_dir / "sync-packaged-config.py").write_text(
+                "# fixture: the fake Python executable records this invocation\n",
+                encoding="utf-8",
             )
             (agent_dir / "taiji_runtime").mkdir()
             (agent_dir / "taiji_runtime" / "main.py").write_text("# fixture\n", encoding="utf-8")
@@ -317,6 +333,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
                     "TAIJI_AGENT_LOG_DIR": "/tmp/evil-agent-log",
                     "TAIJI_AGENT_TMP_DIR": "/tmp/evil-agent-tmp",
                     "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
+                    "PYTHONDONTWRITEBYTECODE": "0",
                     "TAIJI_TEST_OBSERVED_ENV": str(observed_env),
                 }
             )
@@ -337,6 +354,8 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             self.assertIn("user_dirs=0", observed)
             self.assertIn("verify_mode=system-only", observed)
             self.assertIn("sync_packaged_config=0", observed)
+            self.assertIn("dont_write_bytecode=1", observed)
+            self.assertNotIn("dont_write_bytecode=unset", observed)
             self.assertIn(f"runtime_home={state_root}/runtime-home", observed)
             self.assertIn(f"workspace={state_root}/workspace", observed)
             self.assertIn(f"config={state_root}/config", observed)
@@ -363,10 +382,26 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             exact_output = exact_result.stdout + exact_result.stderr
             self.assertEqual(exact_result.returncode, 0, exact_output)
             exact_observed = observed_env.read_text(encoding="utf-8")
+            exact_blocks = [
+                block for block in exact_observed.split("---\n") if block.strip()
+            ]
+            sync_blocks = [
+                block for block in exact_blocks if "phase=packaged-config-sync" in block
+            ]
+            verify_blocks = [
+                block for block in exact_blocks if "phase=runtime-verify" in block
+            ]
+            self.assertEqual(len(sync_blocks), 1, exact_observed)
+            self.assertTrue(verify_blocks, exact_observed)
+            self.assertIn("dont_write_bytecode=1", sync_blocks[0])
+            for block in verify_blocks:
+                self.assertIn("dont_write_bytecode=1", block)
             self.assertIn("home=/nonexistent", exact_observed)
             self.assertIn("account_home=/nonexistent", exact_observed)
             self.assertIn("user_dirs=0", exact_observed)
             self.assertIn("verify_mode=system-only", exact_observed)
+            self.assertIn("dont_write_bytecode=1", exact_observed)
+            self.assertNotIn("dont_write_bytecode=unset", exact_observed)
             self.assertNotIn("unbound variable", exact_output)
 
     def test_postinst_configure_is_idempotent_in_the_same_system_state(self):

@@ -84,8 +84,13 @@ _taiji_validate_installed_runtime_paths() {
 
 if [ "$_TAIJI_CANONICAL_LAUNCH_PROFILE" = "installed-production" ]; then
   _taiji_clear_installed_code_environment
+  # The installed payload is immutable.  System-only verification runs as
+  # root during postinst/silent deployment; without this trusted reset CPython
+  # creates untracked __pycache__ files below /opt and dpkg --purge leaves the
+  # installation root behind.
+  PYTHONDONTWRITEBYTECODE="1"
   PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-  export PATH
+  export PATH PYTHONDONTWRITEBYTECODE
   LAB_DIR="/opt/taiji-agent"
   TAIJI_AGENT_ROOT="$LAB_DIR"
 else
@@ -305,6 +310,7 @@ unset HER""MES_HOME HER""MES_CONFIG_PATH HER""MES_CONFIG HER""MES_ENV
 TAIJI_SECURITY_MODE="${TAIJI_SECURITY_MODE:-restricted}"
 if [ "$TAIJI_LAUNCH_PROFILE" = "installed-production" ]; then
   _taiji_clear_installed_code_environment
+  PYTHONDONTWRITEBYTECODE="1"
   LAB_DIR="/opt/taiji-agent"
   TAIJI_AGENT_ROOT="$LAB_DIR"
   AGENT_DIR="$LAB_DIR/runtime/agent"
@@ -333,7 +339,8 @@ if [ "$TAIJI_LAUNCH_PROFILE" = "installed-production" ]; then
   unset _taiji_allow_name
   export \
     TAIJI_AGENT_ROOT TAIJI_AGENT_AGENT_DIR TAIJI_AGENT_WEBUI_DIR \
-    TAIJI_AGENT_PYTHON TAIJI_WEBUI_PYTHON TAIJI_WEBUI_AGENT_DIR
+    TAIJI_AGENT_PYTHON TAIJI_WEBUI_PYTHON TAIJI_WEBUI_AGENT_DIR \
+    PYTHONDONTWRITEBYTECODE
   export TAIJI_RELEASE_VERSION TAIJI_RELEASE_COMMIT
   export TAIJI_SECURITY_PROFILE
 fi
