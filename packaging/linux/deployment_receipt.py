@@ -233,6 +233,9 @@ def validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     _require_string(receipt["native_verify"], "native_verify")
     if receipt["native_verify"] not in NATIVE_VERIFY_VALUES:
         raise ReceiptError("invalid native_verify value")
+    if result in {"installed", "reinstalled", "upgraded", "rolled_back"} \
+        and receipt["native_verify"] != "PASS":
+        raise ReceiptError("successful deployment receipts require native_verify PASS")
     for field in ("started_at_utc", "finished_at_utc"):
         _require_string(receipt[field], field, TIMESTAMP_RE)
     # Validate the closed enum before the generic diagnostic scanner.  Values

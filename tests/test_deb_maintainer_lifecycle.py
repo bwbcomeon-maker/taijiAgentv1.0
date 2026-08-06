@@ -263,6 +263,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
                   printf 'home=%s\n' "${{HOME:-unset}}"
                   printf 'user_dirs=%s\n' "${{TAIJI_AGENT_USE_USER_DIRS:-unset}}"
                   printf 'verify_mode=%s\n' "${{TAIJI_NATIVE_VERIFY_MODE:-unset}}"
+                  printf 'sync_packaged_config=%s\n' "${{TAIJI_AGENT_SYNC_PACKAGED_CONFIG:-unset}}"
                   printf 'runtime_home=%s\n' "${{TAIJI_RUNTIME_HOME:-unset}}"
                   printf 'workspace=%s\n' "${{TAIJI_WORKSPACE:-unset}}"
                   printf 'config=%s\n' "${{TAIJI_AGENT_CONFIG_DIR:-unset}}"
@@ -335,6 +336,7 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             self.assertIn("home=/nonexistent", observed)
             self.assertIn("user_dirs=0", observed)
             self.assertIn("verify_mode=system-only", observed)
+            self.assertIn("sync_packaged_config=0", observed)
             self.assertIn(f"runtime_home={state_root}/runtime-home", observed)
             self.assertIn(f"workspace={state_root}/workspace", observed)
             self.assertIn(f"config={state_root}/config", observed)
@@ -343,6 +345,29 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             self.assertIn(f"log={log_root}", observed)
             self.assertIn(f"tmp={state_root}/tmp", observed)
             self.assertIn("account_home=/nonexistent", observed)
+
+            observed_env.unlink()
+            exact_env = {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "LANG": "C.UTF-8",
+                "TAIJI_TEST_OBSERVED_ENV": str(observed_env),
+            }
+            exact_result = subprocess.run(
+                [str(wrapper), "--system-only"],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=exact_env,
+            )
+
+            exact_output = exact_result.stdout + exact_result.stderr
+            self.assertEqual(exact_result.returncode, 0, exact_output)
+            exact_observed = observed_env.read_text(encoding="utf-8")
+            self.assertIn("home=/nonexistent", exact_observed)
+            self.assertIn("account_home=/nonexistent", exact_observed)
+            self.assertIn("user_dirs=0", exact_observed)
+            self.assertIn("verify_mode=system-only", exact_observed)
+            self.assertNotIn("unbound variable", exact_output)
 
     def test_postinst_configure_is_idempotent_in_the_same_system_state(self):
         results, _, verify_count, marker_exists = self.run_postinst_sequence(

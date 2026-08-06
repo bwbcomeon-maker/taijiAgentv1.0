@@ -98,6 +98,15 @@ class SilentDeploymentReceiptTest(unittest.TestCase):
             receipt = self._base_receipt(operation=operation, result=result)
             self.assertEqual(module.validate_receipt(receipt), receipt)
 
+    def test_success_receipt_requires_native_verify_pass(self):
+        module = self._import_receipt()
+        for native_verify in ("FAIL", "NOT_RUN"):
+            with self.subTest(native_verify=native_verify):
+                with self.assertRaises(module.ReceiptError):
+                    module.validate_receipt(
+                        self._base_receipt(native_verify=native_verify)
+                    )
+
     def test_upgrade_rollback_receipt_preserves_recovery_cause(self):
         module = self._import_receipt()
         receipt = self._base_receipt(
@@ -107,7 +116,7 @@ class SilentDeploymentReceiptTest(unittest.TestCase):
             version_after="1.2.2",
             dpkg_status_before="installed",
             dpkg_status_after="installed",
-            native_verify="FAIL",
+            native_verify="PASS",
             error_stage="dpkg",
             error_code="DPKG_INSTALL_FAILED_ROLLED_BACK",
             rollback_transaction_id="txn-abc",

@@ -74,6 +74,9 @@ STAGED_DEB_PATH=""
 STAGED_PREVIOUS_DEB_PATH=""
 STAGED_PREVIOUS_SIGNATURE_PATH=""
 DPKG_LOG_PATH=""
+NATIVE_VERIFY_LOG_PATH=""
+ROLLBACK_DPKG_LOG_PATH=""
+ROLLBACK_VERIFY_LOG_PATH=""
 RECEIPT_DEB_BASENAME=""
 HAS_DEB=0
 HAS_EXPECTED_VERSION=0
@@ -250,11 +253,17 @@ cleanup_staged_deb() {
   [ -z "$STAGED_PREVIOUS_DEB_PATH" ] || rm -f -- "$STAGED_PREVIOUS_DEB_PATH" 2>/dev/null || true
   [ -z "$STAGED_PREVIOUS_SIGNATURE_PATH" ] || rm -f -- "$STAGED_PREVIOUS_SIGNATURE_PATH" 2>/dev/null || true
   [ -z "$DPKG_LOG_PATH" ] || rm -f -- "$DPKG_LOG_PATH" 2>/dev/null || true
+  [ -z "$NATIVE_VERIFY_LOG_PATH" ] || rm -f -- "$NATIVE_VERIFY_LOG_PATH" 2>/dev/null || true
+  [ -z "$ROLLBACK_DPKG_LOG_PATH" ] || rm -f -- "$ROLLBACK_DPKG_LOG_PATH" 2>/dev/null || true
+  [ -z "$ROLLBACK_VERIFY_LOG_PATH" ] || rm -f -- "$ROLLBACK_VERIFY_LOG_PATH" 2>/dev/null || true
   rmdir -- "$STAGING_DIR" 2>/dev/null || true
   STAGED_DEB_PATH=""
   STAGED_PREVIOUS_DEB_PATH=""
   STAGED_PREVIOUS_SIGNATURE_PATH=""
   DPKG_LOG_PATH=""
+  NATIVE_VERIFY_LOG_PATH=""
+  ROLLBACK_DPKG_LOG_PATH=""
+  ROLLBACK_VERIFY_LOG_PATH=""
   STAGING_DIR=""
 }
 
@@ -656,8 +665,28 @@ rollback_previous_package() {
   [ "$OPERATION" = upgrade ] || return 1
   [ -n "$STAGED_PREVIOUS_DEB_PATH" ] || return 1
   local rollback_rc=0
-  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a dpkg --install --force-confold -- "$STAGED_PREVIOUS_DEB_PATH" >/dev/null 2>&1 || rollback_rc=$?
-  [ "$rollback_rc" -eq 0 ] || return "$rollback_rc"
+  ROLLBACK_DPKG_LOG_PATH="$STAGING_DIR/rollback-dpkg-install.log"
+  if ! (umask 077; : > "$ROLLBACK_DPKG_LOG_PATH") \
+    || ! chmod 0600 -- "$ROLLBACK_DPKG_LOG_PATH"; then
+    printf '[FAIL] 无法创建 N-1 恢复安装日志\n' >&2
+    return 1
+  fi
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    dpkg --install --force-confold -- "$STAGED_PREVIOUS_DEB_PATH" \
+    >"$ROLLBACK_DPKG_LOG_PATH" 2>&1 || rollback_rc=$?
+  if [ "$rollback_rc" -ne 0 ]; then
+    printf '[FAIL] N-1 恢复安装失败（exit=%s）\n' "$rollback_rc" >&2
+    if [ -s "$ROLLBACK_DPKG_LOG_PATH" ]; then
+      printf '[FAIL] N-1 dpkg/维护者脚本最后 80 行：\n' >&2
+      tail -n 80 -- "$ROLLBACK_DPKG_LOG_PATH" >&2 || true
+    fi
+    return "$rollback_rc"
+  fi
+  if ! rm -f -- "$ROLLBACK_DPKG_LOG_PATH"; then
+    printf '[FAIL] 无法清理 N-1 恢复安装日志\n' >&2
+    return 1
+  fi
+  ROLLBACK_DPKG_LOG_PATH=""
 }
 
 verify_rollback_package() {
@@ -666,19 +695,40 @@ verify_rollback_package() {
   refresh_dpkg_state_after_recovery
   [ "$DPKG_STATUS_AFTER" = installed ] || return 1
   [ "$VERSION_AFTER" = "$PREVIOUS_VERSION" ] || return 1
-  [ -x "$verifier" ] || { NATIVE_VERIFY="NOT_RUN"; return 1; }
-  if env -i \
+  if [ ! -x "$verifier" ]; then
+    NATIVE_VERIFY="NOT_RUN"
+    printf '[FAIL] N-1 恢复后缺少可执行的 native verifier: %s\n' "$verifier" >&2
+    return 1
+  fi
+  ROLLBACK_VERIFY_LOG_PATH="$STAGING_DIR/rollback-native-verify.log"
+  if ! (umask 077; : > "$ROLLBACK_VERIFY_LOG_PATH") \
+    || ! chmod 0600 -- "$ROLLBACK_VERIFY_LOG_PATH"; then
+    NATIVE_VERIFY="NOT_RUN"
+    printf '[FAIL] 无法创建 N-1 恢复校验日志\n' >&2
+    return 1
+  fi
+  local verify_rc=0
+  env -i \
     PATH=/usr/sbin:/usr/bin:/sbin:/bin \
     LANG=C.UTF-8 \
-    TAIJI_LAUNCH_PROFILE=installed-production \
-    TAIJI_NATIVE_VERIFY_MODE=system-only \
     TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0 \
-    "$verifier" >/dev/null 2>&1; then
+    "$verifier" --system-only >"$ROLLBACK_VERIFY_LOG_PATH" 2>&1 || verify_rc=$?
+  if [ "$verify_rc" -eq 0 ]; then
     NATIVE_VERIFY="PASS"
+    if ! rm -f -- "$ROLLBACK_VERIFY_LOG_PATH"; then
+      printf '[FAIL] 无法清理 N-1 恢复校验日志\n' >&2
+      return 1
+    fi
+    ROLLBACK_VERIFY_LOG_PATH=""
     return 0
   fi
   NATIVE_VERIFY="FAIL"
-  return 1
+  printf '[FAIL] N-1 恢复后 native verify 失败（exit=%s）\n' "$verify_rc" >&2
+  if [ -s "$ROLLBACK_VERIFY_LOG_PATH" ]; then
+    printf '[FAIL] N-1 native verify 最后 80 行：\n' >&2
+    tail -n 80 -- "$ROLLBACK_VERIFY_LOG_PATH" >&2 || true
+  fi
+  return "$verify_rc"
 }
 
 stage_candidate_for_install() {
@@ -1034,24 +1084,56 @@ install_local_deb() {
   rm -f -- "$DPKG_LOG_PATH"
   DPKG_LOG_PATH=""
   local verifier="/opt/taiji-agent/bin/taiji-native-verify"
-  if [ -x "$verifier" ]; then
-    if "$verifier" >/dev/null 2>&1; then
-      NATIVE_VERIFY="PASS"
-    else
-      NATIVE_VERIFY="FAIL"
-      if [ -n "$UPGRADE_TRANSACTION_ID" ] && attempt_upgrade_recovery; then
-        RESULT="rolled_back"
-        ERROR_STAGE="native_verify"
-        ERROR_CODE="NATIVE_VERIFY_FAILED_ROLLED_BACK"
-        finish 1
-      fi
-      if [ "$OPERATION" = rollback ]; then
-        manual_recovery native_verify ROLLBACK_NATIVE_VERIFY_FAILED_MANUAL_RECOVERY 1
-      fi
-      manual_recovery native_verify NATIVE_VERIFY_FAILED 1
-    fi
-  else
+  local native_failure_code="" verify_rc=0
+  if [ ! -x "$verifier" ]; then
     NATIVE_VERIFY="NOT_RUN"
+    native_failure_code="NATIVE_VERIFY_UNAVAILABLE"
+    printf '[FAIL] 安装后缺少可执行的 native verifier: %s\n' "$verifier" >&2
+  else
+    NATIVE_VERIFY_LOG_PATH="$STAGING_DIR/native-verify.log"
+    if ! (umask 077; : > "$NATIVE_VERIFY_LOG_PATH") \
+      || ! chmod 0600 -- "$NATIVE_VERIFY_LOG_PATH"; then
+      NATIVE_VERIFY="NOT_RUN"
+      native_failure_code="NATIVE_VERIFY_LOG_UNAVAILABLE"
+      printf '[FAIL] 无法创建安装后 native verify 日志\n' >&2
+    else
+      env -i \
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+        LANG=C.UTF-8 \
+        "$verifier" --system-only >"$NATIVE_VERIFY_LOG_PATH" 2>&1 || verify_rc=$?
+      if [ "$verify_rc" -eq 0 ]; then
+        NATIVE_VERIFY="PASS"
+        rm -f -- "$NATIVE_VERIFY_LOG_PATH"
+        NATIVE_VERIFY_LOG_PATH=""
+      else
+        NATIVE_VERIFY="FAIL"
+        native_failure_code="NATIVE_VERIFY_FAILED"
+        printf '[FAIL] 安装后 native verify 失败（exit=%s）\n' "$verify_rc" >&2
+        if [ -s "$NATIVE_VERIFY_LOG_PATH" ]; then
+          printf '[FAIL] native verify 最后 80 行：\n' >&2
+          tail -n 80 -- "$NATIVE_VERIFY_LOG_PATH" >&2 || true
+        fi
+      fi
+    fi
+  fi
+  if [ -n "$native_failure_code" ]; then
+    if [ -n "$UPGRADE_TRANSACTION_ID" ] && attempt_upgrade_recovery; then
+      RESULT="rolled_back"
+      ERROR_STAGE="native_verify"
+      ERROR_CODE="${native_failure_code}_ROLLED_BACK"
+      finish 1
+    fi
+    if [ "$OPERATION" = rollback ]; then
+      case "$native_failure_code" in
+        NATIVE_VERIFY_FAILED)
+          manual_recovery native_verify ROLLBACK_NATIVE_VERIFY_FAILED_MANUAL_RECOVERY 1 ;;
+        NATIVE_VERIFY_UNAVAILABLE)
+          manual_recovery native_verify ROLLBACK_NATIVE_VERIFY_UNAVAILABLE_MANUAL_RECOVERY 1 ;;
+        *)
+          manual_recovery native_verify ROLLBACK_NATIVE_VERIFY_LOG_UNAVAILABLE_MANUAL_RECOVERY 1 ;;
+      esac
+    fi
+    manual_recovery native_verify "$native_failure_code" 1
   fi
   case "$OPERATION" in
     fresh_install) RESULT="installed" ;;
