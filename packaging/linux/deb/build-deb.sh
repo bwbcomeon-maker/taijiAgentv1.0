@@ -10,6 +10,8 @@ SOURCE_WEB_DIR="$LAB_DIR/sources/hermes-webui"
 APP_DIR="$REPO_ROOT/apps/taiji-desktop"
 ELECTRON_BIN="$APP_DIR/node_modules/electron/dist/electron"
 DESKTOP_FILE="$REPO_ROOT/packaging/linux/taiji-agent.desktop"
+APPSTREAM_FILE="$REPO_ROOT/packaging/linux/taiji-agent.metainfo.xml"
+ICON_VALIDATOR="$REPO_ROOT/packaging/linux/validate_icon_assets.py"
 DEFAULT_CONFIG="$LAB_DIR/config/taiji-default-config.yaml"
 VERSION_FILE="$REPO_ROOT/VERSION"
 POLICY_FILE="$REPO_ROOT/packaging/linux/compatibility-policy.json"
@@ -57,6 +59,7 @@ ABI_REPORT_PATH="$INSTALL_ROOT/resources/elf-abi-audit.json"
 ABI_BUILD_REPORT="$BUILD_ROOT/elf-abi-audit.json"
 PRIVATE_STAGE_REPORT="$BUILD_ROOT/private-library-stage.json"
 MANIFEST_PATH="$OUT_DIR/taiji-package-manifest.json"
+ICON_SET_SHA256=""
 POLICY_SHA256=""
 POLICY_ID=""
 TAIJI_PACKAGE_NAME=""
@@ -116,7 +119,16 @@ validate_desktop_entry() {
     grep -qx 'Exec=/usr/bin/taiji-agent' "$desktop" || fail "Desktop entry missing expected Exec"
     grep -qx 'Icon=taiji-agent' "$desktop" || fail "Desktop entry missing expected Icon"
     grep -qx 'Terminal=false' "$desktop" || fail "Desktop entry must not require a terminal"
+    grep -qx 'StartupWMClass=taiji-agent' "$desktop" || fail "Desktop entry missing StartupWMClass"
+    grep -qx 'X-GNOME-WMClass=taiji-agent' "$desktop" || fail "Desktop entry missing X-GNOME-WMClass"
   fi
+}
+
+validate_appstream_metadata() {
+  [ -f "$APPSTREAM_FILE" ] && [ ! -L "$APPSTREAM_FILE" ] || fail "Missing AppStream metadata: $APPSTREAM_FILE"
+  grep -q '<id>taiji-agent.desktop</id>' "$APPSTREAM_FILE" || fail "AppStream metadata has wrong desktop id"
+  grep -q '<launchable type="desktop-id">taiji-agent.desktop</launchable>' "$APPSTREAM_FILE" || fail "AppStream metadata has no desktop launchable"
+  grep -q '<icon type="cached" width="512" height="512">taiji-agent</icon>' "$APPSTREAM_FILE" || fail "AppStream metadata has no 512px cached icon"
 }
 
 verify_linux_electron_runtime() {
@@ -341,7 +353,7 @@ scan_deb_release_artifact() {
 audit_deb_payload() {
   local contents="$BUILD_ROOT/deb-contents.txt" audit_root="$BUILD_ROOT/deb-audit-root" control_root="$BUILD_ROOT/deb-audit-control" extracted_abi="$BUILD_ROOT/extracted-elf-abi-audit.json" required missing=""
   dpkg-deb -c "$OUT_DEB" > "$contents"
-  for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/taiji-release-manifest.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/scripts/support_bundle.py" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./usr/share/applications/taiji-agent.desktop" "./usr/bin/taiji" "./usr/bin/taiji-agent" "./usr/bin/taiji-agent-support"; do
+  for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/taiji-release-manifest.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/scripts/support_bundle.py" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./opt/taiji-agent/resources/icons/taiji-agent.png" "./usr/share/applications/taiji-agent.desktop" "./usr/share/metainfo/taiji-agent.metainfo.xml" "./usr/share/icons/hicolor/32x32/apps/taiji-agent.png" "./usr/share/icons/hicolor/48x48/apps/taiji-agent.png" "./usr/share/icons/hicolor/64x64/apps/taiji-agent.png" "./usr/share/icons/hicolor/128x128/apps/taiji-agent.png" "./usr/share/icons/hicolor/192x192/apps/taiji-agent.png" "./usr/share/icons/hicolor/256x256/apps/taiji-agent.png" "./usr/share/icons/hicolor/512x512/apps/taiji-agent.png" "./usr/bin/taiji" "./usr/bin/taiji-agent" "./usr/bin/taiji-agent-support"; do
     grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
   done
   [ -z "$missing" ] || { printf '%s' "$missing" >&2; fail "DEB payload is missing required runtime paths"; }
@@ -359,18 +371,24 @@ audit_deb_payload() {
   [ "$(dpkg-deb -f "$OUT_DEB" Maintainer)" = "$TAIJI_PACKAGE_MAINTAINER" ] || fail "DEB maintainer mismatch"
   [ "$(dpkg-deb -f "$OUT_DEB" Depends)" = "$TAIJI_DEBIAN_DEPENDS" ] || fail "DEB Depends mismatch"
   python3 "$PAYLOAD_VERIFIER" --root "$audit_root" >/dev/null
+  python3 "$ICON_VALIDATOR" \
+    --web-static "$audit_root/opt/taiji-agent/runtime/web/static" \
+    --install-icons "$audit_root/usr/share/icons/hicolor" \
+    --resource-icon "$audit_root/opt/taiji-agent/resources/icons/taiji-agent.png" >/dev/null
   python3 "$ELF_AUDITOR" --root "$audit_root" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$extracted_abi" >/dev/null
   cmp -s "$ABI_BUILD_REPORT" "$extracted_abi" || fail "ELF ABI audit changed after DEB extraction"
 }
 
 write_package_manifest() {
-  local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 upgrade_contract_sha256 built_at_utc out_deb_name
+  local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 upgrade_contract_sha256 icon_set_sha256 built_at_utc out_deb_name
   out_deb_name="$(basename "$OUT_DEB")"
   deb_sha256="$(sha256sum "$OUT_DEB" | awk '{print $1}')"
   electron_sha256="$(sha256sum "$DESKTOP_RUNTIME/node_modules/electron/dist/electron" | awk '{print $1}')"
   desktop_sha256="$(sha256sum "$DESKTOP_FILE" | awk '{print $1}')"
   abi_sha256="$(sha256sum "$ABI_REPORT_PATH" | awk '{print $1}')"
   upgrade_contract_sha256="$(sha256sum "$REPO_ROOT/packaging/linux/upgrade-data-contract.json" | awk '{print $1}')"
+  icon_set_sha256="$(for size in 32 48 64 128 192 256 512; do sha256sum "$SOURCE_WEB_DIR/static/favicon-$size.png"; done | sha256sum | awk '{print $1}')"
+  ICON_SET_SHA256="$icon_set_sha256"
   built_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   cat > "$MANIFEST_PATH" <<MANIFEST
 {
@@ -390,6 +408,7 @@ write_package_manifest() {
   "elf_abi_audit_sha256": "$abi_sha256",
   "electron_executable_sha256": "$electron_sha256",
   "desktop_entry_sha256": "$desktop_sha256",
+  "icon_set_sha256": "$icon_set_sha256",
   "built_at_utc": "$built_at_utc"
 }
 MANIFEST
@@ -422,16 +441,21 @@ validate_build_host_glibc
 [ -n "$PACKAGED_NODE_ROOT" ] || fail "TAIJI_PACKAGED_NODE_ROOT is required for the verified offline Node runtime"
 [ -d "$PRIVATE_LIBRARY_SYSROOT" ] || fail "Private-library sysroot is missing: $PRIVATE_LIBRARY_SYSROOT"
 for component in "$RUNTIME_STAGER" "$PYTHON_RUNTIME_STAGER" "$ELECTRON_RUNTIME_STAGER" "$DESKTOP_JS_STAGER" "$PRIVATE_LIB_STAGER" "$ELF_AUDITOR" "$PREINST_RENDERER"; do [ -f "$component" ] || fail "Missing packaging component: $component"; done
+[ -f "$ICON_VALIDATOR" ] || fail "Missing icon validator: $ICON_VALIDATOR"
 SOURCE_AGENT_PYTHON="$SOURCE_AGENT_DIR/venv/bin/python"
 [ -x "$SOURCE_AGENT_PYTHON" ] || fail "Missing Linux Agent venv: $SOURCE_AGENT_PYTHON"
 (cd "$SOURCE_AGENT_DIR" && "$SOURCE_AGENT_PYTHON" -m taiji_runtime.main --help >/dev/null 2>&1) || fail "Linux Agent venv module entrypoint failed"
 verify_linux_electron_runtime
 validate_desktop_entry "$DESKTOP_FILE"
+validate_appstream_metadata
 validate_packaged_config_template
 scan_webui_offline_assets
 
 rm -rf "$BUILD_ROOT"
-mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/config" "$INSTALL_ROOT/licenses" "$INSTALL_ROOT/resources/icons" "$INSTALL_ROOT/scripts" "$INSTALL_ROOT/runtime/lib" "$AGENT_RUNTIME" "$WEB_RUNTIME" "$PKG_ROOT/DEBIAN" "$PKG_ROOT/usr/bin" "$PKG_ROOT/usr/share/applications" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps" "$OUT_DIR"
+mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/config" "$INSTALL_ROOT/licenses" "$INSTALL_ROOT/resources/icons" "$INSTALL_ROOT/scripts" "$INSTALL_ROOT/runtime/lib" "$AGENT_RUNTIME" "$WEB_RUNTIME" "$PKG_ROOT/DEBIAN" "$PKG_ROOT/usr/bin" "$PKG_ROOT/usr/share/applications" "$PKG_ROOT/usr/share/metainfo" "$OUT_DIR"
+for size in 32 48 64 128 192 256 512; do
+  mkdir -p "$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/apps"
+done
 chmod 0755 "$PKG_ROOT/opt" "$INSTALL_ROOT"
 chmod 0755 "$INSTALL_ROOT/resources"
 chmod 0755 "$INSTALL_ROOT/runtime/lib"
@@ -472,8 +496,15 @@ install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-diagnose" "$PKG_ROOT
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-support" "$PKG_ROOT/usr/bin/taiji-agent-support"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-native-verify" "$INSTALL_ROOT/bin/taiji-native-verify"
 install -m 0644 "$DESKTOP_FILE" "$PKG_ROOT/usr/share/applications/taiji-agent.desktop"
-install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
 install -m 0644 "$SOURCE_WEB_DIR/static/favicon-512.png" "$INSTALL_ROOT/resources/icons/taiji-agent.png"
+for size in 32 48 64 128 192 256 512; do
+  install -m 0644 "$SOURCE_WEB_DIR/static/favicon-$size.png" "$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/apps/taiji-agent.png"
+done
+install -m 0644 "$APPSTREAM_FILE" "$PKG_ROOT/usr/share/metainfo/taiji-agent.metainfo.xml"
+python3 "$ICON_VALIDATOR" \
+  --web-static "$SOURCE_WEB_DIR/static" \
+  --install-icons "$PKG_ROOT/usr/share/icons/hicolor" \
+  --resource-icon "$INSTALL_ROOT/resources/icons/taiji-agent.png" >/dev/null
 python3 "$ELF_AUDITOR" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$ABI_BUILD_REPORT" >/dev/null
 install -m 0644 "$ABI_BUILD_REPORT" "$ABI_REPORT_PATH"
 python3 "$PREINST_RENDERER" --template "$SCRIPT_DIR/preinst" --policy "$POLICY_FILE" --output "$PKG_ROOT/DEBIAN/preinst"

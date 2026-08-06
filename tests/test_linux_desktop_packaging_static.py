@@ -1683,6 +1683,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("生成的安装包", preflight)
         self.assertIn("canonical compatibility policy", preflight)
         self.assertIn("verify_marker_and_manifest", preflight)
+        self.assertIn('"icon_set_sha256"', preflight)
+        self.assertIn('marker["icon_set_sha256"]', preflight)
         self.assertIn("verify_deb_payload", preflight)
         self.assertIn("verify_package_output_allowlist", preflight)
         self.assertNotIn("Packages.gz", preflight)
@@ -1802,8 +1804,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
     def test_offline_builder_uses_ascii_tmp_build_root_and_repairs_source_permissions(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
-        self.assertIn('DEFAULT_BUILD_ROOT="/tmp/taiji-agent-build-$(id -u 2>/dev/null || printf user)"', builder)
-        self.assertIn('BUILD_ROOT="${TAIJI_BUILD_ROOT:-$DEFAULT_BUILD_ROOT}"', builder)
+        self.assertIn('BUILD_ROOT="${TAIJI_BUILD_ROOT:-}"', builder)
+        self.assertNotIn('DEFAULT_BUILD_ROOT="/tmp/', builder)
+        self.assertIn("build_root_candidates()", builder)
+        self.assertIn("select_build_root()", builder)
+        self.assertIn("configure_build_tmp()", builder)
         self.assertNotIn('BUILD_ROOT="$SCRIPT_DIR/构建工作区"', builder)
         self.assertIn("reset_build_root", builder)
         self.assertIn("repair_build_tree_permissions", builder)
@@ -1816,6 +1821,119 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         unpack = builder[builder.index("unpack_source() {") : builder.index("npm_ci_with_network_fallback() {")]
         self.assertLess(unpack.index("reset_build_root"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
         self.assertLess(unpack.index('tar -xzf "$SRC_ARCHIVE"'), unpack.index("repair_build_tree_permissions"))
+
+    def test_offline_builder_does_not_hardcode_tmp_as_default_build_root(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertNotIn('DEFAULT_BUILD_ROOT="/tmp/taiji-agent-build-', builder)
+        self.assertIn('XDG_CACHE_HOME', builder)
+        self.assertIn('home_cache="$HOME/.cache"', builder)
+        self.assertIn('/var/tmp/taiji-agent-build-', builder)
+        self.assertIn('TAIJI_BUILD_ROOT', builder)
+
+    def test_offline_builder_checks_exec_and_shared_library_mapping_before_unpack(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn("probe_build_root()", builder)
+        self.assertIn('cc "$probe_dir/probe.c" -o "$probe_dir/probe-exec"', builder)
+        self.assertIn('"$probe_dir/probe-exec"', builder)
+        self.assertIn('cc -shared -fPIC "$probe_dir/probe.c" -o "$probe_dir/probe.so"', builder)
+        self.assertIn('ctypes.CDLL(sys.argv[1])', builder)
+        main = builder[builder.index("main() {") :]
+        self.assertLess(main.index("install_build_dependencies"), main.index("select_build_root"))
+        self.assertLess(main.index("select_build_root"), main.index("prepare_source_release"))
+
+    def test_offline_builder_exports_tmpdir_tmp_temp_under_selected_root(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn('BUILD_TMP_DIR="$BUILD_ROOT/tmp"', builder)
+        self.assertIn('TOOL_ROOT="$BUILD_ROOT/.build-tools"', builder)
+        self.assertIn('NODE_ROOT="$TOOL_ROOT/node"', builder)
+        self.assertIn('export TMPDIR="$BUILD_TMP_DIR" TMP="$BUILD_TMP_DIR" TEMP="$BUILD_TMP_DIR"', builder)
+        self.assertLess(builder.index("configure_build_tmp"), builder.index("prepare_source_release"))
+
+    def test_offline_builder_honors_explicit_root_and_fails_closed_when_probe_fails(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        self.assertIn('if [ -n "${TAIJI_BUILD_ROOT:-}" ]; then', builder)
+        self.assertIn('显式 TAIJI_BUILD_ROOT 探针失败', builder)
+        self.assertIn('probe_build_root "$candidate"', builder)
+
+        harness = "\n".join(
+            [
+                "set -u",
+                'BUILD_ROOT=""',
+                'BUILD_TMP_DIR=""',
+                'TOOL_ROOT=""',
+                'NODE_ROOT=""',
+                'BUILD_ROOT_PROBE_RESULTS=""',
+                'warn() { :; }',
+                'info() { :; }',
+                'fail() { printf "FAIL:%s\\n" "$*"; exit 23; }',
+                'create_owned_build_root() { :; }',
+                'configure_build_tmp() { BUILD_TMP_DIR="$BUILD_ROOT/tmp"; TOOL_ROOT="$BUILD_ROOT/.build-tools"; NODE_ROOT="$TOOL_ROOT/node"; printf "selected=%s TMPDIR=%s TMP=%s TEMP=%s\\n" "$BUILD_ROOT" "$BUILD_TMP_DIR" "$BUILD_TMP_DIR" "$BUILD_TMP_DIR"; }',
+                'validate_candidate_build_root() { return 0; }',
+                'probe_build_root() { printf "probe:%s\\n" "$1" >> "$PROBE_LOG"; case "$1" in *second*) return 0;; *) return 1;; esac; }',
+                re.search(r"(?ms)^build_root_candidates\(\) \{.*?^\}", builder).group(0),
+                re.search(r"(?ms)^select_build_root\(\) \{.*?^\}", builder).group(0),
+                'select_build_root',
+            ]
+        )
+        with tempfile.TemporaryDirectory(prefix="taiji-build-root-contract-") as temp_dir:
+            root = Path(temp_dir)
+            probe_log = root / "probe.log"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "TAIJI_BUILD_ROOT": "",
+                    "XDG_CACHE_HOME": str(root / "first"),
+                    "HOME": str(root / "second-home"),
+                    "PROBE_LOG": str(probe_log),
+                }
+            )
+            auto = subprocess.run(
+                ["bash", "-c", harness],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(auto.returncode, 0, auto.stderr)
+            selected_root = root / "second-home" / ".cache" / f"taiji-agent-build-{os.getuid()}"
+            self.assertIn(str(selected_root), auto.stdout)
+            self.assertIn("TMPDIR=", auto.stdout)
+            self.assertEqual(probe_log.read_text(encoding="utf-8").count("probe:"), 2)
+
+            explicit_env = env | {
+                "TAIJI_BUILD_ROOT": str(root / "explicit" / f"taiji-agent-build-{os.getuid()}"),
+                "PROBE_LOG": str(root / "explicit-probe.log"),
+            }
+            explicit = subprocess.run(
+                ["bash", "-c", harness],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=explicit_env,
+            )
+            self.assertEqual(explicit.returncode, 23, explicit.stdout)
+            self.assertIn("FAIL:", explicit.stdout)
+            self.assertEqual((root / "explicit-probe.log").read_text(encoding="utf-8").count("probe:"), 1)
+
+    def test_offline_builder_candidate_order_uses_xdg_cache_home_home_cache_then_var_tmp(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        candidates = builder[builder.index("build_root_candidates() {") : builder.index("validate_candidate_build_root() {")]
+        self.assertLess(candidates.index("XDG_CACHE_HOME"), candidates.index('home_cache="$HOME/.cache"'))
+        self.assertLess(candidates.index('home_cache="$HOME/.cache"'), candidates.index("/var/tmp/taiji-agent-build-"))
+
+    def test_offline_builder_records_findmnt_and_probe_results_in_failure_diagnostic(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        self.assertIn('findmnt -T "$candidate"', builder)
+        self.assertIn("BUILD_ROOT_PROBE_RESULTS", builder)
+        self.assertIn("findmnt", builder)
+
+    def test_offline_builder_moves_node_tool_root_under_selected_build_root(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        self.assertIn('TOOL_ROOT="$BUILD_ROOT/.build-tools"', builder)
+        self.assertNotIn('TOOL_ROOT="$SCRIPT_DIR/.构建工具"', builder)
 
     def test_offline_builder_only_deletes_owned_dedicated_build_roots(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")

@@ -58,6 +58,31 @@ runtime_issue() {
   fi
 }
 
+verify_product_icon_chain() {
+  local resource_icon="$LAB_DIR/resources/icons/taiji-agent.png"
+  local web_icon="$WEBUI_DIR/static/favicon-512.png"
+  local icon_info
+  if [ ! -f "$resource_icon" ] || [ ! -f "$web_icon" ]; then
+    runtime_issue "Product icon chain is incomplete: resource=$resource_icon web=$web_icon"
+    return 1
+  fi
+  if command -v cmp >/dev/null 2>&1 && cmp -s "$resource_icon" "$web_icon"; then
+    :
+  else
+    runtime_issue "Product icon chain is not byte-identical between installed resource and Web favicon"
+    return 1
+  fi
+  if command -v file >/dev/null 2>&1; then
+    icon_info="$(file "$resource_icon" 2>/dev/null || true)"
+    case "$icon_info" in
+      *"PNG image data, 512 x 512, 8-bit/color RGBA"*) ;;
+      *) runtime_issue "Installed product icon is not a 512x512 RGBA PNG: ${icon_info:-unknown}"; return 1 ;;
+    esac
+  fi
+  ok "Product icon chain is consistent"
+  return 0
+}
+
 http_code() {
   local code
   code="$(curl -sS -o /dev/null -w '%{http_code}' "$1" 2>/dev/null)" || {
@@ -285,7 +310,9 @@ if [ -f /usr/share/applications/taiji-agent.desktop ]; then
   ok "Desktop entry installed: /usr/share/applications/taiji-agent.desktop"
   if grep -qx 'Exec=/usr/bin/taiji-agent' /usr/share/applications/taiji-agent.desktop \
     && grep -qx 'Icon=taiji-agent' /usr/share/applications/taiji-agent.desktop \
-    && grep -qx 'Terminal=false' /usr/share/applications/taiji-agent.desktop; then
+    && grep -qx 'Terminal=false' /usr/share/applications/taiji-agent.desktop \
+    && grep -qx 'StartupWMClass=taiji-agent' /usr/share/applications/taiji-agent.desktop \
+    && grep -qx 'X-GNOME-WMClass=taiji-agent' /usr/share/applications/taiji-agent.desktop; then
     ok "Desktop entry points to the packaged launcher and icon"
   else
     runtime_issue "Desktop entry is missing expected Exec/Icon/Terminal settings"
@@ -299,6 +326,8 @@ if [ -f /usr/share/icons/hicolor/512x512/apps/taiji-agent.png ]; then
 else
   runtime_issue "Desktop icon not found at /usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
 fi
+
+verify_product_icon_chain
 
 if verify_packaged_config; then
   ok "Packaged non-secret config is active in the user runtime"

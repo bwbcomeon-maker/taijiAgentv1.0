@@ -642,6 +642,7 @@ function openTrustedIdentityWindow(url, allowedOrigins) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return Promise.reject(new Error("main window is unavailable"));
   }
+  const authIconPath = resolveIconPath(resolveLabDir());
   const authWindow = new BrowserWindow({
     parent: mainWindow,
     width: 620,
@@ -650,6 +651,7 @@ function openTrustedIdentityWindow(url, allowedOrigins) {
     minHeight: 640,
     show: true,
     title: "企业身份安全登录",
+    icon: authIconPath || undefined,
     autoHideMenuBar: true,
     webPreferences: {
       session: mainWindow.webContents.session,
@@ -756,6 +758,10 @@ if (!gotSingleInstanceLock) {
 
   app.whenReady().then(() => {
     desktopBootLog("app.whenReady");
+    app.setName("taiji-agent");
+    if (process.platform === "linux") {
+      app.setDesktopName("taiji-agent.desktop");
+    }
     try {
       verifyFormalSourceBeforeWindow();
     } catch (error) {

@@ -210,6 +210,69 @@
       "type": "file",
       "mode": "0644",
       "version": {"kind": "product"}
+    },
+    {
+      "id": "appstream_metadata",
+      "path": "usr/share/metainfo/taiji-agent.metainfo.xml",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_resource_icon",
+      "path": "opt/taiji-agent/resources/icons/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "hicolor_icon_32",
+      "path": "usr/share/icons/hicolor/32x32/apps/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "hicolor_icon_48",
+      "path": "usr/share/icons/hicolor/48x48/apps/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "hicolor_icon_64",
+      "path": "usr/share/icons/hicolor/64x64/apps/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "hicolor_icon_128",
+      "path": "usr/share/icons/hicolor/128x128/apps/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "hicolor_icon_192",
+      "path": "usr/share/icons/hicolor/192x192/apps/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "hicolor_icon_256",
+      "path": "usr/share/icons/hicolor/256x256/apps/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "hicolor_icon_512",
+      "path": "usr/share/icons/hicolor/512x512/apps/taiji-agent.png",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
     }
   ]
 }

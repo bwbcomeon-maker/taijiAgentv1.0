@@ -5,18 +5,18 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
-DEFAULT_BUILD_ROOT="/tmp/taiji-agent-build-$(id -u 2>/dev/null || printf user)"
-BUILD_ROOT="${TAIJI_BUILD_ROOT:-$DEFAULT_BUILD_ROOT}"
+BUILD_ROOT="${TAIJI_BUILD_ROOT:-}"
 BUILD_ROOT_OWNER_MARKER=".taiji-build-root-owner"
 BUILD_ROOT_OWNER_TOKEN="taiji-agent-build-root-v1:$(id -u 2>/dev/null || printf user)"
-SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
+BUILD_TMP_DIR=""
+SRC_DIR=""
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 STATE_HOME="${XDG_STATE_HOME:-${HOME:-}/.local/state}"
 LOG_DIR="$STATE_HOME/taiji-agent/build-logs"
 DELIVERY_BUILD_LOG_DIR="$SCRIPT_DIR/构建日志"
 VERSION=""
-TOOL_ROOT="$SCRIPT_DIR/.构建工具"
-NODE_ROOT="$TOOL_ROOT/node"
+TOOL_ROOT=""
+NODE_ROOT=""
 NODE_VERSION="22.23.1"
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
@@ -35,6 +35,7 @@ LOG_DIR_REAL=""
 LOG_FILE=""
 FAILURE_REPORTED=0
 CURRENT_STAGE="初始化"
+BUILD_ROOT_PROBE_RESULTS=""
 
 ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -98,7 +99,7 @@ write_environment_snapshot() {
     printf 'arch=%s\n' "$(uname -m 2>/dev/null || true)"
     printf 'dpkg_arch=%s\n' "$(dpkg --print-architecture 2>/dev/null || true)"
     printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
-    for cmd in sudo apt-get apt-cache dpkg dpkg-deb sha256sum tar gzip git curl python3 node npm uv systemctl lsof; do
+    for cmd in sudo apt-get apt-cache dpkg dpkg-deb sha256sum tar gzip git curl python3 node npm uv cc findmnt systemctl lsof; do
       printf 'cmd.%s=%s\n' "$cmd" "$(safe_cmd_path "$cmd")"
     done
     printf 'TAIJI_NODE_MIRRORS=%s\n' "${TAIJI_NODE_MIRRORS:+set}"
@@ -107,6 +108,14 @@ write_environment_snapshot() {
     printf 'TAIJI_ELECTRON_MIRRORS=%s\n' "${TAIJI_ELECTRON_MIRRORS:+set}"
     printf 'TAIJI_BUILD_ROOT=%s\n' "${TAIJI_BUILD_ROOT:-}"
     printf 'BUILD_ROOT=%s\n' "$BUILD_ROOT"
+    printf 'BUILD_TMP_DIR=%s\n' "$BUILD_TMP_DIR"
+    printf 'TOOL_ROOT=%s\n' "$TOOL_ROOT"
+    printf 'NODE_ROOT=%s\n' "$NODE_ROOT"
+    printf 'TMPDIR=%s\n' "${TMPDIR:-}"
+    printf 'TMP=%s\n' "${TMP:-}"
+    printf 'TEMP=%s\n' "${TEMP:-}"
+    printf '%s\n' '## 构建根探针结果'
+    printf '%s\n' "$BUILD_ROOT_PROBE_RESULTS"
     printf 'UV_INDEX_URL=%s\n' "${UV_INDEX_URL:-}"
     printf '\n## 交付目录\n'
     printf '\n## 最新日志\n'
@@ -136,7 +145,7 @@ failure_next_steps() {
       printf 'next=检查 DNS/代理/镜像，必要时设置 TAIJI_NODE_MIRRORS、TAIJI_NPM_REGISTRIES、TAIJI_ELECTRON_MIRRORS 后重试\n'
       ;;
     *"pyproject.toml"*|*"Permission denied"*|*"os error 13"*|*"源码权限不可读"*)
-      printf 'next=构建工作区源码权限不可读。新版脚本默认使用 /tmp/taiji-agent-build-<uid> 并在解压后修复权限；如仍失败，检查终端安全管控/ACL，或设置 TAIJI_BUILD_ROOT=/tmp/taiji-agent-build-test 后重试\n'
+      printf 'next=构建工作区源码权限不可读。请查看新版候选目录探针和 findmnt 诊断；不要关闭麒麟安全策略，可显式设置一个经过允许的 owner-only TAIJI_BUILD_ROOT 后重试\n'
       ;;
     *"setup-local.sh"*|*"uv.lock"*|*"--locked"*|*"TAIJI_UV_LOCK_MODE"*)
       printf 'next=Python 依赖 lock 漂移。新版脚本默认 TAIJI_UV_LOCK_MODE=auto 会自动重试非 locked 同步；如仍使用旧包，可先用 TAIJI_ALLOW_UV_LOCK_REFRESH=1 bash ./00_制包机_生成离线交付包.sh 临时继续\n'
@@ -335,7 +344,9 @@ run_release_preflight() {
 preflight() {
   info "检查制包机环境"
   cleanup_delivery_metadata
-  validate_build_root_location
+  if [ -n "${TAIJI_BUILD_ROOT:-}" ]; then
+    validate_build_root_location
+  fi
   [ "$(uname -s)" = "Linux" ] || fail "最终 DEB 必须在 Linux amd64 制包机生成，当前为：$(uname -s)"
   case "$(uname -m)" in
     x86_64|amd64) ok "CPU 架构符合：$(uname -m)" ;;
@@ -346,45 +357,207 @@ preflight() {
   require_cmd dpkg
   require_cmd sha256sum
   require_cmd python3
+  require_cmd readlink
   require_admin_capability
   arch="$(dpkg --print-architecture 2>/dev/null || true)"
   [ "$arch" = "amd64" ] || fail "dpkg 架构不是 amd64：${arch:-unknown}"
 }
 
-validate_build_root_location() {
-  local resolved_script resolved_build
-  have readlink || fail "缺少 readlink，无法验证临时构建目录边界"
-  validate_safe_build_root_path
-  resolved_script="$(readlink -f -- "$SCRIPT_DIR")" || fail "无法解析交付目录真实路径：$SCRIPT_DIR"
-  resolved_build="$(readlink -m -- "$BUILD_ROOT")" || fail "无法解析临时构建目录：$BUILD_ROOT"
-  case "$resolved_build" in
+build_root_candidates() {
+  local uid cache_root home_cache candidate
+  uid="$(id -u 2>/dev/null || printf user)"
+  if [ -n "${TAIJI_BUILD_ROOT:-}" ]; then
+    printf '%s\n' "$TAIJI_BUILD_ROOT"
+    return 0
+  fi
+
+  cache_root="${XDG_CACHE_HOME:-}"
+  if [ -n "$cache_root" ] && [[ "$cache_root" = /* ]]; then
+    printf '%s/taiji-agent-build-%s\n' "${cache_root%/}" "$uid"
+  fi
+  if [ -n "${HOME:-}" ] && [[ "$HOME" = /* ]]; then
+    home_cache="$HOME/.cache"
+    if [ "${cache_root%/}" != "$home_cache" ]; then
+      printf '%s/taiji-agent-build-%s\n' "$home_cache" "$uid"
+    fi
+  fi
+  printf '/var/tmp/taiji-agent-build-%s\n' "$uid"
+}
+
+candidate_failure() {
+  local candidate="$1" reason="$2"
+  warn "候选构建根不可用：$candidate（$reason）"
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$candidate stage=validation reason=$reason"$'\n'
+  return 1
+}
+
+validate_candidate_build_root() {
+  local candidate="$1" resolved_candidate resolved_script basename_candidate
+  case "$candidate" in
+    /*) ;;
+    *) candidate_failure "$candidate" "必须是绝对路径"; return 1 ;;
+  esac
+  resolved_candidate="$(readlink -m -- "$candidate")" || {
+    candidate_failure "$candidate" "无法解析路径"
+    return 1
+  }
+  basename_candidate="${resolved_candidate##*/}"
+  case "$basename_candidate" in
+    taiji-agent-build-?*) ;;
+    *) candidate_failure "$resolved_candidate" "目录名必须使用 taiji-agent-build-*"; return 1 ;;
+  esac
+  case "$resolved_candidate" in
+    "/"|"/tmp"|"/tmp/"*|"/home"|"/var"|"/usr")
+      candidate_failure "$resolved_candidate" "拒绝宽泛或受限目录"
+      return 1
+      ;;
+  esac
+  [ ! -L "$candidate" ] || {
+    candidate_failure "$candidate" "不能是符号链接"
+    return 1
+  }
+  if [ -e "$candidate" ] && [ ! -d "$candidate" ]; then
+    candidate_failure "$candidate" "已存在但不是目录"
+    return 1
+  fi
+  resolved_script="$(readlink -f -- "$SCRIPT_DIR")" || {
+    candidate_failure "$candidate" "无法解析交付目录"
+    return 1
+  }
+  case "$resolved_candidate" in
     "$resolved_script"|"$resolved_script"/*)
-      fail "TAIJI_BUILD_ROOT 不能位于交付目录内：$resolved_build"
+      candidate_failure "$resolved_candidate" "不能位于交付目录内"
+      return 1
       ;;
   esac
 }
 
+validate_build_root_location() {
+  validate_candidate_build_root "$BUILD_ROOT" \
+    || fail "显式 TAIJI_BUILD_ROOT 不符合安全路径要求：$BUILD_ROOT"
+}
+
 validate_safe_build_root_path() {
-  local resolved_build build_basename
-  case "$BUILD_ROOT" in
-    /*) ;;
-    *) fail "TAIJI_BUILD_ROOT 必须是绝对路径：$BUILD_ROOT" ;;
-  esac
-  resolved_build="$(readlink -m -- "$BUILD_ROOT")" || fail "无法解析临时构建目录：$BUILD_ROOT"
-  build_basename="${resolved_build##*/}"
-  case "$build_basename" in
-    taiji-agent-build-?*) ;;
-    *) fail "TAIJI_BUILD_ROOT 必须使用 taiji-agent-build-* 专用目录名：$resolved_build" ;;
-  esac
-  case "$resolved_build" in
-    "/"|"/tmp"|"/home"|"/usr"|"/var")
-      fail "拒绝使用危险构建目录：$resolved_build"
-      ;;
-  esac
-  [ ! -L "$BUILD_ROOT" ] || fail "TAIJI_BUILD_ROOT 不能是符号链接：$BUILD_ROOT"
-  if [ -e "$BUILD_ROOT" ] && [ ! -d "$BUILD_ROOT" ]; then
-    fail "TAIJI_BUILD_ROOT 已存在但不是目录：$BUILD_ROOT"
+  validate_candidate_build_root "$BUILD_ROOT" \
+    || fail "TAIJI_BUILD_ROOT 不符合安全路径要求：$BUILD_ROOT"
+}
+
+record_probe_failure() {
+  local candidate="$1" stage="$2" output="$3" findmnt_output
+  findmnt_output=""
+  if have findmnt; then
+    findmnt_output="$(findmnt -T "$candidate" 2>&1 || true)"
   fi
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$candidate stage=$stage"$'\n'
+  BUILD_ROOT_PROBE_RESULTS+="output=$output"$'\n'
+  BUILD_ROOT_PROBE_RESULTS+="findmnt=$findmnt_output"$'\n'
+  warn "构建根探针失败：candidate=$candidate stage=$stage"
+  [ -z "$output" ] || warn "$output"
+  [ -z "$findmnt_output" ] || warn "findmnt -T $candidate：$findmnt_output"
+}
+
+probe_build_root() {
+  local candidate="$1" probe_dir probe_output marker marker_value marker_meta marker_uid marker_mode marker_links
+  validate_candidate_build_root "$candidate" || return 1
+  if [ -e "$candidate" ]; then
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+    [ "$(stat -c '%u' "$candidate" 2>/dev/null || printf -1)" = "$(id -u)" ] || {
+      candidate_failure "$candidate" "目录不属于当前用户"
+      return 1
+    }
+    chmod 0700 "$candidate" 2>/dev/null || {
+      candidate_failure "$candidate" "无法设置 0700 权限"
+      return 1
+    }
+    marker="$candidate/$BUILD_ROOT_OWNER_MARKER"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      [ -f "$marker" ] && [ ! -L "$marker" ] || {
+        candidate_failure "$candidate" "所有权标记不是普通文件"
+        return 1
+      }
+      marker_meta="$(stat -c '%u %a %h' "$marker" 2>/dev/null || true)"
+      read -r marker_uid marker_mode marker_links <<< "$marker_meta"
+      marker_value="$(tr -d '\r\n' < "$marker" 2>/dev/null || true)"
+      if [ "$marker_uid" != "$(id -u)" ] || [ "$marker_mode" != "600" ] || [ "$marker_links" != "1" ] || [ "$marker_value" != "$BUILD_ROOT_OWNER_TOKEN" ]; then
+        candidate_failure "$candidate" "所有权标记不可信"
+        return 1
+      fi
+    elif [ -n "$(find "$candidate" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+      candidate_failure "$candidate" "已有内容但缺少可信所有权标记"
+      return 1
+    fi
+  else
+    mkdir -p -- "$candidate" 2>/dev/null || {
+      candidate_failure "$candidate" "无法创建目录"
+      return 1
+    }
+    chmod 0700 "$candidate" 2>/dev/null || {
+      candidate_failure "$candidate" "无法设置 0700 权限"
+      return 1
+    }
+  fi
+
+  probe_dir="$candidate/.probe-$$"
+  rm -rf -- "$probe_dir"
+  if ! mkdir -m 0700 -- "$probe_dir" 2>/dev/null; then
+    record_probe_failure "$candidate" "mkdir" "无法创建探针目录"
+    return 1
+  fi
+  if ! probe_output="$({
+    printf '#include <stdlib.h>\nint main(void) { return 0; }\n' > "$probe_dir/probe.c"
+    cc "$probe_dir/probe.c" -o "$probe_dir/probe-exec"
+    "$probe_dir/probe-exec"
+    cc -shared -fPIC "$probe_dir/probe.c" -o "$probe_dir/probe.so"
+    python3 - "$probe_dir/probe.so" <<'PY'
+import ctypes
+import sys
+
+ctypes.CDLL(sys.argv[1])
+PY
+  } 2>&1)"; then
+    record_probe_failure "$candidate" "exec-or-dlopen" "$probe_output"
+    rm -rf -- "$probe_dir"
+    return 1
+  fi
+  rm -rf -- "$probe_dir"
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$candidate stage=success"$'\n'
+  return 0
+}
+
+configure_build_tmp() {
+  [ -n "$BUILD_ROOT" ] || fail "构建根尚未选择，不能配置临时目录"
+  BUILD_TMP_DIR="$BUILD_ROOT/tmp"
+  SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
+  TOOL_ROOT="$BUILD_ROOT/.build-tools"
+  NODE_ROOT="$TOOL_ROOT/node"
+  mkdir -p -- "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法创建构建临时目录或工具根"
+  chmod 0700 "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法设置构建临时目录或工具根权限"
+  export TMPDIR="$BUILD_TMP_DIR" TMP="$BUILD_TMP_DIR" TEMP="$BUILD_TMP_DIR"
+  ok "构建临时目录已固定：$BUILD_TMP_DIR"
+  ok "构建工具根已固定：$TOOL_ROOT"
+}
+
+select_build_root() {
+  local candidate explicit
+  explicit="${TAIJI_BUILD_ROOT:-}"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if ! validate_candidate_build_root "$candidate"; then
+      [ -n "$explicit" ] && fail "显式 TAIJI_BUILD_ROOT 不符合安全路径要求：$candidate"
+      continue
+    fi
+    if probe_build_root "$candidate"; then
+      BUILD_ROOT="$candidate"
+      create_owned_build_root
+      configure_build_tmp
+      ok "已选择可执行且可加载动态库的构建根：$BUILD_ROOT"
+      return 0
+    fi
+    if [ -n "$explicit" ]; then
+      fail "显式 TAIJI_BUILD_ROOT 探针失败：$candidate"
+    fi
+  done < <(build_root_candidates)
+  fail "没有候选构建根通过可执行文件和动态库加载探针；请查看失败诊断中的 findmnt 结果"
 }
 
 require_owned_build_root() {
@@ -773,7 +946,7 @@ build_runtime_and_deb() {
 
 collect_artifacts() {
   info "收集候选 DEB 与 build-deb manifest"
-  local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha
+  local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha icon_sha
   src_pkg_dir="$SRC_DIR/packages/麒麟操作系统安装包"
   deb="$src_pkg_dir/taiji-agent_${VERSION}_amd64.deb"
   manifest="$src_pkg_dir/taiji-package-manifest.json"
@@ -813,8 +986,22 @@ if not isinstance(abi, str) or not re.fullmatch(r"[0-9a-f]{64}", abi):
     raise SystemExit("manifest elf_abi_audit_sha256 is invalid")
 print(abi)
 PY
-)"
+  )"
   ELF_ABI_AUDIT_SHA256="$abi_sha"
+  icon_sha="$(python3 - "$MANIFEST_FILE" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = manifest.get("icon_set_sha256")
+if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+    raise SystemExit("manifest icon_set_sha256 is invalid")
+print(value)
+PY
+)"
+  ICON_SET_SHA256="$icon_sha"
   {
     printf 'version=%s\n' "$VERSION"
     printf 'source_archive=%s\n' "$source_name"
@@ -828,6 +1015,7 @@ PY
     printf 'compatibility_policy_id=%s\n' "$POLICY_ID"
     printf 'compatibility_policy_sha256=%s\n' "$POLICY_SHA256"
     printf 'elf_abi_audit_sha256=%s\n' "$ELF_ABI_AUDIT_SHA256"
+    printf 'icon_set_sha256=%s\n' "$ICON_SET_SHA256"
     printf 'maintainer=%s\n' "$POLICY_MAINTAINER"
   } > "$BUILD_MARKER"
   CANDIDATE_DEB_FIXED=1
@@ -859,6 +1047,7 @@ write_build_report() {
     printf 'compatibility policy id：%s\n' "$POLICY_ID"
     printf 'compatibility policy SHA256：%s\n' "$POLICY_SHA256"
     printf 'ELF ABI audit SHA256：%s\n' "$ELF_ABI_AUDIT_SHA256"
+    printf '图标集合 SHA256：%s\n' "$ICON_SET_SHA256"
     printf 'Maintainer（源码 policy 固定）：%s\n' "$POLICY_MAINTAINER"
     printf '客户交付边界：发布预检通过后只交付一个逐字节固定的 amd64 DEB，不附带第二个安装包或 apt 仓库。\n'
     printf '候选 DEB 固定后不再下载运行时依赖。\n'
@@ -927,10 +1116,14 @@ PY
 
 cleanup_delivery_build_cache() {
   require_candidate_deb_fixed
-  info "清理交付目录中的制包缓存"
-  rm -rf "$TOOL_ROOT" || fail "无法清理制包缓存：$TOOL_ROOT"
+  info "清理构建根中的制包工具缓存"
+  [ -n "$BUILD_ROOT" ] && [ "$TOOL_ROOT" = "$BUILD_ROOT/.build-tools" ] \
+    || fail "制包工具根未绑定到受控构建根：$TOOL_ROOT"
+  require_owned_build_root
+  restore_owned_build_root_directory_writes
+  rm -rf -- "$TOOL_ROOT" || fail "无法清理制包工具缓存：$TOOL_ROOT"
   [ ! -e "$TOOL_ROOT" ] || fail "制包缓存仍然存在：$TOOL_ROOT"
-  ok "交付目录制包缓存已清理"
+  ok "构建根制包工具缓存已清理"
 }
 
 normalize_delivery_permissions() {
@@ -990,6 +1183,8 @@ main() {
   preflight
   set_stage "安装制包依赖"
   install_build_dependencies
+  set_stage "选择安全构建根并配置临时目录"
+  select_build_root
   set_stage "源码包发布预检"
   prepare_source_release
   set_stage "准备 Python/Node/Electron 构建工具"

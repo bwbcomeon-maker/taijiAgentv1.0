@@ -99,7 +99,9 @@ bash "taijiagent 打包交付/99_本机_准备制包输入包.sh"
 bash ./00_制包机_生成离线交付包.sh
 ```
 
-只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、离线仓库或 `.build-success` 缺失时仍属于失败。
+脚本会先安装构建依赖，再按 `XDG_CACHE_HOME/taiji-agent-build-<uid>`、`$HOME/.cache/taiji-agent-build-<uid>`、`/var/tmp/taiji-agent-build-<uid>` 顺序选择构建根；显式 `TAIJI_BUILD_ROOT` 只接受绝对路径、当前用户 0700 专用目录。每个候选都必须通过“可执行文件运行 + 共享库动态加载”探针，探针结果和 `findmnt -T` 会写入失败诊断；不再把 `/tmp` 作为默认构建根，也不建议关闭麒麟安全策略。
+
+源码、Node/uv 工具链和所有 npm/Python 临时文件统一位于选中的构建根下，脚本导出 `TMPDIR`、`TMP`、`TEMP` 指向该根。只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、离线仓库或 `.build-success` 缺失时仍属于失败。构建时还会验证蓝色太极 Logo 的 RGBA PNG、hicolor 多尺寸、AppStream、desktop-id/WM_CLASS、Electron 窗口图标和安装态资源同源。
 
 ### 5.3 在受控发布机执行断网生命周期演练
 
@@ -260,7 +262,9 @@ SHA256SUMS.txt
 | Linux 制包 `npm test` 多项失败并提示缺少 `@resvg/resvg-js-linux-*` | 普通 npm 安装只准备当前平台原生包，复制型 DOCX skill 却承诺多个 Linux CPU/ABI | 按 lockfile 下载、校验并原子物化 x64/arm64、gnu/musl 原生包 | lockfile integrity、包身份、ELF/架构校验、制包机真实 `npm test` | 已由真实制包失败暴露并修复 |
 | apt 安装依赖时可能等待时区等交互输入 | 非交互环境没有稳定跨 sudo 传递 | 使用 `DEBIAN_FRONTEND=noninteractive` 和固定 `TZ` | 静态断言并在最小 Ubuntu 制包机实际执行 | 当前候选制包链已覆盖 |
 | Electron `ldd` 审计报告缺共享库 | 最小制包容器没有安装执行 Electron 审计所需的系统库 | 制包依赖阶段安装 DEB 声明的 Electron runtime 库 | Electron 必须为 Linux amd64 ELF，`ldd` 不得出现 `not found` | 当前候选 payload audit 已覆盖 |
-| manifest、最终预检或重试清理出现只读模板 `Permission denied` | 内置模板有意使用 `0444/0555`，普通 `rm -rf` 无法删除父目录 | 只清理受控 `/tmp` 专用目录；先恢复目录 owner 写权限再删除 | manifest、payload-preflight、build-root 三类只读树清理测试 | 已由真实制包失败暴露并修复 |
+| manifest、最终预检或重试清理出现只读模板 `Permission denied` | 内置模板有意使用 `0444/0555`，普通 `rm -rf` 无法删除父目录 | 只清理带所有权标记的专用构建根；先恢复目录 owner 写权限再删除。构建根从用户缓存或 `/var/tmp` 动态选择并先通过执行/dlopen 探针 | manifest、payload-preflight、build-root、候选探针回归测试；失败诊断记录 `findmnt -T` | 当前分支静态/行为回归已覆盖；Linux 制包机真实重建仍未验证 |
+| Kylin 制包在 `/tmp` 首个原生模块测试报 `failed to map segment from shared object` | 目标机安全策略对 `/tmp` 执行或动态库映射有限制，构建工具虽下载成功但 native `.node` 无法加载 | 默认不再使用 `/tmp`；选择 owner-only 用户缓存或 `/var/tmp` 构建根，并在解包/下载前真实运行 ELF 和 `ctypes.CDLL` 探针 | 候选根按顺序尝试；显式根探针失败立即退出；诊断包含候选、阶段、原始错误和 `findmnt` | 根因来自 2026-08-06 Kylin 日志；当前修复尚未在该制包机重建 |
+| Web、开始菜单、Electron 窗口出现不同 Logo 或黑金 SVG | Web favicon、hicolor、desktop entry、Electron class 和安装态资源没有统一同源合同 | 以蓝色太极机器人 RGBA PNG 为 canonical；派生 32/48/64/128/192/256/512 PNG 与 ICO，AppStream/desktop/WM_CLASS/窗口图标/原生校验全部绑定 | `validate_icon_assets.py`、payload contract、native verify、图标链静态回归 | 源码资产和静态合同已实时验证；真实 Kylin/UOS 桌面缓存刷新和安装态仍未验证 |
 | 离线仓库看似生成，但依赖为空或不闭合 | 手写 Depends 解析和 `apt-rdepends` 不能等价于干净目标机上的 apt 求解 | 分开解析 Depends/Pre-Depends；用空 dpkg status 的 apt download-only 求解；按实际下载包建索引 | 直接依赖非空、依赖闭包、`Packages`/`Packages.gz`/每个 DEB 摘要一致 | 历史候选 `1d56849a` 生成 187 个索引项并完成断网生命周期；后续源码提交仍须重跑 |
 | 使用 Debian 13 制包或演练会带来 glibc 2.41 和新系统包冲突 | 演练系统比 Kylin V10/glibc 2.31 更新，可能产生假绿或误报依赖冲突 | 固定 Ubuntu 20.04 amd64 兼容基线，并校验镜像 baseline label | manifest 记录 OS、arch、glibc；生产器核对镜像角色和版本 | 仅证明兼容基线，不证明 Kylin 真机 |
 | Linux 签名预检误报“源码包内容与当前 Git HEAD 不一致” | macOS Apple gzip 与 Linux GNU gzip 会把同一 tar 压成不同字节；比较 `.tar.gz` 本身把编码器差异误判为源码漂移 | 仍用当前 Git HEAD 重建确定性 tar，但与源码包解压后的 tar 流逐字节比较 | 不同 gzip 编码器的同一 git archive 必须通过；解压后 tar 增加任意字节必须拒绝 | 在 `15c058b4` 签名前真实暴露；两端解压 tar SHA256 相同后修复 |
