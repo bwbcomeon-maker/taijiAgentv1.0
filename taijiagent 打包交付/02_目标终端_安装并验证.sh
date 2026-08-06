@@ -165,7 +165,7 @@ release_public_source="$8"
 shift 8
 stage="$(mktemp -d /var/tmp/taiji-agent-management.XXXXXX)"
 cleanup() {
-  rm -f -- "$stage"/* 2>/dev/null || true
+  find "$stage" -mindepth 1 -maxdepth 1 -type f -delete 2>/dev/null || true
   rmdir -- "$stage" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -238,6 +238,16 @@ finally:
 PY
 }
 
+STAGED_DEB_PATH=""
+stage_deb_with_sidecar() {
+  local source="$1" target
+  STAGED_DEB_PATH=""
+  target="$stage/$(basename -- "$source")"
+  stage_regular_file "$source" "$target" 0600
+  stage_regular_file "$source.sha256" "$target.sha256" 0600
+  STAGED_DEB_PATH="$target"
+}
+
 stage_regular_file "$silent_source" "$stage/taiji-silent-deploy.sh" 0755
 stage_regular_file "$receipt_source" "$stage/deployment_receipt.py" 0600
 stage_regular_file "$upgrade_source" "$stage/upgrade_transaction.py" 0600
@@ -254,9 +264,8 @@ for ((index = 0; index < ${#args[@]}; index += 1)); do
   [ $((index + 1)) -lt ${#args[@]} ] || continue
   case "${args[index]}" in
     --deb)
-      stage_regular_file "${args[index + 1]}" "$stage/candidate.deb" 0600
-      stage_regular_file "${args[index + 1]}.sha256" "$stage/candidate.deb.sha256" 0600
-      args[index + 1]="$stage/candidate.deb"
+      stage_deb_with_sidecar "${args[index + 1]}"
+      args[index + 1]="$STAGED_DEB_PATH"
       ;;
     --build-manifest)
       stage_regular_file "${args[index + 1]}" "$stage/build-manifest.json" 0600
@@ -274,9 +283,8 @@ for ((index = 0; index < ${#args[@]}; index += 1)); do
       args[index + 1]="$stage/release-evidence.sig"
       ;;
     --previous-deb)
-      stage_regular_file "${args[index + 1]}" "$stage/previous.deb" 0600
-      stage_regular_file "${args[index + 1]}.sha256" "$stage/previous.deb.sha256" 0600
-      args[index + 1]="$stage/previous.deb"
+      stage_deb_with_sidecar "${args[index + 1]}"
+      args[index + 1]="$STAGED_DEB_PATH"
       ;;
     --previous-signature)
       stage_regular_file "${args[index + 1]}" "$stage/previous.deb.sig" 0600

@@ -135,7 +135,9 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
   --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
 ```
 
-输出目录必须事先不存在。生产器应验证镜像角色和兼容基线、使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。正式输出为 `schema=taiji.offline-install-rehearsal.v1`、`status=PASS` 的结构化证据，绑定 source commit、version、DEB/policy 摘要、`delivery_inventory_sha256` 和同目录会话日志。validator 后续复核时会重算当前交付清单摘要；演练后替换验收工具、脚本或任一未排除交付文件，都会使旧证据失效。当前 v3 证据不包含 target baseline 字段。历史 v2 只能通过 validator 的显式 `--legacy-v2-read-only` 路径查看，不能作为当前发布证据。
+输出目录必须事先不存在。生产器应验证镜像角色、`ubuntu-20.04` 兼容基线和 `kylin-os-release-v1` fixture label，使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。runner 必须先在未改动的镜像状态核对真实 Ubuntu 20.04 和断网状态，之后才可在该一次性容器内原子激活 Kylin policy fixture：只把可信 `/usr/lib/os-release` 改成 `ID=kylin`、建立 canonical `/etc/os-release` 软链接并创建桌面会话目录；候选 DEB、canonical policy 和生产 `preinst` 均不得改动或绕过。
+
+仓库官方 Docker producer 的正式输出为 `schema=taiji.offline-install-rehearsal.v1`、`status=PASS` 的结构化证据，绑定 source commit、version、DEB/policy 摘要、`delivery_inventory_sha256` 和同目录会话日志。该 producer 的 `environment` 固定为 `container-kylin-policy-fixture-v1`，`os_id/os_version` 仍如实记录容器基线 `ubuntu/20.04`；这只证明未修改候选 DEB 在兼容基线上的断网 `dpkg` install/remove/purge/reinstall 与维护脚本链，不证明运行了真实麒麟、统信或 openKylin。`desktop_app_verified` 和 `target_verified` 必须保持 `false`。通用 v1 schema/validator 为历史证据保留 `container/vm/chroot` 的读取与绑定校验兼容，但当前 certification set 组装门禁只接受上述新 fixture 身份与 Ubuntu 20.04 基线，旧 v1 不能进入当前发布认证集合，也不能充当真实目标机证据。validator 后续复核时会重算当前交付清单摘要；演练后替换验收工具、脚本或任一未排除交付文件，都会使旧证据失效。当前 v3 证据不包含 target baseline 字段。历史 v2 只能通过 validator 的显式 `--legacy-v2-read-only` 路径查看，不能作为当前发布证据。
 
 ### 5.4 在真实目标机安装并验收
 
@@ -246,6 +248,7 @@ SHA256SUMS.txt
 
 - `postinst configure` 必须在无图形、无用户 HOME 的 system-only 环境中执行安装态原生校验；脚本权限、Electron `chrome-sandbox` 或 native verify 任一失败都必须返回非零。重复执行 `dpkg --configure taiji-agent` 应可安全重试。
 - 已由 `dpkg` 管理的现有安装直接走 apt/dpkg 原生升级或同版本重装；`02` 不得预先 unhold、purge、强制删除包状态或手工删除 `/opt/taiji-agent`。
+- `02` 提权后复制候选 DEB 或 N-1 DEB 时，必须把 DEB 与同名 `.sha256` 作为一组暂存，并保留 manifest/sidecar 绑定的原始 DEB basename；不得改名为 `candidate.deb`、`previous.deb` 等内部别名。sidecar 首行的 basename 与实际暂存 DEB 不同必须在调用 `dpkg` 前以 `DEB_SHA256_SIDECAR_MISMATCH` 或 `PREVIOUS_DEB_SHA256_SIDECAR_MISMATCH` 失败关闭。
 - 没有 `dpkg` 状态但存在旧系统安装时，`02` 仅允许清理固定白名单内的 legacy 路径；用户 XDG 配置、授权、密钥、会话和附件不在清理范围。
 - `prerm` 只能按 `/proc/<pid>/exe` 的物理路径识别 `/opt/taiji-agent/` 所属进程，并在发送 `SIGKILL` 前重新核验，禁止使用 `pkill/pgrep -f`。
 - 普通 remove 不清用户状态；purge 只清理已知的 root-owned、非 symlink 系统状态目录。发现 symlink、非 root owner、mountpoint 或“白名单目录实际是普通文件”的类型不匹配时应保留并告警，不能扩大递归删除范围。`/opt/taiji-agent` 顶层空目录也必须通过目录类型、root owner、非 symlink 和非 mountpoint 门禁后才能 `rmdir`。
@@ -256,6 +259,7 @@ SHA256SUMS.txt
 ### 7.4 本轮事务实现验证台账
 
 - **已实时验证**：事务/维护脚本/部署回执/安装脚本/断网生命周期聚焦回归 `70` 项通过；Linux 静态门禁 `88` 项通过、`1` 项按平台条件跳过；相关 Bash 语法、Python 编译、JSON 校验和 `git diff --check` 通过。
+- **本轮新增回归要求**：`tests/test_kylin_install_script_simulation.py` 必须证明候选 DEB 和 N-1 DEB 在 root management staging 中均保留原 basename、携带同名 sidecar，且不再出现 `candidate.deb`/`previous.deb`；同时执行 `bash -n taijiagent\ 打包交付/02_目标终端_安装并验证.sh`。冻结新提交并重建 DEB 后，还必须用完整交付目录重跑断网 fresh/reinstall（以及提供 N-1 材料时的 upgrade/rollback）生命周期。
 - **未实时验证**：真实麒麟、统信或 openKylin 终端；真实 `dpkg` maintainer failure 后的 N-1 自动回滚；真实 detached signature 验签；真实图形桌面安装和升级/卸载。
 - **验收边界**：上述聚焦测试只证明当前分支代码和模拟夹具的合同，不提升“制包机已构建”“离线安装已演练”或“目标机已验证”任一证据等级；冻结源码后仍须在 Linux amd64 制包机重建 DEB、执行断网生命周期，再绑定真实目标机证据。
 
@@ -291,9 +295,11 @@ SHA256SUMS.txt
 | `--network none` 被未启用的 tunnel 设备误报；sudo 提示 hostname 解析失败 | 只按网络节点存在判断；容器 hostname 未进入本地 hosts | 只拒绝启用链路、全局地址和非 loopback route；sudo 前确保本地 hostname 解析 | Docker inspect、网络负向测试和结构化会话记录 | 历史候选 `1d56849a` 已完成断网三阶段；后续源码提交仍须重跑 |
 | 无图形容器执行安装后可能被误写成目标机成功 | CLI 和包状态不能证明 Electron/UKUI | 无图形会话默认失败；仅显式 headless rehearsal 可继续，并强制 `desktop_app_verified=false`、`target_verified=false` | release gate 分开验证离线证据与真机证据 | 目标机仍必须执行 `04` |
 | 普通用户交付目录通过校验后、sudo 安装前可被替换 | 用户可写源文件存在 TOCTOU 窗口 | 复制到 root-owned `/var/tmp` staging 后重校验，再走原生 install/upgrade | 拒绝 symlink、hardlink、路径穿越、未列入仓库文件和中途替换 | 安装脚本仿真与负向测试覆盖 |
+| `02` 已通过 manifest/摘要预检，却在安装前返回 `DEB_SHA256_SIDECAR_MISMATCH`（upgrade 的 N-1 输入还可能为 `PREVIOUS_DEB_SHA256_SIDECAR_MISMATCH`） | management staging 把原始 `taiji-agent_<version>_amd64.deb` 改名为 `candidate.deb`/`previous.deb`，但同名 sidecar 首行仍绑定原始 basename；摘要内容未坏，文件身份合同被暂存改名破坏 | 候选和 N-1 DEB 均以原 basename 连同同名 `.sha256` 成对复制到 root-owned management staging，静默部署器继续在 `dpkg` 前复核 basename 和摘要 | 安装脚本仿真必须覆盖候选与 N-1 两条参数路径、明确拒绝固定别名；Bash 语法通过后，用重建制品跑完整断网生命周期 | 源码回归只证明 staging 合同；Ubuntu 容器若被 canonical policy 拒绝，不得算安装失败回归通过，也不得替代真实 Kylin/UOS/openKylin 目标机安装和桌面验收 |
+| Ubuntu 20.04 断网演练在 candidate `preinst` 返回 `TAIJI-LINUX-E002-OS`/`TAIJI-LINUX-E006-DESKTOP` | 演练 runner 强制真实 Ubuntu 20.04 基线，而生产 policy 正确只接受 `kylin/uos/openkylin` 图形系统；fake-Docker 单测没有执行真实 DEB，未发现两者矛盾 | 不放宽生产 policy；专用镜像绑定 `kylin-os-release-v1` label，runner 先验证真实 Ubuntu 和 `network none`，再只在一次性容器内激活 root-owned Kylin os-release/桌面目录 fixture | label 错误必须在 Docker start 前拒绝；静态顺序门禁必须证明 baseline/network 校验早于 fixture 和首次 dpkg；正式演练证据固定 `environment=container-kylin-policy-fixture-v1`、`os_id=ubuntu`、`target_verified=false` | fixture 演练只覆盖未修改 DEB 的 dpkg 生命周期和维护脚本，不是国产系统、图形桌面或目标机验收；真实目标仍执行 `04` |
 | purge 白名单路径被替换为普通文件，或顶层 `/opt/taiji-agent` 绕过安全门禁直接 `rmdir` | 旧脚本把“路径在白名单”误当成“对象类型和身份已可信” | 目录类型不匹配一律保留告警；顶层空目录复用 owner/symlink/mountpoint/type 安全门禁 | 动态执行 ordinary remove、安全 purge、symlink、非 root owner、mountpoint、类型不匹配和顶层目录场景 | 当前只是脚本级动态回归，最终仍需当前制品的断网演练与真实目标机验收 |
 | 并发首次初始化偶发 `Template registry lock not found`，制包 `npm test` 中断 | 旧 regular-file lock 在 owner 内容完整前已经公开；等待者可能看到空锁、消失锁或错误代锁 | 使用 candidate directory 写完整 owner 后原子发布；owner 绑定 generation token；release/stale 通过 tombstone 隔离 | 多进程初始化、旧 owner 不能释放新代、延迟 stale reaper 不能隔离新代、压力测试 | 源码与 Ubuntu 聚焦测试已通过；最终仍以当前 manifest 和证据为准 |
-| `uv --locked` 提示 lockfile 需要更新 | Linux resolver 发现源码 lock 漂移 | 只在受控制包工作区按策略自动非 locked 重试，并写入构建报告 | Python relocation/import、payload audit；严格发布可显式使用 strict 模式 | fallback 是受控告警，不应被描述为 lock 已修复 |
+| `uv --locked` 提示 lockfile 需要更新，或制包机 shell 注入额外 Python 索引 | 制包脚本默认清华索引与旧 PyPI registry lock 身份不一致；`UV_INDEX`/`UV_EXTRA_INDEX_URL` 等现场变量还会以更高优先级覆盖或扩充受控索引 | 提交与默认清华镜像一致、版本和 SHA256 不变的 lock；使用专用 `TAIJI_UV_INDEX_URL`，构建前清除所有可注入额外索引/flat-link/策略的 uv 环境变量，再导出唯一受控 `UV_INDEX_URL` | 固定 uv/Python 的 `--locked --dry-run`、带恶意环境变量的负向静态门禁、完整制包日志确认未触发 non-locked fallback、Python relocation/import 和 payload audit | 显式覆盖索引仍必须与 lock 同步维护；任何 fallback 告警都不能描述为严格可复现构建 |
 
 ## 9. Registry lock 的剩余风险和运维规则
 

@@ -28,6 +28,7 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
 RECORD_BASENAME = "environment-evidence.json"
+CURRENT_OFFLINE_REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
 
 
 class CertificationSetError(ValueError):
@@ -222,6 +223,16 @@ def _validate_offline_evidence(
         )
     except Exception as exc:  # validator owns the current v1 contract wording
         raise CertificationSetError(str(exc)) from exc
+    if (
+        data.get("environment") != CURRENT_OFFLINE_REHEARSAL_ENVIRONMENT
+        or data.get("os_id") != "ubuntu"
+        or data.get("os_version") != "20.04"
+    ):
+        raise CertificationSetError(
+            "current certification set requires "
+            f"environment={CURRENT_OFFLINE_REHEARSAL_ENVIRONMENT}, "
+            "os_id=ubuntu, os_version=20.04"
+        )
     return data, hashlib.sha256(payload).hexdigest()
 
 

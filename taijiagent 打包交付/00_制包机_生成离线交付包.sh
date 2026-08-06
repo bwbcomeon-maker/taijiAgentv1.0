@@ -34,6 +34,7 @@ ELECTRON_VERSION=""
 ELECTRON_ARCHIVE_SHA256=""
 ELECTRON_ARCHIVE=""
 ELF_ABI_AUDIT_SHA256=""
+PYTHON_DEPENDENCY_LOCK_STATUS="unknown"
 CANDIDATE_DEB_FIXED=0
 OUTPUT_ARCHIVE_DIR=""
 OUTPUT_BACKUP=""
@@ -1150,12 +1151,37 @@ run_setup_local() {
     fi
     fail "Python venv 生成失败：setup-local.sh 返回 ${status}，详见 ${setup_log}"
   fi
+
+  case "$uv_lock_mode" in
+    strict)
+      PYTHON_DEPENDENCY_LOCK_STATUS="locked"
+      ;;
+    auto)
+      if grep -Fq "retrying without --locked" "$setup_log"; then
+        PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"
+        warn "Python 依赖使用了 non-locked 后备解析；构建报告将保留该事实。"
+      else
+        PYTHON_DEPENDENCY_LOCK_STATUS="locked"
+      fi
+      ;;
+    unlocked)
+      PYTHON_DEPENDENCY_LOCK_STATUS="explicit-unlocked"
+      ;;
+  esac
+  if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
+    PYTHON_DEPENDENCY_LOCK_STATUS="refreshed-${PYTHON_DEPENDENCY_LOCK_STATUS}"
+  fi
 }
 
 build_runtime_and_deb() {
   local uv_lock_mode source_commit
   export PATH="$NODE_ROOT/current/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:/usr/local/bin"
-  export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+  # Keep the packaging host's shell/profile from injecting a higher-priority
+  # Python package source into uv. UV_NO_CONFIG blocks config files, but these
+  # environment variables otherwise still override or augment UV_INDEX_URL.
+  unset UV_INDEX UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_NO_INDEX UV_INDEX_STRATEGY UV_CONFIG_FILE
+  export UV_NO_CONFIG=1
+  export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"
 
   if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
@@ -1300,6 +1326,7 @@ write_build_report() {
     printf 'compatibility policy SHA256：%s\n' "$POLICY_SHA256"
     printf 'ELF ABI audit SHA256：%s\n' "$ELF_ABI_AUDIT_SHA256"
     printf '图标集合 SHA256：%s\n' "$ICON_SET_SHA256"
+    printf 'Python 依赖锁状态：%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
     printf 'Maintainer（源码 policy 固定）：%s\n' "$POLICY_MAINTAINER"
     printf '客户交付边界：发布预检通过后只交付一个逐字节固定的 amd64 DEB，不附带第二个安装包或 apt 仓库。\n'
     printf '候选 DEB 固定后不再下载运行时依赖。\n'

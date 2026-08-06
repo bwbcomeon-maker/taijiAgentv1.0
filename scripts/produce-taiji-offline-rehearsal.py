@@ -27,6 +27,8 @@ VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
 POLICY_HELPER = ROOT / "packaging" / "linux" / "compatibility_policy.py"
 IMAGE_ROLE_LABEL = "offline-rehearsal-v1"
 IMAGE_BASELINE_LABEL = "ubuntu-20.04"
+IMAGE_FIXTURE_LABEL = "kylin-os-release-v1"
+REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
 SESSION_BASENAME = "offline-install-rehearsal-session.json"
 EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
@@ -311,6 +313,8 @@ def run_lifecycle_container(
         raise ProducerError("演练镜像不是仓库定义的专用离线演练镜像")
     if labels.get("io.taiji.release-evidence.baseline") != IMAGE_BASELINE_LABEL:
         raise ProducerError("演练镜像兼容基线不是 ubuntu-20.04")
+    if labels.get("io.taiji.release-evidence.fixture") != IMAGE_FIXTURE_LABEL:
+        raise ProducerError("演练镜像不是固定的 Kylin policy fixture")
     if entrypoint != ["/usr/local/bin/run-lifecycle.sh"]:
         raise ProducerError("演练镜像入口不是固定 lifecycle runner")
     image_id = image_info.get("Id")
@@ -340,6 +344,8 @@ def run_lifecycle_container(
             f"TAIJI_EXPECTED_DEB_BASENAME={release['deb'].name}",
             "--env",
             f"TAIJI_EXPECTED_DEB_SHA256={release['deb_sha256']}",
+            "--env",
+            f"TAIJI_REHEARSAL_FIXTURE_ID={IMAGE_FIXTURE_LABEL}",
     ]
     if expanded:
         if previous is None or policy is None:
@@ -418,7 +424,7 @@ def validate_session(session: dict[str, Any], release: dict[str, Any], challenge
         "deb_basename": release["deb"].name,
         "deb_sha256": release["deb_sha256"],
         "platform": "linux/amd64",
-        "environment": "container",
+        "environment": REHEARSAL_ENVIRONMENT,
         "os_id": "ubuntu",
         "os_version": "20.04",
         "network": "none",
@@ -702,7 +708,7 @@ def produce(
             "compatibility_policy_sha256": release["compatibility_policy_sha256"],
             "delivery_inventory_sha256": release["delivery_inventory_sha256"],
             "platform": "linux/amd64",
-            "environment": "container",
+            "environment": REHEARSAL_ENVIRONMENT,
             "os_id": session["os_id"],
             "os_version": session["os_version"],
             "network": "none",

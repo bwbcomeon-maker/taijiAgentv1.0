@@ -9,6 +9,8 @@ REHEARSAL_USER="rehearsal"
 REHEARSAL_HOME="/home/$REHEARSAL_USER"
 SESSION_BASENAME="offline-install-rehearsal-session.json"
 LIFECYCLE_BASENAME="offline-install-rehearsal-lifecycle.json"
+EXPECTED_REHEARSAL_FIXTURE_ID="kylin-os-release-v1"
+REHEARSAL_ENVIRONMENT="container-kylin-policy-fixture-v1"
 
 fail() {
   printf 'offline-rehearsal-lifecycle-failed\t%s\n' "$*" >&2
@@ -64,6 +66,48 @@ ensure_local_hostname_resolution() {
       || fail "无法为容器 hostname 写入本地解析"
   fi
   getent hosts "$current_hostname" >/dev/null 2>&1 || fail "容器 hostname 无法在本地解析"
+}
+
+activate_kylin_policy_fixture() {
+  local fixture_target="/usr/lib/os-release"
+  local fixture_tmp=""
+  local fixture_metadata=""
+  local fixture_id=""
+
+  [ "${TAIJI_REHEARSAL_FIXTURE_ID:-}" = "$EXPECTED_REHEARSAL_FIXTURE_ID" ] \
+    || fail "离线演练 policy fixture identity 不匹配"
+  [ -f "$fixture_target" ] && [ ! -L "$fixture_target" ] \
+    || fail "Ubuntu 基线缺少可信 /usr/lib/os-release"
+
+  fixture_tmp="$(mktemp /usr/lib/.taiji-os-release.XXXXXX)" \
+    || fail "无法创建 policy fixture os-release 临时文件"
+  if ! {
+    printf '%s\n' \
+      'ID=kylin' \
+      'NAME="Kylin policy fixture (not a target OS)"' \
+      'VERSION_ID="V10-policy-fixture"' \
+      'PRETTY_NAME="Kylin policy fixture on Ubuntu 20.04"' > "$fixture_tmp" \
+      && chown 0:0 -- "$fixture_tmp" \
+      && chmod 0644 -- "$fixture_tmp" \
+      && mv -f -- "$fixture_tmp" "$fixture_target"; \
+  }; then
+    rm -f -- "$fixture_tmp" 2>/dev/null || true
+    fail "无法激活 Kylin policy fixture os-release"
+  fi
+
+  rm -f -- /etc/os-release
+  ln -s ../usr/lib/os-release /etc/os-release
+  chown -h 0:0 -- /etc/os-release
+  install -d -o 0 -g 0 -m 0755 /usr/share/xsessions
+
+  fixture_metadata="$(stat -Lc '%u:%a:%h' -- "$fixture_target" 2>/dev/null || true)"
+  [ "$fixture_metadata" = "0:644:1" ] \
+    || fail "policy fixture os-release owner/mode/link-count 不可信：${fixture_metadata:-missing}"
+  [ -L /etc/os-release ] \
+    && [ "$(readlink -- /etc/os-release)" = "../usr/lib/os-release" ] \
+    || fail "policy fixture /etc/os-release 不是 canonical symlink"
+  fixture_id="$(awk -F= '$1 == "ID" {print $2; exit}' /etc/os-release)"
+  [ "$fixture_id" = "kylin" ] || fail "policy fixture OS ID 激活失败"
 }
 
 verify_installed() {
@@ -503,7 +547,7 @@ session = {
     "deb_basename": os.environ["TAIJI_EXPECTED_DEB_BASENAME"],
     "deb_sha256": os.environ["TAIJI_EXPECTED_DEB_SHA256"],
     "platform": "linux/amd64",
-    "environment": "container",
+    "environment": os.environ["TAIJI_REHEARSAL_ENVIRONMENT"],
     "os_id": os.environ["TAIJI_REHEARSAL_OS_ID"],
     "os_version": os.environ["TAIJI_REHEARSAL_OS_VERSION"],
     "network": "none",
@@ -581,6 +625,7 @@ require_env TAIJI_OFFLINE_REHEARSAL_CHALLENGE
 require_env TAIJI_EXPECTED_SOURCE_COMMIT
 require_env TAIJI_EXPECTED_DEB_BASENAME
 require_env TAIJI_EXPECTED_DEB_SHA256
+require_env TAIJI_REHEARSAL_FIXTURE_ID
 [[ "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE" =~ ^[0-9a-f]{64,128}$ ]] || fail "challenge 格式不合法"
 [[ "$TAIJI_EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "source commit 格式不合法"
 [[ "$TAIJI_EXPECTED_DEB_BASENAME" =~ ^taiji-agent_[A-Za-z0-9.+:~_-]+_amd64\.deb$ ]] || fail "DEB basename 不合法"
@@ -594,6 +639,8 @@ esac
 verify_runtime_baseline
 verify_runtime_network_none
 ensure_local_hostname_resolution
+activate_kylin_policy_fixture
+export TAIJI_REHEARSAL_ENVIRONMENT="$REHEARSAL_ENVIRONMENT"
 
 for secret_name in \
   OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY \

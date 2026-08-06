@@ -200,6 +200,11 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                             "io.taiji.release-evidence.baseline": (
                                 "debian-13" if mode == "wrong_baseline" else "ubuntu-20.04"
                             ),
+                            "io.taiji.release-evidence.fixture": (
+                                "wrong-fixture"
+                                if mode == "wrong_fixture"
+                                else "kylin-os-release-v1"
+                            ),
                         },
                     },
                 }]))
@@ -295,7 +300,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "deb_basename": state["env"]["TAIJI_EXPECTED_DEB_BASENAME"],
                     "deb_sha256": state["env"]["TAIJI_EXPECTED_DEB_SHA256"],
                     "platform": "linux/amd64",
-                    "environment": "container",
+                    "environment": "container-kylin-policy-fixture-v1",
                     "os_id": "debian" if mode == "wrong_runtime_os" else "ubuntu",
                     "os_version": "13" if mode == "wrong_runtime_os" else "20.04",
                     "network": "none",
@@ -542,6 +547,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertIn("sudoers.d", dockerfile)
         self.assertIn('io.taiji.release-evidence.role="offline-rehearsal-v1"', dockerfile)
         self.assertIn('io.taiji.release-evidence.baseline="ubuntu-20.04"', dockerfile)
+        self.assertIn('io.taiji.release-evidence.fixture="kylin-os-release-v1"', dockerfile)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/run-lifecycle.sh"]', dockerfile)
         self.assertIn("verify_runtime_baseline", lifecycle)
         self.assertIn('[ "$runtime_id" = "ubuntu" ]', lifecycle)
@@ -558,6 +564,23 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertIn('! -e /opt/taiji-agent', lifecycle)
         self.assertIn('"schema": "taiji.offline-install-rehearsal.v1"', lifecycle)
         self.assertNotIn("ONLINE_OK=1", lifecycle)
+
+    def test_lifecycle_activates_policy_fixture_only_after_real_baseline_and_network_checks(self):
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+        main = lifecycle.index('[ "$EUID" -eq 0 ]')
+        baseline = lifecycle.index("\nverify_runtime_baseline\n", main)
+        network_none = lifecycle.index("\nverify_runtime_network_none\n", main)
+        self.assertIn("\nactivate_kylin_policy_fixture\n", lifecycle[main:])
+        fixture = lifecycle.index("\nactivate_kylin_policy_fixture\n", main)
+        first_install = lifecycle.index('sudo -H -u "$REHEARSAL_USER"', main)
+
+        self.assertLess(baseline, network_none)
+        self.assertLess(network_none, fixture)
+        self.assertLess(fixture, first_install)
+        self.assertIn('EXPECTED_REHEARSAL_FIXTURE_ID="kylin-os-release-v1"', lifecycle)
+        self.assertIn("ID=kylin", lifecycle)
+        self.assertIn("/usr/share/xsessions", lifecycle)
+        self.assertIn("0:644:1", lifecycle)
 
     def test_lifecycle_accepts_down_kernel_tunnels_but_rejects_usable_network(self):
         lifecycle = LIFECYCLE.read_text(encoding="utf-8")
@@ -659,6 +682,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertEqual(evidence["architecture"], "amd64")
         self.assertEqual(evidence["compatibility_policy_id"], self.policy_id)
         self.assertEqual(evidence["compatibility_policy_sha256"], self.policy_sha256)
+        self.assertEqual(evidence["environment"], "container-kylin-policy-fixture-v1")
+        self.assertEqual(session["environment"], "container-kylin-policy-fixture-v1")
         validator = load_module(VALIDATOR, "taiji_offline_inventory_test")
         self.assertEqual(
             evidence["delivery_inventory_sha256"],
@@ -705,6 +730,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         joined = " ".join(create)
         self.assertIn("dst=/delivery-ro,readonly", joined)
         self.assertIn("dst=/evidence", joined)
+        self.assertIn("TAIJI_REHEARSAL_FIXTURE_ID=kylin-os-release-v1", joined)
         self.assertNotIn("/var/run/docker.sock", joined)
         for forbidden in ("API_KEY", "PRIVATE_KEY", "LICENSE", "TOKEN"):
             self.assertNotIn(forbidden, joined)
@@ -722,6 +748,27 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
 
         self.assertNotEqual(validation.returncode, 0)
         self.assertIn("target baseline", validation.stderr)
+
+    def test_current_offline_validator_retains_generic_v1_read_compatibility(self):
+        result = self.run_producer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        session_path = self.output / "offline-install-rehearsal-session.json"
+        evidence_path = self.output / "offline-install-rehearsal.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        session["environment"] = "container"
+        session["os_id"] = "debian"
+        session["os_version"] = "12"
+        session_path.write_text(json.dumps(session, sort_keys=True) + "\n", encoding="utf-8")
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["environment"] = "container"
+        evidence["os_id"] = "debian"
+        evidence["os_version"] = "12"
+        evidence["log_sha256"] = sha256(session_path)
+        evidence_path.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")
+
+        validation = self.run_current_offline_validator()
+
+        self.assertEqual(validation.returncode, 0, validation.stdout + validation.stderr)
 
     def test_current_offline_validator_rejects_tampered_bound_session_log(self):
         result = self.run_producer()
@@ -787,6 +834,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             ("wrong_image", "镜像"),
             ("wrong_profile", "专用离线演练镜像"),
             ("wrong_baseline", "兼容基线"),
+            ("wrong_fixture", "policy fixture"),
             ("socket_mount", "未授权挂载"),
         ):
             with self.subTest(mode=mode):

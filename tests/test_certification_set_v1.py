@@ -62,7 +62,7 @@ class CertificationSetV1Tests(unittest.TestCase):
                     "deb_basename": self.deb.name,
                     "deb_sha256": self.deb_sha,
                     "platform": "linux/amd64",
-                    "environment": "container",
+                    "environment": "container-kylin-policy-fixture-v1",
                     "os_id": "ubuntu",
                     "os_version": "20.04",
                     "network": "none",
@@ -93,7 +93,7 @@ class CertificationSetV1Tests(unittest.TestCase):
                     "compatibility_policy_sha256": self.policy_sha,
                     "delivery_inventory_sha256": "9" * 64,
                     "platform": "linux/amd64",
-                    "environment": "container",
+                    "environment": "container-kylin-policy-fixture-v1",
                     "os_id": "ubuntu",
                     "os_version": "20.04",
                     "network": "none",
@@ -414,6 +414,37 @@ class CertificationSetV1Tests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("log_sha256", result.stderr)
+
+    def test_current_certification_set_requires_kylin_policy_fixture_evidence(self):
+        canonical_session = json.loads(self.offline_log.read_text(encoding="utf-8"))
+        canonical_evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        cases = (
+            ("environment", "container"),
+            ("os_id", "debian"),
+            ("os_version", "22.04"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                session = dict(canonical_session)
+                session[field] = value
+                self.offline_log.write_text(
+                    json.dumps(session, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                evidence = dict(canonical_evidence)
+                evidence[field] = value
+                evidence["log_sha256"] = hashlib.sha256(
+                    self.offline_log.read_bytes()
+                ).hexdigest()
+                self.offline.write_text(
+                    json.dumps(evidence, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+                result = self.command()
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("current certification set requires", result.stderr)
 
     def test_current_certification_set_rejects_historical_offline_evidence(self):
         self.offline.write_text(

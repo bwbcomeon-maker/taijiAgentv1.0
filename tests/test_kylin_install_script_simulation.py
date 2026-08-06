@@ -39,6 +39,22 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertNotIn("$OUTPUT_DIR/management", text)
         self.assertNotIn("离线仓库", text)
 
+    def test_root_staging_preserves_deb_basename_bound_by_sha256_sidecar(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("stage_deb_with_sidecar", text)
+        self.assertIn('target="$stage/$(basename -- "$source")"', text)
+        self.assertIn('stage_regular_file "$source.sha256" "$target.sha256" 0600', text)
+        self.assertIn('STAGED_DEB_PATH="$target"', text)
+        self.assertIn('args[index + 1]="$STAGED_DEB_PATH"', text)
+        self.assertNotIn('="$(stage_deb_with_sidecar', text)
+        self.assertNotIn('"$stage/candidate.deb"', text)
+        self.assertNotIn('"$stage/previous.deb"', text)
+
+    def test_root_staging_cleanup_covers_hidden_files_without_recursive_delete(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn('find "$stage" -mindepth 1 -maxdepth 1 -type f -delete', text)
+        self.assertNotIn('rm -f -- "$stage"/*', text)
+
     def test_silent_deployer_declares_noninteractive_local_dpkg_contract(self):
         text = SILENT.read_text(encoding="utf-8")
         self.assertIn("DEBIAN_FRONTEND=noninteractive", text)

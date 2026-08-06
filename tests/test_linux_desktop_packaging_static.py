@@ -1598,6 +1598,48 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('uv sync "${sync_args[@]}"', setup)
         self.assertIn("retrying without --locked", setup)
 
+    def test_offline_builder_uv_index_is_explicit_and_matches_committed_lock(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        lock = read_text("hermes-local-lab/sources/hermes-agent/uv.lock")
+
+        match = re.search(
+            r'export UV_INDEX_URL="\$\{TAIJI_UV_INDEX_URL:-([^}]+)\}"',
+            builder,
+        )
+        self.assertIsNotNone(match)
+        default_index = match.group(1).rstrip("/")
+        registries = {
+            value.rstrip("/")
+            for value in re.findall(r'source = \{ registry = "([^"]+)" \}', lock)
+        }
+        self.assertEqual(registries, {default_index})
+        self.assertNotIn('export UV_INDEX_URL="${UV_INDEX_URL:-', builder)
+        self.assertIn(
+            "unset UV_INDEX UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_NO_INDEX UV_INDEX_STRATEGY UV_CONFIG_FILE",
+            builder,
+        )
+        self.assertIn("export UV_NO_CONFIG=1", builder)
+        self.assertLess(
+            builder.index("unset UV_INDEX UV_DEFAULT_INDEX"),
+            builder.index('export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-'),
+        )
+        self.assertLess(
+            builder.index("export UV_NO_CONFIG=1"),
+            builder.index('export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-'),
+        )
+
+    def test_offline_builder_records_whether_uv_used_locked_dependencies(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="unknown"', builder)
+        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="locked"', builder)
+        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"', builder)
+        self.assertIn('grep -Fq "retrying without --locked" "$setup_log"', builder)
+        self.assertIn(
+            "Python 依赖锁状态：%s\\n' \"$PYTHON_DEPENDENCY_LOCK_STATUS\"",
+            builder,
+        )
+
     def test_setup_local_installs_user_taiji_launcher(self):
         setup = read_text("hermes-local-lab/scripts/setup-local.sh")
 

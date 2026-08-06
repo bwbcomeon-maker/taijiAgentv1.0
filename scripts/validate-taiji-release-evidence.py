@@ -46,6 +46,7 @@ MAX_EVIDENCE_BYTES = 32 * 1024 * 1024
 PACKAGE_MANIFEST_SCHEMA_V3 = "taiji-package-manifest/v3"
 RELEASE_EVIDENCE_SCHEMA_V3 = "taiji-release-evidence/v3"
 OFFLINE_EVIDENCE_SCHEMA_V1 = "taiji.offline-install-rehearsal.v1"
+OFFLINE_REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
 CANONICAL_POLICY_ID = "taiji-linux-amd64-deb-v1"
 # Fallback for a validator copied into a target delivery directory.  When the
 # checked-in policy is available, ``canonical_policy_identity`` recomputes the
@@ -1430,7 +1431,11 @@ def validate_offline_evidence_v1(
     validate_fresh_timestamp(data["generated_at_utc"], "generated_at_utc")
     validate_session_id(data["rehearsal_session_id"], "rehearsal_session_id")
     validate_challenge(data["challenge_nonce"], args.challenge)
-    require_choice(data, "environment", {"container", "vm", "chroot"})
+    require_choice(
+        data,
+        "environment",
+        {"container", "vm", "chroot", OFFLINE_REHEARSAL_ENVIRONMENT},
+    )
     require_nonempty_string(data, "os_id")
     require_nonempty_string(data, "os_version")
     validate_sha256(data["deb_sha256"], "deb_sha256")
