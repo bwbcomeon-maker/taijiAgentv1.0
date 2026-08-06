@@ -209,22 +209,25 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             scripts_dir = install_root / "scripts"
             agent_dir = install_root / "runtime" / "agent"
             webui_dir = install_root / "runtime" / "web"
+            web_static_dir = webui_dir / "static"
             python_path = agent_dir / "venv" / "bin" / "python"
             desktop_app = install_root / "apps" / "taiji-desktop"
             electron_path = desktop_app / "node_modules" / "electron" / "dist" / "electron"
             desktop_entry = temp_root / "usr" / "share" / "applications" / "taiji-agent.desktop"
             desktop_icon = temp_root / "usr" / "share" / "icons" / "hicolor" / "512x512" / "apps" / "taiji-agent.png"
+            resource_icon = install_root / "resources" / "icons" / "taiji-agent.png"
             observed_env = temp_root / "observed-runtime-env.log"
 
             for directory in (
                 wrapper.parent,
                 scripts_dir,
                 python_path.parent,
-                webui_dir,
+                web_static_dir,
                 desktop_app / "src",
                 electron_path.parent,
                 desktop_entry.parent,
                 desktop_icon.parent,
+                resource_icon.parent,
             ):
                 directory.mkdir(parents=True, exist_ok=True)
 
@@ -286,10 +289,14 @@ class DebMaintainerLifecycleTest(unittest.TestCase):
             electron_path.write_bytes(elf_header)
             electron_path.chmod(0o755)
             desktop_entry.write_text(
-                "[Desktop Entry]\nExec=/usr/bin/taiji-agent\nIcon=taiji-agent\nTerminal=false\n",
+                "[Desktop Entry]\nExec=/usr/bin/taiji-agent\nIcon=taiji-agent\nTerminal=false\n"
+                "StartupWMClass=taiji-agent\nX-GNOME-WMClass=taiji-agent\n",
                 encoding="utf-8",
             )
-            desktop_icon.write_bytes(b"fixture icon\n")
+            icon_bytes = (ROOT / "hermes-local-lab" / "sources" / "hermes-webui" / "static" / "favicon-512.png").read_bytes()
+            desktop_icon.write_bytes(icon_bytes)
+            resource_icon.write_bytes(icon_bytes)
+            (web_static_dir / "favicon-512.png").write_bytes(icon_bytes)
 
             hostile_env = os.environ.copy()
             hostile_env.update(

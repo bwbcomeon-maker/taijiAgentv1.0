@@ -1107,6 +1107,9 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
                   normalizeTrustedExternalOrigins: () => []
                 };
               }
+              if (name === "./launch-profile") {
+                return require(path.join(path.dirname(mainPath), "launch-profile.js"));
+              }
               return require(name);
             };
             const sandbox = {

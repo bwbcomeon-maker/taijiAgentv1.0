@@ -7,3 +7,5 @@ Icon=taiji-agent
 Terminal=false
 Categories=Utility;
 StartupNotify=true
+StartupWMClass=taiji-agent
+X-GNOME-WMClass=taiji-agent

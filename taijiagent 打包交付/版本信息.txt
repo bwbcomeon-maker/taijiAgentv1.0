@@ -15,6 +15,14 @@ packaging/linux/certification-matrix.json 和 signed certification-set 形成认
 构建失败日志：保存在制包机 `${XDG_STATE_HOME:-~/.local/state}/taiji-agent/build-logs/`，
 不进入只含一个 DEB 的客户目录。
 
+构建临时根：不再默认使用 `/tmp`；制包脚本按用户缓存、`$HOME/.cache`、`/var/tmp`
+顺序选择通过 ELF 执行与动态库加载探针的 owner-only 目录，并将 `TMPDIR/TMP/TEMP`
+统一指向该目录。探针失败会在诊断中记录 `findmnt -T`，不得通过关闭麒麟安全策略绕过。
+
+产品图标：蓝色太极机器人 RGBA PNG 为 canonical；Web favicon/PWA、ICO、Linux hicolor
+32/48/64/128/192/256/512、AppStream、desktop-id/WM_CLASS、Electron 窗口和安装态资源
+均由同一图标链校验。真实目标机桌面缓存刷新和双击安装仍需单独验收。
+
 适用前提：Kylin/UOS/openKylin、x86_64/amd64、apt/dpkg、systemctl 和图形桌面；包内不
 捆绑 glibc。所有系统能力必须满足 canonical policy。RPM-only、
 ARM/aarch64、无图形桌面或强隔离环境需要另行制品或现场方案。
