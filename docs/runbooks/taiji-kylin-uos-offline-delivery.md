@@ -107,6 +107,8 @@ Python；它会先通过 apt 安装 `python3`/`python3-dev` 和其余构建依�
 
 源码、Node/uv 工具链和所有 npm/Python 临时文件统一位于选中的构建根下，脚本导出 `TMPDIR`、`TMP`、`TEMP` 指向该根。只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、sidecar 或 `.build-success` 缺失时仍属于失败。Electron 下载归档必须与 canonical policy 固定的版本、basename 和 SHA256 一致，且实际写入 DEB 的整个 `dist/` 文件清单及逐文件内容必须与该归档一致；不再只检查 8 个 ELF。构建时还会验证蓝色太极 Logo 的 RGBA PNG、hicolor 多尺寸、AppStream、desktop-id/WM_CLASS、Electron 窗口图标和安装态资源同源。
 
+最终 ELF 闭包审计必须采用 **payload closed-world** 口径：每个最终 ELF 的 `DT_NEEDED` 只能由 DEB payload 内的 ELF、policy 明确允许的 Electron companion、审计器固定的基础运行时边界或 `required_system_sonames` 解决。制包机 sysroot 可以作为私有库暂存阶段的受信来源，但绝不能替最终 DEB“证明运行时已经有这个库”。否则制包机安装的完整 GTK/Electron 构建依赖会掩盖 DEB 中实际缺失的传递依赖，直到干净终端的 `postinst` 才以 `ldd ... not found` 失败。需要随产品携带的库必须进入 `/opt/taiji-agent/runtime/lib` 并受 `allowed_private_sonames` 约束；由目标系统提供的少量核心图形/安全库必须进入 `required_system_sonames`，不能留作未分类依赖。
+
 `00` 重试时只处理自己能够证明归属的路径：已知的上轮产物和安全的旧 PID `.验收工具.tmp-*` 会自动归档到内部 `旧版备份/`；符号链接、非当前用户节点、硬链接或其它不安全残留会 fail closed，不会静默覆盖。上轮输出目录整体移入本轮 PID 备份后，如果创建新目录失败或收到信号，只会在状态证明新目录由本轮创建、仍为当前用户所有的实体空目录时删除并恢复旧输出；出现任何未知内容则绝不覆盖。验收工具也先写入本轮临时目录，再把旧目录移入带本轮 PID 的备份；如果发布的第二次移动失败，或在替换窗口收到 `INT`、`TERM`、`HUP`，`EXIT` 清理会在目标路径仍缺失时恢复本轮备份。
 
 ### 5.3 在受控发布机执行断网生命周期演练
@@ -136,6 +138,8 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 ```
 
 输出目录必须事先不存在。生产器应验证镜像角色、`ubuntu-20.04` 兼容基线和 `kylin-os-release-v1` fixture label，使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。runner 必须先在未改动的镜像状态核对真实 Ubuntu 20.04 和断网状态，之后才可在该一次性容器内原子激活 Kylin policy fixture：只把可信 `/usr/lib/os-release` 改成 `ID=kylin`、建立 canonical `/etc/os-release` 软链接并创建桌面会话目录；候选 DEB、canonical policy 和生产 `preinst` 均不得改动或绕过。
+
+演练镜像不得安装一整套宽泛桌面依赖来制造假绿。`tools/taiji-offline-rehearsal/ubuntu20-required-system-packages.tsv` 必须与 canonical policy 的 `required_system_sonames` 一一对应；镜像只安装这组 Ubuntu 20.04 系统边界包，并用 `ctypes.CDLL` 在镜像构建阶段逐个确认 SONAME 可加载。其余非核心依赖必须由候选 DEB 自己闭合。映射缺项、多项或把 payload 私有库偷偷放进演练基线，都应在 Docker 启动候选安装前失败。
 
 仓库官方 Docker producer 的正式输出为 `schema=taiji.offline-install-rehearsal.v1`、`status=PASS` 的结构化证据，绑定 source commit、version、DEB/policy 摘要、`delivery_inventory_sha256` 和同目录会话日志。该 producer 的 `environment` 固定为 `container-kylin-policy-fixture-v1`，`os_id/os_version` 仍如实记录容器基线 `ubuntu/20.04`；这只证明未修改候选 DEB 在兼容基线上的断网 `dpkg` install/remove/purge/reinstall 与维护脚本链，不证明运行了真实麒麟、统信或 openKylin。`desktop_app_verified` 和 `target_verified` 必须保持 `false`。通用 v1 schema/validator 为历史证据保留 `container/vm/chroot` 的读取与绑定校验兼容，但当前 certification set 组装门禁只接受上述新 fixture 身份与 Ubuntu 20.04 基线，旧 v1 不能进入当前发布认证集合，也不能充当真实目标机证据。validator 后续复核时会重算当前交付清单摘要；演练后替换验收工具、脚本或任一未排除交付文件，都会使旧证据失效。当前 v3 证据不包含 target baseline 字段。历史 v2 只能通过 validator 的显式 `--legacy-v2-read-only` 路径查看，不能作为当前发布证据。
 
@@ -226,7 +230,7 @@ SHA256SUMS.txt
 ### 7.1 Docker 可以覆盖
 
 - Linux amd64 架构和 Ubuntu 20.04/glibc 2.31 兼容基线。
-- Linux Python、Node 和 Electron runtime 的构建与 ELF/共享库审计。
+- Linux Python、Node 和 Electron runtime 的构建，以及不借用 build sysroot 的最终 payload closed-world ELF/共享库审计。
 - DEB payload、manifest、sidecar、`.build-success` 和单 DEB 产物绑定完整性。
 - `--network none` 下的安装、非 GUI 验证、卸载和重装。
 - root-owned staging、同版本重装、旧包清理和 apt/dpkg 状态转换。
@@ -247,6 +251,8 @@ SHA256SUMS.txt
 ### 7.3 安装、升级与卸载生命周期边界
 
 - `postinst configure` 必须在无图形、无用户 HOME 的 system-only 环境中执行安装态原生校验；脚本权限、Electron `chrome-sandbox` 或 native verify 任一失败都必须返回非零。重复执行 `dpkg --configure taiji-agent` 应可安全重试。
+- `preinst` 必须在解包前探测 canonical policy 声明的全部 `required_system_sonames`：真实目标机使用受信 `ldconfig -p`，模拟根只检查受控的标准 x86_64 库目录；缺失任一项时以 `TAIJI-LINUX-E014-RUNTIME` 失败关闭，禁止先写入半包再碰运气。
+- 静默部署器执行 `dpkg --install` 时必须把完整输出写入 root-only 临时日志；返回非零时在清理前向操作员回显最后 80 行。不得再把维护者脚本和 native verify 的关键错误重定向到 `/dev/null`，否则现场只能看到笼统失败并被迫重复制包。
 - 已由 `dpkg` 管理的现有安装直接走 apt/dpkg 原生升级或同版本重装；`02` 不得预先 unhold、purge、强制删除包状态或手工删除 `/opt/taiji-agent`。
 - `02` 提权后复制候选 DEB 或 N-1 DEB 时，必须把 DEB 与同名 `.sha256` 作为一组暂存，并保留 manifest/sidecar 绑定的原始 DEB basename；不得改名为 `candidate.deb`、`previous.deb` 等内部别名。sidecar 首行的 basename 与实际暂存 DEB 不同必须在调用 `dpkg` 前以 `DEB_SHA256_SIDECAR_MISMATCH` 或 `PREVIOUS_DEB_SHA256_SIDECAR_MISMATCH` 失败关闭。
 - 没有 `dpkg` 状态但存在旧系统安装时，`02` 仅允许清理固定白名单内的 legacy 路径；用户 XDG 配置、授权、密钥、会话和附件不在清理范围。
@@ -263,6 +269,13 @@ SHA256SUMS.txt
 - **未实时验证**：真实麒麟、统信或 openKylin 终端；真实 `dpkg` maintainer failure 后的 N-1 自动回滚；真实 detached signature 验签；真实图形桌面安装和升级/卸载。
 - **验收边界**：上述聚焦测试只证明当前分支代码和模拟夹具的合同，不提升“制包机已构建”“离线安装已演练”或“目标机已验证”任一证据等级；冻结源码后仍须在 Linux amd64 制包机重建 DEB、执行断网生命周期，再绑定真实目标机证据。
 
+### 7.5 本轮 ELF 闭包修复验证台账
+
+- **真实失败证据**：旧候选 DEB 在干净 Ubuntu 20.04 兼容演练容器中执行 `dpkg --install` 返回非零并留下 `half-configured`；`postinst` native verify 日志显示 Electron 多项传递共享库 `not found`。旧 ABI 报告同时显示这些 SONAME 曾被制包机 sysroot 错误满足，因此旧候选不得继续交付。
+- **已实时验证（分支源码级）**：修复前新增的 5 个负向合同稳定失败；独立复审提出的隐式非 glibc 系统边界和 i386-only provider 缺口也先由负向测试复现，再纳入 canonical policy 与 `preinst`。最终 486 项完整 Python 测试通过、2 项按平台条件跳过，全部受控 shell 脚本通过 `bash -n`，`git diff --check` 通过；独立复审为 P0=0、P1=0。Ubuntu 20.04 amd64 演练镜像已按 16 项 required-system 映射成功重建，但此时尚未向它投入本轮新 DEB，不能据此记为离线安装已演练。
+- **冻结前仍须闭合**：从正式 `main` 生成新的制包输入包，在 Linux amd64 从头重建同一源码身份的 DEB；对实际 DEB 重跑 closed-world ABI 报告，并在新演练镜像中以 `--network none` 完成 install/remove/purge/reinstall。任何新建镜像或新产物结果都必须绑定最终 source commit、manifest 和 DEB SHA256 后才可提升证据等级。
+- **未实时验证**：本轮新 DEB 的完整制包结果、断网生命周期结果，以及真实麒麟、统信或 openKylin 图形终端的双击安装、桌面启动、窗口图标、模型对话和附件流程。Docker 通过后的最高口径仍是“离线安装已演练”，不能写成“目标机已验证”。
+
 ## 8. 已确认故障经验矩阵
 
 下表只记录本轮已经出现的真实失败，或已由针对性负向测试证明的高风险缺口。未验证猜测不得升级为长期规则。
@@ -278,7 +291,7 @@ SHA256SUMS.txt
 | DEB 已完成 Electron staging 后，`render-preinst.py` 在系统 Python 3.8 报 `TypeError: unsupported operand type(s) for \|` | 预安装脚本生成器的类型注解会在模块加载时求值，使用了 Python 3.10 才原生支持的 union 写法；既有 Python 3.8 门禁遗漏了这个真实 build-deb 入口 | 生成器启用 postponed annotations；Python 3.8 门禁补齐 preinst renderer 和 payload verifier 两个系统 Python 入口 | 修复前真实 Python 3.8 容器稳定复现；修复后门禁必须同时 compile、import 全部入口并继续端到端制包 | 由当前正式输入包的 Ubuntu 20.04 amd64 重放暴露；只证明生成器兼容，仍须继续到单一 DEB 和最终发布预检 |
 | 构建已进入 DEB 真实解包时报 `No space left on device` | 旧脚本没有在重建构建根后核对可用 block/inode；最终预检又硬编码使用 `/tmp`，绕过已选中的 `BUILD_ROOT/TMPDIR` | `00` 在解匋源码前强制至少 12 GiB 和 100000 inode；`01` 的源码比对与 DEB 真实解包统一使用受控 `TMPDIR`，并在分配前复核空间和 inode；`df` 自身失败也转换为明确诊断 | 低 block、低 inode、`df` 非零和临界通过动态回归；静态保证容量门禁早于源码解压且预检不再硬编码 `/tmp` | 由 Ubuntu 20.04 amd64 端到端制包重放暴露；门禁值是制包下限，仍建议现场预留 20 GiB |
 | DEB 已生成，最终发布预检报 `awk: unexpected character '\\'` | 单引号包围的 awk 程序内又对双引号加了多余反斜杠；macOS 侧未走到实物 sidecar 分支，Ubuntu/Kylin 常用 `mawk` 拒绝该语法 | 修正 sidecar 文件名和 ABI marker 两处 awk 程序；用真实 Bash/awk 执行 sidecar 解析夹具 | 回归要求预检脚本不含此类转义，且端到端重放必须到达“发布预检通过” | 修复后已在完整 DEB 上断网执行下游预检并返回 0；冻结新提交后仍须从头重建 |
-| Electron `ldd` 审计报告缺共享库 | 最小制包容器没有安装执行 Electron 审计所需的系统库 | 制包依赖阶段安装 DEB 声明的 Electron runtime 库 | Electron 必须为 Linux amd64 ELF，`ldd` 不得出现 `not found` | 当前候选 payload audit 已覆盖 |
+| 旧候选 DEB 已生成，但干净演练容器的 `dpkg --install` 返回非零、包状态停在 `half-configured`，`postinst` 日志出现多项 Electron `ldd ... not found` | 旧 ELF closure 把制包机 sysroot 中的 provider 当成最终 payload 的运行时 provider；制包机安装的完整 GTK/Electron 构建依赖掩盖了 DEB 中缺失的传递库，旧报告仍留下未分类 external SONAME | 最终审计改为 payload closed-world；需随产品携带的库按 policy 暂存到私有目录，系统边界收敛为显式 `required_system_sonames`；演练镜像只按一一映射安装这组系统包，`preinst` 在解包前探测，静默部署失败时回显 dpkg 最后 80 行 | sysroot-only provider 必须被 final audit 拒绝；policy/Ubuntu 20.04 映射键集合必须完全相等；缺 required SONAME 必须返回 `TAIJI-LINUX-E014-RUNTIME`；新候选必须在 `--network none` 完成 install/remove/purge/reinstall 且 native verify 无 `not found` | 由旧候选实物安装失败暴露；源码回归不能证明新 DEB 已构建，更不能替代真实 Kylin/UOS/openKylin 图形终端验收 |
 | Electron 版本和 8 个 ELF 正确，但 `resources.pak`/ICU/snapshot/locales 可被替换 | policy 声明了整包 `archive_sha256`，旧 stager 却没有消费该字段，非 ELF 只检查“存在” | npm 使用受控私有 Electron cache；只选择 basename/version/SHA256 与 canonical policy 相同的 Linux x64 ZIP；stager 再把最终 staged `dist/` 清单及每个文件与固定 ZIP 比对 | 非 ELF 篡改、归档篡改、文件清单漂移回归；官方 `39.8.10 linux-x64` 归档实物验证 | 本机已实时核对官方 ZIP SHA256 为 `92e8b031...eabd1`；Kylin 制包仍待重跑 |
 | manifest、最终预检或重试清理出现只读模板 `Permission denied` | 内置模板有意使用 `0444/0555`；普通制包用户能够校验内容，但不能直接删除无写权的解包目录；中断时原脚本也没有退出清理 | 构建根仍只按 owner marker 清理；发布预检只允许清理 `TMPDIR` 直接子级且 basename 为 `taiji-release-*` 的实体目录，不跟随软链接地逐目录恢复 owner 写权限；`EXIT/INT/TERM/HUP` 幂等清理保留原退出码 | `000` 嵌套 payload 清理、非受控路径拒绝和 `TERM` 中断动态回归 + 完整 DEB 断网下游预检 | 修复后已在上一轮完整 DEB 上返回 0；冻结新提交后仍须从头重建 |
 | Kylin 制包在 `/tmp` 首个原生模块测试报 `failed to map segment from shared object` | 目标机安全策略对 `/tmp` 执行或动态库映射有限制，构建工具虽下载成功但 native `.node` 无法加载 | 默认不再使用 `/tmp`；选择 owner-only 用户缓存或 `/var/tmp` 构建根，并在解包/下载前真实运行 ELF 和 `ctypes.CDLL` 探针 | 候选根按顺序尝试；显式根探针失败立即退出；诊断包含候选、阶段、原始错误和 `findmnt` | 根因来自 2026-08-06 Kylin 日志；当前修复尚未在该制包机重建 |

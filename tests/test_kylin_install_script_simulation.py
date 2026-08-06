@@ -65,6 +65,83 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertNotIn("apt update", text)
         self.assertNotIn("ONLINE_OK", text)
 
+    def test_silent_deployer_surfaces_dpkg_maintainer_failure_details(self):
+        text = SILENT.read_text(encoding="utf-8")
+        install_body = text[
+            text.index("install_local_deb() {") : text.index("\nmain() {", text.index("install_local_deb() {"))
+        ]
+
+        self.assertIn("DPKG_LOG_PATH", install_body)
+        self.assertIn('tail -n 80 -- "$DPKG_LOG_PATH"', install_body)
+        self.assertIn("DPKG_INSTALL_FAILED", install_body)
+        self.assertNotIn('dpkg --install --force-confold -- "$DEB_PATH" >/dev/null 2>&1', install_body)
+
+    def test_silent_deployer_dynamically_tails_and_cleans_private_dpkg_log(self):
+        with tempfile.TemporaryDirectory(prefix="taiji-dpkg-log-") as temporary:
+            root = Path(temporary)
+            library = root / "taiji-silent-deploy-library.sh"
+            source = SILENT.read_text(encoding="utf-8")
+            self.assertTrue(source.rstrip().endswith('main "$@"'))
+            library.write_text(source.rsplit('main "$@"', 1)[0], encoding="utf-8")
+            stage = root / "stage"
+            stage.mkdir(mode=0o700)
+            deb = root / "candidate.deb"
+            deb.write_bytes(b"fake")
+            result_file = root / "harness-result.txt"
+            harness = r'''
+source "$1"
+chmod() {
+  local mode="$1"
+  shift
+  if [ "${1:-}" = "--" ]; then shift; fi
+  command chmod "$mode" "$@"
+}
+dpkg() {
+  local index
+  for index in $(seq 1 90); do
+    printf 'maintainer-line-%03d\n' "$index"
+  done
+  return 42
+}
+read_dpkg_status() { printf 'half-configured\n'; }
+read_dpkg_version() { printf '\n'; }
+manual_recovery() {
+  local mode
+  mode="$(stat -c '%a' "$DPKG_LOG_PATH" 2>/dev/null || stat -f '%Lp' "$DPKG_LOG_PATH")"
+  printf 'mode=%s\nerror_stage=%s\nerror_code=%s\nlog_path=%s\n' \
+    "$mode" "$1" "$2" "$DPKG_LOG_PATH" > "$HARNESS_RESULT"
+  cleanup_staged_deb
+  exit "$3"
+}
+STAGING_DIR="$HARNESS_STAGE"
+DEB_PATH="$HARNESS_DEB"
+OPERATION=fresh_install
+install_local_deb
+'''
+            completed = subprocess.run(
+                ["/bin/bash", "-c", harness, "taiji-dpkg-log-test", str(library)],
+                env={
+                    **os.environ,
+                    "HARNESS_STAGE": str(stage),
+                    "HARNESS_DEB": str(deb),
+                    "HARNESS_RESULT": str(result_file),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 42, completed.stderr)
+            self.assertIn("DPKG_INSTALL_FAILED", completed.stderr)
+            self.assertIn("maintainer-line-090", completed.stderr)
+            self.assertNotIn("maintainer-line-001", completed.stderr)
+            result = result_file.read_text(encoding="utf-8")
+            self.assertIn("mode=600", result)
+            self.assertIn("error_stage=dpkg", result)
+            self.assertIn("error_code=DPKG_INSTALL_FAILED", result)
+            log_path = Path(result.split("log_path=", 1)[1].strip())
+            self.assertFalse(log_path.exists())
+            self.assertFalse(stage.exists())
+
     def test_dpkg_receives_only_root_owned_staged_copy_after_second_hash(self):
         text = SILENT.read_text(encoding="utf-8")
         self.assertIn("stage_candidate_for_install", text)

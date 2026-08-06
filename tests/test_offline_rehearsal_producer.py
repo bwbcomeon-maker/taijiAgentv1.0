@@ -20,6 +20,9 @@ POLICY = ROOT / "packaging" / "linux" / "compatibility-policy.json"
 POLICY_HELPER = ROOT / "packaging" / "linux" / "compatibility_policy.py"
 DOCKERFILE = ROOT / "tools" / "taiji-offline-rehearsal" / "Dockerfile"
 LIFECYCLE = ROOT / "tools" / "taiji-offline-rehearsal" / "run-lifecycle.sh"
+REQUIRED_SYSTEM_PACKAGES = (
+    ROOT / "tools" / "taiji-offline-rehearsal" / "ubuntu20-required-system-packages.tsv"
+)
 CHALLENGE = "ab" * 32
 SALE_READINESS = ROOT / "docs" / "taiji-sale-readiness.md"
 DELIVERY_GUIDE = ROOT / "taijiagent 打包交付" / "操作说明.md"
@@ -564,6 +567,39 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertIn('! -e /opt/taiji-agent', lifecycle)
         self.assertIn('"schema": "taiji.offline-install-rehearsal.v1"', lifecycle)
         self.assertNotIn("ONLINE_OK=1", lifecycle)
+
+    def test_rehearsal_image_installs_only_the_policy_required_system_boundary(self):
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        expected = {
+            "libdbus-1.so.3": "libdbus-1-3",
+            "libdrm.so.2": "libdrm2",
+            "libgbm.so.1": "libgbm1",
+            "libGL.so.1": "libgl1",
+            "libEGL.so.1": "libegl1",
+            "libGLX.so.0": "libglx0",
+            "libgcrypt.so.20": "libgcrypt20",
+            "libgnutls.so.30": "libgnutls30",
+            "libgssapi_krb5.so.2": "libgssapi-krb5-2",
+            "libmount.so.1": "libmount1",
+            "libselinux.so.1": "libselinux1",
+            "libudev.so.1": "libudev1",
+            "libgcc_s.so.1": "libgcc-s1",
+            "libstdc++.so.6": "libstdc++6",
+            "libz.so.1": "zlib1g",
+            "libcrypt.so.1": "libcrypt1",
+        }
+        mapping = {
+            line.split("\t", 1)[0]: line.split("\t", 1)[1]
+            for line in REQUIRED_SYSTEM_PACKAGES.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+
+        self.assertEqual(mapping, expected)
+        self.assertEqual(set(mapping), set(policy["elf"]["required_system_sonames"]))
+        self.assertIn("COPY ubuntu20-required-system-packages.tsv", dockerfile)
+        self.assertIn("xargs -r apt-get install -y --no-install-recommends", dockerfile)
+        self.assertIn("ctypes.CDLL", dockerfile)
 
     def test_lifecycle_activates_policy_fixture_only_after_real_baseline_and_network_checks(self):
         lifecycle = LIFECYCLE.read_text(encoding="utf-8")

@@ -122,6 +122,19 @@ class LinuxCompatibilityPolicyTest(unittest.TestCase):
             changed["elf"]["required_system_sonames"].append("libX11.so.6")
             self.assert_rejected(self.write_policy(temp_dir, changed))
 
+    def test_non_glibc_runtime_boundary_is_explicitly_required(self):
+        elf = self.policy["elf"]
+        required_system = set(elf["required_system_sonames"])
+        forbidden = set(elf["forbidden_bundled_sonames"])
+        non_glibc_runtime = {
+            "libgcc_s.so.1",
+            "libstdc++.so.6",
+            "libz.so.1",
+            "libcrypt.so.1",
+        }
+        self.assertTrue(non_glibc_runtime <= required_system)
+        self.assertTrue(non_glibc_runtime <= forbidden)
+
     def test_electron_distribution_is_pinned_by_path_soname_hash_and_literal(self):
         self.assertIn("electron_distribution", self.policy["elf"])
         distribution = self.policy["elf"]["electron_distribution"]

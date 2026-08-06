@@ -450,7 +450,7 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
         self.assertIn("TAIJI_PRIVATE_LIBRARY_DIR", runtime_env)
         self.assertNotIn("/etc/ld.so.conf", source_verifier)
 
-    def test_sysroot_candidate_requires_matching_authoritative_soname(self):
+    def test_final_payload_rejects_noncore_dependency_available_only_in_build_sysroot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "payload"
             sysroot = Path(temp_dir) / "sysroot"
@@ -462,52 +462,59 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 "runtime/agent/bin/python",
                 dynamic=(
                     "0x0000000000000001 (NEEDED) Shared library: "
-                    "[libasound.so.2]"
+                    "[libbuildhost-only.so.1]"
                 ),
             )
             self.fake_elf(
                 sysroot,
-                "libasound.so.2",
+                "libbuildhost-only.so.1",
                 dynamic=(
                     "0x000000000000000e (SONAME) Library soname: "
-                    "[libother.so.1]"
+                    "[libbuildhost-only.so.1]"
                 ),
             )
             with self.install_readelf_stub():
-                with self.assertRaisesRegex(self.audit.ElfAuditError, "unresolved"):
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "unresolved SONAME"):
                     self.audit.audit_root(root, self.policy, sysroot)
 
-    def test_sysroot_scan_ignores_unrelated_symlinks_that_leave_library_directory(self):
+    def test_allowlisted_private_dependency_must_exist_in_payload_not_only_sysroot(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "payload"
             sysroot = Path(temp_dir) / "sysroot"
             root.mkdir()
             sysroot.mkdir()
             self.readelf_outputs = {}
+            policy = copy.deepcopy(self.policy)
+            private = "libprivate-fixture.so.1"
+            policy["elf"]["allowed_private_sonames"].append(private)
             self.fake_elf(
                 root,
                 "runtime/agent/bin/python",
                 dynamic=(
                     "0x0000000000000001 (NEEDED) Shared library: "
-                    "[libasound.so.2]"
+                    f"[{private}]"
                 ),
             )
             self.fake_elf(
                 sysroot,
-                "libasound.so.2.0.0",
+                private,
                 dynamic=(
                     "0x000000000000000e (SONAME) Library soname: "
-                    "[libasound.so.2]"
+                    f"[{private}]"
                 ),
             )
-            outside = Path(temp_dir) / "libpython3.8.a"
-            outside.write_bytes(b"development-only static archive")
-            (sysroot / "libpython3.8.a").symlink_to(outside)
-
             with self.install_readelf_stub():
-                report = self.audit.audit_root(root, self.policy, sysroot)
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "unresolved private SONAME"):
+                    self.audit.audit_root(root, policy, sysroot)
 
-            self.assertIn("libasound.so.2", report["private_sonames"])
+            self.fake_elf(
+                root,
+                f"runtime/lib/{private}",
+                dynamic=f"0x000000000000000e (SONAME) Library soname: [{private}]",
+            )
+            with self.install_readelf_stub():
+                report = self.audit.audit_root(root, policy)
+            self.assertIn(private, report["private_sonames"])
 
     def test_rejects_unknown_bundled_soname_even_when_unreferenced(self):
         with tempfile.TemporaryDirectory() as temp_dir:

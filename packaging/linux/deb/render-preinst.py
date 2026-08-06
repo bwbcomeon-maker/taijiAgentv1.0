@@ -33,6 +33,9 @@ TOKENS = {
     "@@TAIJI_DESKTOP_DIRS@@": lambda policy: " ".join(
         policy["system_capabilities"]["desktop_session_dirs"]
     ),
+    "@@TAIJI_REQUIRED_SYSTEM_SONAMES@@": lambda policy: " ".join(
+        policy["elf"]["required_system_sonames"]
+    ),
     "@@TAIJI_LOOPBACK_PATH@@": lambda policy: policy["system_capabilities"]["loopback_path"],
     "@@TAIJI_INSTALL_ROOT_PARENT@@": lambda policy: policy["system_capabilities"]["install_root_parent"],
     "@@TAIJI_DISK_HEADROOM_MIB@@": lambda policy: str(

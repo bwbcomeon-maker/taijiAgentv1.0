@@ -39,12 +39,37 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         subprocess.run(["/bin/bash", "-n", str(output)], check=True)
         return output
 
+    def test_ldconfig_parser_accepts_only_x86_64_provider(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rendered = self.render(Path(temp_dir))
+            command = 'source "$1"; ldconfig_cache_has_amd64_soname "$2"'
+            i386_only = subprocess.run(
+                ["/bin/bash", "-c", command, "taiji-preinst-test", str(rendered), "libdbus-1.so.3"],
+                input="libdbus-1.so.3 (libc6) => /lib/i386-linux-gnu/libdbus-1.so.3\n",
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            amd64 = subprocess.run(
+                ["/bin/bash", "-c", command, "taiji-preinst-test", str(rendered), "libdbus-1.so.3"],
+                input=(
+                    "libdbus-1.so.3 (libc6,x86-64, OS ABI: Linux 3.2.0) "
+                    "=> /lib/x86_64-linux-gnu/libdbus-1.so.3\n"
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(i386_only.returncode, 0)
+            self.assertEqual(amd64.returncode, 0, amd64.stderr)
+
     def make_root(self, temp_root: Path, *, os_id="kylin") -> tuple[Path, Path]:
         root = temp_root / "root"
         (root / "etc").mkdir(parents=True)
         (root / "usr/lib").mkdir(parents=True)
         (root / "usr/bin").mkdir(parents=True)
         (root / "usr/share/xsessions").mkdir(parents=True)
+        (root / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
         (root / "sys/class/net/lo").mkdir(parents=True)
         (root / "opt").mkdir(parents=True)
         for command in ("apt-get", "dpkg", "systemctl"):
@@ -57,6 +82,9 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         )
         (root / "usr/lib/os-release").chmod(0o644)
         (root / "etc/os-release").symlink_to("../usr/lib/os-release")
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        for soname in policy["elf"]["required_system_sonames"]:
+            (root / "usr/lib/x86_64-linux-gnu" / soname).touch()
         return root, root / "etc/os-release"
 
     def call_verifier(
@@ -237,6 +265,19 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                     (root / ".taiji-disk-headroom-mib").write_text("0\n", encoding="utf-8")
                 rendered = self.render(temp_root)
                 self.assert_blocked(rendered, root, os_release, code)
+
+    def test_missing_policy_required_system_soname_is_blocked_before_unpack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            policy = json.loads(POLICY.read_text(encoding="utf-8"))
+            missing = policy["elf"]["required_system_sonames"][0]
+            (root / "usr/lib/x86_64-linux-gnu" / missing).unlink()
+            rendered = self.render(temp_root)
+            payload = self.assert_blocked(
+                rendered, root, os_release, "TAIJI-LINUX-E014-RUNTIME"
+            )
+            self.assertIn("TAIJI-LINUX-E014-RUNTIME", payload["failed_capabilities"])
 
     def test_opt_noexec_known_kysec_or_sandbox_denial_is_blocked_before_install(self):
         cases = (

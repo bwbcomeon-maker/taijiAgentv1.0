@@ -428,7 +428,7 @@ audit_deb_payload() {
     --print-digest)"
   [ "$extracted_icon_sha256" = "$ICON_SET_SHA256" ] \
     || fail "Extracted DEB icon digest changed during packaging"
-  python3 "$ELF_AUDITOR" --root "$audit_root" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$extracted_abi" >/dev/null
+  python3 "$ELF_AUDITOR" --root "$audit_root" --policy "$POLICY_FILE" --output "$extracted_abi" >/dev/null
   cmp -s "$ABI_BUILD_REPORT" "$extracted_abi" || fail "ELF ABI audit changed after DEB extraction"
 }
 
@@ -567,7 +567,7 @@ ICON_SET_SHA256="$(python3 "$ICON_VALIDATOR" \
   --print-digest)"
 printf '%s\n' "$ICON_SET_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
   || fail "Canonical icon digest is invalid"
-python3 "$ELF_AUDITOR" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$ABI_BUILD_REPORT" >/dev/null
+python3 "$ELF_AUDITOR" --root "$PKG_ROOT" --policy "$POLICY_FILE" --output "$ABI_BUILD_REPORT" >/dev/null
 install -m 0644 "$ABI_BUILD_REPORT" "$ABI_REPORT_PATH"
 python3 "$PREINST_RENDERER" --template "$SCRIPT_DIR/preinst" --policy "$POLICY_FILE" --output "$PKG_ROOT/DEBIAN/preinst"
 install -m 0755 "$SCRIPT_DIR/postinst" "$PKG_ROOT/DEBIAN/postinst"

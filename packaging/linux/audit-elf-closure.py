@@ -35,18 +35,17 @@ _TAIJI_BUILD_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _KNOWN_EXTERNAL_SONAMES = {
+    # This implicit boundary is restricted to objects shipped by the declared
+    # libc6 dependency.  Every other system provider must be declared by the
+    # canonical policy so preinst and the offline rehearsal can probe it.
     "ld-linux-x86-64.so.2",
     "libc.so.6",
     "libdl.so.2",
     "libm.so.6",
     "libpthread.so.0",
     "librt.so.1",
-    "libgcc_s.so.1",
-    "libstdc++.so.6",
-    "libz.so.1",
     "libresolv.so.2",
     "libutil.so.1",
-    "libcrypt.so.1",
     "libnss_compat.so.2",
     "libnss_dns.so.2",
     "libnss_files.so.2",
@@ -379,30 +378,17 @@ def _inspect_elf(path: Path) -> dict[str, Any]:
     }
 
 
-def _sysroot_soname_candidates(sysroot: Path, soname: str) -> list[Path]:
-    if not sysroot or not sysroot.is_dir():
-        return []
-    candidates: list[Path] = []
-    seen_inodes: set[tuple[int, int]] = set()
-    for candidate in _iter_regular_files(sysroot, require_internal_symlinks=False):
-        if candidate.name != soname and not candidate.name.startswith(soname + "."):
-            continue
-        try:
-            metadata = candidate.stat()
-            inode_key = (metadata.st_dev, metadata.st_ino)
-            if inode_key in seen_inodes:
-                continue
-            seen_inodes.add(inode_key)
-            if _looks_like_elf(candidate):
-                dynamic = parse_readelf_dynamic(run_readelf(candidate, "-d"))
-                if dynamic["soname"] == soname:
-                    candidates.append(candidate)
-        except ElfAuditError:
-            raise
-    return candidates
+def audit_root(
+    root: Path,
+    policy: dict[str, Any],
+    _build_sysroot: Path | None = None,
+) -> dict[str, Any]:
+    """Audit the final payload as a closed world.
 
-
-def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) -> dict[str, Any]:
+    ``_build_sysroot`` remains as a deliberately ignored compatibility
+    argument for direct callers.  A build host may supply bytes to the private
+    library stager, but it must never satisfy a final payload dependency.
+    """
     records: list[dict[str, Any]] = []
     root_sonames: dict[str, list[str]] = {}
     private_allowed = set(policy["elf"]["allowed_private_sonames"])
@@ -457,6 +443,7 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
     private_sonames: set[str] = set()
     external_sonames: set[str] = set()
     available_sonames = set(root_sonames)
+    resolution_errors: set[str] = set()
     for record in records:
         for soname in record["needed"]:
             if soname in electron_companion_sonames:
@@ -471,9 +458,10 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
                 private_sonames.add(soname)
                 candidates = root_sonames.get(soname, [])
                 if not candidates:
-                    candidates = [str(path) for path in _sysroot_soname_candidates(sysroot, soname)]
-                if not candidates:
-                    raise ElfAuditError(f"unresolved private SONAME {soname}: {record['relative_path']}")
+                    resolution_errors.add(
+                        f"unresolved private SONAME {soname}: {record['relative_path']}"
+                    )
+                    continue
                 if len(candidates) > 1:
                     raise ElfAuditError(f"ambiguous private SONAME {soname}: {record['relative_path']}")
                 continue
@@ -485,11 +473,12 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
                 )
             if soname in required_system or soname in _KNOWN_EXTERNAL_SONAMES:
                 continue
-            candidates = _sysroot_soname_candidates(sysroot, soname)
-            if len(candidates) == 0:
-                raise ElfAuditError(f"unresolved SONAME {soname}: {record['relative_path']}")
-            if len(candidates) > 1:
-                raise ElfAuditError(f"ambiguous SONAME {soname}: {record['relative_path']}")
+            resolution_errors.add(f"unresolved SONAME {soname}: {record['relative_path']}")
+
+    if resolution_errors:
+        raise ElfAuditError(
+            "unresolved ELF closure: " + "; ".join(sorted(resolution_errors))
+        )
 
     files = [
         {
@@ -611,10 +600,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--sysroot", type=Path)
     args = parser.parse_args(argv)
     policy = load_policy(args.policy)
-    report = audit_root(args.root, policy, args.sysroot)
+    report = audit_root(args.root, policy)
     write_report(args.output, report)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0

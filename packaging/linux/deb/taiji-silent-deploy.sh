@@ -73,6 +73,7 @@ STAGING_DIR=""
 STAGED_DEB_PATH=""
 STAGED_PREVIOUS_DEB_PATH=""
 STAGED_PREVIOUS_SIGNATURE_PATH=""
+DPKG_LOG_PATH=""
 RECEIPT_DEB_BASENAME=""
 HAS_DEB=0
 HAS_EXPECTED_VERSION=0
@@ -248,10 +249,12 @@ cleanup_staged_deb() {
   [ -z "$STAGED_DEB_PATH" ] || rm -f -- "$STAGED_DEB_PATH" 2>/dev/null || true
   [ -z "$STAGED_PREVIOUS_DEB_PATH" ] || rm -f -- "$STAGED_PREVIOUS_DEB_PATH" 2>/dev/null || true
   [ -z "$STAGED_PREVIOUS_SIGNATURE_PATH" ] || rm -f -- "$STAGED_PREVIOUS_SIGNATURE_PATH" 2>/dev/null || true
+  [ -z "$DPKG_LOG_PATH" ] || rm -f -- "$DPKG_LOG_PATH" 2>/dev/null || true
   rmdir -- "$STAGING_DIR" 2>/dev/null || true
   STAGED_DEB_PATH=""
   STAGED_PREVIOUS_DEB_PATH=""
   STAGED_PREVIOUS_SIGNATURE_PATH=""
+  DPKG_LOG_PATH=""
   STAGING_DIR=""
 }
 
@@ -978,7 +981,7 @@ preflight() {
   [ "$(uname -s)" = "Linux" ] || blocked preflight LINUX_REQUIRED 1
   case "$(uname -m)" in x86_64|amd64) ;; *) blocked preflight AMD64_REQUIRED 1 ;; esac
   [ "$(id -u)" -eq 0 ] || blocked preflight ROOT_REQUIRED 1
-  for command_name in python3 sha256sum dpkg dpkg-deb dpkg-query flock stat mktemp install chown openssl ps readlink; do
+  for command_name in python3 sha256sum dpkg dpkg-deb dpkg-query flock stat mktemp install chown openssl ps readlink tail; do
     have "$command_name" || blocked preflight "${command_name^^}_MISSING" 1
   done
   [ -r /run/lock ] || blocked preflight LOCK_DIRECTORY_UNAVAILABLE 1
@@ -1002,11 +1005,21 @@ install_local_deb() {
   DPKG_STATUS_BEFORE="$(read_dpkg_status)"
   VERSION_BEFORE="$(read_dpkg_version)"
   local dpkg_rc=0
+  [ -n "$STAGING_DIR" ] || blocked staging STAGING_DIRECTORY_MISSING 1
+  DPKG_LOG_PATH="$STAGING_DIR/dpkg-install.log"
+  (umask 077; : > "$DPKG_LOG_PATH") || blocked staging DPKG_LOG_UNAVAILABLE 1
+  chmod 0600 -- "$DPKG_LOG_PATH" || blocked staging DPKG_LOG_UNAVAILABLE 1
   DPKG_MUTATION_STARTED=1
-  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a dpkg --install --force-confold -- "$DEB_PATH" >/dev/null 2>&1 || dpkg_rc=$?
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    dpkg --install --force-confold -- "$DEB_PATH" >"$DPKG_LOG_PATH" 2>&1 || dpkg_rc=$?
   DPKG_STATUS_AFTER="$(read_dpkg_status)"
   VERSION_AFTER="$(read_dpkg_version)"
   if [ "$dpkg_rc" -ne 0 ]; then
+    printf '[FAIL] dpkg 本地安装失败（exit=%s，error=DPKG_INSTALL_FAILED）\n' "$dpkg_rc" >&2
+    if [ -s "$DPKG_LOG_PATH" ]; then
+      printf '[FAIL] dpkg/维护脚本最后 80 行：\n' >&2
+      tail -n 80 -- "$DPKG_LOG_PATH" >&2 || true
+    fi
     if [ -n "$UPGRADE_TRANSACTION_ID" ] && attempt_upgrade_recovery; then
       RESULT="rolled_back"
       ERROR_STAGE="dpkg"
@@ -1018,6 +1031,8 @@ install_local_deb() {
     fi
     manual_recovery dpkg DPKG_INSTALL_FAILED "$dpkg_rc"
   fi
+  rm -f -- "$DPKG_LOG_PATH"
+  DPKG_LOG_PATH=""
   local verifier="/opt/taiji-agent/bin/taiji-native-verify"
   if [ -x "$verifier" ]; then
     if "$verifier" >/dev/null 2>&1; then

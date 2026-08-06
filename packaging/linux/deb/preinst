@@ -16,6 +16,7 @@ TAIJI_GLIBC_MIN=@@TAIJI_GLIBC_MIN@@
 TAIJI_KERNEL_MIN=@@TAIJI_KERNEL_MIN@@
 TAIJI_COMMANDS=@@TAIJI_COMMANDS@@
 TAIJI_DESKTOP_DIRS=@@TAIJI_DESKTOP_DIRS@@
+TAIJI_REQUIRED_SYSTEM_SONAMES=@@TAIJI_REQUIRED_SYSTEM_SONAMES@@
 TAIJI_LOOPBACK_PATH=@@TAIJI_LOOPBACK_PATH@@
 TAIJI_INSTALL_ROOT_PARENT=@@TAIJI_INSTALL_ROOT_PARENT@@
 TAIJI_DISK_HEADROOM_MIB=@@TAIJI_DISK_HEADROOM_MIB@@
@@ -158,6 +159,43 @@ numeric_version_ge() {
   return 0
 }
 
+ldconfig_cache_has_amd64_soname() {
+  local soname="$1"
+  awk -v expected="$soname" '
+    $1 == expected && $0 ~ /\(libc6,x86-64([,)]|$)/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+required_system_soname_present() {
+  local root_prefix="$1"
+  local soname="$2"
+  local directory=""
+  local cache=""
+  [[ "$soname" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || return 1
+  if [ "$root_prefix" = "/" ]; then
+    if [ -x /sbin/ldconfig ]; then
+      cache="$(/sbin/ldconfig -p 2>/dev/null || true)"
+    elif [ -x /usr/sbin/ldconfig ]; then
+      cache="$(/usr/sbin/ldconfig -p 2>/dev/null || true)"
+    else
+      return 1
+    fi
+    printf '%s\n' "$cache" | ldconfig_cache_has_amd64_soname "$soname"
+    return $?
+  fi
+  for directory in \
+    /lib/x86_64-linux-gnu \
+    /usr/lib/x86_64-linux-gnu \
+    /lib64 \
+    /usr/lib64 \
+    /lib \
+    /usr/lib; do
+    [ -e "$(root_path "$root_prefix" "$directory")/$soname" ] && return 0
+  done
+  return 1
+}
+
 write_preflight_result() {
   local result_path="$1"
   local status="COMPATIBLE"
@@ -223,6 +261,7 @@ verify_compatibility() {
   local command=""
   local desktop_dir=""
   local desktop_found=0
+  local required_soname=""
   local opt_path=""
   local disk_available_kib=""
   local disk_available_mib=""
@@ -273,6 +312,10 @@ verify_compatibility() {
   done
   [ "$desktop_found" = "1" ] || \
     preflight_block "TAIJI-LINUX-E006-DESKTOP" "未检测到图形桌面会话目录"
+  for required_soname in $TAIJI_REQUIRED_SYSTEM_SONAMES; do
+    required_system_soname_present "$root_prefix" "$required_soname" || \
+      preflight_block "TAIJI-LINUX-E014-RUNTIME" "缺少统一安装包必需的系统共享库：$required_soname"
+  done
   [ -e "$(root_path "$root_prefix" "$TAIJI_LOOPBACK_PATH")" ] || \
     preflight_block "TAIJI-LINUX-E008-LOOPBACK" "未检测到 loopback 网络接口"
 
