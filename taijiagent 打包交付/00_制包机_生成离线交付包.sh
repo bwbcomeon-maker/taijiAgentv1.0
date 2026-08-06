@@ -8,6 +8,8 @@ CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 BUILD_ROOT="${TAIJI_BUILD_ROOT:-}"
 BUILD_ROOT_OWNER_MARKER=".taiji-build-root-owner"
 BUILD_ROOT_OWNER_TOKEN="taiji-agent-build-root-v1:$(id -u 2>/dev/null || printf user)"
+BUILD_MIN_FREE_MIB="12288"
+BUILD_MIN_FREE_INODES="100000"
 BUILD_TMP_DIR=""
 SRC_DIR=""
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
@@ -109,7 +111,7 @@ write_environment_snapshot() {
     printf 'arch=%s\n' "$(uname -m 2>/dev/null || true)"
     printf 'dpkg_arch=%s\n' "$(dpkg --print-architecture 2>/dev/null || true)"
     printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
-    for cmd in sudo apt-get apt-cache dpkg dpkg-deb sha256sum tar gzip git curl python3 node npm uv cc findmnt systemctl lsof readelf strings perl cmp ldd getconf desktop-file-validate; do
+    for cmd in sudo apt-get apt-cache dpkg dpkg-deb sha256sum tar gzip git curl python3 node npm uv cc df findmnt systemctl lsof readelf strings perl cmp ldd getconf desktop-file-validate; do
       printf 'cmd.%s=%s\n' "$cmd" "$(safe_cmd_path "$cmd")"
     done
     printf 'TAIJI_NODE_MIRRORS=%s\n' "${TAIJI_NODE_MIRRORS:+set}"
@@ -159,6 +161,9 @@ failure_next_steps() {
       ;;
     *"setup-local.sh"*|*"uv.lock"*|*"--locked"*|*"TAIJI_UV_LOCK_MODE"*)
       printf 'next=Python 依赖 lock 漂移。新版脚本默认 TAIJI_UV_LOCK_MODE=auto 会自动重试非 locked 同步；如仍使用旧包，可先用 TAIJI_ALLOW_UV_LOCK_REFRESH=1 bash ./00_制包机_生成离线交付包.sh 临时继续\n'
+      ;;
+    *"可用空间不足"*|*"inode 不足"*)
+      printf 'next=制包文件系统资源不足。请至少准备 12 GiB 可用空间和 100000 个可用 inode；清理空间后重试，或把 TAIJI_BUILD_ROOT 指向满足条件的 owner-only taiji-agent-build-* 目录\n'
       ;;
     *)
       printf 'next=查看本诊断文件和主日志，按最后一个 [FAIL]/命令错误继续定位\n'
@@ -500,7 +505,7 @@ build_root_candidates() {
 
 candidate_failure() {
   local candidate="$1" reason="$2"
-  warn "候选构建根不可用：$candidate（$reason）"
+  warn "候选构建根不可用：${candidate}（${reason}）"
   BUILD_ROOT_PROBE_RESULTS+="candidate=$candidate stage=validation reason=$reason"$'\n'
   return 1
 }
@@ -567,7 +572,7 @@ record_probe_failure() {
   BUILD_ROOT_PROBE_RESULTS+="findmnt=$findmnt_output"$'\n'
   warn "构建根探针失败：candidate=$candidate stage=$stage"
   [ -z "$output" ] || warn "$output"
-  [ -z "$findmnt_output" ] || warn "findmnt -T $candidate：$findmnt_output"
+  [ -z "$findmnt_output" ] || warn "findmnt -T ${candidate}：${findmnt_output}"
 }
 
 probe_build_root() {
@@ -787,7 +792,7 @@ verify_build_command_contract() {
   for command in \
     curl git tar gzip xz sha256sum openssl python3 cc rsync dpkg dpkg-deb \
     file desktop-file-validate lsof readelf strings perl cmp ldd getconf \
-    stat mktemp date find grep sed awk sort head tail wc tr install chmod cp mv; do
+    stat mktemp date df find grep sed awk sort head tail wc tr install chmod cp mv; do
     if ! have "$command"; then
       missing="$missing $command"
     fi
@@ -962,6 +967,29 @@ reset_build_root() {
   configure_build_tmp
 }
 
+require_build_capacity() {
+  local target="${1:-$BUILD_ROOT}" available_kib available_mib available_inodes
+  if ! available_kib="$(LC_ALL=C df -Pk -- "$target" 2>/dev/null | awk 'NR == 2 {print $4}')"; then
+    fail "无法读取构建文件系统可用空间：$target"
+  fi
+  if ! available_inodes="$(LC_ALL=C df -Pi -- "$target" 2>/dev/null | awk 'NR == 2 {print $(NF-2)}')"; then
+    fail "无法读取构建文件系统可用 inode：$target"
+  fi
+  case "$available_kib" in
+    ''|*[!0-9]*) fail "无法读取构建文件系统可用空间：$target" ;;
+  esac
+  case "$available_inodes" in
+    ''|*[!0-9]*) fail "无法读取构建文件系统可用 inode：$target" ;;
+  esac
+  available_mib=$((available_kib / 1024))
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$target stage=capacity available_mib=$available_mib available_inodes=$available_inodes"$'\n'
+  [ "$available_mib" -ge "$BUILD_MIN_FREE_MIB" ] \
+    || fail "构建文件系统可用空间不足：${available_mib} MiB，至少需要 ${BUILD_MIN_FREE_MIB} MiB（${target}）"
+  [ "$available_inodes" -ge "$BUILD_MIN_FREE_INODES" ] \
+    || fail "构建文件系统可用 inode 不足：${available_inodes}，至少需要 ${BUILD_MIN_FREE_INODES}（${target}）"
+  ok "构建文件系统容量门禁通过：${available_mib} MiB，${available_inodes} inodes"
+}
+
 repair_build_tree_permissions() {
   local agent_dir lab_dir setup_script pyproject
   lab_dir="$(source_lab_dir)"
@@ -980,6 +1008,7 @@ unpack_source() {
   info "解压源码到构建工作区"
   info "构建工作区：$BUILD_ROOT"
   reset_build_root
+  require_build_capacity "$BUILD_ROOT"
   tar -xzf "$SRC_ARCHIVE" -C "$BUILD_ROOT"
   [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
   repair_build_tree_permissions
@@ -1119,7 +1148,7 @@ run_setup_local() {
     if grep -qiE 'pyproject\.toml|Permission denied|os error 13' "$setup_log"; then
       fail "Python venv 生成失败：构建工作区源码权限不可读（pyproject.toml Permission denied）"
     fi
-    fail "Python venv 生成失败：setup-local.sh 返回 $status，详见 $setup_log"
+    fail "Python venv 生成失败：setup-local.sh 返回 ${status}，详见 ${setup_log}"
   fi
 }
 
@@ -1135,7 +1164,7 @@ build_runtime_and_deb() {
     uv lock
   fi
 
-  info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=$uv_lock_mode）"
+  info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=${uv_lock_mode}）"
   cd "$(source_lab_dir)"
   run_setup_local "$uv_lock_mode"
 

@@ -1954,6 +1954,359 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertLess(main.index("install_build_dependencies"), main.index("select_build_root"))
         self.assertLess(main.index("select_build_root"), main.index("prepare_source_release"))
 
+    def test_offline_builder_checks_free_blocks_and_inodes_after_owned_root_reset(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn('BUILD_MIN_FREE_MIB="12288"', builder)
+        self.assertIn('BUILD_MIN_FREE_INODES="100000"', builder)
+        self.assertIn("require_build_capacity() {", builder)
+        capacity = builder[
+            builder.index("require_build_capacity() {") : builder.index(
+                "repair_build_tree_permissions() {"
+            )
+        ]
+        self.assertIn('df -Pk -- "$target"', capacity)
+        self.assertIn('df -Pi -- "$target"', capacity)
+        self.assertIn("构建文件系统可用空间不足", capacity)
+        self.assertIn("构建文件系统可用 inode 不足", capacity)
+        command_gate = builder[
+            builder.index("verify_build_command_contract() {") : builder.index(
+                "source_lab_dir() {"
+            )
+        ]
+        self.assertIn("df", command_gate)
+        unpack = builder[
+            builder.index("unpack_source() {") : builder.index(
+                "load_source_controlled_policy() {"
+            )
+        ]
+        self.assertLess(unpack.index("reset_build_root"), unpack.index("require_build_capacity"))
+        self.assertLess(unpack.index("require_build_capacity"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
+
+        helper = re.search(r"(?ms)^require_build_capacity\(\) \{.*?^\}", builder).group(0)
+        harness = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                'BUILD_MIN_FREE_MIB="12288"',
+                'BUILD_MIN_FREE_INODES="100000"',
+                'BUILD_ROOT_PROBE_RESULTS=""',
+                'ok() { :; }',
+                'fail() { printf "FAIL:%s\\n" "$*"; exit 23; }',
+                'df() { [ "${FAKE_DF_FAIL:-0}" != 1 ] || return 7; if [ "$1" = "-Pk" ]; then printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/fake 1 0 %s 0%% /fake\\n" "$FAKE_AVAILABLE_KIB"; else printf "Filesystem Inodes IUsed IFree IUse%% Mounted\\n/dev/fake 1 0 %s 0%% /fake\\n" "$FAKE_AVAILABLE_INODES"; fi; }',
+                helper,
+                'require_build_capacity /fake',
+            ]
+        )
+        cases = (
+            (str(12288 * 1024), "100000", "1", 23, "FAIL:"),
+            (str(12287 * 1024), "200000", "0", 23, "FAIL:"),
+            (str(12288 * 1024), "99999", "0", 23, "FAIL:"),
+            (str(12288 * 1024), "100000", "0", 0, ""),
+        )
+        for available_kib, available_inodes, df_fail, returncode, marker in cases:
+            with self.subTest(
+                available_kib=available_kib,
+                available_inodes=available_inodes,
+                df_fail=df_fail,
+            ):
+                result = subprocess.run(
+                    ["bash", "-c", harness],
+                    text=True,
+                    errors="replace",
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "FAKE_AVAILABLE_KIB": available_kib,
+                        "FAKE_AVAILABLE_INODES": available_inodes,
+                        "FAKE_DF_FAIL": df_fail,
+                    },
+                )
+                self.assertEqual(result.returncode, returncode, result.stderr)
+                self.assertIn(marker, result.stdout)
+
+    def test_release_preflight_uses_configured_temp_root_and_checks_capacity(self):
+        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+
+        self.assertNotIn("mktemp /tmp/taiji-", preflight)
+        self.assertNotIn("mktemp -d /tmp/taiji-", preflight)
+        self.assertIn('RELEASE_TEMP_ROOT="${TMPDIR:-/var/tmp}"', preflight)
+        self.assertIn("require_release_temp_capacity", preflight)
+        self.assertIn('df -Pk -- "$RELEASE_TEMP_ROOT"', preflight)
+        self.assertIn('df -Pi -- "$RELEASE_TEMP_ROOT"', preflight)
+        self.assertIn(
+            'new_release_temp_file expected_archive "source-head.XXXXXX.tar"',
+            preflight,
+        )
+        self.assertIn(
+            'new_release_temp_directory payload_root "payload.XXXXXX"', preflight
+        )
+        payload = preflight[
+            preflight.index("verify_deb_payload() {") : preflight.index(
+                "verify_package_output_allowlist() {"
+            )
+        ]
+        self.assertLess(
+            payload.index("require_release_temp_capacity"),
+            payload.index('dpkg-deb -x "$deb"'),
+        )
+
+        capacity_helpers = preflight[
+            preflight.index("validate_release_temp_root() {") : preflight.index(
+                "new_release_temp_file() {"
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            harness = "\n".join(
+                [
+                    "set -Eeuo pipefail",
+                    'fail() { printf "FAIL:%s\\n" "$*"; exit 23; }',
+                    'have() { command -v "$1" >/dev/null 2>&1; }',
+                    'df() { [ "${FAKE_DF_FAIL:-0}" != 1 ] || return 7; if [ "$1" = "-Pk" ]; then printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/fake 1 0 %s 0%% /fake\\n" "$FAKE_AVAILABLE_KIB"; else printf "Filesystem Inodes IUsed IFree IUse%% Mounted\\n/dev/fake 1 0 %s 0%% /fake\\n" "$FAKE_AVAILABLE_INODES"; fi; }',
+                    capacity_helpers,
+                    'require_release_temp_capacity 2048 50000',
+                ]
+            )
+            cases = (
+                (str(2048 * 1024), "50000", "1", 23),
+                (str(2047 * 1024), "50000", "0", 23),
+                (str(2048 * 1024), "49999", "0", 23),
+                (str(2048 * 1024), "50000", "0", 0),
+            )
+            for available_kib, available_inodes, df_fail, returncode in cases:
+                with self.subTest(
+                    available_kib=available_kib,
+                    available_inodes=available_inodes,
+                    df_fail=df_fail,
+                ):
+                    result = subprocess.run(
+                        ["bash", "-c", harness],
+                        text=True,
+                        errors="replace",
+                        capture_output=True,
+                        check=False,
+                        env={
+                            **os.environ,
+                            "RELEASE_TEMP_ROOT": temp_dir,
+                            "FAKE_AVAILABLE_KIB": available_kib,
+                            "FAKE_AVAILABLE_INODES": available_inodes,
+                            "FAKE_DF_FAIL": df_fail,
+                        },
+                    )
+                    self.assertEqual(result.returncode, returncode, result.stderr)
+
+    def test_release_preflight_awk_programs_are_portable_and_sidecar_parsing_runs(self):
+        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+
+        self.assertNotIn(r'\"', preflight)
+        helper = re.search(
+            r"(?ms)^verify_deb_checksum_sidecar\(\) \{.*?^\}", preflight
+        ).group(0)
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as temp_dir:
+            deb = Path(temp_dir) / "taiji-agent_1.0.0_amd64.deb"
+            deb.write_bytes(b"fixture")
+            Path(f"{deb}.sha256").write_text(
+                f"{digest}  {deb.name}\n", encoding="utf-8"
+            )
+            harness = "\n".join(
+                [
+                    "set -Eeuo pipefail",
+                    f"EXPECTED={digest}",
+                    'fail() { printf "FAIL:%s\\n" "$*" >&2; exit 23; }',
+                    'hex64() { [ "$(printf \'%s\' "$1" | wc -c | tr -d \' \')" = 64 ] && printf \'%s\' "$1" | grep -Eq \'^[0-9a-fA-F]{64}$\'; }',
+                    'sha256sum() { printf "%s  %s\\n" "$EXPECTED" "$1"; }',
+                    helper,
+                    'verify_deb_checksum_sidecar "$1"',
+                ]
+            )
+            result = subprocess.run(
+                ["bash", "-c", harness, "bash", str(deb)],
+                text=True,
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_preflight_safely_removes_readonly_extracted_payload(self):
+        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+
+        self.assertIn("remove_release_temp_directory() {", preflight)
+        self.assertNotIn('rm -rf "$payload_root"', preflight)
+        helper_names = (
+            "is_controlled_release_temp_file",
+            "is_controlled_release_temp_directory",
+            "remove_release_temp_directory",
+        )
+        helpers = [
+            re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", preflight).group(0)
+            for name in helper_names
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            payload = root / "taiji-release-payload.fixture"
+            nested = payload / "opt" / "taiji-agent" / "readonly"
+            nested.mkdir(parents=True)
+            (nested / "asset.json").write_text("{}", encoding="utf-8")
+            nested.chmod(0o000)
+            for directory in (nested.parent, nested.parent.parent, payload / "opt", payload):
+                directory.chmod(0o555)
+            harness = "\n".join(
+                [
+                    "set -Eeuo pipefail",
+                    'fail() { printf "FAIL:%s\\n" "$*" >&2; exit 23; }',
+                    *helpers,
+                    'remove_release_temp_directory "$1"',
+                ]
+            )
+            result = subprocess.run(
+                ["bash", "-c", harness, "bash", str(payload)],
+                text=True,
+                errors="replace",
+                capture_output=True,
+                check=False,
+                env={**os.environ, "RELEASE_TEMP_ROOT": str(root)},
+            )
+            if payload.exists():
+                for directory in (nested, nested.parent, nested.parent.parent, payload / "opt", payload):
+                    if directory.exists():
+                        directory.chmod(0o755)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(payload.exists())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            outside = root / "not-owned-by-release-helper"
+            outside.mkdir()
+            result = subprocess.run(
+                ["bash", "-c", harness, "bash", str(outside)],
+                text=True,
+                errors="replace",
+                capture_output=True,
+                check=False,
+                env={**os.environ, "RELEASE_TEMP_ROOT": str(root)},
+            )
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertTrue(outside.is_dir())
+
+    def test_release_preflight_signal_trap_cleans_active_temp_artifacts(self):
+        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+
+        self.assertIn('ACTIVE_RELEASE_TEMP_FILE=""', preflight)
+        self.assertIn('ACTIVE_RELEASE_TEMP_DIRECTORY=""', preflight)
+        self.assertIn("trap cleanup_release_temp_artifacts EXIT", preflight)
+        helpers = []
+        for name in (
+            "is_controlled_release_temp_file",
+            "is_controlled_release_temp_directory",
+            "cleanup_release_temp_artifacts",
+        ):
+            helpers.append(
+                re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", preflight).group(0)
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            temp_file = root / "taiji-release-source-head.fixture"
+            temp_file.write_text("fixture", encoding="utf-8")
+            payload = root / "taiji-release-payload.fixture"
+            nested = payload / "readonly"
+            nested.mkdir(parents=True)
+            (nested / "asset").write_text("fixture", encoding="utf-8")
+            nested.chmod(0o000)
+            payload.chmod(0o555)
+            harness = "\n".join(
+                [
+                    "set -Eeuo pipefail",
+                    *helpers,
+                    'trap cleanup_release_temp_artifacts EXIT',
+                    "trap 'exit 143' TERM",
+                    'kill -TERM "$$"',
+                ]
+            )
+            result = subprocess.run(
+                ["bash", "-c", harness],
+                text=True,
+                errors="replace",
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "RELEASE_TEMP_ROOT": str(root),
+                    "ACTIVE_RELEASE_TEMP_FILE": str(temp_file),
+                    "ACTIVE_RELEASE_TEMP_DIRECTORY": str(payload),
+                },
+            )
+            if payload.exists():
+                nested.chmod(0o755)
+                payload.chmod(0o755)
+
+        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertFalse(temp_file.exists())
+        self.assertFalse(payload.exists())
+
+    def test_release_preflight_registers_mktemp_before_deferred_term_trap(self):
+        preflight = read_text("taijiagent 打包交付/01_制包机_发布预检.sh")
+
+        common_names = (
+            "validate_release_temp_root",
+            "is_controlled_release_temp_file",
+            "is_controlled_release_temp_directory",
+            "cleanup_release_temp_artifacts",
+        )
+        common_helpers = [
+            re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", preflight).group(0)
+            for name in common_names
+        ]
+        for helper_name, is_directory in (
+            ("new_release_temp_file", False),
+            ("new_release_temp_directory", True),
+        ):
+            helper = re.search(
+                rf"(?ms)^{helper_name}\(\) \{{.*?^\}}", preflight
+            ).group(0)
+            with self.subTest(helper=helper_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                artifact = root / (
+                    "taiji-release-payload.race"
+                    if is_directory
+                    else "taiji-release-source-head.race"
+                )
+                harness = "\n".join(
+                    [
+                        "set -Eeuo pipefail",
+                        'fail() { printf "FAIL:%s\\n" "$*" >&2; exit 23; }',
+                        *common_helpers,
+                        helper,
+                        'mktemp() { if [ "$MOCK_DIRECTORY" = 1 ]; then command mkdir -m 700 "$MOCK_TEMP_PATH"; else : > "$MOCK_TEMP_PATH"; fi; printf "%s\\n" "$MOCK_TEMP_PATH"; kill -TERM "$PARENT_SHELL_PID"; }',
+                        'trap cleanup_release_temp_artifacts EXIT',
+                        "trap 'exit 143' TERM",
+                        "PARENT_SHELL_PID=$$",
+                        f'{helper_name} created "fixture.XXXXXX"',
+                    ]
+                )
+                result = subprocess.run(
+                    ["bash", "-c", harness],
+                    text=True,
+                    errors="replace",
+                    capture_output=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "RELEASE_TEMP_ROOT": str(root),
+                        "ACTIVE_RELEASE_TEMP_FILE": "",
+                        "ACTIVE_RELEASE_TEMP_DIRECTORY": "",
+                        "MOCK_TEMP_PATH": str(artifact),
+                        "MOCK_DIRECTORY": "1" if is_directory else "0",
+                    },
+                )
+
+                self.assertEqual(result.returncode, 143, result.stderr)
+                self.assertFalse(artifact.exists())
+
     def test_offline_builder_exports_tmpdir_tmp_temp_under_selected_root(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 

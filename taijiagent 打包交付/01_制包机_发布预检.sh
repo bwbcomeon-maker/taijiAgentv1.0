@@ -23,12 +23,112 @@ SOURCE_ARCHIVE=""
 POLICY_ID=""
 POLICY_SHA256=""
 POLICY_MAINTAINER=""
+RELEASE_TEMP_ROOT="${TMPDIR:-/var/tmp}"
+SOURCE_COMPARE_MIN_FREE_MIB="1024"
+SOURCE_COMPARE_MIN_FREE_INODES="10000"
+PAYLOAD_VERIFY_MIN_FREE_MIB="2048"
+PAYLOAD_VERIFY_MIN_FREE_INODES="50000"
+ACTIVE_RELEASE_TEMP_FILE=""
+ACTIVE_RELEASE_TEMP_DIRECTORY=""
 
 ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 hex64() { [ "$(printf '%s' "$1" | wc -c | tr -d ' ')" = 64 ] && printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'; }
+
+validate_release_temp_root() {
+  case "$RELEASE_TEMP_ROOT" in
+    /*) ;;
+    *) fail "发布预检临时目录必须是绝对路径：$RELEASE_TEMP_ROOT" ;;
+  esac
+  [ -d "$RELEASE_TEMP_ROOT" ] && [ ! -L "$RELEASE_TEMP_ROOT" ] && [ -w "$RELEASE_TEMP_ROOT" ] \
+    || fail "发布预检临时目录不可用或不安全：$RELEASE_TEMP_ROOT"
+}
+require_release_temp_capacity() {
+  local required_mib="$1" required_inodes="$2" available_kib available_mib available_inodes
+  validate_release_temp_root
+  have df || fail "缺少 df，无法执行发布预检容量门禁"
+  if ! available_kib="$(LC_ALL=C df -Pk -- "$RELEASE_TEMP_ROOT" 2>/dev/null | awk 'NR == 2 {print $4}')"; then
+    fail "无法读取发布预检临时目录可用空间：$RELEASE_TEMP_ROOT"
+  fi
+  if ! available_inodes="$(LC_ALL=C df -Pi -- "$RELEASE_TEMP_ROOT" 2>/dev/null | awk 'NR == 2 {print $(NF-2)}')"; then
+    fail "无法读取发布预检临时目录可用 inode：$RELEASE_TEMP_ROOT"
+  fi
+  case "$available_kib" in ''|*[!0-9]*) fail "无法读取发布预检临时目录可用空间：$RELEASE_TEMP_ROOT" ;; esac
+  case "$available_inodes" in ''|*[!0-9]*) fail "无法读取发布预检临时目录可用 inode：$RELEASE_TEMP_ROOT" ;; esac
+  available_mib=$((available_kib / 1024))
+  [ "$available_mib" -ge "$required_mib" ] \
+    || fail "发布预检临时目录可用空间不足：${available_mib} MiB，至少需要 ${required_mib} MiB（${RELEASE_TEMP_ROOT}）"
+  [ "$available_inodes" -ge "$required_inodes" ] \
+    || fail "发布预检临时目录可用 inode 不足：${available_inodes}，至少需要 ${required_inodes}（${RELEASE_TEMP_ROOT}）"
+}
+new_release_temp_file() {
+  local target_variable="$1" template="$2"
+  validate_release_temp_root
+  ACTIVE_RELEASE_TEMP_FILE="$(mktemp "$RELEASE_TEMP_ROOT/taiji-release-$template")"
+  printf -v "$target_variable" '%s' "$ACTIVE_RELEASE_TEMP_FILE"
+}
+new_release_temp_directory() {
+  local target_variable="$1" template="$2"
+  validate_release_temp_root
+  ACTIVE_RELEASE_TEMP_DIRECTORY="$(mktemp -d "$RELEASE_TEMP_ROOT/taiji-release-$template")"
+  printf -v "$target_variable" '%s' "$ACTIVE_RELEASE_TEMP_DIRECTORY"
+}
+is_controlled_release_temp_file() {
+  local path="${1:-}" parent name
+  [ -n "$path" ] || return 1
+  parent="$(dirname -- "$path")" || return 1
+  name="$(basename -- "$path")" || return 1
+  [ "$parent" = "${RELEASE_TEMP_ROOT%/}" ] || return 1
+  case "$name" in
+    taiji-release-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+is_controlled_release_temp_directory() {
+  local path="${1:-}"
+  is_controlled_release_temp_file "$path" || return 1
+  [ -d "$path" ] && [ ! -L "$path" ]
+}
+remove_release_temp_file() {
+  local path="$1"
+  is_controlled_release_temp_file "$path" \
+    || fail "拒绝清理未受控的发布临时文件：$path"
+  rm -f -- "$path" || fail "无法清理发布临时文件：$path"
+  [ ! -e "$path" ] && [ ! -L "$path" ] \
+    || fail "发布临时文件清理不完整：$path"
+  if [ "${ACTIVE_RELEASE_TEMP_FILE:-}" = "$path" ]; then
+    ACTIVE_RELEASE_TEMP_FILE=""
+  fi
+}
+remove_release_temp_directory() {
+  local path="$1"
+  is_controlled_release_temp_directory "$path" \
+    || fail "发布临时目录类型不安全，拒绝清理：$path"
+  find -P "$path" -type d -exec chmod u+rwx {} \; \
+    || fail "无法恢复发布临时目录的清理权限：$path"
+  rm -rf -- "$path" || fail "无法清理发布临时目录：$path"
+  [ ! -e "$path" ] && [ ! -L "$path" ] \
+    || fail "发布临时目录清理不完整：$path"
+  if [ "${ACTIVE_RELEASE_TEMP_DIRECTORY:-}" = "$path" ]; then
+    ACTIVE_RELEASE_TEMP_DIRECTORY=""
+  fi
+}
+cleanup_release_temp_artifacts() {
+  local status=$? path
+  trap - EXIT INT TERM HUP
+  path="${ACTIVE_RELEASE_TEMP_FILE:-}"
+  if is_controlled_release_temp_file "$path"; then
+    rm -f -- "$path" >/dev/null 2>&1 || true
+  fi
+  path="${ACTIVE_RELEASE_TEMP_DIRECTORY:-}"
+  if is_controlled_release_temp_directory "$path"; then
+    find -P "$path" -type d -exec chmod u+rwx {} \; >/dev/null 2>&1 || true
+    rm -rf -- "$path" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
 
 checksum_source_archive_name() {
   [ -f "$CHECKSUM_FILE" ] || return 1
@@ -69,10 +169,12 @@ check_source_archive_matches_git_head() {
   [ -e "$REPO_ROOT/.git" ] || return 0
   have gzip && have cmp || fail "缺少 gzip/cmp，无法核对源码包"
   [ -x "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
-  local expected_archive; expected_archive="$(mktemp /tmp/taiji-source-head.XXXXXX.tar)"
-  "$TRUSTED_GIT" -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD > "$expected_archive" || { rm -f "$expected_archive"; fail "无法重建当前 HEAD 源码包"; }
-  gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" - || { rm -f "$expected_archive"; fail "源码包归档内容与当前 Git HEAD 不一致"; }
-  rm -f "$expected_archive"; ok "源码包归档与当前 Git HEAD 一致"
+  local expected_archive
+  require_release_temp_capacity "$SOURCE_COMPARE_MIN_FREE_MIB" "$SOURCE_COMPARE_MIN_FREE_INODES"
+  new_release_temp_file expected_archive "source-head.XXXXXX.tar"
+  "$TRUSTED_GIT" -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD > "$expected_archive" || { remove_release_temp_file "$expected_archive"; fail "无法重建当前 HEAD 源码包"; }
+  gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" - || { remove_release_temp_file "$expected_archive"; fail "源码包归档内容与当前 Git HEAD 不一致"; }
+  remove_release_temp_file "$expected_archive"; ok "源码包归档与当前 Git HEAD 一致"
 }
 check_no_macos_metadata_or_stale_zip() {
   local metadata zips stale_entries
@@ -95,7 +197,7 @@ load_policy() {
 }
 verify_deb_checksum_sidecar() {
   local deb="$1" expected target actual name; name="$(basename "$deb")"; [ -f "$deb.sha256" ] || fail "缺少 DEB SHA256 sidecar：$name.sha256"
-  expected="$(awk 'NR==1 {print $1; exit}' "$deb.sha256")"; target="$(awk 'NR==1 {$1=\"\"; sub(/^[ \t]+\*?/,\"\"); print; exit}' "$deb.sha256")"; hex64 "$expected" || fail "DEB SHA256 sidecar 格式非法：$name.sha256"; [ "$target" = "$name" ] || fail "DEB SHA256 sidecar 指向错误文件：$target"; actual="$(sha256sum "$deb" | awk '{print $1}')"; [ "$actual" = "$expected" ] || fail "DEB SHA256 不匹配：$name"
+  expected="$(awk 'NR==1 {print $1; exit}' "$deb.sha256")"; target="$(awk 'NR==1 {$1=""; sub(/^[[:space:]]+\*?/,""); print; exit}' "$deb.sha256")"; hex64 "$expected" || fail "DEB SHA256 sidecar 格式非法：$name.sha256"; [ "$target" = "$name" ] || fail "DEB SHA256 sidecar 指向错误文件：$target"; actual="$(sha256sum "$deb" | awk '{print $1}')"; [ "$actual" = "$expected" ] || fail "DEB SHA256 不匹配：$name"
 }
 verify_marker_and_manifest() {
   local deb="$1"
@@ -164,26 +266,27 @@ PY
 }
 verify_deb_payload() {
   local deb="$1" payload_root abi embedded_policy abi_sha icon_sha256 marker_icon_sha256
-  payload_root="$(mktemp -d /tmp/taiji-release-payload.XXXXXX)"
-  dpkg-deb -x "$deb" "$payload_root" || { rm -rf "$payload_root"; fail "DEB 真实解包失败：$(basename "$deb")"; }
+  require_release_temp_capacity "$PAYLOAD_VERIFY_MIN_FREE_MIB" "$PAYLOAD_VERIFY_MIN_FREE_INODES"
+  new_release_temp_directory payload_root "payload.XXXXXX"
+  dpkg-deb -x "$deb" "$payload_root" || { remove_release_temp_directory "$payload_root"; fail "DEB 真实解包失败：$(basename "$deb")"; }
   embedded_policy="$payload_root/opt/taiji-agent/resources/linux-compatibility-policy.json"
   abi="$payload_root/opt/taiji-agent/resources/elf-abi-audit.json"
-  [ -f "$embedded_policy" ] && [ ! -L "$embedded_policy" ] || { rm -rf "$payload_root"; fail "DEB 缺少 embedded compatibility policy"; }
-  [ -f "$abi" ] && [ ! -L "$abi" ] || { rm -rf "$payload_root"; fail "DEB 缺少 embedded ELF ABI audit"; }
-  cmp -s "$POLICY_FILE" "$embedded_policy" || { rm -rf "$payload_root"; fail "DEB embedded policy 与源码 policy 不一致"; }
+  [ -f "$embedded_policy" ] && [ ! -L "$embedded_policy" ] || { remove_release_temp_directory "$payload_root"; fail "DEB 缺少 embedded compatibility policy"; }
+  [ -f "$abi" ] && [ ! -L "$abi" ] || { remove_release_temp_directory "$payload_root"; fail "DEB 缺少 embedded ELF ABI audit"; }
+  cmp -s "$POLICY_FILE" "$embedded_policy" || { remove_release_temp_directory "$payload_root"; fail "DEB embedded policy 与源码 policy 不一致"; }
   abi_sha="$(sha256sum "$abi" | awk '{print $1}')"
-  [ "$abi_sha" = "$(awk -F= '$1==\"elf_abi_audit_sha256\" {print $2}' "$BUILD_MARKER")" ] || { rm -rf "$payload_root"; fail "DEB embedded ABI audit 与 marker 不一致"; }
-  [ -f "$PAYLOAD_VERIFIER" ] && [ ! -L "$PAYLOAD_VERIFIER" ] || { rm -rf "$payload_root"; fail "缺少可信 DEB payload verifier：$PAYLOAD_VERIFIER"; }
-  python3 "$PAYLOAD_VERIFIER" --root "$payload_root" >/dev/null || { rm -rf "$payload_root"; fail "DEB payload contract 验证失败"; }
-  [ -f "$ICON_VALIDATOR" ] && [ ! -L "$ICON_VALIDATOR" ] || { rm -rf "$payload_root"; fail "缺少可信图标校验器：$ICON_VALIDATOR"; }
+  [ "$abi_sha" = "$(awk -F= '$1=="elf_abi_audit_sha256" {print $2}' "$BUILD_MARKER")" ] || { remove_release_temp_directory "$payload_root"; fail "DEB embedded ABI audit 与 marker 不一致"; }
+  [ -f "$PAYLOAD_VERIFIER" ] && [ ! -L "$PAYLOAD_VERIFIER" ] || { remove_release_temp_directory "$payload_root"; fail "缺少可信 DEB payload verifier：$PAYLOAD_VERIFIER"; }
+  python3 "$PAYLOAD_VERIFIER" --root "$payload_root" >/dev/null || { remove_release_temp_directory "$payload_root"; fail "DEB payload contract 验证失败"; }
+  [ -f "$ICON_VALIDATOR" ] && [ ! -L "$ICON_VALIDATOR" ] || { remove_release_temp_directory "$payload_root"; fail "缺少可信图标校验器：$ICON_VALIDATOR"; }
   icon_sha256="$(python3 "$ICON_VALIDATOR" \
     --web-static "$payload_root/opt/taiji-agent/runtime/web/static" \
     --install-icons "$payload_root/usr/share/icons/hicolor" \
     --resource-icon "$payload_root/opt/taiji-agent/resources/icons/taiji-agent.png" \
-    --print-digest)" || { rm -rf "$payload_root"; fail "DEB 图标链验证失败"; }
+    --print-digest)" || { remove_release_temp_directory "$payload_root"; fail "DEB 图标链验证失败"; }
   marker_icon_sha256="$(awk -F= '$1=="icon_set_sha256" {print $2}' "$BUILD_MARKER")"
-  [ "$icon_sha256" = "$marker_icon_sha256" ] || { rm -rf "$payload_root"; fail "DEB 实际图标摘要与 marker 不一致"; }
-  rm -rf "$payload_root"
+  [ "$icon_sha256" = "$marker_icon_sha256" ] || { remove_release_temp_directory "$payload_root"; fail "DEB 实际图标摘要与 marker 不一致"; }
+  remove_release_temp_directory "$payload_root"
 }
 verify_package_output_allowlist() {
   local deb="$1" name
@@ -293,4 +396,8 @@ main() {
   check_delivery_artifacts
   ok "发布预检通过"
 }
+trap cleanup_release_temp_artifacts EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 main "$@"

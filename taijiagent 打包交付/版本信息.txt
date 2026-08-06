@@ -18,6 +18,8 @@ packaging/linux/certification-matrix.json 和 signed certification-set 形成认
 构建临时根：不再默认使用 `/tmp`；制包脚本按用户缓存、`$HOME/.cache`、`/var/tmp`
 顺序选择通过 ELF 执行与动态库加载探针的 owner-only 目录，并将 `TMPDIR/TMP/TEMP`
 统一指向该目录。探针失败会在诊断中记录 `findmnt -T`，不得通过关闭麒麟安全策略绕过。
+制包资源：建议至少预留 20 GiB 可用空间；脚本的强制下限是构建根所在文件系统剩余
+12 GiB 和 100000 个可用 inode，不足时会在解压源码之前终止。
 
 产品图标：蓝色太极机器人 RGBA PNG 为 canonical；Web favicon/PWA、ICO、Linux hicolor
 32/48/64/128/192/256/512、AppStream、desktop-id/WM_CLASS、Electron 窗口和安装态资源
