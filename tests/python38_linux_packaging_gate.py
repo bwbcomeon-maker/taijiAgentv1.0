@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import py_compile
 import runpy
+import sys
 import tempfile
 from pathlib import Path
 
@@ -12,6 +13,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON_STAGER = ROOT / "packaging/linux/stage-python-runtime.py"
 COMPONENT_STAGER = ROOT / "packaging/linux/stage-runtime-components.py"
+PAYLOAD_VERIFIER = ROOT / "packaging/linux/verify-payload.py"
+PREINST_RENDERER = ROOT / "packaging/linux/deb/render-preinst.py"
+DEPLOYMENT_RECEIPT = ROOT / "packaging/linux/deployment_receipt.py"
+UPGRADE_TRANSACTION = ROOT / "packaging/linux/upgrade_transaction.py"
+TARGET_EVIDENCE_ASSEMBLER = (
+    ROOT / "tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+)
+INSTALL_OBSERVER = (
+    ROOT / "tools/taiji-desktop-acceptance/observe-single-deb-install.py"
+)
 PYTHON38_ENTRYPOINTS = (
     ROOT / "packaging/linux/compatibility_policy.py",
     ROOT / "packaging/linux/trusted_system_tools.py",
@@ -21,6 +32,12 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "packaging/linux/stage-electron-runtime.py",
     PYTHON_STAGER,
     COMPONENT_STAGER,
+    PAYLOAD_VERIFIER,
+    PREINST_RENDERER,
+    DEPLOYMENT_RECEIPT,
+    UPGRADE_TRANSACTION,
+    TARGET_EVIDENCE_ASSEMBLER,
+    INSTALL_OBSERVER,
     ROOT / "scripts/produce-taiji-offline-rehearsal.py",
     ROOT / "scripts/assemble-taiji-certification-set.py",
     ROOT / "scripts/validate-taiji-release-evidence.py",
@@ -28,6 +45,11 @@ PYTHON38_ENTRYPOINTS = (
 
 
 def main() -> int:
+    assert sys.version_info[:2] == (3, 8), (
+        "this compatibility gate must run on Python 3.8, got {}.{}".format(
+            sys.version_info.major, sys.version_info.minor
+        )
+    )
     with tempfile.TemporaryDirectory(prefix="taiji-python38-gate-") as temp_dir:
         temp_root = Path(temp_dir)
         for index, entrypoint in enumerate(PYTHON38_ENTRYPOINTS):

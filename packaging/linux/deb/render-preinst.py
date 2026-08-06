@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Render the fixed, policy-based DEB compatibility preinst."""
 
+from __future__ import annotations
+
 import argparse
 import os
 import shlex
