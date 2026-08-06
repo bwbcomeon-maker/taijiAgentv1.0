@@ -1187,12 +1187,13 @@ main() {
   select_build_root
   set_stage "源码包发布预检"
   prepare_source_release
-  set_stage "准备 Python/Node/Electron 构建工具"
+  set_stage "准备 Python 构建工具"
   ensure_uv
-  ensure_node
   set_stage "解压源码并加载 canonical policy"
   unpack_source
   load_source_controlled_policy
+  set_stage "准备 Node/Electron 构建工具"
+  ensure_node
   set_stage "构建运行时和 DEB"
   build_runtime_and_deb
   set_stage "收集并绑定候选产物"
