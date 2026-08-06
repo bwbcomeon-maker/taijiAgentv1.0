@@ -199,13 +199,23 @@ def _version_key(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
 
 
-def _iter_regular_files(root: Path) -> Iterable[Path]:
+def _iter_regular_files(
+    root: Path, *, require_internal_symlinks: bool = True
+) -> Iterable[Path]:
     if not root.is_dir():
         raise ElfAuditError(f"ELF audit root is not a directory: {root}")
     resolved_root = root.resolve(strict=True)
     for candidate in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
         try:
             if candidate.is_symlink():
+                if not require_internal_symlinks:
+                    # The host sysroot is a trusted provider lookup tree, not
+                    # payload.  System development packages commonly install
+                    # unrelated aliases that leave one multiarch directory
+                    # (for example libpython*.a).  Provider lookup consumes
+                    # only regular ELF targets with an authoritative SONAME,
+                    # so aliases are neither needed nor followed here.
+                    continue
                 try:
                     resolved_target = candidate.resolve(strict=False)
                 except (OSError, RuntimeError) as exc:
@@ -374,7 +384,7 @@ def _sysroot_soname_candidates(sysroot: Path, soname: str) -> list[Path]:
         return []
     candidates: list[Path] = []
     seen_inodes: set[tuple[int, int]] = set()
-    for candidate in _iter_regular_files(sysroot):
+    for candidate in _iter_regular_files(sysroot, require_internal_symlinks=False):
         if candidate.name != soname and not candidate.name.startswith(soname + "."):
             continue
         try:

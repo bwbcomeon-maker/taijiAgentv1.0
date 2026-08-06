@@ -477,6 +477,38 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 with self.assertRaisesRegex(self.audit.ElfAuditError, "unresolved"):
                     self.audit.audit_root(root, self.policy, sysroot)
 
+    def test_sysroot_scan_ignores_unrelated_symlinks_that_leave_library_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "payload"
+            sysroot = Path(temp_dir) / "sysroot"
+            root.mkdir()
+            sysroot.mkdir()
+            self.readelf_outputs = {}
+            self.fake_elf(
+                root,
+                "runtime/agent/bin/python",
+                dynamic=(
+                    "0x0000000000000001 (NEEDED) Shared library: "
+                    "[libasound.so.2]"
+                ),
+            )
+            self.fake_elf(
+                sysroot,
+                "libasound.so.2.0.0",
+                dynamic=(
+                    "0x000000000000000e (SONAME) Library soname: "
+                    "[libasound.so.2]"
+                ),
+            )
+            outside = Path(temp_dir) / "libpython3.8.a"
+            outside.write_bytes(b"development-only static archive")
+            (sysroot / "libpython3.8.a").symlink_to(outside)
+
+            with self.install_readelf_stub():
+                report = self.audit.audit_root(root, self.policy, sysroot)
+
+            self.assertIn("libasound.so.2", report["private_sonames"])
+
     def test_rejects_unknown_bundled_soname_even_when_unreferenced(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
