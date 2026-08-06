@@ -221,6 +221,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("/api/model-config", verify)
         self.assertIn("/api/settings", verify)
 
+    def test_native_verify_resets_strict_shell_options_after_runtime_env(self):
+        verify = read_text("hermes-local-lab/scripts/taiji-native-verify")
+        runtime_env_marker = 'source "$SCRIPT_DIR/runtime-env.sh"'
+        self.assertIn(runtime_env_marker, verify)
+        after_runtime_env = verify.split(runtime_env_marker, 1)[1]
+        self.assertIn(
+            "\nset +e\nset +o pipefail 2>/dev/null || true\n",
+            after_runtime_env,
+        )
+
     def test_native_verify_closed_health_ports_do_not_abort_under_inherited_errexit(self):
         if importlib.util.find_spec("yaml") is None:
             self.skipTest("PyYAML is not installed in this test environment")
