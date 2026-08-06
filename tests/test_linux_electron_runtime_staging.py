@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import shutil
-import subprocess
+import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGER = ROOT / "packaging/linux/stage-electron-runtime.py"
+
+
+def load_stager():
+    spec = importlib.util.spec_from_file_location("taiji_electron_runtime_stager_test", STAGER)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load Electron runtime stager")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class LinuxElectronRuntimeStagingTest(unittest.TestCase):
@@ -54,23 +67,32 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
         (self.source / "dist/tests").mkdir()
         (self.source / "dist/tests/leak.js").write_text("throw new Error();\n", encoding="utf-8")
 
-    def test_stages_only_audited_electron_runtime_files(self) -> None:
-        completed = subprocess.run(
-            [
-                "python3",
-                str(STAGER),
-                "--source",
-                str(self.source),
-                "--destination",
-                str(self.destination),
-                "--require-linux-x86-64",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
+        self.archive = self.temp_dir / "electron-v39.8.10-linux-x64.zip"
+        with zipfile.ZipFile(self.archive, "w", compression=zipfile.ZIP_STORED) as bundle:
+            for path in sorted((self.source / "dist").rglob("*")):
+                relative = path.relative_to(self.source / "dist")
+                if path.is_file() and not any(
+                    part == "tests" or part.endswith(".map") for part in relative.parts
+                ):
+                    bundle.write(path, relative.as_posix())
+        self.archive_sha256 = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        self.stager = load_stager()
+
+    def stage(self):
+        return self.stager.stage_electron_runtime(
+            self.source,
+            self.destination,
+            archive=self.archive,
+            expected_version="39.8.10",
+            expected_archive_sha256=self.archive_sha256,
+            require_linux_x86_64=True,
         )
 
-        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+    def test_stages_only_audited_electron_runtime_files(self) -> None:
+        result = self.stage()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["electron_archive_sha256"], self.archive_sha256)
         self.assertEqual(
             (self.destination / "dist/electron").read_bytes(),
             (self.source / "dist/electron").read_bytes(),
@@ -96,6 +118,25 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
             self.assertFalse(name.endswith(".d.ts"), relative)
             self.assertFalse(name.endswith(".map"), relative)
 
+    def test_rejects_tampered_non_elf_resource_even_when_elf_is_unchanged(self) -> None:
+        (self.source / "dist/resources.pak").write_bytes(b"attacker-controlled-resource")
+
+        with self.assertRaisesRegex(
+            self.stager.ElectronRuntimeStageError,
+            "archive member differs from installed Electron dist",
+        ):
+            self.stage()
+
+    def test_rejects_archive_that_does_not_match_fixed_policy_sha256(self) -> None:
+        with self.archive.open("ab") as handle:
+            handle.write(b"tampered")
+
+        with self.assertRaisesRegex(
+            self.stager.ElectronRuntimeStageError,
+            "archive SHA256",
+        ):
+            self.stage()
+
     def test_build_does_not_copy_the_complete_desktop_node_modules_tree(self) -> None:
         build = (ROOT / "packaging/linux/deb/build-deb.sh").read_text(encoding="utf-8")
         start = build.index('mkdir -p "$DESKTOP_RUNTIME/src"')
@@ -104,8 +145,20 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
 
         self.assertIn("stage-electron-runtime.py", build)
         self.assertIn("--require-linux-x86-64", desktop_stage)
+        self.assertIn('--archive "$ELECTRON_ARCHIVE"', desktop_stage)
+        self.assertIn('--policy "$POLICY_FILE"', desktop_stage)
         self.assertNotIn('"$APP_DIR/node_modules"/', desktop_stage)
         self.assertNotIn('"$DESKTOP_RUNTIME/node_modules"/', desktop_stage)
+
+    def test_builder_uses_a_private_electron_cache_and_binds_the_downloaded_archive(self) -> None:
+        builder = (
+            ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('electron_config_cache="$BUILD_ROOT/electron-cache"', builder)
+        self.assertIn('electron-v${ELECTRON_VERSION}-linux-x64.zip', builder)
+        self.assertIn('ELECTRON_ARCHIVE_SHA256', builder)
+        self.assertIn('TAIJI_ELECTRON_ARCHIVE="$ELECTRON_ARCHIVE"', builder)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
 PRIVATE_LIBRARY_SYSROOT="${TAIJI_PRIVATE_LIBRARY_SYSROOT:-/usr/lib/x86_64-linux-gnu}"
 SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
+ELECTRON_ARCHIVE="${TAIJI_ELECTRON_ARCHIVE:-}"
 PACKAGED_NODE_VERSION="22.23.1"
 ISSUER_PUBLIC_KEY_FINGERPRINT="2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
 
@@ -227,12 +228,61 @@ stage_python_runtime() {
   rename_internal_agent_modules
   rewrite_product_text_tokens "$AGENT_RUNTIME"
   python3 "$PYTHON_RUNTIME_STAGER" --source-venv "$SOURCE_AGENT_DIR/venv" --destination "$AGENT_RUNTIME/venv" --require-linux-x86-64 --smoke-import yaml --smoke-import fastapi --smoke-import uvicorn --smoke-import httpx --smoke-import pydantic
+  assert_no_development_distributions
   rsync -a --exclude '.git' --exclude '.DS_Store' --exclude '._*' --exclude '__pycache__' --exclude '*.pyc' --exclude '.env' --exclude '.env.example' --exclude '.env.docker.example' --exclude '*.example' --exclude 'docs' --exclude 'reports' --exclude 'scripts' --exclude 'ctl.sh' --exclude 'start.sh' --exclude 'docker_init.bash' --exclude 'docker*' --exclude '*compose*' --exclude 'start.ps1' --exclude 'eslint*' --exclude 'tests' --exclude 'node_modules' --exclude 'Dockerfile' --exclude 'package*.json' --exclude 'pyproject.toml' --exclude 'LICENSE' --exclude '*.md' "$SOURCE_WEB_DIR"/ "$WEB_RUNTIME"/
   rewrite_product_text_tokens "$WEB_RUNTIME"
   write_packaged_webui_version
   write_installed_runtime_profile
   compile_sourceless_python "$AGENT_RUNTIME" "$SOURCE_AGENT_PYTHON"
   compile_sourceless_python "$WEB_RUNTIME" "$SOURCE_AGENT_PYTHON"
+}
+
+assert_no_development_distributions() {
+  if ! python3 - "$AGENT_RUNTIME/venv" <<'PY'
+import re
+import sys
+from email.parser import Parser
+from pathlib import Path
+
+runtime = Path(sys.argv[1])
+site_packages_roots = sorted(runtime.glob("lib/python*/site-packages"))
+if not site_packages_roots:
+    raise SystemExit(f"staged Python site-packages is missing under {runtime}")
+
+forbidden = {
+    "debugpy",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-timeout",
+    "ruff",
+    "ty",
+}
+found = []
+metadata_count = 0
+for site_packages in site_packages_roots:
+    for metadata_dir in sorted(site_packages.glob("*.dist-info")):
+        if metadata_dir.is_symlink() or not metadata_dir.is_dir():
+            raise SystemExit(f"invalid staged distribution metadata directory: {metadata_dir}")
+        metadata_path = metadata_dir / "METADATA"
+        if metadata_path.is_symlink() or not metadata_path.is_file():
+            raise SystemExit(f"staged distribution metadata is missing: {metadata_path}")
+        metadata_count += 1
+        metadata = Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
+        name = metadata.get("Name")
+        if not name:
+            raise SystemExit(f"staged distribution has no Name metadata: {metadata_path}")
+        normalized = re.sub(r"[-_.]+", "-", name).lower()
+        if normalized in forbidden:
+            found.append(f"{name} ({metadata_dir.name})")
+
+if metadata_count == 0:
+    raise SystemExit(f"no staged Python distribution metadata found under {runtime}")
+if found:
+    raise SystemExit("forbidden development distributions in staged runtime: " + ", ".join(found))
+PY
+  then
+    fail "Staged Python development-distribution gate failed"
+  fi
 }
 
 scan_private_key_material() {
@@ -351,7 +401,7 @@ scan_deb_release_artifact() {
 }
 
 audit_deb_payload() {
-  local contents="$BUILD_ROOT/deb-contents.txt" audit_root="$BUILD_ROOT/deb-audit-root" control_root="$BUILD_ROOT/deb-audit-control" extracted_abi="$BUILD_ROOT/extracted-elf-abi-audit.json" required missing=""
+  local contents="$BUILD_ROOT/deb-contents.txt" audit_root="$BUILD_ROOT/deb-audit-root" control_root="$BUILD_ROOT/deb-audit-control" extracted_abi="$BUILD_ROOT/extracted-elf-abi-audit.json" extracted_icon_sha256 required missing=""
   dpkg-deb -c "$OUT_DEB" > "$contents"
   for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/taiji-release-manifest.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/scripts/support_bundle.py" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./opt/taiji-agent/resources/icons/taiji-agent.png" "./usr/share/applications/taiji-agent.desktop" "./usr/share/metainfo/taiji-agent.metainfo.xml" "./usr/share/icons/hicolor/32x32/apps/taiji-agent.png" "./usr/share/icons/hicolor/48x48/apps/taiji-agent.png" "./usr/share/icons/hicolor/64x64/apps/taiji-agent.png" "./usr/share/icons/hicolor/128x128/apps/taiji-agent.png" "./usr/share/icons/hicolor/192x192/apps/taiji-agent.png" "./usr/share/icons/hicolor/256x256/apps/taiji-agent.png" "./usr/share/icons/hicolor/512x512/apps/taiji-agent.png" "./usr/bin/taiji" "./usr/bin/taiji-agent" "./usr/bin/taiji-agent-support"; do
     grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
@@ -371,10 +421,13 @@ audit_deb_payload() {
   [ "$(dpkg-deb -f "$OUT_DEB" Maintainer)" = "$TAIJI_PACKAGE_MAINTAINER" ] || fail "DEB maintainer mismatch"
   [ "$(dpkg-deb -f "$OUT_DEB" Depends)" = "$TAIJI_DEBIAN_DEPENDS" ] || fail "DEB Depends mismatch"
   python3 "$PAYLOAD_VERIFIER" --root "$audit_root" >/dev/null
-  python3 "$ICON_VALIDATOR" \
+  extracted_icon_sha256="$(python3 "$ICON_VALIDATOR" \
     --web-static "$audit_root/opt/taiji-agent/runtime/web/static" \
     --install-icons "$audit_root/usr/share/icons/hicolor" \
-    --resource-icon "$audit_root/opt/taiji-agent/resources/icons/taiji-agent.png" >/dev/null
+    --resource-icon "$audit_root/opt/taiji-agent/resources/icons/taiji-agent.png" \
+    --print-digest)"
+  [ "$extracted_icon_sha256" = "$ICON_SET_SHA256" ] \
+    || fail "Extracted DEB icon digest changed during packaging"
   python3 "$ELF_AUDITOR" --root "$audit_root" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$extracted_abi" >/dev/null
   cmp -s "$ABI_BUILD_REPORT" "$extracted_abi" || fail "ELF ABI audit changed after DEB extraction"
 }
@@ -387,8 +440,9 @@ write_package_manifest() {
   desktop_sha256="$(sha256sum "$DESKTOP_FILE" | awk '{print $1}')"
   abi_sha256="$(sha256sum "$ABI_REPORT_PATH" | awk '{print $1}')"
   upgrade_contract_sha256="$(sha256sum "$REPO_ROOT/packaging/linux/upgrade-data-contract.json" | awk '{print $1}')"
-  icon_set_sha256="$(for size in 32 48 64 128 192 256 512; do sha256sum "$SOURCE_WEB_DIR/static/favicon-$size.png"; done | sha256sum | awk '{print $1}')"
-  ICON_SET_SHA256="$icon_set_sha256"
+  icon_set_sha256="$ICON_SET_SHA256"
+  printf '%s\n' "$icon_set_sha256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "Canonical icon digest is missing or invalid"
   built_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   cat > "$MANIFEST_PATH" <<MANIFEST
 {
@@ -489,7 +543,12 @@ rewrite_product_text_tokens "$INSTALL_ROOT/scripts"
 mkdir -p "$DESKTOP_RUNTIME/src" "$DESKTOP_RUNTIME/node_modules"
 install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"
 node "$DESKTOP_JS_STAGER" --source "$APP_DIR/src" --destination "$DESKTOP_RUNTIME/src" --entry main.js --entry preload.js
-python3 "$ELECTRON_RUNTIME_STAGER" --source "$APP_DIR/node_modules/electron" --destination "$DESKTOP_RUNTIME/node_modules/electron" --require-linux-x86-64
+python3 "$ELECTRON_RUNTIME_STAGER" \
+  --source "$APP_DIR/node_modules/electron" \
+  --destination "$DESKTOP_RUNTIME/node_modules/electron" \
+  --archive "$ELECTRON_ARCHIVE" \
+  --policy "$POLICY_FILE" \
+  --require-linux-x86-64
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/taiji-agent"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-diagnose" "$PKG_ROOT/usr/bin/taiji-agent-diagnose"
@@ -501,10 +560,13 @@ for size in 32 48 64 128 192 256 512; do
   install -m 0644 "$SOURCE_WEB_DIR/static/favicon-$size.png" "$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/apps/taiji-agent.png"
 done
 install -m 0644 "$APPSTREAM_FILE" "$PKG_ROOT/usr/share/metainfo/taiji-agent.metainfo.xml"
-python3 "$ICON_VALIDATOR" \
+ICON_SET_SHA256="$(python3 "$ICON_VALIDATOR" \
   --web-static "$SOURCE_WEB_DIR/static" \
   --install-icons "$PKG_ROOT/usr/share/icons/hicolor" \
-  --resource-icon "$INSTALL_ROOT/resources/icons/taiji-agent.png" >/dev/null
+  --resource-icon "$INSTALL_ROOT/resources/icons/taiji-agent.png" \
+  --print-digest)"
+printf '%s\n' "$ICON_SET_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+  || fail "Canonical icon digest is invalid"
 python3 "$ELF_AUDITOR" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$ABI_BUILD_REPORT" >/dev/null
 install -m 0644 "$ABI_BUILD_REPORT" "$ABI_REPORT_PATH"
 python3 "$PREINST_RENDERER" --template "$SCRIPT_DIR/preinst" --policy "$POLICY_FILE" --output "$PKG_ROOT/DEBIAN/preinst"

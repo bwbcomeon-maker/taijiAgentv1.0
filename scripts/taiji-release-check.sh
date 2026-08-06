@@ -139,8 +139,6 @@ check_delivery_artifacts() {
     fail "缺少 .deb.sha256"
     return 1
   }
-  [ -f "$DELIVERY_DIR/离线依赖/Packages" ] || { fail "缺少 离线依赖/Packages"; return 1; }
-  [ -f "$DELIVERY_DIR/离线依赖/Packages.gz" ] || { fail "缺少 离线依赖/Packages.gz"; return 1; }
   [ -f "$DELIVERY_DIR/生成的安装包/taiji-package-manifest.json" ] || { fail "缺少 生成的安装包/taiji-package-manifest.json"; return 1; }
   [ -f "$DELIVERY_DIR/生成的安装包/构建报告.txt" ] || { fail "缺少 生成的安装包/构建报告.txt"; return 1; }
 }
@@ -200,8 +198,6 @@ PY
     --manifest "$manifest" \
     --build-marker "$DELIVERY_DIR/生成的安装包/.build-success" \
     --source-archive "$source_archive" \
-    --packages "$DELIVERY_DIR/离线依赖/Packages" \
-    --packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz" \
     --delivery-dir "$DELIVERY_DIR" \
     --matrix "$CERTIFICATION_MATRIX" \
     --challenge "$CERTIFICATION_CHALLENGE" || return 1
@@ -213,8 +209,6 @@ PY
     --manifest "$manifest" \
     --build-marker "$DELIVERY_DIR/生成的安装包/.build-success" \
     --source-archive "$source_archive" \
-    --packages "$DELIVERY_DIR/离线依赖/Packages" \
-    --packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz" \
     --delivery-dir "$DELIVERY_DIR" \
     --attestation-signature "$RELEASE_SIGNATURE" \
     --attestation-public-key "$EVIDENCE_ATTESTATION_PUBLIC_KEY" \

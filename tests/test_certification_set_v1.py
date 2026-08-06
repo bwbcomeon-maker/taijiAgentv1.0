@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
@@ -17,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/assemble-taiji-certification-set.py"
+VALIDATOR = ROOT / "scripts/validate-taiji-release-evidence.py"
 MATRIX = ROOT / "packaging/linux/certification-matrix.json"
 
 
@@ -40,18 +43,47 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.deb_sha = hashlib.sha256(self.deb.read_bytes()).hexdigest()
         self.source_commit = "a" * 40
         self.version = "1.2.3"
-        self.policy = self.root / "compatibility-policy.json"
-        self.policy.write_text(
-            json.dumps({"policy_id": "taiji-linux-amd64-deb-v1", "schema": "test-policy/v1"}, sort_keys=True) + "\n",
+        self.challenge = "c" * 64
+        self.session_id = "b" * 32
+        self.generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+        self.policy = ROOT / "packaging/linux/compatibility-policy.json"
+        self.policy_sha = load_script()._policy_identity(self.policy)[1]
+        self.offline_log = self.root / "offline-install-rehearsal-session.json"
+        self.offline_log.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji.offline-install-rehearsal.v1",
+                    "generated_at_utc": self.generated_at,
+                    "rehearsal_session_id": self.session_id,
+                    "challenge_nonce": self.challenge,
+                    "source_commit": self.source_commit,
+                    "deb_basename": self.deb.name,
+                    "deb_sha256": self.deb_sha,
+                    "platform": "linux/amd64",
+                    "environment": "container",
+                    "os_id": "ubuntu",
+                    "os_version": "20.04",
+                    "network": "none",
+                    "checks": {"install": True, "uninstall": True, "reinstall": True},
+                    "desktop_app_verified": False,
+                    "target_verified": False,
+                },
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
-        self.policy_sha = hashlib.sha256(self.policy.read_bytes()).hexdigest()
         self.offline = self.root / "offline-install-rehearsal.json"
         self.offline.write_text(
             json.dumps(
                 {
                     "schema": "taiji.offline-install-rehearsal.v1",
                     "status": "PASS",
+                    "generated_at_utc": self.generated_at,
+                    "rehearsal_session_id": self.session_id,
+                    "challenge_nonce": self.challenge,
                     "source_commit": self.source_commit,
                     "version": self.version,
                     "architecture": "amd64",
@@ -59,7 +91,17 @@ class CertificationSetV1Tests(unittest.TestCase):
                     "deb_sha256": self.deb_sha,
                     "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
                     "compatibility_policy_sha256": self.policy_sha,
+                    "delivery_inventory_sha256": "9" * 64,
+                    "platform": "linux/amd64",
+                    "environment": "container",
+                    "os_id": "ubuntu",
+                    "os_version": "20.04",
+                    "network": "none",
                     "checks": {"install": "PASS", "uninstall": "PASS", "reinstall": "PASS"},
+                    "desktop_app_verified": False,
+                    "target_verified": False,
+                    "log_basename": self.offline_log.name,
+                    "log_sha256": hashlib.sha256(self.offline_log.read_bytes()).hexdigest(),
                 },
                 sort_keys=True,
             ) + "\n",
@@ -144,7 +186,7 @@ class CertificationSetV1Tests(unittest.TestCase):
                 "--deb", str(self.deb),
                 "--policy", str(self.policy),
                 "--output", str(self.output),
-                "--challenge", "c" * 64,
+                "--challenge", self.challenge,
                 *extra,
             ],
             text=True,
@@ -216,6 +258,213 @@ class CertificationSetV1Tests(unittest.TestCase):
         result = self.command()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("DEB", result.stderr)
+
+    def test_release_validator_compares_every_environment_record_to_build_binding(self):
+        validator_path = ROOT / "scripts/validate-taiji-release-evidence.py"
+        spec = importlib.util.spec_from_file_location(
+            "taiji_release_validator_environment_binding_test",
+            validator_path,
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None and spec.loader is not None
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="e" * 64,
+            desktop_entry_sha256="f" * 64,
+        )
+        matrix_sha = hashlib.sha256(MATRIX.read_bytes()).hexdigest()
+        certification = {
+            "schema": "taiji-linux-certification-set/v1",
+            "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "challenge_nonce": "c" * 64,
+            "source_commit": self.source_commit,
+            "version": self.version,
+            "architecture": "amd64",
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.deb_sha,
+            "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+            "compatibility_policy_sha256": self.policy_sha,
+            "certification_profile": {
+                "matrix_schema": "taiji-linux-certification-matrix/v1",
+                "matrix_sha256": matrix_sha,
+                "positive_category_count": 6,
+                "negative_boundary_count": 6,
+            },
+            "offline_rehearsal": {
+                "basename": self.offline.name,
+                "sha256": hashlib.sha256(self.offline.read_bytes()).hexdigest(),
+                "status": "PASS",
+            },
+            "environments": [],
+            "negative_boundaries": [],
+        }
+        for category in self.matrix["positive_categories"]:
+            record_path = self.records / category["id"] / "environment-evidence.json"
+            certification["environments"].append(
+                {
+                    "category_id": category["id"],
+                    "compatibility": "CERTIFIED",
+                    "record_basename": f"records/{category['id']}/environment-evidence.json",
+                    "record_sha256": hashlib.sha256(record_path.read_bytes()).hexdigest(),
+                }
+            )
+        for category in self.matrix["negative_boundaries"]:
+            record_path = self.records / category["id"] / "environment-evidence.json"
+            certification["negative_boundaries"].append(
+                {
+                    "category_id": category["id"],
+                    "compatibility": "BLOCKED",
+                    "record_basename": f"records/{category['id']}/environment-evidence.json",
+                    "record_sha256": hashlib.sha256(record_path.read_bytes()).hexdigest(),
+                }
+            )
+        record_path = self.records / "kylin-min-ukui" / "environment-evidence.json"
+        original_record = json.loads(record_path.read_text(encoding="utf-8"))
+        original_contract = validator._load_environment_contract_for_certification()
+        relaxed_record_contract = SimpleNamespace(
+            validate_certification_matrix=original_contract.validate_certification_matrix,
+            validate_environment_record=lambda _record, _matrix: None,
+        )
+        args = SimpleNamespace(challenge="c" * 64, matrix=MATRIX)
+        mutations = {
+            "source_commit": "b" * 40,
+            "version": "9.9.9",
+            "architecture": "arm64",
+            "deb_basename": "taiji-agent_9.9.9_amd64.deb",
+            "deb_sha256": "c" * 64,
+            "compatibility_policy_id": "other-policy-v1",
+            "compatibility_policy_sha256": "d" * 64,
+        }
+        for field, replacement in mutations.items():
+            with self.subTest(field=field):
+                record = dict(original_record)
+                record[field] = replacement
+                record_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+                summary = next(
+                    item
+                    for item in certification["environments"]
+                    if item["category_id"] == "kylin-min-ukui"
+                )
+                summary["record_sha256"] = hashlib.sha256(record_path.read_bytes()).hexdigest()
+                with patch.object(
+                    validator,
+                    "canonical_policy_identity",
+                    return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+                ), patch.object(
+                    validator,
+                    "_load_environment_contract_for_certification",
+                    return_value=relaxed_record_contract,
+                ):
+                    with self.assertRaisesRegex(validator.EvidenceError, field):
+                        validator.validate_certification_set_v1(
+                            certification,
+                            self.root / "certification-set.json",
+                            args,
+                            binding,
+                        )
+        record_path.write_text(json.dumps(original_record, sort_keys=True) + "\n", encoding="utf-8")
+
+    def test_unbound_current_v1_offline_evidence_is_rejected(self):
+        self.offline.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji.offline-install-rehearsal.v1",
+                    "status": "PASS",
+                    "checks": {
+                        "install": "PASS",
+                        "uninstall": "PASS",
+                        "reinstall": "PASS",
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("offline", result.stderr.lower())
+
+    def test_unknown_current_v1_offline_evidence_field_is_rejected(self):
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        evidence["unknown"] = True
+        self.offline.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("未知字段", result.stderr)
+
+    def test_current_v1_offline_evidence_log_hash_mismatch_is_rejected(self):
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        evidence["log_sha256"] = "0" * 64
+        self.offline.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("log_sha256", result.stderr)
+
+    def test_current_certification_set_rejects_historical_offline_evidence(self):
+        self.offline.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-linux-offline-evidence/v1",
+                    "status": "PASS",
+                    "checks": {
+                        "install": True,
+                        "uninstall": True,
+                        "reinstall": True,
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("schema", result.stderr.lower())
+
+    def test_delivery_copy_loads_current_validator_from_assembler_directory(self):
+        isolated_tools = self.root / "isolated-delivery" / "验收工具"
+        isolated_tools.mkdir(parents=True)
+        isolated_script = isolated_tools / SCRIPT.name
+        shutil.copy2(SCRIPT, isolated_script)
+        shutil.copy2(VALIDATOR, isolated_tools / VALIDATOR.name)
+        spec = importlib.util.spec_from_file_location(
+            "taiji_certification_set_isolated_copy_test",
+            isolated_script,
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None and spec.loader is not None
+        isolated = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(isolated)
+
+        accepted, accepted_sha = isolated._validate_offline_evidence(
+            self.offline,
+            source_commit=self.source_commit,
+            version=self.version,
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            policy_id="taiji-linux-amd64-deb-v1",
+            policy_sha256=self.policy_sha,
+        )
+
+        self.assertEqual(accepted["source_commit"], self.source_commit)
+        self.assertEqual(accepted_sha, hashlib.sha256(self.offline.read_bytes()).hexdigest())
 
     def test_unknown_fields_positive_nonpass_and_missing_negative_boundary_fail(self):
         path = self.records / "kylin-min-ukui" / "environment-evidence.json"

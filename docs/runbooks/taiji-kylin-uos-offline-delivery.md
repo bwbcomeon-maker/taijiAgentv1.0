@@ -25,7 +25,7 @@
 - ARM/aarch64。
 - 只有 RPM 包管理器的终端。
 - 没有可用包管理器或管理员能力的终端。
-- 禁止 `/opt`、systemd、本地 apt 仓库、Electron 沙箱修复或本地 loopback 服务的强隔离环境。
+- 禁止 `/opt`、systemd、本地 DEB 安装、Electron 沙箱修复或本地 loopback 服务的强隔离环境。
 - 用同一个 DEB 覆盖所有“国产 x86”发行版和安全策略。
 
 RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需要单独的 `.run` 或现场定制方案。
@@ -37,7 +37,7 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 | 标签 | 必须具备的证据 |
 | --- | --- |
 | 源码包已准备 | 当前基线只有一个源码包；basename 与当前候选源提交一致；`SHA256SUMS.txt` 精确匹配；源码发布预检通过 |
-| 制包机已构建 | 兼容 Linux amd64 制包机生成 DEB、sidecar、manifest、构建报告、完整离线仓库和 `.build-success`，最终发布预检通过 |
+| 制包机已构建 | 兼容 Linux amd64 制包机生成单一 DEB、sidecar、manifest、构建报告和 `.build-success`，最终发布预检通过 |
 | 离线安装已演练 | 干净 Linux amd64 容器、VM 或 chroot 在断网状态下只使用本地交付物完成安装、验证、卸载和重装，并生成当前产物绑定证据 |
 | 目标机已验证 | 真实 Kylin/UOS/openKylin 图形终端完成安装态 Electron 启动、CLI、真实模型对话、附件、关窗退出和诊断导出 |
 
@@ -63,8 +63,8 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 | 环境 | 负责内容 | 不能据此宣称 |
 | --- | --- | --- |
 | macOS/开发机 | 清理源码、生成唯一输入包、静态检查、单元测试 | 已生成目标 DEB、已完成离线安装、目标机已验证 |
-| Linux amd64 制包机 | 构建 Linux Python/Node/Electron runtime、DEB、离线仓库、manifest 和报告 | 真实 Kylin 桌面 App 已通过 |
-| Docker/VM 断网演练 | 校验本地 apt 仓库和安装→卸载→重装生命周期 | UKUI、kysec、Electron 桌面、真实模型已通过 |
+| Linux amd64 制包机 | 构建 Linux Python/Node/Electron runtime、单一 DEB、manifest 和报告 | 真实 Kylin 桌面 App 已通过 |
+| Docker/VM 断网演练 | 校验 manifest 绑定的唯一 DEB 和安装→卸载→重装生命周期 | UKUI、kysec、Electron 桌面、真实模型已通过 |
 | 真实国产终端 | 验证系统策略、桌面启动、真实业务链和关闭行为 | 其它未测试发行版也必然兼容 |
 
 ## 5. 标准交付链
@@ -101,7 +101,9 @@ bash ./00_制包机_生成离线交付包.sh
 
 脚本会先安装构建依赖，再按 `XDG_CACHE_HOME/taiji-agent-build-<uid>`、`$HOME/.cache/taiji-agent-build-<uid>`、`/var/tmp/taiji-agent-build-<uid>` 顺序选择构建根；显式 `TAIJI_BUILD_ROOT` 只接受绝对路径、当前用户 0700 专用目录。每个候选都必须通过“可执行文件运行 + 共享库动态加载”探针，探针结果和 `findmnt -T` 会写入失败诊断；不再把 `/tmp` 作为默认构建根，也不建议关闭麒麟安全策略。
 
-源码、Node/uv 工具链和所有 npm/Python 临时文件统一位于选中的构建根下，脚本导出 `TMPDIR`、`TMP`、`TEMP` 指向该根。只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、离线仓库或 `.build-success` 缺失时仍属于失败。构建时还会验证蓝色太极 Logo 的 RGBA PNG、hicolor 多尺寸、AppStream、desktop-id/WM_CLASS、Electron 窗口图标和安装态资源同源。
+源码、Node/uv 工具链和所有 npm/Python 临时文件统一位于选中的构建根下，脚本导出 `TMPDIR`、`TMP`、`TEMP` 指向该根。只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、sidecar 或 `.build-success` 缺失时仍属于失败。Electron 下载归档必须与 canonical policy 固定的版本、basename 和 SHA256 一致，且实际写入 DEB 的整个 `dist/` 文件清单及逐文件内容必须与该归档一致；不再只检查 8 个 ELF。构建时还会验证蓝色太极 Logo 的 RGBA PNG、hicolor 多尺寸、AppStream、desktop-id/WM_CLASS、Electron 窗口图标和安装态资源同源。
+
+`00` 重试时只处理自己能够证明归属的路径：已知的上轮产物和安全的旧 PID `.验收工具.tmp-*` 会自动归档到内部 `旧版备份/`；符号链接、非当前用户节点、硬链接或其它不安全残留会 fail closed，不会静默覆盖。上轮输出目录整体移入本轮 PID 备份后，如果创建新目录失败或收到信号，只会在状态证明新目录由本轮创建、仍为当前用户所有的实体空目录时删除并恢复旧输出；出现任何未知内容则绝不覆盖。验收工具也先写入本轮临时目录，再把旧目录移入带本轮 PID 的备份；如果发布的第二次移动失败，或在替换窗口收到 `INT`、`TERM`、`HUP`，`EXIT` 清理会在目标路径仍缺失时恢复本轮备份。
 
 ### 5.3 在受控发布机执行断网生命周期演练
 
@@ -121,7 +123,7 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
   --image taiji-offline-rehearsal:local \
   --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
 
-# 旧版 --delivery-dir 入口仍保留兼容，但只适合历史 fresh/reinstall 演练，不能替代上面的 N-1 全生命周期。
+# 当前 v3 单 DEB 目录入口：用于 fresh/reinstall 快速演练，不能替代上面的 N-1 全生命周期。
 python3 scripts/produce-taiji-offline-rehearsal.py \
   --delivery-dir "taijiagent 打包交付" \
   --output-dir "taijiagent 打包交付/offline-install-rehearsal" \
@@ -129,14 +131,16 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
   --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
 ```
 
-输出目录必须事先不存在。生产器应验证镜像角色和兼容基线、使用 `--network none`、只读挂载交付目录，并将证据绑定到当前 manifest、DEB、源码包和离线仓库摘要。
+输出目录必须事先不存在。生产器应验证镜像角色和兼容基线、使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。正式输出为 `schema=taiji.offline-install-rehearsal.v1`、`status=PASS` 的结构化证据，绑定 source commit、version、DEB/policy 摘要、`delivery_inventory_sha256` 和同目录会话日志。validator 后续复核时会重算当前交付清单摘要；演练后替换验收工具、脚本或任一未排除交付文件，都会使旧证据失效。当前 v3 证据不包含 target baseline 字段。历史 v2 只能通过 validator 的显式 `--legacy-v2-read-only` 路径查看，不能作为当前发布证据。
 
 ### 5.4 在真实目标机安装并验收
 
 真实验收必须覆盖两条路径，但不能在同一系统状态中混跑：
 
 1. **客户单 DEB 路径是 `04` 的前置路径。**在符合 canonical policy、没有 `taiji-agent` dpkg 记录且当前用户没有太极 XDG/Electron 状态的干净图形终端，准备一个只有 manifest 同名候选 DEB 的实体目录。先启动 `验收工具/observe-single-deb-install.py observe`，再关闭全部非 loopback 网络并从文件管理器双击 DEB，由系统图形包安装器完成安装。观察器必须从安装前持续存活到 `install ok installed`。
-2. **内部生命周期路径使用另一个干净环境或另一个恢复点。**完整工作区中的 `02_目标终端_安装并验证.sh` 用于 root staging、本地离线仓库、诊断、升级/同版本重装等验证。不得在准备运行 `04` 的同一目标状态上先执行 `02`，否则安装前观察合同已经失效。
+2. **内部生命周期路径使用另一个干净环境或另一个恢复点。**完整工作区中的 `02_目标终端_安装并验证.sh` 用于 root staging、单 DEB、诊断、升级/同版本重装等验证。不得在准备运行 `04` 的同一目标状态上先执行 `02`，否则安装前观察合同已经失效。
+
+`04` 在平台、图形环境和长流程输入检查之前，先以严格 JSON 解析确认 `schema=taiji-package-manifest/v3`；历史 `schema_version=2` 在入口立即拒绝，不得启动桌面验收流程。
 
 单 DEB 路径的命令、人工见证和首次配置顺序见第 10 节。机器观察记录替代旧的事后自报环境变量；`04` 不接受 `TAIJI_TARGET_INSTALL_METHOD`、`TAIJI_TARGET_INSTALL_NETWORK`、`TAIJI_TARGET_DPKG_STATUS_BEFORE` 或 `TAIJI_TARGET_FIRST_LAUNCH`。
 
@@ -145,6 +149,8 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 ### 5.5 签名与最终放行
 
 断网演练和代表环境验收使用不同 challenge。各环境记录聚合为 certification set 后，发布负责人检查原始会话、截图和诊断内容，再用独立离线私钥签名；发布回执另用独立 challenge。最终门禁必须复用当轮原 challenge，不能重新生成：
+
+certification validator 会对六个正向和六个负向环境记录逐条比对 `source_commit/version/architecture/deb_basename/deb_sha256/compatibility_policy_id/compatibility_policy_sha256`，必须与顶层 v3 `BuildBinding` 完全一致；摘要和字段结构合法不能代替这项逐记录身份校验。
 
 ```bash
 export TAIJI_CERTIFICATION_CHALLENGE="<当轮认证集原值>"
@@ -193,24 +199,21 @@ SHA256SUMS.txt
 生成的安装包/taiji-package-manifest.json
 生成的安装包/构建报告.txt
 生成的安装包/.build-success
-离线依赖/Packages
-离线依赖/Packages.gz
-离线依赖/SHA256SUMS.txt
-离线依赖/runtime-dependencies.txt
-离线依赖/*.deb
 验收工具/
 ```
 
 必须同时满足：
 
 - 当前源码包唯一且 SHA256 匹配。
+- v3 manifest 的完整 `source_commit` 必须唯一决定源码包 basename；根 `SHA256SUMS.txt` 只能精确记录该 basename 和内容 SHA，`.build-success` 中的 source/DEB/policy/ABI/icon/maintainer 身份也必须与 manifest 和当前文件一致。即使旧源码包内容 SHA 正确，只要 basename 不是当前完整 commit，仍必须拒绝。
 - `生成的安装包/` 只有一套允许的当前产物。
 - `.deb.sha256` 只记录 basename，不记录制包机绝对路径。
-- `Packages.gz` 可解压且内容与 `Packages` 一致。
-- 离线仓库文件集合、索引和每个 DEB 摘要闭合。
+- v3 当前路径不得混入历史 `离线依赖/Packages*` 或第二个安装包；客户边界是 manifest 绑定的唯一 DEB。
 - 最终 DEB 真实解包后，Python、Linux Electron ELF、Web runtime、CLI、desktop entry、配置模板、诊断、授权公钥和产品 Skills 均满足 payload contract。
 - 最终 Web 静态文件不依赖 jsDelivr、unpkg 等公网 CDN。
-- 交付目录不包含旧 DEB、旧 zip、多个源码包、构建日志、macOS metadata、客户授权、私钥、API Key 或本地会话。
+- 当前发布清单路径不包含旧 DEB、旧 zip、多个源码包、构建日志、macOS metadata、客户授权、私钥、API Key 或本地会话。
+- 内部 `旧版备份/` 可以保存 `00` 自动归档的历史 DEB、已知上轮产物或验收工具临时残留；`delivery_inventory_sha256` 明确排除该目录，因此其中内容不能充当当前候选、当前证据或客户输入。
+- 客户发布目录仍严格只包含一个 DEB；内部备份、manifest、报告、sidecar、验收工具和签名证据均不得复制到客户目录。
 
 ## 7. Docker 能覆盖与不能覆盖的边界
 
@@ -218,7 +221,7 @@ SHA256SUMS.txt
 
 - Linux amd64 架构和 Ubuntu 20.04/glibc 2.31 兼容基线。
 - Linux Python、Node 和 Electron runtime 的构建与 ELF/共享库审计。
-- DEB payload、manifest、sidecar、`.build-success` 和离线仓库完整性。
+- DEB payload、manifest、sidecar、`.build-success` 和单 DEB 产物绑定完整性。
 - `--network none` 下的安装、非 GUI 验证、卸载和重装。
 - root-owned staging、同版本重装、旧包清理和 apt/dpkg 状态转换。
 - 交付目录只读挂载、证据目录单独可写和 challenge/摘要绑定。
@@ -262,10 +265,13 @@ SHA256SUMS.txt
 | Linux 制包 `npm test` 多项失败并提示缺少 `@resvg/resvg-js-linux-*` | 普通 npm 安装只准备当前平台原生包，复制型 DOCX skill 却承诺多个 Linux CPU/ABI | 按 lockfile 下载、校验并原子物化 x64/arm64、gnu/musl 原生包 | lockfile integrity、包身份、ELF/架构校验、制包机真实 `npm test` | 已由真实制包失败暴露并修复 |
 | apt 安装依赖时可能等待时区等交互输入 | 非交互环境没有稳定跨 sudo 传递 | 使用 `DEBIAN_FRONTEND=noninteractive` 和固定 `TZ` | 静态断言并在最小 Ubuntu 制包机实际执行 | 当前候选制包链已覆盖 |
 | Electron `ldd` 审计报告缺共享库 | 最小制包容器没有安装执行 Electron 审计所需的系统库 | 制包依赖阶段安装 DEB 声明的 Electron runtime 库 | Electron 必须为 Linux amd64 ELF，`ldd` 不得出现 `not found` | 当前候选 payload audit 已覆盖 |
+| Electron 版本和 8 个 ELF 正确，但 `resources.pak`/ICU/snapshot/locales 可被替换 | policy 声明了整包 `archive_sha256`，旧 stager 却没有消费该字段，非 ELF 只检查“存在” | npm 使用受控私有 Electron cache；只选择 basename/version/SHA256 与 canonical policy 相同的 Linux x64 ZIP；stager 再把最终 staged `dist/` 清单及每个文件与固定 ZIP 比对 | 非 ELF 篡改、归档篡改、文件清单漂移回归；官方 `39.8.10 linux-x64` 归档实物验证 | 本机已实时核对官方 ZIP SHA256 为 `92e8b031...eabd1`；Kylin 制包仍待重跑 |
 | manifest、最终预检或重试清理出现只读模板 `Permission denied` | 内置模板有意使用 `0444/0555`，普通 `rm -rf` 无法删除父目录 | 只清理带所有权标记的专用构建根；先恢复目录 owner 写权限再删除。构建根从用户缓存或 `/var/tmp` 动态选择并先通过执行/dlopen 探针 | manifest、payload-preflight、build-root、候选探针回归测试；失败诊断记录 `findmnt -T` | 当前分支静态/行为回归已覆盖；Linux 制包机真实重建仍未验证 |
 | Kylin 制包在 `/tmp` 首个原生模块测试报 `failed to map segment from shared object` | 目标机安全策略对 `/tmp` 执行或动态库映射有限制，构建工具虽下载成功但 native `.node` 无法加载 | 默认不再使用 `/tmp`；选择 owner-only 用户缓存或 `/var/tmp` 构建根，并在解包/下载前真实运行 ELF 和 `ctypes.CDLL` 探针 | 候选根按顺序尝试；显式根探针失败立即退出；诊断包含候选、阶段、原始错误和 `findmnt` | 根因来自 2026-08-06 Kylin 日志；当前修复尚未在该制包机重建 |
 | Web、开始菜单、Electron 窗口出现不同 Logo 或黑金 SVG | Web favicon、hicolor、desktop entry、Electron class 和安装态资源没有统一同源合同 | 以蓝色太极机器人 RGBA PNG 为 canonical；派生 32/48/64/128/192/256/512 PNG 与 ICO，AppStream/desktop/WM_CLASS/窗口图标/原生校验全部绑定 | `validate_icon_assets.py`、payload contract、native verify、图标链静态回归 | 源码资产和静态合同已实时验证；真实 Kylin/UOS 桌面缓存刷新和安装态仍未验证 |
-| 离线仓库看似生成，但依赖为空或不闭合 | 手写 Depends 解析和 `apt-rdepends` 不能等价于干净目标机上的 apt 求解 | 分开解析 Depends/Pre-Depends；用空 dpkg status 的 apt download-only 求解；按实际下载包建索引 | 直接依赖非空、依赖闭包、`Packages`/`Packages.gz`/每个 DEB 摘要一致 | 历史候选 `1d56849a` 生成 187 个索引项并完成断网生命周期；后续源码提交仍须重跑 |
+| v3 单 DEB 发布门禁仍要求历史 `离线依赖/Packages*` | v2 内部 apt 仓库证据合同未与 v3 `exactly-one-deb` 客户边界同步 | v3 inventory 只允许 manifest 绑定的唯一 DEB 和 sidecar，显式拒绝混入历史 apt 仓库；v2 只保留为显式历史只读路径 | v3/v2 证据 schema 回归、release-check 静态合同 | 当前源码合同待 Linux 实际制包重跑；历史 v2 证据不升级为当前发布证据 |
+| Kylin 制包在 276 个 DOCX 测试全部通过后报 `trusted /usr/bin/readelf is missing or unsafe` | Debian/Kylin 的 `/usr/bin/readelf` 通常是 root 管理的架构别名软链接，旧解析器只接受普通文件，误拒绝正常系统工具；Python runtime 的 libpython 消费者检查曾另外从 `PATH` 裸调 `readelf` | 同时校验别名目录、软链接归属、解析后实体路径、root owner、权限和可执行位，返回 canonical 实体路径；ABI audit、private-library staging 和 libpython 消费者检查全部复用同一 trusted resolver，执行时固定安全 `PATH` 与 C locale，逃逸到非受信目录仍 fail closed | root-managed symlink 正/负回归、恶意 `PATH` 不得被调用、实际 Linux `/usr/bin/readelf` 解析 | 根因来自 2026-08-06 Kylin 日志；源码回归不代表当前输入包已在制包机重建 |
+| 修复 `readelf` 后实物 ELF 闭包会继续遇到 debugpy/Tcl-Tk/异架构 resvg/Electron companion 误报 | 开发 extras 被带入正式 venv，uv standalone 携带无用 GUI 组件，DOCX 源码测试与最终 x86_64 payload 未分层，Electron 自带配套 ELF 未精确建模 | 正式 production profile 不安装 dev；stager 裁剪 Tcl/Tk 和非 x64-glibc resvg；Electron companion 必须 SONAME+固定相对路径同时命中，安全 `$ORIGIN` RPATH 按 policy 校验 | 旧真实 DEB 裁剪回放、Python/Node smoke、39 个 ELF 完整 closure | 临时严格规则已在 Ubuntu 20.04 sysroot 实物回放通过；正式代码与当前 Kylin 制品仍须重跑 |
 | 使用 Debian 13 制包或演练会带来 glibc 2.41 和新系统包冲突 | 演练系统比 Kylin V10/glibc 2.31 更新，可能产生假绿或误报依赖冲突 | 固定 Ubuntu 20.04 amd64 兼容基线，并校验镜像 baseline label | manifest 记录 OS、arch、glibc；生产器核对镜像角色和版本 | 仅证明兼容基线，不证明 Kylin 真机 |
 | Linux 签名预检误报“源码包内容与当前 Git HEAD 不一致” | macOS Apple gzip 与 Linux GNU gzip 会把同一 tar 压成不同字节；比较 `.tar.gz` 本身把编码器差异误判为源码漂移 | 仍用当前 Git HEAD 重建确定性 tar，但与源码包解压后的 tar 流逐字节比较 | 不同 gzip 编码器的同一 git archive 必须通过；解压后 tar 增加任意字节必须拒绝 | 在 `15c058b4` 签名前真实暴露；两端解压 tar SHA256 相同后修复 |
 | Linux `execute_code` 报 `OSError: AF_UNIX path too long` | `TAIJI_AGENT_TMP_DIR` 或工作树路径过深；`sockaddr_un.sun_path` 按编码字节计，Linux 约 108 B，旧逻辑只处理 Darwin 长路径 | 脚本和数据继续留在 Taiji 临时目录；仅 RPC socket 放入随机 owner-only `/tmp/taiji_rpc_*`，目录 `0700`、socket `0600`；POSIX 建立安全 UDS 失败时 fail closed，不降级到无鉴权 TCP | Ubuntu 多字节中文长路径必须成功且退出后无残留；短目录创建失败时必须返回错误且不得打开 AF_INET | Docker Linux release-check 中真实暴露；13 项聚焦测试已覆盖成功和失败路径，最终发布仍以冻结提交重跑为准 |
@@ -437,7 +443,7 @@ bash ./03_目标终端_导出诊断报告.sh
 - `summary.txt`：失败阶段、错误码和四级证据状态。
 - `release/`：manifest、`.build-success`、构建报告和 SHA 清单；不复制大 DEB。
 - `system/`：OS、架构、glibc、桌面会话、sudo/systemd、kysec 摘要。
-- `package/`：dpkg/apt 状态、离线仓库文件集合与摘要。
+- `package/`：dpkg 状态、唯一 DEB/manifest/sidecar 摘要与安装日志。
 - `runtime/`：native verify、CLI、Electron `file/ldd`、desktop entry、权限、服务、进程和端口。
 - `logs/`：自动失败诊断和经过脱敏的日志尾部。
 - `app/`：已有的产品支持包；不能静默收集完整会话或附件。

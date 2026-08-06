@@ -2,16 +2,22 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import os
 import shutil
 import stat
 import sys
+import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath
 
 
 EXPECTED_ELECTRON_VERSION = "39.8.10"
 PRUNED_DIRECTORY_NAMES = {"__tests__", "docs", "test", "tests"}
+MAX_ELECTRON_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_ELECTRON_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class ElectronRuntimeStageError(RuntimeError):
@@ -57,7 +63,153 @@ def ignore_dev_only(_directory: str, names: list[str]) -> set[str]:
     return {name for name in names if is_dev_only_name(name)}
 
 
-def validate_source(source: Path, *, require_linux_x86_64: bool) -> dict[str, object]:
+def load_electron_contract(policy_path: Path) -> tuple[str, str]:
+    helper_path = Path(__file__).with_name("compatibility_policy.py")
+    spec = importlib.util.spec_from_file_location(
+        "taiji_electron_runtime_compatibility_policy",
+        helper_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ElectronRuntimeStageError("cannot load compatibility policy helper")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        policy = module.load_and_validate(policy_path)
+    except Exception as exc:
+        raise ElectronRuntimeStageError(f"compatibility policy is invalid: {exc}") from exc
+    distribution = policy["elf"]["electron_distribution"]
+    return distribution["version"], distribution["archive_sha256"]
+
+
+def _sha256_file_digest(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
+def sha256_regular_file(path: Path, label: str) -> str:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ElectronRuntimeStageError(f"{label} cannot be inspected: {path}: {exc}") from exc
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ElectronRuntimeStageError(f"{label} must be a single-link regular file: {path}")
+    if metadata.st_size <= 0 or metadata.st_size > MAX_ELECTRON_ARCHIVE_BYTES:
+        raise ElectronRuntimeStageError(f"{label} size is invalid: {metadata.st_size}")
+    return _sha256_file_digest(path).hex()
+
+
+def _runtime_file_inventory(dist: Path) -> dict[str, Path]:
+    inventory: dict[str, Path] = {}
+    for candidate in sorted(dist.rglob("*")):
+        relative = candidate.relative_to(dist)
+        if any(is_dev_only_name(part) for part in relative.parts):
+            continue
+        if candidate.is_symlink() or (candidate.exists() and not candidate.is_file() and not candidate.is_dir()):
+            raise ElectronRuntimeStageError(
+                f"installed Electron dist contains an unsupported node: {relative.as_posix()}"
+            )
+        if candidate.is_file():
+            metadata = candidate.stat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ElectronRuntimeStageError(
+                    f"installed Electron dist file is not a single-link regular file: {relative.as_posix()}"
+                )
+            inventory[relative.as_posix()] = candidate
+    return inventory
+
+
+def _safe_archive_member_name(info: zipfile.ZipInfo) -> str:
+    raw = info.filename
+    path = PurePosixPath(raw.rstrip("/"))
+    if (
+        not raw
+        or "\\" in raw
+        or path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ElectronRuntimeStageError(f"Electron archive contains an unsafe path: {raw!r}")
+    return path.as_posix()
+
+
+def validate_archive_matches_dist(
+    source: Path,
+    archive: Path,
+    *,
+    expected_version: str,
+    expected_archive_sha256: str,
+) -> str:
+    expected_basename = f"electron-v{expected_version}-linux-x64.zip"
+    if archive.name != expected_basename:
+        raise ElectronRuntimeStageError(
+            f"Electron archive basename must be {expected_basename}, got {archive.name}"
+        )
+    actual_sha256 = sha256_regular_file(archive, "Electron archive")
+    if actual_sha256 != expected_archive_sha256:
+        raise ElectronRuntimeStageError(
+            "Electron archive SHA256 does not match the canonical compatibility policy"
+        )
+
+    source_files = _runtime_file_inventory(source / "dist")
+    archive_files: dict[str, zipfile.ZipInfo] = {}
+    uncompressed_bytes = 0
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for info in bundle.infolist():
+                relative = _safe_archive_member_name(info)
+                if info.is_dir() or any(is_dev_only_name(part) for part in PurePosixPath(relative).parts):
+                    continue
+                mode = info.external_attr >> 16
+                if stat.S_ISLNK(mode):
+                    raise ElectronRuntimeStageError(
+                        f"Electron archive contains an unsupported symlink: {relative}"
+                    )
+                if relative in archive_files:
+                    raise ElectronRuntimeStageError(
+                        f"Electron archive contains a duplicate member: {relative}"
+                    )
+                uncompressed_bytes += info.file_size
+                if uncompressed_bytes > MAX_ELECTRON_UNCOMPRESSED_BYTES:
+                    raise ElectronRuntimeStageError("Electron archive uncompressed size is excessive")
+                archive_files[relative] = info
+
+            if set(source_files) != set(archive_files):
+                missing = sorted(set(archive_files) - set(source_files))
+                extra = sorted(set(source_files) - set(archive_files))
+                detail = []
+                if missing:
+                    detail.append("missing=" + ",".join(missing[:5]))
+                if extra:
+                    detail.append("extra=" + ",".join(extra[:5]))
+                raise ElectronRuntimeStageError(
+                    "installed Electron dist inventory differs from the fixed archive: "
+                    + "; ".join(detail)
+                )
+
+            for relative, source_file in source_files.items():
+                source_digest = _sha256_file_digest(source_file)
+                archive_digest = hashlib.sha256()
+                with bundle.open(archive_files[relative], "r") as archived:
+                    for chunk in iter(lambda: archived.read(1024 * 1024), b""):
+                        archive_digest.update(chunk)
+                if source_digest != archive_digest.digest():
+                    raise ElectronRuntimeStageError(
+                        f"archive member differs from installed Electron dist: {relative}"
+                    )
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ElectronRuntimeStageError(f"Electron archive cannot be validated: {exc}") from exc
+    return actual_sha256
+
+
+def validate_source(
+    source: Path,
+    *,
+    expected_version: str,
+    require_linux_x86_64: bool,
+) -> dict[str, object]:
     source = source.resolve(strict=True)
     if not source.is_dir():
         raise ElectronRuntimeStageError(f"Electron source is not a directory: {source}")
@@ -69,9 +221,9 @@ def validate_source(source: Path, *, require_linux_x86_64: bool) -> dict[str, ob
         package = json.loads(package_path.read_text(encoding="utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ElectronRuntimeStageError("Electron package.json is invalid") from exc
-    if package.get("version") != EXPECTED_ELECTRON_VERSION:
+    if package.get("version") != expected_version:
         raise ElectronRuntimeStageError(
-            f"Electron version must be {EXPECTED_ELECTRON_VERSION}, got {package.get('version')}"
+            f"Electron version must be {expected_version}, got {package.get('version')}"
         )
     dist = source / "dist"
     if dist.is_symlink() or not dist.is_dir():
@@ -124,10 +276,18 @@ def stage_electron_runtime(
     source: Path,
     destination: Path,
     *,
+    archive: Path,
+    expected_version: str,
+    expected_archive_sha256: str,
     require_linux_x86_64: bool,
 ) -> dict[str, object]:
     source = source.expanduser().resolve(strict=True)
-    package = validate_source(source, require_linux_x86_64=require_linux_x86_64)
+    package = validate_source(
+        source,
+        expected_version=expected_version,
+        require_linux_x86_64=require_linux_x86_64,
+    )
+    archive = archive.expanduser().absolute()
     destination = destination.expanduser().absolute()
     shutil.rmtree(destination, ignore_errors=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -141,12 +301,23 @@ def stage_electron_runtime(
             ignore=ignore_dev_only,
         )
         validate_staged_runtime(destination)
+        archive_sha256 = validate_archive_matches_dist(
+            destination,
+            archive,
+            expected_version=expected_version,
+            expected_archive_sha256=expected_archive_sha256,
+        )
+        if sha256_regular_file(archive, "Electron archive") != archive_sha256:
+            raise ElectronRuntimeStageError(
+                "Electron archive changed while the staged distribution was validated"
+            )
     except Exception:
         shutil.rmtree(destination, ignore_errors=True)
         raise
     return {
         "ok": True,
         "electron_version": package["version"],
+        "electron_archive_sha256": archive_sha256,
         "runtime_root": str(destination),
     }
 
@@ -155,12 +326,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage the audited Taiji Electron runtime")
     parser.add_argument("--source", required=True)
     parser.add_argument("--destination", required=True)
+    parser.add_argument("--archive", required=True)
+    parser.add_argument("--policy", required=True)
     parser.add_argument("--require-linux-x86-64", action="store_true")
     args = parser.parse_args()
     try:
+        expected_version, expected_archive_sha256 = load_electron_contract(Path(args.policy))
         result = stage_electron_runtime(
             Path(args.source),
             Path(args.destination),
+            archive=Path(args.archive),
+            expected_version=expected_version,
+            expected_archive_sha256=expected_archive_sha256,
             require_linux_x86_64=bool(args.require_linux_x86_64),
         )
     except (OSError, ValueError, ElectronRuntimeStageError) as exc:

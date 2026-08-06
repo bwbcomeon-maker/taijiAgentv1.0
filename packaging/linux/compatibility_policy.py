@@ -41,6 +41,67 @@ EXPECTED_SYSTEM_CAPABILITIES = {
     "disk_headroom_mib": 6144,
 }
 EXPECTED_DEBIAN = {"depends": ["ca-certificates", "libc6 (>= 2.31)"]}
+EXPECTED_ELECTRON_DISTRIBUTION = {
+    "version": "39.8.10",
+    "archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
+    "elf_files": {
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron": {
+            "soname": None,
+            "sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
+            "allowed_host_path_literals": [
+                "/home/privacy/",
+                "/tmp/__v8_gc__",
+                "/tmp/foo.js",
+                "/tmp/node-repl-sock",
+                "/tmp/perfetto-consumer",
+                "/tmp/perfetto-producer",
+                "/workspace/workspace.js",
+            ],
+        },
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome-sandbox": {
+            "soname": None,
+            "sha256": "b80ae15c6479c7feaba09d0be5baa7dc5e9f6c4a8318ad810ab2403bd19c1556",
+            "allowed_host_path_literals": [],
+        },
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome_crashpad_handler": {
+            "soname": None,
+            "sha256": "7a24f3d83dbe3374c6369dd812f45333b4cf4f37ba2f6183692367f6aa5218ae",
+            "allowed_host_path_literals": [],
+        },
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libEGL.so": {
+            "soname": "libEGL.so",
+            "sha256": "6cfd87c370d8d54b091d92e37ee8557746e07fc811835f91aa0e2f1498874eec",
+            "allowed_host_path_literals": [],
+        },
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libGLESv2.so": {
+            "soname": "libGLESv2.so",
+            "sha256": "4cc6eed2c6bd7780c610d2af3d7222ffe14e1d4b06774a995b592f5b19d89f74",
+            "allowed_host_path_literals": [],
+        },
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libffmpeg.so": {
+            "soname": "libffmpeg.so",
+            "sha256": "201277a3add9103e67152e0a351368412ab1ef021297261032d08c130748a72c",
+            "allowed_host_path_literals": ["/tmp/%sXXXXXX"],
+        },
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libvulkan.so.1": {
+            "soname": "libvulkan.so.1",
+            "sha256": "0469f4bec7fc7b850961110e2ab403535ac31521184ac57a76be3960dc7b046c",
+            "allowed_host_path_literals": [
+                "/build/linux/debian_bullseye_amd64-sysroot/usr/include",
+                "/build/linux/debian_bullseye_amd64-sysroot/usr/include/X11",
+                "/build/linux/debian_bullseye_amd64-sysroot/usr/include/x86_64-linux-gnu/bits",
+                "/build/linux/debian_bullseye_amd64-sysroot/usr/include/x86_64-linux-gnu/bits/types",
+                "/build/linux/debian_bullseye_amd64-sysroot/usr/include/x86_64-linux-gnu/sys",
+                "/build/linux/debian_bullseye_amd64-sysroot/usr/include/xcb",
+            ],
+        },
+        "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libvk_swiftshader.so": {
+            "soname": "libvk_swiftshader.so",
+            "sha256": "f29e848cde25445ed9f0b157b4fd0caaf8818cec096bd2e175a52c1d7c0f2ea2",
+            "allowed_host_path_literals": [],
+        },
+    },
+}
 EXPECTED_ELF = {
     "maximum_symbol_versions": {"GLIBC": "2.31", "GLIBCXX": "3.4.28", "CXXABI": "1.3.12"},
     "private_library_dir": "/opt/taiji-agent/runtime/lib",
@@ -64,6 +125,7 @@ EXPECTED_ELF = {
         "libgbm.so.1", "libGL.so.1", "libEGL.so.1", "libGLX.so.0",
     ],
     "allowed_runpaths": ["$ORIGIN", "$ORIGIN/../lib", "/opt/taiji-agent/runtime/lib"],
+    "electron_distribution": EXPECTED_ELECTRON_DISTRIBUTION,
 }
 
 
@@ -162,6 +224,7 @@ def render_debian_depends(policy: dict[str, Any]) -> str:
 def shell_exports(policy: dict[str, Any]) -> dict[str, str]:
     _validate(policy)
     package = policy["package"]
+    electron = policy["elf"]["electron_distribution"]
     return {
         "TAIJI_POLICY_ID": policy["policy_id"],
         "TAIJI_POLICY_SHA256": canonical_sha256(policy),
@@ -173,6 +236,8 @@ def shell_exports(policy: dict[str, Any]) -> dict[str, str]:
         "TAIJI_GLIBC_MIN": policy["minimum_supported"]["glibc"],
         "TAIJI_KERNEL_MIN": policy["minimum_supported"]["kernel"],
         "TAIJI_PRIVATE_LIBRARY_DIR": policy["elf"]["private_library_dir"],
+        "TAIJI_ELECTRON_VERSION": electron["version"],
+        "TAIJI_ELECTRON_ARCHIVE_SHA256": electron["archive_sha256"],
     }
 
 

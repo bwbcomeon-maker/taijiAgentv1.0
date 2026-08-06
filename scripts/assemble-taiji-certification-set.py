@@ -49,6 +49,31 @@ def _load_assembler():
 CONTRACT = _load_assembler()
 
 
+def _load_release_validator():
+    candidates = (
+        Path(__file__).resolve().with_name("validate-taiji-release-evidence.py"),
+        ROOT / "scripts/validate-taiji-release-evidence.py",
+    )
+    for path in dict.fromkeys(candidates):
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "taiji_certification_set_release_validator",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise CertificationSetError("cannot load release evidence validator")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(spec.name, None)
+            raise
+        return module
+    return None
+
+
 def _strict_json(payload: bytes, label: str) -> dict[str, Any]:
     try:
         value = json.loads(
@@ -167,32 +192,36 @@ def _validate_offline_evidence(
     payload = _safe_regular(evidence_path, "offline rehearsal evidence")
     data = _strict_json(payload, "offline rehearsal evidence")
     schema = data.get("schema")
-    if schema not in {"taiji.offline-install-rehearsal.v1", "taiji-linux-offline-evidence/v1"}:
+    if schema != "taiji.offline-install-rehearsal.v1":
         raise CertificationSetError("offline rehearsal evidence schema is invalid")
-    if data.get("status") not in {None, "PASS"}:
-        raise CertificationSetError("offline rehearsal evidence must be PASS")
-    # Accept the existing rehearsal producer's boolean checks and the v1
-    # record's string checks, but require all lifecycle operations to pass.
-    checks = data.get("checks")
-    if type(checks) is not dict:
-        raise CertificationSetError("offline rehearsal evidence checks are missing")
-    for key in ("install", "uninstall", "reinstall"):
-        value = checks.get(key)
-        if value is not True and value != "PASS":
-            raise CertificationSetError(f"offline rehearsal check {key} must be PASS")
-    bindings = {
-        "source_commit": source_commit,
-        "version": version,
-        "deb_basename": deb_basename,
-        "deb_sha256": deb_sha256,
-        "compatibility_policy_id": policy_id,
-        "compatibility_policy_sha256": policy_sha256,
-    }
-    for key, expected in bindings.items():
-        if key in data and data[key] != expected:
-            raise CertificationSetError(f"offline rehearsal {key} does not match the release binding")
-    if data.get("source_commit") not in {None, source_commit} or data.get("deb_sha256") not in {None, deb_sha256}:
-        raise CertificationSetError("offline rehearsal release binding is invalid")
+    validator = _load_release_validator()
+    if validator is None:
+        raise CertificationSetError("current offline rehearsal evidence validator is missing")
+    binding = validator.BuildBinding(
+        source_commit=source_commit,
+        version=version,
+        architecture="amd64",
+        deb_basename=deb_basename,
+        deb_sha256=deb_sha256,
+        compatibility_policy_id=policy_id,
+        compatibility_policy_sha256=policy_sha256,
+        electron_executable_sha256="0" * 64,
+        desktop_entry_sha256="0" * 64,
+    )
+    validation_args = argparse.Namespace(
+        challenge=data.get("challenge_nonce"),
+        source_commit=source_commit,
+        deb=Path(deb_basename),
+    )
+    try:
+        validator.validate_offline_evidence_v1(
+            data,
+            evidence_path,
+            validation_args,
+            binding,
+        )
+    except Exception as exc:  # validator owns the current v1 contract wording
+        raise CertificationSetError(str(exc)) from exc
     return data, hashlib.sha256(payload).hexdigest()
 
 

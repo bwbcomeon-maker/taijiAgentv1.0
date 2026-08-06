@@ -1,8 +1,10 @@
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -12,6 +14,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "scripts" / "produce-taiji-offline-rehearsal.py"
+VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
+CERTIFICATION_ASSEMBLER = ROOT / "scripts" / "assemble-taiji-certification-set.py"
+POLICY = ROOT / "packaging" / "linux" / "compatibility-policy.json"
+POLICY_HELPER = ROOT / "packaging" / "linux" / "compatibility_policy.py"
 DOCKERFILE = ROOT / "tools" / "taiji-offline-rehearsal" / "Dockerfile"
 LIFECYCLE = ROOT / "tools" / "taiji-offline-rehearsal" / "run-lifecycle.sh"
 CHALLENGE = "ab" * 32
@@ -26,6 +32,16 @@ def sha256(path: Path) -> str:
 def write_executable(path: Path, body: str) -> None:
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
     path.chmod(0o755)
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class OfflineRehearsalProducerTest(unittest.TestCase):
@@ -52,46 +68,38 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
 
     def _write_delivery_fixture(self) -> None:
         package_dir = self.delivery / "生成的安装包"
-        offline_repo = self.delivery / "离线依赖"
         package_dir.mkdir(parents=True)
-        offline_repo.mkdir()
         source_archive = self.delivery / f"taiji-agentv1.0-kylin-build-src-{self.source_commit}.tar.gz"
         source_archive.write_bytes(b"source archive fixture\n")
         deb = package_dir / "taiji-agent_0.1.0_amd64.deb"
         deb.write_bytes(b"deb fixture\n")
-        packages = offline_repo / "Packages"
-        packages.write_bytes(b"packages fixture\n")
-        packages_gz = offline_repo / "Packages.gz"
-        packages_gz.write_bytes(b"packages gzip fixture\n")
-        dependency = offline_repo / "dependency-fixture_1.0_amd64.deb"
-        dependency.write_bytes(b"dependency fixture\n")
         checksum = package_dir / f"{deb.name}.sha256"
         checksum.write_text(f"{sha256(deb)}  {deb.name}\n", encoding="utf-8")
         generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        target_profile_id = "kylin-v10-amd64-123456789abc"
-        target_profile_sha256 = "b" * 64
+        policy_helper = load_module(POLICY_HELPER, "taiji_offline_rehearsal_policy_test")
+        policy = policy_helper.load_and_validate(POLICY)
+        self.policy_id = policy["policy_id"]
+        self.policy_sha256 = policy_helper.canonical_sha256(policy)
         manifest = package_dir / "taiji-package-manifest.json"
         manifest.write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema": "taiji-package-manifest/v3",
                     "package": "taiji-agent",
                     "version": "0.1.0",
-                    "build_arch": "x86_64",
-                    "dpkg_arch": "amd64",
-                    "deb": deb.name,
-                    "deb_sha256": sha256(deb),
-                    "checksum": checksum.name,
-                    "source_archive": source_archive.name,
+                    "architecture": "amd64",
                     "source_commit": self.source_commit,
-                    "source_sha256": sha256(source_archive),
-                    "packages_sha256": sha256(packages),
-                    "packages_gz_sha256": sha256(packages_gz),
+                    "deb_basename": deb.name,
+                    "deb_sha256": sha256(deb),
+                    "compatibility_policy_id": self.policy_id,
+                    "compatibility_policy_sha256": self.policy_sha256,
+                    "elf_abi_audit_basename": "elf-abi-audit.json",
+                    "elf_abi_audit_sha256": "a" * 64,
+                    "icon_set_sha256": "1" * 64,
                     "electron_executable_sha256": "e" * 64,
                     "desktop_entry_sha256": "d" * 64,
-                    "target_baseline_profile_id": target_profile_id,
-                    "target_baseline_sha256": target_profile_sha256,
-                    "built_at": generated_at,
+                    "maintainer": "Taiji Agent Product Team <noreply@localhost>",
+                    "built_at_utc": generated_at,
                 },
                 sort_keys=True,
             )
@@ -104,15 +112,17 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "version=0.1.0",
                     f"source_archive={source_archive.name}",
                     f"source_sha256={sha256(source_archive)}",
+                    f"source_commit={self.source_commit}",
                     f"deb={deb.name}",
                     f"deb_sha256={sha256(deb)}",
                     f"checksum={checksum.name}",
-                    "built_at=2026-07-11T08:00:00+0800",
+                    f"built_at_utc={generated_at}",
                     f"manifest={manifest.name}",
-                    f"packages_sha256={sha256(packages)}",
-                    f"packages_gz_sha256={sha256(packages_gz)}",
-                    f"target_baseline_profile_id={target_profile_id}",
-                    f"target_baseline_sha256={target_profile_sha256}",
+                    f"compatibility_policy_id={self.policy_id}",
+                    f"compatibility_policy_sha256={self.policy_sha256}",
+                    f"elf_abi_audit_sha256={'a' * 64}",
+                    f"icon_set_sha256={'1' * 64}",
+                    "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )
             + "\n",
@@ -156,10 +166,6 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         )
         (self.delivery / "操作说明.md").write_text("instructions\n", encoding="utf-8")
         (self.delivery / "版本信息.txt").write_text("0.1.0\n", encoding="utf-8")
-        (offline_repo / "SHA256SUMS.txt").write_text("fixture inventory\n", encoding="utf-8")
-        (offline_repo / "runtime-dependencies.txt").write_text(
-            "dependency-fixture\n", encoding="utf-8"
-        )
 
     def _write_fake_docker(self) -> None:
         write_executable(
@@ -318,23 +324,61 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                         "receipts": [
                             {
                                 "operation": operation,
+                                "result": result,
+                                "state": "committed",
+                                "transaction_id": transaction_id,
                                 "deb_sha256": state["env"]["TAIJI_EXPECTED_DEB_SHA256"],
                                 "compatibility_policy_id": state["env"]["TAIJI_COMPATIBILITY_POLICY_ID"],
                                 "compatibility_policy_sha256": state["env"]["TAIJI_COMPATIBILITY_POLICY_SHA256"],
+                                "network": "none",
                             }
-                            for operation in ("fresh_install", "reinstall", "upgrade", "rollback")
+                            for operation, result, transaction_id in (
+                                ("fresh_install", "installed", "fresh-n"),
+                                ("reinstall", "reinstalled", "reinstall-n"),
+                                ("upgrade", "upgraded", "upgrade-n"),
+                                ("rollback", "rolled_back", "rollback-n"),
+                                ("upgrade_again", "upgraded", "upgrade-again-n"),
+                            )
                         ],
                         "data_manifests": {
                             "before_upgrade": "d" * 64,
                             "after_upgrade": "d" * 64,
                             "after_rollback": "d" * 64,
+                            "after_remove": "d" * 64,
+                            "after_purge": "d" * 64,
                         },
                         "compatibility_policy_id": state["env"]["TAIJI_COMPATIBILITY_POLICY_ID"],
                         "compatibility_policy_sha256": state["env"]["TAIJI_COMPATIBILITY_POLICY_SHA256"],
                         "journal": {
-                            "resume": "partial journal is never committed",
+                            "upgrade_transaction_id": "upgrade-n",
+                            "rollback_transaction_id": "rollback-n",
+                            "second_upgrade_transaction_id": "upgrade-again-n",
+                            "resume": "partial journal is never committed; manual_recovery_required is explicit",
+                            "power_loss_resume_checked": True,
+                            "partial_journal_treated_as_committed": False,
+                            "partial_journal_result": "manual_recovery_required",
                             "manual_recovery_required": False,
                         },
+                        "package_actions": [
+                            {
+                                "command": "dpkg --install",
+                                "package": state["env"]["TAIJI_EXPECTED_DEB_BASENAME"],
+                                "network": "none",
+                                "download": False,
+                            },
+                            {
+                                "command": "dpkg --remove",
+                                "package": "taiji-agent",
+                                "network": "none",
+                                "download": False,
+                            },
+                            {
+                                "command": "dpkg --purge",
+                                "package": "taiji-agent",
+                                "network": "none",
+                                "download": False,
+                            },
+                        ],
                     })
                     (evidence_dir / "offline-install-rehearsal-lifecycle.json").write_text(
                         json.dumps(lifecycle, sort_keys=True) + "\n", encoding="utf-8"
@@ -345,7 +389,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                         if (item.get("dst") or item.get("destination")) == "/delivery-ro"
                     )
                     delivery_dir = Path(delivery_mount.get("src") or delivery_mount.get("source"))
-                    (delivery_dir / "版本信息.txt").write_text("tampered during rehearsal\n", encoding="utf-8")
+                    (delivery_dir / "版本信息.txt").write_text(
+                        "tampered during rehearsal\n", encoding="utf-8"
+                    )
                 print("fake lifecycle ok")
                 raise SystemExit(0)
 
@@ -429,6 +475,46 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             ],
             cwd=ROOT,
             env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def run_current_offline_validator(
+        self,
+        *,
+        evidence: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        package_dir = self.delivery / "生成的安装包"
+        deb = package_dir / "taiji-agent_0.1.0_amd64.deb"
+        return subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "offline",
+                "--evidence",
+                str(evidence or (self.output / "offline-install-rehearsal.json")),
+                "--source-commit",
+                self.source_commit,
+                "--deb",
+                str(deb),
+                "--checksum",
+                str(package_dir / f"{deb.name}.sha256"),
+                "--manifest",
+                str(package_dir / "taiji-package-manifest.json"),
+                "--build-marker",
+                str(package_dir / ".build-success"),
+                "--source-archive",
+                str(
+                    self.delivery
+                    / f"taiji-agentv1.0-kylin-build-src-{self.source_commit}.tar.gz"
+                ),
+                "--delivery-dir",
+                str(self.delivery),
+                "--challenge",
+                CHALLENGE,
+            ],
+            cwd=ROOT,
             text=True,
             capture_output=True,
             check=False,
@@ -556,6 +642,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         )
 
     def test_success_uses_locked_down_docker_and_publishes_bound_evidence(self):
+        self.assertFalse((self.delivery / "离线依赖").exists())
         result = self.run_producer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -566,15 +653,45 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertEqual(session["challenge_nonce"], CHALLENGE)
         self.assertEqual(session["checks"], {"install": True, "uninstall": True, "reinstall": True})
         self.assertEqual(evidence["challenge_nonce"], CHALLENGE)
-        self.assertEqual(evidence["schema_version"], 2)
+        self.assertEqual(evidence["schema"], "taiji.offline-install-rehearsal.v1")
+        self.assertEqual(evidence["status"], "PASS")
+        self.assertEqual(evidence["version"], "0.1.0")
+        self.assertEqual(evidence["architecture"], "amd64")
+        self.assertEqual(evidence["compatibility_policy_id"], self.policy_id)
+        self.assertEqual(evidence["compatibility_policy_sha256"], self.policy_sha256)
+        validator = load_module(VALIDATOR, "taiji_offline_inventory_test")
         self.assertEqual(
-            evidence["target_baseline_profile_id"],
-            "kylin-v10-amd64-123456789abc",
+            evidence["delivery_inventory_sha256"],
+            validator.delivery_inventory_sha256(self.delivery),
         )
-        self.assertEqual(evidence["target_baseline_sha256"], "b" * 64)
+        self.assertEqual(
+            evidence["checks"],
+            {"install": "PASS", "uninstall": "PASS", "reinstall": "PASS"},
+        )
+        self.assertNotIn("schema_version", evidence)
+        self.assertNotIn("release_artifacts_sha256", evidence)
+        self.assertNotIn("target_baseline_profile_id", evidence)
+        self.assertNotIn("target_baseline_sha256", evidence)
         self.assertEqual(evidence["log_sha256"], sha256(session_path))
         self.assertFalse(evidence["desktop_app_verified"])
         self.assertFalse(evidence["target_verified"])
+
+        validation = self.run_current_offline_validator()
+        self.assertEqual(validation.returncode, 0, validation.stdout + validation.stderr)
+        self.assertIn("offline-rehearsal-valid", validation.stdout)
+
+        assembler = load_module(CERTIFICATION_ASSEMBLER, "taiji_offline_rehearsal_assembler_test")
+        accepted, accepted_sha = assembler._validate_offline_evidence(
+            evidence_path,
+            source_commit=self.source_commit,
+            version="0.1.0",
+            deb_basename=evidence["deb_basename"],
+            deb_sha256=evidence["deb_sha256"],
+            policy_id=self.policy_id,
+            policy_sha256=self.policy_sha256,
+        )
+        self.assertEqual(accepted, evidence)
+        self.assertEqual(accepted_sha, sha256(evidence_path))
 
         calls = self.docker_calls()
         create = next(call for call in calls if call and call[0] == "create")
@@ -592,6 +709,68 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         for forbidden in ("API_KEY", "PRIVATE_KEY", "LICENSE", "TOKEN"):
             self.assertNotIn(forbidden, joined)
         self.assertTrue(any(call[:2] == ["rm", "--force"] for call in calls))
+
+    def test_current_offline_validator_rejects_target_baseline_fields(self):
+        result = self.run_producer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence_path = self.output / "offline-install-rehearsal.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["target_baseline_sha256"] = "b" * 64
+        evidence_path.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+
+        validation = self.run_current_offline_validator()
+
+        self.assertNotEqual(validation.returncode, 0)
+        self.assertIn("target baseline", validation.stderr)
+
+    def test_current_offline_validator_rejects_tampered_bound_session_log(self):
+        result = self.run_producer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        session_path = self.output / "offline-install-rehearsal-session.json"
+        session_path.write_text(session_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+        validation = self.run_current_offline_validator()
+
+        self.assertNotEqual(validation.returncode, 0)
+        self.assertIn("log_sha256", validation.stderr)
+
+    def test_current_offline_validator_rejects_policy_binding_mismatch(self):
+        result = self.run_producer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence_path = self.output / "offline-install-rehearsal.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["compatibility_policy_sha256"] = "0" * 64
+        evidence_path.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+
+        validation = self.run_current_offline_validator()
+
+        self.assertNotEqual(validation.returncode, 0)
+        self.assertIn("compatibility_policy_sha256", validation.stderr)
+
+    def test_current_offline_validator_rejects_delivery_inventory_drift_after_rehearsal(self):
+        result = self.run_producer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (self.delivery / "操作说明.md").write_text(
+            "replaced after rehearsal\n",
+            encoding="utf-8",
+        )
+
+        validation = self.run_current_offline_validator()
+
+        self.assertNotEqual(validation.returncode, 0)
+        self.assertIn("delivery_inventory_sha256", validation.stderr)
+
+    def test_v3_manifest_target_baseline_is_rejected_before_docker(self):
+        manifest_path = self.delivery / "生成的安装包" / "taiji-package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["target_baseline_profile_id"] = "legacy-profile"
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        result = self.run_producer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("target baseline", result.stdout + result.stderr)
+        self.assertFalse(self.docker_log.exists())
 
     def test_network_mode_mismatch_fails_before_start_and_publishes_nothing(self):
         result = self.run_producer("network_bridge")

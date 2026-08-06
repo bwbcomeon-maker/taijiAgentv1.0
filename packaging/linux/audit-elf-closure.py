@@ -26,7 +26,13 @@ ELF_MAGIC = b"\x7fELF"
 SCHEMA = "taiji-elf-abi-audit/v1"
 _VERSION_RE = re.compile(r"\b(GLIBCXX|CXXABI|GLIBC)_([0-9]+(?:\.[0-9]+)*)\b")
 _HOST_PATH_RE = re.compile(
-    rb"/(?:Users|home|private/var|tmp|workspace|build|Volumes)/[A-Za-z0-9_.+@%~:/\\-]+"
+    rb"/(?:Users|home|private/var|var/tmp|tmp|workspace|build|Volumes)/"
+    rb"[A-Za-z0-9_.+@%~:/\\-]+"
+)
+_TAIJI_BUILD_PATH_RE = re.compile(
+    rb"/(?:Users|home|private/var|var/tmp|tmp|workspace|build|Volumes)/"
+    rb"[A-Za-z0-9_.+@%~:/\\-]*(?:taiji|hermes)[A-Za-z0-9_.+@%~:/\\-]*",
+    re.IGNORECASE,
 )
 _KNOWN_EXTERNAL_SONAMES = {
     "ld-linux-x86-64.so.2",
@@ -45,7 +51,14 @@ _KNOWN_EXTERNAL_SONAMES = {
     "libnss_dns.so.2",
     "libnss_files.so.2",
 }
-_TRUSTED_READELF_CANDIDATES = (Path("/usr/bin/readelf"), Path("/bin/readelf"))
+_TRUSTED_READELF_CANDIDATES = (
+    Path("/usr/bin/readelf"),
+    Path("/bin/readelf"),
+    Path("/usr/bin/x86_64-linux-gnu-readelf"),
+    Path("/bin/x86_64-linux-gnu-readelf"),
+)
+_TRUSTED_READELF_DIRECTORIES = (Path("/usr/bin"), Path("/bin"))
+_TRUSTED_TOOLS_MODULE = None
 
 
 class ElfAuditError(RuntimeError):
@@ -75,21 +88,31 @@ def policy_sha256(policy: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_policy_bytes(policy)).hexdigest()
 
 
+def _trusted_tools_module():
+    global _TRUSTED_TOOLS_MODULE
+    if _TRUSTED_TOOLS_MODULE is not None:
+        return _TRUSTED_TOOLS_MODULE
+    module_path = Path(__file__).with_name("trusted_system_tools.py")
+    spec = importlib.util.spec_from_file_location("taiji_trusted_system_tools_for_elf", module_path)
+    if spec is None or spec.loader is None:
+        raise ElfAuditError(f"cannot load trusted system tool helper: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _TRUSTED_TOOLS_MODULE = module
+    return module
+
+
 def resolve_trusted_readelf() -> str:
-    for candidate in _TRUSTED_READELF_CANDIDATES:
-        try:
-            metadata = candidate.lstat()
-        except OSError:
-            continue
-        mode = metadata.st_mode
-        if (
-            stat.S_ISREG(mode)
-            and metadata.st_uid == 0
-            and mode & 0o111
-            and not mode & 0o022
-        ):
-            return str(candidate)
-    raise ElfAuditError("trusted /usr/bin/readelf is missing or unsafe")
+    module = _trusted_tools_module()
+    try:
+        return module.resolve_trusted_system_tool(
+            "readelf",
+            candidates=_TRUSTED_READELF_CANDIDATES,
+            trusted_directories=_TRUSTED_READELF_DIRECTORIES,
+            allowed_resolved_names=("readelf", "x86_64-linux-gnu-readelf"),
+        )
+    except module.TrustedSystemToolError as exc:
+        raise ElfAuditError(str(exc)) from exc
 
 
 def run_readelf(path: Path, option: str) -> str:
@@ -208,17 +231,89 @@ def _looks_like_elf(path: Path) -> bool:
         raise ElfAuditError(f"cannot read payload ELF candidate: {path}") from exc
 
 
-def _check_build_host_path_leak(path: Path) -> None:
+def _electron_elf_files(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return policy["elf"]["electron_distribution"]["elf_files"]
+
+
+def _check_build_host_path_leak(
+    path: Path,
+    relative_path: str,
+    policy: dict[str, Any],
+) -> None:
     overlap = b""
+    matches: set[bytes] = set()
+    taiji_build_matches: set[bytes] = set()
     try:
         with path.open("rb") as handle:
             while block := handle.read(1024 * 1024):
                 window = overlap + block
-                if _HOST_PATH_RE.search(window):
-                    raise ElfAuditError(f"build-host absolute path leak in ELF: {path}")
+                matches.update(match.group(0) for match in _HOST_PATH_RE.finditer(window))
+                taiji_build_matches.update(
+                    match.group(0) for match in _TAIJI_BUILD_PATH_RE.finditer(window)
+                )
                 overlap = window[-256:]
     except OSError as exc:
         raise ElfAuditError(f"cannot scan ELF bytes: {path}") from exc
+    if not matches:
+        return
+    descriptor = _electron_elf_files(policy).get(relative_path)
+    if descriptor is not None:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ElfAuditError(f"cannot hash Electron ELF: {path}") from exc
+        if digest == descriptor["sha256"]:
+            allowed = {
+                literal.encode("utf-8")
+                for literal in descriptor["allowed_host_path_literals"]
+            }
+            if matches <= allowed:
+                return
+        raise ElfAuditError(f"build-host absolute path leak in ELF: {path}")
+
+    # Third-party Python, Node and native-wheel binaries legitimately retain
+    # upstream compiler/debug literals such as /build/BUILD/gcc, /home/.cargo
+    # and runtime templates under /tmp.  Treating every such literal as a
+    # local build-host leak makes a clean payload impossible to package.  For
+    # non-Electron ELF files, reject only paths carrying this product's own
+    # Taiji/Hermes build identity.  Electron remains stricter above: its exact
+    # archive-derived hashes and complete literal allowlist are both required.
+    if not taiji_build_matches:
+        return
+    raise ElfAuditError(f"build-host absolute path leak in ELF: {path}")
+
+
+def _validate_electron_distribution(
+    records: list[dict[str, Any]],
+    policy: dict[str, Any],
+) -> set[str]:
+    expected = _electron_elf_files(policy)
+    expected_paths = set(expected)
+    electron_directory = Path(next(iter(expected_paths))).parent.as_posix() + "/"
+    observed = {
+        record["relative_path"]: record
+        for record in records
+        if record["relative_path"].startswith(electron_directory)
+    }
+    if not observed:
+        return set()
+    missing = sorted(expected_paths - set(observed))
+    if missing:
+        raise ElfAuditError(f"missing pinned Electron ELF: {', '.join(missing)}")
+    unexpected = sorted(set(observed) - expected_paths)
+    if unexpected:
+        raise ElfAuditError(f"unexpected Electron ELF: {', '.join(unexpected)}")
+
+    companion_sonames: set[str] = set()
+    for relative_path, descriptor in expected.items():
+        record = observed[relative_path]
+        if record["sha256"] != descriptor["sha256"]:
+            raise ElfAuditError(f"Electron ELF hash mismatch: {relative_path}")
+        if record["_soname"] != descriptor["soname"]:
+            raise ElfAuditError(f"Electron ELF SONAME mismatch: {relative_path}")
+        if descriptor["soname"]:
+            companion_sonames.add(descriptor["soname"])
+    return companion_sonames
 
 
 def _allowed_runpath(path: str, policy: dict[str, Any]) -> bool:
@@ -302,12 +397,14 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
     root_sonames: dict[str, list[str]] = {}
     private_allowed = set(policy["elf"]["allowed_private_sonames"])
     required_system = set(policy["elf"]["required_system_sonames"])
+    electron_files = _electron_elf_files(policy)
     for path in _iter_regular_files(root):
         if not _looks_like_elf(path):
             continue
-        _check_build_host_path_leak(path)
+        relative_path = path.relative_to(root).as_posix()
+        _check_build_host_path_leak(path, relative_path, policy)
         record = _inspect_elf(path)
-        record["relative_path"] = path.relative_to(root).as_posix()
+        record["relative_path"] = relative_path
         if record["machine"] != "x86_64":
             raise ElfAuditError(
                 f"ELF must be x86_64, got {record['machine']}: {record['relative_path']}"
@@ -318,8 +415,9 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
             raise ElfAuditError(
                 f"{namespace} symbol version {version} exceeds policy maximum {limit}: {record['relative_path']}"
             )
-        if record["_rpath"]:
-            raise ElfAuditError(f"DT_RPATH is forbidden: {record['relative_path']}")
+        for rpath in record["_rpath"]:
+            if not _allowed_runpath(rpath, policy):
+                raise ElfAuditError(f"unsafe RPATH {rpath!r}: {record['relative_path']}")
         for runpath in record["runpath"]:
             if not _allowed_runpath(runpath, policy):
                 raise ElfAuditError(f"unsafe RUNPATH {runpath!r}: {record['relative_path']}")
@@ -329,13 +427,18 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
         soname = record["_soname"]
         if len(record["_sonames"]) > 1:
             raise ElfAuditError(f"ambiguous SONAME declarations: {record['relative_path']}")
-        if soname and soname not in private_allowed:
+        expected_electron = electron_files.get(record["relative_path"])
+        if soname and soname not in private_allowed and not (
+            expected_electron is not None and soname == expected_electron["soname"]
+        ):
             raise ElfAuditError(
                 f"non-allowlisted bundled SONAME {soname}: {record['relative_path']}"
             )
         if soname:
             root_sonames.setdefault(soname, []).append(record["relative_path"])
         records.append(record)
+
+    electron_companion_sonames = _validate_electron_distribution(records, policy)
 
     for soname, paths in root_sonames.items():
         if len(paths) > 1:
@@ -346,6 +449,14 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
     available_sonames = set(root_sonames)
     for record in records:
         for soname in record["needed"]:
+            if soname in electron_companion_sonames:
+                candidates = root_sonames.get(soname, [])
+                if len(candidates) != 1:
+                    raise ElfAuditError(
+                        f"unresolved Electron companion SONAME {soname}: "
+                        f"{record['relative_path']}"
+                    )
+                continue
             if soname in private_allowed:
                 private_sonames.add(soname)
                 candidates = root_sonames.get(soname, [])
@@ -377,6 +488,7 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
             "machine": record["machine"],
             "needed": record["needed"],
             "runpath": record["runpath"],
+            "rpath": record["_rpath"],
             "version_needs": record["version_needs"],
         }
         for record in sorted(records, key=lambda item: item["relative_path"])
@@ -387,6 +499,7 @@ def audit_root(root: Path, policy: dict[str, Any], sysroot: Path | None = None) 
         "compatibility_policy_sha256": policy_sha256(policy),
         "max_required_versions": dict(policy["elf"]["maximum_symbol_versions"]),
         "external_sonames": sorted(external_sonames),
+        "electron_companion_sonames": sorted(electron_companion_sonames),
         "private_sonames": sorted(private_sonames),
         "files": files,
     }

@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import importlib.util
 import json
@@ -54,6 +55,34 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
 
         return mock.patch.object(self.audit, "run_readelf", side_effect=readelf)
 
+    def fake_electron_distribution(self, root: Path, *, electron_body: bytes = b""):
+        policy = copy.deepcopy(self.policy)
+        files = policy["elf"]["electron_distribution"]["elf_files"]
+        paths = {}
+        for relative, descriptor in files.items():
+            soname = descriptor["soname"]
+            dynamic = self.fixture("readelf-dynamic-safe.txt")
+            if soname:
+                dynamic += (
+                    "\n0x000000000000000e (SONAME) Library soname: "
+                    f"[{soname}]"
+                )
+            if relative.endswith("/electron"):
+                dynamic = (
+                    "0x0000000000000001 (NEEDED) Shared library: [libffmpeg.so]\n"
+                    "0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n"
+                    "0x000000000000000f (RPATH) Library rpath: [$ORIGIN]"
+                )
+            path = self.fake_elf(
+                root,
+                relative,
+                dynamic=dynamic,
+                body=electron_body if relative.endswith("/electron") else b"",
+            )
+            descriptor["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            paths[relative] = path
+        return policy, paths
+
     def test_scans_every_elf_native_wheel_electron_node_and_python(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -100,9 +129,21 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 with self.assertRaisesRegex(self.audit.ElfAuditError, "GLIBC"):
                     self.audit.audit_root(root, self.policy)
 
-    def test_rejects_dt_rpath_absolute_or_escaping_runpath(self):
+    def test_allows_policy_rpath_and_rejects_absolute_or_escaping_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            self.fake_elf(
+                root,
+                "apps/taiji-desktop/node_modules/electron/dist/electron",
+                dynamic="0x000000000000000f (RPATH) Library rpath: [$ORIGIN]",
+            )
+            with self.install_readelf_stub():
+                report = self.audit.audit_root(root, self.policy)
+            self.assertEqual(report["files"][0]["rpath"], ["$ORIGIN"])
+
         dynamic_cases = [
-            "0x000000000000000f (RPATH)              Library rpath: [$ORIGIN]",
+            "0x000000000000000f (RPATH)              Library rpath: [/tmp]",
             "0x000000000000001d (RUNPATH)            Library runpath: [/usr/local/lib]",
             "0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN/../../escape]",
         ]
@@ -156,6 +197,137 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
             root = Path(temp_dir)
             self.readelf_outputs = {}
             self.fake_elf(root, "runtime/agent/bin/python", body=b"/Users/buildbot/src/taiji\0")
+            with self.install_readelf_stub():
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "build-host"):
+                    self.audit.audit_root(root, self.policy)
+
+    def test_allows_upstream_runtime_and_compiler_path_literals(self):
+        upstream_literals = b"\0".join(
+            (
+                b"/tmp/.historyXXXXXX",
+                b"/tmp/histedit.XXXXXXXXXX",
+                b"/tmp/myimport.zip/mydirectory",
+                b"/build/BUILD/gcc-10.3.1/obj/libstdc++/include/string_view",
+                b"/home/.cargo/registry/src/index.crates.io/example/src/lib.rs",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            self.fake_elf(
+                root,
+                "runtime/agent/venv/bin/python",
+                body=upstream_literals,
+            )
+            with self.install_readelf_stub():
+                report = self.audit.audit_root(root, self.policy)
+            self.assertEqual(len(report["files"]), 1)
+
+    def test_accepts_complete_hash_pinned_electron_distribution(self):
+        vendor_literals = b"\0".join(
+            (
+                b"/home/privacy/",
+                b"/tmp/__v8_gc__",
+                b"/tmp/foo.js",
+                b"/tmp/node-repl-sock",
+                b"/tmp/perfetto-consumer",
+                b"/tmp/perfetto-producer",
+                b"/workspace/workspace.js",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            policy, _ = self.fake_electron_distribution(
+                root,
+                electron_body=vendor_literals,
+            )
+            with self.install_readelf_stub():
+                report = self.audit.audit_root(root, policy)
+            self.assertEqual(len(report["files"]), 8)
+            self.assertEqual(
+                report["electron_companion_sonames"],
+                [
+                    "libEGL.so",
+                    "libGLESv2.so",
+                    "libffmpeg.so",
+                    "libvk_swiftshader.so",
+                    "libvulkan.so.1",
+                ],
+            )
+
+    def test_rejects_tampered_or_incomplete_electron_distribution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            policy, paths = self.fake_electron_distribution(root)
+            main_relative = (
+                "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
+            )
+            paths[main_relative].write_bytes(paths[main_relative].read_bytes() + b"tampered")
+            with self.install_readelf_stub():
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "hash"):
+                    self.audit.audit_root(root, policy)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            policy, paths = self.fake_electron_distribution(root)
+            missing_relative = (
+                "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libEGL.so"
+            )
+            paths[missing_relative].unlink()
+            self.readelf_outputs.pop(paths[missing_relative])
+            with self.install_readelf_stub():
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "missing"):
+                    self.audit.audit_root(root, policy)
+
+    def test_vendor_host_path_exemption_requires_exact_path_hash_and_literal(self):
+        known_literal = b"/tmp/foo.js"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            policy, _ = self.fake_electron_distribution(
+                root,
+                electron_body=known_literal,
+            )
+            impostor = self.fake_elf(
+                root,
+                "runtime/agent/bin/impostor",
+                body=b"/tmp/taiji-agent-build-1000/src/taiji-agentv1.0",
+            )
+            with self.install_readelf_stub():
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "build-host"):
+                    self.audit.audit_root(root, policy)
+            impostor.unlink()
+            self.readelf_outputs.pop(impostor)
+            with self.install_readelf_stub():
+                report = self.audit.audit_root(root, policy)
+            self.assertEqual(len(report["files"]), 8)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            policy, _ = self.fake_electron_distribution(
+                root,
+                electron_body=b"/tmp/not-approved.js",
+            )
+            with self.install_readelf_stub():
+                with self.assertRaisesRegex(self.audit.ElfAuditError, "build-host"):
+                    self.audit.audit_root(root, policy)
+
+    def test_rejects_known_taiji_builder_root_path_leak(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.readelf_outputs = {}
+            self.fake_elf(
+                root,
+                "runtime/agent/bin/python",
+                body=(
+                    b"/home/kylin/.cache/taiji-agent-build-1000/"
+                    b"taiji-agentv1.0/runtime/agent/bin/python\0"
+                ),
+            )
             with self.install_readelf_stub():
                 with self.assertRaisesRegex(self.audit.ElfAuditError, "build-host"):
                     self.audit.audit_root(root, self.policy)
@@ -240,8 +412,15 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                     with mock.patch.object(self.stager, "readelf_soname", side_effect=stage_soname), \
                             mock.patch.object(self.stager, "source_metadata", side_effect=stage_metadata), \
                             mock.patch.object(self.stager, "_copy_atomically", return_value="0" * 64):
-                        with self.assertRaises(self.stager.StageError):
-                            self.stager.stage_private_libraries(stage_root, self.policy, stage_sysroot)
+                        report = self.stager.stage_private_libraries(
+                            stage_root,
+                            self.policy,
+                            stage_sysroot,
+                        )
+                    self.assertEqual(
+                        [entry["soname"] for entry in report["files"]],
+                        [allowed],
+                    )
                 candidate.unlink()
 
             wrong_owner = sysroot / "wrong-owner.so.1"
@@ -382,6 +561,87 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 except self.stager.StageError:
                     pass
             self.assertFalse(marker.exists())
+
+    def test_readelf_accepts_root_managed_system_symlink_to_arch_binary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trusted_dir = Path(temp_dir)
+            target = trusted_dir / "x86_64-linux-gnu-readelf"
+            target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            target.chmod(0o755)
+            alias = trusted_dir / "readelf"
+            alias.symlink_to(target.name)
+            real_lstat = Path.lstat
+            real_stat = Path.stat
+
+            def root_owned(metadata):
+                values = list(metadata)
+                values[4] = 0
+                values[5] = 0
+                return os.stat_result(values)
+
+            def root_owned_lstat(path):
+                return root_owned(real_lstat(path))
+
+            def root_owned_stat(path, *args, **kwargs):
+                return root_owned(real_stat(path, *args, **kwargs))
+
+            for module in (self.audit, self.stager):
+                with self.subTest(module=module.__name__), \
+                        mock.patch.object(module, "_TRUSTED_READELF_CANDIDATES", (alias,)), \
+                        mock.patch.object(
+                            module,
+                            "_TRUSTED_READELF_DIRECTORIES",
+                            (trusted_dir,),
+                            create=True,
+                        ), \
+                        mock.patch.object(Path, "lstat", root_owned_lstat), \
+                        mock.patch.object(Path, "stat", root_owned_stat):
+                    self.assertEqual(module.resolve_trusted_readelf(), str(target.resolve()))
+
+    def test_readelf_rejects_system_symlink_that_escapes_trusted_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            trusted_dir = root / "trusted"
+            trusted_dir.mkdir()
+            outside = root / "x86_64-linux-gnu-readelf"
+            outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            outside.chmod(0o755)
+            alias = trusted_dir / "readelf"
+            alias.symlink_to(outside)
+            real_lstat = Path.lstat
+            real_stat = Path.stat
+
+            def root_owned(metadata):
+                values = list(metadata)
+                values[4] = 0
+                values[5] = 0
+                return os.stat_result(values)
+
+            with mock.patch.object(Path, "lstat", lambda path: root_owned(real_lstat(path))), \
+                    mock.patch.object(
+                        Path,
+                        "stat",
+                        lambda path, *args, **kwargs: root_owned(real_stat(path, *args, **kwargs)),
+                    ):
+                for module in (self.audit, self.stager):
+                    error_type = (
+                        self.stager.StageError
+                        if module is self.stager
+                        else self.audit.ElfAuditError
+                    )
+                    with self.subTest(module=module.__name__), \
+                            mock.patch.object(module, "_TRUSTED_READELF_CANDIDATES", (alias,)), \
+                            mock.patch.object(
+                                module,
+                                "_TRUSTED_READELF_DIRECTORIES",
+                                (trusted_dir,),
+                                create=True,
+                            ), \
+                            self.assertRaisesRegex(
+                                error_type,
+                                "trusted",
+                            ):
+                        module.resolve_trusted_readelf()
 
     def test_stager_rejects_allowlisted_basename_without_authoritative_soname(self):
         with tempfile.TemporaryDirectory() as temp_dir:

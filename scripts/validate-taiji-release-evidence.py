@@ -45,11 +45,12 @@ MAX_JSON_BYTES = 1024 * 1024
 MAX_EVIDENCE_BYTES = 32 * 1024 * 1024
 PACKAGE_MANIFEST_SCHEMA_V3 = "taiji-package-manifest/v3"
 RELEASE_EVIDENCE_SCHEMA_V3 = "taiji-release-evidence/v3"
+OFFLINE_EVIDENCE_SCHEMA_V1 = "taiji.offline-install-rehearsal.v1"
 CANONICAL_POLICY_ID = "taiji-linux-amd64-deb-v1"
 # Fallback for a validator copied into a target delivery directory.  When the
 # checked-in policy is available, ``canonical_policy_identity`` recomputes the
 # value through compatibility_policy.py instead of trusting this constant.
-CANONICAL_POLICY_SHA256 = "7956044933d4add977b3c84e24b607120cfd285e3e99f1ce38431e6bd2ee163e"
+CANONICAL_POLICY_SHA256 = "8a09d4ffe2c960888d1a80da3648ad7f28e712391b22112e6177657287c8fc45"
 CANONICAL_POLICY_PATH = (
     Path(__file__).resolve().parents[1] / "packaging/linux/compatibility-policy.json"
 )
@@ -127,6 +128,51 @@ OFFLINE_KEYS = {
     "log_basename",
     "log_sha256",
 }
+
+OFFLINE_V1_KEYS = {
+    "schema",
+    "status",
+    "generated_at_utc",
+    "rehearsal_session_id",
+    "challenge_nonce",
+    "source_commit",
+    "version",
+    "architecture",
+    "deb_basename",
+    "deb_sha256",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
+    "delivery_inventory_sha256",
+    "platform",
+    "environment",
+    "os_id",
+    "os_version",
+    "network",
+    "checks",
+    "desktop_app_verified",
+    "target_verified",
+    "log_basename",
+    "log_sha256",
+}
+OFFLINE_V1_LIFECYCLE_KEYS = {
+    "steps",
+    "receipts",
+    "data_manifests",
+    "journal",
+    "package_actions",
+}
+OFFLINE_LIFECYCLE_STEPS = [
+    "fresh_install_n",
+    "same_version_reinstall_n",
+    "seed_n_minus_one",
+    "upgrade_n_minus_one_to_n",
+    "data_manifest_after_upgrade",
+    "inject_postinst_failure_same_candidate",
+    "automatic_rollback_to_n_minus_one",
+    "upgrade_n_again",
+    "remove_preserves_user_data",
+    "purge_clears_root_state_only",
+]
 
 TARGET_KEYS = {
     "schema_version",
@@ -283,6 +329,11 @@ class BuildBinding:
     compatibility_policy_sha256: builtins.str
     electron_executable_sha256: builtins.str
     desktop_entry_sha256: builtins.str
+    source_archive_basename: builtins.str = ""
+    source_archive_sha256: builtins.str = ""
+    source_checksums_sha256: builtins.str = ""
+    build_marker_sha256: builtins.str = ""
+    delivery_inventory_sha256: builtins.str = ""
 
 
 def canonical_policy_identity() -> tuple[str, str]:
@@ -430,6 +481,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         "target-verification",
         "构建日志",
         "诊断报告",
+        "旧版备份",
     }
     required_relative = {
         "00_制包机_生成离线交付包.sh",
@@ -444,10 +496,6 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         "生成的安装包/.build-success",
         "生成的安装包/taiji-package-manifest.json",
         "生成的安装包/构建报告.txt",
-        "离线依赖/Packages",
-        "离线依赖/Packages.gz",
-        "离线依赖/SHA256SUMS.txt",
-        "离线依赖/runtime-dependencies.txt",
         "验收工具/run-installed-electron-acceptance.js",
         "验收工具/assemble-target-evidence.py",
         "验收工具/observe-single-deb-install.py",
@@ -504,16 +552,125 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
     file_inventory.sort()
     directory_inventory.sort()
     paths = {relative for relative, _mode, _digest in file_inventory}
+    file_hashes = {relative: digest for relative, _mode, digest in file_inventory}
     missing = sorted(required_relative - paths)
     if missing:
         raise EvidenceError(f"交付清单缺少必需文件: {', '.join(missing)}")
-    offline_debs = [
-        relative
-        for relative in paths
-        if relative.startswith("离线依赖/") and relative.endswith(".deb")
-    ]
-    if not offline_debs:
-        raise EvidenceError("交付清单未包含离线仓库 DEB")
+    manifest_path = delivery_dir / "生成的安装包/taiji-package-manifest.json"
+    manifest_bytes, _manifest_stat = read_regular_bytes(
+        manifest_path,
+        "交付清单 package manifest",
+    )
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise EvidenceError("交付清单 package manifest 不是合法 JSON") from exc
+    if not isinstance(manifest, dict) or isinstance(manifest, list):
+        raise EvidenceError("交付清单 package manifest 必须是对象")
+
+    if manifest.get("schema") == "taiji-package-manifest/v3":
+        source_commit = manifest.get("source_commit")
+        if not isinstance(source_commit, str) or not FULL_COMMIT_RE.fullmatch(source_commit):
+            raise EvidenceError("v3 交付清单 manifest source_commit 不合法")
+        expected_source_name = f"taiji-agentv1.0-kylin-build-src-{source_commit}.tar.gz"
+        source_candidates = sorted(
+            relative
+            for relative in paths
+            if "/" not in relative
+            and relative.startswith("taiji-agentv1.0-kylin-build-src-")
+            and relative.endswith(".tar.gz")
+        )
+        if source_candidates != [expected_source_name]:
+            raise EvidenceError(
+                "v3 交付清单必须且只能包含 manifest source_commit 命名的源码包"
+            )
+        source_hash = file_hashes[expected_source_name]
+        source_sums_payload, _ = read_regular_bytes(
+            delivery_dir / "SHA256SUMS.txt",
+            "根 SHA256SUMS",
+        )
+        try:
+            source_sums_text = source_sums_payload.decode("ascii")
+        except UnicodeError as exc:
+            raise EvidenceError("根 SHA256SUMS 必须是 ASCII") from exc
+        source_sums_match = re.fullmatch(
+            r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?",
+            source_sums_text,
+        )
+        if (
+            source_sums_match is None
+            or source_sums_match.group(1) != source_hash
+            or source_sums_match.group(2) != expected_source_name
+        ):
+            raise EvidenceError("根 SHA256SUMS 未精确绑定 manifest source_commit 对应的唯一源码包")
+        deb_name = manifest.get("deb_basename")
+        if not isinstance(deb_name, str) or not re.fullmatch(
+            r"taiji-agent_(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)_amd64\.deb",
+            deb_name,
+        ):
+            raise EvidenceError("v3 交付清单 manifest 的 deb_basename 不合法")
+        required_v3 = {
+            f"生成的安装包/{deb_name}",
+            f"生成的安装包/{deb_name}.sha256",
+        }
+        missing_v3 = sorted(required_v3 - paths)
+        if missing_v3:
+            raise EvidenceError(f"v3 单 DEB 交付清单缺少文件: {', '.join(missing_v3)}")
+        output_debs = sorted(
+            relative
+            for relative in paths
+            if relative.startswith("生成的安装包/") and relative.endswith("_amd64.deb")
+        )
+        if output_debs != [f"生成的安装包/{deb_name}"]:
+            raise EvidenceError("v3 交付清单必须且只能包含 manifest 绑定的单一 DEB")
+        deb_hash = file_hashes[f"生成的安装包/{deb_name}"]
+        if manifest.get("deb_sha256") != deb_hash:
+            raise EvidenceError("v3 交付清单 manifest deb_sha256 与唯一 DEB 不一致")
+        version = manifest.get("version")
+        if not isinstance(version, str) or deb_name != f"taiji-agent_{version}_amd64.deb":
+            raise EvidenceError("v3 交付清单 manifest version 与 DEB basename 不一致")
+        marker = parse_marker(delivery_dir / "生成的安装包/.build-success")
+        marker_expected = {
+            "version": version,
+            "source_archive": expected_source_name,
+            "source_sha256": source_hash,
+            "source_commit": source_commit,
+            "deb": deb_name,
+            "deb_sha256": deb_hash,
+            "checksum": f"{deb_name}.sha256",
+            "manifest": "taiji-package-manifest.json",
+            "compatibility_policy_id": manifest.get("compatibility_policy_id"),
+            "compatibility_policy_sha256": manifest.get("compatibility_policy_sha256"),
+            "elf_abi_audit_sha256": manifest.get("elf_abi_audit_sha256"),
+            "icon_set_sha256": manifest.get("icon_set_sha256"),
+            "maintainer": manifest.get("maintainer"),
+        }
+        require_exact_keys(marker, set(marker_expected) | {"built_at_utc"}, "构建成功标记")
+        if not marker["built_at_utc"].strip():
+            raise EvidenceError("构建成功标记 built_at_utc 不能为空")
+        for key, expected in marker_expected.items():
+            if not isinstance(expected, str) or not expected or marker[key] != expected:
+                raise EvidenceError(f"构建成功标记 {key} 与 v3 manifest/当前交付物不一致")
+        legacy_entries = sorted(relative for relative in paths if relative.startswith("离线依赖/"))
+        if legacy_entries:
+            raise EvidenceError("v3 单 DEB 交付清单不能混入遗留离线 APT 仓库")
+    else:
+        legacy_required = {
+            "离线依赖/Packages",
+            "离线依赖/Packages.gz",
+            "离线依赖/SHA256SUMS.txt",
+            "离线依赖/runtime-dependencies.txt",
+        }
+        missing_legacy = sorted(legacy_required - paths)
+        if missing_legacy:
+            raise EvidenceError(f"legacy v2 交付清单缺少文件: {', '.join(missing_legacy)}")
+        offline_debs = [
+            relative
+            for relative in paths
+            if relative.startswith("离线依赖/") and relative.endswith(".deb")
+        ]
+        if not offline_debs:
+            raise EvidenceError("legacy v2 交付清单未包含离线仓库 DEB")
     source_archives = [
         relative
         for relative in paths
@@ -817,6 +974,50 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
     # be a well-formed immutable release input before later certification work.
     if "elf_abi_audit_sha256" in manifest:
         validate_sha256(manifest["elf_abi_audit_sha256"], "elf_abi_audit_sha256")
+    required_delivery_inputs = {
+        "checksum": getattr(args, "checksum", None),
+        "build_marker": getattr(args, "build_marker", None),
+        "source_archive": getattr(args, "source_archive", None),
+        "delivery_dir": getattr(args, "delivery_dir", None),
+    }
+    missing_delivery_inputs = sorted(
+        name for name, value in required_delivery_inputs.items() if value is None
+    )
+    if missing_delivery_inputs:
+        raise EvidenceError(
+            "v3 BuildBinding 缺少完整交付身份输入: " + ", ".join(missing_delivery_inputs)
+        )
+    delivery_dir = Path(required_delivery_inputs["delivery_dir"])
+    expected_source_archive = (
+        delivery_dir / f"taiji-agentv1.0-kylin-build-src-{source_commit}.tar.gz"
+    )
+    expected_paths = {
+        "deb": delivery_dir / "生成的安装包" / deb_path.name,
+        "checksum": delivery_dir / "生成的安装包" / f"{deb_path.name}.sha256",
+        "manifest": delivery_dir / "生成的安装包" / "taiji-package-manifest.json",
+        "build_marker": delivery_dir / "生成的安装包" / ".build-success",
+        "source_archive": expected_source_archive,
+    }
+    actual_paths = {
+        "deb": deb_path,
+        "checksum": Path(required_delivery_inputs["checksum"]),
+        "manifest": Path(args.manifest),
+        "build_marker": Path(required_delivery_inputs["build_marker"]),
+        "source_archive": Path(required_delivery_inputs["source_archive"]),
+    }
+    for name, expected_path in expected_paths.items():
+        if Path(os.path.abspath(actual_paths[name])) != Path(os.path.abspath(expected_path)):
+            raise EvidenceError(f"v3 BuildBinding {name} 必须来自同一交付目录的 canonical 路径")
+    inventory_hash = delivery_inventory_sha256(delivery_dir)
+    source_hash, _ = sha256_regular_file(expected_source_archive, "当前源码包")
+    source_checksums_hash, _ = sha256_regular_file(
+        delivery_dir / "SHA256SUMS.txt",
+        "根 SHA256SUMS",
+    )
+    build_marker_hash, _ = sha256_regular_file(
+        expected_paths["build_marker"],
+        "构建成功标记",
+    )
     return BuildBinding(
         source_commit=source_commit,
         version=version,
@@ -827,6 +1028,11 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         compatibility_policy_sha256=policy_sha256,
         electron_executable_sha256=electron_hash,
         desktop_entry_sha256=desktop_hash,
+        source_archive_basename=expected_source_archive.name,
+        source_archive_sha256=source_hash,
+        source_checksums_sha256=source_checksums_hash,
+        build_marker_sha256=build_marker_hash,
+        delivery_inventory_sha256=inventory_hash,
     )
 
 
@@ -1067,6 +1273,193 @@ def validate_offline_session(data: dict[str, Any], session: dict[str, Any], args
     require_exact_keys(checks, {"install", "uninstall", "reinstall"}, "离线演练 checks")
     for key in checks:
         require_exact(checks, key, True)
+
+
+def validate_offline_lifecycle_extensions(
+    data: dict[str, Any], binding: BuildBinding
+) -> None:
+    present = OFFLINE_V1_LIFECYCLE_KEYS.intersection(data)
+    if not present:
+        return
+    if present != OFFLINE_V1_LIFECYCLE_KEYS:
+        missing = sorted(OFFLINE_V1_LIFECYCLE_KEYS - present)
+        raise EvidenceError(f"扩展离线生命周期证据缺少字段: {', '.join(missing)}")
+    if data["steps"] != OFFLINE_LIFECYCLE_STEPS:
+        raise EvidenceError("扩展离线生命周期 steps 不完整或顺序错误")
+
+    receipts = data["receipts"]
+    if type(receipts) is not list or len(receipts) != 5:
+        raise EvidenceError("扩展离线生命周期 receipts 不完整")
+    operations: list[str] = []
+    receipt_keys = {
+        "operation",
+        "result",
+        "state",
+        "transaction_id",
+        "deb_sha256",
+        "compatibility_policy_id",
+        "compatibility_policy_sha256",
+        "network",
+    }
+    for index, receipt in enumerate(receipts):
+        if type(receipt) is not dict:
+            raise EvidenceError(f"扩展离线生命周期 receipt[{index}] 必须是 object")
+        require_exact_keys(receipt, receipt_keys, f"扩展离线生命周期 receipt[{index}]")
+        operation = require_nonempty_string(receipt, "operation")
+        operations.append(operation)
+        for key in ("result", "state", "transaction_id"):
+            require_nonempty_string(receipt, key)
+        require_exact(receipt, "deb_sha256", binding.deb_sha256)
+        require_exact(receipt, "compatibility_policy_id", binding.compatibility_policy_id)
+        require_exact(
+            receipt,
+            "compatibility_policy_sha256",
+            binding.compatibility_policy_sha256,
+        )
+        require_exact(receipt, "network", "none")
+    if operations != [
+        "fresh_install",
+        "reinstall",
+        "upgrade",
+        "rollback",
+        "upgrade_again",
+    ]:
+        raise EvidenceError("扩展离线生命周期 receipt operation 顺序不完整")
+
+    manifests = data["data_manifests"]
+    manifest_keys = {
+        "before_upgrade",
+        "after_upgrade",
+        "after_rollback",
+        "after_remove",
+        "after_purge",
+    }
+    if type(manifests) is not dict:
+        raise EvidenceError("扩展离线生命周期 data_manifests 必须是 object")
+    require_exact_keys(manifests, manifest_keys, "扩展离线生命周期 data_manifests")
+    for key in manifest_keys:
+        validate_sha256(manifests[key], f"data_manifests.{key}")
+    if len(set(manifests.values())) != 1:
+        raise EvidenceError("扩展离线生命周期未证明升级/回滚/卸载保留同一用户数据")
+
+    journal = data["journal"]
+    journal_keys = {
+        "upgrade_transaction_id",
+        "rollback_transaction_id",
+        "second_upgrade_transaction_id",
+        "resume",
+        "power_loss_resume_checked",
+        "partial_journal_treated_as_committed",
+        "partial_journal_result",
+        "manual_recovery_required",
+    }
+    if type(journal) is not dict:
+        raise EvidenceError("扩展离线生命周期 journal 必须是 object")
+    require_exact_keys(journal, journal_keys, "扩展离线生命周期 journal")
+    for key in (
+        "upgrade_transaction_id",
+        "rollback_transaction_id",
+        "second_upgrade_transaction_id",
+        "resume",
+    ):
+        require_nonempty_string(journal, key)
+    require_exact(journal, "power_loss_resume_checked", True)
+    require_exact(journal, "partial_journal_treated_as_committed", False)
+    require_exact(journal, "partial_journal_result", "manual_recovery_required")
+    require_exact(journal, "manual_recovery_required", False)
+
+    actions = data["package_actions"]
+    if type(actions) is not list or not actions:
+        raise EvidenceError("扩展离线生命周期 package_actions 必须是非空 list")
+    action_keys = {"command", "package", "network", "download"}
+    commands: set[str] = set()
+    for index, action in enumerate(actions):
+        if type(action) is not dict:
+            raise EvidenceError(f"扩展离线生命周期 package_actions[{index}] 必须是 object")
+        require_exact_keys(action, action_keys, f"扩展离线生命周期 package_actions[{index}]")
+        require_choice(action, "command", {"dpkg --install", "dpkg --remove", "dpkg --purge"})
+        commands.add(action["command"])
+        require_nonempty_string(action, "package")
+        require_exact(action, "network", "none")
+        require_exact(action, "download", False)
+    if commands != {"dpkg --install", "dpkg --remove", "dpkg --purge"}:
+        raise EvidenceError("扩展离线生命周期 package_actions 未覆盖 install/remove/purge")
+
+
+def validate_offline_evidence_v1(
+    data: dict[str, Any],
+    evidence_path: Path,
+    args: argparse.Namespace,
+    binding: BuildBinding,
+) -> None:
+    reject_target_baseline_fields(data, "offline rehearsal evidence v1")
+    missing = sorted(OFFLINE_V1_KEYS - data.keys())
+    extra = sorted(data.keys() - OFFLINE_V1_KEYS - OFFLINE_V1_LIFECYCLE_KEYS)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"缺少字段: {', '.join(missing)}")
+        if extra:
+            details.append(f"未知字段: {', '.join(extra)}")
+        raise EvidenceError(
+            f"{evidence_path.name} 字段集合不合法；{'；'.join(details)}"
+        )
+    for key, expected in {
+        "schema": OFFLINE_EVIDENCE_SCHEMA_V1,
+        "status": "PASS",
+        "source_commit": binding.source_commit,
+        "version": binding.version,
+        "architecture": binding.architecture,
+        "deb_basename": binding.deb_basename,
+        "deb_sha256": binding.deb_sha256,
+        "compatibility_policy_id": binding.compatibility_policy_id,
+        "compatibility_policy_sha256": binding.compatibility_policy_sha256,
+        "platform": "linux/amd64",
+        "network": "none",
+        "desktop_app_verified": False,
+        "target_verified": False,
+        "log_basename": "offline-install-rehearsal-session.json",
+    }.items():
+        require_exact(data, key, expected)
+    if binding.delivery_inventory_sha256:
+        require_exact(
+            data,
+            "delivery_inventory_sha256",
+            binding.delivery_inventory_sha256,
+        )
+    validate_fresh_timestamp(data["generated_at_utc"], "generated_at_utc")
+    validate_session_id(data["rehearsal_session_id"], "rehearsal_session_id")
+    validate_challenge(data["challenge_nonce"], args.challenge)
+    require_choice(data, "environment", {"container", "vm", "chroot"})
+    require_nonempty_string(data, "os_id")
+    require_nonempty_string(data, "os_version")
+    validate_sha256(data["deb_sha256"], "deb_sha256")
+    validate_sha256(data["compatibility_policy_sha256"], "compatibility_policy_sha256")
+    validate_sha256(data["delivery_inventory_sha256"], "delivery_inventory_sha256")
+    expected_policy_id, expected_policy_sha256 = canonical_policy_identity()
+    require_exact(data, "compatibility_policy_id", expected_policy_id)
+    require_exact(data, "compatibility_policy_sha256", expected_policy_sha256)
+
+    checks = data["checks"]
+    if type(checks) is not dict:
+        raise EvidenceError("offline rehearsal evidence v1 checks 必须是 object")
+    require_exact_keys(checks, {"install", "uninstall", "reinstall"}, "offline rehearsal checks")
+    for key in checks:
+        require_exact(checks, key, "PASS")
+
+    _, log_payload, _ = validate_bound_file(
+        data,
+        evidence_path,
+        "log_basename",
+        "log_sha256",
+        "离线演练结构化会话",
+    )
+    validate_offline_session(
+        data,
+        parse_json_bytes(log_payload, "离线演练结构化会话"),
+        args,
+    )
+    validate_offline_lifecycle_extensions(data, binding)
 
 
 def validate_offline(
@@ -1802,6 +2195,17 @@ def validate_certification_set_v1(
         contract.validate_environment_record(record, matrix)
         require_exact(record, "category_id", category_id)
         require_exact(record, "category_kind", expected_kind)
+        for key, expected in {
+            "source_commit": binding.source_commit,
+            "version": binding.version,
+            "architecture": binding.architecture,
+            "deb_basename": binding.deb_basename,
+            "deb_sha256": binding.deb_sha256,
+            "compatibility_policy_id": binding.compatibility_policy_id,
+            "compatibility_policy_sha256": binding.compatibility_policy_sha256,
+        }.items():
+            if record.get(key) != expected:
+                raise EvidenceError(f"认证集环境记录 {key} 与顶层 BuildBinding 不一致")
         if expected_kind == "positive":
             required = set(categories[category_id]["required_business_checks"]) | set(
                 categories[category_id]["required_lifecycle_checks"]
@@ -1971,6 +2375,23 @@ def main() -> int:
             raise EvidenceError(
                 "当前验证入口正式只接受 release evidence schema v3；v2 只能显式 --legacy-v2-read-only"
             )
+        if args.mode == "offline":
+            if args.pre_sign:
+                raise EvidenceError("当前 offline rehearsal v1 不使用 release --pre-sign 模式")
+            if data.get("schema") != OFFLINE_EVIDENCE_SCHEMA_V1:
+                raise EvidenceError(
+                    "offline mode 只接受 taiji.offline-install-rehearsal.v1"
+                )
+            binding = validate_build_binding(args)
+            if not isinstance(binding, BuildBinding):
+                raise EvidenceError("offline rehearsal v1 未获得 v3 BuildBinding")
+            if args.attestation_signature is not None:
+                if args.attestation_public_key is None or not args.attestation_public_key_fingerprint:
+                    raise EvidenceError("offline rehearsal detached signature 缺少验签公钥参数")
+                validate_attestation(args, evidence_payload)
+            validate_offline_evidence_v1(data, args.evidence, args, binding)
+            print(f"offline-rehearsal-valid\t{args.evidence}")
+            return 0
         if not args.pre_sign:
             if args.attestation_signature is None:
                 raise EvidenceError("发布证据缺少 detached signature")

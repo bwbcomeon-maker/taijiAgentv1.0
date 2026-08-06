@@ -2,11 +2,11 @@
 
 > **资料状态：旧架构参考，不是当前操作入口。** 本文保留早期设计背景，其中的旧脚本名称、交付物结构和状态结论可能已经失效，不得据此执行当前制包、安装或发布放行。当前长期规则以[《太极 Agent 国产 x86 Linux 离线交付运行手册》](runbooks/taiji-kylin-uos-offline-delivery.md)为准；现场命令以 [`taijiagent 打包交付/操作说明.md`](../taijiagent%20打包交付/操作说明.md) 和交付目录内现有 `00`、`01`、`02`、`03`、`04`、`99` 脚本为准。
 
-特别注意：本文后文提到的 `01_目标终端_构建安装包.sh` 已不是当前主流程，旧的产物清单也没有覆盖当前 manifest、`.build-success`、未压缩 `Packages`、验收工具和签名证据。遇到冲突时不要尝试恢复旧流程。
+特别注意：历史 v2 路径曾使用 `01_目标终端_构建安装包.sh` 和本地 APT 仓库；当前 v3 已删除这条发布路径。当前产物清单以唯一 DEB、sidecar、manifest、`.build-success`、验收工具和签名证据为准。遇到冲突时不要尝试恢复旧流程。
 
 ## 当前统一 DEB 合同
 
-第一版销售交付只覆盖 `x86_64/amd64 + 图形桌面 + dpkg/apt + Kylin/UOS/openKylin`。统一兼容范围由 `packaging/linux/compatibility-policy.json` 和六正六负 `packaging/linux/certification-matrix.json` 固定；不按每台终端采集 baseline，也不按终端 profile 重新生成 DEB。客户最终只收到 `taiji-agent_${VERSION}_amd64.deb` 一个文件，内部认证记录、签名、receipt、N-1 包和离线依赖不属于客户输入。
+第一版销售交付只覆盖 `x86_64/amd64 + 图形桌面 + dpkg/apt + Kylin/UOS/openKylin`。统一兼容范围由 `packaging/linux/compatibility-policy.json` 和六正六负 `packaging/linux/certification-matrix.json` 固定；不按每台终端采集 baseline，也不按终端 profile 重新生成 DEB。当前 v3 单 DEB 路径下，客户最终只收到 `taiji-agent_${VERSION}_amd64.deb` 一个文件；内部认证记录、签名、receipt、N-1 包和 `旧版备份/` 都不属于客户输入，也不再向客户附带本地 APT 依赖仓库。
 
 该文件只作为旧架构背景资料。当前制包、认证、签名和发布命令以 [`docs/runbooks/taiji-kylin-uos-offline-delivery.md`](runbooks/taiji-kylin-uos-offline-delivery.md) 和 [`taijiagent 打包交付/操作说明.md`](../taijiagent%20打包交付/操作说明.md) 为准。
 
@@ -52,22 +52,26 @@ python3 --version 2>/dev/null || true
 
 ## Linux 离线交付流程
 
-最终 DEB 必须在 Linux x86_64/amd64 制包机生成，不允许在 macOS 上产最终包。构建策略保持离线优先：目标机完全离线时不执行构建、不联网下载依赖，只安装制包机提前生成的 DEB 和本地 apt 依赖仓库。
+最终 DEB 必须在 Linux x86_64/amd64 制包机生成，不允许在 macOS 上产最终包。构建策略保持离线优先：联网制包机完成依赖准备和构建，目标机完全离线时不执行构建、不联网下载依赖，只双击安装制包机提前生成并通过门禁的唯一 DEB。
 
-完全离线交付优先使用根目录下的 `taijiagent 打包交付/00_制包机_生成离线交付包.sh`。该脚本在联网 Linux amd64 制包机上校验源码包、准备构建工具、生成 Linux Python venv、安装 Linux Electron runtime、执行 DEB 构建，并把 DEB 的直接和递归运行依赖收集到 `离线依赖/Packages.gz`。制包机脚本在系统 Node/npm 过旧时使用交付目录内的隔离 Node.js Linux x64 构建工具，避免 Kylin V10 源里的 Node.js 10 / npm 6 无法处理 lockfile v3；Python venv 生成阶段默认使用 `TAIJI_UV_LOCK_MODE=auto`，先按 `uv.lock` 严格同步，遇到制包工作区 lock 漂移时自动重试非 locked 同步并把警告写入日志。如需发布门禁强制锁文件完全一致，可显式设置 `TAIJI_UV_LOCK_MODE=strict`。
+完全离线交付使用根目录下的 `taijiagent 打包交付/00_制包机_生成离线交付包.sh`。该脚本在联网 Linux amd64 制包机上校验源码包、准备构建工具、生成 Linux Python venv、安装 Linux Electron runtime、执行 DEB 构建，并生成唯一 DEB、SHA256 sidecar、manifest、构建报告、`.build-success` 和当前验收工具；当前 v3 不再生成 `离线依赖/` APT 仓库。制包机脚本在系统 Node/npm 过旧时使用交付目录内的隔离 Node.js Linux x64 构建工具，避免 Kylin V10 源里的 Node.js 10 / npm 6 无法处理 lockfile v3；Electron 必须来自本轮受控缓存中与 canonical policy 固定 SHA256 匹配的 Linux x64 ZIP，最终 staged `dist/` 全文件比对通过后才可入包；Python venv 生成阶段默认使用 `TAIJI_UV_LOCK_MODE=auto`，先按 `uv.lock` 严格同步，遇到制包工作区 lock 漂移时自动重试非 locked 同步并把警告写入日志。如需发布门禁强制锁文件完全一致，可显式设置 `TAIJI_UV_LOCK_MODE=strict`。
 
-`01_目标终端_构建安装包.sh` 只保留给“目标机本身可联网构建”的兼容路径，本轮完全离线交付说明不使用它。
+历史 v2 的 `01_目标终端_构建安装包.sh` 只作为背景记录；当前 `01_制包机_发布预检.sh` 负责检查当前 v3 制品，目标机不再现场构建安装包。
 
 固定交付物结构：
 
 ```text
 taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-<hash>.tar.gz
+taijiagent 打包交付/SHA256SUMS.txt
 taijiagent 打包交付/生成的安装包/taiji-agent_<version>_amd64.deb
 taijiagent 打包交付/生成的安装包/taiji-agent_<version>_amd64.deb.sha256
-taijiagent 打包交付/离线依赖/Packages.gz
-taijiagent 打包交付/离线依赖/*.deb
-taijiagent 打包交付/SHA256SUMS.txt
+taijiagent 打包交付/生成的安装包/taiji-package-manifest.json
+taijiagent 打包交付/生成的安装包/构建报告.txt
+taijiagent 打包交付/生成的安装包/.build-success
+taijiagent 打包交付/验收工具/
 ```
+
+制包工作区内部允许存在 `旧版备份/`，用于保存 `00` 重试时归档的已知历史产物或验收工具临时残留；它被 `delivery_inventory_sha256` 排除，不能作为当前候选或发布证据。客户发布目录仍严格只包含一个 manifest 绑定的 DEB。
 
 构建脚本会拒绝以下情况：
 
@@ -78,13 +82,13 @@ taijiagent 打包交付/SHA256SUMS.txt
 - 默认非密产品配置模板缺失、字段不完整，或 YAML 实际字段里出现敏感凭据形态。
 - DEB 产物字符串中出现 `LIBARCHIVE`、`com.apple`、`PaxHeaders`、`SCHILY.xattr` 等历史失败标记。
 
-本轮发布基线必须从干净 commit 生成，源码包使用 `git archive` 生成，文件名带 commit 短 hash。运行态目录、日志、缓存、Playwright 输出和本地模型密钥不得进入源码包。
+本轮发布基线必须从干净 commit 生成，源码包使用 `git archive` 生成，文件名带完整 40 位 commit。运行态目录、日志、缓存、Playwright 输出和本地模型密钥不得进入源码包。
 
 制包机脚本构建成功后写入 `.build-success`。目标机安装脚本必须看到该成功标记并校验当前 DEB 的 SHA256，才会执行安装，避免误装历史残留包。
 
 桌面启动链不依赖控制台脚本的绝对 shebang。目标机交付目录可能包含空格或中文路径，因此 `start-agent.sh`、`/usr/bin/taiji`、`health-check.sh` 和 DEB 构建门禁统一通过产品运行时入口启动。安装态 `taiji-native-verify` 也会提前验证该入口，避免安装成功但双击后 Agent 启动失败。
 
-如果目标机已经安装过旧版 `taiji-agent`，新版交付不按两个产品并存处理。`02_目标终端_安装并验证.sh` 会停止并禁用旧 `taiji-agent-webui.service` / `taiji-agent-gateway.service`，清理命令行明确指向 `/opt/taiji-agent` 的旧进程，解除 `taiji-agent` hold 状态，并通过 `apt-get purge`、`dpkg --remove --force-remove-reinstreq`、`dpkg --purge --force-all` 收口旧包状态。只有旧包状态清理干净后，脚本才会删除白名单内旧路径并安装 Electron 完整版；如果旧包状态仍残留，脚本直接失败，不安装新版。旧 `/opt/taiji-agent`、旧系统配置、旧 systemd unit、旧命令入口和旧桌面入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不在清理范围内。运行资源被其他程序占用时只记录脱敏诊断，不阻断安装，因为桌面端会自动选择可用资源。
+当前 v3 安装生命周期不把两个版本当作两个产品并存。已由 `dpkg` 管理的现有安装走 apt/dpkg 原生升级或同版本重装，`02_目标终端_安装并验证.sh` 不会先 purge 或手工删除 `/opt/taiji-agent`；只有没有 dpkg 状态的遗留系统安装，才允许清理固定白名单内的旧系统路径。用户 XDG 配置、授权、密钥、会话和附件不属于自动清理范围。历史 v2 曾采用“先强制清旧包再安装”的处理方式，该行为已退出当前主流程，不得据此操作；完整安全边界见主运行手册第 7.3 节。
 
 安装包内置非密产品配置模板。启动时同步菜单显隐、默认模型和图片模型展示；已有用户配置时只补空值，不覆盖用户已配置的密钥。Linux 桌面端默认隐藏 Electron 应用菜单栏，保留麒麟原生标题栏。
 
@@ -93,10 +97,13 @@ taijiagent 打包交付/SHA256SUMS.txt
 ```text
 taijiagent 打包交付/生成的安装包/taiji-agent_0.1.0_amd64.deb
 taijiagent 打包交付/生成的安装包/taiji-agent_0.1.0_amd64.deb.sha256
-taijiagent 打包交付/离线依赖/Packages.gz
+taijiagent 打包交付/生成的安装包/taiji-package-manifest.json
+taijiagent 打包交付/生成的安装包/.build-success
 ```
 
 ## 安装与验证
+
+客户验收路径是在干净、断网图形终端上，先启动安装观察器，再从文件管理器双击客户目录中的唯一 DEB。内部安装→卸载→重装生命周期必须使用另一台干净环境或恢复点，再执行：
 
 ```bash
 bash ./02_目标终端_安装并验证.sh

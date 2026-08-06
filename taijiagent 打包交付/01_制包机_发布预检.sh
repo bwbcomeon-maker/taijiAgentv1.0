@@ -15,6 +15,7 @@ MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
 POLICY_FILE="$REPO_ROOT/packaging/linux/compatibility-policy.json"
 POLICY_HELPER="$REPO_ROOT/packaging/linux/compatibility_policy.py"
 PAYLOAD_VERIFIER="$REPO_ROOT/packaging/linux/verify-payload.py"
+ICON_VALIDATOR="$REPO_ROOT/packaging/linux/validate_icon_assets.py"
 ACCEPTANCE_TOOLS="$SCRIPT_DIR/验收工具"
 REQUIRE_ARTIFACTS="$(printenv TAIJI_RELEASE_REQUIRE_ARTIFACTS || printf 0)"
 SKIP_GIT_CHECK="$(printenv TAIJI_RELEASE_SKIP_GIT_CHECK || printf 0)"
@@ -74,13 +75,14 @@ check_source_archive_matches_git_head() {
   rm -f "$expected_archive"; ok "源码包归档与当前 Git HEAD 一致"
 }
 check_no_macos_metadata_or_stale_zip() {
-  local metadata zips stale_debs
+  local metadata zips stale_entries
   metadata="$(find "$SCRIPT_DIR" \( -name '__MACOSX' -o -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -print)"
   [ -z "$metadata" ] || { info "发现 macOS 拷贝元数据，将自动清理"; find "$SCRIPT_DIR" \( -name '__MACOSX' -o -name '.DS_Store' -o -name '._*' -o -name '.AppleDouble' -o -name 'PaxHeaders*' \) -exec rm -rf -- {} +; }
   zips="$(find "$SCRIPT_DIR" -maxdepth 1 -type f -name '*.zip' -print)"; [ -z "$zips" ] || fail "交付目录含旧 zip：$zips"
   if [ "$REQUIRE_ARTIFACTS" != 1 ]; then
-    stale_debs="$(find "$OUTPUT_DIR" -maxdepth 1 -type f \( -name '*.deb' -o -name '*.deb.sha256' \) -print 2>/dev/null || true)"
-    [ -z "$stale_debs" ] || fail "发布预检发现旧安装包，请先清理 生成的安装包/"
+    [ ! -L "$OUTPUT_DIR" ] || fail "生成的安装包目录不能是符号链接"
+    stale_entries="$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)"
+    [ -z "$stale_entries" ] || fail "发布预检发现上次制包残留；请通过 00 脚本自动归档后重试：$stale_entries"
   fi
 }
 load_policy() {
@@ -161,7 +163,7 @@ if not re.fullmatch(r"[0-9a-f]{64}", marker["icon_set_sha256"]):
 PY
 }
 verify_deb_payload() {
-  local deb="$1" payload_root abi embedded_policy abi_sha
+  local deb="$1" payload_root abi embedded_policy abi_sha icon_sha256 marker_icon_sha256
   payload_root="$(mktemp -d /tmp/taiji-release-payload.XXXXXX)"
   dpkg-deb -x "$deb" "$payload_root" || { rm -rf "$payload_root"; fail "DEB 真实解包失败：$(basename "$deb")"; }
   embedded_policy="$payload_root/opt/taiji-agent/resources/linux-compatibility-policy.json"
@@ -173,6 +175,14 @@ verify_deb_payload() {
   [ "$abi_sha" = "$(awk -F= '$1==\"elf_abi_audit_sha256\" {print $2}' "$BUILD_MARKER")" ] || { rm -rf "$payload_root"; fail "DEB embedded ABI audit 与 marker 不一致"; }
   [ -f "$PAYLOAD_VERIFIER" ] && [ ! -L "$PAYLOAD_VERIFIER" ] || { rm -rf "$payload_root"; fail "缺少可信 DEB payload verifier：$PAYLOAD_VERIFIER"; }
   python3 "$PAYLOAD_VERIFIER" --root "$payload_root" >/dev/null || { rm -rf "$payload_root"; fail "DEB payload contract 验证失败"; }
+  [ -f "$ICON_VALIDATOR" ] && [ ! -L "$ICON_VALIDATOR" ] || { rm -rf "$payload_root"; fail "缺少可信图标校验器：$ICON_VALIDATOR"; }
+  icon_sha256="$(python3 "$ICON_VALIDATOR" \
+    --web-static "$payload_root/opt/taiji-agent/runtime/web/static" \
+    --install-icons "$payload_root/usr/share/icons/hicolor" \
+    --resource-icon "$payload_root/opt/taiji-agent/resources/icons/taiji-agent.png" \
+    --print-digest)" || { rm -rf "$payload_root"; fail "DEB 图标链验证失败"; }
+  marker_icon_sha256="$(awk -F= '$1=="icon_set_sha256" {print $2}' "$BUILD_MARKER")"
+  [ "$icon_sha256" = "$marker_icon_sha256" ] || { rm -rf "$payload_root"; fail "DEB 实际图标摘要与 marker 不一致"; }
   rm -rf "$payload_root"
 }
 verify_package_output_allowlist() {
@@ -196,10 +206,16 @@ for path in entries.values():
 PY
 }
 verify_target_acceptance_toolchain() {
-  local name script source_script
+  local name script source_script root_acceptance_script root_acceptance_source
   [ "$REQUIRE_ARTIFACTS" = 1 ] || return 0
+  root_acceptance_script="$SCRIPT_DIR/04_目标终端_桌面App验收并导出证据.sh"
+  root_acceptance_source="$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh"
+  [ -f "$root_acceptance_script" ] && [ ! -L "$root_acceptance_script" ] \
+    && [ -f "$root_acceptance_source" ] && [ ! -L "$root_acceptance_source" ] \
+    || fail "缺少或不安全的根目录目标终端验收脚本"
+  cmp -s "$root_acceptance_script" "$root_acceptance_source" \
+    || fail "根目录目标终端验收脚本与源码不一致"
   local -a files=(
-    "04_目标终端_桌面App验收并导出证据.sh"
     "run-installed-electron-acceptance.js"
     "assemble-target-evidence.py"
     "observe-single-deb-install.py"
@@ -217,7 +233,6 @@ verify_target_acceptance_toolchain() {
   )
   for name in "${files[@]}"; do
     script="$SCRIPT_DIR/验收工具/$name"
-    source_script="$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh"
     case "$name" in
       run-installed-electron-acceptance.js|assemble-target-evidence.py|observe-single-deb-install.py)
         source_script="$REPO_ROOT/tools/taiji-desktop-acceptance/$name"

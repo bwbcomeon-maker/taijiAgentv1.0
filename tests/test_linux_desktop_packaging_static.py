@@ -180,6 +180,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         for source in (release_check, release_signer, rehearsal_producer):
             self.assertNotIn("rev-parse --short=8 HEAD", source)
         self.assertIn(
+            'data.get("schema") != "taiji-package-manifest/v3"',
+            target_acceptance,
+        )
+        self.assertNotIn(
             'if type(schema_version) is not int or schema_version != 2:',
             target_acceptance,
         )
@@ -1585,10 +1589,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         setup = read_text("hermes-local-lab/scripts/setup-local.sh")
 
         self.assertIn("TAIJI_UV_LOCK_MODE", setup)
+        self.assertIn("TAIJI_DEPENDENCY_PROFILE", setup)
         self.assertIn("strict", setup)
         self.assertIn("auto", setup)
-        self.assertIn("uv sync --extra all --locked", setup)
-        self.assertIn("uv sync --extra all", setup)
+        self.assertIn("local -a sync_args=(--extra all)", setup)
+        self.assertIn("sync_args+=(--extra dev)", setup)
+        self.assertIn('uv sync "${sync_args[@]}" --locked', setup)
+        self.assertIn('uv sync "${sync_args[@]}"', setup)
         self.assertIn("retrying without --locked", setup)
 
     def test_setup_local_installs_user_taiji_launcher(self):
@@ -1610,6 +1617,21 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("Node.js 10 / npm 6", doc)
         self.assertIn("TAIJI_UV_LOCK_MODE=auto", doc)
         self.assertIn("TAIJI_UV_LOCK_MODE=strict", doc)
+
+    def test_current_delivery_docs_describe_v3_single_deb_and_internal_backup_boundary(self):
+        operator_doc = read_text("docs/taiji-desktop-uos-packaging.md")
+        runbook = read_text("docs/runbooks/taiji-kylin-uos-offline-delivery.md")
+        current_operator_guidance = operator_doc[
+            operator_doc.index("## 当前统一 DEB 合同") :
+        ]
+
+        self.assertIn("当前 v3 单 DEB 路径", current_operator_guidance)
+        self.assertNotIn("离线依赖/Packages.gz", current_operator_guidance)
+        self.assertNotIn("校验本地 apt 仓库", runbook)
+        self.assertIn("内部 `旧版备份/`", runbook)
+        self.assertIn("delivery_inventory_sha256", runbook)
+        self.assertIn("客户发布目录仍严格只包含一个 DEB", runbook)
+        self.assertIn("历史 v2", runbook)
 
     def test_delivery_install_script_uses_native_managed_upgrade_and_allowlisted_legacy_migration(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
@@ -1663,9 +1685,39 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             deb_builder, re.compile(r'^DEB_DEPENDS="libc6,', re.MULTILINE)
         )
 
-        for package in ("dpkg-dev", "python3", "rsync"):
+        for package in (
+            "dpkg-dev",
+            "python3",
+            "rsync",
+            "binutils",
+            "perl-base",
+            "diffutils",
+            "libc-bin",
+        ):
             with self.subTest(package=package):
                 self.assertIn(package, install_body)
+
+        self.assertIn("verify_build_command_contract", builder)
+        command_gate = builder[
+            builder.index("verify_build_command_contract() {") : builder.index("source_lab_dir() {")
+        ]
+        for command in (
+            "readelf",
+            "strings",
+            "perl",
+            "cmp",
+            "ldd",
+            "getconf",
+            "dpkg-deb",
+            "desktop-file-validate",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, command_gate)
+        main_body = builder[builder.index("main() {") :]
+        self.assertLess(
+            main_body.index("verify_build_command_contract"),
+            main_body.index("ensure_uv"),
+        )
 
     def test_delivery_release_preflight_is_a_hard_gate(self):
         preflight_path = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
@@ -1714,6 +1766,36 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("将自动清理", preflight)
         self.assertIn("rm -rf --", preflight)
         self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS", preflight)
+
+    def test_builder_archives_only_managed_previous_outputs_before_initial_preflight(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+
+        self.assertIn("archive_previous_build_outputs() {", builder)
+        archive_body = builder[
+            builder.index("archive_previous_build_outputs() {") : builder.index(
+                "install_build_dependencies() {"
+            )
+        ]
+        for managed in (
+            "taiji-agent_*_amd64.deb",
+            "taiji-agent_*_amd64.deb.sha256",
+            ".build-success",
+            "taiji-package-manifest.json",
+            "构建报告.txt",
+        ):
+            with self.subTest(managed=managed):
+                self.assertIn(managed, archive_body)
+        self.assertIn("mv --", archive_body)
+        self.assertNotIn("rm -rf", archive_body)
+        main_body = builder[builder.index("main() {") :]
+        self.assertLess(
+            main_body.index("preflight"),
+            main_body.index("archive_previous_build_outputs"),
+        )
+        self.assertLess(
+            main_body.index("archive_previous_build_outputs"),
+            main_body.index("install_build_dependencies"),
+        )
 
     def test_delivery_scripts_have_failure_diagnostics_and_admin_preflight(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -1798,6 +1880,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"', builder)
         self.assertIn('run_setup_local "$uv_lock_mode"', builder)
         self.assertIn('TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh', builder)
+        self.assertIn('TAIJI_DEPENDENCY_PROFILE=production', builder)
         self.assertIn("Python 依赖 lock 漂移", builder)
         self.assertNotIn("TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh", builder)
         self.assertNotIn("\n  uv lock\n", builder)

@@ -20,7 +20,14 @@ from typing import Any
 
 SCHEMA = "taiji-elf-private-library-stage/v1"
 _SONAME_RE = re.compile(r"\(SONAME\).*?\[([^\]]+)\]")
-_TRUSTED_READELF_CANDIDATES = (Path("/usr/bin/readelf"), Path("/bin/readelf"))
+_TRUSTED_READELF_CANDIDATES = (
+    Path("/usr/bin/readelf"),
+    Path("/bin/readelf"),
+    Path("/usr/bin/x86_64-linux-gnu-readelf"),
+    Path("/bin/x86_64-linux-gnu-readelf"),
+)
+_TRUSTED_READELF_DIRECTORIES = (Path("/usr/bin"), Path("/bin"))
+_TRUSTED_TOOLS_MODULE = None
 
 
 class StageError(RuntimeError):
@@ -58,21 +65,31 @@ def source_metadata(path: Path) -> tuple[int, int, int]:
     return metadata.st_mode, metadata.st_uid, metadata.st_nlink
 
 
+def _trusted_tools_module():
+    global _TRUSTED_TOOLS_MODULE
+    if _TRUSTED_TOOLS_MODULE is not None:
+        return _TRUSTED_TOOLS_MODULE
+    module_path = Path(__file__).with_name("trusted_system_tools.py")
+    spec = importlib.util.spec_from_file_location("taiji_trusted_system_tools_for_stager", module_path)
+    if spec is None or spec.loader is None:
+        raise StageError(f"cannot load trusted system tool helper: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _TRUSTED_TOOLS_MODULE = module
+    return module
+
+
 def resolve_trusted_readelf() -> str:
-    for candidate in _TRUSTED_READELF_CANDIDATES:
-        try:
-            metadata = candidate.lstat()
-        except OSError:
-            continue
-        mode = metadata.st_mode
-        if (
-            stat.S_ISREG(mode)
-            and metadata.st_uid == 0
-            and mode & 0o111
-            and not mode & 0o022
-        ):
-            return str(candidate)
-    raise StageError("trusted /usr/bin/readelf is missing or unsafe")
+    module = _trusted_tools_module()
+    try:
+        return module.resolve_trusted_system_tool(
+            "readelf",
+            candidates=_TRUSTED_READELF_CANDIDATES,
+            trusted_directories=_TRUSTED_READELF_DIRECTORIES,
+            allowed_resolved_names=("readelf", "x86_64-linux-gnu-readelf"),
+        )
+    except module.TrustedSystemToolError as exc:
+        raise StageError(str(exc)) from exc
 
 
 def readelf_soname(path: Path) -> str | None:
@@ -194,11 +211,10 @@ def _iter_sources(sysroot: Path, policy: dict[str, Any]):
     for candidate in sorted(sysroot.rglob("*"), key=lambda item: item.as_posix()):
         try:
             if candidate.is_symlink():
-                # Let an allowlisted symlink reach validate_source so it is
-                # rejected explicitly instead of being silently ignored.
-                soname = readelf_soname(candidate)
-                if soname in allowlisted or _basename_matches_allowlisted(candidate, allowlisted):
-                    yield candidate
+                # Debian-family SONAME aliases normally point at the real,
+                # versioned ELF beside them.  Discovery ignores the alias and
+                # validates/copies only the root-owned regular target found by
+                # the same deterministic scan.
                 continue
             if not candidate.is_file():
                 continue

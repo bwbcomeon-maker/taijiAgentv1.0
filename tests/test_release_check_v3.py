@@ -45,6 +45,12 @@ class ReleaseCheckV3Tests(unittest.TestCase):
         self.assertIn("certification-set", self.signer)
         self.assertIn("release-evidence/v3", self.signer)
 
+    def test_current_v3_release_check_does_not_require_legacy_offline_apt_repository(self):
+        self.assertNotIn('"$DELIVERY_DIR/离线依赖/Packages"', self.check)
+        self.assertNotIn('"$DELIVERY_DIR/离线依赖/Packages.gz"', self.check)
+        self.assertNotIn('--packages "$DELIVERY_DIR/离线依赖/Packages"', self.check)
+        self.assertNotIn('--packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz"', self.check)
+
 
 if __name__ == "__main__":
     unittest.main()

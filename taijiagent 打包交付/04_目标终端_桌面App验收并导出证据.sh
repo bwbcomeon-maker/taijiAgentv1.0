@@ -5,7 +5,6 @@ umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TOOLS_DIR="$SCRIPT_DIR/验收工具"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
-OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
 MANIFEST="$OUTPUT_DIR/taiji-package-manifest.json"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DRIVER="$TOOLS_DIR/run-installed-electron-acceptance.js"
@@ -61,6 +60,31 @@ require_regular_file() {
   if [ "$executable" = "1" ]; then
     [ -x "$path" ] || fail "$label 不可执行：$path"
   fi
+}
+
+validate_manifest_schema_v3() {
+  [ -f "$MANIFEST" ] && [ ! -L "$MANIFEST" ] \
+    || fail "当前目标验收缺少实体发布 manifest：$MANIFEST"
+  [ -x /usr/bin/python3 ] \
+    || fail "目标系统缺少 /usr/bin/python3，无法执行 v3 manifest 前置门禁"
+  /usr/bin/python3 -B - "$MANIFEST" <<'PY' \
+    || fail "当前目标验收只接受 taiji-package-manifest/v3"
+import json
+import sys
+from pathlib import Path
+
+def strict(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate manifest key: {key}")
+        result[key] = value
+    return result
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"), object_pairs_hook=strict)
+if type(data) is not dict or data.get("schema") != "taiji-package-manifest/v3":
+    raise SystemExit("target acceptance requires taiji-package-manifest/v3")
+PY
 }
 
 validate_platform() {
@@ -131,8 +155,6 @@ validate_inputs() {
   require_regular_file "$PUBLIC_KEY" "发布证据验签公钥"
   require_regular_file "$MANIFEST" "发布 manifest"
   require_regular_file "$BUILD_MARKER" "构建成功标记"
-  require_regular_file "$OFFLINE_REPO/Packages" "离线仓库 Packages"
-  require_regular_file "$OFFLINE_REPO/Packages.gz" "离线仓库 Packages.gz"
   require_regular_file "$INSTALL_OBSERVATION" "单 DEB 安装持续观察记录"
   if [ -z "$ENVIRONMENT_RECORD" ]; then
     ENVIRONMENT_RECORD="$(dirname "$INSTALL_OBSERVATION")/environment-evidence.json"
@@ -204,13 +226,10 @@ def strict(pairs):
     return result
 
 data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"), object_pairs_hook=strict)
-canonical = data.get("schema") == "taiji-package-manifest/v3"
-if not canonical:
-    schema_version = data.get("schema_version")
-    if type(schema_version) is not int or schema_version != 2:
-        raise SystemExit("target acceptance requires manifest schema_version=2 or schema=taiji-package-manifest/v3")
+if data.get("schema") != "taiji-package-manifest/v3":
+    raise SystemExit("target acceptance requires taiji-package-manifest/v3")
 fields = ("source_commit", "version", "deb_sha256", "electron_executable_sha256", "desktop_entry_sha256")
-fields = fields + (("deb_basename", "compatibility_policy_id", "compatibility_policy_sha256") if canonical else ("deb",))
+fields = fields + ("deb_basename", "compatibility_policy_id", "compatibility_policy_sha256")
 for key in fields:
     value = data.get(key)
     if type(value) is not str or not value or any(character in value for character in "\r\n\t"):
@@ -219,7 +238,7 @@ if not re.fullmatch(r"[0-9a-f]{40}", data["source_commit"]):
     raise SystemExit("invalid source_commit")
 if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", data["version"]):
     raise SystemExit("invalid version")
-deb_name = data["deb_basename"] if canonical else data["deb"]
+deb_name = data["deb_basename"]
 if deb_name != f'taiji-agent_{data["version"]}_amd64.deb':
     raise SystemExit("manifest deb/version mismatch")
 for key in ("deb_sha256", "electron_executable_sha256", "desktop_entry_sha256"):
@@ -433,6 +452,7 @@ PY
 }
 
 main() {
+  validate_manifest_schema_v3
   validate_platform
   validate_inputs
   read_os_identity

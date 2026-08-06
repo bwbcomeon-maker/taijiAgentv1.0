@@ -122,6 +122,55 @@ class LinuxCompatibilityPolicyTest(unittest.TestCase):
             changed["elf"]["required_system_sonames"].append("libX11.so.6")
             self.assert_rejected(self.write_policy(temp_dir, changed))
 
+    def test_electron_distribution_is_pinned_by_path_soname_hash_and_literal(self):
+        self.assertIn("electron_distribution", self.policy["elf"])
+        distribution = self.policy["elf"]["electron_distribution"]
+        self.assertEqual(distribution["version"], "39.8.10")
+        self.assertEqual(
+            distribution["archive_sha256"],
+            "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
+        )
+        expected_sonames = {
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron": None,
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome-sandbox": None,
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome_crashpad_handler": None,
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libEGL.so": "libEGL.so",
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libGLESv2.so": "libGLESv2.so",
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libffmpeg.so": "libffmpeg.so",
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libvulkan.so.1": "libvulkan.so.1",
+            "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/libvk_swiftshader.so": "libvk_swiftshader.so",
+        }
+        files = distribution["elf_files"]
+        self.assertEqual(
+            {path: descriptor["soname"] for path, descriptor in files.items()},
+            expected_sonames,
+        )
+        self.assertEqual(
+            files[
+                "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
+            ]["allowed_host_path_literals"],
+            [
+                "/home/privacy/",
+                "/tmp/__v8_gc__",
+                "/tmp/foo.js",
+                "/tmp/node-repl-sock",
+                "/tmp/perfetto-consumer",
+                "/tmp/perfetto-producer",
+                "/workspace/workspace.js",
+            ],
+        )
+        for descriptor in files.values():
+            self.assertEqual(
+                set(descriptor),
+                {"soname", "sha256", "allowed_host_path_literals"},
+            )
+            self.assertRegex(descriptor["sha256"], r"^[0-9a-f]{64}$")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            changed = copy.deepcopy(self.policy)
+            changed["elf"]["electron_distribution"]["version"] = "39.8.11"
+            self.assert_rejected(self.write_policy(temp_dir, changed))
+
     def test_debian_depends_contains_no_target_captured_versions(self):
         depends = self.policy["debian"]["depends"]
         self.assertEqual(depends, ["ca-certificates", "libc6 (>= 2.31)"])

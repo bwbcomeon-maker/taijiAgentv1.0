@@ -24,9 +24,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 TRUSTED_GIT = ROOT / "scripts" / "taiji-trusted-git"
 VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
-PUBLIC_KEY = ROOT / "tools" / "taiji-release-evidence" / "signing-public.pem"
-PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
-POLICY_PATH = ROOT / "packaging" / "linux" / "compatibility-policy.json"
 POLICY_HELPER = ROOT / "packaging" / "linux" / "compatibility_policy.py"
 IMAGE_ROLE_LABEL = "offline-rehearsal-v1"
 IMAGE_BASELINE_LABEL = "ubuntu-20.04"
@@ -51,31 +48,6 @@ OFFLINE_SESSION_KEYS = {
     "checks",
     "desktop_app_verified",
     "target_verified",
-}
-LEGACY_EVIDENCE_KEYS = {
-    "schema_version",
-    "evidence_type",
-    "generated_at_utc",
-    "rehearsal_session_id",
-    "challenge_nonce",
-    "release_artifacts_sha256",
-    "target_baseline_profile_id",
-    "target_baseline_sha256",
-    "source_commit",
-    "deb_basename",
-    "deb_sha256",
-    "platform",
-    "environment",
-    "os_id",
-    "os_version",
-    "network",
-    "install",
-    "uninstall",
-    "reinstall",
-    "desktop_app_verified",
-    "target_verified",
-    "log_basename",
-    "log_sha256",
 }
 
 
@@ -228,7 +200,6 @@ def resolve_output(path: Path) -> Path:
 def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, Any]:
     commit = current_source_commit()
     package_dir = delivery / "生成的安装包"
-    offline_repo = delivery / "离线依赖"
     debs = sorted(package_dir.glob("taiji-agent_*_amd64.deb"))
     if len(debs) != 1:
         raise ProducerError(f"生成的安装包目录必须且只能包含一个 amd64 DEB，实际为 {len(debs)}")
@@ -237,8 +208,6 @@ def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, 
     manifest = package_dir / "taiji-package-manifest.json"
     build_marker = package_dir / ".build-success"
     source_archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
-    packages = offline_repo / "Packages"
-    packages_gz = offline_repo / "Packages.gz"
     binding_args = argparse.Namespace(
         source_commit=commit,
         deb=deb,
@@ -246,42 +215,28 @@ def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, 
         manifest=manifest,
         build_marker=build_marker,
         source_archive=source_archive,
-        packages=packages,
-        packages_gz=packages_gz,
         delivery_dir=delivery,
     )
     try:
-        binding = validator.validate_build_binding(
-            binding_args,
-            legacy_v2_read_only=True,
-        )
+        binding = validator.validate_build_binding(binding_args)
     except Exception as exc:
         raise ProducerError(f"交付物与当前源码/manifest 绑定校验失败：{exc}") from exc
-    if type(binding) is not tuple or len(binding) != 7:
-        raise ProducerError("release evidence validator 返回了不兼容的 build binding")
-    (
-        deb_hash,
-        version,
-        release_hash,
-        _electron_hash,
-        _desktop_entry_hash,
-        target_baseline_profile_id,
-        target_baseline_sha256,
-    ) = binding
+    if not isinstance(binding, validator.BuildBinding):
+        raise ProducerError("release evidence validator 未返回当前 v3 BuildBinding")
     return {
-        "source_commit": commit,
+        "source_commit": binding.source_commit,
         "deb": deb,
         "checksum": checksum,
         "manifest": manifest,
+        "deb_sha256": binding.deb_sha256,
+        "version": binding.version,
+        "architecture": binding.architecture,
+        "compatibility_policy_id": binding.compatibility_policy_id,
+        "compatibility_policy_sha256": binding.compatibility_policy_sha256,
         "build_marker": build_marker,
         "source_archive": source_archive,
-        "packages": packages,
-        "packages_gz": packages_gz,
-        "deb_sha256": deb_hash,
-        "version": version,
-        "release_artifacts_sha256": release_hash,
-        "target_baseline_profile_id": target_baseline_profile_id,
-        "target_baseline_sha256": target_baseline_sha256,
+        "delivery_inventory_sha256": binding.delivery_inventory_sha256,
+        "binding": binding,
     }
 
 
@@ -531,25 +486,15 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def validate_legacy_read_only(
-    evidence: Path, release: dict[str, Any], challenge: str, delivery: Path
+def validate_current_offline(
+    evidence: Path, release: dict[str, Any], challenge: str
 ) -> None:
-    # The historical validator deliberately rejects unknown top-level fields.
-    # Keep the published lifecycle evidence extensible while validating a
-    # temporary exact v2 view against the unchanged legacy session log.
-    payload = load_json(evidence, "离线演练 evidence")
-    legacy_payload = {key: payload[key] for key in LEGACY_EVIDENCE_KEYS if key in payload}
-    if set(legacy_payload) != LEGACY_EVIDENCE_KEYS:
-        missing = sorted(LEGACY_EVIDENCE_KEYS - set(legacy_payload))
-        raise ProducerError(f"离线演练 evidence 缺少历史 v2 字段：{missing}")
-    temporary = evidence.with_name(f".{evidence.name}.{uuid.uuid4().hex}.legacy.json")
-    atomic_write_json(temporary, legacy_payload)
     args = [
         sys.executable,
         str(VALIDATOR),
         "offline",
         "--evidence",
-        str(temporary),
+        str(evidence),
         "--source-commit",
         release["source_commit"],
         "--deb",
@@ -562,24 +507,12 @@ def validate_legacy_read_only(
         str(release["build_marker"]),
         "--source-archive",
         str(release["source_archive"]),
-        "--packages",
-        str(release["packages"]),
-        "--packages-gz",
-        str(release["packages_gz"]),
         "--delivery-dir",
-        str(delivery),
-        "--attestation-public-key",
-        str(PUBLIC_KEY),
-        "--attestation-public-key-fingerprint",
-        PUBLIC_KEY_FINGERPRINT,
+        str(release["source_archive"].parent),
         "--challenge",
         challenge,
-        "--legacy-v2-read-only",
     ]
-    try:
-        run_command(args)
-    finally:
-        temporary.unlink(missing_ok=True)
+    run_command(args)
 
 
 @contextmanager
@@ -618,7 +551,7 @@ def prepare_explicit_inputs(
     manifest_arg: Path,
     policy_arg: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
-    """Validate the fixed explicit CLI contract while retaining v2 release checks."""
+    """Validate the fixed explicit CLI contract against the current v3 release."""
 
     release = discover_release_inputs(delivery, validator)
     deb = resolve_regular_file(deb_arg, "candidate DEB")
@@ -639,15 +572,8 @@ def prepare_explicit_inputs(
     manifest_payload = load_json(manifest, "build manifest")
     manifest_policy_id = manifest_payload.get("compatibility_policy_id")
     manifest_policy_sha256 = manifest_payload.get("compatibility_policy_sha256")
-    if manifest_policy_id is not None or manifest_policy_sha256 is not None:
-        if manifest_policy_id != policy_id or manifest_policy_sha256 != policy_sha256:
-            raise ProducerError("显式 policy identity 与 candidate build manifest 不一致")
-    else:
-        # Legacy v2 fixtures did not carry policy identity.  They may use only
-        # the checked-in canonical policy, never an arbitrary alternate policy.
-        canonical_id, canonical_sha256 = load_policy_identity(POLICY_PATH)
-        if (policy_id, policy_sha256) != (canonical_id, canonical_sha256):
-            raise ProducerError("旧版 build manifest 缺少 policy identity，必须使用当前 canonical policy")
+    if manifest_policy_id != policy_id or manifest_policy_sha256 != policy_sha256:
+        raise ProducerError("显式 policy identity 与 candidate build manifest 不一致")
     return (
         release,
         {"deb": previous, "sha256": previous_hash},
@@ -670,8 +596,6 @@ def produce(
         raise ProducerError("challenge 必须是 64-128 位小写十六进制")
     if not image.strip() or any(character.isspace() for character in image):
         raise ProducerError("Docker image 名称不能为空或包含空白")
-    if not PUBLIC_KEY.is_file() or PUBLIC_KEY.is_symlink():
-        raise ProducerError(f"缺少固定 release evidence 验签公钥：{PUBLIC_KEY}")
     docker = shutil.which("docker")
     if docker is None:
         raise ProducerError("缺少 docker 命令")
@@ -735,12 +659,12 @@ def produce(
         lifecycle_path = output / "offline-install-rehearsal-lifecycle.json"
         if not session_path.is_file() and lifecycle_path.is_file():
             lifecycle_session = load_json(lifecycle_path, "扩展离线生命周期会话")
-            legacy_session = {
+            base_session = {
                 key: lifecycle_session[key]
                 for key in OFFLINE_SESSION_KEYS
                 if key in lifecycle_session
             }
-            atomic_write_json(session_path, legacy_session)
+            atomic_write_json(session_path, base_session)
         session = load_json(session_path, "离线生命周期结构化会话")
         validate_session(session, release, challenge)
         lifecycle_session = (
@@ -756,31 +680,33 @@ def produce(
                 raise ProducerError("lifecycle evidence compatibility_policy_sha256 与固定 policy 不一致")
 
         current_release = discover_release_inputs(delivery, validator)
-        if current_release["release_artifacts_sha256"] != release["release_artifacts_sha256"]:
-            raise ProducerError("交付目录在 Docker 演练期间发生变化")
-        if current_release["deb_sha256"] != release["deb_sha256"]:
-            raise ProducerError("DEB 在 Docker 演练期间发生变化")
+        if (
+            current_release["binding"] != release["binding"]
+            or current_release["delivery_inventory_sha256"]
+            != release["delivery_inventory_sha256"]
+        ):
+            raise ProducerError("当前 v3 交付目录在 Docker 演练期间发生变化")
 
         evidence = {
-            "schema_version": 2,
-            "evidence_type": "offline-install-rehearsal",
+            "schema": "taiji.offline-install-rehearsal.v1",
+            "status": "PASS",
             "generated_at_utc": session["generated_at_utc"],
             "rehearsal_session_id": session["rehearsal_session_id"],
             "challenge_nonce": challenge,
-            "release_artifacts_sha256": release["release_artifacts_sha256"],
-            "target_baseline_profile_id": release["target_baseline_profile_id"],
-            "target_baseline_sha256": release["target_baseline_sha256"],
             "source_commit": release["source_commit"],
+            "version": release["version"],
+            "architecture": release["architecture"],
             "deb_basename": release["deb"].name,
             "deb_sha256": release["deb_sha256"],
+            "compatibility_policy_id": release["compatibility_policy_id"],
+            "compatibility_policy_sha256": release["compatibility_policy_sha256"],
+            "delivery_inventory_sha256": release["delivery_inventory_sha256"],
             "platform": "linux/amd64",
             "environment": "container",
             "os_id": session["os_id"],
             "os_version": session["os_version"],
             "network": "none",
-            "install": True,
-            "uninstall": True,
-            "reinstall": True,
+            "checks": {"install": "PASS", "uninstall": "PASS", "reinstall": "PASS"},
             "desktop_app_verified": False,
             "target_verified": False,
             "log_basename": SESSION_BASENAME,
@@ -793,14 +719,12 @@ def produce(
                 "data_manifests",
                 "journal",
                 "package_actions",
-                "compatibility_policy_id",
-                "compatibility_policy_sha256",
             ):
                 if key in lifecycle_session:
                     evidence[key] = lifecycle_session[key]
         evidence_path = output / EVIDENCE_BASENAME
         atomic_write_json(evidence_path, evidence)
-        validate_legacy_read_only(evidence_path, release, challenge, delivery)
+        validate_current_offline(evidence_path, release, challenge)
         published = True
         return evidence_path
     finally:
@@ -821,7 +745,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--delivery-dir",
         type=Path,
-        help="历史 v2 交付目录入口；与显式 DEB 输入互斥（保留兼容）",
+        help="当前 v3 单 DEB 交付目录入口；与显式 DEB 输入互斥",
     )
     parser.add_argument("--deb", type=Path, help="本轮固定 candidate amd64 DEB")
     parser.add_argument("--previous-deb", type=Path, help="必须存在且有 .sha256 sidecar 的 N-1 DEB")
