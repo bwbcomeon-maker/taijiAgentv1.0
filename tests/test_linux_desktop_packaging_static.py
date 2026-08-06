@@ -1962,6 +1962,16 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('NODE_ROOT="$TOOL_ROOT/node"', builder)
         self.assertIn('export TMPDIR="$BUILD_TMP_DIR" TMP="$BUILD_TMP_DIR" TEMP="$BUILD_TMP_DIR"', builder)
         self.assertLess(builder.index("configure_build_tmp"), builder.index("prepare_source_release"))
+        reset_body = builder[
+            builder.index("reset_build_root() {") : builder.index(
+                "repair_build_tree_permissions() {"
+            )
+        ]
+        self.assertIn("configure_build_tmp", reset_body)
+        self.assertLess(
+            reset_body.index("create_owned_build_root"),
+            reset_body.index("configure_build_tmp"),
+        )
 
     def test_offline_builder_honors_explicit_root_and_fails_closed_when_probe_fails(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")

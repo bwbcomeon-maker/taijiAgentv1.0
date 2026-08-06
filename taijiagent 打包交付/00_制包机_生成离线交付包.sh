@@ -959,6 +959,7 @@ reset_build_root() {
       || fail "专用构建工作区清理后仍存在：$BUILD_ROOT"
   fi
   create_owned_build_root
+  configure_build_tmp
 }
 
 repair_build_tree_permissions() {
