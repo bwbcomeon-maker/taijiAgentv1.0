@@ -10,6 +10,11 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=runtime-env.sh
 source "$SCRIPT_DIR/runtime-env.sh"
+# runtime-env.sh enables strict options for launchers.  Native verification is
+# intentionally aggregate-only: warnings must reach the final summary even
+# when an installer/test harness exports SHELLOPTS=errexit:pipefail.
+set +e
+set +o pipefail 2>/dev/null || true
 
 _taiji_private_library_dir_secure() {
   local _taiji_private_library_meta _taiji_private_library_uid _taiji_private_library_mode
