@@ -256,6 +256,7 @@ SHA256SUMS.txt
 
 | 症状 | 根因 | 修复 | 防复发门禁 | 验证边界 |
 | --- | --- | --- | --- | --- |
+| `npm audit` 向 `registry.npmmirror.com/-/npm/v1/security/audits/quick` 请求后返回 `404 NOT_IMPLEMENTED` | 依赖下载成功后把 install-only 镜像留在 `NPM_CONFIG_REGISTRY`，安全审计错误继承了不实现 audit API 的镜像；该响应不等于已经发现依赖漏洞 | 安装继续使用 `TAIJI_NPM_REGISTRIES`，审计单独使用 `TAIJI_NPM_AUDIT_REGISTRY`（默认 `https://registry.npmjs.org`，也可指定实现审计接口的 HTTPS 内网源） | 动态回归在继承 `npmmirror` 的环境中捕获 npm 参数，必须看到 audit 显式指定独立 registry；漏洞、网络和接口错误仍全部 fail closed | 已由 Kylin 制包机真实失败暴露；修复后的当前输入包仍须在制包机重新构建，不能据源码测试标记制包成功 |
 | Linux 制包 `npm test` 多项失败并提示缺少 `@resvg/resvg-js-linux-*` | 普通 npm 安装只准备当前平台原生包，复制型 DOCX skill 却承诺多个 Linux CPU/ABI | 按 lockfile 下载、校验并原子物化 x64/arm64、gnu/musl 原生包 | lockfile integrity、包身份、ELF/架构校验、制包机真实 `npm test` | 已由真实制包失败暴露并修复 |
 | apt 安装依赖时可能等待时区等交互输入 | 非交互环境没有稳定跨 sudo 传递 | 使用 `DEBIAN_FRONTEND=noninteractive` 和固定 `TZ` | 静态断言并在最小 Ubuntu 制包机实际执行 | 当前候选制包链已覆盖 |
 | Electron `ldd` 审计报告缺共享库 | 最小制包容器没有安装执行 Electron 审计所需的系统库 | 制包依赖阶段安装 DEB 声明的 Electron runtime 库 | Electron 必须为 Linux amd64 ELF，`ldd` 不得出现 `not found` | 当前候选 payload audit 已覆盖 |

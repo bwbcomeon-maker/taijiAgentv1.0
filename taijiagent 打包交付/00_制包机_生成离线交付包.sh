@@ -103,6 +103,7 @@ write_environment_snapshot() {
     done
     printf 'TAIJI_NODE_MIRRORS=%s\n' "${TAIJI_NODE_MIRRORS:+set}"
     printf 'TAIJI_NPM_REGISTRIES=%s\n' "${TAIJI_NPM_REGISTRIES:+set}"
+    printf 'TAIJI_NPM_AUDIT_REGISTRY=%s\n' "${TAIJI_NPM_AUDIT_REGISTRY:+set}"
     printf 'TAIJI_ELECTRON_MIRRORS=%s\n' "${TAIJI_ELECTRON_MIRRORS:+set}"
     printf 'TAIJI_BUILD_ROOT=%s\n' "${TAIJI_BUILD_ROOT:-}"
     printf 'BUILD_ROOT=%s\n' "$BUILD_ROOT"
@@ -127,6 +128,9 @@ failure_next_steps() {
       ;;
     *"源码包"*|*"SHA256"*|*"当前 commit"*|*"未提交改动"*|*"已暂存未提交"*)
       printf 'next=在本地重新生成唯一源码包和 SHA256SUMS.txt，并重新拷贝整个交付目录\n'
+      ;;
+    *"npm audit"*|*"DOCX Engine 生产依赖"*)
+      printf 'next=查看 npm audit 输出；镜像不支持审计接口时设置 TAIJI_NPM_AUDIT_REGISTRY=https://registry.npmjs.org，实际存在 high/critical 漏洞时必须更新依赖后重新制包\n'
       ;;
     *"Node.js"*|*"npm ci"*|*"Electron"*)
       printf 'next=检查 DNS/代理/镜像，必要时设置 TAIJI_NODE_MIRRORS、TAIJI_NPM_REGISTRIES、TAIJI_ELECTRON_MIRRORS 后重试\n'
@@ -665,6 +669,47 @@ npm_ci_with_network_fallback() {
   [ "$installed" = "1" ] || fail "npm ci 失败：已尝试多个 npm registry 和 Electron mirror；请检查制包机网络、DNS、代理，或设置 TAIJI_NPM_REGISTRIES / TAIJI_ELECTRON_MIRRORS"
 }
 
+npm_audit_fail_closed() {
+  local audit_registry audit_registry_host
+  audit_registry="${TAIJI_NPM_AUDIT_REGISTRY:-https://registry.npmjs.org}"
+  audit_registry="${audit_registry%/}"
+  if ! audit_registry_host="$(python3 - "$audit_registry" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+raw = sys.argv[1]
+try:
+    parsed = urlsplit(raw)
+    port = parsed.port
+except ValueError:
+    raise SystemExit(1)
+
+if (
+    any(character.isspace() for character in raw)
+    or parsed.scheme != "https"
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.query
+    or parsed.fragment
+):
+    raise SystemExit(1)
+
+host = parsed.hostname
+if ":" in host:
+    host = f"[{host}]"
+if port is not None:
+    host = f"{host}:{port}"
+print(host)
+PY
+)"; then
+    fail "TAIJI_NPM_AUDIT_REGISTRY 必须是单个 HTTPS URL，且不得包含凭据、空白、查询参数或片段"
+  fi
+  info "使用 npm audit registry 主机：$audit_registry_host"
+  npm audit --omit=dev --audit-level=high --registry="$audit_registry" \
+    || fail "DOCX Engine 生产依赖包含 high/critical 漏洞或 npm audit 不可用，拒绝生成正式安装包"
+}
+
 run_setup_local() {
   local uv_lock_mode="$1" setup_log status
   setup_log="$LOG_DIR/setup-local-$(date +%Y%m%d_%H%M%S)_$$.log"
@@ -706,8 +751,7 @@ build_runtime_and_deb() {
   info "准备 DOCX Engine V2 生产依赖并执行源码测试"
   cd "$(source_lab_dir)/sources/docx-engine-v2"
   npm_ci_with_network_fallback --omit=dev
-  npm audit --omit=dev --audit-level=high \
-    || fail "DOCX Engine 生产依赖包含 high/critical 漏洞或 npm audit 不可用，拒绝生成正式安装包"
+  npm_audit_fail_closed
   node scripts/materialize-portable-resvg-dependencies.js
   npm test
 

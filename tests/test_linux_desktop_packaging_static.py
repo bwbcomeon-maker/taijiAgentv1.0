@@ -2022,10 +2022,108 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         docx_build = builder[start:end]
 
         install = "npm_ci_with_network_fallback --omit=dev"
-        audit = "npm audit --omit=dev --audit-level=high"
+        audit = "npm_audit_fail_closed"
         self.assertIn(audit, docx_build)
         self.assertLess(docx_build.index(install), docx_build.index(audit))
         self.assertLess(docx_build.index(audit), docx_build.index("npm test"))
+
+    def test_offline_builder_does_not_send_audit_to_install_only_npm_mirror(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        marker = "npm_audit_fail_closed() {"
+        self.assertIn(marker, builder)
+        start = builder.index(marker)
+        end = builder.index("\n}\n\nrun_setup_local()", start) + len("\n}")
+        audit_function = builder[start:end]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_bin = temp_root / "bin"
+            fake_bin.mkdir()
+            capture = temp_root / "npm-call.txt"
+            npm = fake_bin / "npm"
+            npm.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "%s\\n" "$*" > "$TAIJI_TEST_CAPTURE"\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            npm.chmod(0o755)
+            harness = temp_root / "audit-registry.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "info() { :; }\n"
+                "warn() { :; }\n"
+                "fail() { printf '%s\\n' \"$*\" >&2; exit 91; }\n"
+                f"{audit_function}\n"
+                f'export PATH="{fake_bin}:$PATH"\n'
+                'export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"\n'
+                f'export TAIJI_TEST_CAPTURE="{capture}"\n'
+                "unset TAIJI_NPM_AUDIT_REGISTRY\n"
+                "npm_audit_fail_closed\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["bash", str(harness)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            invocation = capture.read_text(encoding="utf-8").strip()
+            self.assertEqual(
+                invocation,
+                "audit --omit=dev --audit-level=high "
+                "--registry=https://registry.npmjs.org",
+            )
+
+    def test_offline_builder_rejects_credentialed_npm_audit_registry(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        marker = "npm_audit_fail_closed() {"
+        self.assertIn(marker, builder)
+        start = builder.index(marker)
+        end = builder.index("\n}\n\nrun_setup_local()", start) + len("\n}")
+        audit_function = builder[start:end]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_bin = temp_root / "bin"
+            fake_bin.mkdir()
+            npm = fake_bin / "npm"
+            npm.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "npm must not run\\n" >&2\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            npm.chmod(0o755)
+            harness = temp_root / "audit-registry.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "info() { :; }\n"
+                "warn() { :; }\n"
+                "fail() { printf '%s\\n' \"$*\" >&2; exit 91; }\n"
+                f"{audit_function}\n"
+                f'export PATH="{fake_bin}:$PATH"\n'
+                'export TAIJI_NPM_AUDIT_REGISTRY="https://token@example.invalid/npm"\n'
+                "npm_audit_fail_closed\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["bash", str(harness)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 91, result.stdout + result.stderr)
+            self.assertIn("不得包含凭据", result.stderr)
+            self.assertNotIn("token@example.invalid", result.stderr)
+            self.assertNotIn("npm must not run", result.stderr)
 
     def test_webui_runtime_assets_are_local_for_offline_target(self):
         static_root = ROOT / "hermes-local-lab/sources/hermes-webui/static"
@@ -2131,6 +2229,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("for mirror in $(node_mirrors)", builder)
         self.assertIn("--connect-timeout", builder)
         self.assertIn("TAIJI_NPM_REGISTRIES", builder)
+        self.assertIn("TAIJI_NPM_AUDIT_REGISTRY", builder)
         self.assertIn("TAIJI_ELECTRON_MIRRORS", builder)
         self.assertIn("npm_ci_with_network_fallback", builder)
         self.assertIn("https://registry.npmjs.org", builder)
