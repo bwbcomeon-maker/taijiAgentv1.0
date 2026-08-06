@@ -462,9 +462,6 @@ run_release_preflight() {
 preflight() {
   info "检查制包机环境"
   cleanup_delivery_metadata
-  if [ -n "${TAIJI_BUILD_ROOT:-}" ]; then
-    validate_build_root_location
-  fi
   [ "$(uname -s)" = "Linux" ] || fail "最终 DEB 必须在 Linux amd64 制包机生成，当前为：$(uname -s)"
   case "$(uname -m)" in
     x86_64|amd64) ok "CPU 架构符合：$(uname -m)" ;;
@@ -474,7 +471,6 @@ preflight() {
   require_cmd apt-cache
   require_cmd dpkg
   require_cmd sha256sum
-  require_cmd python3
   require_cmd readlink
   require_admin_capability
   arch="$(dpkg --print-architecture 2>/dev/null || true)"
@@ -776,7 +772,7 @@ install_build_dependencies() {
   info "安装制包依赖。这里可能需要输入 sudo 密码。"
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y \
-    curl ca-certificates build-essential python3-dev libffi-dev git rsync \
+    curl ca-certificates build-essential python3 python3-dev libffi-dev git rsync \
     dpkg-dev binutils perl-base diffutils libc-bin file desktop-file-utils \
     lsof xz-utils tar gzip openssl \
     libc6 libgtk-3-0 libnss3 libnspr4 libxss1 libasound2 libatk1.0-0 \

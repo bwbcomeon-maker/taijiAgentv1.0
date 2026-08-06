@@ -99,7 +99,9 @@ bash "taijiagent 打包交付/99_本机_准备制包输入包.sh"
 bash ./00_制包机_生成离线交付包.sh
 ```
 
-脚本会先安装构建依赖，再按 `XDG_CACHE_HOME/taiji-agent-build-<uid>`、`$HOME/.cache/taiji-agent-build-<uid>`、`/var/tmp/taiji-agent-build-<uid>` 顺序选择构建根；显式 `TAIJI_BUILD_ROOT` 只接受绝对路径、当前用户 0700 专用目录。每个候选都必须通过“可执行文件运行 + 共享库动态加载”探针，探针结果和 `findmnt -T` 会写入失败诊断；不再把 `/tmp` 作为默认构建根，也不建议关闭麒麟安全策略。
+脚本只预先要求可用的 `apt`/`dpkg` 和 `sudo` 管理员能力，不要求制包机预装
+Python；它会先通过 apt 安装 `python3`/`python3-dev` 和其余构建依赖，再按
+`XDG_CACHE_HOME/taiji-agent-build-<uid>`、`$HOME/.cache/taiji-agent-build-<uid>`、`/var/tmp/taiji-agent-build-<uid>` 顺序选择构建根；显式 `TAIJI_BUILD_ROOT` 只接受绝对路径、当前用户 0700 专用目录。每个候选都必须通过“可执行文件运行 + 共享库动态加载”探针，探针结果和 `findmnt -T` 会写入失败诊断；不再把 `/tmp` 作为默认构建根，也不建议关闭麒麟安全策略。
 
 源码、Node/uv 工具链和所有 npm/Python 临时文件统一位于选中的构建根下，脚本导出 `TMPDIR`、`TMP`、`TEMP` 指向该根。只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、sidecar 或 `.build-success` 缺失时仍属于失败。Electron 下载归档必须与 canonical policy 固定的版本、basename 和 SHA256 一致，且实际写入 DEB 的整个 `dist/` 文件清单及逐文件内容必须与该归档一致；不再只检查 8 个 ELF。构建时还会验证蓝色太极 Logo 的 RGBA PNG、hicolor 多尺寸、AppStream、desktop-id/WM_CLASS、Electron 窗口图标和安装态资源同源。
 
@@ -264,6 +266,7 @@ SHA256SUMS.txt
 | `npm audit` 向 `registry.npmmirror.com/-/npm/v1/security/audits/quick` 请求后返回 `404 NOT_IMPLEMENTED` | 依赖下载成功后把 install-only 镜像留在 `NPM_CONFIG_REGISTRY`，安全审计错误继承了不实现 audit API 的镜像；该响应不等于已经发现依赖漏洞 | 安装继续使用 `TAIJI_NPM_REGISTRIES`，审计单独使用 `TAIJI_NPM_AUDIT_REGISTRY`（默认 `https://registry.npmjs.org`，也可指定实现审计接口的 HTTPS 内网源）；URL 禁止内嵌凭据，需要认证时使用现场受控的标准 npm 配置 | 动态回归在继承 `npmmirror` 的环境中捕获 npm 参数，必须看到 audit 显式指定独立 registry；漏洞、网络和接口错误仍全部 fail closed | 已由 Kylin 制包机真实失败暴露；修复后的当前输入包仍须在制包机重新构建，不能据源码测试标记制包成功 |
 | Linux 制包 `npm test` 多项失败并提示缺少 `@resvg/resvg-js-linux-*` | 普通 npm 安装只准备当前平台原生包，复制型 DOCX skill 却承诺多个 Linux CPU/ABI | 按 lockfile 下载、校验并原子物化 x64/arm64、gnu/musl 原生包 | lockfile integrity、包身份、ELF/架构校验、制包机真实 `npm test` | 已由真实制包失败暴露并修复 |
 | apt 安装依赖时可能等待时区等交互输入 | 非交互环境没有稳定跨 sudo 传递 | 使用 `DEBIAN_FRONTEND=noninteractive` 和固定 `TZ` | 静态断言并在最小 Ubuntu 制包机实际执行 | 当前候选制包链已覆盖 |
+| 极简 Ubuntu 20.04 制包镜像在 apt 安装前报 `缺少命令：python3` | 旧预检把本应由 apt 安装的 Python 和依赖 Python 的显式构建根探针放在依赖安装之前，形成自相矛盾的隐含前提 | 初始预检只核对 Linux amd64、apt/dpkg、摘要工具和 sudo；apt 明确安装 `python3`/`python3-dev` 后再选择并探测构建根 | 静态顺序回归 + 当前输入包最小 Ubuntu 20.04 amd64 端到端重放 | Docker 重放用于提前发现制包链问题，不能替代 Kylin/UOS 目标机安装验收 |
 | Electron `ldd` 审计报告缺共享库 | 最小制包容器没有安装执行 Electron 审计所需的系统库 | 制包依赖阶段安装 DEB 声明的 Electron runtime 库 | Electron 必须为 Linux amd64 ELF，`ldd` 不得出现 `not found` | 当前候选 payload audit 已覆盖 |
 | Electron 版本和 8 个 ELF 正确，但 `resources.pak`/ICU/snapshot/locales 可被替换 | policy 声明了整包 `archive_sha256`，旧 stager 却没有消费该字段，非 ELF 只检查“存在” | npm 使用受控私有 Electron cache；只选择 basename/version/SHA256 与 canonical policy 相同的 Linux x64 ZIP；stager 再把最终 staged `dist/` 清单及每个文件与固定 ZIP 比对 | 非 ELF 篡改、归档篡改、文件清单漂移回归；官方 `39.8.10 linux-x64` 归档实物验证 | 本机已实时核对官方 ZIP SHA256 为 `92e8b031...eabd1`；Kylin 制包仍待重跑 |
 | manifest、最终预检或重试清理出现只读模板 `Permission denied` | 内置模板有意使用 `0444/0555`，普通 `rm -rf` 无法删除父目录 | 只清理带所有权标记的专用构建根；先恢复目录 owner 写权限再删除。构建根从用户缓存或 `/var/tmp` 动态选择并先通过执行/dlopen 探针 | manifest、payload-preflight、build-root、候选探针回归测试；失败诊断记录 `findmnt -T` | 当前分支静态/行为回归已覆盖；Linux 制包机真实重建仍未验证 |
