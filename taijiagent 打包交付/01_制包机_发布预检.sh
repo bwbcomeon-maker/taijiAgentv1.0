@@ -110,7 +110,7 @@ source_path = Path(sys.argv[4])
 policy_id = sys.argv[5]
 policy_sha = sys.argv[6]
 maintainer = sys.argv[7]
-required = {"version","source_archive","source_sha256","source_commit","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","maintainer"}
+required = {"version","source_archive","source_sha256","source_commit","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"}
 marker = {}
 for line in marker_path.read_text(encoding="utf-8").splitlines():
     if not line or "=" not in line:
@@ -135,6 +135,7 @@ expected = {
     "compatibility_policy_sha256": policy_sha,
     "elf_abi_audit_basename": "elf-abi-audit.json",
     "elf_abi_audit_sha256": marker["elf_abi_audit_sha256"],
+    "icon_set_sha256": marker["icon_set_sha256"],
 }
 for key, value in expected.items():
     if manifest.get(key) != value:
@@ -155,6 +156,8 @@ if not re.fullmatch(r"[0-9a-f]{40}", marker["source_commit"]):
     raise SystemExit("marker source_commit must be full SHA")
 if not re.fullmatch(r"[0-9a-f]{64}", marker["elf_abi_audit_sha256"]):
     raise SystemExit("marker ABI audit SHA256 invalid")
+if not re.fullmatch(r"[0-9a-f]{64}", marker["icon_set_sha256"]):
+    raise SystemExit("marker icon set SHA256 invalid")
 PY
 }
 verify_deb_payload() {

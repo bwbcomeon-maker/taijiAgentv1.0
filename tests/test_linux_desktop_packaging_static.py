@@ -1683,6 +1683,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("生成的安装包", preflight)
         self.assertIn("canonical compatibility policy", preflight)
         self.assertIn("verify_marker_and_manifest", preflight)
+        self.assertIn('"icon_set_sha256"', preflight)
+        self.assertIn('marker["icon_set_sha256"]', preflight)
         self.assertIn("verify_deb_payload", preflight)
         self.assertIn("verify_package_output_allowlist", preflight)
         self.assertNotIn("Packages.gz", preflight)
