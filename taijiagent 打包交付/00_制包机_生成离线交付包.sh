@@ -672,12 +672,15 @@ npm_ci_with_network_fallback() {
 npm_audit_fail_closed() {
   local audit_registry audit_registry_host
   audit_registry="${TAIJI_NPM_AUDIT_REGISTRY:-https://registry.npmjs.org}"
+  unset TAIJI_NPM_AUDIT_REGISTRY
   audit_registry="${audit_registry%/}"
-  if ! audit_registry_host="$(python3 - "$audit_registry" <<'PY'
+  if ! audit_registry_host="$(python3 -c '
 import sys
 from urllib.parse import urlsplit
 
-raw = sys.argv[1]
+raw = sys.stdin.read()
+if raw.endswith("\n"):
+    raw = raw[:-1]
 try:
     parsed = urlsplit(raw)
     port = parsed.port
@@ -685,7 +688,9 @@ except ValueError:
     raise SystemExit(1)
 
 if (
-    any(character.isspace() for character in raw)
+    not raw.isascii()
+    or any(character.isspace() for character in raw)
+    or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw)
     or parsed.scheme != "https"
     or not parsed.hostname
     or parsed.username is not None
@@ -701,9 +706,9 @@ if ":" in host:
 if port is not None:
     host = f"{host}:{port}"
 print(host)
-PY
+ ' <<<"$audit_registry"
 )"; then
-    fail "TAIJI_NPM_AUDIT_REGISTRY 必须是单个 HTTPS URL，且不得包含凭据、空白、查询参数或片段"
+    fail "TAIJI_NPM_AUDIT_REGISTRY 必须是单个 ASCII HTTPS URL，且不得包含凭据、空白、控制字符、查询参数或片段"
   fi
   info "使用 npm audit registry 主机：$audit_registry_host"
   npm audit --omit=dev --audit-level=high --registry="$audit_registry" \
