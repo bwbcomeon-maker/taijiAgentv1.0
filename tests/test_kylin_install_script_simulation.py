@@ -55,6 +55,17 @@ class KylinInstallScriptSimulationTest(unittest.TestCase):
         self.assertIn('find "$stage" -mindepth 1 -maxdepth 1 -type f -delete', text)
         self.assertNotIn('rm -f -- "$stage"/*', text)
 
+    def test_root_staging_disables_python_bytecode_before_any_helper_runs(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        staged = text[
+            text.index("<<'ROOT_STAGED_SCRIPT'") : text.index("ROOT_STAGED_SCRIPT\n}")
+        ]
+        assignment = staged.index('PYTHONDONTWRITEBYTECODE="1"')
+        exported = staged.index("export PYTHONDONTWRITEBYTECODE")
+        first_helper = staged.index("stage_regular_file() {")
+        self.assertLess(assignment, exported)
+        self.assertLess(exported, first_helper)
+
     def test_silent_deployer_declares_noninteractive_local_dpkg_contract(self):
         text = SILENT.read_text(encoding="utf-8")
         self.assertIn("DEBIAN_FRONTEND=noninteractive", text)

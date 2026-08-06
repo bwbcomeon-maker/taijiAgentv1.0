@@ -102,6 +102,9 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         predictable_temp_target=None,
         fake_mktemp=False,
         fake_mv=False,
+        trace_canary=False,
+        probe_owner_mismatch_path=None,
+        opt_path_override=None,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
         if owner_uid is None:
             owner_uid = os.getuid()
@@ -110,24 +113,46 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         if result_path is None:
             result_path = root / "var/lib/taiji-agent/preflight.json"
         fake_bin = ""
-        if fake_mktemp or fake_mv:
+        if fake_mktemp or fake_mv or trace_canary or probe_owner_mismatch_path:
             fake_bin_path = root / ".fake-bin"
             fake_bin_path.mkdir(parents=True, exist_ok=True)
-            if fake_mktemp:
+            if fake_mktemp or trace_canary:
                 real_mktemp = shutil.which("mktemp") or "/usr/bin/mktemp"
                 fake_mktemp_path = fake_bin_path / "mktemp"
-                fake_mktemp_path.write_text(
-                    "#!/bin/sh\n"
-                    f"state={shlex.quote(str(root / '.fake-mktemp-used'))}\n"
-                    "if [ ! -e \"$state\" ]; then : > \"$state\"; exit 1; fi\n"
-                    f"exec {shlex.quote(real_mktemp)} \"$@\"\n",
-                    encoding="utf-8",
-                )
+                if fake_mktemp:
+                    fake_mktemp_path.write_text(
+                        "#!/bin/sh\n"
+                        f"state={shlex.quote(str(root / '.fake-mktemp-used'))}\n"
+                        "if [ ! -e \"$state\" ]; then : > \"$state\"; exit 1; fi\n"
+                        f"exec {shlex.quote(real_mktemp)} \"$@\"\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    fake_mktemp_path.write_text(
+                        "#!/bin/sh\n"
+                        f"trace={shlex.quote(str(root / '.canary-called'))}\n"
+                        "case \"${1:-}\" in */.taiji-preflight.*) : > \"$trace\" ;; esac\n"
+                        f"exec {shlex.quote(real_mktemp)} \"$@\"\n",
+                        encoding="utf-8",
+                    )
                 fake_mktemp_path.chmod(0o755)
             if fake_mv:
                 fake_mv_path = fake_bin_path / "mv"
                 fake_mv_path.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
                 fake_mv_path.chmod(0o755)
+            if probe_owner_mismatch_path:
+                real_stat = shutil.which("stat") or "/usr/bin/stat"
+                fake_stat_path = fake_bin_path / "stat"
+                fake_stat_path.write_text(
+                    "#!/bin/sh\n"
+                    "last=''\n"
+                    "for argument in \"$@\"; do last=\"$argument\"; done\n"
+                    f"probe={shlex.quote(str(probe_owner_mismatch_path))}\n"
+                    "if [ \"$last\" = \"$probe\" ]; then printf '99999:755:2'; exit 0; fi\n"
+                    f"exec {shlex.quote(real_stat)} \"$@\"\n",
+                    encoding="utf-8",
+                )
+                fake_stat_path.chmod(0o755)
             fake_bin = str(fake_bin_path)
         result_path.parent.mkdir(parents=True, exist_ok=True)
         command = (
@@ -136,6 +161,18 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             "if [ -n \"${10:-}\" ]; then ln -s \"${10}\" \"${8}.tmp.$$\"; fi; "
             "source \"$1\"; "
             "if [ -n \"${11:-}\" ]; then PATH=\"${11}:$PATH\"; export PATH; fi; "
+            "if [ -n \"${12:-}\" ]; then "
+            "TAIJI_TEST_OPT_PATH=\"${12}\"; "
+            "root_path() { "
+            "local test_root=\"$1\" test_path=\"$2\"; "
+            "if [ \"$test_path\" = \"$TAIJI_INSTALL_ROOT_PARENT\" ]; then "
+            "printf '%s' \"$TAIJI_TEST_OPT_PATH\"; return; fi; "
+            "if [ \"$test_root\" = / ]; then printf '%s' \"$test_path\"; "
+            "elif [ \"$test_path\" = \"$test_root\" ] || [[ \"$test_path\" == \"$test_root\"/* ]]; then "
+            "printf '%s' \"$test_path\"; "
+            "elif [[ \"$test_path\" == /* ]]; then printf '%s%s' \"$test_root\" \"$test_path\"; "
+            "else printf '%s/%s' \"${test_root%/}\" \"$test_path\"; fi; "
+            "}; fi; "
             "verify_compatibility \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\""
         )
         env = {
@@ -159,6 +196,7 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                 str(effective_uid),
                 str(predictable_temp_target or ""),
                 fake_bin,
+                str(opt_path_override or ""),
             ],
             text=True,
             capture_output=True,
@@ -241,12 +279,11 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                 rendered, root, os_release, "TAIJI-LINUX-E005-KERNEL", kernel="4.18.0"
             )
 
-    def test_missing_desktop_systemd_loopback_opt_or_disk_is_blocked(self):
+    def test_missing_desktop_systemd_loopback_or_disk_is_blocked(self):
         cases = (
             ("desktop", "TAIJI-LINUX-E006-DESKTOP"),
             ("systemd", "TAIJI-LINUX-E007-SYSTEMD"),
             ("loopback", "TAIJI-LINUX-E008-LOOPBACK"),
-            ("opt", "TAIJI-LINUX-E009-DISK"),
             ("disk", "TAIJI-LINUX-E009-DISK"),
         )
         for missing, code in cases:
@@ -259,12 +296,121 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                     (root / "usr/bin/systemctl").unlink()
                 elif missing == "loopback":
                     (root / "sys/class/net/lo").rmdir()
-                elif missing == "opt":
-                    (root / "opt").rmdir()
                 elif missing == "disk":
                     (root / ".taiji-disk-headroom-mib").write_text("0\n", encoding="utf-8")
                 rendered = self.render(temp_root)
                 self.assert_blocked(rendered, root, os_release, code)
+
+    def test_missing_opt_parent_uses_nearest_existing_trusted_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            (root / "opt").rmdir()
+            (root / ".taiji-disk-headroom-mib").write_text(
+                "8192\n", encoding="utf-8"
+            )
+            rendered = self.render(temp_root)
+
+            self.assert_compatible(rendered, root, os_release)
+            self.assertFalse((root / "opt").exists())
+
+    def test_opt_parent_symlink_or_non_directory_is_blocked(self):
+        for unsafe_type in ("symlink", "broken_symlink", "file"):
+            with self.subTest(unsafe_type=unsafe_type), tempfile.TemporaryDirectory() as directory:
+                temp_root = Path(directory)
+                root, os_release = self.make_root(temp_root)
+                (root / "opt").rmdir()
+                if unsafe_type == "symlink":
+                    (root / "opt").symlink_to("usr")
+                elif unsafe_type == "broken_symlink":
+                    (root / "opt").symlink_to("missing-opt-target")
+                else:
+                    (root / "opt").write_text("not a directory\n", encoding="utf-8")
+                rendered = self.render(temp_root)
+
+                self.assert_blocked(
+                    rendered, root, os_release, "TAIJI-LINUX-E009-DISK"
+                )
+
+    def test_missing_opt_still_enforces_ancestor_preflight_guards(self):
+        cases = (
+            ("disk", "TAIJI-LINUX-E009-DISK"),
+            ("noexec", "TAIJI-LINUX-E012-OPT-NOEXEC"),
+            ("sandbox", "TAIJI-LINUX-E013-SANDBOX"),
+            ("unsafe_mode", "TAIJI-LINUX-E009-DISK"),
+        )
+        for guard, code in cases:
+            with self.subTest(guard=guard), tempfile.TemporaryDirectory() as directory:
+                temp_root = Path(directory)
+                root, os_release = self.make_root(temp_root)
+                (root / "opt").rmdir()
+                if guard == "disk":
+                    (root / ".taiji-disk-headroom-mib").write_text(
+                        "0\n", encoding="utf-8"
+                    )
+                elif guard == "noexec":
+                    (root / ".taiji-noexec").touch()
+                elif guard == "unsafe_mode":
+                    root.chmod(0o777)
+                rendered = self.render(temp_root)
+
+                self.assert_blocked(
+                    rendered,
+                    root,
+                    os_release,
+                    code,
+                    fake_mktemp=(guard == "sandbox"),
+                )
+
+    def test_untrusted_existing_opt_never_receives_a_canary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            (root / "opt").chmod(0o777)
+            rendered = self.render(temp_root)
+
+            self.assert_blocked(
+                rendered,
+                root,
+                os_release,
+                "TAIJI-LINUX-E009-DISK",
+                trace_canary=True,
+            )
+            self.assertFalse((root / ".canary-called").exists())
+
+    def test_probe_owner_mismatch_is_blocked_before_any_canary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            rendered = self.render(temp_root)
+
+            self.assert_blocked(
+                rendered,
+                root,
+                os_release,
+                "TAIJI-LINUX-E009-DISK",
+                trace_canary=True,
+                probe_owner_mismatch_path=root / "opt",
+            )
+            self.assertFalse((root / ".canary-called").exists())
+
+    def test_probe_cannot_escape_root_prefix_or_receive_a_canary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            outside = temp_root / "outside"
+            outside.mkdir(mode=0o755)
+            rendered = self.render(temp_root)
+
+            self.assert_blocked(
+                rendered,
+                root,
+                os_release,
+                "TAIJI-LINUX-E009-DISK",
+                trace_canary=True,
+                opt_path_override=outside,
+            )
+            self.assertFalse((root / ".canary-called").exists())
 
     def test_missing_policy_required_system_soname_is_blocked_before_unpack(self):
         with tempfile.TemporaryDirectory() as directory:

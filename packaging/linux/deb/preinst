@@ -263,6 +263,12 @@ verify_compatibility() {
   local desktop_found=0
   local required_soname=""
   local opt_path=""
+  local opt_probe_path=""
+  local opt_probe_metadata=""
+  local opt_probe_owner=""
+  local opt_probe_mode=""
+  local opt_probe_links=""
+  local opt_probe_trusted=0
   local disk_available_kib=""
   local disk_available_mib=""
   local marker=""
@@ -320,15 +326,49 @@ verify_compatibility() {
     preflight_block "TAIJI-LINUX-E008-LOOPBACK" "未检测到 loopback 网络接口"
 
   opt_path="$(root_path "$root_prefix" "$TAIJI_INSTALL_ROOT_PARENT")"
-  if [ ! -d "$opt_path" ]; then
-    preflight_block "TAIJI-LINUX-E009-DISK" "安装目录父路径不存在"
+  opt_probe_path="$opt_path"
+  if [ -L "$opt_path" ] || { [ -e "$opt_path" ] && [ ! -d "$opt_path" ]; }; then
+    preflight_block "TAIJI-LINUX-E009-DISK" "安装目录父路径类型不安全"
   else
+    while [ ! -e "$opt_probe_path" ] && [ ! -L "$opt_probe_path" ]; do
+      if [ "$opt_probe_path" = "$root_prefix" ] || [ "$opt_probe_path" = "/" ]; then
+        break
+      fi
+      opt_probe_path="${opt_probe_path%/*}"
+      [ -n "$opt_probe_path" ] || opt_probe_path="/"
+    done
+    opt_probe_trusted=1
+    if [ "$root_prefix" != "/" ]; then
+      case "$opt_probe_path" in
+        "$root_prefix"|"$root_prefix"/*) ;;
+        *)
+          opt_probe_trusted=0
+          preflight_block "TAIJI-LINUX-E009-DISK" "安装目录父路径探测越过受控根"
+          ;;
+      esac
+    fi
+    if [ -L "$opt_probe_path" ] || [ ! -d "$opt_probe_path" ]; then
+      opt_probe_trusted=0
+      preflight_block "TAIJI-LINUX-E009-DISK" "安装目录最近存在的父路径不可信"
+    elif [ "$opt_probe_trusted" = "1" ]; then
+      opt_probe_metadata="$(trusted_stat_metadata "$opt_probe_path" 0 2>/dev/null || true)"
+      IFS=: read -r opt_probe_owner opt_probe_mode opt_probe_links <<< "$opt_probe_metadata"
+      if [ "$opt_probe_owner" != "$expected_owner_uid" ] \
+        || [[ ! "$opt_probe_mode" =~ ^[0-7]{3,4}$ ]] \
+        || (( (8#$opt_probe_mode & 8#022) != 0 )); then
+        opt_probe_trusted=0
+        preflight_block "TAIJI-LINUX-E009-DISK" "安装目录最近存在的父路径权限不可信"
+      fi
+    fi
+  fi
+
+  if [ "$opt_probe_trusted" = "1" ]; then
     marker="$root_prefix/.taiji-disk-headroom-mib"
     if [ "$root_prefix" != "/" ] && [ -f "$marker" ]; then
       disk_available_mib="$(cat "$marker" 2>/dev/null || printf '%s' 0)"
       [[ "$disk_available_mib" =~ ^[0-9]+$ ]] || disk_available_mib=0
     else
-      disk_available_kib="$(df -Pk "$opt_path" 2>/dev/null | awk 'NR == 2 {print $4}')"
+      disk_available_kib="$(df -Pk "$opt_probe_path" 2>/dev/null | awk 'NR == 2 {print $4}')"
       if [[ "$disk_available_kib" =~ ^[0-9]+$ ]]; then
         disk_available_mib=$((disk_available_kib / 1024))
       else
@@ -350,16 +390,18 @@ verify_compatibility() {
     preflight_block "TAIJI-LINUX-E011-KYSEC" "检测到 Kysec 安全策略，无法保证安装目录可执行"
   fi
 
-  if [ -e "$opt_path/.taiji-noexec" ] || [ -e "$opt_path/.noexec" ]; then
+  if [ "$opt_probe_trusted" = "1" ] \
+    && { [ -e "$opt_probe_path/.taiji-noexec" ] || [ -e "$opt_probe_path/.noexec" ]; }; then
     preflight_block "TAIJI-LINUX-E012-OPT-NOEXEC" "安装目录所在文件系统启用了 noexec"
-  elif [ "$root_prefix" = "/" ] && command -v findmnt >/dev/null 2>&1; then
-    if findmnt -no OPTIONS --target "$opt_path" 2>/dev/null | tr ',' '\n' | grep -qx noexec; then
+  elif [ "$opt_probe_trusted" = "1" ] && [ "$root_prefix" = "/" ] \
+    && command -v findmnt >/dev/null 2>&1; then
+    if findmnt -no OPTIONS --target "$opt_probe_path" 2>/dev/null | tr ',' '\n' | grep -qx noexec; then
       preflight_block "TAIJI-LINUX-E012-OPT-NOEXEC" "安装目录所在文件系统启用了 noexec"
     fi
   fi
 
-  if [ -d "$opt_path" ]; then
-    canary="$(mktemp "$opt_path/.taiji-preflight.XXXXXX" 2>/dev/null || true)"
+  if [ "$opt_probe_trusted" = "1" ]; then
+    canary="$(mktemp "$opt_probe_path/.taiji-preflight.XXXXXX" 2>/dev/null || true)"
     if [ -z "$canary" ]; then
       preflight_block "TAIJI-LINUX-E013-SANDBOX" "安全策略阻止安装目录写入测试"
     else

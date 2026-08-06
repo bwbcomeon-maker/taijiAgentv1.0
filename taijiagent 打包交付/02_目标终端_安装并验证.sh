@@ -154,6 +154,8 @@ run_root_staged_management() {
     "$UPGRADE_CONTRACT_PATH" "$COMPATIBILITY_HELPER" "$POLICY_PATH" "$RELEASE_VALIDATOR" "${TAIJI_RELEASE_PUBLIC_KEY:-}" \
     "${DEPLOY_ARGS[@]}" <<'ROOT_STAGED_SCRIPT'
 set -Eeuo pipefail
+PYTHONDONTWRITEBYTECODE="1"
+export PYTHONDONTWRITEBYTECODE
 silent_source="$1"
 receipt_source="$2"
 upgrade_source="$3"
