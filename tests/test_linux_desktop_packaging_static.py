@@ -201,6 +201,15 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertNotIn("runtime-depends.txt", build)
         self.assertNotIn("render-depends", build)
 
+    def test_builder_prepares_node_after_resetting_build_root(self):
+        builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        main_body = builder[builder.index("main() {") :]
+        self.assertLess(
+            main_body.index("  unpack_source\n"),
+            main_body.index("  ensure_node\n"),
+            "Node.js must be prepared after unpack_source resets the build root",
+        )
+
     def test_native_verify_checks_packaged_electron_runtime(self):
         verify = read_text("hermes-local-lab/scripts/taiji-native-verify")
 
