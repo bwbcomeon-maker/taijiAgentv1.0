@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Load the fixed Linux amd64 DEB compatibility policy without host overrides."""
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json

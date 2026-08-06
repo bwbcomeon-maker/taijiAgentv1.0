@@ -35,6 +35,11 @@ class LinuxCompatibilityPolicyTest(unittest.TestCase):
         with self.assertRaises(self.module.PolicyError):
             self.module.load_and_validate(path)
 
+    def test_policy_helper_defers_annotations_for_kylin_python38(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        header = "\n".join(source.splitlines()[:12])
+        self.assertIn("from __future__ import annotations", header)
+
     def test_repository_policy_is_canonical_and_hash_stable(self):
         raw = POLICY_PATH.read_bytes()
         self.assertEqual(raw, self.module.canonical_bytes(self.policy))
