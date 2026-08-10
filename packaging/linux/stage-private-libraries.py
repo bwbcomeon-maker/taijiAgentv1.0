@@ -209,6 +209,12 @@ def _basename_matches_allowlisted(path: Path, allowlisted: set[str]) -> bool:
 
 
 def _candidate_source_directories(sysroot: Path) -> tuple[Path, ...]:
+    if (
+        sysroot.name == "x86_64-linux-gnu"
+        and sysroot.parent.name == "lib"
+        and not sysroot.is_symlink()
+    ) or (sysroot.name == "lib64" and not sysroot.is_symlink()):
+        return (sysroot,)
     directories = tuple(
         directory
         for relative in _DEBIAN_AMD64_LIBRARY_DIRECTORIES

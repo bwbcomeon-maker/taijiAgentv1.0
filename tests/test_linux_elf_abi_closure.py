@@ -469,7 +469,7 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                     mock.patch.object(self.stager, "source_metadata", side_effect=fake_metadata), \
                     mock.patch.object(self.stager, "_copy_atomically", side_effect=fake_copy), \
                     mock.patch.object(self.stager, "_ensure_private_directory"):
-                report = self.stager.stage_private_libraries(root, policy, sysroot)
+                report = self.stager.stage_private_libraries(root, policy, standard_dir)
 
             self.assertEqual(report["files"][0]["soname"], allowed)
             self.assertEqual(

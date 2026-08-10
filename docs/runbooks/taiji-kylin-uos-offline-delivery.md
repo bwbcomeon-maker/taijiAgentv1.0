@@ -292,8 +292,8 @@ SHA256SUMS.txt
 
 - **真实失败证据**：首个 1.0.1 冻结候选在真实 Kylin 制包到 DEB staging 时，递归扫描到 `/usr/lib/x86_64-linux-gnu/innogpu-fh2m/libepoxy.so.0.0.0`。该厂商 GPU 子目录归 uid 1000 所有，安全门禁正确拒绝复制。
 - **根因**：旧收集器递归扫描整个 sysroot，把未进入 `/etc/ld.so.conf*` 且未被动态链接器选中的厂商私有副本也当成正式候选。真实系统的 `ldconfig` 选中标准 `/lib/x86_64-linux-gnu/libepoxy.so.0`，它对应 root 管理的 `libepoxy0` 文件。
-- **修复合同**：Debian amd64 布局存在时，只扫描标准 `/usr/lib/x86_64-linux-gnu` 和 `/usr/lib64` 的直接文件，不递归进入显卡等厂商子目录；隔离 fixture/sysroot 无标准 Debian 目录时保留原有通用扫描。选中文件仍必须通过 root 属主、单硬链接、普通文件、权威 SONAME、allowlist 和原子复制检查。
-- **已实时验证（候选源码级）**：新增测试先稳定复现普通用户厂商副本阻断，最小修复后 ELF/ABI 聚焦测试 26/26 通过。真实 Kylin sysroot 快速 staging 成功收集 63 个 policy 允许库；`libepoxy.so.0` SHA256 与 root 管理标准文件一致，报告中没有 `innogpu` 引用。
+- **修复合同**：Debian amd64 布局存在时，无论 sysroot 指向 `/` 还是直接指向 `/usr/lib/x86_64-linux-gnu`，都只扫描标准 `/usr/lib/x86_64-linux-gnu` 和 `/usr/lib64` 的直接文件，不递归进入显卡等厂商子目录；隔离 fixture/sysroot 无标准 Debian 目录时保留原有通用扫描。选中文件仍必须通过 root 属主、单硬链接、普通文件、权威 SONAME、allowlist 和原子复制检查。
+- **已实时验证（候选源码级）**：新增测试先稳定复现普通用户厂商副本阻断，并使用正式构建的直接多架构目录 sysroot 参数固化回归；最小修复后 ELF/ABI 聚焦测试 26/26 通过。真实 Kylin 使用 `/usr/lib/x86_64-linux-gnu` 快速 staging 成功收集 63 个 policy 允许库；`libepoxy.so.0` SHA256 与 root 管理标准文件一致，报告中没有 `innogpu` 引用。
 - **证据边界**：失败的冻结提交及其输入包已废弃；修复必须经新提交、新输入包和从头制包后才能产生有效 DEB 证据。
 
 ## 8. 已确认故障经验矩阵
