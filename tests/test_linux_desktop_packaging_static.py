@@ -234,6 +234,50 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("/api/model-config", verify)
         self.assertIn("/api/settings", verify)
 
+    def test_native_verify_accepts_desktop_api_access_denial_without_a_desktop_token(self):
+        verify = read_text("hermes-local-lab/scripts/taiji-native-verify")
+        function_start = verify.index("verify_webui_api_payloads() {")
+        python_start = verify.index("<<'PY'\n", function_start) + len("<<'PY'\n")
+        python_end = verify.index("\nPY\n}", python_start)
+        embedded_check = verify[python_start:python_end]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            urllib_dir = Path(temp_dir) / "urllib"
+            urllib_dir.mkdir()
+            (urllib_dir / "__init__.py").write_text("", encoding="utf-8")
+            (urllib_dir / "error.py").write_text(
+                "class HTTPError(Exception):\n"
+                "    def __init__(self, code, payload):\n"
+                "        self.code = code\n"
+                "        self._payload = payload\n"
+                "    def read(self):\n"
+                "        return self._payload\n",
+                encoding="utf-8",
+            )
+            (urllib_dir / "request.py").write_text(
+                "from .error import HTTPError\n"
+                "def urlopen(_url, timeout=5):\n"
+                "    raise HTTPError(403, b'{\\\"error\\\":\\\"\\u8bf7\\u4ece\\u684c\\u9762\\u5e94\\u7528\\u542f\\u52a8\\u592a\\u6781 Agent\\\"}')\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = temp_dir
+            result = subprocess.run(
+                [sys.executable, "-", "http://127.0.0.1:18787"],
+                input=embedded_check,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn(
+            "Desktop access gate rejected unauthenticated settings/model-config requests",
+            output,
+        )
+
     def test_native_verify_resets_strict_shell_options_after_runtime_env(self):
         verify = read_text("hermes-local-lab/scripts/taiji-native-verify")
         runtime_env_marker = 'source "$SCRIPT_DIR/runtime-env.sh"'
