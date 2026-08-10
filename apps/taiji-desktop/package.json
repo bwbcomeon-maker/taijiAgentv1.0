@@ -1,6 +1,6 @@
 {
   "name": "taiji-agent-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Taiji Agent desktop shell for local Agent and WebUI services.",
   "main": "src/main.js",
