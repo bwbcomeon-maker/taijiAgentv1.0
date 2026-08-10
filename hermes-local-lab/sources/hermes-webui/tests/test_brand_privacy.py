@@ -1236,13 +1236,16 @@ def test_onboarding_system_step_does_not_render_raw_paths():
     start = src.index("if(key==='system')")
     end = src.index("if(key==='setup')")
     system_block = src[start:end]
+    workbench_start = src.index("function _renderSetupWorkbench()")
+    workbench_end = src.index("async function _loadSetupPreflight", workbench_start)
+    workbench_block = src[workbench_start:workbench_end]
 
-    assert "system.config_path" not in system_block
-    assert "system.env_path" not in system_block
-    assert "system.current_base_url" not in system_block
-    assert "system.missing_modules" not in system_block
-    assert "onboarding_config_status" in system_block
-    assert "onboarding_credentials_status" in system_block
+    assert "_renderSetupWorkbench()" in system_block
+    for block in (system_block, workbench_block):
+        assert "system.config_path" not in block
+        assert "system.env_path" not in block
+        assert "system.current_base_url" not in block
+        assert "system.missing_modules" not in block
 
 
 def test_onboarding_workspace_dropdown_does_not_label_options_with_paths():
