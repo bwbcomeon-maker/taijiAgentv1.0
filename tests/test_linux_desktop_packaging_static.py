@@ -1916,6 +1916,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("tarfile.USTAR_FORMAT", prepare)
         self.assertIn("PaxHeaders", prepare)
         self.assertIn("._", prepare)
+        self.assertIn('"离线演练证据"', prepare)
         self.assertIn("失败诊断", docs)
 
     def test_release_preflight_cleans_macos_copy_metadata(self):

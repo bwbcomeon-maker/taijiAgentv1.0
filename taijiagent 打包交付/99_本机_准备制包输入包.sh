@@ -72,6 +72,7 @@ skip_dirs = {
     "构建日志",
     "旧版备份",
     "离线依赖",
+    "离线演练证据",
     "目标基线",
     "target-verification",
     "offline-install-rehearsal",
