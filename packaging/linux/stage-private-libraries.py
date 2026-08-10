@@ -27,6 +27,10 @@ _TRUSTED_READELF_CANDIDATES = (
     Path("/bin/x86_64-linux-gnu-readelf"),
 )
 _TRUSTED_READELF_DIRECTORIES = (Path("/usr/bin"), Path("/bin"))
+_DEBIAN_AMD64_LIBRARY_DIRECTORIES = (
+    Path("usr/lib/x86_64-linux-gnu"),
+    Path("usr/lib64"),
+)
 _TRUSTED_TOOLS_MODULE = None
 
 
@@ -204,11 +208,34 @@ def _basename_matches_allowlisted(path: Path, allowlisted: set[str]) -> bool:
     return path.name in allowlisted or any(path.name.startswith(f"{soname}.") for soname in allowlisted)
 
 
+def _candidate_source_directories(sysroot: Path) -> tuple[Path, ...]:
+    directories = tuple(
+        directory
+        for relative in _DEBIAN_AMD64_LIBRARY_DIRECTORIES
+        if (directory := sysroot / relative).is_dir() and not directory.is_symlink()
+    )
+    return directories
+
+
 def _iter_sources(sysroot: Path, policy: dict[str, Any]):
     if not sysroot.is_dir():
         raise StageError(f"private-library sysroot is not a directory: {sysroot}")
     allowlisted = set(policy["elf"]["allowed_private_sonames"])
-    for candidate in sorted(sysroot.rglob("*"), key=lambda item: item.as_posix()):
+    source_directories = _candidate_source_directories(sysroot)
+    if source_directories:
+        # Debian-family amd64 runtime libraries are selected from the standard
+        # multiarch directories.  Do not recurse into vendor GPU subdirectories
+        # that are not part of the system linker's selected runtime closure.
+        candidates = (
+            candidate
+            for directory in source_directories
+            for candidate in directory.iterdir()
+        )
+    else:
+        # Retain generic sysroot support for isolated fixture/build roots that
+        # do not expose the Debian amd64 directory layout.
+        candidates = sysroot.rglob("*")
+    for candidate in sorted(candidates, key=lambda item: item.as_posix()):
         try:
             if candidate.is_symlink():
                 # Debian-family SONAME aliases normally point at the real,

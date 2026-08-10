@@ -288,12 +288,21 @@ SHA256SUMS.txt
 - **已实时验证（分支源码级）**：首轮修复前新增用例稳定出现 13 个预期失败，随后新增的单独断链 `getstatus` 信号也先证明旧检测会错误放行；最小修复后 Kysec/preinst 聚焦回归 27/27 通过，覆盖 `off`、`on`、缺失/非零/重复/未知输出、symlink/断链 symlink、权限、硬链接、父目录、`PATH` 注入和其它门禁不被遮蔽。同一渲染脚本在真实 Kylin V10 SP1/amd64/glibc 2.31 根文件系统返回 `COMPATIBLE`；该机 Kysec 为 `enabled`且 `exec control : off`，预检前后均为 `install ok not-installed`且 `/opt/taiji-agent` 不存在。
 - **未实时验证**：版本 1.0.1 完整制包、断网生命周期和真实图形安装仍须绑定最终冻结提交和 DEB SHA256 重跑。
 
+### 7.7 厂商 GPU 子目录不得污染私有库收集
+
+- **真实失败证据**：首个 1.0.1 冻结候选在真实 Kylin 制包到 DEB staging 时，递归扫描到 `/usr/lib/x86_64-linux-gnu/innogpu-fh2m/libepoxy.so.0.0.0`。该厂商 GPU 子目录归 uid 1000 所有，安全门禁正确拒绝复制。
+- **根因**：旧收集器递归扫描整个 sysroot，把未进入 `/etc/ld.so.conf*` 且未被动态链接器选中的厂商私有副本也当成正式候选。真实系统的 `ldconfig` 选中标准 `/lib/x86_64-linux-gnu/libepoxy.so.0`，它对应 root 管理的 `libepoxy0` 文件。
+- **修复合同**：Debian amd64 布局存在时，只扫描标准 `/usr/lib/x86_64-linux-gnu` 和 `/usr/lib64` 的直接文件，不递归进入显卡等厂商子目录；隔离 fixture/sysroot 无标准 Debian 目录时保留原有通用扫描。选中文件仍必须通过 root 属主、单硬链接、普通文件、权威 SONAME、allowlist 和原子复制检查。
+- **已实时验证（候选源码级）**：新增测试先稳定复现普通用户厂商副本阻断，最小修复后 ELF/ABI 聚焦测试 26/26 通过。真实 Kylin sysroot 快速 staging 成功收集 63 个 policy 允许库；`libepoxy.so.0` SHA256 与 root 管理标准文件一致，报告中没有 `innogpu` 引用。
+- **证据边界**：失败的冻结提交及其输入包已废弃；修复必须经新提交、新输入包和从头制包后才能产生有效 DEB 证据。
+
 ## 8. 已确认故障经验矩阵
 
 下表只记录本轮已经出现的真实失败，或已由针对性负向测试证明的高风险缺口。未验证猜测不得升级为长期规则。
 
 | 症状 | 根因 | 修复 | 防复发门禁 | 验证边界 |
 | --- | --- | --- | --- | --- |
+| 真实 Kylin 制包拒绝 uid 1000 的 `innogpu-fh2m/libepoxy.so.0.0.0` | 私有库收集器递归扫描整个 sysroot，误把未被系统动态链接器选中的 GPU 厂商副本当作候选 | Debian amd64 只扫描标准多架构目录直接文件，不进入厂商子目录；不放宽文件信任校验 | 先红后绿回归 + 真实 sysroot staging + 新 commit 从头制包 | 候选源码快速验证已通过；新冻结提交完整制包待验证 |
 | 真实 Kylin 终端安装在 `preinst` 返回 `TAIJI-LINUX-E011-KYSEC`，但 `getstatus` 显示 `exec control : off` | 旧逻辑把“存在 Kysec”等同于“执行控制已阻断”，未读取真实执行控制状态 | 信任固定且 root 管理的 `/usr/sbin/getstatus`；唯一 `off` 放行、`on` 阻断，未知或不可信状态失败关闭，不改动 Kysec | 27 项 preinst 聚焦回归 + 真实 Kylin 渲染脚本独立预检 + 最终 DEB 断网安装 | 当前源码回归已通过；最终制品、图形安装和其他 Kysec 版本仍需实物证据 |
 | `npm audit` 向 `registry.npmmirror.com/-/npm/v1/security/audits/quick` 请求后返回 `404 NOT_IMPLEMENTED` | 依赖下载成功后把 install-only 镜像留在 `NPM_CONFIG_REGISTRY`，安全审计错误继承了不实现 audit API 的镜像；该响应不等于已经发现依赖漏洞 | 安装继续使用 `TAIJI_NPM_REGISTRIES`，审计单独使用 `TAIJI_NPM_AUDIT_REGISTRY`（默认 `https://registry.npmjs.org`，也可指定实现审计接口的 HTTPS 内网源）；URL 禁止内嵌凭据，需要认证时使用现场受控的标准 npm 配置 | 动态回归在继承 `npmmirror` 的环境中捕获 npm 参数，必须看到 audit 显式指定独立 registry；漏洞、网络和接口错误仍全部 fail closed | 已由 Kylin 制包机真实失败暴露；修复后的当前输入包仍须在制包机重新构建，不能据源码测试标记制包成功 |
 | Linux 制包 `npm test` 多项失败并提示缺少 `@resvg/resvg-js-linux-*` | 普通 npm 安装只准备当前平台原生包，复制型 DOCX skill 却承诺多个 Linux CPU/ABI | 按 lockfile 下载、校验并原子物化 x64/arm64、gnu/musl 原生包 | lockfile integrity、包身份、ELF/架构校验、制包机真实 `npm test` | 已由真实制包失败暴露并修复 |

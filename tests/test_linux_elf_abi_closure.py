@@ -437,6 +437,46 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 with self.assertRaises(self.stager.StageError):
                     self.stager.validate_source(non_allowlisted, self.policy)
 
+    def test_stager_ignores_unselected_vendor_subdirectory_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "payload"
+            sysroot = Path(temp_dir) / "sysroot"
+            standard_dir = sysroot / "usr/lib/x86_64-linux-gnu"
+            vendor_dir = standard_dir / "innogpu-fh2m"
+            root.mkdir()
+            vendor_dir.mkdir(parents=True)
+            allowed = "libepoxy.so.0"
+            standard = standard_dir / "libepoxy.so.0.0.0"
+            vendor = vendor_dir / "libepoxy.so.0.0.0"
+            standard.write_bytes(b"standard")
+            vendor.write_bytes(b"vendor")
+
+            def fake_soname(path, *args):
+                return allowed if Path(path).name == "libepoxy.so.0.0.0" else None
+
+            def fake_metadata(path):
+                uid = 1000 if Path(path) == vendor else 0
+                return stat.S_IFREG | 0o644, uid, 1
+
+            def fake_copy(source_path, destination, *, uid, gid):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source_path.read_bytes())
+                return hashlib.sha256(destination.read_bytes()).hexdigest()
+
+            policy = copy.deepcopy(self.policy)
+            policy["elf"]["allowed_private_sonames"] = [allowed]
+            with mock.patch.object(self.stager, "readelf_soname", side_effect=fake_soname), \
+                    mock.patch.object(self.stager, "source_metadata", side_effect=fake_metadata), \
+                    mock.patch.object(self.stager, "_copy_atomically", side_effect=fake_copy), \
+                    mock.patch.object(self.stager, "_ensure_private_directory"):
+                report = self.stager.stage_private_libraries(root, policy, sysroot)
+
+            self.assertEqual(report["files"][0]["soname"], allowed)
+            self.assertEqual(
+                (root / "opt/taiji-agent/runtime/lib" / allowed).read_bytes(),
+                b"standard",
+            )
+
     def test_source_native_verifier_reinjects_private_loader_path_after_runtime_env(self):
         source_verifier = (ROOT / "hermes-local-lab/scripts/taiji-native-verify").read_text(encoding="utf-8")
         runtime_env = (ROOT / "hermes-local-lab/scripts/runtime-env.sh").read_text(encoding="utf-8")
