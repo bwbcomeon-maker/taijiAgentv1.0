@@ -281,12 +281,20 @@ SHA256SUMS.txt
 - **冻结前仍须闭合**：从正式 `main` 生成新的制包输入包，在 Linux amd64 从头重建同一源码身份的 DEB；对实际 DEB 重跑 closed-world ABI 报告，并在新演练镜像中以 `--network none` 完成 install/remove/purge/reinstall。任何新建镜像或新产物结果都必须绑定最终 source commit、manifest 和 DEB SHA256 后才可提升证据等级。
 - **未实时验证**：本轮新 DEB 的完整制包结果、断网生命周期结果，以及真实麒麟、统信或 openKylin 图形终端的双击安装、桌面启动、窗口图标、模型对话和附件流程。Docker 通过后的最高口径仍是“离线安装已演练”，不能写成“目标机已验证”。
 
+### 7.6 本轮 Kysec 预安装修复验证台账
+
+- **真实失败证据**：Kylin V10 SP1 x86_64 终端的 Kysec 总状态为 `enabled`，但 `/usr/sbin/getstatus` 明确返回 `exec control : off`；旧 `preinst` 仅因 Kysec 存在就返回 `TAIJI-LINUX-E011-KYSEC`，使安全策略未阻断执行的正常终端被误拒绝。
+- **修复合同**：只使用固定 `/usr/sbin/getstatus`，校验 `/usr`、`/usr/sbin` 和工具的 owner、mode、类型、执行位与单硬链接；仅接受唯一 `exec control : off|on` 状态行。`off` 继续其他能力门禁，`on` 保持 E011 阻断，命令缺失、不可信、失败或输出不可识别时以 E011 失败关闭；不关闭、不修改、不绕过 Kysec。
+- **已实时验证（分支源码级）**：首轮修复前新增用例稳定出现 13 个预期失败，随后新增的单独断链 `getstatus` 信号也先证明旧检测会错误放行；最小修复后 Kysec/preinst 聚焦回归 27/27 通过，覆盖 `off`、`on`、缺失/非零/重复/未知输出、symlink/断链 symlink、权限、硬链接、父目录、`PATH` 注入和其它门禁不被遮蔽。同一渲染脚本在真实 Kylin V10 SP1/amd64/glibc 2.31 根文件系统返回 `COMPATIBLE`；该机 Kysec 为 `enabled`且 `exec control : off`，预检前后均为 `install ok not-installed`且 `/opt/taiji-agent` 不存在。
+- **未实时验证**：版本 1.0.1 完整制包、断网生命周期和真实图形安装仍须绑定最终冻结提交和 DEB SHA256 重跑。
+
 ## 8. 已确认故障经验矩阵
 
 下表只记录本轮已经出现的真实失败，或已由针对性负向测试证明的高风险缺口。未验证猜测不得升级为长期规则。
 
 | 症状 | 根因 | 修复 | 防复发门禁 | 验证边界 |
 | --- | --- | --- | --- | --- |
+| 真实 Kylin 终端安装在 `preinst` 返回 `TAIJI-LINUX-E011-KYSEC`，但 `getstatus` 显示 `exec control : off` | 旧逻辑把“存在 Kysec”等同于“执行控制已阻断”，未读取真实执行控制状态 | 信任固定且 root 管理的 `/usr/sbin/getstatus`；唯一 `off` 放行、`on` 阻断，未知或不可信状态失败关闭，不改动 Kysec | 27 项 preinst 聚焦回归 + 真实 Kylin 渲染脚本独立预检 + 最终 DEB 断网安装 | 当前源码回归已通过；最终制品、图形安装和其他 Kysec 版本仍需实物证据 |
 | `npm audit` 向 `registry.npmmirror.com/-/npm/v1/security/audits/quick` 请求后返回 `404 NOT_IMPLEMENTED` | 依赖下载成功后把 install-only 镜像留在 `NPM_CONFIG_REGISTRY`，安全审计错误继承了不实现 audit API 的镜像；该响应不等于已经发现依赖漏洞 | 安装继续使用 `TAIJI_NPM_REGISTRIES`，审计单独使用 `TAIJI_NPM_AUDIT_REGISTRY`（默认 `https://registry.npmjs.org`，也可指定实现审计接口的 HTTPS 内网源）；URL 禁止内嵌凭据，需要认证时使用现场受控的标准 npm 配置 | 动态回归在继承 `npmmirror` 的环境中捕获 npm 参数，必须看到 audit 显式指定独立 registry；漏洞、网络和接口错误仍全部 fail closed | 已由 Kylin 制包机真实失败暴露；修复后的当前输入包仍须在制包机重新构建，不能据源码测试标记制包成功 |
 | Linux 制包 `npm test` 多项失败并提示缺少 `@resvg/resvg-js-linux-*` | 普通 npm 安装只准备当前平台原生包，复制型 DOCX skill 却承诺多个 Linux CPU/ABI | 按 lockfile 下载、校验并原子物化 x64/arm64、gnu/musl 原生包 | lockfile integrity、包身份、ELF/架构校验、制包机真实 `npm test` | 已由真实制包失败暴露并修复 |
 | apt 安装依赖时可能等待时区等交互输入 | 非交互环境没有稳定跨 sudo 传递 | 使用 `DEBIAN_FRONTEND=noninteractive` 和固定 `TZ` | 静态断言并在最小 Ubuntu 制包机实际执行 | 当前候选制包链已覆盖 |

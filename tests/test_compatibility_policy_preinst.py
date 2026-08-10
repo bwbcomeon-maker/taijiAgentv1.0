@@ -87,6 +87,28 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             (root / "usr/lib/x86_64-linux-gnu" / soname).touch()
         return root, root / "etc/os-release"
 
+    def add_kysec_getstatus(
+        self,
+        root: Path,
+        *,
+        output="KySec status: enabled\n\nexec control : off\n",
+        exit_code=0,
+        marker=True,
+    ) -> Path:
+        if marker:
+            (root / "etc/kysec").mkdir(exist_ok=True)
+        tool_dir = root / "usr/sbin"
+        tool_dir.mkdir(parents=True, exist_ok=True)
+        tool = tool_dir / "getstatus"
+        tool.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s' {shlex.quote(output)}\n"
+            f"exit {exit_code}\n",
+            encoding="utf-8",
+        )
+        tool.chmod(0o755)
+        return tool
+
     def call_verifier(
         self,
         rendered: Path,
@@ -105,6 +127,7 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
         trace_canary=False,
         probe_owner_mismatch_path=None,
         opt_path_override=None,
+        path_prefix=None,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
         if owner_uid is None:
             owner_uid = os.getuid()
@@ -112,7 +135,7 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             effective_uid = owner_uid
         if result_path is None:
             result_path = root / "var/lib/taiji-agent/preflight.json"
-        fake_bin = ""
+        fake_bin = str(path_prefix or "")
         if fake_mktemp or fake_mv or trace_canary or probe_owner_mismatch_path:
             fake_bin_path = root / ".fake-bin"
             fake_bin_path.mkdir(parents=True, exist_ok=True)
@@ -425,10 +448,9 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
             )
             self.assertIn("TAIJI-LINUX-E014-RUNTIME", payload["failed_capabilities"])
 
-    def test_opt_noexec_known_kysec_or_sandbox_denial_is_blocked_before_install(self):
+    def test_opt_noexec_or_sandbox_denial_is_blocked_before_install(self):
         cases = (
             ("noexec", "TAIJI-LINUX-E012-OPT-NOEXEC"),
-            ("kysec", "TAIJI-LINUX-E011-KYSEC"),
             ("sandbox", "TAIJI-LINUX-E013-SANDBOX"),
         )
         for marker, code in cases:
@@ -437,14 +459,203 @@ class CompatibilityPolicyPreinstTest(unittest.TestCase):
                 root, os_release = self.make_root(temp_root)
                 if marker == "noexec":
                     (root / "opt/.taiji-noexec").touch()
-                elif marker == "kysec":
-                    (root / "etc/kysec").mkdir()
                 rendered = self.render(temp_root)
                 payload = self.assert_blocked(
                     rendered, root, os_release, code, fake_mktemp=(marker == "sandbox")
                 )
                 self.assertFalse((root / "opt/taiji-agent").exists())
                 self.assertEqual(payload["status"], "BLOCKED")
+
+    def test_trusted_kysec_exec_control_off_is_compatible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            self.add_kysec_getstatus(root)
+            rendered = self.render(temp_root)
+
+            self.assert_compatible(rendered, root, os_release)
+
+    def test_getstatus_itself_is_a_kysec_signal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            self.add_kysec_getstatus(root, marker=False)
+            rendered = self.render(temp_root)
+
+            self.assert_compatible(rendered, root, os_release)
+
+    def test_broken_getstatus_symlink_is_an_untrusted_kysec_signal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            tool = self.add_kysec_getstatus(root, marker=False)
+            tool.unlink()
+            tool.symlink_to("missing-getstatus")
+            rendered = self.render(temp_root)
+
+            self.assert_blocked(
+                rendered, root, os_release, "TAIJI-LINUX-E011-KYSEC"
+            )
+
+    def test_kysec_exec_control_on_is_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            self.add_kysec_getstatus(
+                root,
+                output="KySec status: enabled\nexec control : on\n",
+            )
+            rendered = self.render(temp_root)
+
+            payload = self.assert_blocked(
+                rendered, root, os_release, "TAIJI-LINUX-E011-KYSEC"
+            )
+            self.assertEqual(payload["reason_zh"], "Kysec exec control 已开启")
+
+    def test_kysec_unknown_or_untrusted_state_fails_closed(self):
+        cases = (
+            ("missing_tool", None, 0),
+            ("nonzero", "exec control : off\n", 7),
+            ("missing_line", "KySec status: enabled\n", 0),
+            ("duplicate", "exec control : off\nexec control : off\n", 0),
+            ("unknown", "exec control : audit\n", 0),
+            ("substring", "note: exec control : off but uncertain\n", 0),
+        )
+        for case, output, exit_code in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                temp_root = Path(directory)
+                root, os_release = self.make_root(temp_root)
+                if output is None:
+                    (root / "etc/kysec").mkdir()
+                else:
+                    self.add_kysec_getstatus(
+                        root,
+                        output=output,
+                        exit_code=exit_code,
+                    )
+                rendered = self.render(temp_root)
+
+                payload = self.assert_blocked(
+                    rendered, root, os_release, "TAIJI-LINUX-E011-KYSEC"
+                )
+                self.assertEqual(
+                    payload["reason_zh"],
+                    "无法可信确认 Kysec exec control 已关闭",
+                )
+
+    def test_kysec_status_allows_controlled_whitespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            self.add_kysec_getstatus(
+                root,
+                output="KySec status: enabled\n  exec   control  :  off  \n",
+            )
+            rendered = self.render(temp_root)
+
+            self.assert_compatible(rendered, root, os_release)
+
+    def test_untrusted_getstatus_files_fail_closed(self):
+        cases = (
+            "symlink",
+            "broken_symlink",
+            "not_executable",
+            "writable",
+            "hardlink",
+            "owner",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                temp_root = Path(directory)
+                root, os_release = self.make_root(temp_root)
+                tool = self.add_kysec_getstatus(root)
+                owner_mismatch = None
+                if case == "symlink":
+                    tool.unlink()
+                    tool.symlink_to("/bin/true")
+                elif case == "broken_symlink":
+                    tool.unlink()
+                    tool.symlink_to("missing-getstatus")
+                elif case == "not_executable":
+                    tool.chmod(0o644)
+                elif case == "writable":
+                    tool.chmod(0o775)
+                elif case == "hardlink":
+                    os.link(tool, tool.with_name("getstatus-copy"))
+                elif case == "owner":
+                    owner_mismatch = tool
+                rendered = self.render(temp_root)
+
+                self.assert_blocked(
+                    rendered,
+                    root,
+                    os_release,
+                    "TAIJI-LINUX-E011-KYSEC",
+                    probe_owner_mismatch_path=owner_mismatch,
+                )
+
+    def test_untrusted_getstatus_parent_directory_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            self.add_kysec_getstatus(root)
+            (root / "usr/sbin").chmod(0o777)
+            rendered = self.render(temp_root)
+
+            self.assert_blocked(
+                rendered, root, os_release, "TAIJI-LINUX-E011-KYSEC"
+            )
+
+    def test_kysec_ignores_path_injected_getstatus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_root = Path(directory)
+            root, os_release = self.make_root(temp_root)
+            self.add_kysec_getstatus(root)
+            fake_bin = root / ".fake-bin"
+            fake_bin.mkdir()
+            fake_tool = fake_bin / "getstatus"
+            fake_tool.write_text(
+                "#!/bin/sh\nprintf 'exec control : on\\n'\n",
+                encoding="utf-8",
+            )
+            fake_tool.chmod(0o755)
+            rendered = self.render(temp_root)
+
+            self.assert_compatible(
+                rendered,
+                root,
+                os_release,
+                path_prefix=fake_bin,
+            )
+
+    def test_kysec_off_does_not_mask_other_preflight_failures(self):
+        cases = (
+            ("noexec", "TAIJI-LINUX-E012-OPT-NOEXEC"),
+            ("sandbox", "TAIJI-LINUX-E013-SANDBOX"),
+            ("runtime", "TAIJI-LINUX-E014-RUNTIME"),
+        )
+        for case, code in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                temp_root = Path(directory)
+                root, os_release = self.make_root(temp_root)
+                self.add_kysec_getstatus(root)
+                fake_mktemp = case == "sandbox"
+                if case == "noexec":
+                    (root / "opt/.taiji-noexec").touch()
+                elif case == "runtime":
+                    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+                    missing = policy["elf"]["required_system_sonames"][0]
+                    (root / "usr/lib/x86_64-linux-gnu" / missing).unlink()
+                rendered = self.render(temp_root)
+
+                payload = self.assert_blocked(
+                    rendered,
+                    root,
+                    os_release,
+                    code,
+                    fake_mktemp=fake_mktemp,
+                )
+                self.assertNotIn("TAIJI-LINUX-E011-KYSEC", payload["failed_capabilities"])
 
     def test_os_release_symlink_owner_and_mode_are_hardened(self):
         with tempfile.TemporaryDirectory() as directory:

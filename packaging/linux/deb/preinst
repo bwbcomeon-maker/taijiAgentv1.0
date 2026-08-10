@@ -196,6 +196,60 @@ required_system_soname_present() {
   return 1
 }
 
+trusted_system_directory() {
+  local path="$1"
+  local expected_owner_uid="$2"
+  local metadata="" owner="" mode="" link_count=""
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  metadata="$(trusted_stat_metadata "$path" 0)" || return 1
+  IFS=: read -r owner mode link_count <<< "$metadata"
+  [ "$owner" = "$expected_owner_uid" ] || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 8#022) == 0 )) || return 1
+}
+
+trusted_kysec_exec_control() {
+  local root_prefix="$1"
+  local expected_owner_uid="$2"
+  local trusted_usr=""
+  local trusted_usr_sbin=""
+  local getstatus=""
+  local metadata="" owner="" mode="" link_count=""
+  local output="" value=""
+  trusted_usr="$(root_path "$root_prefix" /usr)"
+  trusted_usr_sbin="$(root_path "$root_prefix" /usr/sbin)"
+  getstatus="$(root_path "$root_prefix" /usr/sbin/getstatus)"
+
+  trusted_system_directory "$trusted_usr" "$expected_owner_uid" || return 1
+  trusted_system_directory "$trusted_usr_sbin" "$expected_owner_uid" || return 1
+  [ -f "$getstatus" ] && [ ! -L "$getstatus" ] && [ -x "$getstatus" ] || return 1
+  metadata="$(trusted_stat_metadata "$getstatus" 0)" || return 1
+  IFS=: read -r owner mode link_count <<< "$metadata"
+  [ "$owner" = "$expected_owner_uid" ] || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 8#022) == 0 )) || return 1
+  [ "$link_count" = "1" ] || return 1
+
+  if ! output="$(LC_ALL=C LANG=C "$getstatus" 2>/dev/null)"; then
+    return 1
+  fi
+  value="$(printf '%s\n' "$output" | awk '
+    /^[[:space:]]*exec[[:space:]]+control[[:space:]]*:[[:space:]]*(off|on)[[:space:]]*$/ {
+      count += 1
+      if ($0 ~ /:[[:space:]]*off[[:space:]]*$/) value = "off"
+      else value = "on"
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ')" || return 1
+  case "$value" in
+    off|on) printf '%s' "$value" ;;
+    *) return 1 ;;
+  esac
+}
+
 write_preflight_result() {
   local result_path="$1"
   local status="COMPATIBLE"
@@ -273,6 +327,8 @@ verify_compatibility() {
   local disk_available_mib=""
   local marker=""
   local canary=""
+  local kysec_detected=0
+  local kysec_exec_control=""
 
   TAIJI_PREFLIGHT_ERROR_CODE=""
   TAIJI_PREFLIGHT_REASON_ZH=""
@@ -383,11 +439,22 @@ verify_compatibility() {
   if [ -e "$(root_path "$root_prefix" /etc/kysec)" ] || \
     [ -e "$(root_path "$root_prefix" /etc/kysec.conf)" ] || \
     [ -e "$(root_path "$root_prefix" /etc/security/kysec)" ] || \
+    [ -e "$(root_path "$root_prefix" /usr/sbin/getstatus)" ] || \
+    [ -L "$(root_path "$root_prefix" /usr/sbin/getstatus)" ] || \
     [ -e "$(root_path "$root_prefix" /usr/sbin/kysec)" ] || \
     [ -e "$(root_path "$root_prefix" /usr/bin/kysec)" ] || \
     [ -e "$(root_path "$root_prefix" /usr/lib/kysec)" ] || \
     [ -e "$(root_path "$root_prefix" /usr/libexec/kysec)" ]; then
-    preflight_block "TAIJI-LINUX-E011-KYSEC" "检测到 Kysec 安全策略，无法保证安装目录可执行"
+    kysec_detected=1
+  fi
+  if [ "$kysec_detected" = "1" ]; then
+    if kysec_exec_control="$(trusted_kysec_exec_control "$root_prefix" "$expected_owner_uid")"; then
+      if [ "$kysec_exec_control" = "on" ]; then
+        preflight_block "TAIJI-LINUX-E011-KYSEC" "Kysec exec control 已开启"
+      fi
+    else
+      preflight_block "TAIJI-LINUX-E011-KYSEC" "无法可信确认 Kysec exec control 已关闭"
+    fi
   fi
 
   if [ "$opt_probe_trusted" = "1" ] \
