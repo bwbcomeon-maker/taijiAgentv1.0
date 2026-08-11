@@ -6,6 +6,7 @@ ROOT_DIR="${TAIJI_RELEASE_REPO_ROOT:-$SCRIPT_ROOT}"
 TRUSTED_GIT="$SCRIPT_ROOT/scripts/taiji-trusted-git"
 SOURCE_GATE="$SCRIPT_ROOT/scripts/check-clean-worktree.sh"
 EVIDENCE_VALIDATOR="$SCRIPT_ROOT/scripts/validate-taiji-release-evidence.py"
+LIVE_CI_REVALIDATOR="$SCRIPT_ROOT/scripts/revalidate-taiji-github-ci-evidence.py"
 EVIDENCE_ATTESTATION_PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 AGENT_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-agent"
@@ -67,6 +68,7 @@ run_root_tests() {
     tests.test_kylin_install_script_simulation \
     tests.test_taiji_license_issuer_gui \
     tests.test_target_desktop_acceptance_producer \
+    tests.test_github_ci_live_revalidation \
     tests.test_release_evidence_signer_guards \
     tests.test_certification_set_v1 \
     tests.test_release_evidence_assembler_v3 \
@@ -154,11 +156,17 @@ check_certification_and_publication() {
   printf '%s\n' "$PUBLICATION_CHALLENGE" | grep -Eq '^[0-9a-f]{64,128}$' || { fail "TAIJI_PUBLICATION_CHALLENGE 无效"; return 1; }
   [ "$CERTIFICATION_CHALLENGE" != "$PUBLICATION_CHALLENGE" ] || { fail "认证 challenge 与 publication challenge 必须独立"; return 1; }
   command -v openssl >/dev/null 2>&1 || { fail "缺少 openssl"; return 1; }
+  [ -f "$LIVE_CI_REVALIDATOR" ] && [ ! -L "$LIVE_CI_REVALIDATOR" ] \
+    || { fail "缺少固定 GitHub CI 实时复验器"; return 1; }
   commit="$($TRUSTED_GIT -C "$ROOT_DIR" rev-parse HEAD)" || return 1
   deb="$(find "$DELIVERY_DIR/生成的安装包" -maxdepth 1 -type f -name 'taiji-agent_*.deb' | head -n 1)"
   manifest="$DELIVERY_DIR/生成的安装包/taiji-package-manifest.json"
   checksum="${deb}.sha256"
   source_archive="$DELIVERY_DIR/taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
+  python3 "$LIVE_CI_REVALIDATOR" \
+    --evidence "$DELIVERY_DIR/github-ci-evidence.json" \
+    --source-commit "$commit" \
+    || { fail "github-ci-live-revalidation 未通过"; return 1; }
   openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$CERTIFICATION_SET_SIGNATURE" "$CERTIFICATION_SET" >/dev/null \
     || { fail "certification-set.json.sig 验签失败"; return 1; }
   openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$RELEASE_SIGNATURE" "$RELEASE_EVIDENCE" >/dev/null \

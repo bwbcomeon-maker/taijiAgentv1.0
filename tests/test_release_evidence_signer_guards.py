@@ -175,6 +175,14 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
             "validator.validate_release_evidence_v3(data, bundle_evidence, args, binding)",
             source,
         )
+        self.assertIn("revalidate-taiji-github-ci-evidence.py", source)
+        self.assertIn(
+            '"$SNAPSHOT_ROOT/delivery/github-ci-evidence.json"', source
+        )
+        self.assertLess(
+            source.index("github-ci-live-revalidation"),
+            source.index("private_fingerprint="),
+        )
 
 
 if __name__ == "__main__":

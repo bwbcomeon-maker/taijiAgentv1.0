@@ -59,6 +59,17 @@ class ReleaseCheckV3Tests(unittest.TestCase):
         self.assertNotIn('--packages "$DELIVERY_DIR/离线依赖/Packages"', self.check)
         self.assertNotIn('--packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz"', self.check)
 
+    def test_release_check_requires_fixed_live_github_ci_revalidation(self):
+        self.assertIn("revalidate-taiji-github-ci-evidence.py", self.check)
+        self.assertIn("tests.test_github_ci_live_revalidation", self.check)
+        self.assertIn('"$DELIVERY_DIR/github-ci-evidence.json"', self.check)
+        self.assertIn('"$commit"', self.check)
+        self.assertNotIn("TAIJI_CI_SKIP", self.check)
+        self.assertLess(
+            self.check.index("github-ci-live-revalidation"),
+            self.check.index("openssl dgst -sha256 -verify"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

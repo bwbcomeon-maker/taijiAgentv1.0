@@ -46,6 +46,7 @@ PYTHON38_ENTRYPOINTS = (
     TARGET_EVIDENCE_ASSEMBLER,
     INSTALL_OBSERVER,
     ROOT / "scripts/produce-taiji-github-ci-evidence.py",
+    ROOT / "scripts/revalidate-taiji-github-ci-evidence.py",
     ROOT / "scripts/produce-taiji-offline-rehearsal.py",
     ROOT / "scripts/produce-taiji-negative-boundary-evidence.py",
     ROOT / "scripts/assemble-taiji-certification-set.py",

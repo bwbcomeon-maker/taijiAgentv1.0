@@ -97,6 +97,27 @@ class SingleDebPublisherGateTest(unittest.TestCase):
             self.repo / "scripts/validate-taiji-release-evidence.py",
         )
         write_executable(
+            self.repo / "scripts/revalidate-taiji-github-ci-evidence.py",
+            """
+            #!/usr/bin/env python3
+            import os
+            import sys
+            from pathlib import Path
+
+            if len(sys.argv) != 5 or sys.argv[1] != "--evidence":
+                raise SystemExit(2)
+            if Path(sys.argv[2]).name != "github-ci-evidence.json":
+                raise SystemExit(2)
+            if Path(sys.argv[2]).parent == Path(os.environ["TEST_DELIVERY_DIR"]):
+                raise SystemExit("publisher did not use its private CI snapshot")
+            if sys.argv[3:] != ["--source-commit", os.environ["TEST_SOURCE_COMMIT"]]:
+                raise SystemExit(2)
+            with open(os.environ["TEST_GATE_LOG"], "a", encoding="utf-8") as stream:
+                stream.write("live-revalidate\\n")
+            raise SystemExit(1 if os.environ.get("TEST_LIVE_CI_FAIL") == "1" else 0)
+            """,
+        )
+        write_executable(
             self.fake_bin / "dpkg-deb",
             """
             #!/usr/bin/env bash
@@ -218,6 +239,8 @@ class SingleDebPublisherGateTest(unittest.TestCase):
             "TEST_CANDIDATE_DEB": str(self.deb),
             "TEST_CERT_ATTACHMENT": str(self.certification_attachment),
             "TEST_MAINTAINER": self.maintainer,
+            "TEST_DELIVERY_DIR": str(self.delivery),
+            "TEST_SOURCE_COMMIT": "b" * 40,
         }
         if extra_env:
             env.update(extra_env)
@@ -267,7 +290,18 @@ class SingleDebPublisherGateTest(unittest.TestCase):
             },
         )
         self.assertEqual((receipt / "deb.sha256").read_text(), f"{self.deb_sha}  {self.deb.name}\n")
-        self.assertEqual(self.gate_log.read_text().splitlines(), ["release-check"])
+        self.assertEqual(
+            self.gate_log.read_text().splitlines(),
+            ["live-revalidate", "release-check"],
+        )
+
+    def test_live_ci_failure_blocks_before_formal_release_check(self):
+        result = self.run_publisher(extra_env={"TEST_LIVE_CI_FAIL": "1"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.gate_log.read_text().splitlines(), ["live-revalidate"])
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.receipts.exists() and any(self.receipts.iterdir()))
 
     def test_raw_ci_tamper_is_rejected_even_when_external_gate_is_stubbed(self):
         raw = self.delivery / "github-ci-jobs-response.json"
@@ -299,7 +333,10 @@ class SingleDebPublisherGateTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.output.exists())
         self.assertFalse(self.receipts.exists() and any(self.receipts.iterdir()))
-        self.assertEqual(self.gate_log.read_text().splitlines(), ["release-check"])
+        self.assertEqual(
+            self.gate_log.read_text().splitlines(),
+            ["live-revalidate", "release-check"],
+        )
 
     def test_publisher_rejects_downgraded_v3_even_if_external_gate_is_stubbed(self):
         release = json.loads(self.release.read_text(encoding="utf-8"))

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TRUSTED_GIT="$ROOT_DIR/scripts/taiji-trusted-git"
+LIVE_CI_REVALIDATOR="$ROOT_DIR/scripts/revalidate-taiji-github-ci-evidence.py"
 PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 
@@ -19,6 +20,7 @@ SIGNATURE="${EVIDENCE}.sig"
 command -v openssl >/dev/null 2>&1 || fail "缺少 openssl"
 command -v python3 >/dev/null 2>&1 || fail "缺少 python3"
 [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "仓库缺少可信 Git 边界"
+[ -f "$LIVE_CI_REVALIDATOR" ] && [ ! -L "$LIVE_CI_REVALIDATOR" ] || fail "仓库缺少固定 GitHub CI 实时复验器"
 [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] || fail "证据必须是普通 JSON 文件且不能是符号链接"
 [ -f "$PRIVATE_KEY" ] && [ ! -L "$PRIVATE_KEY" ] || fail "发布私钥必须是普通文件且不能是符号链接"
 [ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || fail "仓库缺少固定验签公钥"
@@ -176,12 +178,15 @@ mode = {
     "taiji-release-evidence/v3": "publication",
 }.get(schema)
 challenge = payload.get("challenge_nonce")
+source_commit = payload.get("source_commit", "")
 if mode is None or type(challenge) is not str:
     raise SystemExit("当前 signer 只接受 certification-set v1 或 release-evidence v3")
-print(f"{mode}\t{challenge}")
+if type(source_commit) is not str:
+    raise SystemExit("source_commit must be a string")
+print(f"{mode}\t{challenge}\t{source_commit}")
 PY
  )" || fail "证据 JSON 无法严格解析"
-IFS=$'\t' read -r MODE CHALLENGE <<< "$metadata"
+IFS=$'\t' read -r MODE CHALLENGE SOURCE_COMMIT <<< "$metadata"
 case "$MODE" in
   certification) EXPECTED_CHALLENGE="${TAIJI_CERTIFICATION_CHALLENGE:-}" ;;
   publication) EXPECTED_CHALLENGE="${TAIJI_PUBLICATION_CHALLENGE:-}" ;;
@@ -427,6 +432,11 @@ validator.validate_certification_set_v1(
     binding,
 )
 PY
+
+  python3 "$LIVE_CI_REVALIDATOR" \
+    --evidence "$SNAPSHOT_ROOT/delivery/github-ci-evidence.json" \
+    --source-commit "$SOURCE_COMMIT" \
+    || fail "github-ci-live-revalidation 未通过，拒绝在签名前读取私钥"
 fi
 
 if ! private_fingerprint="$(openssl pkey -in "$PRIVATE_KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"; then

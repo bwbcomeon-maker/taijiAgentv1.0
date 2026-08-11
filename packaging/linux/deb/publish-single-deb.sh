@@ -46,6 +46,7 @@ ROOT = Path(os.environ["TAIJI_PUBLISHER_REPO_ROOT"]).resolve()
 PUBLIC_KEY = ROOT / "tools/taiji-release-evidence/signing-public.pem"
 RELEASE_CHECK = ROOT / "scripts/taiji-release-check.sh"
 RELEASE_VALIDATOR = ROOT / "scripts/validate-taiji-release-evidence.py"
+LIVE_CI_REVALIDATOR = ROOT / "scripts/revalidate-taiji-github-ci-evidence.py"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -355,6 +356,27 @@ def validate_ci_bundle(evidence_path: Path, source_commit: str) -> dict:
         fail(f"trusted GitHub CI v2 physical trio is invalid: {exc}")
 
 
+def live_revalidate_ci(evidence_path: Path, source_commit: str) -> None:
+    if not LIVE_CI_REVALIDATOR.is_file() or LIVE_CI_REVALIDATOR.is_symlink():
+        fail("fixed GitHub CI live revalidator is unavailable")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(LIVE_CI_REVALIDATOR),
+            "--evidence",
+            str(evidence_path),
+            "--source-commit",
+            source_commit,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail("github-ci-live-revalidation failed before publication")
+
+
 def publish_noreplace(source: Path, destination: Path) -> None:
     if source.parent != destination.parent:
         fail("atomic publication requires source and destination to share a filesystem directory")
@@ -629,6 +651,10 @@ def main() -> int:
             or release.get("ci_evidence_sha256") != ci_bundle["evidence_sha256"]
         ):
             fail("release evidence does not bind the trusted GitHub CI v2 trio")
+        live_revalidate_ci(
+            snapshots["github-ci-evidence.json"]["path"],
+            release["source_commit"],
+        )
         cert_expected = {
             "source_commit": release["source_commit"],
             "version": version,
