@@ -8,6 +8,8 @@ SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 SOURCE_INTEGRITY_HELPER="$SCRIPT_DIR/source-archive-integrity.py"
 SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+BUILDER_INPUT_HELPER="$SCRIPT_DIR/builder-input-package.py"
+BUILDER_INPUT_HELPER_SHA256="208a61312365341f750677b78cb3de88c34f243d17e19f31476a2feb3d6ced54"
 SOURCE_INVENTORY=""
 SOURCE_INVENTORY_SHA256=""
 SOURCE_ARCHIVE_SHA256=""
@@ -827,6 +829,61 @@ prepare_source_release() {
   resolve_and_verify_source_inventory
   ok "源码包与 archive-derived 成员清单校验通过"
   run_release_preflight
+}
+
+verify_builder_input_package() {
+  local helper_sha source_name source_commit input_parent input_archive input_manifest input_checksum
+  [ -f "$BUILDER_INPUT_HELPER" ] && [ ! -L "$BUILDER_INPUT_HELPER" ] \
+    && [ "$(stat -c '%h' "$BUILDER_INPUT_HELPER")" = "1" ] \
+    || fail "制包机输入包审计工具缺失或不安全：$BUILDER_INPUT_HELPER"
+  helper_sha="$(sha256sum "$BUILDER_INPUT_HELPER" | awk '{print $1}')"
+  [ "$helper_sha" = "$BUILDER_INPUT_HELPER_SHA256" ] \
+    || fail "制包机输入包审计工具不是固定审查版本"
+
+  resolve_source_archive
+  [ -f "$SRC_ARCHIVE" ] && [ ! -L "$SRC_ARCHIVE" ] \
+    || fail "制包机输入包中的源码包缺失或不安全：$SRC_ARCHIVE"
+  [ "$(cd "$(dirname "$SRC_ARCHIVE")" && pwd -P)" = "$SCRIPT_DIR" ] \
+    || fail "源码包必须来自已验证的制包机输入包解压目录"
+  source_name="$(basename "$SRC_ARCHIVE")"
+  source_commit="$(printf '%s\n' "$source_name" | sed -nE 's/^taiji-agentv1\.0-kylin-build-src-([0-9a-f]{40})\.tar\.gz$/\1/p')"
+  printf '%s\n' "$source_commit" | grep -Eq '^[0-9a-f]{40}$' \
+    || fail "无法从源码包名称解析完整 commit：$source_name"
+
+  input_parent="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+  input_archive="$input_parent/taijiagent-制包机输入-$source_commit.tar.gz"
+  input_manifest="$input_parent/taijiagent-制包机输入-$source_commit.manifest.json"
+  input_checksum="$input_archive.sha256"
+  python3 - "$input_parent" "$input_archive" "$input_manifest" "$input_checksum" <<'PY' \
+    || fail "制包机输入包三件套不唯一或与源码 commit 不一致"
+import re
+import sys
+from pathlib import Path
+
+parent = Path(sys.argv[1])
+archive, manifest, checksum = (Path(value) for value in sys.argv[2:5])
+patterns = (
+    re.compile(r"^taijiagent-制包机输入-[0-9a-f]{40}\.tar\.gz$"),
+    re.compile(r"^taijiagent-制包机输入-[0-9a-f]{40}\.manifest\.json$"),
+    re.compile(r"^taijiagent-制包机输入-[0-9a-f]{40}\.tar\.gz\.sha256$"),
+)
+candidates = [
+    path
+    for path in parent.iterdir()
+    if any(pattern.fullmatch(path.name) for pattern in patterns)
+]
+expected = {archive.name, manifest.name, checksum.name}
+if len(candidates) != 3 or {path.name for path in candidates} != expected:
+    raise SystemExit("builder input triplet is not unique")
+PY
+
+  python3 "$BUILDER_INPUT_HELPER" verify \
+    --archive "$input_archive" \
+    --manifest "$input_manifest" \
+    --checksum "$input_checksum" \
+    --extracted-dir "$SCRIPT_DIR" \
+    || fail "制包机输入包三件套或解压成员验证失败"
+  ok "制包机输入包三件套及解压成员已绑定：$source_commit"
 }
 
 archive_previous_build_outputs() {
@@ -2313,6 +2370,8 @@ main() {
   install_build_dependencies
   set_stage "校验制包命令依赖闭包"
   verify_build_command_contract
+  set_stage "校验制包机输入包三件套"
+  verify_builder_input_package
   set_stage "选择安全构建根并配置临时目录"
   select_build_root
   set_stage "源码包发布预检"
