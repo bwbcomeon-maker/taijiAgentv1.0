@@ -16,7 +16,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,13 @@ RECORD_BASENAME = "environment-evidence.json"
 CURRENT_OFFLINE_REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
 MAX_OFFLINE_ATTACHMENT_BYTES = 1024 * 1024
 MAX_PREVIOUS_RELEASE_DEB_BYTES = 2 * 1024 * 1024 * 1024
+MAX_CERTIFICATION_ATTACHMENT_BYTES = 1024 * 1024
+MAX_CERTIFICATION_PNG_BYTES = 32 * 1024 * 1024
+LARGE_CERTIFICATION_PNG_BASENAMES = {
+    "single-deb-graphical-installer.png",
+    "desktop-app.png",
+}
+AttachmentCopySource = Tuple[Path, str, int]
 
 
 class CertificationSetError(ValueError):
@@ -171,6 +178,57 @@ def _safe_regular(
         return b"".join(chunks)
     except OSError as exc:
         raise CertificationSetError(f"{label} cannot be read: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _sha256_bounded_stable_regular_file(
+    path: Path,
+    label: str,
+    *,
+    max_bytes: int,
+) -> tuple[str, int]:
+    """Hash one bounded, stable single-link file without buffering its body."""
+
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise CertificationSetError(f"{label} must be an absolute regular file")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise CertificationSetError(f"{label} cannot be inspected: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise CertificationSetError(f"{label} must be exactly one regular single-link file")
+    if metadata.st_size <= 0 or metadata.st_size > max_bytes:
+        raise CertificationSetError(f"{label} has an invalid size")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+    except OSError as exc:
+        raise CertificationSetError(f"{label} cannot be opened safely: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if _regular_identity(metadata) != _regular_identity(opened):
+            raise CertificationSetError(f"{label} changed before it was opened")
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise CertificationSetError(f"{label} was truncated while it was hashed")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise CertificationSetError(f"{label} grew while it was hashed")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            _regular_identity(opened) != _regular_identity(after)
+            or _regular_identity(opened) != _regular_identity(current)
+        ):
+            raise CertificationSetError(f"{label} changed while it was hashed")
+        return digest.hexdigest(), opened.st_size
+    except OSError as exc:
+        raise CertificationSetError(f"{label} cannot be hashed: {exc}") from exc
     finally:
         os.close(descriptor)
 
@@ -528,7 +586,16 @@ def _validate_offline_evidence(
     return data, payloads, files, inventory_sha256
 
 
-def _validate_attachment(category_dir: Path, attachment: Any) -> tuple[str, str, bytes]:
+def _certification_attachment_limit(basename: str) -> int:
+    if basename in LARGE_CERTIFICATION_PNG_BASENAMES:
+        return MAX_CERTIFICATION_PNG_BYTES
+    return MAX_CERTIFICATION_ATTACHMENT_BYTES
+
+
+def _validate_attachment(
+    category_dir: Path,
+    attachment: Any,
+) -> tuple[str, str, bytes | AttachmentCopySource]:
     if type(attachment) is not dict or set(attachment) != {"basename", "sha256"}:
         raise CertificationSetError("environment evidence attachment fields are invalid")
     basename = attachment["basename"]
@@ -543,14 +610,30 @@ def _validate_attachment(category_dir: Path, attachment: Any) -> tuple[str, str,
         raise CertificationSetError("environment evidence attachment path escapes its category directory")
     expected = _require_sha(attachment["sha256"], "environment evidence attachment SHA256")
     path = category_dir / basename
-    payload = _safe_regular(path, "environment evidence attachment")
-    actual = hashlib.sha256(payload).hexdigest()
+    limit = _certification_attachment_limit(basename)
+    if basename in LARGE_CERTIFICATION_PNG_BASENAMES:
+        actual, _size = _sha256_bounded_stable_regular_file(
+            path,
+            "environment evidence attachment",
+            max_bytes=limit,
+        )
+        payload_or_source: bytes | AttachmentCopySource = (path, actual, limit)
+    else:
+        payload_or_source = _safe_regular(
+            path,
+            "environment evidence attachment",
+            max_bytes=limit,
+        )
+        actual = hashlib.sha256(payload_or_source).hexdigest()
     if actual != expected:
         raise CertificationSetError("environment evidence attachment hash does not match")
-    return basename, actual, payload
+    return basename, actual, payload_or_source
 
 
-def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+def _read_records(
+    records_dir: Path,
+    matrix: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, bytes | AttachmentCopySource]]:
     _safe_directory(records_dir, "records directory")
     expected_categories = {
         item["id"]
@@ -565,7 +648,7 @@ def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[
         extra = sorted(actual_categories - expected_categories)
         raise CertificationSetError(f"certification category set is incomplete or has extras: missing={missing} extra={extra}")
     records: list[dict[str, Any]] = []
-    copied_payloads: dict[str, bytes] = {}
+    copied_payloads: dict[str, bytes | AttachmentCopySource] = {}
     release_validator = (
         _load_release_validator()
         if matrix.get("schema") == "taiji-linux-certification-matrix/v2"
@@ -587,10 +670,27 @@ def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[
         allowed = {RECORD_BASENAME}
         category_attachment_payloads: dict[str, bytes] = {}
         for attachment in attachments:
-            basename, _digest, attachment_payload = _validate_attachment(category_dir, attachment)
+            basename, digest, attachment_payload = _validate_attachment(category_dir, attachment)
             allowed.add(basename)
             copied_payloads[f"{category_id}/{basename}"] = attachment_payload
-            category_attachment_payloads[basename] = attachment_payload
+            if type(attachment_payload) is bytes:
+                category_payload = attachment_payload
+            else:
+                source, expected_digest, limit = attachment_payload
+                category_payload = _safe_regular(
+                    source,
+                    f"environment evidence attachment {basename}",
+                    max_bytes=limit,
+                )
+                if hashlib.sha256(category_payload).hexdigest() != expected_digest:
+                    raise CertificationSetError(
+                        "environment evidence attachment changed before recursive validation"
+                    )
+            if hashlib.sha256(category_payload).hexdigest() != digest:
+                raise CertificationSetError(
+                    "environment evidence attachment changed before recursive validation"
+                )
+            category_attachment_payloads[basename] = category_payload
         directory_entries = {item.name for item in category_dir.iterdir()}
         if directory_entries != allowed:
             raise CertificationSetError(f"category {category_id} must contain exactly its record and declared attachments")
@@ -602,12 +702,12 @@ def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[
                 CONTRACT.validate_negative_preflight_attachment(
                     record,
                     matrix,
-                    copied_payloads[f"{category_id}/preflight-result.json"],
+                    category_attachment_payloads["preflight-result.json"],
                 )
                 CONTRACT.validate_negative_business_data_attachment(
                     record,
                     matrix,
-                    copied_payloads[f"{category_id}/business-data-inventory.json"],
+                    category_attachment_payloads["business-data-inventory.json"],
                 )
         except Exception as exc:
             raise CertificationSetError(str(exc)) from exc
@@ -873,7 +973,20 @@ def assemble(args: argparse.Namespace) -> Path:
             for relative, payload in sorted(payloads.items()):
                 destination = records_root / relative
                 destination.parent.mkdir(mode=0o700, exist_ok=True)
-                _write_new_file(destination, payload)
+                if type(payload) is bytes:
+                    _write_new_file(destination, payload)
+                else:
+                    source, expected_digest, limit = payload
+                    copied_digest, _size = _stream_regular_snapshot(
+                        source,
+                        destination,
+                        f"certification attachment {relative}",
+                        max_bytes=limit,
+                    )
+                    if copied_digest != expected_digest:
+                        raise CertificationSetError(
+                            f"certification attachment changed before publication: {relative}"
+                        )
             os.rename(offline_snapshot_root, temp_dir / "offline-rehearsal")
             _write_new_file(temp_dir / "certification-set.json", output_payload)
             _publish_directory_noreplace(temp_dir, args.output)

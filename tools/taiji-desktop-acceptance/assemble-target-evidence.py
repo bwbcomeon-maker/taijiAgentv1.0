@@ -1421,19 +1421,33 @@ def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -
         os.close(descriptor)
 
 
-def sha256_regular_file(path: Path, label: str) -> str:
+def sha256_regular_file(
+    path: Path,
+    label: str,
+    *,
+    limit: int | None = None,
+    required_prefix: bytes | None = None,
+) -> str:
     descriptor, file_stat = open_regular(path, label)
     digest = hashlib.sha256()
     total = 0
+    prefix = bytearray()
     try:
+        if limit is not None and file_stat.st_size > limit:
+            raise AssemblyError(f"{label} exceeds the {limit}-byte limit")
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
+            if required_prefix is not None and len(prefix) < len(required_prefix):
+                needed = len(required_prefix) - len(prefix)
+                prefix.extend(chunk[:needed])
             total += len(chunk)
             digest.update(chunk)
         if total != file_stat.st_size:
             raise AssemblyError(f"{label} was truncated while hashing")
+        if required_prefix is not None and bytes(prefix) != required_prefix:
+            raise AssemblyError(f"{label} has an invalid file signature")
         _verify_unchanged(descriptor, file_stat, label)
         return digest.hexdigest()
     finally:
@@ -2108,14 +2122,12 @@ def assemble_canonical(args: argparse.Namespace) -> None:
     }.items():
         if environment_observation.get(key) != value:
             raise AssemblyError(f"environment observation {key} does not match the current release or target")
-    graphical_evidence_payload = read_regular_bytes(
+    graphical_evidence_hash = sha256_regular_file(
         args.graphical_installer_evidence,
         "graphical installer evidence",
         limit=MAX_SCREENSHOT_BYTES,
+        required_prefix=b"\x89PNG\r\n\x1a\n",
     )
-    if not graphical_evidence_payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise AssemblyError("graphical installer evidence has an invalid PNG signature")
-    graphical_evidence_hash = hashlib.sha256(graphical_evidence_payload).hexdigest()
     attestation_payload = read_regular_bytes(
         args.install_method_attestation,
         "single-DEB install method attestation",
@@ -2132,15 +2144,17 @@ def assemble_canonical(args: argparse.Namespace) -> None:
         raise AssemblyError("screenshot input basename does not match the driver result")
     if args.diagnostic.name != driver["diagnostic_basename"]:
         raise AssemblyError("diagnostic input basename does not match the driver result")
-    screenshot_payload = read_regular_bytes(args.screenshot, "desktop App screenshot", limit=MAX_SCREENSHOT_BYTES)
-    if not screenshot_payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise AssemblyError("desktop App screenshot has an invalid PNG signature")
+    screenshot_hash = sha256_regular_file(
+        args.screenshot,
+        "desktop App screenshot",
+        limit=MAX_SCREENSHOT_BYTES,
+        required_prefix=b"\x89PNG\r\n\x1a\n",
+    )
     diagnostic_payload = read_regular_bytes(args.diagnostic, "App diagnostic export")
     diagnostic_json = parse_json_bytes(diagnostic_payload, "App diagnostic export")
     if set(diagnostic_json) != {"schema", "manifest", "diagnostics"} or diagnostic_json["schema"] != "taiji.product.support-bundle.v1":
         raise AssemblyError("App diagnostic export has an invalid schema")
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    screenshot_hash = hashlib.sha256(screenshot_payload).hexdigest()
     diagnostic_hash = hashlib.sha256(diagnostic_payload).hexdigest()
     graphical_name = GRAPHICAL_INSTALLER_EVIDENCE_BASENAME
 
@@ -2157,20 +2171,28 @@ def assemble_canonical(args: argparse.Namespace) -> None:
             environment_payload,
         )
         copied_observation_hash = write_exclusive(
-            temporary / OBSERVATION_BASENAME,
+            temporary / INSTALL_OBSERVATION_BASENAME,
             observation_payload,
         )
         copied_attestation_hash = write_exclusive(
             temporary / INSTALL_METHOD_ATTESTATION_BASENAME,
             attestation_payload,
         )
-        copied_graphical_hash = write_exclusive(
+        copied_graphical_hash = copy_regular_file(
+            args.graphical_installer_evidence,
             temporary / graphical_name,
-            graphical_evidence_payload,
+            "graphical installer evidence",
+            limit=MAX_SCREENSHOT_BYTES,
+            required_prefix=b"\x89PNG\r\n\x1a\n",
         )
         copied_driver_hash = write_exclusive(temporary / DRIVER_RESULT_BASENAME, driver_payload)
         copied_diagnostic_hash = write_exclusive(temporary / DIAGNOSTIC_BASENAME, diagnostic_payload)
-        if copied_screenshot_hash != screenshot_hash or copied_environment_observation_hash != hashlib.sha256(environment_payload).hexdigest():
+        if (
+            copied_screenshot_hash != screenshot_hash
+            or copied_graphical_hash != graphical_evidence_hash
+            or copied_environment_observation_hash
+            != hashlib.sha256(environment_payload).hexdigest()
+        ):
             raise AssemblyError("canonical evidence changed while it was copied")
         target_evidence = {
             "schema": CANONICAL_TARGET_EVIDENCE_SCHEMA,
@@ -2200,7 +2222,7 @@ def assemble_canonical(args: argparse.Namespace) -> None:
             "checks": driver["checks"],
             "environment_observation_basename": ENVIRONMENT_OBSERVATION_BASENAME,
             "environment_observation_sha256": copied_environment_observation_hash,
-            "install_observation_basename": OBSERVATION_BASENAME,
+            "install_observation_basename": INSTALL_OBSERVATION_BASENAME,
             "install_observation_sha256": copied_observation_hash,
             "install_method_attestation_basename": INSTALL_METHOD_ATTESTATION_BASENAME,
             "install_method_attestation_sha256": copied_attestation_hash,
@@ -2231,7 +2253,7 @@ def assemble_canonical(args: argparse.Namespace) -> None:
             attachment_hashes={
                 EVIDENCE_BASENAME: target_evidence_hash,
                 ENVIRONMENT_OBSERVATION_BASENAME: copied_environment_observation_hash,
-                OBSERVATION_BASENAME: copied_observation_hash,
+                INSTALL_OBSERVATION_BASENAME: copied_observation_hash,
                 INSTALL_METHOD_ATTESTATION_BASENAME: copied_attestation_hash,
                 graphical_name: copied_graphical_hash,
                 DRIVER_RESULT_BASENAME: copied_driver_hash,
@@ -2313,14 +2335,12 @@ def assemble(args: argparse.Namespace) -> None:
         target_baseline_profile_id=target_baseline_profile_id,
         target_baseline_sha256=target_baseline_sha256,
     )
-    graphical_evidence_payload = read_regular_bytes(
+    graphical_evidence_hash = sha256_regular_file(
         args.graphical_installer_evidence,
         "graphical installer evidence",
         limit=MAX_SCREENSHOT_BYTES,
+        required_prefix=b"\x89PNG\r\n\x1a\n",
     )
-    if not graphical_evidence_payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise AssemblyError("graphical installer evidence has an invalid PNG signature")
-    graphical_evidence_hash = hashlib.sha256(graphical_evidence_payload).hexdigest()
     attestation_payload = read_regular_bytes(
         args.install_method_attestation,
         "single-DEB install method attestation",
@@ -2377,9 +2397,12 @@ def assemble(args: argparse.Namespace) -> None:
             temporary / INSTALL_METHOD_ATTESTATION_BASENAME,
             attestation_payload,
         )
-        copied_graphical_evidence_hash = write_exclusive(
+        copied_graphical_evidence_hash = copy_regular_file(
+            args.graphical_installer_evidence,
             temporary / GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
-            graphical_evidence_payload,
+            "graphical installer evidence",
+            limit=MAX_SCREENSHOT_BYTES,
+            required_prefix=b"\x89PNG\r\n\x1a\n",
         )
         if install_observation_hash != observation_hash:
             raise AssemblyError("copied install observation hash changed")

@@ -46,6 +46,10 @@ PUBLIC_VERSION_RE = re.compile(
 MAX_JSON_BYTES = 1024 * 1024
 MAX_EVIDENCE_BYTES = 32 * 1024 * 1024
 MAX_PREVIOUS_RELEASE_DEB_BYTES = 2 * 1024 * 1024 * 1024
+CERTIFICATION_LARGE_PNG_BASENAMES = {
+    "single-deb-graphical-installer.png",
+    "desktop-app.png",
+}
 PACKAGE_MANIFEST_SCHEMA_V3 = "taiji-package-manifest/v3"
 RELEASE_EVIDENCE_SCHEMA_V3 = "taiji-release-evidence/v3"
 OFFLINE_EVIDENCE_SCHEMA_V1 = "taiji.offline-install-rehearsal.v1"
@@ -827,8 +831,14 @@ def resolve_trusted_openssl() -> str:
 
 
 def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -> tuple[bytes, os.stat_result]:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"{label} 不可读取: {path}: {exc}") from exc
     descriptor, file_stat = open_regular(path, label)
     try:
+        if regular_file_identity(before) != regular_file_identity(file_stat):
+            raise EvidenceError(f"{label} 在打开前发生变化: {path}")
         if file_stat.st_size > limit:
             raise EvidenceError(f"{label} 超过大小上限 {limit}: {path}")
         chunks: list[bytes] = []
@@ -842,7 +852,18 @@ def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -
         payload = b"".join(chunks)
         if len(payload) != file_stat.st_size:
             raise EvidenceError(f"{label} 读取期间发生变化: {path}")
+        if os.read(descriptor, 1):
+            raise EvidenceError(f"{label} 读取期间增长: {path}")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            regular_file_identity(file_stat) != regular_file_identity(after)
+            or regular_file_identity(file_stat) != regular_file_identity(current)
+        ):
+            raise EvidenceError(f"{label} 读取期间发生变化: {path}")
         return payload, file_stat
+    except OSError as exc:
+        raise EvidenceError(f"{label} 读取失败: {path}: {exc}") from exc
     finally:
         os.close(descriptor)
 
@@ -3015,6 +3036,14 @@ def validate_target_driver(
         require_exact(data, key, True)
 
 
+def certification_attachment_limit(basename: str) -> int:
+    """Return the fixed recursive-validation cap for one evidence basename."""
+
+    if basename in CERTIFICATION_LARGE_PNG_BASENAMES:
+        return MAX_EVIDENCE_BYTES
+    return MAX_JSON_BYTES
+
+
 def validate_positive_certification_bundle(
     record: dict[str, Any],
     attachment_payloads: dict[str, bytes],
@@ -3079,7 +3108,11 @@ def validate_positive_certification_bundle(
         ):
             raise EvidenceError("正向认证 attachment basename 不安全、未知或重复")
         payload = attachment_payloads[basename]
-        if type(payload) is not bytes or not payload or len(payload) > MAX_EVIDENCE_BYTES:
+        if (
+            type(payload) is not bytes
+            or not payload
+            or len(payload) > certification_attachment_limit(basename)
+        ):
             raise EvidenceError("正向认证 attachment 实物不合法")
         digest = validate_sha256(attachment["sha256"], f"正向认证 {basename} SHA256")
         if digest != hashlib.sha256(payload).hexdigest():
@@ -3720,7 +3753,7 @@ def _validate_certification_set_v1_inner(
             attachment_payload, _ = read_regular_bytes(
                 record_path.parent / attachment_basename,
                 "认证集环境 attachment",
-                limit=MAX_EVIDENCE_BYTES,
+                limit=certification_attachment_limit(attachment_basename),
             )
             attachment_sha256 = validate_sha256(
                 attachment["sha256"],

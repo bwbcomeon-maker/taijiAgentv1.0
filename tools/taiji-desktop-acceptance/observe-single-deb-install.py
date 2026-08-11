@@ -1861,6 +1861,9 @@ def create_method_attestation(
     operator_id,
     runtime,
     user_state_paths=None,
+    matrix_path=None,
+    category_id=None,
+    environment_observation_path=None,
 ):
     """Create an explicit human attestation bound to machine evidence.
 
@@ -1875,12 +1878,34 @@ def create_method_attestation(
     if not observation_file.is_absolute() or observation_file.is_symlink() or not observation_file.is_file():
         raise ObservationError("install observation must be an absolute regular file")
     observation = _load_json(observation_file, "install observation")
-    machine_fingerprint, boot_fingerprint = _validate_observation_identity(
-        observation,
-        challenge,
-        runtime,
-        user_state_paths=user_state_paths,
-    )
+    schema = observation.get("schema")
+    canonical_values = (matrix_path, category_id, environment_observation_path)
+    if schema == "taiji.single-deb-install-observation/v2":
+        if any(value is None for value in canonical_values):
+            raise ObservationError(
+                "canonical install attestation requires matrix, category, and environment observation"
+            )
+        machine_fingerprint, boot_fingerprint = _validate_canonical_attestation_context(
+            observation=observation,
+            observation_file=observation_file,
+            challenge=challenge,
+            runtime=runtime,
+            user_state_paths=user_state_paths,
+            matrix_path=Path(matrix_path),
+            category_id=category_id,
+            environment_observation_path=Path(environment_observation_path),
+        )
+    elif schema == OBSERVATION_SCHEMA:
+        if any(value is not None for value in canonical_values):
+            raise ObservationError("legacy install attestation does not accept canonical evidence inputs")
+        machine_fingerprint, boot_fingerprint = _validate_observation_identity(
+            observation,
+            challenge,
+            runtime,
+            user_state_paths=user_state_paths,
+        )
+    else:
+        raise ObservationError("install observation schema is invalid")
     if runtime.package_status() != "install ok installed":
         raise ObservationError("taiji-agent is not installed while method is being attested")
     evidence = _validate_png_evidence(graphical_evidence_path)
@@ -1901,6 +1926,92 @@ def create_method_attestation(
         "graphical_installer_evidence_basename": evidence.name,
         "graphical_installer_evidence_sha256": _sha256_path(evidence),
     }
+
+
+def _validate_canonical_attestation_context(
+    *,
+    observation,
+    observation_file,
+    challenge,
+    runtime,
+    user_state_paths,
+    matrix_path,
+    category_id,
+    environment_observation_path,
+):
+    if (
+        not matrix_path.is_absolute()
+        or matrix_path.is_symlink()
+        or not matrix_path.is_file()
+    ):
+        raise ObservationError("canonical attestation matrix must be an absolute regular file")
+    if (
+        not environment_observation_path.is_absolute()
+        or environment_observation_path.is_symlink()
+        or not environment_observation_path.is_file()
+        or environment_observation_path.name != ENVIRONMENT_RECORD_BASENAME
+        or environment_observation_path.parent != observation_file.parent
+    ):
+        raise ObservationError(
+            "canonical attestation environment observation must be the fixed peer of the install observation"
+        )
+    matrix = _read_certification_matrix(matrix_path)
+    machine_fingerprint, boot_fingerprint = _validate_observation_identity(
+        observation,
+        challenge,
+        runtime,
+        user_state_paths=user_state_paths,
+        canonical=True,
+    )
+    record = _load_json(environment_observation_path, "environment observation")
+    if record.get("schema") != ENVIRONMENT_RECORD_SCHEMA:
+        raise ObservationError("environment observation schema is invalid")
+    if record.get("category_id") != category_id:
+        raise ObservationError("environment observation category does not match")
+    if record.get("source_commit") != observation.get("source_commit"):
+        raise ObservationError("environment observation source commit does not match")
+    if record.get("deb_sha256") != observation.get("deb_sha256"):
+        raise ObservationError("environment observation DEB hash does not match")
+    if record.get("deb_basename") != observation.get("deb_observed_basename"):
+        raise ObservationError("environment observation DEB basename does not match")
+    if record.get("machine_identity_commitment_sha256") != observation.get(
+        "machine_identity_commitment_sha256"
+    ):
+        raise ObservationError("environment observation machine commitment does not match")
+    version = record.get("version")
+    deb_basename = record.get("deb_basename")
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise ObservationError("environment observation version is invalid")
+    if deb_basename != "taiji-agent_%s_amd64.deb" % version:
+        raise ObservationError("environment observation DEB basename is invalid")
+    if record.get("architecture") != "amd64":
+        raise ObservationError("environment observation architecture is invalid")
+    if record.get("compatibility_policy_id") != CERTIFICATION_POLICY_ID:
+        raise ObservationError("environment observation compatibility policy is invalid")
+    policy_sha = record.get("compatibility_policy_sha256")
+    if not isinstance(policy_sha, str) or not HEX64_RE.fullmatch(policy_sha):
+        raise ObservationError("environment observation compatibility policy hash is invalid")
+    platform_identity = collect_platform_identity(matrix, category_id)
+    expected = _canonical_environment_record(
+        category_id=category_id,
+        matrix=matrix,
+        manifest={
+            "source_commit": record["source_commit"],
+            "version": version,
+            "deb_basename": deb_basename,
+            "deb_sha256": record["deb_sha256"],
+            "compatibility_policy_id": record["compatibility_policy_id"],
+            "compatibility_policy_sha256": policy_sha,
+        },
+        observation=observation,
+        platform_identity=platform_identity,
+    )
+    _require_exact_keys(record, expected.keys(), "environment observation")
+    if record != expected:
+        raise ObservationError(
+            "environment observation does not match the canonical install facts"
+        )
+    return machine_fingerprint, boot_fingerprint
 
 
 def verify_method_attestation(
@@ -2268,6 +2379,9 @@ def _build_parser():
     attest.add_argument("--operator-id", required=True)
     attest.add_argument("--confirmation", required=True)
     attest.add_argument("--output-dir", required=True)
+    attest.add_argument("--matrix")
+    attest.add_argument("--category-id")
+    attest.add_argument("--environment-observation")
 
     verify = subparsers.add_parser("verify", help="verify an observation on the same target and boot")
     verify.add_argument("--observation", required=True)
@@ -2354,6 +2468,13 @@ def main(argv=None):
                 challenge=args.challenge,
                 operator_id=args.operator_id,
                 runtime=runtime,
+                matrix_path=Path(args.matrix) if args.matrix else None,
+                category_id=args.category_id,
+                environment_observation_path=(
+                    Path(args.environment_observation)
+                    if args.environment_observation
+                    else None
+                ),
             )
             output = output_dir / ATTESTATION_BASENAME
             _atomic_json(output, attestation)

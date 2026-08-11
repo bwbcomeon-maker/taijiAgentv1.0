@@ -1270,6 +1270,190 @@ class SingleDebInstallObserverTests(unittest.TestCase):
                 user_state_paths=self.user_paths,
             )
 
+    def test_canonical_cli_attest_accepts_v2_and_binds_environment_matrix_category(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        output_dir = self.root.resolve() / "canonical-attestation"
+        output_dir.mkdir(mode=0o700)
+        observation_path = output_dir / self.observer.OBSERVATION_BASENAME
+        environment_path = output_dir / self.observer.ENVIRONMENT_RECORD_BASENAME
+        observation_path.write_text(
+            json.dumps(observation, sort_keys=True), encoding="utf-8"
+        )
+        environment_path.write_text(
+            json.dumps(environment, sort_keys=True), encoding="utf-8"
+        )
+        screenshot = self.root / "raw-installer-success.png"
+        screenshot.write_bytes(png_fixture())
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+
+        with mock.patch.object(
+            self.observer, "SystemRuntime", return_value=runtime
+        ), mock.patch.object(
+            self.observer,
+            "collect_platform_identity",
+            return_value=platform_identity,
+        ), mock.patch.object(
+            self.observer,
+            "default_user_state_paths",
+            return_value=self.user_paths,
+        ):
+            result = self.observer.main(
+                [
+                    "attest",
+                    "--observation",
+                    str(observation_path),
+                    "--graphical-evidence",
+                    str(screenshot),
+                    "--challenge",
+                    self.challenge,
+                    "--operator-id",
+                    "target-operator-01",
+                    "--confirmation",
+                    "I-observed-desktop-double-click-and-system-installer",
+                    "--output-dir",
+                    str(output_dir),
+                    "--matrix",
+                    str(MATRIX),
+                    "--category-id",
+                    environment["category_id"],
+                    "--environment-observation",
+                    str(environment_path),
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        attestation_path = output_dir / self.observer.ATTESTATION_BASENAME
+        self.assertTrue(attestation_path.is_file())
+        self.observer.verify_method_attestation(
+            attestation_path=attestation_path,
+            observation_path=observation_path,
+            graphical_evidence_path=output_dir / self.observer.GRAPHICAL_EVIDENCE_BASENAME,
+            challenge=self.challenge,
+            runtime=runtime,
+            user_state_paths=self.user_paths,
+            canonical=True,
+        )
+
+    def test_canonical_attest_fails_closed_on_schema_challenge_or_environment_binding(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        observation_path = self.root / self.observer.OBSERVATION_BASENAME
+        environment_path = self.root / self.observer.ENVIRONMENT_RECORD_BASENAME
+        screenshot = self.root / "graphical-installer.png"
+        screenshot.write_bytes(png_fixture())
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+        cases = {
+            "schema": ({**observation, "schema": "taiji.single-deb-install-observation/v9"}, environment),
+            "challenge": ({**observation, "challenge_nonce": "0" * 64}, environment),
+            "environment": (observation, {**environment, "category_id": "uos-min-dde"}),
+            "environment-deb-name": (
+                observation,
+                {
+                    **environment,
+                    "version": "1.0.0+renamed",
+                    "deb_basename": "taiji-agent_1.0.0+renamed_amd64.deb",
+                },
+            ),
+        }
+        for label, (candidate_observation, candidate_environment) in cases.items():
+            with self.subTest(label=label):
+                observation_path.write_text(
+                    json.dumps(candidate_observation, sort_keys=True), encoding="utf-8"
+                )
+                environment_path.write_text(
+                    json.dumps(candidate_environment, sort_keys=True), encoding="utf-8"
+                )
+                with mock.patch.object(
+                    self.observer,
+                    "collect_platform_identity",
+                    return_value=platform_identity,
+                ), self.assertRaises(self.observer.ObservationError):
+                    self.observer.create_method_attestation(
+                        observation_path=observation_path,
+                        graphical_evidence_path=screenshot,
+                        challenge=self.challenge,
+                        operator_id="target-operator-01",
+                        runtime=runtime,
+                        user_state_paths=self.user_paths,
+                        matrix_path=MATRIX,
+                        category_id=environment["category_id"],
+                        environment_observation_path=environment_path,
+                    )
+
+    def test_canonical_attest_fails_closed_on_operator_png_and_legacy_input(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        observation_path = self.root / self.observer.OBSERVATION_BASENAME
+        environment_path = self.root / self.observer.ENVIRONMENT_RECORD_BASENAME
+        observation_path.write_text(
+            json.dumps(observation, sort_keys=True), encoding="utf-8"
+        )
+        environment_path.write_text(
+            json.dumps(environment, sort_keys=True), encoding="utf-8"
+        )
+        valid_png = self.root / "valid-installer.png"
+        invalid_png = self.root / "invalid-installer.png"
+        valid_png.write_bytes(png_fixture())
+        invalid_png.write_bytes(b"not-a-png")
+        canonical_arguments = {
+            "observation_path": observation_path,
+            "challenge": self.challenge,
+            "runtime": runtime,
+            "user_state_paths": self.user_paths,
+            "matrix_path": MATRIX,
+            "category_id": environment["category_id"],
+            "environment_observation_path": environment_path,
+        }
+        with self.assertRaisesRegex(self.observer.ObservationError, "operator_id"):
+            self.observer.create_method_attestation(
+                graphical_evidence_path=valid_png,
+                operator_id="!",
+                **canonical_arguments,
+            )
+
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+        with mock.patch.object(
+            self.observer,
+            "collect_platform_identity",
+            return_value=platform_identity,
+        ), self.assertRaisesRegex(self.observer.ObservationError, "PNG|png"):
+            self.observer.create_method_attestation(
+                graphical_evidence_path=invalid_png,
+                operator_id="target-operator-01",
+                **canonical_arguments,
+            )
+
+        legacy_runtime = FakeRuntime([None, "install ok installed"])
+        legacy_observation = self.observe(legacy_runtime)
+        observation_path.write_text(
+            json.dumps(legacy_observation, sort_keys=True), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(
+            self.observer.ObservationError,
+            "legacy.*canonical",
+        ):
+            self.observer.create_method_attestation(
+                graphical_evidence_path=valid_png,
+                operator_id="target-operator-01",
+                **{**canonical_arguments, "runtime": legacy_runtime},
+            )
+
     def test_method_attestation_rejects_fake_truncated_or_small_png(self):
         runtime = FakeRuntime([None, "install ok installed"])
         observation = self.observe(runtime)
