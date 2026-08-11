@@ -17,6 +17,8 @@ PAYLOAD_VERIFIER = ROOT / "packaging/linux/verify-payload.py"
 PREINST_RENDERER = ROOT / "packaging/linux/deb/render-preinst.py"
 DEPLOYMENT_RECEIPT = ROOT / "packaging/linux/deployment_receipt.py"
 UPGRADE_TRANSACTION = ROOT / "packaging/linux/upgrade_transaction.py"
+ACCEPTANCE_TOOLS_MANIFEST = ROOT / "packaging/linux/acceptance_tools_manifest.py"
+ACCEPTANCE_RUNNER = ROOT / "packaging/linux/acceptance_runner.py"
 TARGET_EVIDENCE_ASSEMBLER = (
     ROOT / "tools/taiji-desktop-acceptance/assemble-target-evidence.py"
 )
@@ -36,10 +38,15 @@ PYTHON38_ENTRYPOINTS = (
     PREINST_RENDERER,
     DEPLOYMENT_RECEIPT,
     UPGRADE_TRANSACTION,
+    ACCEPTANCE_TOOLS_MANIFEST,
+    ACCEPTANCE_RUNNER,
     TARGET_EVIDENCE_ASSEMBLER,
     INSTALL_OBSERVER,
+    ROOT / "scripts/produce-taiji-github-ci-evidence.py",
     ROOT / "scripts/produce-taiji-offline-rehearsal.py",
+    ROOT / "scripts/produce-taiji-negative-boundary-evidence.py",
     ROOT / "scripts/assemble-taiji-certification-set.py",
+    ROOT / "scripts/assemble-taiji-release-evidence.py",
     ROOT / "scripts/validate-taiji-release-evidence.py",
 )
 

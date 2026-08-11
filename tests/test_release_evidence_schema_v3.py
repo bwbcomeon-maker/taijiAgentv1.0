@@ -60,6 +60,31 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.manifest = self.package_dir / "taiji-package-manifest.json"
         self.write_manifest()
         self.write_delivery_identity_fixture()
+        self.ci_evidence = self.root / "github-ci-evidence.json"
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.ci_evidence.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-github-ci-evidence/v1",
+                    "provider": "github-actions",
+                    "repository": "example/taiji-agent",
+                    "workflow_name": "Pull Request CI",
+                    "required_check_name": "CI Gate",
+                    "run_id": 123456789,
+                    "run_attempt": 1,
+                    "event": "push",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_sha": self.commit,
+                    "html_url": "https://github.com/example/taiji-agent/actions/runs/123456789",
+                    "completed_at_utc": now,
+                    "collected_at_utc": now,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         self.evidence = self.root / "release-evidence.json"
         self.write_evidence()
 
@@ -171,11 +196,20 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "certification_set_sha256": "f" * 64,
             "certification_set_signature_basename": "certification-set.json.sig",
             "certification_set_signature_sha256": "1" * 64,
+            "ci_evidence_basename": self.ci_evidence.name,
+            "ci_evidence_sha256": self.sha256(self.ci_evidence),
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
             "customer_filename": self.deb.name,
             "customer_folder_contract": "exactly-one-deb",
             "signing_public_key_fingerprint": "2" * 64,
-            "formal_gates": {"build": "PASS"},
+            "formal_gates": {
+                "candidate_deb_unchanged": "PASS",
+                "canonical_policy": "PASS",
+                "certification_set": "PASS",
+                "certification_signature": "PASS",
+                "github_ci_gate": "PASS",
+                "manifest_binding": "PASS",
+            },
         }
         evidence.update(updates)
         self.evidence.write_text(json.dumps(evidence), encoding="utf-8")
@@ -263,6 +297,35 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         result = self.run_cli()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("canonical policy", result.stderr)
+
+    def test_v3_rejects_missing_or_nonpass_ci_formal_gate(self):
+        for gates in (
+            {},
+            {
+                "candidate_deb_unchanged": "PASS",
+                "canonical_policy": "PASS",
+                "certification_set": "PASS",
+                "certification_signature": "PASS",
+                "github_ci_gate": "FAIL",
+                "manifest_binding": "PASS",
+            },
+        ):
+            with self.subTest(gates=gates):
+                self.write_evidence(formal_gates=gates)
+                result = self.run_cli()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("formal_gates", result.stderr)
+
+    def test_v3_rejects_ci_file_tamper_or_wrong_head_sha(self):
+        ci = json.loads(self.ci_evidence.read_text(encoding="utf-8"))
+        ci["head_sha"] = "b" * 40
+        self.ci_evidence.write_text(json.dumps(ci) + "\n", encoding="utf-8")
+        self.write_evidence(ci_evidence_sha256=self.sha256(self.ci_evidence))
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CI", result.stderr)
 
     def test_v3_build_binding_rejects_old_or_wrong_named_source_archive(self):
         wrong_archive = self.delivery / "taiji-agentv1.0-kylin-build-src-bbbbbbb.tar.gz"

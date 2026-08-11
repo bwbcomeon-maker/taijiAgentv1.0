@@ -19,9 +19,9 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MATRIX_SCHEMA = "taiji-linux-certification-matrix/v1"
+MATRIX_SCHEMA = "taiji-linux-certification-matrix/v2"
 SET_SCHEMA = "taiji-linux-certification-set/v1"
-ENVIRONMENT_SCHEMA = "taiji-linux-environment-evidence/v1"
+ENVIRONMENT_SCHEMA = "taiji-linux-environment-evidence/v2"
 POLICY_ID = "taiji-linux-amd64-deb-v1"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -221,6 +221,12 @@ def _validate_offline_evidence(
             validation_args,
             binding,
         )
+        validator.validate_offline_lifecycle_extensions(
+            data,
+            binding,
+            evidence_path,
+            required=True,
+        )
     except Exception as exc:  # validator owns the current v1 contract wording
         raise CertificationSetError(str(exc)) from exc
     if (
@@ -293,11 +299,23 @@ def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[
         directory_entries = {item.name for item in category_dir.iterdir()}
         if directory_entries != allowed:
             raise CertificationSetError(f"category {category_id} must contain exactly its record and declared attachments")
-        if CONTRACT is not None:
-            try:
-                CONTRACT.validate_environment_record(record, matrix)
-            except Exception as exc:
-                raise CertificationSetError(str(exc)) from exc
+        if CONTRACT is None:
+            raise CertificationSetError("current environment evidence contract is missing")
+        try:
+            CONTRACT.validate_environment_record(record, matrix)
+            if record.get("category_kind") == "negative":
+                CONTRACT.validate_negative_preflight_attachment(
+                    record,
+                    matrix,
+                    copied_payloads[f"{category_id}/preflight-result.json"],
+                )
+                CONTRACT.validate_negative_business_data_attachment(
+                    record,
+                    matrix,
+                    copied_payloads[f"{category_id}/business-data-inventory.json"],
+                )
+        except Exception as exc:
+            raise CertificationSetError(str(exc)) from exc
         records.append(record)
         copied_payloads[f"{category_id}/{RECORD_BASENAME}"] = payload
     return records, copied_payloads
@@ -365,6 +383,8 @@ def assemble(args: argparse.Namespace) -> Path:
     if not VERSION_RE.fullmatch(version):
         raise CertificationSetError("candidate DEB version is invalid")
     records, payloads = _read_records(args.records_dir, matrix)
+    if any(record.get("challenge_nonce") != args.challenge for record in records):
+        raise CertificationSetError("every environment record must bind the certification challenge")
     if CONTRACT is not None:
         try:
             CONTRACT.validate_environment_records(records, matrix)

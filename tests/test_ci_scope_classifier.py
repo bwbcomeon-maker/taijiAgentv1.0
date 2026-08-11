@@ -57,6 +57,11 @@ class CiScopeClassifierTest(unittest.TestCase):
             "packaging/linux/compatibility-policy.json",
             "packaging/linux/deb/preinst",
             "packaging/linux/deb/publish-single-deb.sh",
+            "packaging/linux/acceptance_runner.py",
+            "packaging/linux/bin/taiji-agent-acceptance",
+            "scripts/produce-taiji-github-ci-evidence.py",
+            "scripts/produce-taiji-negative-boundary-evidence.py",
+            "scripts/produce-taiji-offline-rehearsal.py",
             "scripts/validate-taiji-release-evidence.py",
             "taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh",
         ):
@@ -144,6 +149,43 @@ class CiScopeClassifierTest(unittest.TestCase):
         self.assertIn(
             "hermes-local-lab/sources/hermes-agent/venv/bin/python -m unittest",
             root_job,
+        )
+
+    def test_linux_packaging_job_executes_the_real_python38_compatibility_gate(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        linux_job = workflow[
+            workflow.index("  linux_packaging:") : workflow.index("  root:")
+        ]
+        self.assertIn("python-version: '3.8'", linux_job)
+        self.assertIn(
+            "python tests/python38_linux_packaging_gate.py",
+            linux_job,
+        )
+        for contract in (
+            "tests.test_acceptance_tools_integrity",
+            "tests.test_installed_acceptance_trust_anchor",
+            "tests.test_github_ci_evidence_producer",
+            "tests.test_negative_boundary_evidence_producer",
+            "tests.test_offline_rehearsal_producer",
+            "tests.test_environment_evidence_v2_contract",
+            "tests.test_target_evidence_v2_contract",
+            "tests.test_release_evidence_schema_v3",
+            "tests.test_strict_build_toolchain_contract",
+        ):
+            self.assertIn(contract, linux_job)
+        self.assertIn(
+            "packaging/linux/bin/taiji-agent-acceptance",
+            linux_job,
+        )
+        self.assertIn(
+            "node --test tools/taiji-desktop-acceptance/run-installed-electron-acceptance.test.js",
+            linux_job,
+        )
+        self.assertIn(
+            "python -B tools/taiji-desktop-acceptance/test_observe_single_deb_install.py",
+            linux_job,
         )
 
 

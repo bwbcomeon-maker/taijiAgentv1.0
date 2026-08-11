@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+exec /usr/bin/env -i \
+  HOME="${HOME-}" \
+  USER="${USER-}" \
+  LOGNAME="${LOGNAME-}" \
+  DISPLAY="${DISPLAY-}" \
+  WAYLAND_DISPLAY="${WAYLAND_DISPLAY-}" \
+  XAUTHORITY="${XAUTHORITY-}" \
+  DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS-}" \
+  XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR-}" \
+  XDG_SESSION_ID="${XDG_SESSION_ID-}" \
+  XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP-}" \
+  XDG_SESSION_TYPE="${XDG_SESSION_TYPE-}" \
+  XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP-}" \
+  DESKTOP_SESSION="${DESKTOP_SESSION-}" \
+  XDG_CONFIG_HOME="${XDG_CONFIG_HOME-}" \
+  XDG_DATA_HOME="${XDG_DATA_HOME-}" \
+  XDG_CACHE_HOME="${XDG_CACHE_HOME-}" \
+  XDG_STATE_HOME="${XDG_STATE_HOME-}" \
+  LANG="${LANG-}" \
+  LANGUAGE="${LANGUAGE-}" \
+  LC_ALL="${LC_ALL-}" \
+  LC_CTYPE="${LC_CTYPE-}" \
+  LC_NUMERIC="${LC_NUMERIC-}" \
+  LC_TIME="${LC_TIME-}" \
+  LC_COLLATE="${LC_COLLATE-}" \
+  LC_MONETARY="${LC_MONETARY-}" \
+  LC_MESSAGES="${LC_MESSAGES-}" \
+  LC_PAPER="${LC_PAPER-}" \
+  LC_NAME="${LC_NAME-}" \
+  LC_ADDRESS="${LC_ADDRESS-}" \
+  LC_TELEPHONE="${LC_TELEPHONE-}" \
+  LC_MEASUREMENT="${LC_MEASUREMENT-}" \
+  LC_IDENTIFICATION="${LC_IDENTIFICATION-}" \
+  PATH=/usr/bin:/bin \
+  /opt/taiji-agent/runtime/agent/venv/bin/python -I -B \
+  /opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py "$@"

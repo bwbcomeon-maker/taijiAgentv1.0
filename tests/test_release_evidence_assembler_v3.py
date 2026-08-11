@@ -8,7 +8,10 @@ import json
 import subprocess
 import tempfile
 import unittest
+from argparse import Namespace
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +23,7 @@ POLICY_HELPER = ROOT / "packaging/linux/compatibility_policy.py"
 class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="taiji-release-evidence-v3-")
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.deb = self.root / "taiji-agent_1.2.3_amd64.deb"
         self.deb.write_bytes(b"immutable-deb-v3")
         self.commit = "a" * 40
@@ -42,6 +45,7 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
                     "compatibility_policy_sha256": self.policy_sha,
                     "electron_executable_sha256": "c" * 64,
                     "desktop_entry_sha256": "d" * 64,
+                    "maintainer": "Taiji Agent Product Team <noreply@localhost>",
                 },
                 sort_keys=True,
             ) + "\n",
@@ -67,6 +71,8 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
         )
         self.signature = Path(f"{self.certification_set}.sig")
         self.signature.write_bytes(b"not-a-signature")
+        self.ci_evidence = self.root / "github-ci-evidence.json"
+        self.write_ci_evidence()
         self.output = self.root / "release-evidence.json"
 
     def tearDown(self):
@@ -81,6 +87,55 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    @staticmethod
+    def _load_assembler():
+        spec = importlib.util.spec_from_file_location("taiji_release_assembler_v3_test", SCRIPT)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("cannot load release assembler")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def write_ci_evidence(self, **updates):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        payload = {
+            "schema": "taiji-github-ci-evidence/v1",
+            "provider": "github-actions",
+            "repository": "example/taiji-agent",
+            "workflow_name": "Pull Request CI",
+            "required_check_name": "CI Gate",
+            "run_id": 123456789,
+            "run_attempt": 1,
+            "event": "pull_request",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": self.commit,
+            "html_url": "https://github.com/example/taiji-agent/actions/runs/123456789",
+            "completed_at_utc": now,
+            "collected_at_utc": now,
+        }
+        payload.update(updates)
+        self.ci_evidence.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    def assemble_with_verified_certification(self):
+        assembler = self._load_assembler()
+        args = Namespace(
+            manifest=self.manifest,
+            deb=self.deb,
+            policy=POLICY,
+            certification_set=self.certification_set,
+            certification_signature=self.signature,
+            ci_evidence=self.ci_evidence,
+            output=self.output,
+            challenge="d" * 64,
+        )
+        with patch.object(
+            assembler,
+            "_validate_certification_set",
+            return_value=hashlib.sha256(self.signature.read_bytes()).hexdigest(),
+        ):
+            return assembler.assemble(args)
+
     def command(self, *, manifest=None, challenge="d" * 64):
         return subprocess.run(
             [
@@ -91,6 +146,7 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
                 "--policy", str(POLICY),
                 "--certification-set", str(self.certification_set),
                 "--certification-signature", str(self.signature),
+                "--ci-evidence", str(self.ci_evidence),
                 "--output", str(self.output),
                 "--challenge", challenge,
             ],
@@ -125,6 +181,36 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
         result = self.command()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.deb.read_bytes(), before)
+
+    def test_formal_release_binds_exact_successful_ci_gate(self):
+        output = self.assemble_with_verified_certification()
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(evidence["ci_evidence_basename"], self.ci_evidence.name)
+        self.assertEqual(
+            evidence["ci_evidence_sha256"],
+            hashlib.sha256(self.ci_evidence.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            evidence["formal_gates"],
+            {
+                "candidate_deb_unchanged": "PASS",
+                "canonical_policy": "PASS",
+                "certification_set": "PASS",
+                "certification_signature": "PASS",
+                "github_ci_gate": "PASS",
+                "manifest_binding": "PASS",
+            },
+        )
+
+    def test_ci_head_sha_or_conclusion_mismatch_blocks_before_output(self):
+        for updates in ({"head_sha": "b" * 40}, {"conclusion": "failure"}):
+            with self.subTest(updates=updates):
+                if self.output.exists():
+                    self.output.unlink()
+                self.write_ci_evidence(**updates)
+                with self.assertRaisesRegex(ValueError, "CI"):
+                    self.assemble_with_verified_certification()
+                self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

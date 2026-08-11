@@ -34,6 +34,7 @@ EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 OFFLINE_SESSION_KEYS = {
     "schema",
     "generated_at_utc",
@@ -492,6 +493,26 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def copy_new_evidence_file(source: Path, destination: Path) -> str:
+    source = resolve_regular_file(source, "offline lifecycle identity input")
+    payload = source.read_bytes()
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise ProducerError("无法归档 N-1 生命周期身份文件")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    digest = hashlib.sha256(payload).hexdigest()
+    if sha256_file(destination) != digest:
+        raise ProducerError("N-1 生命周期身份文件归档后摘要不一致")
+    return digest
+
+
 def validate_current_offline(
     evidence: Path, release: dict[str, Any], challenge: str
 ) -> None:
@@ -522,7 +543,7 @@ def validate_current_offline(
 
 
 @contextmanager
-def staged_expanded_delivery(delivery: Path, previous: Path, policy_source: Path):
+def staged_expanded_delivery(delivery: Path, previous: dict[str, Any], policy_source: Path):
     """Expose previous-release and transaction inputs without mutating delivery."""
 
     with tempfile.TemporaryDirectory(prefix=".taiji-offline-rehearsal-", dir=delivery.parent) as temporary:
@@ -531,9 +552,11 @@ def staged_expanded_delivery(delivery: Path, previous: Path, policy_source: Path
         input_root = staged / ".rehearsal-inputs"
         previous_dir = input_root / "previous"
         previous_dir.mkdir(mode=0o700, parents=True)
-        previous_target = previous_dir / previous.name
-        shutil.copy2(previous, previous_target)
-        shutil.copy2(Path(f"{previous}.sha256"), Path(f"{previous_target}.sha256"))
+        previous_deb = previous["deb"]
+        previous_target = previous_dir / previous_deb.name
+        shutil.copy2(previous_deb, previous_target)
+        shutil.copy2(previous["checksum"], Path(f"{previous_target}.sha256"))
+        shutil.copy2(previous["manifest"], previous_dir / "previous-release-manifest.json")
         for source in (
             ROOT / "packaging" / "linux" / "upgrade_transaction.py",
             ROOT / "packaging" / "linux" / "upgrade-data-contract.json",
@@ -554,6 +577,7 @@ def prepare_explicit_inputs(
     validator: ModuleType,
     deb_arg: Path,
     previous_arg: Path,
+    previous_manifest_arg: Path,
     manifest_arg: Path,
     policy_arg: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
@@ -573,7 +597,34 @@ def prepare_explicit_inputs(
     if previous == deb:
         raise ProducerError("previous DEB 不能与 candidate DEB 是同一文件")
     previous_hash = sha256_file(previous)
-    parse_sha256_sidecar(Path(f"{previous}.sha256"), previous, previous_hash)
+    previous_checksum = resolve_regular_file(Path(f"{previous}.sha256"), "previous DEB checksum")
+    parse_sha256_sidecar(previous_checksum, previous, previous_hash)
+    previous_manifest = resolve_regular_file(previous_manifest_arg, "previous build manifest")
+    previous_manifest_payload = load_json(previous_manifest, "previous build manifest")
+    required_previous_manifest = {
+        "schema": "taiji-package-manifest/v3",
+        "package": "taiji-agent",
+        "architecture": "amd64",
+        "deb_basename": previous.name,
+        "deb_sha256": previous_hash,
+    }
+    for key, expected in required_previous_manifest.items():
+        if previous_manifest_payload.get(key) != expected:
+            raise ProducerError(f"previous build manifest {key} 与 previous DEB 不一致")
+    previous_source_commit = previous_manifest_payload.get("source_commit")
+    previous_version = previous_manifest_payload.get("version")
+    previous_policy_id = previous_manifest_payload.get("compatibility_policy_id")
+    previous_policy_sha256 = previous_manifest_payload.get("compatibility_policy_sha256")
+    if type(previous_source_commit) is not str or not re.fullmatch(r"[0-9a-f]{40}", previous_source_commit):
+        raise ProducerError("previous build manifest source_commit 不合法")
+    if type(previous_version) is not str or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}", previous_version):
+        raise ProducerError("previous build manifest version 不合法")
+    if previous_version == release["version"]:
+        raise ProducerError("previous build manifest 必须是不同于 candidate 的 N-1 版本")
+    if type(previous_policy_id) is not str or not previous_policy_id:
+        raise ProducerError("previous build manifest compatibility_policy_id 不合法")
+    if type(previous_policy_sha256) is not str or not SHA256_RE.fullmatch(previous_policy_sha256):
+        raise ProducerError("previous build manifest compatibility_policy_sha256 不合法")
     policy_id, policy_sha256 = load_policy_identity(policy_arg)
     manifest_payload = load_json(manifest, "build manifest")
     manifest_policy_id = manifest_payload.get("compatibility_policy_id")
@@ -582,7 +633,18 @@ def prepare_explicit_inputs(
         raise ProducerError("显式 policy identity 与 candidate build manifest 不一致")
     return (
         release,
-        {"deb": previous, "sha256": previous_hash},
+        {
+            "deb": previous,
+            "sha256": previous_hash,
+            "checksum": previous_checksum,
+            "checksum_sha256": sha256_file(previous_checksum),
+            "manifest": previous_manifest,
+            "manifest_sha256": sha256_file(previous_manifest),
+            "source_commit": previous_source_commit,
+            "version": previous_version,
+            "compatibility_policy_id": previous_policy_id,
+            "compatibility_policy_sha256": previous_policy_sha256,
+        },
         {"id": policy_id, "sha256": policy_sha256, "path": str(Path(policy_arg).resolve())},
     )
 
@@ -595,6 +657,7 @@ def produce(
     *,
     deb_arg: Path | None = None,
     previous_deb_arg: Path | None = None,
+    previous_manifest_arg: Path | None = None,
     build_manifest_arg: Path | None = None,
     policy_arg: Path | None = None,
 ) -> Path:
@@ -608,10 +671,15 @@ def produce(
 
     explicit = any(
         value is not None
-        for value in (deb_arg, previous_deb_arg, build_manifest_arg, policy_arg)
+        for value in (deb_arg, previous_deb_arg, previous_manifest_arg, build_manifest_arg, policy_arg)
     )
-    if explicit and any(value is None for value in (deb_arg, previous_deb_arg, build_manifest_arg, policy_arg)):
-        raise ProducerError("显式生命周期入口必须同时提供 --deb、--previous-deb、--build-manifest、--policy")
+    if explicit and any(
+        value is None
+        for value in (deb_arg, previous_deb_arg, previous_manifest_arg, build_manifest_arg, policy_arg)
+    ):
+        raise ProducerError(
+            "显式生命周期入口必须同时提供 --deb、--previous-deb、--previous-manifest、--build-manifest、--policy"
+        )
     if not explicit and delivery_arg is None:
         raise ProducerError("必须提供 --delivery-dir，或完整的显式 DEB/previous/manifest/policy 输入")
     if explicit and delivery_arg is not None:
@@ -636,6 +704,7 @@ def produce(
             validator=validator,
             deb_arg=Path(deb_arg),
             previous_arg=Path(previous_deb_arg),
+            previous_manifest_arg=Path(previous_manifest_arg),
             manifest_arg=Path(build_manifest_arg),
             policy_arg=Path(policy_arg),
         )
@@ -646,7 +715,7 @@ def produce(
     published = False
     try:
         with (
-            staged_expanded_delivery(delivery, previous["deb"], Path(policy["path"]))
+            staged_expanded_delivery(delivery, previous, Path(policy["path"]))
             if expanded and previous
             else unmodified_delivery(delivery)
         ) as container_delivery:
@@ -693,6 +762,42 @@ def produce(
         ):
             raise ProducerError("当前 v3 交付目录在 Docker 演练期间发生变化")
 
+        previous_release_evidence: dict[str, Any] | None = None
+        if expanded:
+            if previous is None:
+                raise ProducerError("扩展生命周期演练缺少已验证的 N-1 身份")
+            archived_deb_hash = copy_new_evidence_file(
+                previous["deb"],
+                output / previous["deb"].name,
+            )
+            archived_checksum_hash = copy_new_evidence_file(
+                previous["checksum"],
+                output / previous["checksum"].name,
+            )
+            previous_manifest_basename = "previous-release-manifest.json"
+            archived_manifest_hash = copy_new_evidence_file(
+                previous["manifest"],
+                output / previous_manifest_basename,
+            )
+            if (
+                archived_deb_hash != previous["sha256"]
+                or archived_checksum_hash != previous["checksum_sha256"]
+                or archived_manifest_hash != previous["manifest_sha256"]
+            ):
+                raise ProducerError("归档后的 N-1 身份与已验证输入不一致")
+            previous_release_evidence = {
+                "source_commit": previous["source_commit"],
+                "version": previous["version"],
+                "deb_basename": previous["deb"].name,
+                "deb_sha256": previous["sha256"],
+                "checksum_basename": previous["checksum"].name,
+                "checksum_sha256": previous["checksum_sha256"],
+                "manifest_basename": previous_manifest_basename,
+                "manifest_sha256": previous["manifest_sha256"],
+                "compatibility_policy_id": previous["compatibility_policy_id"],
+                "compatibility_policy_sha256": previous["compatibility_policy_sha256"],
+            }
+
         evidence = {
             "schema": "taiji.offline-install-rehearsal.v1",
             "status": "PASS",
@@ -728,6 +833,9 @@ def produce(
             ):
                 if key in lifecycle_session:
                     evidence[key] = lifecycle_session[key]
+            if previous_release_evidence is None:
+                raise ProducerError("扩展生命周期证据缺少 N-1 身份")
+            evidence["previous_release"] = previous_release_evidence
         evidence_path = output / EVIDENCE_BASENAME
         atomic_write_json(evidence_path, evidence)
         validate_current_offline(evidence_path, release, challenge)
@@ -755,16 +863,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--deb", type=Path, help="本轮固定 candidate amd64 DEB")
     parser.add_argument("--previous-deb", type=Path, help="必须存在且有 .sha256 sidecar 的 N-1 DEB")
+    parser.add_argument("--previous-manifest", type=Path, help="与 N-1 DEB 身份一致的发布 manifest")
     parser.add_argument("--build-manifest", type=Path, help="绑定 candidate 的 taiji-package-manifest.json")
     parser.add_argument("--policy", type=Path, help="固定 compatibility-policy.json")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--image", required=True)
     parser.add_argument("--challenge", required=True)
     args = parser.parse_args()
-    explicit = (args.deb, args.previous_deb, args.build_manifest, args.policy)
+    explicit = (args.deb, args.previous_deb, args.previous_manifest, args.build_manifest, args.policy)
     if args.delivery_dir is None and any(item is None for item in explicit):
         parser.error(
-            "必须提供 --delivery-dir，或完整提供 --deb --previous-deb --build-manifest --policy"
+            "必须提供 --delivery-dir，或完整提供 --deb --previous-deb --previous-manifest --build-manifest --policy"
         )
     if args.delivery_dir is not None and any(item is not None for item in explicit):
         parser.error("--delivery-dir 与显式 DEB 输入不能混用")
@@ -781,6 +890,7 @@ def main() -> int:
             args.challenge,
             deb_arg=args.deb,
             previous_deb_arg=args.previous_deb,
+            previous_manifest_arg=args.previous_manifest,
             build_manifest_arg=args.build_manifest,
             policy_arg=args.policy,
         )

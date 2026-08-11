@@ -11,7 +11,6 @@ import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
@@ -75,6 +74,34 @@ class CertificationSetV1Tests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        self.previous_deb = self.root / "taiji-agent_1.2.2_amd64.deb"
+        self.previous_deb.write_bytes(b"immutable-n-minus-one-deb")
+        self.previous_deb_sha = hashlib.sha256(self.previous_deb.read_bytes()).hexdigest()
+        self.previous_checksum = self.root / f"{self.previous_deb.name}.sha256"
+        self.previous_checksum.write_text(
+            f"{self.previous_deb_sha}  {self.previous_deb.name}\n",
+            encoding="ascii",
+        )
+        self.previous_manifest = self.root / "previous-release-manifest.json"
+        self.previous_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-package-manifest/v3",
+                    "package": "taiji-agent",
+                    "version": "1.2.2",
+                    "architecture": "amd64",
+                    "source_commit": "8" * 40,
+                    "deb_basename": self.previous_deb.name,
+                    "deb_sha256": self.previous_deb_sha,
+                    "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                    "compatibility_policy_sha256": self.policy_sha,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stable_data_hash = "7" * 64
         self.offline = self.root / "offline-install-rehearsal.json"
         self.offline.write_text(
             json.dumps(
@@ -102,6 +129,67 @@ class CertificationSetV1Tests(unittest.TestCase):
                     "target_verified": False,
                     "log_basename": self.offline_log.name,
                     "log_sha256": hashlib.sha256(self.offline_log.read_bytes()).hexdigest(),
+                    "steps": [
+                        "fresh_install_n",
+                        "same_version_reinstall_n",
+                        "seed_n_minus_one",
+                        "upgrade_n_minus_one_to_n",
+                        "data_manifest_after_upgrade",
+                        "inject_postinst_failure_same_candidate",
+                        "automatic_rollback_to_n_minus_one",
+                        "upgrade_n_again",
+                        "remove_preserves_user_data",
+                        "purge_clears_root_state_only",
+                    ],
+                    "receipts": [
+                        {
+                            "operation": operation,
+                            "result": "PASS",
+                            "state": "committed",
+                            "transaction_id": f"tx-{index}",
+                            "deb_sha256": self.deb_sha,
+                            "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                            "compatibility_policy_sha256": self.policy_sha,
+                            "network": "none",
+                        }
+                        for index, operation in enumerate(
+                            ["fresh_install", "reinstall", "upgrade", "rollback", "upgrade_again"],
+                            start=1,
+                        )
+                    ],
+                    "data_manifests": {
+                        "before_upgrade": stable_data_hash,
+                        "after_upgrade": stable_data_hash,
+                        "after_rollback": stable_data_hash,
+                        "after_remove": stable_data_hash,
+                        "after_purge": stable_data_hash,
+                    },
+                    "journal": {
+                        "upgrade_transaction_id": "tx-upgrade",
+                        "rollback_transaction_id": "tx-rollback",
+                        "second_upgrade_transaction_id": "tx-upgrade-again",
+                        "resume": "verified",
+                        "power_loss_resume_checked": True,
+                        "partial_journal_treated_as_committed": False,
+                        "partial_journal_result": "manual_recovery_required",
+                        "manual_recovery_required": False,
+                    },
+                    "package_actions": [
+                        {"command": command, "package": "taiji-agent", "network": "none", "download": False}
+                        for command in ("dpkg --install", "dpkg --remove", "dpkg --purge")
+                    ],
+                    "previous_release": {
+                        "source_commit": "8" * 40,
+                        "version": "1.2.2",
+                        "deb_basename": self.previous_deb.name,
+                        "deb_sha256": self.previous_deb_sha,
+                        "checksum_basename": self.previous_checksum.name,
+                        "checksum_sha256": hashlib.sha256(self.previous_checksum.read_bytes()).hexdigest(),
+                        "manifest_basename": self.previous_manifest.name,
+                        "manifest_sha256": hashlib.sha256(self.previous_manifest.read_bytes()).hexdigest(),
+                        "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                        "compatibility_policy_sha256": self.policy_sha,
+                    },
                 },
                 sort_keys=True,
             ) + "\n",
@@ -109,15 +197,31 @@ class CertificationSetV1Tests(unittest.TestCase):
         )
         self.matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
         self.positive_checks = {
+            "preflight": "PASS",
             "visible_first_configuration_completion": "PASS",
             "desktop_launch": "PASS",
             "real_model_conversation": "PASS",
             "attachment_flow": "PASS",
             "diagnostic_export": "PASS",
+            "model_configuration_state_consistent": "PASS",
             "install": "PASS",
-            "uninstall": "PASS",
-            "reinstall": "PASS",
             "window_close_exit": "PASS",
+            "three_restart_cycles": "PASS",
+            "second_instance_focus": "PASS",
+            "no_new_electron_core": "PASS",
+        }
+        self.positive_attachment_payloads = {
+            basename: ("evidence:" + basename).encode("utf-8")
+            for basename in {
+                "target-verification.json",
+                "environment-observation.json",
+                "single-deb-install-observation.json",
+                "single-deb-install-method-attestation.json",
+                "single-deb-graphical-installer.png",
+                "desktop-driver-result.json",
+                "desktop-app.png",
+                "taiji-support-bundle.json",
+            }
         }
         self._write_records()
         self.output = self.root / "certification"
@@ -152,8 +256,152 @@ class CertificationSetV1Tests(unittest.TestCase):
     ):
         directory = self.records / category_id
         directory.mkdir(mode=0o700, exist_ok=True)
+        attachments = []
+        if category_kind == "positive":
+            for basename, payload in sorted(self.positive_attachment_payloads.items()):
+                (directory / basename).write_bytes(payload)
+                attachments.append(
+                    {"basename": basename, "sha256": hashlib.sha256(payload).hexdigest()}
+                )
+        else:
+            boundary = next(
+                item for item in self.matrix["negative_boundaries"] if item["id"] == category_id
+            )
+            preflight_payload = (
+                json.dumps(
+                    {
+                        "schema": "taiji-install-preflight/v1",
+                        "status": "BLOCKED",
+                        "policy_id": "taiji-linux-amd64-deb-v1",
+                        "compatibility_policy_sha256": self.policy_sha,
+                        "error_code": boundary["stable_error_code"],
+                        "reason_zh": "受控负向边界预检阻断",
+                        "failed_capabilities": [boundary["stable_error_code"]],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+            (directory / "preflight-result.json").write_bytes(preflight_payload)
+            preflight_sha = hashlib.sha256(preflight_payload).hexdigest()
+            attachments.append(
+                {"basename": "preflight-result.json", "sha256": preflight_sha}
+            )
+            protected_paths = [
+                "home/customer/.config/taiji-agent",
+                "home/customer/.config/taiji-agent-desktop",
+                "home/customer/.local/share/taiji-agent",
+                "home/customer/.local/share/taiji-agent-desktop",
+                "home/customer/.local/state/taiji-agent",
+                "home/customer/.local/state/taiji-agent-desktop",
+                "home/customer/.cache/taiji-agent",
+                "home/customer/.cache/taiji-agent-desktop",
+                "opt/taiji-agent",
+            ]
+            inventory_entries = [
+                {"path": path, "sha256": hashlib.sha256(path.encode("utf-8")).hexdigest()}
+                for path in protected_paths
+            ]
+            inventory_payload = (
+                json.dumps(
+                    {
+                        "schema": "taiji-business-data-inventory/v1",
+                        "scope_id": "taiji-user-and-install-state-v1",
+                        "protected_paths": protected_paths,
+                        "before": inventory_entries,
+                        "after": inventory_entries,
+                        "unchanged": True,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n"
+            ).encode("utf-8")
+            inventory_path = directory / "business-data-inventory.json"
+            inventory_path.write_bytes(inventory_payload)
+            inventory_sha = hashlib.sha256(inventory_payload).hexdigest()
+            aggregate_payload = (
+                json.dumps(
+                    {"entries": inventory_entries},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n"
+            ).encode("utf-8")
+            aggregate_sha = hashlib.sha256(aggregate_payload).hexdigest()
+            attachments.append(
+                {"basename": inventory_path.name, "sha256": inventory_sha}
+            )
+            security_facts = {
+                "business_data_mutation": False,
+                "business_data_before_sha256": aggregate_sha,
+                "business_data_after_sha256": aggregate_sha,
+                "business_data_scope_id": "taiji-user-and-install-state-v1",
+                "business_data_inventory_sha256": inventory_sha,
+                "boundary": boundary["boundary"],
+                "observed_value": "controlled-negative-value",
+                "stable_error_code": boundary["stable_error_code"],
+                "execution_environment": "controlled-root-fixture-v1",
+                "preflight_result_sha256": preflight_sha,
+            }
+        acceptance_session_id = self.session_id
+        machine_fingerprint_sha256 = "f" * 64
+        machine_identity_commitment_sha256 = None
+        os_version = "controlled-negative-fixture-v1"
+        if category_kind == "positive":
+            category = next(
+                item for item in self.matrix["positive_categories"] if item["id"] == category_id
+            )
+            profile = category["platform_profile"]
+            release_id = {
+                "kylin-min-ukui": "2403",
+                "kylin-current-standard": "2503",
+                "kylin-hardened": "2503",
+                "uos-min-dde": "1070u2",
+                "uos-current-or-hardened": "25",
+                "openkylin-current": "2.0-SP2",
+            }[category_id]
+            os_id = profile["os_id"]
+            os_version = f'{profile["version_id"]}/{release_id}'
+            desktop_environment = profile["desktop_environments"][0]
+            hardened = category_id == "kylin-hardened"
+            security_facts = {
+                "administrator_available": True,
+                "business_data_mutation": False,
+                "graphical_desktop": True,
+                "network_observation": "continuous-process-sampling-no-non-loopback-up",
+                "package_manager": "dpkg",
+                "security_profile": profile["security_profile"],
+                "kysec_detected": hardened,
+                "kysec_enabled": hardened,
+                "kysec_exec_control": "off" if hardened else "not-present",
+                "os_release_sha256": hashlib.sha256(
+                    ("os-release\0" + category_id).encode("utf-8")
+                ).hexdigest(),
+                "os_version_sha256": (
+                    hashlib.sha256(("os-version\0" + category_id).encode("utf-8")).hexdigest()
+                    if os_id == "uos"
+                    else "not-present"
+                ),
+            }
+            acceptance_session_id = hashlib.sha256(
+                ("session\0" + category_id).encode("utf-8")
+            ).hexdigest()[:32]
+            machine_identity_commitment_sha256 = hashlib.sha256(
+                ("taiji-machine-identity-v1\0" + category_id).encode("utf-8")
+            ).hexdigest()
+            machine_fingerprint_sha256 = hashlib.sha256(
+                (
+                    self.challenge
+                    + "\0"
+                    + machine_identity_commitment_sha256
+                ).encode("utf-8")
+            ).hexdigest()
         record = {
-            "schema": "taiji-linux-environment-evidence/v1",
+            "schema": "taiji-linux-environment-evidence/v2",
             "category_id": category_id,
             "category_kind": category_kind,
             "compatibility": compatibility,
@@ -165,12 +413,19 @@ class CertificationSetV1Tests(unittest.TestCase):
             "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
             "compatibility_policy_sha256": self.policy_sha,
             "os_id": os_id,
-            "os_version": "V10",
+            "os_version": os_version,
             "desktop_environment": desktop_environment,
             "security_facts": security_facts or {"business_data_mutation": False, "graphical_desktop": True},
             "checks": checks,
-            "attachments": [],
+            "attachments": attachments,
+            "challenge_nonce": self.challenge,
+            "acceptance_session_id": acceptance_session_id,
+            "machine_fingerprint_sha256": machine_fingerprint_sha256,
         }
+        if machine_identity_commitment_sha256 is not None:
+            record["machine_identity_commitment_sha256"] = (
+                machine_identity_commitment_sha256
+            )
         (directory / "environment-evidence.json").write_text(
             json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -250,6 +505,46 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("exactly", result.stderr.lower())
 
+    def test_certification_challenge_binds_every_record_and_positive_targets_are_distinct(self):
+        for category in self.matrix["positive_categories"] + self.matrix["negative_boundaries"]:
+            record_path = self.records / category["id"] / "environment-evidence.json"
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["challenge_nonce"] = "d" * 64
+            if record["category_kind"] == "positive":
+                record["machine_fingerprint_sha256"] = hashlib.sha256(
+                    (
+                        record["challenge_nonce"]
+                        + "\0"
+                        + record["machine_identity_commitment_sha256"]
+                    ).encode("utf-8")
+                ).hexdigest()
+            record_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+        result = self.command()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("challenge", result.stderr.lower())
+
+        self.tearDown()
+        self.setUp()
+        first, second = self.matrix["positive_categories"][:2]
+        first_path = self.records / first["id"] / "environment-evidence.json"
+        second_path = self.records / second["id"] / "environment-evidence.json"
+        first_record = json.loads(first_path.read_text(encoding="utf-8"))
+        second_record = json.loads(second_path.read_text(encoding="utf-8"))
+        second_record["machine_identity_commitment_sha256"] = first_record[
+            "machine_identity_commitment_sha256"
+        ]
+        second_record["machine_fingerprint_sha256"] = hashlib.sha256(
+            (
+                second_record["challenge_nonce"]
+                + "\0"
+                + second_record["machine_identity_commitment_sha256"]
+            ).encode("utf-8")
+        ).hexdigest()
+        second_path.write_text(json.dumps(second_record, sort_keys=True) + "\n", encoding="utf-8")
+        result = self.command()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("machine", result.stderr.lower())
+
     def test_mixed_deb_hash_and_binding_drift_are_rejected(self):
         path = self.records / "kylin-min-ukui" / "environment-evidence.json"
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -293,7 +588,7 @@ class CertificationSetV1Tests(unittest.TestCase):
             "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
             "compatibility_policy_sha256": self.policy_sha,
             "certification_profile": {
-                "matrix_schema": "taiji-linux-certification-matrix/v1",
+                "matrix_schema": "taiji-linux-certification-matrix/v2",
                 "matrix_sha256": matrix_sha,
                 "positive_category_count": 6,
                 "negative_boundary_count": 6,
@@ -394,6 +689,24 @@ class CertificationSetV1Tests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("offline", result.stderr.lower())
+
+    def test_quick_offline_rehearsal_cannot_enter_formal_certification(self):
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        for key in (
+            "steps",
+            "receipts",
+            "data_manifests",
+            "journal",
+            "package_actions",
+            "previous_release",
+        ):
+            evidence.pop(key)
+        self.offline.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("N-1", result.stderr)
 
     def test_unknown_current_v1_offline_evidence_field_is_rejected(self):
         evidence = json.loads(self.offline.read_text(encoding="utf-8"))
@@ -509,7 +822,26 @@ class CertificationSetV1Tests(unittest.TestCase):
         self._write_record("kylin-min-ukui", "positive", "COMPATIBLE", {"install": "FAIL"})
         result = self.command()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("PASS", result.stderr)
+        self.assertIn("successful target checks", result.stderr)
+
+    def test_negative_raw_preflight_must_match_matrix_error_code(self):
+        directory = self.records / "arm-blocked"
+        preflight_path = directory / "preflight-result.json"
+        payload = json.loads(preflight_path.read_text(encoding="utf-8"))
+        payload["error_code"] = "TAIJI-LINUX-E999-FORGED"
+        payload["failed_capabilities"] = [payload["error_code"]]
+        preflight_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        preflight_sha = hashlib.sha256(preflight_path.read_bytes()).hexdigest()
+        record_path = directory / "environment-evidence.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record["attachments"][0]["sha256"] = preflight_sha
+        record["security_facts"]["preflight_result_sha256"] = preflight_sha
+        record_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("preflight", result.stderr.lower())
 
     def test_path_escape_symlink_hardlink_attachment_and_existing_output_fail(self):
         path = self.records / "kylin-min-ukui" / "environment-evidence.json"

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,31 @@ VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
 DEB_RE = re.compile(r"^taiji-agent_[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}_amd64\.deb$")
 MAX_JSON_BYTES = 1024 * 1024
 MAX_SIGNATURE_BYTES = 1024 * 1024
+CI_SCHEMA = "taiji-github-ci-evidence/v1"
+CI_EVIDENCE_KEYS = {
+    "schema",
+    "provider",
+    "repository",
+    "workflow_name",
+    "required_check_name",
+    "run_id",
+    "run_attempt",
+    "event",
+    "status",
+    "conclusion",
+    "head_sha",
+    "html_url",
+    "completed_at_utc",
+    "collected_at_utc",
+}
+FORMAL_GATES = {
+    "candidate_deb_unchanged": "PASS",
+    "canonical_policy": "PASS",
+    "certification_set": "PASS",
+    "certification_signature": "PASS",
+    "github_ci_gate": "PASS",
+    "manifest_binding": "PASS",
+}
 
 
 class ReleaseEvidenceError(ValueError):
@@ -129,6 +155,73 @@ def _canonical_policy(path: Path) -> tuple[str, str]:
         return loaded["policy_id"], helper.canonical_sha256(loaded)
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise ReleaseEvidenceError("compatibility policy is not canonical") from exc
+
+
+def _parse_ci_timestamp(value: Any, label: str) -> datetime:
+    if type(value) is not str or not value.endswith("Z"):
+        raise ReleaseEvidenceError(f"CI {label} must be a UTC ISO8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ReleaseEvidenceError(f"CI {label} must be a UTC ISO8601 timestamp") from exc
+    now = datetime.now(timezone.utc)
+    if parsed > now:
+        raise ReleaseEvidenceError(f"CI {label} cannot be in the future")
+    return parsed
+
+
+def _validate_ci_evidence(
+    path: Path,
+    *,
+    source_commit: str,
+    output_parent: Path,
+) -> tuple[dict[str, Any], str]:
+    if path.name != "github-ci-evidence.json" or path.parent.resolve() != output_parent.resolve():
+        raise ReleaseEvidenceError("CI evidence must be github-ci-evidence.json beside the release evidence output")
+    data, payload = _load_json(path, "GitHub CI evidence")
+    if set(data) != CI_EVIDENCE_KEYS:
+        raise ReleaseEvidenceError("CI evidence has an invalid exact field set")
+    required = {
+        "schema": CI_SCHEMA,
+        "provider": "github-actions",
+        "workflow_name": "Pull Request CI",
+        "required_check_name": "CI Gate",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": source_commit,
+    }
+    for key, expected in required.items():
+        if data.get(key) != expected:
+            raise ReleaseEvidenceError(f"CI {key} does not match the frozen release contract")
+    repository = _require_text(
+        data.get("repository"),
+        "CI repository",
+        re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"),
+    )
+    if data.get("event") not in {"pull_request", "push", "workflow_dispatch"}:
+        raise ReleaseEvidenceError("CI event is not an approved GitHub Actions trigger")
+    for key in ("run_id", "run_attempt"):
+        value = data.get(key)
+        if type(value) is not int or value <= 0:
+            raise ReleaseEvidenceError(f"CI {key} must be a positive integer")
+    completed = _parse_ci_timestamp(data.get("completed_at_utc"), "completed_at_utc")
+    collected = _parse_ci_timestamp(data.get("collected_at_utc"), "collected_at_utc")
+    if collected < completed:
+        raise ReleaseEvidenceError("CI collected_at_utc cannot precede completed_at_utc")
+    url = urlsplit(_require_text(data.get("html_url"), "CI html_url"))
+    expected_path = f"/{repository}/actions/runs/{data['run_id']}"
+    if (
+        url.scheme != "https"
+        or url.hostname != "github.com"
+        or url.username is not None
+        or url.password is not None
+        or url.port is not None
+        or url.path != expected_path
+        or url.query
+        or url.fragment
+    ):
+        raise ReleaseEvidenceError("CI html_url is not the exact GitHub Actions run URL")
+    return data, hashlib.sha256(payload).hexdigest()
 
 
 def _verify_signature(payload_path: Path, signature_path: Path) -> str:
@@ -292,6 +385,11 @@ def assemble(args: argparse.Namespace) -> Path:
     if deb_hash_after != deb_hash_before:
         raise ReleaseEvidenceError("candidate DEB changed while assembling publication evidence")
     certification_hash = _sha(args.certification_set, "certification set")
+    _ci_data, ci_evidence_hash = _validate_ci_evidence(
+        args.ci_evidence,
+        source_commit=source_commit,
+        output_parent=args.output.parent,
+    )
     generated = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     evidence = {
         "schema": SCHEMA,
@@ -309,17 +407,13 @@ def assemble(args: argparse.Namespace) -> Path:
         "certification_set_sha256": certification_hash,
         "certification_set_signature_basename": args.certification_signature.name,
         "certification_set_signature_sha256": certification_signature_hash,
+        "ci_evidence_basename": args.ci_evidence.name,
+        "ci_evidence_sha256": ci_evidence_hash,
         "maintainer": _require_text(manifest.get("maintainer"), "manifest maintainer"),
         "customer_filename": deb_basename,
         "customer_folder_contract": "exactly-one-deb",
         "signing_public_key_fingerprint": PUBLIC_KEY_FINGERPRINT,
-        "formal_gates": {
-            "candidate_deb_unchanged": "PASS",
-            "canonical_policy": "PASS",
-            "certification_set": "PASS",
-            "certification_signature": "PASS",
-            "manifest_binding": "PASS",
-        },
+        "formal_gates": dict(FORMAL_GATES),
     }
     payload = (json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
     _write_new(args.output, payload)
@@ -333,6 +427,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--certification-set", required=True, type=Path)
     parser.add_argument("--certification-signature", required=True, type=Path)
+    parser.add_argument("--ci-evidence", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--challenge", required=True)
     return parser.parse_args(argv)

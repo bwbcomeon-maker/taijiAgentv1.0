@@ -18,6 +18,7 @@ SUITES = ("root", "desktop", "docx", "agent", "webui")
 LINUX_PACKAGING_PREFIXES = (
     "packaging/linux/",
     "scripts/taiji-",
+    "scripts/produce-taiji-",
     "scripts/assemble-taiji-",
     "scripts/sign-taiji-",
     "scripts/validate-taiji-",

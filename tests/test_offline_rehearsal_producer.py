@@ -153,7 +153,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             "# fixture pre-install observer\n", encoding="utf-8"
         )
         (acceptance_tools / "certification-matrix.json").write_text(
-            "{\"schema\":\"taiji-linux-certification-matrix/v1\"}\n", encoding="utf-8"
+            "{\"schema\":\"taiji-linux-certification-matrix/v2\"}\n", encoding="utf-8"
         )
         (acceptance_tools / "assemble-taiji-certification-set.py").write_text(
             "# fixture certification set assembler\n", encoding="utf-8"
@@ -449,8 +449,10 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         mode: str = "expanded_success",
         *,
         previous: Path | None = None,
+        previous_manifest: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         previous = previous or self._write_previous_release()
+        previous_manifest = previous_manifest or previous.parent / "taiji-package-manifest.json"
         env = os.environ.copy()
         env.update(
             {
@@ -470,6 +472,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 str(candidate),
                 "--previous-deb",
                 str(previous),
+                "--previous-manifest",
+                str(previous_manifest),
                 "--build-manifest",
                 str(package_dir / "taiji-package-manifest.json"),
                 "--policy",
@@ -534,6 +538,26 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         previous.write_bytes(b"previous deb fixture\n")
         (previous.parent / f"{previous.name}.sha256").write_text(
             f"{sha256(previous)}  {previous.name}\n", encoding="utf-8"
+        )
+        policy_helper = load_module(POLICY_HELPER, "taiji_policy_previous_fixture")
+        policy = policy_helper.load_and_validate(ROOT / "packaging/linux/compatibility-policy.json")
+        (previous.parent / "taiji-package-manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-package-manifest/v3",
+                    "package": "taiji-agent",
+                    "version": "0.0.9",
+                    "architecture": "amd64",
+                    "source_commit": "8" * 40,
+                    "deb_basename": previous.name,
+                    "deb_sha256": sha256(previous),
+                    "compatibility_policy_id": policy["policy_id"],
+                    "compatibility_policy_sha256": policy_helper.canonical_sha256(policy),
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         return previous
 
@@ -742,17 +766,19 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertIn("offline-rehearsal-valid", validation.stdout)
 
         assembler = load_module(CERTIFICATION_ASSEMBLER, "taiji_offline_rehearsal_assembler_test")
-        accepted, accepted_sha = assembler._validate_offline_evidence(
-            evidence_path,
-            source_commit=self.source_commit,
-            version="0.1.0",
-            deb_basename=evidence["deb_basename"],
-            deb_sha256=evidence["deb_sha256"],
-            policy_id=self.policy_id,
-            policy_sha256=self.policy_sha256,
-        )
-        self.assertEqual(accepted, evidence)
-        self.assertEqual(accepted_sha, sha256(evidence_path))
+        with self.assertRaisesRegex(
+            assembler.CertificationSetError,
+            "N-1",
+        ):
+            assembler._validate_offline_evidence(
+                evidence_path,
+                source_commit=self.source_commit,
+                version="0.1.0",
+                deb_basename=evidence["deb_basename"],
+                deb_sha256=evidence["deb_sha256"],
+                policy_id=self.policy_id,
+                policy_sha256=self.policy_sha256,
+            )
 
         calls = self.docker_calls()
         create = next(call for call in calls if call and call[0] == "create")
@@ -931,6 +957,50 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 "purge_clears_root_state_only",
             ],
         )
+
+    def test_expanded_evidence_archives_and_binds_previous_release_identity(self):
+        previous = self._write_previous_release()
+        previous_manifest = previous.parent / "taiji-package-manifest.json"
+        result = self.run_producer_explicit(
+            previous=previous,
+            previous_manifest=previous_manifest,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads((self.output / "offline-install-rehearsal.json").read_text(encoding="utf-8"))
+        identity = evidence["previous_release"]
+        self.assertEqual(identity["source_commit"], "8" * 40)
+        self.assertEqual(identity["version"], "0.0.9")
+        self.assertEqual(identity["deb_sha256"], sha256(previous))
+        self.assertEqual(identity["manifest_sha256"], sha256(previous_manifest))
+        for key in ("deb_basename", "checksum_basename", "manifest_basename"):
+            archived = self.output / identity[key]
+            self.assertTrue(archived.is_file(), key)
+            self.assertFalse(archived.is_symlink(), key)
+
+    def test_current_validator_rejects_tampered_archived_previous_release(self):
+        result = self.run_producer_explicit()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads(
+            (self.output / "offline-install-rehearsal.json").read_text(encoding="utf-8")
+        )
+        archived_previous = self.output / evidence["previous_release"]["deb_basename"]
+        archived_previous.write_bytes(archived_previous.read_bytes() + b"tampered\n")
+
+        validation = self.run_current_offline_validator()
+
+        self.assertNotEqual(validation.returncode, 0)
+        self.assertIn("deb_sha256", validation.stderr)
+
+    def test_missing_previous_manifest_blocks_expanded_rehearsal(self):
+        previous = self._write_previous_release()
+        missing_manifest = previous.parent / "missing-manifest.json"
+        result = self.run_producer_explicit(
+            previous=previous,
+            previous_manifest=missing_manifest,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("previous", (result.stdout + result.stderr).lower())
+        self.assertFalse(self.output.exists())
 
     def test_postinst_failure_injection_uses_same_candidate_deb_bytes(self):
         lifecycle = LIFECYCLE.read_text(encoding="utf-8")

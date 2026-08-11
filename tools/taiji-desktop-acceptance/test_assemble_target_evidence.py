@@ -47,6 +47,10 @@ DRIVER_KEYS = {
     "web_pid",
     "screenshot_basename",
     "diagnostic_basename",
+    "restart_rounds",
+    "persistent_user_data",
+    "core_observation",
+    "model_config_observation",
     "checks",
     "js_error_count",
     "unexpected_http_failures",
@@ -273,8 +277,35 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             )
 
     def driver_payload(self) -> dict[str, object]:
+        restart_rounds = [
+            {
+                "round": round_number,
+                "ready": True,
+                "electron_pid": 4242 + ((round_number - 1) * 10),
+                "agent_pid": 4243 + ((round_number - 1) * 10),
+                "web_pid": 4244 + ((round_number - 1) * 10),
+                "secondary_pid": 4245 + ((round_number - 1) * 10),
+                "cdp_port": 19222 + round_number - 1,
+                "webui_port": 18787 + round_number - 1,
+                "second_instance_exit_code": 0,
+                "electron_exit_code": 0,
+                "restored_and_focused": True,
+                "page_close_sent": True,
+                "process_identities_gone": {
+                    "electron": True,
+                    "agent": True,
+                    "webui": True,
+                    "secondary": True,
+                },
+                "ports_closed": {"cdp": True, "webui": True},
+                "pidfiles_absent": True,
+                "model_config_observed": True,
+                "profile_continuity_observed": True,
+            }
+            for round_number in range(1, 4)
+        ]
         payload = {
-            "schema": "taiji.desktop.acceptance-driver.v1",
+            "schema": "taiji.desktop.acceptance-driver.v2",
             "acceptance_session_id": self.session_id,
             "challenge_nonce": self.challenge,
             "electron_pid": 4242,
@@ -297,6 +328,36 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             "web_pid": 4244,
             "screenshot_basename": self.screenshot.name,
             "diagnostic_basename": self.diagnostic.name,
+            "restart_rounds": restart_rounds,
+            "persistent_user_data": {
+                "mode": "electron-default-persistent",
+                "restart_rounds": 3,
+                "user_data_override": False,
+                "profile_reset": False,
+                "environment_reused": True,
+                "continuity_observed_rounds": 3,
+                "continuity_token": "8" * 64,
+            },
+            "core_observation": {
+                "status": "verified",
+                "mechanism": "journalctl-json-user-electron",
+                "baseline_entry_count": 0,
+                "baseline_cursor_set_token": "9" * 64,
+                "rounds": [
+                    {
+                        "round": round_number,
+                        "status": "verified",
+                        "added_entry_count": 0,
+                        "cursor_set_token": format(round_number, "x") * 64,
+                    }
+                    for round_number in range(1, 4)
+                ],
+            },
+            "model_config_observation": {
+                "observed_rounds": 3,
+                "consistent": True,
+                "public_projection_token": "a" * 64,
+            },
             "checks": {
                 "visible_first_configuration_completion": True,
                 "desktop_launch": True,
@@ -304,6 +365,10 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
                 "attachment_flow": True,
                 "window_close_exit": True,
                 "diagnostic_export": True,
+                "three_restart_cycles": True,
+                "second_instance_focus": True,
+                "model_configuration_state_consistent": True,
+                "no_new_electron_core": True,
             },
             "js_error_count": 0,
             "unexpected_http_failures": 0,

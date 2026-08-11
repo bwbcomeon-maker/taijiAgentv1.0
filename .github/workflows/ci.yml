@@ -74,6 +74,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
@@ -85,6 +88,7 @@ jobs:
             packaging/linux/deb/prerm \
             packaging/linux/deb/postrm \
             packaging/linux/deb/publish-single-deb.sh \
+            packaging/linux/bin/taiji-agent-acceptance \
             scripts/sign-taiji-release-evidence.sh \
             scripts/taiji-release-check.sh \
             taijiagent\ 打包交付/00_制包机_生成离线交付包.sh \
@@ -98,12 +102,34 @@ jobs:
             tests.test_compatibility_policy_preinst \
             tests.test_linux_elf_abi_closure \
             tests.test_unified_deb_build_contract \
+            tests.test_acceptance_tools_integrity \
+            tests.test_installed_acceptance_trust_anchor \
             tests.test_certification_matrix_contract \
             tests.test_certification_set_v1 \
+            tests.test_environment_evidence_v2_contract \
+            tests.test_github_ci_evidence_producer \
+            tests.test_linux_desktop_packaging_static \
+            tests.test_linux_electron_runtime_staging \
+            tests.test_negative_boundary_evidence_producer \
+            tests.test_offline_rehearsal_producer \
             tests.test_release_evidence_assembler_v3 \
+            tests.test_release_evidence_schema_v3 \
             tests.test_release_check_v3 \
             tests.test_single_deb_publisher_gate \
-            tests.test_single_deb_sales_contract
+            tests.test_single_deb_sales_contract \
+            tests.test_strict_build_toolchain_contract \
+            tests.test_target_desktop_acceptance_producer \
+            tests.test_target_evidence_v2_contract
+      - name: Run installed Electron acceptance evidence contracts
+        run: |
+          node --test tools/taiji-desktop-acceptance/run-installed-electron-acceptance.test.js
+          python -B tools/taiji-desktop-acceptance/test_assemble_target_evidence.py
+          python -B tools/taiji-desktop-acceptance/test_observe_single_deb_install.py
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.8'
+      - name: Execute Kylin Python 3.8 packaging compatibility gate
+        run: python tests/python38_linux_packaging_gate.py
       - name: Check packaging diff
         run: git diff --check
 

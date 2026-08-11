@@ -161,6 +161,19 @@ OFFLINE_V1_LIFECYCLE_KEYS = {
     "data_manifests",
     "journal",
     "package_actions",
+    "previous_release",
+}
+OFFLINE_PREVIOUS_RELEASE_KEYS = {
+    "source_commit",
+    "version",
+    "deb_basename",
+    "deb_sha256",
+    "checksum_basename",
+    "checksum_sha256",
+    "manifest_basename",
+    "manifest_sha256",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
 }
 OFFLINE_LIFECYCLE_STEPS = [
     "fresh_install_n",
@@ -1277,10 +1290,16 @@ def validate_offline_session(data: dict[str, Any], session: dict[str, Any], args
 
 
 def validate_offline_lifecycle_extensions(
-    data: dict[str, Any], binding: BuildBinding
+    data: dict[str, Any],
+    binding: BuildBinding,
+    evidence_path: Path,
+    *,
+    required: bool = False,
 ) -> None:
     present = OFFLINE_V1_LIFECYCLE_KEYS.intersection(data)
     if not present:
+        if required:
+            raise EvidenceError("正式认证要求完整 N-1 升级、回滚、卸载和重装生命周期证据")
         return
     if present != OFFLINE_V1_LIFECYCLE_KEYS:
         missing = sorted(OFFLINE_V1_LIFECYCLE_KEYS - present)
@@ -1386,6 +1405,77 @@ def validate_offline_lifecycle_extensions(
     if commands != {"dpkg --install", "dpkg --remove", "dpkg --purge"}:
         raise EvidenceError("扩展离线生命周期 package_actions 未覆盖 install/remove/purge")
 
+    previous = data["previous_release"]
+    if type(previous) is not dict:
+        raise EvidenceError("扩展离线生命周期 previous_release 必须是 object")
+    require_exact_keys(
+        previous,
+        OFFLINE_PREVIOUS_RELEASE_KEYS,
+        "扩展离线生命周期 previous_release",
+    )
+    previous_source_commit = require_nonempty_string(previous, "source_commit")
+    if not re.fullmatch(r"[0-9a-f]{40}", previous_source_commit):
+        raise EvidenceError("previous_release.source_commit 必须是 40 位小写 Git commit")
+    previous_version = require_nonempty_string(previous, "version")
+    if previous_version == binding.version:
+        raise EvidenceError("previous_release.version 必须不同于当前候选版本")
+    previous_policy_id = require_nonempty_string(previous, "compatibility_policy_id")
+    previous_policy_sha256 = validate_sha256(
+        previous["compatibility_policy_sha256"],
+        "previous_release.compatibility_policy_sha256",
+    )
+
+    previous_deb_path, previous_deb_payload, _ = validate_bound_file(
+        previous,
+        evidence_path,
+        "deb_basename",
+        "deb_sha256",
+        "N-1 DEB",
+    )
+    _, checksum_payload, _ = validate_bound_file(
+        previous,
+        evidence_path,
+        "checksum_basename",
+        "checksum_sha256",
+        "N-1 DEB SHA256 sidecar",
+    )
+    try:
+        checksum_text = checksum_payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError("N-1 DEB SHA256 sidecar 必须是 ASCII") from exc
+    checksum_match = re.fullmatch(
+        r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?",
+        checksum_text,
+    )
+    previous_deb_sha256 = hashlib.sha256(previous_deb_payload).hexdigest()
+    if (
+        checksum_match is None
+        or checksum_match.group(1) != previous_deb_sha256
+        or checksum_match.group(2) != previous_deb_path.name
+    ):
+        raise EvidenceError("N-1 DEB SHA256 sidecar 未准确绑定归档 DEB")
+
+    _, manifest_payload, _ = validate_bound_file(
+        previous,
+        evidence_path,
+        "manifest_basename",
+        "manifest_sha256",
+        "N-1 发布 manifest",
+    )
+    manifest = parse_json_bytes(manifest_payload, "N-1 发布 manifest")
+    for key, expected in {
+        "schema": PACKAGE_MANIFEST_SCHEMA_V3,
+        "package": "taiji-agent",
+        "version": previous_version,
+        "architecture": "amd64",
+        "source_commit": previous_source_commit,
+        "deb_basename": previous_deb_path.name,
+        "deb_sha256": previous_deb_sha256,
+        "compatibility_policy_id": previous_policy_id,
+        "compatibility_policy_sha256": previous_policy_sha256,
+    }.items():
+        require_exact(manifest, key, expected)
+
 
 def validate_offline_evidence_v1(
     data: dict[str, Any],
@@ -1464,7 +1554,7 @@ def validate_offline_evidence_v1(
         parse_json_bytes(log_payload, "离线演练结构化会话"),
         args,
     )
-    validate_offline_lifecycle_extensions(data, binding)
+    validate_offline_lifecycle_extensions(data, binding, evidence_path)
 
 
 def validate_offline(
@@ -2063,11 +2153,37 @@ RELEASE_EVIDENCE_V3_KEYS = {
     "certification_set_sha256",
     "certification_set_signature_basename",
     "certification_set_signature_sha256",
+    "ci_evidence_basename",
+    "ci_evidence_sha256",
     "maintainer",
     "customer_filename",
     "customer_folder_contract",
     "signing_public_key_fingerprint",
     "formal_gates",
+}
+CI_EVIDENCE_KEYS = {
+    "schema",
+    "provider",
+    "repository",
+    "workflow_name",
+    "required_check_name",
+    "run_id",
+    "run_attempt",
+    "event",
+    "status",
+    "conclusion",
+    "head_sha",
+    "html_url",
+    "completed_at_utc",
+    "collected_at_utc",
+}
+RELEASE_FORMAL_GATES = {
+    "candidate_deb_unchanged": "PASS",
+    "canonical_policy": "PASS",
+    "certification_set": "PASS",
+    "certification_signature": "PASS",
+    "github_ci_gate": "PASS",
+    "manifest_binding": "PASS",
 }
 
 CERTIFICATION_SET_SCHEMA_V1 = "taiji-linux-certification-set/v1"
@@ -2134,7 +2250,7 @@ def validate_certification_set_v1(
         "matrix_schema", "matrix_sha256", "positive_category_count", "negative_boundary_count"
     }:
         raise EvidenceError("认证集 certification_profile 字段集合不合法")
-    require_exact(profile, "matrix_schema", "taiji-linux-certification-matrix/v1")
+    require_exact(profile, "matrix_schema", "taiji-linux-certification-matrix/v2")
     validate_sha256(profile["matrix_sha256"], "认证集 matrix_sha256")
     if profile["positive_category_count"] != 6 or profile["negative_boundary_count"] != 6:
         raise EvidenceError("认证集 certification_profile 必须覆盖六正六负类别")
@@ -2169,7 +2285,7 @@ def validate_certification_set_v1(
     if not _safe_record_root.is_dir() or _safe_record_root.is_symlink():
         raise EvidenceError("认证集 records 目录缺失或不安全")
 
-    def validate_summary(item: Any, expected_kind: str, expected_compatibility: str) -> None:
+    def validate_summary(item: Any, expected_kind: str, expected_compatibility: str) -> dict[str, Any]:
         if type(item) is not dict or set(item) != {
             "category_id", "compatibility", "record_basename", "record_sha256"
         }:
@@ -2200,6 +2316,7 @@ def validate_certification_set_v1(
         contract.validate_environment_record(record, matrix)
         require_exact(record, "category_id", category_id)
         require_exact(record, "category_kind", expected_kind)
+        require_exact(record, "challenge_nonce", data["challenge_nonce"])
         for key, expected in {
             "source_commit": binding.source_commit,
             "version": binding.version,
@@ -2217,11 +2334,17 @@ def validate_certification_set_v1(
             )
             if any(record["checks"].get(key) != "PASS" for key in required):
                 raise EvidenceError("认证集正向记录必须所有检查 PASS")
+        return record
 
-    for item in environments:
-        validate_summary(item, "positive", "CERTIFIED")
-    for item in negative:
-        validate_summary(item, "negative", "BLOCKED")
+    validated_records = [
+        validate_summary(item, "positive", "CERTIFIED") for item in environments
+    ] + [
+        validate_summary(item, "negative", "BLOCKED") for item in negative
+    ]
+    try:
+        contract.validate_environment_records(validated_records, matrix)
+    except Exception as exc:
+        raise EvidenceError(str(exc)) from exc
     offline = data["offline_rehearsal"]
     if type(offline) is not dict or set(offline) != {"basename", "sha256", "status"}:
         raise EvidenceError("认证集 offline_rehearsal 字段集合不合法")
@@ -2229,8 +2352,63 @@ def validate_certification_set_v1(
     validate_sha256(offline["sha256"], "认证集 offline_rehearsal.sha256")
 
 
+def validate_ci_evidence_binding(
+    data: dict[str, Any],
+    evidence_path: Path,
+    binding: BuildBinding,
+) -> None:
+    _, ci_payload, _ = validate_bound_file(
+        data,
+        evidence_path,
+        "ci_evidence_basename",
+        "ci_evidence_sha256",
+        "GitHub CI evidence",
+    )
+    ci = parse_json_bytes(ci_payload, "GitHub CI evidence")
+    require_exact_keys(ci, CI_EVIDENCE_KEYS, "GitHub CI evidence")
+    for key, expected in {
+        "schema": "taiji-github-ci-evidence/v1",
+        "provider": "github-actions",
+        "workflow_name": "Pull Request CI",
+        "required_check_name": "CI Gate",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": binding.source_commit,
+    }.items():
+        if ci.get(key) != expected:
+            raise EvidenceError(f"GitHub CI {key} 与冻结发布合同不一致")
+    repository = require_nonempty_string(ci, "repository")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise EvidenceError("GitHub CI repository 格式不合法")
+    require_choice(ci, "event", {"pull_request", "push", "workflow_dispatch"})
+    for key in ("run_id", "run_attempt"):
+        if type(ci[key]) is not int or ci[key] <= 0:
+            raise EvidenceError(f"GitHub CI {key} 必须是正整数")
+    validate_fresh_timestamp(ci["completed_at_utc"], "CI completed_at_utc")
+    validate_fresh_timestamp(ci["collected_at_utc"], "CI collected_at_utc")
+    completed = datetime.fromisoformat(ci["completed_at_utc"][:-1] + "+00:00")
+    collected = datetime.fromisoformat(ci["collected_at_utc"][:-1] + "+00:00")
+    if collected < completed:
+        raise EvidenceError("GitHub CI collected_at_utc 不能早于 completed_at_utc")
+    url = urlsplit(require_nonempty_string(ci, "html_url"))
+    if (
+        url.scheme != "https"
+        or url.hostname != "github.com"
+        or url.username is not None
+        or url.password is not None
+        or url.port is not None
+        or url.path != f"/{repository}/actions/runs/{ci['run_id']}"
+        or url.query
+        or url.fragment
+    ):
+        raise EvidenceError("GitHub CI html_url 不是精确的 Actions run 地址")
+
+
 def validate_release_evidence_v3(
-    data: dict[str, Any], args: argparse.Namespace, binding: BuildBinding
+    data: dict[str, Any],
+    evidence_path: Path,
+    args: argparse.Namespace,
+    binding: BuildBinding,
 ) -> None:
     """Validate the current publication evidence envelope.
 
@@ -2268,18 +2446,20 @@ def validate_release_evidence_v3(
     for key in (
         "certification_set_sha256",
         "certification_set_signature_sha256",
+        "ci_evidence_sha256",
         "signing_public_key_fingerprint",
     ):
         validate_sha256(data[key], key)
     for key in (
         "certification_set_basename",
         "certification_set_signature_basename",
+        "ci_evidence_basename",
         "maintainer",
     ):
         require_nonempty_string(data, key)
-    formal_gates = data["formal_gates"]
-    if type(formal_gates) is not dict or not formal_gates:
-        raise EvidenceError("release evidence v3 formal_gates 必须是非空 object")
+    if data["formal_gates"] != RELEASE_FORMAL_GATES:
+        raise EvidenceError("release evidence v3 formal_gates 必须是固定且全部 PASS 的正式门禁")
+    validate_ci_evidence_binding(data, evidence_path, binding)
 
 
 def validate_legacy_v2_read_only(
@@ -2407,7 +2587,7 @@ def main() -> int:
         if not isinstance(binding, BuildBinding):
             raise EvidenceError("当前发布路径未返回 v3 BuildBinding")
         if data.get("schema") == RELEASE_EVIDENCE_SCHEMA_V3 or args.mode == "release":
-            validate_release_evidence_v3(data, args, binding)
+            validate_release_evidence_v3(data, args.evidence, args, binding)
         else:
             raise EvidenceError("当前验证入口只接受 release evidence schema v3")
     except (EvidenceError, OSError, KeyError, TypeError, ValueError) as exc:

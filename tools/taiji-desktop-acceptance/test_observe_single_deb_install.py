@@ -4,12 +4,14 @@
 import hashlib
 import importlib.util
 import json
+import os
 import struct
 import tempfile
 import unittest
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -43,6 +45,14 @@ def load_observer():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def completed(stdout="", returncode=0, stderr=""):
+    return type(
+        "Completed",
+        (),
+        {"stdout": stdout, "stderr": stderr, "returncode": returncode},
+    )()
 
 
 class FakeRuntime:
@@ -124,19 +134,7 @@ class SingleDebInstallObserverTests(unittest.TestCase):
             poll_interval_seconds=0.1,
         )
 
-    def test_observes_absent_to_installed_transition_while_offline(self):
-        payload = self.observe(FakeRuntime([None, "install ok unpacked", "install ok installed"]))
-
-        self.assertEqual(payload["package_status_before"], "not-installed")
-        self.assertEqual(payload["package_status_after"], "install ok installed")
-        self.assertEqual(payload["network_observation"], "continuous-process-sampling-no-non-loopback-up")
-        self.assertGreaterEqual(payload["network_sample_count"], 3)
-        self.assertEqual(payload["candidate_file_count"], 1)
-        self.assertFalse(payload["additional_install_files_observed"])
-        self.assertTrue(payload["first_launch_eligible"])
-        self.assertFalse(payload["installation_method_machine_observed"])
-
-    def test_canonical_mode_emits_category_bound_environment_record_without_baseline(self):
+    def observe_canonical(self, challenge=None, runtime=None):
         canonical_manifest = self.root / "taiji-package-manifest-v3.json"
         canonical_manifest.write_text(
             json.dumps(
@@ -155,6 +153,168 @@ class SingleDebInstallObserverTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        platform_identity = {
+            "os_id": "kylin",
+            "os_version": "v10/2503",
+            "desktop_environment": "UKUI",
+            "security_facts": {
+                "administrator_available": True,
+                "business_data_mutation": False,
+                "graphical_desktop": True,
+                "network_observation": "continuous-process-sampling-no-non-loopback-up",
+                "package_manager": "dpkg",
+                "security_profile": "supported-default",
+                "kysec_detected": False,
+                "kysec_enabled": False,
+                "kysec_exec_control": "not-present",
+                "os_release_sha256": "a" * 64,
+                "os_version_sha256": "not-present",
+            },
+        }
+        return self.observer.observe_environment_install(
+            customer_dir=self.customer,
+            manifest_path=canonical_manifest,
+            matrix_path=MATRIX,
+            category_id="kylin-current-standard",
+            challenge=challenge or self.challenge,
+            user_state_paths=self.user_paths,
+            runtime=runtime or FakeRuntime([None, "install ok installed"]),
+            timeout_seconds=10,
+            poll_interval_seconds=0.1,
+            platform_identity=platform_identity,
+        )
+
+    def make_trusted_desktop_fixture(
+        self,
+        executable_name="ukui-session",
+        scope="session-4.scope",
+        fixture_root=None,
+    ):
+        root = self.root if fixture_root is None else Path(fixture_root)
+        loginctl = root / "trusted-bin/loginctl"
+        loginctl.parent.mkdir(mode=0o755)
+        loginctl.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        loginctl.chmod(0o755)
+        executable_root = root / "trusted-desktop"
+        executable_root.mkdir(mode=0o755)
+        executable = executable_root / executable_name
+        executable.write_bytes(b"trusted desktop session executable")
+        executable.chmod(0o755)
+        proc_root = root / "proc"
+        process = proc_root / "2295"
+        process.mkdir(parents=True)
+        (process / "cgroup").write_text(
+            "0::/user.slice/user-1000.slice/%s\n" % scope,
+            encoding="ascii",
+        )
+        stat_fields = ["S"] + (["0"] * 18) + ["123456"]
+        (process / "stat").write_text(
+            "2295 (%s) %s\n" % (executable_name, " ".join(stat_fields)),
+            encoding="ascii",
+        )
+        (process / "status").write_text(
+            "Name:\t%s\nUid:\t1000\t1000\t1000\t1000\n" % executable_name,
+            encoding="ascii",
+        )
+        (process / "exe").symlink_to(executable)
+        current_process = proc_root / "self"
+        current_process.mkdir()
+        (current_process / "cgroup").write_text(
+            "0::/user.slice/user-1000.slice/%s\n" % scope,
+            encoding="ascii",
+        )
+        return loginctl, proc_root, executable_root, executable
+
+    @staticmethod
+    def loginctl_runner(
+        session_overrides=None,
+        user_output="Display=4\nSessions=4\n",
+        calls=None,
+    ):
+        session = {
+            "User": "1000",
+            "Seat": "seat0",
+            "Display": ":0",
+            "Remote": "no",
+            "Desktop": "ukui",
+            "Leader": "2295",
+            "Type": "x11",
+            "Class": "user",
+            "Active": "yes",
+            "State": "active",
+            "Scope": "session-4.scope",
+        }
+        session.update(session_overrides or {})
+
+        def run(argv, **kwargs):
+            if calls is not None:
+                calls.append((list(argv), dict(kwargs)))
+            if argv[1:3] == ["show-user", "1000"]:
+                return completed(user_output)
+            if argv[1:3] == ["show-session", "4"]:
+                return completed(
+                    "".join("%s=%s\n" % (key, value) for key, value in session.items())
+                )
+            if len(argv) > 2 and argv[1] == "show-session":
+                alternate = dict(session)
+                alternate["Scope"] = "session-%s.scope" % argv[2]
+                alternate["Leader"] = str(3000 + int(argv[2]))
+                return completed(
+                    "".join("%s=%s\n" % (key, value) for key, value in alternate.items())
+                )
+            return completed(returncode=1, stderr="unexpected invocation")
+
+        return run
+
+    def test_observes_absent_to_installed_transition_while_offline(self):
+        payload = self.observe(FakeRuntime([None, "install ok unpacked", "install ok installed"]))
+
+        self.assertEqual(payload["package_status_before"], "not-installed")
+        self.assertEqual(payload["package_status_after"], "install ok installed")
+        self.assertEqual(payload["network_observation"], "continuous-process-sampling-no-non-loopback-up")
+        self.assertGreaterEqual(payload["network_sample_count"], 3)
+        self.assertEqual(payload["candidate_file_count"], 1)
+        self.assertFalse(payload["additional_install_files_observed"])
+        self.assertTrue(payload["first_launch_eligible"])
+        self.assertFalse(payload["installation_method_machine_observed"])
+
+    def test_canonical_mode_emits_category_bound_environment_observation_without_baseline(self):
+        canonical_manifest = self.root / "taiji-package-manifest-v3.json"
+        canonical_manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-package-manifest/v3",
+                    "package": "taiji-agent",
+                    "version": "1.0.0",
+                    "architecture": "amd64",
+                    "source_commit": "d" * 40,
+                    "deb_basename": self.deb.name,
+                    "deb_sha256": hashlib.sha256(self.deb.read_bytes()).hexdigest(),
+                    "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                    "compatibility_policy_sha256": "e" * 64,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        platform_identity = {
+            "os_id": "kylin",
+            "os_version": "v10/2503",
+            "desktop_environment": "UKUI",
+            "security_facts": {
+                "administrator_available": True,
+                "business_data_mutation": False,
+                "graphical_desktop": True,
+                "network_observation": "continuous-process-sampling-no-non-loopback-up",
+                "package_manager": "dpkg",
+                "security_profile": "supported-default",
+                "kysec_detected": False,
+                "kysec_enabled": False,
+                "kysec_exec_control": "not-present",
+                "os_release_sha256": "a" * 64,
+                "os_version_sha256": "not-present",
+            },
+        }
         observation, record = self.observer.observe_environment_install(
             customer_dir=self.customer,
             manifest_path=canonical_manifest,
@@ -165,16 +325,745 @@ class SingleDebInstallObserverTests(unittest.TestCase):
             runtime=FakeRuntime([None, "install ok installed"]),
             timeout_seconds=10,
             poll_interval_seconds=0.1,
-            os_id="kylin",
-            os_version="V10",
-            desktop_environment="UKUI",
+            platform_identity=platform_identity,
         )
         self.assertEqual(observation["schema"], "taiji.single-deb-install-observation/v2")
-        self.assertEqual(record["schema"], "taiji-linux-environment-evidence/v1")
+        self.assertEqual(record["schema"], "taiji-linux-environment-observation/v1")
         self.assertEqual(record["compatibility"], "COMPATIBLE")
         self.assertEqual(record["category_id"], "kylin-current-standard")
         self.assertNotIn("target_baseline_profile_id", record)
         self.assertNotIn("CERTIFIED", json.dumps(record))
+        expected_commitment = hashlib.sha256(
+            ("taiji-machine-identity-v1\0" + "a" * 32).encode("utf-8")
+        ).hexdigest()
+        expected_fingerprint = hashlib.sha256(
+            (self.challenge + "\0" + expected_commitment).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(
+            observation["machine_identity_commitment_sha256"],
+            expected_commitment,
+        )
+        self.assertEqual(observation["machine_fingerprint_sha256"], expected_fingerprint)
+        self.assertEqual(
+            record["machine_identity_commitment_sha256"],
+            expected_commitment,
+        )
+
+    def test_canonical_machine_commitment_is_stable_and_forgery_is_rejected(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        first, first_record = self.observe_canonical(runtime=runtime)
+        second_challenge = "d" * 64
+        second, second_record = self.observe_canonical(
+            challenge=second_challenge,
+            runtime=FakeRuntime([None, "install ok installed"]),
+        )
+
+        commitment = first["machine_identity_commitment_sha256"]
+        self.assertEqual(commitment, second["machine_identity_commitment_sha256"])
+        self.assertEqual(commitment, first_record["machine_identity_commitment_sha256"])
+        self.assertEqual(commitment, second_record["machine_identity_commitment_sha256"])
+        self.assertNotEqual(
+            first["machine_fingerprint_sha256"],
+            second["machine_fingerprint_sha256"],
+        )
+        self.assertEqual(
+            second["machine_fingerprint_sha256"],
+            hashlib.sha256(
+                (second_challenge + "\0" + commitment).encode("utf-8")
+            ).hexdigest(),
+        )
+
+        forged = dict(first)
+        forged["machine_identity_commitment_sha256"] = "1" * 64
+        forged["machine_fingerprint_sha256"] = hashlib.sha256(
+            (self.challenge + "\0" + forged["machine_identity_commitment_sha256"]).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        old_positive_v2 = dict(first)
+        old_positive_v2.pop("machine_identity_commitment_sha256")
+        with self.assertRaisesRegex(self.observer.ObservationError, "field|commitment"):
+            self.observer._validate_observation_identity(
+                old_positive_v2,
+                self.challenge,
+                runtime,
+                user_state_paths=self.user_paths,
+                canonical=True,
+            )
+        with self.assertRaisesRegex(self.observer.ObservationError, "machine|commitment"):
+            self.observer._validate_observation_identity(
+                forged,
+                self.challenge,
+                runtime,
+                user_state_paths=self.user_paths,
+                canonical=True,
+            )
+
+    def test_canonical_records_never_serialize_raw_machine_id(self):
+        machine_id = "0123456789abcdef0123456789abcdef"
+        observation, record = self.observe_canonical(
+            runtime=FakeRuntime(
+                [None, "install ok installed"],
+                machine_id=machine_id,
+            )
+        )
+
+        serialized = json.dumps(
+            {"observation": observation, "environment": record},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.assertNotIn(machine_id, serialized)
+
+    def test_trusted_desktop_probe_uses_fixed_loginctl_and_scope_process_not_forged_path(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+        calls = []
+
+        desktop = self.observer._probe_trusted_desktop_session(
+            environment={
+                "PATH": str(self.root / "attacker-bin"),
+                "XDG_CURRENT_DESKTOP": "UKUI",
+                "XDG_SESSION_TYPE": "x11",
+            },
+            loginctl_path=loginctl,
+            proc_root=proc_root,
+            current_process_cgroup_path=proc_root / "self/cgroup",
+            trusted_executable_roots=(executable_root,),
+            expected_owner_uid=os.getuid(),
+            uid=1000,
+            command_runner=self.loginctl_runner(calls=calls),
+        )
+
+        self.assertEqual(desktop, "UKUI")
+        self.assertTrue(calls)
+        self.assertTrue(all(call[0][0] == str(loginctl.resolve()) for call in calls))
+        self.assertTrue(
+            all(
+                call[1]["env"]
+                == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C", "LANG": "C"}
+                for call in calls
+            )
+        )
+
+    def test_trusted_desktop_probe_recognizes_each_certified_process_family(self):
+        cases = (
+            ("ukui-session", "ukui", "UKUI"),
+            ("startdde", "dde", "DDE"),
+            ("dde-session", "deepin", "DDE"),
+            ("gnome-session-binary", "gnome", "GNOME"),
+        )
+        for executable_name, logind_desktop, expected in cases:
+            with self.subTest(executable=executable_name):
+                case_root = self.root / executable_name
+                case_root.mkdir()
+                loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture(
+                    executable_name=executable_name,
+                    fixture_root=case_root,
+                )
+                actual = self.observer._probe_trusted_desktop_session(
+                    environment={"XDG_CURRENT_DESKTOP": logind_desktop, "XDG_SESSION_TYPE": "x11"},
+                    loginctl_path=loginctl,
+                    proc_root=proc_root,
+                    current_process_cgroup_path=proc_root / "self/cgroup",
+                    trusted_executable_roots=(executable_root,),
+                    expected_owner_uid=os.getuid(),
+                    uid=1000,
+                    command_runner=self.loginctl_runner({"Desktop": logind_desktop}),
+                )
+                self.assertEqual(actual, expected)
+
+    def test_trusted_desktop_probe_accepts_trusted_leader_and_separate_session_process(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+        desktop_process = proc_root / "2295"
+        desktop_process.rename(proc_root / "2390")
+        (proc_root / "2390/stat").write_text(
+            "2390 (ukui-session) %s\n"
+            % " ".join(["S"] + (["0"] * 18) + ["223344"]),
+            encoding="ascii",
+        )
+        leader_executable = executable_root / "systemd"
+        leader_executable.write_bytes(b"trusted session leader")
+        leader_executable.chmod(0o755)
+        leader = proc_root / "2295"
+        leader.mkdir()
+        (leader / "cgroup").write_text(
+            "2:cpu,cpuacct:/user.slice/user-1000.slice/session-4.scope\n"
+            "0::/user.slice/user-1000.slice/session-4.scope\n",
+            encoding="ascii",
+        )
+        (leader / "stat").write_text(
+            "2295 (systemd) %s\n"
+            % " ".join(["S"] + (["0"] * 18) + ["112233"]),
+            encoding="ascii",
+        )
+        (leader / "status").write_text(
+            "Name:\tsystemd\nUid:\t1000\t1000\t1000\t1000\n",
+            encoding="ascii",
+        )
+        (leader / "exe").symlink_to(leader_executable)
+
+        desktop = self.observer._probe_trusted_desktop_session(
+            environment={"XDG_CURRENT_DESKTOP": "UKUI", "XDG_SESSION_TYPE": "x11"},
+            loginctl_path=loginctl,
+            proc_root=proc_root,
+            current_process_cgroup_path=proc_root / "self/cgroup",
+            trusted_executable_roots=(executable_root,),
+            expected_owner_uid=os.getuid(),
+            uid=1000,
+            command_runner=self.loginctl_runner(),
+        )
+
+        self.assertEqual(desktop, "UKUI")
+
+    def test_trusted_desktop_probe_rejects_executor_outside_selected_display_scope(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+        foreign = self.root / "foreign-self-cgroup"
+        foreign.write_text(
+            "0::/user.slice/user-1000.slice/session-99.scope\n",
+            encoding="ascii",
+        )
+
+        with self.assertRaisesRegex(self.observer.ObservationError, "current|executor|scope|session"):
+            self.observer._probe_trusted_desktop_session(
+                environment={"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "UKUI"},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=foreign,
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=self.loginctl_runner(),
+            )
+
+    def test_trusted_desktop_probe_rejects_execve_switch_and_manager_uid_mismatch(self):
+        loginctl, proc_root, executable_root, executable = self.make_trusted_desktop_fixture()
+        replacement = executable_root / "startdde"
+        replacement.write_bytes(b"different trusted executable")
+        replacement.chmod(0o755)
+        original_snapshot = self.observer._read_proc_executable_snapshot
+        snapshots = 0
+
+        def switching_snapshot(*args, **kwargs):
+            nonlocal snapshots
+            snapshots += 1
+            if snapshots == 2:
+                (proc_root / "2295/exe").unlink()
+                (proc_root / "2295/exe").symlink_to(replacement)
+            return original_snapshot(*args, **kwargs)
+
+        with mock.patch.object(
+            self.observer,
+            "_read_proc_executable_snapshot",
+            side_effect=switching_snapshot,
+        ):
+            with self.assertRaisesRegex(self.observer.ObservationError, "executable|changed|process"):
+                self.observer._probe_trusted_desktop_session(
+                    environment={"XDG_CURRENT_DESKTOP": "UKUI"},
+                    loginctl_path=loginctl,
+                    proc_root=proc_root,
+                    current_process_cgroup_path=proc_root / "self/cgroup",
+                    trusted_executable_roots=(executable_root,),
+                    expected_owner_uid=os.getuid(),
+                    uid=1000,
+                    command_runner=self.loginctl_runner(),
+                )
+
+        (proc_root / "2295/exe").unlink()
+        (proc_root / "2295/exe").symlink_to(executable)
+        (proc_root / "2295/status").write_text(
+            "Name:\tukui-session\nUid:\t2000\t2000\t2000\t2000\n",
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(self.observer.ObservationError, "UID|uid|user|manager"):
+            self.observer._probe_trusted_desktop_session(
+                environment={"XDG_CURRENT_DESKTOP": "UKUI"},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=self.loginctl_runner(),
+            )
+
+    def test_trusted_desktop_probe_rejects_prefix_lookalike_manager_names(self):
+        cases = (("ukui-session-helper", "ukui"), ("dde-session-arbitrary", "dde"))
+        for executable_name, desktop_name in cases:
+            with self.subTest(executable=executable_name):
+                case_root = self.root / ("lookalike-" + executable_name)
+                case_root.mkdir()
+                loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture(
+                    executable_name=executable_name,
+                    fixture_root=case_root,
+                )
+                with self.assertRaisesRegex(self.observer.ObservationError, "manager|family|desktop|process"):
+                    self.observer._probe_trusted_desktop_session(
+                        environment={"XDG_CURRENT_DESKTOP": desktop_name},
+                        loginctl_path=loginctl,
+                        proc_root=proc_root,
+                        current_process_cgroup_path=proc_root / "self/cgroup",
+                        trusted_executable_roots=(executable_root,),
+                        expected_owner_uid=os.getuid(),
+                        uid=1000,
+                        command_runner=self.loginctl_runner({"Desktop": desktop_name}),
+                    )
+
+    def test_trusted_desktop_probe_allows_empty_logind_desktop_when_manager_is_unique(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+
+        desktop = self.observer._probe_trusted_desktop_session(
+            environment={},
+            loginctl_path=loginctl,
+            proc_root=proc_root,
+            current_process_cgroup_path=proc_root / "self/cgroup",
+            trusted_executable_roots=(executable_root,),
+            expected_owner_uid=os.getuid(),
+            uid=1000,
+            command_runner=self.loginctl_runner({"Desktop": ""}),
+        )
+
+        self.assertEqual(desktop, "UKUI")
+
+    def test_trusted_desktop_probe_rejects_logind_session_change_after_process_scan(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+        base_runner = self.loginctl_runner()
+        selected_reads = 0
+
+        def changing_runner(argv, **kwargs):
+            nonlocal selected_reads
+            result = base_runner(argv, **kwargs)
+            if argv[1:3] == ["show-session", "4"]:
+                selected_reads += 1
+                if selected_reads == 2:
+                    result.stdout = result.stdout.replace("Active=yes", "Active=no")
+            return result
+
+        with self.assertRaisesRegex(self.observer.ObservationError, "changed|session|logind"):
+            self.observer._probe_trusted_desktop_session(
+                environment={"XDG_CURRENT_DESKTOP": "UKUI"},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=changing_runner,
+            )
+
+    def test_trusted_desktop_probe_rejects_xdg_forgery_and_logind_process_disagreement(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+        with self.assertRaisesRegex(self.observer.ObservationError, "desktop|XDG|session"):
+            self.observer._probe_trusted_desktop_session(
+                environment={"XDG_CURRENT_DESKTOP": "GNOME", "XDG_SESSION_TYPE": "x11"},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=self.loginctl_runner(),
+            )
+        with self.assertRaisesRegex(self.observer.ObservationError, "desktop|process|session"):
+            self.observer._probe_trusted_desktop_session(
+                environment={"XDG_CURRENT_DESKTOP": "GNOME", "XDG_SESSION_TYPE": "x11"},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=self.loginctl_runner({"Desktop": "gnome"}),
+            )
+
+    def test_trusted_desktop_probe_fails_closed_for_remote_tty_ambiguous_or_timeout(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+        cases = (
+            ("remote", self.loginctl_runner({"Remote": "yes"})),
+            ("tty", self.loginctl_runner({"Type": "tty", "Display": ""})),
+            ("ambiguous", self.loginctl_runner(user_output="Display=4\nSessions=4 5\n")),
+        )
+        for label, runner in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(self.observer.ObservationError, "desktop|session|local|graphical|ambiguous"):
+                    self.observer._probe_trusted_desktop_session(
+                        environment={"XDG_CURRENT_DESKTOP": "UKUI"},
+                        loginctl_path=loginctl,
+                        proc_root=proc_root,
+                        current_process_cgroup_path=proc_root / "self/cgroup",
+                        trusted_executable_roots=(executable_root,),
+                        expected_owner_uid=os.getuid(),
+                        uid=1000,
+                        command_runner=runner,
+                    )
+
+        def timeout_runner(argv, **kwargs):
+            raise TimeoutError("timeout")
+
+        with self.assertRaisesRegex(self.observer.ObservationError, "loginctl|desktop|session"):
+            self.observer._probe_trusted_desktop_session(
+                environment={},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=timeout_runner,
+            )
+
+        noisy_runner = self.loginctl_runner()
+
+        def stderr_runner(argv, **kwargs):
+            result = noisy_runner(argv, **kwargs)
+            result.stderr = "untrusted partial loginctl warning"
+            return result
+
+        with self.assertRaisesRegex(self.observer.ObservationError, "loginctl|desktop|session"):
+            self.observer._probe_trusted_desktop_session(
+                environment={},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=stderr_runner,
+            )
+
+    def test_trusted_desktop_probe_rejects_user_writable_executable_and_pid_race(self):
+        loginctl, proc_root, executable_root, executable = self.make_trusted_desktop_fixture()
+        executable.chmod(0o775)
+        with self.assertRaisesRegex(self.observer.ObservationError, "desktop|executable|trusted"):
+            self.observer._probe_trusted_desktop_session(
+                environment={"XDG_CURRENT_DESKTOP": "UKUI"},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=self.loginctl_runner(),
+            )
+
+        executable.chmod(0o755)
+        with mock.patch.object(
+            self.observer,
+            "_read_proc_start_time",
+            side_effect=["123456", "654321"],
+        ):
+            with self.assertRaisesRegex(self.observer.ObservationError, "changed|race|process"):
+                self.observer._probe_trusted_desktop_session(
+                    environment={"XDG_CURRENT_DESKTOP": "UKUI"},
+                    loginctl_path=loginctl,
+                    proc_root=proc_root,
+                    current_process_cgroup_path=proc_root / "self/cgroup",
+                    trusted_executable_roots=(executable_root,),
+                    expected_owner_uid=os.getuid(),
+                    uid=1000,
+                    command_runner=self.loginctl_runner(),
+                )
+
+    def test_trusted_machine_id_accepts_canonical_symlink_and_rejects_mutable_or_racing_file(self):
+        trusted_root = self.root / "machine-id-root"
+        trusted_root.mkdir(mode=0o755)
+        target = trusted_root / "machine-id.real"
+        target.write_text("a" * 32 + "\n", encoding="ascii")
+        target.chmod(0o644)
+        link = trusted_root / "machine-id"
+        link.symlink_to(target.name)
+
+        observed = self.observer._read_trusted_machine_id(
+            paths=(link,),
+            trusted_roots=(trusted_root,),
+            expected_owner_uid=os.getuid(),
+        )
+        self.assertEqual(observed, "a" * 32)
+
+        target.chmod(0o666)
+        with self.assertRaisesRegex(self.observer.ObservationError, "machine|trusted|root-owned"):
+            self.observer._read_trusted_machine_id(
+                paths=(link,),
+                trusted_roots=(trusted_root,),
+                expected_owner_uid=os.getuid(),
+            )
+        target.chmod(0o644)
+        hardlink = trusted_root / "machine-id-hardlink"
+        os.link(target, hardlink)
+        with self.assertRaisesRegex(self.observer.ObservationError, "machine|trusted|root-owned"):
+            self.observer._read_trusted_machine_id(
+                paths=(link,),
+                trusted_roots=(trusted_root,),
+                expected_owner_uid=os.getuid(),
+            )
+        hardlink.unlink()
+
+        real_fstat = os.fstat
+        calls = 0
+
+        def racing_fstat(descriptor):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                target.write_text("b" * 32 + "\n", encoding="ascii")
+            return real_fstat(descriptor)
+
+        with mock.patch.object(self.observer.os, "fstat", side_effect=racing_fstat):
+            with self.assertRaisesRegex(self.observer.ObservationError, "changed|machine"):
+                self.observer._read_trusted_machine_id(
+                    paths=(link,),
+                    trusted_roots=(trusted_root,),
+                    expected_owner_uid=os.getuid(),
+                )
+
+    def test_trusted_machine_id_rejects_writable_directory_in_parent_chain(self):
+        trusted_root = self.root / "trusted-machine-root"
+        trusted_root.mkdir(mode=0o755)
+        writable_parent = trusted_root / "replaceable"
+        writable_parent.mkdir(mode=0o777)
+        writable_parent.chmod(0o777)
+        machine_id = writable_parent / "machine-id"
+        machine_id.write_text("a" * 32 + "\n", encoding="ascii")
+        machine_id.chmod(0o644)
+
+        with self.assertRaisesRegex(self.observer.ObservationError, "directory|parent|trusted|machine"):
+            self.observer._read_trusted_machine_id(
+                paths=(machine_id,),
+                trusted_roots=(trusted_root,),
+                expected_owner_uid=os.getuid(),
+            )
+
+    def test_loginctl_symlink_rejects_writable_original_parent_chain(self):
+        trusted_root = self.root / "trusted-loginctl-root"
+        trusted_root.mkdir(mode=0o755)
+        real_dir = trusted_root / "libexec"
+        real_dir.mkdir(mode=0o755)
+        real_loginctl = real_dir / "loginctl"
+        real_loginctl.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+        real_loginctl.chmod(0o755)
+        writable_bin = trusted_root / "bin"
+        writable_bin.mkdir(mode=0o777)
+        writable_bin.chmod(0o777)
+        linked_loginctl = writable_bin / "loginctl"
+        linked_loginctl.symlink_to(real_loginctl)
+
+        with self.assertRaisesRegex(self.observer.ObservationError, "loginctl|directory|trusted"):
+            self.observer._probe_trusted_desktop_session(
+                environment={},
+                loginctl_path=linked_loginctl,
+                trusted_loginctl_roots=(trusted_root,),
+                proc_root=self.root / "unused-proc",
+                current_process_cgroup_path=self.root / "unused-cgroup",
+                trusted_executable_roots=(trusted_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=self.loginctl_runner(),
+            )
+
+    def test_platform_identity_is_derived_from_release_files_desktop_session_and_kysec_probe(self):
+        matrix = self.observer._read_certification_matrix(MATRIX)
+        files = {
+            "/etc/os-release": (
+                b'ID=kylin\nVERSION_ID="v10"\nKYLIN_RELEASE_ID="2503"\n'
+            ),
+        }
+
+        identity = self.observer.collect_platform_identity(
+            matrix,
+            "kylin-hardened",
+            read_system_file=lambda path, required=True: files.get(str(path)),
+            environment={
+                "XDG_CURRENT_DESKTOP": "UKUI",
+                "XDG_SESSION_TYPE": "x11",
+            },
+            desktop_probe=lambda environment: "UKUI",
+            kysec_probe=lambda: {
+                "detected": True,
+                "enabled": True,
+                "exec_control": "off",
+            },
+        )
+
+        self.assertEqual(identity["os_id"], "kylin")
+        self.assertEqual(identity["os_version"], "v10/2503")
+        self.assertEqual(identity["desktop_environment"], "UKUI")
+        self.assertEqual(
+            identity["security_facts"]["security_profile"],
+            "kysec-enabled-exec-control-off",
+        )
+        self.assertEqual(
+            identity["security_facts"]["os_release_sha256"],
+            hashlib.sha256(files["/etc/os-release"]).hexdigest(),
+        )
+
+    def test_platform_identity_rejects_claimed_category_version_desktop_or_security_mismatch(self):
+        matrix = self.observer._read_certification_matrix(MATRIX)
+        cases = (
+            (
+                "release",
+                b'ID=kylin\nVERSION_ID="v10"\nKYLIN_RELEASE_ID="2403"\n',
+                {"XDG_CURRENT_DESKTOP": "UKUI"},
+                {"detected": False, "enabled": False, "exec_control": "not-present"},
+            ),
+            (
+                "desktop",
+                b'ID=kylin\nVERSION_ID="v10"\nKYLIN_RELEASE_ID="2503"\n',
+                {"XDG_CURRENT_DESKTOP": "DDE"},
+                {"detected": False, "enabled": False, "exec_control": "not-present"},
+            ),
+            (
+                "security",
+                b'ID=kylin\nVERSION_ID="v10"\nKYLIN_RELEASE_ID="2503"\n',
+                {"XDG_CURRENT_DESKTOP": "UKUI"},
+                {"detected": False, "enabled": False, "exec_control": "not-present"},
+            ),
+        )
+        for label, os_release, environment, kysec in cases:
+            with self.subTest(case=label):
+                with self.assertRaisesRegex(self.observer.ObservationError, "platform|release|desktop|security|Kysec"):
+                    self.observer.collect_platform_identity(
+                        matrix,
+                        "kylin-hardened",
+                        read_system_file=lambda path, required=True, payload=os_release: (
+                            payload if str(path) == "/etc/os-release" else None
+                        ),
+                        environment=environment,
+                        desktop_probe=lambda environment, observer=self.observer: observer._desktop_family_from_label(
+                            environment["XDG_CURRENT_DESKTOP"], "test desktop"
+                        ),
+                        kysec_probe=lambda value=kysec: value,
+                    )
+
+    def test_uos_and_openkylin_release_normalization_is_deterministic(self):
+        matrix = self.observer._read_certification_matrix(MATRIX)
+        uos_files = {
+            "/etc/os-release": b'ID=uos\nVERSION_ID="20"\n',
+            "/etc/os-version": b'[Version]\nMajorVersion=20\nMinorVersion=1070u2\n',
+        }
+        uos = self.observer.collect_platform_identity(
+            matrix,
+            "uos-min-dde",
+            read_system_file=lambda path, required=True: uos_files.get(str(path)),
+            environment={"XDG_CURRENT_DESKTOP": "Deepin"},
+            desktop_probe=lambda environment: "DDE",
+            kysec_probe=lambda: {"detected": False, "enabled": False, "exec_control": "not-present"},
+        )
+        self.assertEqual(uos["os_version"], "20/1070u2")
+        self.assertEqual(uos["desktop_environment"], "DDE")
+
+        openkylin_files = {
+            "/etc/os-release": (
+                b'ID=openkylin\nVERSION_ID="2.0"\nPRETTY_NAME="openKylin 2.0 SP2"\n'
+            ),
+        }
+        openkylin = self.observer.collect_platform_identity(
+            matrix,
+            "openkylin-current",
+            read_system_file=lambda path, required=True: openkylin_files.get(str(path)),
+            environment={"XDG_CURRENT_DESKTOP": "GNOME"},
+            desktop_probe=lambda environment: "GNOME",
+            kysec_probe=lambda: {"detected": False, "enabled": False, "exec_control": "not-present"},
+        )
+        self.assertEqual(openkylin["os_version"], "2.0/2.0-SP2")
+
+    def test_uos_realistic_os_version_with_localized_and_unquoted_values_is_accepted(self):
+        matrix = self.observer._read_certification_matrix(MATRIX)
+        files = {
+            "/etc/os-release": b'ID=uos\nVERSION_ID="25"\n',
+            "/etc/os-version": (
+                "[Version]\n"
+                "SystemName=UOS Desktop\n"
+                "SystemName[zh_CN]=统信桌面操作系统\n"
+                "ProductType=Desktop\n"
+                "ProductType[zh_CN]=桌面\n"
+                "EditionName=Professional\n"
+                "MajorVersion=25\n"
+                "MinorVersion=2500\n"
+            ).encode("utf-8"),
+        }
+
+        identity = self.observer.collect_platform_identity(
+            matrix,
+            "uos-current-or-hardened",
+            read_system_file=lambda path, required=True: files.get(str(path)),
+            environment={"XDG_CURRENT_DESKTOP": "DDE"},
+            desktop_probe=lambda environment: "DDE",
+            kysec_probe=lambda: {
+                "detected": False,
+                "enabled": False,
+                "exec_control": "not-present",
+            },
+        )
+
+        self.assertEqual(identity["os_version"], "25/2500")
+
+    def test_canonical_root_owned_0777_os_release_symlink_is_accepted(self):
+        trusted_root = self.root / "trusted-system"
+        trusted_root.mkdir(mode=0o755)
+        target = trusted_root / "os-release.real"
+        payload = b'ID=kylin\nVERSION_ID="v10"\nKYLIN_RELEASE_ID="2503"\n'
+        target.write_bytes(payload)
+        target.chmod(0o644)
+        link = trusted_root / "os-release"
+        link.symlink_to(target.name)
+
+        observed = self.observer._read_trusted_system_file(
+            link,
+            trusted_roots=(trusted_root,),
+            expected_owner_uid=os.getuid(),
+        )
+
+        self.assertEqual(observed, payload)
+
+    def test_any_kysec_exec_control_on_is_rejected_even_if_status_is_disabled(self):
+        matrix = self.observer._read_certification_matrix(MATRIX)
+        with self.assertRaisesRegex(self.observer.ObservationError, "Kysec|security"):
+            self.observer.collect_platform_identity(
+                matrix,
+                "kylin-current-standard",
+                read_system_file=lambda path, required=True: (
+                    b'ID=kylin\nVERSION_ID="v10"\nKYLIN_RELEASE_ID="2503"\n'
+                    if str(path) == "/etc/os-release"
+                    else None
+                ),
+                environment={"XDG_CURRENT_DESKTOP": "UKUI"},
+                desktop_probe=lambda environment: "UKUI",
+                kysec_probe=lambda: {
+                    "detected": True,
+                    "enabled": False,
+                    "exec_control": "on",
+                },
+            )
+
+    def test_kysec_probe_fails_closed_when_marker_exists_but_trusted_tool_is_missing(self):
+        marker = self.root / "etc/kysec"
+        marker.mkdir(parents=True)
+        missing_tool = self.root / "usr/sbin/getstatus"
+        with self.assertRaisesRegex(self.observer.ObservationError, "Kysec"):
+            self.observer._probe_kysec_status(
+                tool=missing_tool,
+                markers=(marker, missing_tool),
+                expected_owner_uid=os.getuid(),
+            )
+
+    def test_kysec_probe_accepts_only_trusted_unambiguous_exec_control_off(self):
+        tool = self.root / "usr/sbin/getstatus"
+        tool.parent.mkdir(parents=True, mode=0o755)
+        tool.write_text(
+            "#!/bin/sh\nprintf 'Kysec status : enabled\\nexec control : off\\n'\n",
+            encoding="utf-8",
+        )
+        tool.chmod(0o755)
+
+        status = self.observer._probe_kysec_status(
+            tool=tool,
+            markers=(tool,),
+            expected_owner_uid=os.getuid(),
+        )
+
+        self.assertEqual(
+            status,
+            {"detected": True, "enabled": True, "exec_control": "off"},
+        )
 
     def test_rejects_observer_started_after_package_is_already_installed(self):
         with self.assertRaisesRegex(self.observer.ObservationError, "before the package is installed"):
