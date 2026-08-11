@@ -1018,6 +1018,112 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
                 self.assertEqual(sentinel.read_bytes(), b"preexisting")
                 self.assertEqual({item.name for item in delivery.iterdir()}, {sentinel.name})
 
+    def test_final_destination_transient_unlink_failure_retries_owned_inode_without_residue(self):
+        delivery = self.root / "final-destination-unlink-retry"
+        delivery.mkdir(mode=0o700)
+        original_promote = self.producer._promote_staged_file
+        original_unlink = self.producer.os.unlink
+        failed_directory_descriptor = None
+        owned_unlink_attempts = 0
+
+        def fail_after_second_promotion(*args, **kwargs):
+            result = original_promote(*args, **kwargs)
+            if args[2] == "github-ci-jobs-response.json":
+                raise OSError("simulated failure after second promotion")
+            return result
+
+        def fail_first_owned_unlink(path, *args, **kwargs):
+            nonlocal failed_directory_descriptor, owned_unlink_attempts
+            if (
+                path == "github-ci-run-response.json"
+                and failed_directory_descriptor is None
+            ):
+                failed_directory_descriptor = kwargs.get("dir_fd")
+                owned_unlink_attempts += 1
+                raise OSError("simulated transient canonical unlink failure")
+            if (
+                path == "github-ci-run-response.json"
+                and kwargs.get("dir_fd") == failed_directory_descriptor
+            ):
+                owned_unlink_attempts += 1
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(
+            self.producer,
+            "_promote_staged_file",
+            side_effect=fail_after_second_promotion,
+        ), patch.object(
+            self.producer.os,
+            "unlink",
+            side_effect=fail_first_owned_unlink,
+        ):
+            with self.assertRaises(OSError) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertIn("failure after second promotion", str(caught.exception))
+        self.assertEqual(owned_unlink_attempts, 2)
+        self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_final_destination_retry_preserves_foreign_inode_and_reports_rollback_failure(self):
+        delivery = self.root / "final-destination-foreign-replacement"
+        delivery.mkdir(mode=0o700)
+        original_promote = self.producer._promote_staged_file
+        original_unlink = self.producer.os.unlink
+        replacement_identity = None
+
+        def fail_after_second_promotion(*args, **kwargs):
+            result = original_promote(*args, **kwargs)
+            if args[2] == "github-ci-jobs-response.json":
+                raise OSError("simulated failure after second promotion")
+            return result
+
+        def replace_during_first_owned_unlink(path, *args, **kwargs):
+            nonlocal replacement_identity
+            if (
+                path == "github-ci-run-response.json"
+                and replacement_identity is None
+            ):
+                directory_descriptor = kwargs.get("dir_fd")
+                original_unlink(path, *args, **kwargs)
+                descriptor = self.producer.os.open(
+                    path,
+                    self.producer.os.O_WRONLY
+                    | self.producer.os.O_CREAT
+                    | self.producer.os.O_EXCL
+                    | getattr(self.producer.os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_descriptor,
+                )
+                try:
+                    self.producer.os.write(descriptor, b"foreign-must-survive")
+                    metadata = self.producer.os.fstat(descriptor)
+                    replacement_identity = (metadata.st_dev, metadata.st_ino)
+                finally:
+                    self.producer.os.close(descriptor)
+                raise OSError("simulated unlink result ambiguity")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(
+            self.producer,
+            "_promote_staged_file",
+            side_effect=fail_after_second_promotion,
+        ), patch.object(
+            self.producer.os,
+            "unlink",
+            side_effect=replace_during_first_owned_unlink,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertIn("rollback could not remove", str(caught.exception))
+        replacement = delivery / "github-ci-run-response.json"
+        metadata = replacement.lstat()
+        self.assertEqual((metadata.st_dev, metadata.st_ino), replacement_identity)
+        self.assertEqual(replacement.read_bytes(), b"foreign-must-survive")
+        self.assertEqual({item.name for item in delivery.iterdir()}, {replacement.name})
+
     def test_output_is_private_new_and_cli_has_no_trust_target_override(self):
         result = self.produce()
         self.assertEqual(stat.S_IMODE(self.output.lstat().st_mode), 0o700)

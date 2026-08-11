@@ -38,6 +38,7 @@ MAX_RUN_BYTES = 2 * 1024 * 1024
 MAX_JOBS_BYTES = 8 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 20
 MAX_RUN_AGE = timedelta(days=7)
+FINAL_DESTINATION_ROLLBACK_ATTEMPTS = 3
 STAGING_PREFIX = ".taiji-github-ci-evidence."
 DELIVERY_BASENAMES = (
     RUN_BASENAME,
@@ -936,7 +937,10 @@ def _remove_owned_destinations(
     delivery_descriptor: int,
     created_destinations: List[Dict[str, Any]],
 ) -> bool:
-    return _remove_owned_files(delivery_descriptor, created_destinations)
+    for _attempt in range(FINAL_DESTINATION_ROLLBACK_ATTEMPTS):
+        if _remove_owned_files(delivery_descriptor, created_destinations):
+            return True
+    return False
 
 
 def _remove_staging_directory(
