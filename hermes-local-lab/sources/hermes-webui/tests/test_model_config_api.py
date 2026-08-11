@@ -1655,6 +1655,52 @@ def test_main_model_config_writes_deepseek_key_without_echo(monkeypatch, tmp_pat
     os.environ.pop("DEEPSEEK_API_KEY", None)
 
 
+def test_main_model_config_response_marks_committed_applied_without_secret(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    secret = "sk-main-contract-secret-123456"
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+        }
+    )
+
+    assert result["commit_state"] == "committed"
+    assert result["runtime_state"] == "applied"
+    assert secret not in json.dumps(result)
+
+
+def test_main_model_config_response_marks_committed_refresh_pending_without_secret(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    secret = "sk-main-pending-secret-123456"
+    monkeypatch.setattr(
+        model_config,
+        "reload_config",
+        lambda: (_ for _ in ()).throw(OSError("reload failed")),
+    )
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+        }
+    )
+
+    assert result["commit_state"] == "committed"
+    assert result["runtime_state"] == "refresh_pending"
+    assert result["refresh_pending"] is True
+    assert secret not in json.dumps(result)
+
+
 def test_custom_main_model_uses_key_env_not_inline_secret(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     monkeypatch.delenv("HERMES_CUSTOM_MODEL_API_KEY", raising=False)
@@ -1724,7 +1770,11 @@ def test_main_model_config_acquires_credential_transaction_before_cfg_lock(
             "provider": "deepseek",
             "model": "deepseek-chat",
         }
-    ) == {"ok": True}
+    ) == {
+        "ok": True,
+        "commit_state": "committed",
+        "runtime_state": "applied",
+    }
 
 
 def test_oauth_main_provider_rejected_from_webui(monkeypatch, tmp_path):

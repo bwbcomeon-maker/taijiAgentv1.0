@@ -6887,7 +6887,12 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
     # and agent cache identity, but it does not change either auxiliary
     # capability fingerprint.  Refresh config/model caches without revoking a
     # still-valid vision or image-generation verification.
-    return _merge_post_commit_warnings(
+    result = _merge_post_commit_warnings(
         response,
         warnings,
     )
+    result["commit_state"] = "committed"
+    result["runtime_state"] = (
+        "refresh_pending" if result.get("refresh_pending") is True else "applied"
+    )
+    return result

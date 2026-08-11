@@ -208,6 +208,44 @@ def test_api_can_suppress_timeout_toast_for_background_pollers():
     assert not any("msg" in event for event in payload["events"]), payload
 
 
+def test_api_can_disable_network_retries_for_uncertain_mutations():
+    """A write whose response is uncertain must not replay on fetch TypeError."""
+    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    script = textwrap.dedent(
+        f"""
+        let attempts=0;
+        let forwarded=null;
+        global.document={{baseURI:'http://example.test/hermes/'}};
+        global.location={{href:'http://example.test/hermes/',pathname:'/hermes/',search:''}};
+        global.window={{location:global.location}};
+        global.fetch=(url,opts)=>{{
+          attempts++;
+          forwarded=opts.retryNetworkErrors;
+          return Promise.reject(new TypeError('connection closed after commit'));
+        }};
+        {api_fn}
+        api('/api/model-config/main',{{
+          method:'POST',
+          body:'{{}}',
+          timeoutToast:false,
+          retryNetworkErrors:false
+        }})
+          .then(()=>{{console.error('resolved unexpectedly');process.exit(2);}})
+          .catch(err=>{{
+            console.log(JSON.stringify({{
+              attempts,
+              forwarded:forwarded===undefined?null:forwarded,
+              name:String(err&&err.name||'')
+            }}));
+          }});
+        """
+    )
+    result = _node_eval(script)
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip())
+    assert payload == {"attempts": 1, "forwarded": None, "name": "TypeError"}
+
+
 def test_api_has_default_timeout_and_per_call_override_contract():
     src = _source(WORKSPACE_JS)
     body = _extract_js_function(src, "api")
@@ -218,6 +256,7 @@ def test_api_has_default_timeout_and_per_call_override_contract():
     assert "AbortController" in body, "api() must abort hung fetches with AbortController"
     assert "delete fetchOpts.timeoutMs" in body, "api() must strip timeoutMs before calling fetch()"
     assert "delete fetchOpts.timeoutToast" in body, "api() must strip timeoutToast before calling fetch()"
+    assert "delete fetchOpts.retryNetworkErrors" in body, "api() must strip retryNetworkErrors before calling fetch()"
 
     fetch_call = re.search(r"fetch\(url\.href,\{.*?\.\.\.fetchOpts.*?\}\)", body, re.DOTALL)
     assert fetch_call, "api() must call fetch() with sanitized fetchOpts"
