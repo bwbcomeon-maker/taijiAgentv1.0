@@ -57,6 +57,28 @@ FORMAL_GATES = {
     "github_ci_gate": "PASS",
     "manifest_binding": "PASS",
 }
+PINNED_UV_VERSION = "0.12.2"
+PINNED_UV_ARCHIVE_SHA256 = "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"
+PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
+PINNED_NODE_VERSION = "22.23.1"
+PINNED_NODE_ARCHIVE_SHA256 = "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
+PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+TOOLCHAIN_FIELDS = {
+    "python_dependency_lock_status",
+    "python_lock_basename",
+    "python_lock_sha256",
+    "python_version",
+    "python_executable_sha256",
+    "uv_version",
+    "uv_archive_sha256",
+    "uv_executable_sha256",
+    "node_version",
+    "node_archive_sha256",
+    "node_executable_sha256",
+    "electron_version",
+    "electron_archive_sha256",
+    "electron_executable_sha256",
+}
 
 
 class ReleaseEvidenceError(ValueError):
@@ -224,6 +246,36 @@ def _validate_ci_evidence(
     return data, hashlib.sha256(payload).hexdigest()
 
 
+def _manifest_toolchain(manifest: dict[str, Any], policy: dict[str, Any]) -> dict[str, str]:
+    missing = sorted(TOOLCHAIN_FIELDS - manifest.keys())
+    if missing:
+        raise ReleaseEvidenceError(
+            "current v3 manifest is missing formal toolchain identity: " + ", ".join(missing)
+        )
+    electron = policy.get("elf", {}).get("electron_distribution", {})
+    expected = {
+        "python_dependency_lock_status": "strict-locked",
+        "python_lock_basename": "uv.lock",
+        "uv_version": PINNED_UV_VERSION,
+        "uv_archive_sha256": PINNED_UV_ARCHIVE_SHA256,
+        "uv_executable_sha256": PINNED_UV_EXECUTABLE_SHA256,
+        "node_version": PINNED_NODE_VERSION,
+        "node_archive_sha256": PINNED_NODE_ARCHIVE_SHA256,
+        "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
+        "electron_version": electron.get("version"),
+        "electron_archive_sha256": electron.get("archive_sha256"),
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise ReleaseEvidenceError(f"manifest {key} is not the pinned formal identity")
+    if type(manifest.get("python_version")) is not str or re.fullmatch(r"3\.11\.[0-9]+", manifest["python_version"]) is None:
+        raise ReleaseEvidenceError("manifest python_version must be 3.11.x")
+    for key in TOOLCHAIN_FIELDS:
+        if key.endswith("_sha256"):
+            _require_sha(manifest.get(key), f"manifest {key}")
+    return {key: manifest[key] for key in TOOLCHAIN_FIELDS}
+
+
 def _verify_signature(payload_path: Path, signature_path: Path) -> str:
     if not PUBLIC_KEY.is_file() or PUBLIC_KEY.is_symlink():
         raise ReleaseEvidenceError("fixed signing public key is unavailable")
@@ -294,6 +346,7 @@ def _validate_certification_set(
         compatibility_policy_sha256=policy_sha,
         electron_executable_sha256=manifest["electron_executable_sha256"],
         desktop_entry_sha256=manifest["desktop_entry_sha256"],
+        **{field: manifest[field] for field in TOOLCHAIN_FIELDS if field != "electron_executable_sha256"},
     )
     matrix_path = ROOT / "packaging/linux/certification-matrix.json"
     args = SimpleNamespace(challenge=cert_challenge, matrix=matrix_path)
@@ -367,6 +420,8 @@ def assemble(args: argparse.Namespace) -> Path:
         raise ReleaseEvidenceError("candidate DEB hash does not match manifest")
     _require_sha(manifest.get("electron_executable_sha256"), "manifest electron hash")
     _require_sha(manifest.get("desktop_entry_sha256"), "manifest desktop entry hash")
+    policy_document, _ = _load_json(args.policy, "compatibility policy")
+    toolchain = _manifest_toolchain(manifest, policy_document)
     policy_id, policy_sha = _canonical_policy(args.policy)
     if manifest.get("compatibility_policy_id") != policy_id or manifest.get("compatibility_policy_sha256") != policy_sha:
         raise ReleaseEvidenceError("manifest policy identity does not match canonical policy")
@@ -403,6 +458,7 @@ def assemble(args: argparse.Namespace) -> Path:
         "deb_sha256": deb_hash_before,
         "compatibility_policy_id": policy_id,
         "compatibility_policy_sha256": policy_sha,
+        **toolchain,
         "certification_set_basename": args.certification_set.name,
         "certification_set_sha256": certification_hash,
         "certification_set_signature_basename": args.certification_signature.name,

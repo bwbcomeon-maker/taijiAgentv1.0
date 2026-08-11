@@ -19,9 +19,20 @@ DELIVERY_BUILD_LOG_DIR="$SCRIPT_DIR/构建日志"
 VERSION=""
 TOOL_ROOT=""
 NODE_ROOT=""
+UV_ROOT=""
+UV_BIN=""
+UV_ARCHIVE_PATH=""
+UV_VERSION="0.12.2"
+UV_ARCHIVE="uv-x86_64-unknown-linux-gnu.tar.gz"
+UV_ARCHIVE_URL="https://github.com/astral-sh/uv/releases/download/0.12.2/uv-x86_64-unknown-linux-gnu.tar.gz"
+UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"
+UV_PINNED_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
+UV_EXECUTABLE_SHA256=""
 NODE_VERSION="22.23.1"
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
+NODE_PINNED_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+NODE_ARCHIVE_PATH=""
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
@@ -33,8 +44,14 @@ POLICY_MAINTAINER=""
 ELECTRON_VERSION=""
 ELECTRON_ARCHIVE_SHA256=""
 ELECTRON_ARCHIVE=""
+ELECTRON_EXECUTABLE_SHA256=""
 ELF_ABI_AUDIT_SHA256=""
 PYTHON_DEPENDENCY_LOCK_STATUS="unknown"
+PYTHON_LOCK_BASENAME="uv.lock"
+PYTHON_LOCK_SHA256=""
+PYTHON_VERSION=""
+PYTHON_EXECUTABLE_SHA256=""
+NODE_EXECUTABLE_SHA256=""
 CANDIDATE_DEB_FIXED=0
 OUTPUT_ARCHIVE_DIR=""
 OUTPUT_BACKUP=""
@@ -161,7 +178,7 @@ failure_next_steps() {
       printf 'next=构建工作区源码权限不可读。请查看新版候选目录探针和 findmnt 诊断；不要关闭麒麟安全策略，可显式设置一个经过允许的 owner-only TAIJI_BUILD_ROOT 后重试\n'
       ;;
     *"setup-local.sh"*|*"uv.lock"*|*"--locked"*|*"TAIJI_UV_LOCK_MODE"*)
-      printf 'next=Python 依赖 lock 漂移。新版脚本默认 TAIJI_UV_LOCK_MODE=auto 会自动重试非 locked 同步；如仍使用旧包，可先用 TAIJI_ALLOW_UV_LOCK_REFRESH=1 bash ./00_制包机_生成离线交付包.sh 临时继续\n'
+      printf 'next=正式制包只允许提交态 uv.lock 的 strict 同步；请修复并提交 lock 后重新生成制包输入包，禁止现场刷新或无锁重试\n'
       ;;
     *"可用空间不足"*|*"inode 不足"*)
       printf 'next=制包文件系统资源不足。请至少准备 12 GiB 可用空间和 100000 个可用 inode；清理空间后重试，或把 TAIJI_BUILD_ROOT 指向满足条件的 owner-only taiji-agent-build-* 目录\n'
@@ -650,6 +667,8 @@ configure_build_tmp() {
   SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
   TOOL_ROOT="$BUILD_ROOT/.build-tools"
   NODE_ROOT="$TOOL_ROOT/node"
+  UV_ROOT="$TOOL_ROOT/uv"
+  UV_BIN="$UV_ROOT/current/uv"
   mkdir -p -- "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法创建构建临时目录或工具根"
   chmod 0700 "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法设置构建临时目录或工具根权限"
   export TMPDIR="$BUILD_TMP_DIR" TMP="$BUILD_TMP_DIR" TEMP="$BUILD_TMP_DIR"
@@ -793,7 +812,7 @@ verify_build_command_contract() {
   for command in \
     curl git tar gzip xz sha256sum openssl python3 cc rsync dpkg dpkg-deb \
     file desktop-file-validate lsof readelf strings perl cmp ldd getconf \
-    stat mktemp date df find grep sed awk sort head tail wc tr install chmod cp mv; do
+    stat mktemp date df find grep sed awk sort head tail wc tr install chmod cp mv readlink; do
     if ! have "$command"; then
       missing="$missing $command"
     fi
@@ -823,17 +842,65 @@ source_agent_dir() {
 }
 
 ensure_uv() {
-  export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-  if have uv; then
-    ok "uv 已存在：$(command -v uv)"
-    uv --version || true
-    return
+  local download_dir extract_dir extracted_bin actual_archive_sha current_uid
+  current_uid="$(id -u)"
+  download_dir="$UV_ROOT/download"
+  extract_dir="$UV_ROOT/extract"
+  UV_ARCHIVE_PATH="$download_dir/$UV_ARCHIVE"
+  [ "$UV_ROOT" = "$TOOL_ROOT/uv" ] || fail "uv 工具根未绑定受控 owner-only 工具根"
+  install -d -m 0700 "$UV_ROOT" "$download_dir" "$extract_dir" "$UV_ROOT/current"
+  [ "$(stat -c '%u' "$UV_ROOT")" = "$current_uid" ] \
+    && [ "$(stat -c '%a' "$UV_ROOT")" = 700 ] \
+    || fail "uv 工具根必须由当前用户以 0700 独占"
+
+  info "下载固定版 uv ${UV_VERSION} Linux x86_64 GNU 归档"
+  curl_download "$UV_ARCHIVE_URL" "$UV_ARCHIVE_PATH"
+  [ -f "$UV_ARCHIVE_PATH" ] && [ ! -L "$UV_ARCHIVE_PATH" ] \
+    && [ "$(stat -c '%h' "$UV_ARCHIVE_PATH")" = 1 ] \
+    && [ "$(stat -c '%u' "$UV_ARCHIVE_PATH")" = "$current_uid" ] \
+    || fail "uv 归档不是当前用户独占的普通文件"
+  actual_archive_sha="$(sha256sum "$UV_ARCHIVE_PATH" | awk '{print $1}')"
+  [ "$actual_archive_sha" = "$UV_ARCHIVE_SHA256" ] \
+    || fail "uv 固定归档 SHA256 校验失败"
+  python3 - "$UV_ARCHIVE_PATH" <<'PY' || fail "uv 归档成员路径不安全"
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    for member in archive.getmembers():
+        parts = member.name.split("/")
+        if member.name.startswith("/") or ".." in parts or member.issym() or member.islnk():
+            raise SystemExit("unsafe uv archive member")
+PY
+  tar --no-same-owner --no-same-permissions -xzf "$UV_ARCHIVE_PATH" -C "$extract_dir"
+  extracted_bin="$extract_dir/uv-x86_64-unknown-linux-gnu/uv"
+  [ -f "$extracted_bin" ] && [ ! -L "$extracted_bin" ] \
+    && [ "$(stat -c '%h' "$extracted_bin")" = 1 ] \
+    || fail "uv 固定归档解压后缺少安全的 uv 可执行文件"
+  install -m 0700 "$extracted_bin" "$UV_BIN"
+  [ -f "$UV_BIN" ] && [ ! -L "$UV_BIN" ] \
+    && [ "$(stat -c '%h' "$UV_BIN")" = 1 ] \
+    && [ "$(stat -c '%u' "$UV_BIN")" = "$current_uid" ] \
+    || fail "uv 可执行文件不是当前用户独占的普通文件"
+  [ "$("$UV_BIN" --version)" = "uv $UV_VERSION" ] \
+    || fail "uv 可执行文件版本不等于固定版本 $UV_VERSION"
+  file "$UV_BIN" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
+    || fail "uv 可执行文件不是 Linux x86_64 ELF"
+  UV_EXECUTABLE_SHA256="$(sha256sum "$UV_BIN" | awk '{print $1}')"
+  [ "$UV_EXECUTABLE_SHA256" = "$UV_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "uv 可执行文件 SHA256 不等于官方固定归档身份"
+  ok "固定 uv 已验证：$UV_BIN (uv $UV_VERSION)"
+}
+
+validate_formal_uv_contract() {
+  case "${TAIJI_UV_LOCK_MODE-}" in
+    ""|strict) ;;
+    auto|unlocked) fail "正式制包拒绝 TAIJI_UV_LOCK_MODE=${TAIJI_UV_LOCK_MODE}；只允许 unset/strict" ;;
+    *) fail "正式制包只接受 unset/strict 的 TAIJI_UV_LOCK_MODE" ;;
+  esac
+  if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH+x}" = x ]; then
+    fail "正式制包拒绝 TAIJI_ALLOW_UV_LOCK_REFRESH；禁止在制包现场刷新 lock"
   fi
-  info "安装 uv"
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-  have uv || fail "uv 安装后仍不可用，请检查网络或构建日志"
-  uv --version
 }
 
 curl_download() {
@@ -894,11 +961,13 @@ portable_node_is_exact() {
   [ "$(tr -d '\r\n' < "$root/.taiji-node-version")" = "$NODE_VERSION" ] || return 1
   [ "$(tr -d '\r\n' < "$root/.taiji-node-archive-sha256")" = "$NODE_ARCHIVE_SHA256" ] || return 1
   [ "$("$root/bin/node" --version 2>/dev/null)" = "v$NODE_VERSION" ] || return 1
+  [ "$(sha256sum "$root/bin/node" | awk '{print $1}')" = "$NODE_PINNED_EXECUTABLE_SHA256" ] || return 1
   file "$root/bin/node" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' || return 1
 }
 
 install_portable_node() {
   mkdir -p "$NODE_ROOT"
+  NODE_ARCHIVE_PATH="$NODE_ROOT/download/$NODE_ARCHIVE"
   if portable_node_is_exact; then
     export PATH="$NODE_ROOT/current/bin:$PATH"
     return 0
@@ -1137,11 +1206,17 @@ print(host)
 }
 
 run_setup_local() {
-  local uv_lock_mode="$1" setup_log status
+  local uv_lock_mode="$1" setup_log status lock_path lock_before lock_after python_bin python_real
   setup_log="$LOG_DIR/setup-local-$(date +%Y%m%d_%H%M%S)_$$.log"
+  lock_path="$(source_agent_dir)/$PYTHON_LOCK_BASENAME"
+  [ -f "$lock_path" ] && [ ! -L "$lock_path" ] || fail "正式制包缺少普通文件 uv.lock"
+  lock_before="$(sha256sum "$lock_path" | awk '{print $1}')"
 
   set +e
-  TAIJI_DEPENDENCY_PROFILE=production TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
+  TAIJI_DEPENDENCY_PROFILE=production \
+  TAIJI_UV_LOCK_MODE="$uv_lock_mode" \
+  TAIJI_UV_EXECUTABLE="$UV_BIN" \
+    ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
   status="${PIPESTATUS[0]}"
   set -e
 
@@ -1152,47 +1227,38 @@ run_setup_local() {
     fail "Python venv 生成失败：setup-local.sh 返回 ${status}，详见 ${setup_log}"
   fi
 
-  case "$uv_lock_mode" in
-    strict)
-      PYTHON_DEPENDENCY_LOCK_STATUS="locked"
-      ;;
-    auto)
-      if grep -Fq "retrying without --locked" "$setup_log"; then
-        PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"
-        warn "Python 依赖使用了 non-locked 后备解析；构建报告将保留该事实。"
-      else
-        PYTHON_DEPENDENCY_LOCK_STATUS="locked"
-      fi
-      ;;
-    unlocked)
-      PYTHON_DEPENDENCY_LOCK_STATUS="explicit-unlocked"
-      ;;
-  esac
-  if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
-    PYTHON_DEPENDENCY_LOCK_STATUS="refreshed-${PYTHON_DEPENDENCY_LOCK_STATUS}"
-  fi
+  lock_after="$(sha256sum "$lock_path" | awk '{print $1}')"
+  [ "$lock_after" = "$lock_before" ] || fail "uv.lock 在 strict sync 前后发生变化"
+  PYTHON_LOCK_SHA256="$lock_after"
+  PYTHON_DEPENDENCY_LOCK_STATUS="strict-locked"
+  python_bin="$(source_agent_dir)/venv/bin/python"
+  [ -x "$python_bin" ] || fail "strict sync 后 Python 可执行文件不可执行"
+  python_real="$(readlink -f "$python_bin")"
+  [ -f "$python_real" ] || fail "strict sync 后 Python 真实可执行文件不存在"
+  PYTHON_VERSION="$("$python_bin" -c 'import platform; print(platform.python_version())')"
+  printf '%s\n' "$PYTHON_VERSION" | grep -Eq '^3\.11\.[0-9]+$' \
+    || fail "正式 Python 运行时版本不是 3.11.x：$PYTHON_VERSION"
+  PYTHON_EXECUTABLE_SHA256="$(sha256sum "$python_real" | awk '{print $1}')"
 }
 
 build_runtime_and_deb() {
   local uv_lock_mode source_commit
-  export PATH="$NODE_ROOT/current/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:/usr/local/bin"
+  export PATH="$NODE_ROOT/current/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   # Keep the packaging host's shell/profile from injecting a higher-priority
   # Python package source into uv. UV_NO_CONFIG blocks config files, but these
   # environment variables otherwise still override or augment UV_INDEX_URL.
   unset UV_INDEX UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_NO_INDEX UV_INDEX_STRATEGY UV_CONFIG_FILE
   export UV_NO_CONFIG=1
   export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-  uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"
-
-  if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
-    warn "TAIJI_ALLOW_UV_LOCK_REFRESH=1：将刷新目标构建工作区 Python lock；正式发布应使用已提交 lock。"
-    cd "$(source_agent_dir)"
-    uv lock
-  fi
+  uv_lock_mode="${TAIJI_UV_LOCK_MODE:-strict}"
+  [ "$uv_lock_mode" = strict ] || fail "正式制包只允许 strict Python lock 模式"
 
   info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=${uv_lock_mode}）"
   cd "$(source_lab_dir)"
   run_setup_local "$uv_lock_mode"
+  NODE_EXECUTABLE_SHA256="$(sha256sum "$NODE_ROOT/current/bin/node" | awk '{print $1}')"
+  [ "$NODE_EXECUTABLE_SHA256" = "$NODE_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "Node.js 可执行文件 SHA256 不等于固定官方归档身份"
 
   info "获取 Linux Electron runtime"
   cd "$SRC_DIR/apps/taiji-desktop"
@@ -1219,12 +1285,21 @@ build_runtime_and_deb() {
   TAIJI_SOURCE_COMMIT="$source_commit" \
   TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current" \
   TAIJI_ELECTRON_ARCHIVE="$ELECTRON_ARCHIVE" \
+  TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS="$PYTHON_DEPENDENCY_LOCK_STATUS" \
+  TAIJI_PYTHON_LOCK_BASENAME="$PYTHON_LOCK_BASENAME" \
+  TAIJI_PYTHON_LOCK_SHA256="$PYTHON_LOCK_SHA256" \
+  TAIJI_UV_EXECUTABLE="$UV_BIN" \
+  TAIJI_UV_ARCHIVE_PATH="$UV_ARCHIVE_PATH" \
+  TAIJI_UV_VERSION="$UV_VERSION" \
+  TAIJI_UV_ARCHIVE_SHA256="$UV_ARCHIVE_SHA256" \
+  TAIJI_UV_EXECUTABLE_SHA256="$UV_EXECUTABLE_SHA256" \
+  TAIJI_NODE_ARCHIVE_PATH="$NODE_ARCHIVE_PATH" \
     ./packaging/linux/deb/build-deb.sh
 }
 
 collect_artifacts() {
   info "收集候选 DEB 与 build-deb manifest"
-  local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha icon_sha
+  local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha icon_sha electron_sha
   src_pkg_dir="$SRC_DIR/packages/麒麟操作系统安装包"
   deb="$src_pkg_dir/taiji-agent_${VERSION}_amd64.deb"
   manifest="$src_pkg_dir/taiji-package-manifest.json"
@@ -1241,7 +1316,11 @@ collect_artifacts() {
   source_name="$(basename "$SRC_ARCHIVE")"
   source_sha="$(cd "$SCRIPT_DIR" && sha256sum "$source_name" | awk '{print $1}')"
   source_commit="$(printf '%s\n' "$source_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
-  abi_sha="$(python3 - "$MANIFEST_FILE" "$deb_name" "$deb_sha" "$source_commit" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" <<'PY'
+  abi_sha="$(python3 - "$MANIFEST_FILE" "$deb_name" "$deb_sha" "$source_commit" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" \
+    "$PYTHON_DEPENDENCY_LOCK_STATUS" "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256" "$PYTHON_VERSION" "$PYTHON_EXECUTABLE_SHA256" \
+    "$UV_VERSION" "$UV_ARCHIVE_SHA256" "$UV_EXECUTABLE_SHA256" \
+    "$NODE_VERSION" "$NODE_ARCHIVE_SHA256" "$NODE_EXECUTABLE_SHA256" \
+    "$ELECTRON_VERSION" "$ELECTRON_ARCHIVE_SHA256" <<'PY'
 import json
 import re
 import sys
@@ -1255,6 +1334,19 @@ expected = {
     "compatibility_policy_id": sys.argv[5],
     "compatibility_policy_sha256": sys.argv[6],
     "maintainer": sys.argv[7],
+    "python_dependency_lock_status": sys.argv[8],
+    "python_lock_basename": sys.argv[9],
+    "python_lock_sha256": sys.argv[10],
+    "python_version": sys.argv[11],
+    "python_executable_sha256": sys.argv[12],
+    "uv_version": sys.argv[13],
+    "uv_archive_sha256": sys.argv[14],
+    "uv_executable_sha256": sys.argv[15],
+    "node_version": sys.argv[16],
+    "node_archive_sha256": sys.argv[17],
+    "node_executable_sha256": sys.argv[18],
+    "electron_version": sys.argv[19],
+    "electron_archive_sha256": sys.argv[20],
 }
 for key, value in expected.items():
     if manifest.get(key) != value:
@@ -1280,6 +1372,19 @@ print(value)
 PY
 )"
   ICON_SET_SHA256="$icon_sha"
+  electron_sha="$(python3 - "$MANIFEST_FILE" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("electron_executable_sha256")
+if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+    raise SystemExit("manifest electron_executable_sha256 is invalid")
+print(value)
+PY
+)"
+  ELECTRON_EXECUTABLE_SHA256="$electron_sha"
   {
     printf 'version=%s\n' "$VERSION"
     printf 'source_archive=%s\n' "$source_name"
@@ -1294,6 +1399,20 @@ PY
     printf 'compatibility_policy_sha256=%s\n' "$POLICY_SHA256"
     printf 'elf_abi_audit_sha256=%s\n' "$ELF_ABI_AUDIT_SHA256"
     printf 'icon_set_sha256=%s\n' "$ICON_SET_SHA256"
+    printf 'python_dependency_lock_status=%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
+    printf 'python_lock_basename=%s\n' "$PYTHON_LOCK_BASENAME"
+    printf 'python_lock_sha256=%s\n' "$PYTHON_LOCK_SHA256"
+    printf 'python_version=%s\n' "$PYTHON_VERSION"
+    printf 'python_executable_sha256=%s\n' "$PYTHON_EXECUTABLE_SHA256"
+    printf 'uv_version=%s\n' "$UV_VERSION"
+    printf 'uv_archive_sha256=%s\n' "$UV_ARCHIVE_SHA256"
+    printf 'uv_executable_sha256=%s\n' "$UV_EXECUTABLE_SHA256"
+    printf 'node_version=%s\n' "$NODE_VERSION"
+    printf 'node_archive_sha256=%s\n' "$NODE_ARCHIVE_SHA256"
+    printf 'node_executable_sha256=%s\n' "$NODE_EXECUTABLE_SHA256"
+    printf 'electron_version=%s\n' "$ELECTRON_VERSION"
+    printf 'electron_archive_sha256=%s\n' "$ELECTRON_ARCHIVE_SHA256"
+    printf 'electron_executable_sha256=%s\n' "$ELECTRON_EXECUTABLE_SHA256"
     printf 'maintainer=%s\n' "$POLICY_MAINTAINER"
   } > "$BUILD_MARKER"
   CANDIDATE_DEB_FIXED=1
@@ -1327,6 +1446,11 @@ write_build_report() {
     printf 'ELF ABI audit SHA256：%s\n' "$ELF_ABI_AUDIT_SHA256"
     printf '图标集合 SHA256：%s\n' "$ICON_SET_SHA256"
     printf 'Python 依赖锁状态：%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
+    printf 'Python lock：%s %s\n' "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256"
+    printf 'Python：%s %s\n' "$PYTHON_VERSION" "$PYTHON_EXECUTABLE_SHA256"
+    printf 'uv：%s archive=%s executable=%s\n' "$UV_VERSION" "$UV_ARCHIVE_SHA256" "$UV_EXECUTABLE_SHA256"
+    printf 'Node.js：%s archive=%s executable=%s\n' "$NODE_VERSION" "$NODE_ARCHIVE_SHA256" "$NODE_EXECUTABLE_SHA256"
+    printf 'Electron：%s archive=%s executable=%s\n' "$ELECTRON_VERSION" "$ELECTRON_ARCHIVE_SHA256" "$ELECTRON_EXECUTABLE_SHA256"
     printf 'Maintainer（源码 policy 固定）：%s\n' "$POLICY_MAINTAINER"
     printf '客户交付边界：发布预检通过后只交付一个逐字节固定的 amd64 DEB，不附带第二个安装包或 apt 仓库。\n'
     printf '候选 DEB 固定后不再下载运行时依赖。\n'
@@ -1590,6 +1714,7 @@ apt_source_summary() {
 }
 
 main() {
+  validate_formal_uv_contract
   initialize_build_logging
   set_stage "制包机预检"
   preflight

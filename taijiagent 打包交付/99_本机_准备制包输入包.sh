@@ -107,7 +107,7 @@ PY
 main() {
   preflight_repo
   write_source_archive
-  bash "$SCRIPT_DIR/01_制包机_发布预检.sh"
+  TAIJI_RELEASE_REQUIRE_ARTIFACTS=0 bash "$SCRIPT_DIR/01_制包机_发布预检.sh"
   write_builder_input_package
   printf '\n[OK] 本机发布输入准备完成。优先把 taijiagent-制包机输入-*.tar.gz 复制到 Linux amd64 制包机并解压后执行：\n'
   printf 'bash ./00_制包机_生成离线交付包.sh\n'

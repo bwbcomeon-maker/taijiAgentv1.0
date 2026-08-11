@@ -32,6 +32,7 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "packaging/linux/audit-elf-closure.py",
     ROOT / "packaging/linux/validate_icon_assets.py",
     ROOT / "packaging/linux/stage-electron-runtime.py",
+    ROOT / "packaging/linux/verify-python-lock-contract.py",
     PYTHON_STAGER,
     COMPONENT_STAGER,
     PAYLOAD_VERIFIER,

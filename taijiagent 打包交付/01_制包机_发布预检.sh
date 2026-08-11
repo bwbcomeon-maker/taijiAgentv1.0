@@ -154,6 +154,252 @@ check_source_checksum() {
   name="$(basename "$SOURCE_ARCHIVE")"; expected="$(checksum_source_archive_hash "$name")"; hex64 "$expected" || fail "源码包 SHA256 格式非法：$name"
   actual="$(cd "$SCRIPT_DIR" && sha256sum "$name" | awk '{print $1}')"; [ "$actual" = "$expected" ] || fail "源码包 SHA256 不匹配：$name"; ok "源码包 SHA256 校验通过"
 }
+check_formal_source_toolchain_contract() {
+  python3 - "$SOURCE_ARCHIVE" <<'PY' \
+    || fail "formal source toolchain contract 校验失败"
+import hashlib
+import re
+import sys
+import tarfile
+
+archive_path = sys.argv[1]
+prefix = "taiji-agentv1.0/"
+required_paths = {
+    "builder": prefix + "taijiagent 打包交付/00_制包机_生成离线交付包.sh",
+    "setup": prefix + "hermes-local-lab/scripts/setup-local.sh",
+    "requirements": prefix + "hermes-local-lab/sources/hermes-webui/requirements.txt",
+    "pyproject": prefix + "hermes-local-lab/sources/hermes-agent/pyproject.toml",
+    "lock": prefix + "hermes-local-lab/sources/hermes-agent/uv.lock",
+    "helper": prefix + "packaging/linux/verify-python-lock-contract.py",
+    "deb_builder": prefix + "packaging/linux/deb/build-deb.sh",
+}
+
+with tarfile.open(archive_path, "r:gz") as archive:
+    by_name = {}
+    for member in archive.getmembers():
+        if member.name not in required_paths.values():
+            continue
+        if member.name in by_name or not member.isfile() or member.size <= 0 or member.size > 32 * 1024 * 1024:
+            raise SystemExit("formal source toolchain member is duplicate, unsafe, empty, or oversized")
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise SystemExit("formal source toolchain member cannot be read")
+        payload = extracted.read(member.size + 1)
+        if len(payload) != member.size:
+            raise SystemExit("formal source toolchain member changed while reading")
+        by_name[member.name] = payload
+
+missing = sorted(set(required_paths.values()) - set(by_name))
+if missing:
+    raise SystemExit("formal source toolchain members are missing: " + ", ".join(missing))
+
+def text(label):
+    try:
+        return by_name[required_paths[label]].decode("utf-8")
+    except UnicodeError as exc:
+        raise SystemExit("formal source toolchain member is not UTF-8: " + label) from exc
+
+def require_tokens(label, tokens):
+    source = text(label)
+    for token in tokens:
+        if token not in source:
+            raise SystemExit("formal source toolchain token is missing from %s: %s" % (label, token))
+    return source
+
+builder = require_tokens(
+    "builder",
+    (
+        'UV_VERSION="0.12.2"',
+        'UV_ARCHIVE_URL="https://github.com/astral-sh/uv/releases/download/0.12.2/uv-x86_64-unknown-linux-gnu.tar.gz"',
+        'UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"',
+        'UV_PINNED_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"',
+        'NODE_VERSION="22.23.1"',
+        'NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"',
+        'NODE_PINNED_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"',
+        'validate_formal_uv_contract',
+        'auto|unlocked) fail',
+        'uv_lock_mode="${TAIJI_UV_LOCK_MODE:-strict}"',
+        'TAIJI_UV_EXECUTABLE="$UV_BIN"',
+        'TAIJI_UV_ARCHIVE_PATH="$UV_ARCHIVE_PATH"',
+        'TAIJI_NODE_ARCHIVE_PATH="$NODE_ARCHIVE_PATH"',
+        'TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS="$PYTHON_DEPENDENCY_LOCK_STATUS"',
+        'lock 在 strict sync 前后发生变化',
+    ),
+)
+for forbidden in ("https://astral.sh/uv/install.sh", "command -v uv", "\n  uv lock\n"):
+    if forbidden in builder:
+        raise SystemExit("formal source builder contains a forbidden downgrade path: " + forbidden)
+main_matches = re.findall(r'(?ms)^main\(\) \{\n(.*?)^\}\n\nmain "\$@"\s*$', builder)
+if len(main_matches) != 1:
+    raise SystemExit("formal source builder must have one canonical main entry")
+main_calls = []
+for raw in main_matches[0].splitlines():
+    active = raw.split("#", 1)[0].strip()
+    if active:
+        main_calls.append(active)
+if not main_calls or main_calls[0] != "validate_formal_uv_contract":
+    raise SystemExit("formal source builder must enter through strict validation before side effects")
+
+setup = require_tokens(
+    "setup",
+    (
+        "verify-python-lock-contract.py",
+        "Production dependency setup requires strict",
+        '"$UV_EXECUTABLE" sync "${sync_args[@]}" --locked',
+        "--verify-installed",
+    ),
+)
+if "uv pip install" in setup:
+    raise SystemExit("formal production setup contains a second unlocked pip install")
+
+deb_builder = require_tokens(
+    "deb_builder",
+    (
+        'PINNED_UV_VERSION="0.12.2"',
+        'PINNED_UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"',
+        'PINNED_UV_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"',
+        'PINNED_LOCK_CONTRACT_HELPER_SHA256="fca76118874d3846f1bddf304de0159160beff8467bef0870c3636858dedb9e6"',
+        'PACKAGED_NODE_VERSION="22.23.1"',
+        'PACKAGED_NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"',
+        'PINNED_NODE_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"',
+        'TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS must be strict-locked',
+        'sha256sum "$UV_EXECUTABLE"',
+        'sha256sum "$UV_ARCHIVE_PATH"',
+        'sha256sum "$node_bin"',
+        'sha256sum "$NODE_ARCHIVE_PATH"',
+        'validate_locked_python_environment',
+        '"$UV_EXECUTABLE" sync --extra all --locked --check',
+        'validate_staged_toolchain_executables',
+    ),
+)
+
+requirements = {
+    line.strip()
+    for line in text("requirements").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+}
+expected_requirements = {"cryptography==46.0.7", "pypdf==6.14.2", "pyyaml==6.0.3"}
+if requirements != expected_requirements:
+    raise SystemExit("formal WebUI requirements are not the exact approved Agent lock subset")
+
+helper = text("helper")
+compile(helper, required_paths["helper"], "exec")
+if hashlib.sha256(by_name[required_paths["helper"]]).hexdigest() != "fca76118874d3846f1bddf304de0159160beff8467bef0870c3636858dedb9e6":
+    raise SystemExit("formal Python lock helper differs from the reviewed fixed implementation")
+if "import tomllib" in helper or "verify_installed" not in helper:
+    raise SystemExit("formal Python lock helper is not Python 3.8-compatible or lacks installed verification")
+
+exact_requirement = re.compile(
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*)$"
+)
+
+def normalize_name(value):
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+def parse_requested(source):
+    result = {}
+    for line_number, raw in enumerate(source.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = exact_requirement.fullmatch(line)
+        if match is None:
+            raise SystemExit("formal WebUI requirement line %d is not exact" % line_number)
+        name = normalize_name(match.group(1))
+        if name in result:
+            raise SystemExit("formal WebUI requirements contain a duplicate: " + name)
+        result[name] = match.group(2)
+    if not result:
+        raise SystemExit("formal WebUI requirements are empty")
+    return result
+
+def parse_direct_dependencies(source):
+    in_project = False
+    in_dependencies = False
+    dependencies = []
+    for raw in source.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_project = line == "[project]"
+            in_dependencies = False
+            continue
+        if not in_project:
+            continue
+        if not in_dependencies:
+            inline = re.fullmatch(r"dependencies\s*=\s*\[(.*)\]", line)
+            if inline is not None:
+                dependencies.extend(re.findall(r'"([^"\\]+)"', inline.group(1)))
+                break
+            if re.fullmatch(r"dependencies\s*=\s*\[", line):
+                in_dependencies = True
+            continue
+        if line == "]":
+            in_dependencies = False
+            break
+        match = re.match(r'^"([^"\\]+)"\s*,?', line)
+        if match is None:
+            if not line or line.startswith("#"):
+                continue
+            raise SystemExit("formal pyproject dependencies contain an unsupported entry")
+        dependencies.append(match.group(1))
+    if in_dependencies or not dependencies:
+        raise SystemExit("formal pyproject project.dependencies is missing or incomplete")
+    result = {}
+    for dependency in dependencies:
+        match = exact_requirement.fullmatch(dependency)
+        if match is None:
+            continue
+        name = normalize_name(match.group(1))
+        if name in result and result[name] != match.group(2):
+            raise SystemExit("formal pyproject has conflicting direct dependency: " + name)
+        result[name] = match.group(2)
+    return result
+
+def parse_locked_packages(source):
+    result = {}
+    current_name = None
+    current_version = None
+
+    def finish_package():
+        if current_name is not None and current_version is not None:
+            result.setdefault(normalize_name(current_name), set()).add(current_version)
+
+    for raw in source.splitlines():
+        line = raw.strip()
+        if line == "[[package]]":
+            finish_package()
+            current_name = None
+            current_version = None
+            continue
+        match = re.fullmatch(r'name\s*=\s*"([^"]+)"', line)
+        if match is not None and current_name is None:
+            current_name = match.group(1)
+            continue
+        match = re.fullmatch(r'version\s*=\s*"([^"]+)"', line)
+        if match is not None and current_version is None:
+            current_version = match.group(1)
+    finish_package()
+    if not result:
+        raise SystemExit("formal uv.lock package tables are missing")
+    return result
+
+requested = parse_requested(text("requirements"))
+direct = parse_direct_dependencies(text("pyproject"))
+locked = parse_locked_packages(text("lock"))
+for name, version in requested.items():
+    if direct.get(name) != version:
+        raise SystemExit(
+            "formal WebUI requirement %s==%s is not the exact Agent direct dependency"
+            % (name, version)
+        )
+    if locked.get(name) != {version}:
+        raise SystemExit(
+            "formal WebUI requirement %s==%s is not uniquely fixed by uv.lock"
+            % (name, version)
+        )
+PY
+  ok "formal source toolchain contract 校验通过"
+}
 check_git_clean_and_commit_match() {
   [ "$SKIP_GIT_CHECK" = 1 ] && return 0
   [ -e "$REPO_ROOT/.git" ] || return 0
@@ -201,11 +447,12 @@ verify_deb_checksum_sidecar() {
 }
 verify_marker_and_manifest() {
   local deb="$1"
-  python3 - "$BUILD_MARKER" "$MANIFEST_FILE" "$deb" "$SOURCE_ARCHIVE" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" <<'PY'
+  python3 - "$BUILD_MARKER" "$MANIFEST_FILE" "$deb" "$SOURCE_ARCHIVE" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" "$POLICY_FILE" <<'PY'
 import hashlib
 import json
 import re
 import sys
+import tarfile
 from pathlib import Path
 marker_path = Path(sys.argv[1])
 manifest_path = Path(sys.argv[2])
@@ -214,7 +461,24 @@ source_path = Path(sys.argv[4])
 policy_id = sys.argv[5]
 policy_sha = sys.argv[6]
 maintainer = sys.argv[7]
-required = {"version","source_archive","source_sha256","source_commit","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"}
+policy_path = Path(sys.argv[8])
+toolchain_fields = {
+    "python_dependency_lock_status",
+    "python_lock_basename",
+    "python_lock_sha256",
+    "python_version",
+    "python_executable_sha256",
+    "uv_version",
+    "uv_archive_sha256",
+    "uv_executable_sha256",
+    "node_version",
+    "node_archive_sha256",
+    "node_executable_sha256",
+    "electron_version",
+    "electron_archive_sha256",
+    "electron_executable_sha256",
+}
+required = {"version","source_archive","source_sha256","source_commit","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"} | toolchain_fields
 marker = {}
 for line in marker_path.read_text(encoding="utf-8").splitlines():
     if not line or "=" not in line:
@@ -240,6 +504,7 @@ expected = {
     "elf_abi_audit_basename": "elf-abi-audit.json",
     "elf_abi_audit_sha256": marker["elf_abi_audit_sha256"],
     "icon_set_sha256": marker["icon_set_sha256"],
+    **{field: marker[field] for field in toolchain_fields},
 }
 for key, value in expected.items():
     if manifest.get(key) != value:
@@ -262,6 +527,44 @@ if not re.fullmatch(r"[0-9a-f]{64}", marker["elf_abi_audit_sha256"]):
     raise SystemExit("marker ABI audit SHA256 invalid")
 if not re.fullmatch(r"[0-9a-f]{64}", marker["icon_set_sha256"]):
     raise SystemExit("marker icon set SHA256 invalid")
+for field in (
+    "python_lock_sha256",
+    "python_executable_sha256",
+    "uv_archive_sha256",
+    "uv_executable_sha256",
+    "node_archive_sha256",
+    "node_executable_sha256",
+    "electron_archive_sha256",
+    "electron_executable_sha256",
+):
+    if not re.fullmatch(r"[0-9a-f]{64}", marker[field]):
+        raise SystemExit("marker toolchain SHA256 invalid: " + field)
+if marker["python_dependency_lock_status"] != "strict-locked":
+    raise SystemExit("formal build marker is not strict-locked")
+if marker["python_lock_basename"] != "uv.lock":
+    raise SystemExit("formal build marker has an unexpected Python lock basename")
+if not re.fullmatch(r"3\.11\.[0-9]+", marker["python_version"]):
+    raise SystemExit("formal build marker Python version is not 3.11.x")
+if marker["uv_version"] != "0.12.2" or marker["uv_archive_sha256"] != "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4" or marker["uv_executable_sha256"] != "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2":
+    raise SystemExit("formal build marker uv identity is not pinned")
+if marker["node_version"] != "22.23.1" or marker["node_archive_sha256"] != "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578" or marker["node_executable_sha256"] != "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068":
+    raise SystemExit("formal build marker Node identity is not pinned")
+policy = json.loads(policy_path.read_text(encoding="utf-8"))
+electron = policy["elf"]["electron_distribution"]
+if marker["electron_version"] != electron["version"] or marker["electron_archive_sha256"] != electron["archive_sha256"]:
+    raise SystemExit("formal build marker Electron identity differs from canonical policy")
+lock_member = "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock"
+with tarfile.open(source_path, "r:gz") as archive:
+    matches = [candidate for candidate in archive.getmembers() if candidate.name == lock_member]
+    if len(matches) != 1:
+        raise SystemExit("source archive must contain exactly one uv.lock")
+    member = matches[0]
+    if not member.isfile() or member.size <= 0 or member.size > 32 * 1024 * 1024:
+        raise SystemExit("source archive uv.lock is not a safe regular file")
+    extracted = archive.extractfile(member)
+    payload = extracted.read(member.size + 1) if extracted is not None else b""
+    if len(payload) != member.size or hashlib.sha256(payload).hexdigest() != marker["python_lock_sha256"]:
+        raise SystemExit("source archive uv.lock SHA256 differs from formal build identity")
 PY
 }
 verify_deb_payload() {
@@ -286,6 +589,23 @@ verify_deb_payload() {
     --print-digest)" || { remove_release_temp_directory "$payload_root"; fail "DEB 图标链验证失败"; }
   marker_icon_sha256="$(awk -F= '$1=="icon_set_sha256" {print $2}' "$BUILD_MARKER")"
   [ "$icon_sha256" = "$marker_icon_sha256" ] || { remove_release_temp_directory "$payload_root"; fail "DEB 实际图标摘要与 marker 不一致"; }
+  python3 - "$payload_root" "$MANIFEST_FILE" <<'PY' || { remove_release_temp_directory "$payload_root"; fail "DEB 工具链可执行文件摘要与 manifest 不一致"; }
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+paths = {
+    "python_executable_sha256": root / "opt/taiji-agent/runtime/agent/venv/bin/python",
+    "node_executable_sha256": root / "opt/taiji-agent/runtime/node/bin/node",
+    "electron_executable_sha256": root / "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
+}
+for field, path in paths.items():
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != manifest.get(field):
+        raise SystemExit(field + " mismatch")
+PY
   remove_release_temp_directory "$payload_root"
 }
 verify_package_output_allowlist() {
@@ -390,6 +710,7 @@ main() {
   info "执行太极 Agent 发布预检"
   check_single_source_archive
   check_source_checksum
+  check_formal_source_toolchain_contract
   check_git_clean_and_commit_match
   check_source_archive_matches_git_head
   check_no_macos_metadata_or_stale_zip

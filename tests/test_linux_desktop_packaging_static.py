@@ -9,6 +9,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import zlib
@@ -16,10 +17,32 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FORMAL_BUILD_SOURCE_PATHS = (
+    "taijiagent 打包交付/00_制包机_生成离线交付包.sh",
+    "hermes-local-lab/scripts/setup-local.sh",
+    "hermes-local-lab/sources/hermes-agent/pyproject.toml",
+    "hermes-local-lab/sources/hermes-webui/requirements.txt",
+    "hermes-local-lab/sources/hermes-agent/uv.lock",
+    "packaging/linux/verify-python-lock-contract.py",
+    "packaging/linux/deb/build-deb.sh",
+)
 
 
 def read_text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def copy_formal_build_sources(destination: Path) -> None:
+    for relative in FORMAL_BUILD_SOURCE_PATHS:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+
+
+def write_formal_build_source_archive(path: Path) -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        for relative in FORMAL_BUILD_SOURCE_PATHS:
+            archive.add(ROOT / relative, arcname=f"taiji-agentv1.0/{relative}")
 
 
 def build_function_source(name: str, next_name: str) -> str:
@@ -980,6 +1003,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             gate_dir.mkdir()
             shutil.copy2(ROOT / "scripts/check-clean-worktree.sh", gate_dir)
             shutil.copy2(ROOT / "scripts/taiji-trusted-git", gate_dir)
+            copy_formal_build_sources(repo_root)
             (repo_root / ".gitignore").write_text(
                 "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.tar.gz\n"
                 "/taijiagent 打包交付/SHA256SUMS.txt\n",
@@ -1629,7 +1653,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("Categories=Utility;", desktop)
         self.assertNotIn("Categories=Utility;Development;", desktop)
 
-    def test_setup_local_can_recover_from_stale_uv_lockfile_on_kylin_build_host(self):
+    def test_setup_local_keeps_developer_modes_but_production_is_strict_only(self):
         setup = read_text("hermes-local-lab/scripts/setup-local.sh")
 
         self.assertIn("TAIJI_UV_LOCK_MODE", setup)
@@ -1638,9 +1662,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("auto", setup)
         self.assertIn("local -a sync_args=(--extra all)", setup)
         self.assertIn("sync_args+=(--extra dev)", setup)
-        self.assertIn('uv sync "${sync_args[@]}" --locked', setup)
-        self.assertIn('uv sync "${sync_args[@]}"', setup)
+        self.assertIn('"$UV_EXECUTABLE" sync "${sync_args[@]}" --locked', setup)
+        self.assertIn('"$UV_EXECUTABLE" sync "${sync_args[@]}"', setup)
         self.assertIn("retrying without --locked", setup)
+        self.assertIn("Production dependency setup requires strict", setup)
+        self.assertNotIn("uv pip install", setup)
 
     def test_offline_builder_uv_index_is_explicit_and_matches_committed_lock(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -1672,13 +1698,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             builder.index('export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-'),
         )
 
-    def test_offline_builder_records_whether_uv_used_locked_dependencies(self):
+    def test_offline_builder_records_strict_locked_dependencies_only(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
         self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="unknown"', builder)
-        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="locked"', builder)
-        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"', builder)
-        self.assertIn('grep -Fq "retrying without --locked" "$setup_log"', builder)
+        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="strict-locked"', builder)
+        self.assertNotIn('PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"', builder)
+        self.assertNotIn('PYTHON_DEPENDENCY_LOCK_STATUS="explicit-unlocked"', builder)
         self.assertIn(
             "Python 依赖锁状态：%s\\n' \"$PYTHON_DEPENDENCY_LOCK_STATUS\"",
             builder,
@@ -1700,9 +1726,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("glibc 2.31", doc)
         self.assertIn("离线优先", doc)
         self.assertIn("不内置模型", doc)
-        self.assertIn("Node.js 10 / npm 6", doc)
-        self.assertIn("TAIJI_UV_LOCK_MODE=auto", doc)
+        self.assertIn("Node.js", doc)
+        self.assertIn("22.23.1", doc)
         self.assertIn("TAIJI_UV_LOCK_MODE=strict", doc)
+        self.assertNotIn("TAIJI_UV_LOCK_MODE=auto", doc)
+        self.assertIn("72c5f455…68e23e2", doc)
+        self.assertIn("93956de2…8e068", doc)
 
     def test_current_delivery_docs_describe_v3_single_deb_and_internal_backup_boundary(self):
         operator_doc = read_text("docs/taiji-desktop-uos-packaging.md")
@@ -1931,7 +1960,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             shutil.copy2(source_script, script)
 
             archive = delivery / "taiji-agentv1.0-kylin-build-src-test.tar.gz"
-            archive.write_bytes(b"fake source archive\n")
+            write_formal_build_source_archive(archive)
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
             (delivery / "SHA256SUMS.txt").write_text(
                 f"{digest}  {archive.name}\n",
@@ -1962,7 +1991,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertFalse((delivery / ".DS_Store").exists())
             self.assertFalse(apple_dir.exists())
 
-    def test_offline_builder_generates_manifest_and_does_not_refresh_lock_by_default(self):
+    def test_offline_builder_generates_manifest_and_forbids_lock_refresh(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
         self.assertIn("MANIFEST_FILE", builder)
@@ -1973,12 +2002,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("elf_abi_audit_sha256", builder)
         self.assertIn("CANDIDATE_DEB_FIXED", builder)
         self.assertIn("TAIJI_ALLOW_UV_LOCK_REFRESH", builder)
-        self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"', builder)
+        self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-strict}"', builder)
         self.assertIn('run_setup_local "$uv_lock_mode"', builder)
-        self.assertIn('TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh', builder)
+        self.assertIn('TAIJI_UV_LOCK_MODE="$uv_lock_mode"', builder)
+        self.assertIn('./scripts/setup-local.sh', builder)
         self.assertIn('TAIJI_DEPENDENCY_PROFILE=production', builder)
-        self.assertIn("Python 依赖 lock 漂移", builder)
-        self.assertNotIn("TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh", builder)
+        self.assertIn("lock 在 strict sync 前后发生变化", builder)
         self.assertNotIn("\n  uv lock\n", builder)
         self.assertIn('printf \'%s  %s\\n\' "$deb_sha" "$deb_name"', builder)
         self.assertNotIn("write_release_manifest", builder)

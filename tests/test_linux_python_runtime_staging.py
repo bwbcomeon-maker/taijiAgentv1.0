@@ -347,6 +347,17 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
             fake_root = self.temp_dir / f"fake-uv-{profile or 'default'}"
             fake_bin = fake_root / "bin"
             fake_bin.mkdir(parents=True)
+            test_venv = ROOT / "hermes-local-lab/sources/hermes-agent/venv"
+            self.assertFalse(test_venv.exists(), "isolated worktree must not have a real venv")
+            (test_venv / "bin").mkdir(parents=True)
+            fake_python = test_venv / "bin/python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [ \"${1:-}\" = -c ]; then printf '%s\\n' \"$3\"; exit 0; fi\n"
+                "exec python3 \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
             uv_log = fake_root / "uv.log"
             fake_uv = fake_bin / "uv"
             fake_uv.write_text(
@@ -364,13 +375,16 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
             }
             if profile is not None:
                 env["TAIJI_DEPENDENCY_PROFILE"] = profile
-            completed = subprocess.run(
-                ["bash", str(setup)],
-                text=True,
-                capture_output=True,
-                check=False,
-                env=env,
-            )
+            try:
+                completed = subprocess.run(
+                    ["bash", str(setup)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=env,
+                )
+            finally:
+                shutil.rmtree(test_venv)
             completed.uv_log = uv_log.read_text(encoding="utf-8") if uv_log.exists() else ""  # type: ignore[attr-defined]
             return completed
 

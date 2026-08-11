@@ -1,11 +1,13 @@
 import argparse
 import hashlib
+import io
 import importlib.util
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +17,25 @@ ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "scripts/validate-taiji-release-evidence.py"
 POLICY_PATH = ROOT / "packaging/linux/compatibility-policy.json"
 POLICY_HELPER_PATH = ROOT / "packaging/linux/compatibility_policy.py"
+
+
+def toolchain_identity() -> dict[str, str]:
+    return {
+        "python_dependency_lock_status": "strict-locked",
+        "python_lock_basename": "uv.lock",
+        "python_lock_sha256": "dbab12665d98aef021ba64953c61b0ed8a908cfb56a1c01e2fcb4b052b71a2a1",
+        "python_version": "3.11.15",
+        "python_executable_sha256": "5" * 64,
+        "uv_version": "0.12.2",
+        "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
+        "uv_executable_sha256": "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2",
+        "node_version": "22.23.1",
+        "node_archive_sha256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
+        "node_executable_sha256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
+        "electron_version": "39.8.10",
+        "electron_archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
+        "electron_executable_sha256": "c" * 64,
+    }
 
 
 def load_validator():
@@ -113,6 +134,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "desktop_entry_sha256": "d" * 64,
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
             "built_at_utc": "2026-08-05T00:00:00Z",
+            **toolchain_identity(),
         }
         manifest.update(updates)
         self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
@@ -121,7 +143,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.source_archive = (
             self.delivery / f"taiji-agentv1.0-kylin-build-src-{self.commit}.tar.gz"
         )
-        self.source_archive.write_bytes(b"source fixture\n")
+        self.write_source_archive(self.source_archive)
         self.checksum = self.package_dir / f"{self.deb.name}.sha256"
         self.checksum.write_text(
             f"{self.sha256(self.deb)}  {self.deb.name}\n",
@@ -148,6 +170,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"compatibility_policy_sha256={self.policy_sha256}",
                     f"elf_abi_audit_sha256={'e' * 64}",
                     f"icon_set_sha256={'1' * 64}",
+                    *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )
@@ -178,6 +201,16 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "signing-public.pem",
         ):
             (tools_dir / filename).write_text(f"fixture {filename}\n", encoding="utf-8")
+
+    @staticmethod
+    def write_source_archive(path: Path, payload: bytes = b"version = 1\n") -> None:
+        member = tarfile.TarInfo(
+            "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock"
+        )
+        member.size = len(payload)
+        member.mode = 0o644
+        with tarfile.open(path, "w:gz") as archive:
+            archive.addfile(member, io.BytesIO(payload))
 
     def write_evidence(self, **updates) -> None:
         evidence = {
@@ -210,6 +243,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                 "github_ci_gate": "PASS",
                 "manifest_binding": "PASS",
             },
+            **toolchain_identity(),
         }
         evidence.update(updates)
         self.evidence.write_text(json.dumps(evidence), encoding="utf-8")
@@ -327,6 +361,17 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("CI", result.stderr)
 
+    def test_old_v3_without_strict_toolchain_is_rejected_not_upgraded(self):
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest.pop("uv_executable_sha256")
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        downgraded = self.manifest.read_bytes()
+
+        with self.assertRaisesRegex(self.validator.EvidenceError, "工具链|toolchain"):
+            self.validator.validate_build_binding(self.args())
+        self.assertNotIn("uv_executable_sha256", json.loads(self.manifest.read_text()))
+        self.assertEqual(self.manifest.read_bytes(), downgraded)
+
     def test_v3_build_binding_rejects_old_or_wrong_named_source_archive(self):
         wrong_archive = self.delivery / "taiji-agentv1.0-kylin-build-src-bbbbbbb.tar.gz"
         wrong_archive.write_bytes(self.source_archive.read_bytes())
@@ -351,6 +396,26 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(self.validator.EvidenceError, "source_commit|\u6784\u5efa\u6210\u529f\u6807\u8bb0"):
+            self.validator.validate_build_binding(self.args())
+
+    def test_v3_build_binding_rejects_source_archive_lock_drift(self):
+        old_source_sha = self.sha256(self.source_archive)
+        self.write_source_archive(self.source_archive, b"version = 2\n")
+        new_source_sha = self.sha256(self.source_archive)
+        (self.delivery / "SHA256SUMS.txt").write_text(
+            f"{new_source_sha}  {self.source_archive.name}\n",
+            encoding="ascii",
+        )
+        marker = self.build_marker.read_text(encoding="utf-8")
+        self.build_marker.write_text(
+            marker.replace(
+                f"source_sha256={old_source_sha}",
+                f"source_sha256={new_source_sha}",
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(self.validator.EvidenceError, "uv.lock|lock"):
             self.validator.validate_build_binding(self.args())
 
     def test_delivery_copy_fallback_uses_current_canonical_policy_identity(self):
@@ -393,7 +458,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         for filename in root_files:
             (delivery / filename).write_text(f"fixture {filename}\n", encoding="utf-8")
         source_archive = delivery / f"taiji-agentv1.0-kylin-build-src-{self.commit}.tar.gz"
-        source_archive.write_bytes(b"source fixture\n")
+        self.write_source_archive(source_archive)
         (delivery / "SHA256SUMS.txt").write_text(
             f"{self.sha256(source_archive)}  {source_archive.name}\n",
             encoding="ascii",
@@ -418,6 +483,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "elf_abi_audit_sha256": "e" * 64,
             "icon_set_sha256": "1" * 64,
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
+            **toolchain_identity(),
         }
         (package_dir / "taiji-package-manifest.json").write_text(
             json.dumps(manifest),
@@ -439,6 +505,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"compatibility_policy_sha256={self.policy_sha256}",
                     f"elf_abi_audit_sha256={'e' * 64}",
                     f"icon_set_sha256={'1' * 64}",
+                    *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )

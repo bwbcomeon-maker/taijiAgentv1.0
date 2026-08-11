@@ -21,6 +21,24 @@ POLICY_HELPER = ROOT / "packaging/linux/compatibility_policy.py"
 PUBLIC_KEY = ROOT / "tools/taiji-release-evidence/signing-public.pem"
 
 
+TOOLCHAIN = {
+    "python_dependency_lock_status": "strict-locked",
+    "python_lock_basename": "uv.lock",
+    "python_lock_sha256": "dbab12665d98aef021ba64953c61b0ed8a908cfb56a1c01e2fcb4b052b71a2a1",
+    "python_version": "3.11.15",
+    "python_executable_sha256": "5" * 64,
+    "uv_version": "0.12.2",
+    "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
+    "uv_executable_sha256": "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2",
+    "node_version": "22.23.1",
+    "node_archive_sha256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
+    "node_executable_sha256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
+    "electron_version": "39.8.10",
+    "electron_archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
+    "electron_executable_sha256": "c" * 64,
+}
+
+
 def write_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
@@ -59,6 +77,9 @@ class SingleDebPublisherGateTest(unittest.TestCase):
             #!/usr/bin/env bash
             set -eu
             printf 'release-check\\n' >> "$TEST_GATE_LOG"
+            if [ "${TEST_GATE_FAIL:-0}" = 1 ]; then
+              exit 23
+            fi
             if [ "${TEST_MUTATE_INPUT:-0}" = 1 ]; then
               printf 'mutated-after-snapshot\\n' >> "$TEST_CANDIDATE_DEB"
             fi
@@ -142,6 +163,7 @@ class SingleDebPublisherGateTest(unittest.TestCase):
                     "customer_folder_contract": "exactly-one-deb",
                     "signing_public_key_fingerprint": "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da",
                     "formal_gates": {"certification_set": "PASS"},
+                    **TOOLCHAIN,
                 },
                 sort_keys=True,
             )
@@ -220,6 +242,25 @@ class SingleDebPublisherGateTest(unittest.TestCase):
 
     def test_input_replacement_during_gate_fails_closed(self):
         result = self.run_publisher(extra_env={"TEST_MUTATE_INPUT": "1"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.receipts.exists() and any(self.receipts.iterdir()))
+
+    def test_real_formal_gate_failure_publishes_nothing(self):
+        result = self.run_publisher(extra_env={"TEST_GATE_FAIL": "1"})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.receipts.exists() and any(self.receipts.iterdir()))
+        self.assertEqual(self.gate_log.read_text().splitlines(), ["release-check"])
+
+    def test_publisher_rejects_downgraded_v3_even_if_external_gate_is_stubbed(self):
+        release = json.loads(self.release.read_text(encoding="utf-8"))
+        release.pop("uv_executable_sha256")
+        self.release.write_text(json.dumps(release) + "\n", encoding="utf-8")
+
+        result = self.run_publisher()
 
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.output.exists())

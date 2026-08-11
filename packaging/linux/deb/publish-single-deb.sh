@@ -64,6 +64,24 @@ RECEIPT_NAMES = {
     "compatibility-policy.json",
     "deb.sha256",
 }
+TOOLCHAIN_FIELDS = {
+    "python_dependency_lock_status",
+    "python_lock_basename",
+    "python_lock_sha256",
+    "python_version",
+    "python_executable_sha256",
+    "uv_version",
+    "uv_archive_sha256",
+    "uv_executable_sha256",
+    "node_version",
+    "node_archive_sha256",
+    "node_executable_sha256",
+    "electron_version",
+    "electron_archive_sha256",
+    "electron_executable_sha256",
+}
+PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
+PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
 
 
 class PublisherError(RuntimeError):
@@ -412,6 +430,10 @@ def main() -> int:
             snapshots[name] = {"path": work / name, "sha256": payload_hash, "identity": identity}
 
         policy_id, policy_sha, policy_maintainer = policy_identity(snapshots["compatibility-policy.json"]["path"])
+        policy_document = strict_json(
+            snapshots["compatibility-policy.json"]["path"].read_bytes(),
+            "compatibility policy",
+        )
         if maintainer != policy_maintainer:
             fail("candidate DEB maintainer does not match canonical compatibility policy")
 
@@ -423,6 +445,29 @@ def main() -> int:
             fail("certification set must use taiji-linux-certification-set/v1")
         if release.get("schema") != "taiji-release-evidence/v3" or release.get("evidence_type") != "single-deb-publication":
             fail("release evidence must use taiji-release-evidence/v3")
+        missing_toolchain = sorted(TOOLCHAIN_FIELDS - release.keys())
+        if missing_toolchain:
+            fail("release evidence is missing formal toolchain identity: " + ", ".join(missing_toolchain))
+        electron = policy_document.get("elf", {}).get("electron_distribution", {})
+        expected_toolchain = {
+            "python_dependency_lock_status": "strict-locked",
+            "python_lock_basename": "uv.lock",
+            "uv_version": "0.12.2",
+            "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
+            "uv_executable_sha256": PINNED_UV_EXECUTABLE_SHA256,
+            "node_version": "22.23.1",
+            "node_archive_sha256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
+            "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
+            "electron_version": electron.get("version"),
+            "electron_archive_sha256": electron.get("archive_sha256"),
+        }
+        if any(release.get(key) != value for key, value in expected_toolchain.items()):
+            fail("release evidence formal toolchain identity is not pinned")
+        if not re.fullmatch(r"3\.11\.[0-9]+", str(release.get("python_version"))):
+            fail("release evidence Python identity must be 3.11.x")
+        for key in TOOLCHAIN_FIELDS:
+            if key.endswith("_sha256") and not SHA_RE.fullmatch(str(release.get(key))):
+                fail(f"release evidence formal toolchain SHA256 is invalid: {key}")
         cert_challenge = cert.get("challenge_nonce")
         publication_challenge = release.get("challenge_nonce")
         if not CHALLENGE_RE.fullmatch(cert_challenge or "") or not CHALLENGE_RE.fullmatch(publication_challenge or ""):

@@ -1,10 +1,12 @@
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -26,6 +28,22 @@ REQUIRED_SYSTEM_PACKAGES = (
 CHALLENGE = "ab" * 32
 SALE_READINESS = ROOT / "docs" / "taiji-sale-readiness.md"
 DELIVERY_GUIDE = ROOT / "taijiagent 打包交付" / "操作说明.md"
+TOOLCHAIN = {
+    "python_dependency_lock_status": "strict-locked",
+    "python_lock_basename": "uv.lock",
+    "python_lock_sha256": "dbab12665d98aef021ba64953c61b0ed8a908cfb56a1c01e2fcb4b052b71a2a1",
+    "python_version": "3.11.15",
+    "python_executable_sha256": "5" * 64,
+    "uv_version": "0.12.2",
+    "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
+    "uv_executable_sha256": "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2",
+    "node_version": "22.23.1",
+    "node_archive_sha256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
+    "node_executable_sha256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
+    "electron_version": "39.8.10",
+    "electron_archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
+    "electron_executable_sha256": "e" * 64,
+}
 
 
 def sha256(path: Path) -> str:
@@ -73,7 +91,14 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         package_dir = self.delivery / "生成的安装包"
         package_dir.mkdir(parents=True)
         source_archive = self.delivery / f"taiji-agentv1.0-kylin-build-src-{self.source_commit}.tar.gz"
-        source_archive.write_bytes(b"source archive fixture\n")
+        lock_payload = b"version = 1\n"
+        lock_member = tarfile.TarInfo(
+            "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock"
+        )
+        lock_member.size = len(lock_payload)
+        lock_member.mode = 0o644
+        with tarfile.open(source_archive, "w:gz") as archive:
+            archive.addfile(lock_member, io.BytesIO(lock_payload))
         deb = package_dir / "taiji-agent_0.1.0_amd64.deb"
         deb.write_bytes(b"deb fixture\n")
         checksum = package_dir / f"{deb.name}.sha256"
@@ -99,10 +124,10 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "elf_abi_audit_basename": "elf-abi-audit.json",
                     "elf_abi_audit_sha256": "a" * 64,
                     "icon_set_sha256": "1" * 64,
-                    "electron_executable_sha256": "e" * 64,
                     "desktop_entry_sha256": "d" * 64,
                     "maintainer": "Taiji Agent Product Team <noreply@localhost>",
                     "built_at_utc": generated_at,
+                    **TOOLCHAIN,
                 },
                 sort_keys=True,
             )
@@ -126,6 +151,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     f"elf_abi_audit_sha256={'a' * 64}",
                     f"icon_set_sha256={'1' * 64}",
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
+                    *(f"{key}={value}" for key, value in TOOLCHAIN.items()),
                 )
             )
             + "\n",

@@ -24,6 +24,7 @@ ELECTRON_RUNTIME_STAGER="$REPO_ROOT/packaging/linux/stage-electron-runtime.py"
 DESKTOP_JS_STAGER="$REPO_ROOT/packaging/linux/stage-desktop-js-closure.js"
 PRIVATE_LIB_STAGER="$REPO_ROOT/packaging/linux/stage-private-libraries.py"
 ELF_AUDITOR="$REPO_ROOT/packaging/linux/audit-elf-closure.py"
+LOCK_CONTRACT_HELPER="$REPO_ROOT/packaging/linux/verify-python-lock-contract.py"
 PREINST_RENDERER="$SCRIPT_DIR/render-preinst.py"
 TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
@@ -31,6 +32,28 @@ PRIVATE_LIBRARY_SYSROOT="${TAIJI_PRIVATE_LIBRARY_SYSROOT:-/usr/lib/x86_64-linux-
 SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
 ELECTRON_ARCHIVE="${TAIJI_ELECTRON_ARCHIVE:-}"
 PACKAGED_NODE_VERSION="22.23.1"
+PACKAGED_NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
+PINNED_NODE_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PINNED_UV_VERSION="0.12.2"
+PINNED_UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"
+PINNED_UV_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
+PINNED_LOCK_CONTRACT_HELPER_SHA256="fca76118874d3846f1bddf304de0159160beff8467bef0870c3636858dedb9e6"
+PYTHON_DEPENDENCY_LOCK_STATUS="${TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS:-}"
+PYTHON_LOCK_BASENAME="${TAIJI_PYTHON_LOCK_BASENAME:-}"
+PYTHON_LOCK_SHA256="${TAIJI_PYTHON_LOCK_SHA256:-}"
+UV_EXECUTABLE="${TAIJI_UV_EXECUTABLE:-}"
+UV_ARCHIVE_PATH="${TAIJI_UV_ARCHIVE_PATH:-}"
+UV_VERSION="${TAIJI_UV_VERSION:-}"
+UV_ARCHIVE_SHA256="${TAIJI_UV_ARCHIVE_SHA256:-}"
+UV_EXECUTABLE_SHA256="${TAIJI_UV_EXECUTABLE_SHA256:-}"
+NODE_ARCHIVE_PATH="${TAIJI_NODE_ARCHIVE_PATH:-}"
+PYTHON_VERSION=""
+PYTHON_EXECUTABLE_SHA256=""
+NODE_VERSION=""
+NODE_ARCHIVE_SHA256=""
+NODE_EXECUTABLE_SHA256=""
+ELECTRON_VERSION=""
+ELECTRON_ARCHIVE_SHA256=""
 ISSUER_PUBLIC_KEY_FINGERPRINT="2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de7550265f7628b35"
 
 [ -f "$VERSION_FILE" ] || { echo "Missing product VERSION: $VERSION_FILE" >&2; exit 1; }
@@ -107,6 +130,116 @@ validate_build_host_glibc() {
   build_glibc="$(ldd --version 2>&1 | awk 'NR == 1 { print }' | grep -Eo '[0-9]+(\.[0-9]+)+' | tail -n 1)"
   [ -n "$build_glibc" ] || fail "Cannot determine Linux build-host glibc version"
   dpkg --compare-versions "$build_glibc" le "$TAIJI_GLIBC_MIN" || fail "Build-host glibc $build_glibc exceeds policy $TAIJI_GLIBC_MIN"
+}
+
+validate_strict_toolchain_contract() {
+  local actual lock_path python_real node_bin node_archive_marker actual_electron_archive_sha
+  [ "$PYTHON_DEPENDENCY_LOCK_STATUS" = "strict-locked" ] \
+    || fail "TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS must be strict-locked"
+  [ "$PYTHON_LOCK_BASENAME" = "uv.lock" ] \
+    || fail "TAIJI_PYTHON_LOCK_BASENAME must be uv.lock"
+  printf '%s\n' "$PYTHON_LOCK_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "TAIJI_PYTHON_LOCK_SHA256 is required"
+  lock_path="$SOURCE_AGENT_DIR/$PYTHON_LOCK_BASENAME"
+  [ -f "$lock_path" ] && [ ! -L "$lock_path" ] || fail "Python lock must be a regular file"
+  actual="$(sha256sum "$lock_path" | awk '{print $1}')"
+  [ "$actual" = "$PYTHON_LOCK_SHA256" ] || fail "Python lock SHA256 changed before DEB build"
+
+  [ "$UV_VERSION" = "$PINNED_UV_VERSION" ] || fail "TAIJI_UV_VERSION is not the pinned uv version"
+  [ "$UV_ARCHIVE_SHA256" = "$PINNED_UV_ARCHIVE_SHA256" ] || fail "TAIJI_UV_ARCHIVE_SHA256 is not pinned"
+  [ "$UV_EXECUTABLE_SHA256" = "$PINNED_UV_EXECUTABLE_SHA256" ] || fail "TAIJI_UV_EXECUTABLE_SHA256 is not pinned"
+  [ -f "$UV_ARCHIVE_PATH" ] && [ ! -L "$UV_ARCHIVE_PATH" ] \
+    && [ "$(stat -c '%h' "$UV_ARCHIVE_PATH")" = 1 ] \
+    || fail "TAIJI_UV_ARCHIVE_PATH must be a regular single-link file"
+  actual="$(sha256sum "$UV_ARCHIVE_PATH" | awk '{print $1}')"
+  [ "$actual" = "$PINNED_UV_ARCHIVE_SHA256" ] || fail "uv archive SHA256 mismatch"
+  [ -f "$UV_EXECUTABLE" ] && [ ! -L "$UV_EXECUTABLE" ] \
+    && [ "$(stat -c '%h' "$UV_EXECUTABLE")" = 1 ] \
+    || fail "TAIJI_UV_EXECUTABLE must be a regular single-link file"
+  [ "$("$UV_EXECUTABLE" --version)" = "uv $PINNED_UV_VERSION" ] || fail "uv executable version mismatch"
+  file "$UV_EXECUTABLE" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
+    || fail "uv executable is not Linux x86_64 ELF"
+  actual="$(sha256sum "$UV_EXECUTABLE" | awk '{print $1}')"
+  [ "$actual" = "$UV_EXECUTABLE_SHA256" ] || fail "uv executable SHA256 mismatch"
+
+  python_real="$(readlink -f "$SOURCE_AGENT_DIR/venv/bin/python")"
+  [ -f "$python_real" ] || fail "resolved Agent Python executable is missing"
+  PYTHON_VERSION="$("$SOURCE_AGENT_DIR/venv/bin/python" -c 'import platform; print(platform.python_version())')"
+  printf '%s\n' "$PYTHON_VERSION" | grep -Eq '^3\.11\.[0-9]+$' || fail "Agent Python must be 3.11.x"
+  PYTHON_EXECUTABLE_SHA256="$(sha256sum "$python_real" | awk '{print $1}')"
+
+  node_bin="$PACKAGED_NODE_ROOT/bin/node"
+  node_archive_marker="$PACKAGED_NODE_ROOT/.taiji-node-archive-sha256"
+  [ -f "$node_bin" ] && [ ! -L "$node_bin" ] \
+    && [ -f "$node_archive_marker" ] && [ ! -L "$node_archive_marker" ] \
+    || fail "verified Node identity files are missing or unsafe"
+  NODE_VERSION="$("$node_bin" --version)"
+  NODE_VERSION="${NODE_VERSION#v}"
+  [ "$NODE_VERSION" = "$PACKAGED_NODE_VERSION" ] || fail "Node version mismatch"
+  NODE_ARCHIVE_SHA256="$(tr -d '\r\n' < "$node_archive_marker")"
+  [ "$NODE_ARCHIVE_SHA256" = "$PACKAGED_NODE_ARCHIVE_SHA256" ] || fail "Node archive SHA256 mismatch"
+  [ -f "$NODE_ARCHIVE_PATH" ] && [ ! -L "$NODE_ARCHIVE_PATH" ] \
+    && [ "$(stat -c '%h' "$NODE_ARCHIVE_PATH")" = 1 ] \
+    || fail "TAIJI_NODE_ARCHIVE_PATH must be a regular single-link file"
+  actual="$(sha256sum "$NODE_ARCHIVE_PATH" | awk '{print $1}')"
+  [ "$actual" = "$PACKAGED_NODE_ARCHIVE_SHA256" ] || fail "Node archive file SHA256 mismatch"
+  NODE_EXECUTABLE_SHA256="$(sha256sum "$node_bin" | awk '{print $1}')"
+  [ "$NODE_EXECUTABLE_SHA256" = "$PINNED_NODE_EXECUTABLE_SHA256" ] \
+    || fail "Node executable SHA256 is not the pinned official archive identity"
+
+  ELECTRON_VERSION="$TAIJI_ELECTRON_VERSION"
+  ELECTRON_ARCHIVE_SHA256="$TAIJI_ELECTRON_ARCHIVE_SHA256"
+  [ -f "$ELECTRON_ARCHIVE" ] && [ ! -L "$ELECTRON_ARCHIVE" ] || fail "verified Electron archive is required"
+  actual_electron_archive_sha="$(sha256sum "$ELECTRON_ARCHIVE" | awk '{print $1}')"
+  [ "$actual_electron_archive_sha" = "$ELECTRON_ARCHIVE_SHA256" ] || fail "Electron archive SHA256 mismatch"
+}
+
+validate_locked_python_environment() {
+  local helper_sha lock_before lock_after
+  [ -f "$LOCK_CONTRACT_HELPER" ] && [ ! -L "$LOCK_CONTRACT_HELPER" ] \
+    || fail "Python lock contract helper is missing"
+  helper_sha="$(sha256sum "$LOCK_CONTRACT_HELPER" | awk '{print $1}')"
+  [ "$helper_sha" = "$PINNED_LOCK_CONTRACT_HELPER_SHA256" ] \
+    || fail "Python lock contract helper differs from the reviewed fixed implementation"
+  lock_before="$(sha256sum "$SOURCE_AGENT_DIR/uv.lock" | awk '{print $1}')"
+  [ "$lock_before" = "$PYTHON_LOCK_SHA256" ] \
+    || fail "Python lock changed before installed-environment verification"
+  python3 "$LOCK_CONTRACT_HELPER" \
+    --pyproject "$SOURCE_AGENT_DIR/pyproject.toml" \
+    --lock "$SOURCE_AGENT_DIR/uv.lock" \
+    --requirements "$SOURCE_WEB_DIR/requirements.txt" \
+    --verify-installed \
+    --python "$SOURCE_AGENT_DIR/venv/bin/python" >/dev/null \
+    || fail "Installed Python environment failed the lock contract"
+  (
+    cd "$SOURCE_AGENT_DIR"
+    unset UV_INDEX UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_NO_INDEX UV_INDEX_STRATEGY UV_CONFIG_FILE
+    export UV_NO_CONFIG=1
+    UV_OFFLINE=1 UV_PROJECT_ENVIRONMENT="$SOURCE_AGENT_DIR/venv" \
+      "$UV_EXECUTABLE" sync --extra all --locked --check
+  ) >/dev/null \
+    || fail "Installed Python environment is not a complete locked uv sync"
+  lock_after="$(sha256sum "$SOURCE_AGENT_DIR/uv.lock" | awk '{print $1}')"
+  [ "$lock_after" = "$lock_before" ] && [ "$lock_after" = "$PYTHON_LOCK_SHA256" ] \
+    || fail "Python lock changed during installed-environment verification"
+}
+
+validate_staged_toolchain_executables() {
+  local staged_python staged_node staged_electron actual expected_electron
+  staged_python="$AGENT_RUNTIME/venv/bin/python"
+  staged_node="$INSTALL_ROOT/runtime/node/bin/node"
+  staged_electron="$DESKTOP_RUNTIME/node_modules/electron/dist/electron"
+  for path in "$staged_python" "$staged_node" "$staged_electron"; do
+    [ -f "$path" ] && [ ! -L "$path" ] || fail "Staged toolchain executable is not a regular file: $path"
+  done
+  actual="$(sha256sum "$staged_python" | awk '{print $1}')"
+  [ "$actual" = "$PYTHON_EXECUTABLE_SHA256" ] || fail "Staged Python executable SHA256 mismatch"
+  actual="$(sha256sum "$staged_node" | awk '{print $1}')"
+  [ "$actual" = "$NODE_EXECUTABLE_SHA256" ] && [ "$actual" = "$PINNED_NODE_EXECUTABLE_SHA256" ] \
+    || fail "Staged Node executable SHA256 mismatch"
+  expected_electron="$(sha256sum "$ELECTRON_BIN" | awk '{print $1}')"
+  actual="$(sha256sum "$staged_electron" | awk '{print $1}')"
+  [ "$actual" = "$expected_electron" ] || fail "Staged Electron executable SHA256 mismatch"
 }
 
 validate_desktop_entry() {
@@ -460,6 +593,19 @@ write_package_manifest() {
   "upgrade_data_contract_sha256": "$upgrade_contract_sha256",
   "elf_abi_audit_basename": "elf-abi-audit.json",
   "elf_abi_audit_sha256": "$abi_sha256",
+  "python_dependency_lock_status": "$PYTHON_DEPENDENCY_LOCK_STATUS",
+  "python_lock_basename": "$PYTHON_LOCK_BASENAME",
+  "python_lock_sha256": "$PYTHON_LOCK_SHA256",
+  "python_version": "$PYTHON_VERSION",
+  "python_executable_sha256": "$PYTHON_EXECUTABLE_SHA256",
+  "uv_version": "$UV_VERSION",
+  "uv_archive_sha256": "$UV_ARCHIVE_SHA256",
+  "uv_executable_sha256": "$UV_EXECUTABLE_SHA256",
+  "node_version": "$NODE_VERSION",
+  "node_archive_sha256": "$NODE_ARCHIVE_SHA256",
+  "node_executable_sha256": "$NODE_EXECUTABLE_SHA256",
+  "electron_version": "$ELECTRON_VERSION",
+  "electron_archive_sha256": "$ELECTRON_ARCHIVE_SHA256",
   "electron_executable_sha256": "$electron_sha256",
   "desktop_entry_sha256": "$desktop_sha256",
   "icon_set_sha256": "$icon_set_sha256",
@@ -488,7 +634,7 @@ MANIFEST
 
 if [ "$(uname -s)" != "Linux" ]; then fail "Refusing to build final DEB on non-Linux host"; fi
 case "$(uname -m)" in x86_64|amd64) ;; *) fail "Refusing to build on non-x86_64 host: $(uname -m)" ;; esac
-for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp readelf date; do require_cmd "$cmd"; done
+for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp readelf readlink date; do require_cmd "$cmd"; done
 load_policy_contract
 resolve_source_commit
 validate_build_host_glibc
@@ -498,6 +644,8 @@ for component in "$RUNTIME_STAGER" "$PYTHON_RUNTIME_STAGER" "$ELECTRON_RUNTIME_S
 [ -f "$ICON_VALIDATOR" ] || fail "Missing icon validator: $ICON_VALIDATOR"
 SOURCE_AGENT_PYTHON="$SOURCE_AGENT_DIR/venv/bin/python"
 [ -x "$SOURCE_AGENT_PYTHON" ] || fail "Missing Linux Agent venv: $SOURCE_AGENT_PYTHON"
+validate_strict_toolchain_contract
+validate_locked_python_environment
 (cd "$SOURCE_AGENT_DIR" && "$SOURCE_AGENT_PYTHON" -m taiji_runtime.main --help >/dev/null 2>&1) || fail "Linux Agent venv module entrypoint failed"
 verify_linux_electron_runtime
 validate_desktop_entry "$DESKTOP_FILE"
@@ -549,6 +697,7 @@ python3 "$ELECTRON_RUNTIME_STAGER" \
   --archive "$ELECTRON_ARCHIVE" \
   --policy "$POLICY_FILE" \
   --require-linux-x86-64
+validate_staged_toolchain_executables
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/taiji-agent"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-diagnose" "$PKG_ROOT/usr/bin/taiji-agent-diagnose"

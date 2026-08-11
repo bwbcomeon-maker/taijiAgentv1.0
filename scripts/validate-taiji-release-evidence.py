@@ -14,6 +14,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import zlib
 from dataclasses import dataclass
@@ -58,6 +59,30 @@ CANONICAL_POLICY_PATH = (
 CANONICAL_POLICY_HELPER_PATH = (
     Path(__file__).resolve().parents[1] / "packaging/linux/compatibility_policy.py"
 )
+PINNED_UV_VERSION = "0.12.2"
+PINNED_UV_ARCHIVE_SHA256 = "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"
+PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
+PINNED_NODE_VERSION = "22.23.1"
+PINNED_NODE_ARCHIVE_SHA256 = "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
+PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PINNED_ELECTRON_VERSION = "39.8.10"
+PINNED_ELECTRON_ARCHIVE_SHA256 = "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1"
+TOOLCHAIN_MANIFEST_FIELDS = {
+    "python_dependency_lock_status",
+    "python_lock_basename",
+    "python_lock_sha256",
+    "python_version",
+    "python_executable_sha256",
+    "uv_version",
+    "uv_archive_sha256",
+    "uv_executable_sha256",
+    "node_version",
+    "node_archive_sha256",
+    "node_executable_sha256",
+    "electron_version",
+    "electron_archive_sha256",
+    "electron_executable_sha256",
+}
 ELECTRON_PATH = "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
 DRIVER_RESULT_BASENAME = "desktop-driver-result.json"
 SCREENSHOT_BASENAME = "desktop-app.png"
@@ -343,6 +368,19 @@ class BuildBinding:
     compatibility_policy_sha256: builtins.str
     electron_executable_sha256: builtins.str
     desktop_entry_sha256: builtins.str
+    python_dependency_lock_status: builtins.str = ""
+    python_lock_basename: builtins.str = ""
+    python_lock_sha256: builtins.str = ""
+    python_version: builtins.str = ""
+    python_executable_sha256: builtins.str = ""
+    uv_version: builtins.str = ""
+    uv_archive_sha256: builtins.str = ""
+    uv_executable_sha256: builtins.str = ""
+    node_version: builtins.str = ""
+    node_archive_sha256: builtins.str = ""
+    node_executable_sha256: builtins.str = ""
+    electron_version: builtins.str = ""
+    electron_archive_sha256: builtins.str = ""
     source_archive_basename: builtins.str = ""
     source_archive_sha256: builtins.str = ""
     source_checksums_sha256: builtins.str = ""
@@ -374,6 +412,43 @@ def canonical_policy_identity() -> tuple[str, str]:
         except (EvidenceError, OSError, KeyError, TypeError, ValueError) as exc:
             raise EvidenceError(f"canonical compatibility policy 无法验证: {exc}") from exc
     return CANONICAL_POLICY_ID, CANONICAL_POLICY_SHA256
+
+
+def validate_manifest_toolchain_identity(manifest: dict[str, Any]) -> dict[str, str]:
+    missing = sorted(TOOLCHAIN_MANIFEST_FIELDS - manifest.keys())
+    if missing:
+        raise EvidenceError(
+            "当前 v3 manifest 缺少正式工具链身份字段: " + ", ".join(missing)
+        )
+    expected = {
+        "python_dependency_lock_status": "strict-locked",
+        "python_lock_basename": "uv.lock",
+        "uv_version": PINNED_UV_VERSION,
+        "uv_archive_sha256": PINNED_UV_ARCHIVE_SHA256,
+        "uv_executable_sha256": PINNED_UV_EXECUTABLE_SHA256,
+        "node_version": PINNED_NODE_VERSION,
+        "node_archive_sha256": PINNED_NODE_ARCHIVE_SHA256,
+        "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
+        "electron_version": PINNED_ELECTRON_VERSION,
+        "electron_archive_sha256": PINNED_ELECTRON_ARCHIVE_SHA256,
+    }
+    for key, value in expected.items():
+        require_exact(manifest, key, value)
+    python_version = require_nonempty_string(manifest, "python_version")
+    if re.fullmatch(r"3\.11\.[0-9]+", python_version) is None:
+        raise EvidenceError("当前 v3 manifest python_version 必须是 3.11.x")
+    for key in (
+        "python_lock_sha256",
+        "python_executable_sha256",
+        "uv_archive_sha256",
+        "uv_executable_sha256",
+        "node_archive_sha256",
+        "node_executable_sha256",
+        "electron_archive_sha256",
+        "electron_executable_sha256",
+    ):
+        validate_sha256(manifest.get(key), key)
+    return {key: manifest[key] for key in TOOLCHAIN_MANIFEST_FIELDS}
 
 
 def reject_target_baseline_fields(data: dict[str, Any], label: str) -> None:
@@ -489,6 +564,57 @@ def sha256_regular_file(path: Path, label: str) -> tuple[str, os.stat_result]:
     return digest.hexdigest(), file_stat
 
 
+def sha256_regular_tar_member(path: Path, member_name: str, label: str) -> str:
+    descriptor, before = open_regular(path, label)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        try:
+            with os.fdopen(os.dup(descriptor), "rb") as archive_file:
+                with tarfile.open(fileobj=archive_file, mode="r:gz") as archive:
+                    matches = [member for member in archive.getmembers() if member.name == member_name]
+                    if len(matches) != 1:
+                        raise EvidenceError(f"{label} 必须且只能包含一个 {member_name}")
+                    member = matches[0]
+                    if not member.isfile() or member.size <= 0 or member.size > MAX_EVIDENCE_BYTES:
+                        raise EvidenceError(f"{label} 中的 {member_name} 不是安全普通文件")
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise EvidenceError(f"{label} 中的 {member_name} 无法读取")
+                    while True:
+                        chunk = extracted.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > member.size:
+                            raise EvidenceError(f"{label} 中的 {member_name} 读取越界")
+                        digest.update(chunk)
+                    if total != member.size:
+                        raise EvidenceError(f"{label} 中的 {member_name} 读取不完整")
+        except tarfile.TarError as exc:
+            raise EvidenceError(f"{label} 不是可验证的 tar.gz 归档: {exc}") from exc
+        after = os.fstat(descriptor)
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if identity_before != identity_after:
+            raise EvidenceError(f"{label} 在成员摘要计算期间发生变化")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
 def delivery_inventory_sha256(delivery_dir: Path) -> str:
     excluded_top_level = {
         "offline-install-rehearsal",
@@ -583,6 +709,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         raise EvidenceError("交付清单 package manifest 必须是对象")
 
     if manifest.get("schema") == "taiji-package-manifest/v3":
+        toolchain = validate_manifest_toolchain_identity(manifest)
         source_commit = manifest.get("source_commit")
         if not isinstance(source_commit, str) or not FULL_COMMIT_RE.fullmatch(source_commit):
             raise EvidenceError("v3 交付清单 manifest source_commit 不合法")
@@ -599,6 +726,13 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
                 "v3 交付清单必须且只能包含 manifest source_commit 命名的源码包"
             )
         source_hash = file_hashes[expected_source_name]
+        source_lock_hash = sha256_regular_tar_member(
+            delivery_dir / expected_source_name,
+            "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock",
+            "当前源码包",
+        )
+        if source_lock_hash != toolchain["python_lock_sha256"]:
+            raise EvidenceError("当前源码包 uv.lock SHA256 与正式工具链身份不一致")
         source_sums_payload, _ = read_regular_bytes(
             delivery_dir / "SHA256SUMS.txt",
             "根 SHA256SUMS",
@@ -658,6 +792,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             "elf_abi_audit_sha256": manifest.get("elf_abi_audit_sha256"),
             "icon_set_sha256": manifest.get("icon_set_sha256"),
             "maintainer": manifest.get("maintainer"),
+            **toolchain,
         }
         require_exact_keys(marker, set(marker_expected) | {"built_at_utc"}, "构建成功标记")
         if not marker["built_at_utc"].strip():
@@ -983,6 +1118,7 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         manifest.get("desktop_entry_sha256"),
         "desktop_entry_sha256",
     )
+    toolchain = validate_manifest_toolchain_identity(manifest)
     # The ABI report is part of the v3 manifest binding.  It is deliberately
     # checked even though it is not a BuildBinding field: the report hash must
     # be a well-formed immutable release input before later certification work.
@@ -1042,6 +1178,7 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         compatibility_policy_sha256=policy_sha256,
         electron_executable_sha256=electron_hash,
         desktop_entry_sha256=desktop_hash,
+        **{field: value for field, value in toolchain.items() if field != "electron_executable_sha256"},
         source_archive_basename=expected_source_archive.name,
         source_archive_sha256=source_hash,
         source_checksums_sha256=source_checksums_hash,
@@ -2160,7 +2297,7 @@ RELEASE_EVIDENCE_V3_KEYS = {
     "customer_folder_contract",
     "signing_public_key_fingerprint",
     "formal_gates",
-}
+} | TOOLCHAIN_MANIFEST_FIELDS
 CI_EVIDENCE_KEYS = {
     "schema",
     "provider",
@@ -2433,6 +2570,7 @@ def validate_release_evidence_v3(
         "compatibility_policy_sha256": binding.compatibility_policy_sha256,
         "customer_filename": binding.deb_basename,
         "customer_folder_contract": "exactly-one-deb",
+        **{field: getattr(binding, field) for field in TOOLCHAIN_MANIFEST_FIELDS},
     }
     for key, expected in comparisons.items():
         require_exact(data, key, expected)
