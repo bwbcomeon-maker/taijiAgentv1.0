@@ -9,7 +9,11 @@ CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 SOURCE_INTEGRITY_HELPER="$SCRIPT_DIR/source-archive-integrity.py"
 SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
 BUILDER_INPUT_HELPER="$SCRIPT_DIR/builder-input-package.py"
-BUILDER_INPUT_HELPER_SHA256="8c4b378bc762eb7dc10d4cb260cf5499c54f8a348f202d49fb9af754349af1dd"
+BUILDER_INPUT_HELPER_SHA256="a8936d7ada260f5da497c33a3682ff2d5438cae41ff3d1bec54aecc431544d39"
+FROZEN_SOURCE_COMMIT="${TAIJI_FROZEN_SOURCE_COMMIT:-}"
+FROZEN_SOURCE_HELPER_TEMP=""
+FROZEN_CONTROL_TEMP_DIR=""
+FROZEN_CONTROL_TEMP_PARENT=""
 SOURCE_INVENTORY=""
 SOURCE_INVENTORY_SHA256=""
 SOURCE_ARCHIVE_SHA256=""
@@ -100,6 +104,10 @@ ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+raw_system_git() {
+  env -i PATH=/usr/bin:/bin LC_ALL=C LANG=C GIT_NO_REPLACE_OBJECTS=1 \
+    /usr/bin/git "$@"
+}
 set_stage() { CURRENT_STAGE="$1"; info "阶段：$CURRENT_STAGE"; }
 
 initialize_build_logging() {
@@ -337,6 +345,22 @@ rollback_target_acceptance_tools() {
 
 cleanup_transient_delivery() {
   set +e
+  if [ -n "${FROZEN_SOURCE_HELPER_TEMP:-}" ]; then
+    case "$FROZEN_SOURCE_HELPER_TEMP" in
+      "${TMPDIR:-/tmp}"/taiji-frozen-source-helper.*)
+        [ -f "$FROZEN_SOURCE_HELPER_TEMP" ] && [ ! -L "$FROZEN_SOURCE_HELPER_TEMP" ] \
+          && rm -f -- "$FROZEN_SOURCE_HELPER_TEMP"
+        ;;
+    esac
+  fi
+  if [ -n "${FROZEN_CONTROL_TEMP_DIR:-}" ]; then
+    case "$FROZEN_CONTROL_TEMP_DIR" in
+      "$FROZEN_CONTROL_TEMP_PARENT"/taiji-frozen-build-controls.*)
+        [ -d "$FROZEN_CONTROL_TEMP_DIR" ] && [ ! -L "$FROZEN_CONTROL_TEMP_DIR" ] \
+          && rm -rf -- "$FROZEN_CONTROL_TEMP_DIR"
+        ;;
+    esac
+  fi
   if [ -n "${PENDING_BUILD_MARKER:-}" ]; then
     rm -f -- "$PENDING_BUILD_MARKER"
   fi
@@ -461,12 +485,13 @@ resolve_and_verify_source_inventory() {
 }
 
 create_source_archive_from_git() {
-  local repo_root source_gate trusted_git commit archive_name inventory_name archive_sha inventory_sha
+  local repo_root source_gate trusted_git archive_name inventory_name archive_sha inventory_sha observed main_commit relative entry mode path actual_mode
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd -P)"
   source_gate="$repo_root/scripts/check-clean-worktree.sh"
   trusted_git="$repo_root/scripts/taiji-trusted-git"
   [ -e "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
   require_cmd git
+  [ -x /usr/bin/git ] || fail "缺少受信任系统 Git：/usr/bin/git"
   [ -x "$source_gate" ] || fail "缺少正式源码门禁：$source_gate"
   [ -x "$trusted_git" ] && [ ! -L "$trusted_git" ] || fail "缺少可信 Git 边界：$trusted_git"
   "$source_gate" \
@@ -474,17 +499,52 @@ create_source_archive_from_git() {
     --repo-root "$repo_root" \
     --source-root "$repo_root" \
     || fail "发布源码包必须来自干净本地 main"
-  commit="$("$trusted_git" -C "$repo_root" rev-parse HEAD)"
-  archive_name="taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
+  FROZEN_SOURCE_COMMIT="$(raw_system_git -C "$repo_root" rev-parse --verify 'HEAD^{commit}')"
+  [ "$(raw_system_git -C "$repo_root" symbolic-ref --quiet --short HEAD)" = main ] \
+    || fail "冻结源码必须来自 main"
+  main_commit="$(raw_system_git -C "$repo_root" rev-parse --verify refs/heads/main)"
+  [ "$main_commit" = "$FROZEN_SOURCE_COMMIT" ] || fail "main 与冻结 source commit 不一致"
+  for relative in \
+    "scripts/check-clean-worktree.sh" \
+    "scripts/taiji-trusted-git" \
+    "packaging/linux/source-archive-integrity.py" \
+    "taijiagent 打包交付/00_制包机_生成离线交付包.sh"; do
+    path="$repo_root/$relative"
+    entry="$(raw_system_git -c core.quotePath=false -C "$repo_root" ls-tree "$FROZEN_SOURCE_COMMIT" -- "$relative")"
+    [ -n "$entry" ] || fail "冻结 commit 缺少制包参与成员：$relative"
+    mode="${entry%% *}"
+    [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c '%h' "$path")" = 1 ] \
+      && [ "$(stat -c '%u' "$path")" = "$(id -u)" ] \
+      || fail "冻结成员文件类型、属主或硬链接数不安全：$relative"
+    actual_mode="$(stat -c '%a' "$path")"
+    case "$mode" in 100644) [ "$actual_mode" = 644 ] || fail "冻结成员模式漂移：$relative" ;; 100755) [ "$actual_mode" = 755 ] || fail "冻结成员模式漂移：$relative" ;; *) fail "冻结成员模式不安全：$relative" ;; esac
+    raw_system_git -C "$repo_root" show "$FROZEN_SOURCE_COMMIT:$relative" \
+      | cmp -s - "$path" || fail "工作树制包参与成员与冻结 commit 不一致：$relative"
+  done
+  FROZEN_CONTROL_TEMP_PARENT="${TMPDIR:-/tmp}"
+  FROZEN_CONTROL_TEMP_DIR="$(mktemp -d "$FROZEN_CONTROL_TEMP_PARENT/taiji-frozen-build-controls.XXXXXX")"
+  chmod 0700 "$FROZEN_CONTROL_TEMP_DIR"
+  raw_system_git -C "$repo_root" show "$FROZEN_SOURCE_COMMIT:scripts/taiji-trusted-git" > "$FROZEN_CONTROL_TEMP_DIR/taiji-trusted-git"
+  raw_system_git -C "$repo_root" show "$FROZEN_SOURCE_COMMIT:scripts/check-clean-worktree.sh" > "$FROZEN_CONTROL_TEMP_DIR/check-clean-worktree.sh"
+  chmod 0755 "$FROZEN_CONTROL_TEMP_DIR/taiji-trusted-git" "$FROZEN_CONTROL_TEMP_DIR/check-clean-worktree.sh"
+  trusted_git="$FROZEN_CONTROL_TEMP_DIR/taiji-trusted-git"
+  source_gate="$FROZEN_CONTROL_TEMP_DIR/check-clean-worktree.sh"
+  "$source_gate" --mode formal --repo-root "$repo_root" --source-root "$repo_root" \
+    || fail "冻结后的正式源码门禁复核失败"
+  archive_name="taiji-agentv1.0-kylin-build-src-$FROZEN_SOURCE_COMMIT.tar.gz"
   inventory_name="${archive_name%.tar.gz}.inventory.json"
   info "使用 git archive 生成源码包：$archive_name"
-  "$trusted_git" -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
+  "$trusted_git" -C "$repo_root" -c tar.umask=0022 archive --format=tar --prefix=taiji-agentv1.0/ "$FROZEN_SOURCE_COMMIT" | gzip -n > "$SCRIPT_DIR/$archive_name"
+  FROZEN_SOURCE_HELPER_TEMP="$FROZEN_CONTROL_TEMP_DIR/source-archive-integrity.py"
+  "$trusted_git" -C "$repo_root" show "$FROZEN_SOURCE_COMMIT:packaging/linux/source-archive-integrity.py" > "$FROZEN_SOURCE_HELPER_TEMP"
+  chmod 0600 "$FROZEN_SOURCE_HELPER_TEMP"
+  SOURCE_INTEGRITY_HELPER="$FROZEN_SOURCE_HELPER_TEMP"
   resolve_source_integrity_helper
   rm -f -- "$SCRIPT_DIR/$inventory_name"
   python3 "$SOURCE_INTEGRITY_HELPER" create \
     --archive "$SCRIPT_DIR/$archive_name" \
     --inventory "$SCRIPT_DIR/$inventory_name" \
-    --source-commit "$commit" \
+    --source-commit "$FROZEN_SOURCE_COMMIT" \
     || fail "无法生成源码不可变成员清单"
   archive_sha="$(sha256sum "$SCRIPT_DIR/$archive_name" | awk '{print $1}')"
   inventory_sha="$(sha256sum "$SCRIPT_DIR/$inventory_name" | awk '{print $1}')"
@@ -493,6 +553,26 @@ create_source_archive_from_git() {
     printf '%s  %s\n' "$inventory_sha" "$inventory_name"
   } > "$CHECKSUM_FILE"
   SRC_ARCHIVE="$SCRIPT_DIR/$archive_name"
+  observed="$(raw_system_git -C "$repo_root" rev-parse --verify 'HEAD^{commit}')"
+  [ "$observed" = "$FROZEN_SOURCE_COMMIT" ] \
+    && [ "$(raw_system_git -C "$repo_root" rev-parse --verify refs/heads/main)" = "$FROZEN_SOURCE_COMMIT" ] \
+    && [ "$(raw_system_git -C "$repo_root" symbolic-ref --quiet --short HEAD)" = main ] \
+    || fail "源码归档生成期间 HEAD/main 偏离冻结 source commit"
+  "$source_gate" --mode formal --repo-root "$repo_root" --source-root "$repo_root" \
+    || fail "源码归档生成后正式源码门禁复核失败"
+  for relative in \
+    "scripts/check-clean-worktree.sh" \
+    "scripts/taiji-trusted-git" \
+    "packaging/linux/source-archive-integrity.py" \
+    "taijiagent 打包交付/00_制包机_生成离线交付包.sh"; do
+    path="$repo_root/$relative"
+    entry="$(raw_system_git -c core.quotePath=false -C "$repo_root" ls-tree "$FROZEN_SOURCE_COMMIT" -- "$relative")"
+    mode="${entry%% *}"
+    actual_mode="$(stat -c '%a' "$path")"
+    case "$mode:$actual_mode" in 100644:644|100755:755) ;; *) fail "归档后冻结成员模式漂移：$relative" ;; esac
+    raw_system_git -C "$repo_root" show "$FROZEN_SOURCE_COMMIT:$relative" \
+      | cmp -s - "$path" || fail "归档后工作树制包参与成员偏离冻结 commit：$relative"
+  done
   ok "源码包已生成并写入 SHA256SUMS.txt"
 }
 

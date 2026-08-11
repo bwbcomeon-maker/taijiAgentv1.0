@@ -13,6 +13,8 @@ import re
 import stat
 import sys
 import tarfile
+import tempfile
+import types
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -53,6 +55,8 @@ MANIFEST_KEYS = {
     "members",
 }
 MEMBER_KEYS = {"basename", "mode", "sha256", "size"}
+FileIdentity = Tuple[int, int, int, int, int, int, int, int]
+DirectoryIdentity = Tuple[int, int, int, int]
 
 
 class BuilderInputError(RuntimeError):
@@ -133,7 +137,99 @@ def _read_regular(path: Path, label: str) -> Tuple[bytes, int]:
         os.close(descriptor)
 
 
-def _write_exclusive(path: Path, payload: bytes, mode: int = 0o644) -> None:
+def _file_identity(metadata: os.stat_result) -> FileIdentity:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _directory_identity(metadata: os.stat_result) -> DirectoryIdentity:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+    )
+
+
+def _safe_unlink_owned(path: Path, owned_identity: FileIdentity) -> Optional[str]:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return "cannot inspect owned path {}: {}".format(path, exc)
+    if _file_identity(current) != owned_identity:
+        return "path identity was replaced; foreign inode preserved: {}".format(path)
+    try:
+        path.unlink()
+    except OSError as exc:
+        return "cannot unlink owned path {}: {}".format(path, exc)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return "cannot confirm owned path removal {}: {}".format(path, exc)
+    return "owned path still exists after unlink: {}".format(path)
+
+
+def _safe_unlink_owned_at(
+    directory_fd: int,
+    path: Path,
+    owned_identity: FileIdentity,
+) -> Optional[str]:
+    try:
+        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return "cannot inspect owned publication {}: {}".format(path, exc)
+    if _file_identity(current) != owned_identity:
+        return "publication identity was replaced; foreign inode preserved: {}".format(path)
+    try:
+        os.unlink(path.name, dir_fd=directory_fd)
+    except OSError as exc:
+        return "cannot unlink owned publication {}: {}".format(path, exc)
+    try:
+        os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return "cannot confirm publication removal {}: {}".format(path, exc)
+    return "owned publication still exists after unlink: {}".format(path)
+
+
+def _check_owned_publications_at(
+    directory_fd: int,
+    owned_files: Sequence[Tuple[Path, FileIdentity]],
+) -> None:
+    for path, owned_identity in owned_files:
+        try:
+            current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise BuilderInputError(
+                "published path identity is unavailable: {}".format(path)
+            ) from exc
+        if _file_identity(current) != owned_identity:
+            raise BuilderInputError(
+                "published path identity was replaced: {}".format(path)
+            )
+
+
+def _write_exclusive_impl(
+    path: Path,
+    payload: bytes,
+    mode: int = 0o644,
+    directory_fd: Optional[int] = None,
+) -> FileIdentity:
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -142,11 +238,17 @@ def _write_exclusive(path: Path, payload: bytes, mode: int = 0o644) -> None:
         | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
-        descriptor = os.open(str(path), flags, mode)
+        if directory_fd is None:
+            descriptor = os.open(str(path), flags, mode)
+        else:
+            descriptor = os.open(path.name, flags, mode, dir_fd=directory_fd)
     except OSError as exc:
         raise BuilderInputError("output already exists or is unsafe: {}".format(path)) from exc
-    failed = True
+    owned_identity = None  # type: Optional[FileIdentity]
+    original_error = None  # type: Optional[BaseException]
     try:
+        opened = os.fstat(descriptor)
+        owned_identity = _file_identity(opened)
         view = memoryview(payload)
         while view:
             written = os.write(descriptor, view)
@@ -154,16 +256,304 @@ def _write_exclusive(path: Path, payload: bytes, mode: int = 0o644) -> None:
                 raise BuilderInputError("failed to write {}".format(path))
             view = view[written:]
         os.fsync(descriptor)
-        failed = False
-    finally:
+        owned_identity = _file_identity(os.fstat(descriptor))
+    except BaseException as exc:
+        original_error = exc
         try:
-            os.close(descriptor)
-        finally:
-            if failed:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+            owned_identity = _file_identity(os.fstat(descriptor))
+        except OSError:
+            pass
+    try:
+        os.close(descriptor)
+    except BaseException as exc:
+        if original_error is None:
+            original_error = exc
+    if original_error is not None:
+        cleanup_error = None  # type: Optional[str]
+        if owned_identity is not None:
+            if directory_fd is None:
+                cleanup_error = _safe_unlink_owned(path, owned_identity)
+            else:
+                cleanup_error = _safe_unlink_owned_at(directory_fd, path, owned_identity)
+        if cleanup_error is not None:
+            raise BuilderInputError(
+                "write failed and rollback is incomplete/poisoned for {}: {}; original error: {}".format(
+                    path, cleanup_error, original_error
+                )
+            ) from original_error
+        raise original_error
+    if owned_identity is None:
+        raise BuilderInputError("output identity is unavailable after write: {}".format(path))
+    return owned_identity
+
+
+def _write_exclusive(
+    path: Path,
+    payload: bytes,
+    mode: int = 0o644,
+    directory_fd: Optional[int] = None,
+) -> FileIdentity:
+    return _write_exclusive_impl(path, payload, mode, directory_fd)
+
+
+def _validate_publication_directory(
+    paths: Sequence[Path],
+) -> Tuple[Path, int, DirectoryIdentity]:
+    if not paths:
+        raise BuilderInputError("publication path set is empty")
+    absolute_parents = [Path(os.path.abspath(str(path.parent))) for path in paths]
+    try:
+        requested_metadata = [parent.lstat() for parent in absolute_parents]
+        resolved_parents = [parent.resolve(strict=True) for parent in absolute_parents]
+    except OSError as exc:
+        raise BuilderInputError("output publication directory is unsafe") from exc
+    if any(parent.is_symlink() for parent in absolute_parents):
+        raise BuilderInputError("output publication directory is unsafe")
+    if len({str(parent) for parent in resolved_parents}) != 1:
+        raise BuilderInputError("output publication files must share one directory")
+    parent = resolved_parents[0]
+    metadata = parent.lstat()
+    if (
+        any(not stat.S_ISDIR(item.st_mode) for item in requested_metadata)
+        or parent.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise BuilderInputError("output publication directory is unsafe")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(str(parent), flags)
+    except OSError as exc:
+        raise BuilderInputError("output publication directory cannot be opened safely") from exc
+    try:
+        identity = _directory_identity(metadata)
+        if _directory_identity(os.fstat(descriptor)) != identity:
+            raise BuilderInputError("output publication directory changed before use")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return parent, descriptor, identity
+
+
+def _check_publication_directory(
+    parent: Path,
+    descriptor: int,
+    identity: DirectoryIdentity,
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        current = parent.lstat()
+    except OSError as exc:
+        raise BuilderInputError("output publication directory changed during publication") from exc
+    if _directory_identity(opened) != identity or _directory_identity(current) != identity:
+        raise BuilderInputError("output publication directory changed during publication")
+
+
+def _cleanup_private_stage(
+    stage: Path,
+    stage_identity: DirectoryIdentity,
+    owned_files: Sequence[Tuple[Path, FileIdentity]],
+) -> List[str]:
+    errors = []  # type: List[str]
+    for path, identity in reversed(list(owned_files)):
+        error = _safe_unlink_owned(path, identity)
+        if error is not None:
+            errors.append(error)
+    try:
+        current = stage.lstat()
+    except FileNotFoundError:
+        return errors
+    except OSError as exc:
+        errors.append("cannot inspect private staging directory {}: {}".format(stage, exc))
+        return errors
+    if _directory_identity(current) != stage_identity:
+        errors.append("private staging directory identity was replaced: {}".format(stage))
+        return errors
+    try:
+        stage.rmdir()
+    except OSError as exc:
+        errors.append("cannot remove private staging directory {}: {}".format(stage, exc))
+    return errors
+
+
+def _publish_triplet(
+    *,
+    archive_payload: bytes,
+    manifest_payload: bytes,
+    checksum_payload: bytes,
+    output: Path,
+    manifest_path: Path,
+    checksum_path: Path,
+) -> None:
+    parent, parent_fd, parent_identity = _validate_publication_directory(
+        (output, manifest_path, checksum_path)
+    )
+    try:
+        _publish_triplet_controlled(
+            archive_payload=archive_payload,
+            manifest_payload=manifest_payload,
+            checksum_payload=checksum_payload,
+            output=output,
+            manifest_path=manifest_path,
+            checksum_path=checksum_path,
+            parent=parent,
+            parent_fd=parent_fd,
+            parent_identity=parent_identity,
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def _publish_triplet_controlled(
+    *,
+    archive_payload: bytes,
+    manifest_payload: bytes,
+    checksum_payload: bytes,
+    output: Path,
+    manifest_path: Path,
+    checksum_path: Path,
+    parent: Path,
+    parent_fd: int,
+    parent_identity: DirectoryIdentity,
+) -> None:
+    _check_publication_directory(parent, parent_fd, parent_identity)
+    destinations = (
+        (Path(os.path.abspath(str(output))), archive_payload),
+        (Path(os.path.abspath(str(manifest_path))), manifest_payload),
+        (Path(os.path.abspath(str(checksum_path))), checksum_payload),
+    )
+    if len({path.name for path, _payload in destinations}) != 3:
+        raise BuilderInputError("publication filenames must be distinct")
+    for path, _payload in destinations:
+        if path.parent.resolve(strict=True) != parent:
+            raise BuilderInputError("publication path escaped the controlled directory")
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BuilderInputError("publication path cannot be inspected: {}".format(path)) from exc
+        raise BuilderInputError("output already exists or is unsafe: {}".format(path))
+
+    stage = Path(tempfile.mkdtemp(prefix="taiji-builder-input-stage-"))
+    stage.chmod(0o700)
+    stage_identity = _directory_identity(stage.lstat())
+    stage_owned = []  # type: List[Tuple[Path, FileIdentity]]
+    published = []  # type: List[Tuple[Path, FileIdentity]]
+    primary_error = None  # type: Optional[BaseException]
+    rollback_errors = []  # type: List[str]
+    try:
+        staged_paths = []  # type: List[Path]
+        for destination, payload in destinations:
+            staged = stage / destination.name
+            identity = _write_exclusive_impl(staged, payload)
+            stage_owned.append((staged, identity))
+            staged_paths.append(staged)
+        verify_builder_input(
+            archive_path=staged_paths[0],
+            manifest_path=staged_paths[1],
+            checksum_path=staged_paths[2],
+        )
+        frozen_payloads = [
+            _read_regular(path, "staged builder input {}".format(path.name))[0]
+            for path in staged_paths
+        ]
+        for (destination, _payload), frozen_payload in zip(destinations, frozen_payloads):
+            _check_publication_directory(parent, parent_fd, parent_identity)
+            owned_identity = _write_exclusive(
+                destination,
+                frozen_payload,
+                directory_fd=parent_fd,
+            )
+            published.append((destination, owned_identity))
+            _check_owned_publications_at(parent_fd, published)
+            _check_publication_directory(parent, parent_fd, parent_identity)
+        _check_publication_directory(parent, parent_fd, parent_identity)
+        _check_owned_publications_at(parent_fd, published)
+        verify_builder_input(
+            archive_path=destinations[0][0],
+            manifest_path=destinations[1][0],
+            checksum_path=destinations[2][0],
+        )
+        _check_owned_publications_at(parent_fd, published)
+        _check_publication_directory(parent, parent_fd, parent_identity)
+    except BaseException as exc:
+        primary_error = exc
+        for path, identity in reversed(published):
+            error = _safe_unlink_owned_at(parent_fd, path, identity)
+            if error is not None:
+                rollback_errors.append(error)
+    finally:
+        cleanup_errors = _cleanup_private_stage(stage, stage_identity, stage_owned)
+        if cleanup_errors and primary_error is None:
+            for path, identity in reversed(published):
+                error = _safe_unlink_owned_at(parent_fd, path, identity)
+                if error is not None:
+                    rollback_errors.append(error)
+    if primary_error is not None:
+        if rollback_errors or cleanup_errors:
+            raise BuilderInputError(
+                "publication failed and cleanup is incomplete/poisoned: {}{}; original error: {}".format(
+                    "publication rollback: {}; ".format("; ".join(rollback_errors))
+                    if rollback_errors
+                    else "",
+                    "private staging cleanup: {}".format("; ".join(cleanup_errors))
+                    if cleanup_errors
+                    else "",
+                    primary_error,
+                )
+            ) from primary_error
+        raise primary_error
+    if cleanup_errors:
+        raise BuilderInputError(
+            "private staging cleanup is incomplete/poisoned: {}{}".format(
+                "; ".join(cleanup_errors),
+                "; publication rollback incomplete/poisoned: {}".format(
+                    "; ".join(rollback_errors)
+                )
+                if rollback_errors
+                else "",
+            )
+        )
+
+
+def _verify_source_inventory_from_frozen_helper(
+    *,
+    source_archive_payload: bytes,
+    source_inventory_payload: bytes,
+    source_helper_payload: bytes,
+    source_archive_name: str,
+    source_inventory_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="taiji-source-integrity-") as temporary:
+        root = Path(temporary)
+        archive = root / source_archive_name
+        inventory = root / source_inventory_name
+        _write_exclusive_impl(archive, source_archive_payload, 0o600)
+        _write_exclusive_impl(inventory, source_inventory_payload, 0o600)
+        module = types.ModuleType("taiji_frozen_source_archive_integrity")
+        module.__file__ = "<frozen-source-archive-integrity.py>"
+        try:
+            code = compile(source_helper_payload, module.__file__, "exec")
+            exec(code, module.__dict__)
+            verifier = module.__dict__.get("verify")
+            if not callable(verifier):
+                raise BuilderInputError("frozen source inventory verifier is missing")
+            verifier(archive, inventory, None, [])
+        except BuilderInputError:
+            raise
+        except BaseException as exc:
+            raise BuilderInputError(
+                "source inventory is not archive-derived under the frozen source helper: {}".format(
+                    exc
+                )
+            ) from exc
 
 
 def _parse_source_checksums(
@@ -615,6 +1005,13 @@ def create_builder_input(
     helper_payload, helper_mode = frozen[SOURCE_HELPER_BASENAME]
     if current_helper_payload != helper_payload or current_helper_mode != helper_mode:
         raise BuilderInputError("source archive integrity helper differs from frozen source commit")
+    _verify_source_inventory_from_frozen_helper(
+        source_archive_payload=source_archive_payload,
+        source_inventory_payload=source_inventory_payload,
+        source_helper_payload=helper_payload,
+        source_archive_name=expected_archive_name,
+        source_inventory_name=expected_inventory_name,
+    )
     members.append(
         {
             "basename": SOURCE_HELPER_BASENAME,
@@ -690,21 +1087,77 @@ def create_builder_input(
         )
     ).encode("utf-8")
 
-    published = []  # type: List[Path]
-    try:
-        _write_exclusive(output, archive_payload)
-        published.append(output)
-        _write_exclusive(manifest_path, manifest_payload)
-        published.append(manifest_path)
-        _write_exclusive(checksum_path, checksum_payload)
-        published.append(checksum_path)
-    except Exception:
-        for path in reversed(published):
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        raise
+    _publish_triplet(
+        archive_payload=archive_payload,
+        manifest_payload=manifest_payload,
+        checksum_payload=checksum_payload,
+        output=output,
+        manifest_path=manifest_path,
+        checksum_path=checksum_path,
+    )
+    return manifest
+
+
+def publish_builder_input(
+    *,
+    archive_path: Path,
+    manifest_path: Path,
+    checksum_path: Path,
+    output: Path,
+    output_manifest: Path,
+    output_checksum: Path,
+) -> Dict[str, Any]:
+    manifest = verify_builder_input(
+        archive_path=archive_path,
+        manifest_path=manifest_path,
+        checksum_path=checksum_path,
+    )
+    if (
+        output.name != archive_path.name
+        or output_manifest.name != manifest_path.name
+        or output_checksum.name != checksum_path.name
+    ):
+        raise BuilderInputError("publication basenames must preserve the verified triplet identity")
+    archive_payload, _archive_mode = _read_regular(archive_path, "staged builder input archive")
+    manifest_payload, _manifest_mode = _read_regular(manifest_path, "staged builder input manifest")
+    checksum_payload, _checksum_mode = _read_regular(checksum_path, "staged builder input checksum")
+    _publish_triplet(
+        archive_payload=archive_payload,
+        manifest_payload=manifest_payload,
+        checksum_payload=checksum_payload,
+        output=output,
+        manifest_path=output_manifest,
+        checksum_path=output_checksum,
+    )
+    return manifest
+
+
+def withdraw_builder_input(
+    *,
+    archive_path: Path,
+    manifest_path: Path,
+    checksum_path: Path,
+) -> Dict[str, Any]:
+    manifest = verify_builder_input(
+        archive_path=archive_path,
+        manifest_path=manifest_path,
+        checksum_path=checksum_path,
+    )
+    owned = []  # type: List[Tuple[Path, FileIdentity]]
+    for path in (archive_path, manifest_path, checksum_path):
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise BuilderInputError("withdrawal path is no longer a regular file: {}".format(path))
+        owned.append((path, _file_identity(metadata)))
+    errors = []  # type: List[str]
+    for path, identity in reversed(owned):
+        error = _safe_unlink_owned(path, identity)
+        if error is not None:
+            errors.append(error)
+    if errors:
+        raise BuilderInputError(
+            "triplet withdrawal is incomplete/poisoned: {}".format("; ".join(errors))
+        )
     return manifest
 
 
@@ -723,6 +1176,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     verify.add_argument("--manifest", required=True, type=Path)
     verify.add_argument("--checksum", required=True, type=Path)
     verify.add_argument("--extracted-dir", type=Path)
+    publish = subparsers.add_parser("publish", allow_abbrev=False)
+    publish.add_argument("--archive", required=True, type=Path)
+    publish.add_argument("--manifest", required=True, type=Path)
+    publish.add_argument("--checksum", required=True, type=Path)
+    publish.add_argument("--output", required=True, type=Path)
+    publish.add_argument("--output-manifest", required=True, type=Path)
+    publish.add_argument("--output-checksum", required=True, type=Path)
+    withdraw = subparsers.add_parser("withdraw", allow_abbrev=False)
+    withdraw.add_argument("--archive", required=True, type=Path)
+    withdraw.add_argument("--manifest", required=True, type=Path)
+    withdraw.add_argument("--checksum", required=True, type=Path)
     return parser.parse_args(argv)
 
 
@@ -739,7 +1203,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 source_commit=args.source_commit,
             )
             action = "created"
-        else:
+        elif args.command == "verify":
             manifest = verify_builder_input(
                 archive_path=args.archive,
                 manifest_path=args.manifest,
@@ -747,6 +1211,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 extracted_dir=args.extracted_dir,
             )
             action = "verified"
+        elif args.command == "publish":
+            manifest = publish_builder_input(
+                archive_path=args.archive,
+                manifest_path=args.manifest,
+                checksum_path=args.checksum,
+                output=args.output,
+                output_manifest=args.output_manifest,
+                output_checksum=args.output_checksum,
+            )
+            action = "published"
+        else:
+            manifest = withdraw_builder_input(
+                archive_path=args.archive,
+                manifest_path=args.manifest,
+                checksum_path=args.checksum,
+            )
+            action = "withdrawn"
     except BuilderInputError as exc:
         print("builder-input-package-failed\t{}".format(exc), file=sys.stderr)
         return 1

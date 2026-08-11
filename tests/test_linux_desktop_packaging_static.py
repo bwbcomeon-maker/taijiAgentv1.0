@@ -226,7 +226,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('dpkg-deb --root-owner-group', build)
         self.assertIn("^[0-9a-f]{40}$", offline_builder)
         for source in (offline_builder, input_builder, release_preflight):
-            self.assertIn("rev-parse HEAD", source)
+            self.assertIn("FROZEN_SOURCE_COMMIT", source)
+            self.assertIn("rev-parse --verify", source)
             self.assertNotIn("rev-parse --short=8 HEAD", source)
         for source in (release_check, release_signer, rehearsal_producer):
             self.assertNotIn("rev-parse --short=8 HEAD", source)
@@ -1067,6 +1068,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "git",
                     "-C",
                     str(repo_root),
+                    "-c",
+                    "tar.umask=0022",
                     "archive",
                     "--format=tar",
                     "--prefix=taiji-agentv1.0/",
@@ -1107,7 +1110,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 0,
                 msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
             )
-            self.assertIn("源码包归档与当前 Git HEAD 一致", result.stdout)
+            self.assertIn("源码包归档与冻结 source commit 一致", result.stdout)
 
             tampered_payload = gzip.compress(
                 tar_payload + b"not part of git archive\n",
@@ -1130,7 +1133,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("源码包归档内容与当前 Git HEAD 不一致", rejected.stderr)
+            self.assertIn("源码包归档内容与冻结 source commit 不一致", rejected.stderr)
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")

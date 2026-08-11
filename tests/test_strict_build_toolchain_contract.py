@@ -742,8 +742,67 @@ validate_strict_toolchain_contract
     def test_local_input_preparation_runs_source_contract_before_archiving(self):
         prepare = PREPARE.read_text(encoding="utf-8")
         main = prepare[prepare.index("main() {") :]
-        self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS=0", main)
-        self.assertLess(main.index("01_制包机_发布预检.sh"), main.index("write_builder_input_package"))
+        frozen_preflight = prepare.split("run_frozen_release_preflight() {", 1)[1].split(
+            "withdraw_published_triplet() {", 1
+        )[0]
+        self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS=0", frozen_preflight)
+        self.assertIn("01_制包机_发布预检.sh", frozen_preflight)
+        self.assertLess(
+            main.index("run_frozen_release_preflight"),
+            main.index("write_builder_input_package"),
+        )
+
+    def test_repo_source_gates_capture_and_recheck_f_with_fixed_system_git(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        preflight = PREFLIGHT.read_text(encoding="utf-8")
+        builder_fallback = builder[
+            builder.index("create_source_archive_from_git() {") :
+            builder.index("resolve_source_archive() {")
+        ]
+        preflight_gate = preflight[
+            preflight.index("check_git_clean_and_commit_match() {") :
+            preflight.index("check_source_archive_matches_git_head() {")
+        ]
+
+        for source in (builder, preflight):
+            self.assertIn("raw_system_git()", source)
+            self.assertIn(
+                "env -i PATH=/usr/bin:/bin LC_ALL=C LANG=C GIT_NO_REPLACE_OBJECTS=1",
+                source,
+            )
+        self.assertIn(
+            'FROZEN_SOURCE_COMMIT="$(raw_system_git -C "$repo_root" rev-parse --verify \'HEAD^{commit}\')"',
+            builder_fallback,
+        )
+        self.assertNotIn(
+            'FROZEN_SOURCE_COMMIT="$("$trusted_git"',
+            builder_fallback,
+        )
+        self.assertGreaterEqual(
+            builder_fallback.count(
+                'raw_system_git -C "$repo_root" symbolic-ref --quiet --short HEAD'
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            builder_fallback.count(
+                'raw_system_git -C "$repo_root" rev-parse --verify refs/heads/main'
+            ),
+            2,
+        )
+        self.assertIn(
+            'observed="$(raw_system_git -C "$REPO_ROOT" rev-parse --verify \'HEAD^{commit}\')"',
+            preflight_gate,
+        )
+        self.assertNotIn('observed="$("$TRUSTED_GIT"', preflight_gate)
+        self.assertIn(
+            'branch="$(raw_system_git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD)"',
+            preflight_gate,
+        )
+        self.assertIn(
+            'main_commit="$(raw_system_git -C "$REPO_ROOT" rev-parse --verify refs/heads/main)"',
+            preflight_gate,
+        )
 
     def test_source_only_preflight_rejects_downgraded_formal_builder(self):
         source_members = (

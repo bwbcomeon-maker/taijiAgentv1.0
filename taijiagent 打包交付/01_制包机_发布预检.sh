@@ -3,10 +3,16 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-SOURCE_TREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+SOURCE_TREE_ROOT_OVERRIDE="$(printenv TAIJI_RELEASE_SOURCE_ROOT || true)"
+if [ -n "$SOURCE_TREE_ROOT_OVERRIDE" ]; then
+  SOURCE_TREE_ROOT="$(cd "$SOURCE_TREE_ROOT_OVERRIDE" && pwd -P)"
+else
+  SOURCE_TREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+fi
 REPO_ROOT="$(printenv TAIJI_REPO_ROOT || printf '%s' "$SOURCE_TREE_ROOT")"
-SOURCE_GATE="$SOURCE_TREE_ROOT/scripts/check-clean-worktree.sh"
-TRUSTED_GIT="$SOURCE_TREE_ROOT/scripts/taiji-trusted-git"
+SOURCE_GATE="$(printenv TAIJI_SOURCE_GATE || printf '%s' "$SOURCE_TREE_ROOT/scripts/check-clean-worktree.sh")"
+TRUSTED_GIT="$(printenv TAIJI_TRUSTED_GIT || printf '%s' "$SOURCE_TREE_ROOT/scripts/taiji-trusted-git")"
+FROZEN_SOURCE_COMMIT="$(printenv TAIJI_FROZEN_SOURCE_COMMIT || true)"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
@@ -24,7 +30,7 @@ SKIP_GIT_CHECK="$(printenv TAIJI_RELEASE_SKIP_GIT_CHECK || printf 0)"
 EXTRACTED_SOURCE_ROOT="$(printenv TAIJI_EXTRACTED_SOURCE_ROOT || true)"
 SOURCE_ARCHIVE=""
 SOURCE_INVENTORY=""
-SOURCE_INTEGRITY_HELPER="$SCRIPT_DIR/source-archive-integrity.py"
+SOURCE_INTEGRITY_HELPER="$(printenv TAIJI_SOURCE_INTEGRITY_HELPER || printf '%s' "$SCRIPT_DIR/source-archive-integrity.py")"
 SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
 POLICY_ID=""
 POLICY_SHA256=""
@@ -41,6 +47,10 @@ ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+raw_system_git() {
+  env -i PATH=/usr/bin:/bin LC_ALL=C LANG=C GIT_NO_REPLACE_OBJECTS=1 \
+    /usr/bin/git "$@"
+}
 hex64() { [ "$(printf '%s' "$1" | wc -c | tr -d ' ')" = 64 ] && printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'; }
 
 validate_release_temp_root() {
@@ -460,15 +470,58 @@ for name, version in requested.items():
 PY
   ok "formal source toolchain contract 校验通过"
 }
+check_frozen_git_control_member() {
+  local relative="$1" path="$2" entry git_mode
+  [ -x /usr/bin/git ] || fail "缺少受信任系统 Git：/usr/bin/git"
+  entry="$(env -i PATH=/usr/bin:/bin LC_ALL=C LANG=C GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -c core.quotePath=false -C "$REPO_ROOT" ls-tree "$FROZEN_SOURCE_COMMIT" -- "$relative")"
+  [ -n "$entry" ] || fail "冻结 commit 缺少发布控制成员：$relative"
+  git_mode="${entry%% *}"
+  python3 - "$path" "$git_mode" <<'PY' || fail "发布控制成员文件类型或模式偏离冻结 commit：$relative"
+import os
+import stat
+import sys
+
+path, git_mode = sys.argv[1:]
+metadata = os.lstat(path)
+expected = {"100644": 0o644, "100755": 0o755}.get(git_mode)
+if (
+    expected is None
+    or not stat.S_ISREG(metadata.st_mode)
+    or stat.S_ISLNK(metadata.st_mode)
+    or metadata.st_uid != os.getuid()
+    or metadata.st_nlink != 1
+    or stat.S_IMODE(metadata.st_mode) != expected
+):
+    raise SystemExit(1)
+PY
+  env -i PATH=/usr/bin:/bin LC_ALL=C LANG=C GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -C "$REPO_ROOT" show "$FROZEN_SOURCE_COMMIT:$relative" \
+    | cmp -s - "$path" || fail "发布控制成员内容偏离冻结 commit：$relative"
+}
+check_frozen_git_controls() {
+  check_frozen_git_control_member "scripts/check-clean-worktree.sh" "$SOURCE_GATE"
+  check_frozen_git_control_member "scripts/taiji-trusted-git" "$TRUSTED_GIT"
+  check_frozen_git_control_member "packaging/linux/source-archive-integrity.py" "$SOURCE_INTEGRITY_HELPER"
+  check_frozen_git_control_member "taijiagent 打包交付/01_制包机_发布预检.sh" "$0"
+}
 check_git_clean_and_commit_match() {
   [ "$SKIP_GIT_CHECK" = 1 ] && return 0
   [ -e "$REPO_ROOT/.git" ] || return 0
-  have git || fail "缺少 git，无法执行发布预检"
+  [ -x /usr/bin/git ] || fail "缺少受信任系统 Git：/usr/bin/git"
   [ -x "$SOURCE_GATE" ] || fail "缺少正式源码门禁：$SOURCE_GATE"
   "$SOURCE_GATE" --mode formal --repo-root "$REPO_ROOT" --source-root "$SOURCE_TREE_ROOT" || fail "正式发布必须来自干净本地 main"
   [ -x "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
-  local commit; commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
-  case "$(basename "$SOURCE_ARCHIVE")" in *-"$commit".tar.gz) ok "源码包与当前 commit 匹配：$commit" ;; *) fail "源码包不匹配当前 commit：$commit" ;; esac
+  local observed branch main_commit
+  observed="$(raw_system_git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')"
+  if [ -z "$FROZEN_SOURCE_COMMIT" ]; then
+    FROZEN_SOURCE_COMMIT="$observed"
+  fi
+  [ "$observed" = "$FROZEN_SOURCE_COMMIT" ] || fail "HEAD 已偏离冻结 source commit"
+  branch="$(raw_system_git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD)"
+  [ "$branch" = main ] || fail "冻结源码复核时当前分支不是 main"
+  main_commit="$(raw_system_git -C "$REPO_ROOT" rev-parse --verify refs/heads/main)"
+  [ "$main_commit" = "$FROZEN_SOURCE_COMMIT" ] || fail "main 已偏离冻结 source commit"
+  check_frozen_git_controls
+  case "$(basename "$SOURCE_ARCHIVE")" in *-"$FROZEN_SOURCE_COMMIT".tar.gz) ok "源码包与冻结 commit 匹配：$FROZEN_SOURCE_COMMIT" ;; *) fail "源码包不匹配冻结 commit：$FROZEN_SOURCE_COMMIT" ;; esac
 }
 check_source_archive_matches_git_head() {
   [ "$SKIP_GIT_CHECK" = 1 ] && return 0
@@ -478,9 +531,10 @@ check_source_archive_matches_git_head() {
   local expected_archive
   require_release_temp_capacity "$SOURCE_COMPARE_MIN_FREE_MIB" "$SOURCE_COMPARE_MIN_FREE_INODES"
   new_release_temp_file expected_archive "source-head.XXXXXX.tar"
-  "$TRUSTED_GIT" -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD > "$expected_archive" || { remove_release_temp_file "$expected_archive"; fail "无法重建当前 HEAD 源码包"; }
-  gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" - || { remove_release_temp_file "$expected_archive"; fail "源码包归档内容与当前 Git HEAD 不一致"; }
-  remove_release_temp_file "$expected_archive"; ok "源码包归档与当前 Git HEAD 一致"
+  [ -n "$FROZEN_SOURCE_COMMIT" ] || { remove_release_temp_file "$expected_archive"; fail "尚未捕获冻结 source commit"; }
+  "$TRUSTED_GIT" -C "$REPO_ROOT" -c tar.umask=0022 archive --format=tar --prefix=taiji-agentv1.0/ "$FROZEN_SOURCE_COMMIT" > "$expected_archive" || { remove_release_temp_file "$expected_archive"; fail "无法重建冻结 source commit 源码包"; }
+  gzip -dc "$SOURCE_ARCHIVE" | cmp -s "$expected_archive" - || { remove_release_temp_file "$expected_archive"; fail "源码包归档内容与冻结 source commit 不一致"; }
+  remove_release_temp_file "$expected_archive"; ok "源码包归档与冻结 source commit 一致"
 }
 check_no_macos_metadata_or_stale_zip() {
   local metadata zips stale_entries
@@ -901,6 +955,7 @@ main() {
   check_source_archive_matches_git_head
   check_no_macos_metadata_or_stale_zip
   check_delivery_artifacts
+  check_git_clean_and_commit_match
   ok "发布预检通过"
 }
 trap cleanup_release_temp_artifacts EXIT
