@@ -245,6 +245,26 @@ def _load_certification_validator():
     return module
 
 
+def _load_challenge_helper():
+    candidates = (
+        Path(__file__).resolve().with_name("taiji-challenge-envelope.py"),
+        ROOT / "scripts/taiji-challenge-envelope.py",
+    )
+    for path in dict.fromkeys(candidates):
+        if not path.is_file() or path.is_symlink():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "taiji_publication_challenge_envelope",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise ReleaseEvidenceError("cannot load challenge-envelope helper")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    raise ReleaseEvidenceError("challenge-envelope helper is missing")
+
+
 def _validate_certification_set(
     certification_path: Path,
     certification: dict[str, Any],
@@ -331,8 +351,6 @@ def _write_new(path: Path, payload: bytes) -> None:
 
 
 def assemble(args: argparse.Namespace) -> Path:
-    if not CHALLENGE_RE.fullmatch(args.challenge or ""):
-        raise ReleaseEvidenceError("publication challenge must be 64-128 lowercase hexadecimal characters")
     for path, label in (
         (args.manifest, "manifest"),
         (args.deb, "candidate DEB"),
@@ -340,6 +358,7 @@ def assemble(args: argparse.Namespace) -> Path:
         (args.certification_set, "certification set"),
         (args.certification_signature, "certification signature"),
         (args.output, "output"),
+        (args.challenge_envelope, "publication challenge envelope"),
     ):
         if not path.is_absolute():
             raise ReleaseEvidenceError(f"{label} path must be absolute")
@@ -359,6 +378,9 @@ def assemble(args: argparse.Namespace) -> Path:
     deb_hash_before = _sha(args.deb, "candidate DEB")
     if manifest.get("deb_sha256") != deb_hash_before:
         raise ReleaseEvidenceError("candidate DEB hash does not match manifest")
+    challenge_helper = _load_challenge_helper()
+    challenge_envelope = challenge_helper.load_envelope_file(args.challenge_envelope)
+    publication_challenge = challenge_envelope.get("nonce")
     _require_sha(manifest.get("electron_executable_sha256"), "manifest electron hash")
     _require_sha(manifest.get("desktop_entry_sha256"), "manifest desktop entry hash")
     policy_document, _ = _load_json(args.policy, "compatibility policy")
@@ -375,7 +397,7 @@ def assemble(args: argparse.Namespace) -> Path:
         deb_hash=deb_hash_before,
         policy_id=policy_id,
         policy_sha=policy_sha,
-        publication_challenge=args.challenge,
+        publication_challenge=publication_challenge,
     )
     deb_hash_after = _sha(args.deb, "candidate DEB")
     if deb_hash_after != deb_hash_before:
@@ -387,11 +409,21 @@ def assemble(args: argparse.Namespace) -> Path:
         output_parent=args.output.parent,
     )
     generated = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    challenge_helper.verify_envelope(
+        challenge_envelope,
+        purpose="publication",
+        source_commit=source_commit,
+        deb_basename=deb_basename,
+        deb_sha256=deb_hash_before,
+        require_active=True,
+        evidence_times=(generated,),
+    )
     evidence = {
         "schema": SCHEMA,
         "evidence_type": "single-deb-publication",
         "generated_at_utc": generated,
-        "challenge_nonce": args.challenge,
+        "challenge_nonce": publication_challenge,
+        "challenge_envelope": challenge_envelope,
         "source_commit": source_commit,
         "version": version,
         "architecture": "amd64",
@@ -426,7 +458,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--certification-signature", required=True, type=Path)
     parser.add_argument("--ci-evidence", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--challenge", required=True)
+    parser.add_argument("--challenge-envelope", required=True, type=Path)
     return parser.parse_args(argv)
 
 

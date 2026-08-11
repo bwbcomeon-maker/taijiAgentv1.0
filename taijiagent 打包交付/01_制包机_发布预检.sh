@@ -809,6 +809,7 @@ verify_target_acceptance_toolchain() {
     "certification-matrix.json"
     "assemble-taiji-certification-set.py"
     "validate-taiji-release-evidence.py"
+    "taiji-challenge-envelope.py"
     "signing-public.pem"
     "management/taiji-silent-deploy.sh"
     "management/deployment_receipt.py"
@@ -831,6 +832,9 @@ verify_target_acceptance_toolchain() {
         source_script="$REPO_ROOT/scripts/assemble-taiji-certification-set.py"
         ;;
       validate-taiji-release-evidence.py)
+        source_script="$REPO_ROOT/scripts/$name"
+        ;;
+      taiji-challenge-envelope.py)
         source_script="$REPO_ROOT/scripts/$name"
         ;;
       signing-public.pem)

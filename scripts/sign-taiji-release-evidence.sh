@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TRUSTED_GIT="$ROOT_DIR/scripts/taiji-trusted-git"
 LIVE_CI_REVALIDATOR="$ROOT_DIR/scripts/revalidate-taiji-github-ci-evidence.py"
+CHALLENGE_HELPER="$ROOT_DIR/scripts/taiji-challenge-envelope.py"
 PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 
@@ -21,6 +22,7 @@ command -v openssl >/dev/null 2>&1 || fail "缺少 openssl"
 command -v python3 >/dev/null 2>&1 || fail "缺少 python3"
 [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "仓库缺少可信 Git 边界"
 [ -f "$LIVE_CI_REVALIDATOR" ] && [ ! -L "$LIVE_CI_REVALIDATOR" ] || fail "仓库缺少固定 GitHub CI 实时复验器"
+[ -f "$CHALLENGE_HELPER" ] && [ ! -L "$CHALLENGE_HELPER" ] || fail "仓库缺少 canonical challenge-envelope helper"
 [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] || fail "证据必须是普通 JSON 文件且不能是符号链接"
 [ -f "$PRIVATE_KEY" ] && [ ! -L "$PRIVATE_KEY" ] || fail "发布私钥必须是普通文件且不能是符号链接"
 [ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || fail "仓库缺少固定验签公钥"
@@ -60,6 +62,7 @@ umask 077
 SNAPSHOT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/taiji-sign-snapshot.XXXXXX")" \
   || fail "无法创建签名私有快照目录"
 SNAPSHOT_EVIDENCE="$SNAPSHOT_ROOT/evidence.json"
+SNAPSHOT_ENVELOPE="$SNAPSHOT_ROOT/challenge-envelope.json"
 tmp_signature=""
 cleanup_signer() {
   [ -z "$tmp_signature" ] || rm -f -- "$tmp_signature"
@@ -128,9 +131,11 @@ if identity(opened) != identity(after):
     raise SystemExit("evidence changed while snapshotting")
 PY
 
-metadata="$(python3 - "$SNAPSHOT_EVIDENCE" <<'PY'
+metadata="$(python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" "$SNAPSHOT_ENVELOPE" <<'PY'
+import importlib.util
 import json
 import os
+import re
 import stat
 import sys
 
@@ -144,7 +149,7 @@ def no_duplicates(pairs):
     return result
 
 
-evidence_path = sys.argv[1]
+root, evidence_path, envelope_path = sys.argv[1:]
 evidence_stat = os.lstat(evidence_path)
 if (
     not stat.S_ISREG(evidence_stat.st_mode)
@@ -172,33 +177,67 @@ if len(raw) != evidence_stat.st_size:
 payload = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates)
 if type(payload) is not dict:
     raise SystemExit("top-level evidence must be an object")
+helper_path = os.path.join(root, "scripts", "taiji-challenge-envelope.py")
+spec = importlib.util.spec_from_file_location("taiji_signer_challenge_envelope", helper_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load canonical challenge-envelope helper")
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
 schema = payload.get("schema")
 mode = {
     "taiji-linux-certification-set/v1": "certification",
     "taiji-release-evidence/v3": "publication",
 }.get(schema)
+envelope = payload.get("challenge_envelope")
 challenge = payload.get("challenge_nonce")
 source_commit = payload.get("source_commit", "")
-if mode is None or type(challenge) is not str:
+deb_basename = payload.get("deb_basename", "")
+deb_sha256 = payload.get("deb_sha256", "")
+generated_at = payload.get("generated_at_utc", "")
+if mode is None or type(challenge) is not str or type(envelope) is not dict:
     raise SystemExit("当前 signer 只接受 certification-set v1 或 release-evidence v3")
-if type(source_commit) is not str:
-    raise SystemExit("source_commit must be a string")
-print(f"{mode}\t{challenge}\t{source_commit}")
+if type(source_commit) is not str or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+    raise SystemExit("source_commit must be a complete lowercase commit")
+if type(deb_basename) is not str or helper.DEB_RE.fullmatch(deb_basename) is None:
+    raise SystemExit("deb_basename is invalid")
+if type(deb_sha256) is not str or helper.SHA256_RE.fullmatch(deb_sha256) is None:
+    raise SystemExit("deb_sha256 is invalid")
+if type(generated_at) is not str:
+    raise SystemExit("generated_at_utc is invalid")
+helper.verify_envelope(
+    envelope,
+    purpose=mode,
+    source_commit=source_commit,
+    deb_basename=deb_basename,
+    deb_sha256=deb_sha256,
+    require_active=True,
+    evidence_times=(generated_at,),
+)
+if challenge != envelope["nonce"]:
+    raise SystemExit("challenge_nonce does not match canonical envelope")
+descriptor = os.open(
+    envelope_path,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    0o600,
+)
+try:
+    view = memoryview(helper.canonical_bytes(envelope))
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise SystemExit("challenge envelope snapshot write failed")
+        view = view[written:]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+print(f"{mode}\t{challenge}\t{source_commit}\t{deb_basename}\t{deb_sha256}\t{generated_at}")
 PY
  )" || fail "证据 JSON 无法严格解析"
-IFS=$'\t' read -r MODE CHALLENGE SOURCE_COMMIT <<< "$metadata"
+IFS=$'\t' read -r MODE CHALLENGE SOURCE_COMMIT DEB_BASENAME DEB_SHA256 GENERATED_AT_UTC <<< "$metadata"
 case "$MODE" in
-  certification) EXPECTED_CHALLENGE="${TAIJI_CERTIFICATION_CHALLENGE:-}" ;;
-  publication) EXPECTED_CHALLENGE="${TAIJI_PUBLICATION_CHALLENGE:-}" ;;
+  certification|publication) ;;
   *) fail "当前 signer 只接受 taiji-linux-certification-set/v1 或 taiji-release-evidence/v3" ;;
 esac
-case "$EXPECTED_CHALLENGE" in
-  ""|*[!0-9a-f]*) fail "签名前必须独立提供本次 64-128 位小写十六进制 challenge" ;;
-esac
-[ "${#EXPECTED_CHALLENGE}" -ge 64 ] && [ "${#EXPECTED_CHALLENGE}" -le 128 ] \
-  || fail "签名前必须独立提供本次 64-128 位小写十六进制 challenge"
-[ "$CHALLENGE" = "$EXPECTED_CHALLENGE" ] \
-  || fail "证据 challenge 与签名前独立提供的本次 challenge 不一致"
 [ ! -e "$SIGNATURE" ] && [ ! -L "$SIGNATURE" ] || fail "签名输出已存在，拒绝覆盖：$SIGNATURE"
 
 if ! public_fingerprint="$(openssl pkey -pubin -in "$PUBLIC_KEY" -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"; then
@@ -337,7 +376,7 @@ def copy_tree(source, destination, at_root=False):
 copy_tree(source_root, destination_root, at_root=True)
 PY
 
-  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery" "$SNAPSHOT_EVIDENCE" "$EXPECTED_CHALLENGE" <<'PY' \
+  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery" "$SNAPSHOT_EVIDENCE" <<'PY' \
     || fail "publication physical bundle 未通过完整实物和签名前合同校验，拒绝读取私钥"
 import argparse
 import hashlib
@@ -350,7 +389,6 @@ root = Path(sys.argv[1]).resolve()
 delivery = Path(sys.argv[2]).resolve()
 evidence = Path(sys.argv[3]).resolve()
 bundle_evidence = delivery / "release-evidence.json"
-challenge = sys.argv[4]
 validator_path = root / "scripts/validate-taiji-release-evidence.py"
 spec = importlib.util.spec_from_file_location("taiji_signer_publication_validator", validator_path)
 if spec is None or spec.loader is None:
@@ -382,7 +420,8 @@ args = argparse.Namespace(
     build_marker=package_root / ".build-success",
     source_archive=delivery / ("taiji-agentv1.0-kylin-build-src-" + source_commit + ".tar.gz"),
     delivery_dir=delivery,
-    challenge=challenge,
+    challenge="",
+    require_active_challenge=True,
 )
 binding = validator.validate_build_binding(args)
 if not isinstance(binding, validator.BuildBinding):
@@ -414,18 +453,19 @@ validator.validate_attestation(
     certification_payload,
 )
 certification_data = validator.parse_json_bytes(certification_payload, "certification set")
+publication_challenge = data["challenge_envelope"]["nonce"]
 certification_challenge = certification_data.get("challenge_nonce")
 if (
     type(certification_challenge) is not str
     or validator.CHALLENGE_RE.fullmatch(certification_challenge) is None
-    or certification_challenge == challenge
+    or certification_challenge == publication_challenge
 ):
     raise SystemExit("certification challenge is invalid or reused for publication")
 validator.validate_certification_set_v1(
     certification_data,
     certification,
     argparse.Namespace(
-        challenge=certification_challenge,
+        challenge="",
         matrix=delivery / "验收工具/certification-matrix.json",
         manifest=manifest,
     ),
@@ -542,7 +582,7 @@ for name in ("records", "offline-rehearsal"):
     copy_tree(source_root / name, snapshot / name)
 PY
 
-  python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" "$EXPECTED_CHALLENGE" <<'PY' \
+  python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" <<'PY' \
     || fail "certification-set physical bundle 未通过完整实物校验，拒绝签名"
 import argparse
 import importlib.util
@@ -553,7 +593,6 @@ from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 evidence = Path(sys.argv[2]).resolve()
-challenge = sys.argv[3]
 validator_path = root / "scripts/validate-taiji-release-evidence.py"
 matrix_path = root / "packaging/linux/certification-matrix.json"
 spec = importlib.util.spec_from_file_location("taiji_signer_certification_validator", validator_path)
@@ -575,72 +614,28 @@ binding = validator.BuildBinding(
     electron_executable_sha256="0" * 64,
     desktop_entry_sha256="0" * 64,
 )
-args = argparse.Namespace(challenge=challenge, matrix=matrix_path)
+args = argparse.Namespace(
+    challenge="",
+    matrix=matrix_path,
+    require_active_challenge=True,
+)
 validator.validate_certification_set_v1(data, evidence, args, binding)
 PY
 fi
 
 if [ "$MODE" = "certification" ] || [ "$MODE" = "publication" ]; then
-  # Reserve the challenge before the cryptographic write.  The record is
-  # owner-only and keyed by mode, so a certification challenge cannot be
-  # replayed as a publication challenge (or vice versa).
-  python3 - "$PRIVATE_KEY" "$MODE" "$EXPECTED_CHALLENGE" "$SNAPSHOT_EVIDENCE" <<'PY' \
-    || fail "本次 challenge 已使用或发布私钥目录不安全；请生成新 challenge 后重新验收"
-import hashlib
-import os
-import stat
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-private_key = Path(sys.argv[1])
-mode = sys.argv[2]
-challenge = sys.argv[3]
-evidence = Path(sys.argv[4])
-parent = private_key.parent
-flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-parent_fd = os.open(parent, flags)
-try:
-    parent_stat = os.fstat(parent_fd)
-    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o077:
-        raise SystemExit("unsafe private-key directory")
-    state_name = ".taiji-release-evidence-used-challenges"
-    try:
-        os.mkdir(state_name, 0o700, dir_fd=parent_fd)
-        os.fsync(parent_fd)
-    except FileExistsError:
-        pass
-    state_fd = os.open(state_name, flags, dir_fd=parent_fd)
-    try:
-        state_stat = os.fstat(state_fd)
-        if not stat.S_ISDIR(state_stat.st_mode) or state_stat.st_uid != os.getuid() or stat.S_IMODE(state_stat.st_mode) != 0o700:
-            raise SystemExit("unsafe challenge state directory")
-        record = (
-            f"mode={mode}\nchallenge={challenge}\nevidence_sha256={hashlib.sha256(evidence.read_bytes()).hexdigest()}\n"
-            f"reserved_at_utc={datetime.now(timezone.utc).isoformat()}\n"
-        ).encode("ascii")
-        record_fd = os.open(
-            f"{mode}-{challenge}.used",
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=state_fd,
-        )
-        try:
-            view = memoryview(record)
-            while view:
-                written = os.write(record_fd, view)
-                if written <= 0:
-                    raise SystemExit("challenge record write failed")
-                view = view[written:]
-            os.fsync(record_fd)
-        finally:
-            os.close(record_fd)
-        os.fsync(state_fd)
-    finally:
-        os.close(state_fd)
-finally:
-    os.close(parent_fd)
-PY
+  # Reserve once for this public-key identity before the cryptographic write.
+  # The nonce filename intentionally omits purpose, so cross-purpose replay in
+  # this controlled signing account fails closed.  This is not a global ledger.
+  python3 "$CHALLENGE_HELPER" reserve --envelope "$SNAPSHOT_ENVELOPE" \
+    --evidence "$SNAPSHOT_EVIDENCE" \
+    --public-key-fingerprint "$public_fingerprint" \
+    --purpose "$MODE" \
+    --source-commit "$SOURCE_COMMIT" \
+    --deb-basename "$DEB_BASENAME" \
+    --deb-sha256 "$DEB_SHA256" \
+    --evidence-time "$GENERATED_AT_UTC" \
+    || fail "本次 challenge 已使用、已过期或固定 signer state 不安全；请签发新 envelope 后重新验收"
 
   tmp_signature="$(mktemp "${SIGNATURE}.tmp.XXXXXX")"
   openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "$tmp_signature" "$SNAPSHOT_EVIDENCE" || fail "证据签名失败"

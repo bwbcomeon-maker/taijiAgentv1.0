@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -73,11 +74,23 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
             encoding="utf-8",
         )
         self.certification_set = self.root / "certification-set.json"
+        now = datetime.now(timezone.utc)
+        self.certification_envelope = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "certification",
+            "nonce": "c" * 64,
+            "issued_at_utc": (now - timedelta(minutes=10)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "expires_at_utc": (now + timedelta(minutes=50)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "source_commit": self.commit,
+            "deb_basename": self.deb.name,
+            "deb_sha256": hashlib.sha256(self.deb.read_bytes()).hexdigest(),
+        }
         self.certification_set.write_text(
             json.dumps(
                 {
                     "schema": "taiji-linux-certification-set/v1",
                     "challenge_nonce": "c" * 64,
+                    "challenge_envelope": self.certification_envelope,
                     "source_commit": self.commit,
                     "version": "1.2.3",
                     "architecture": "amd64",
@@ -95,6 +108,8 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
         self.ci_evidence = self.root / "github-ci-evidence.json"
         self.write_ci_evidence()
         self.output = self.root / "release-evidence.json"
+        self.publication_envelope = self.root / "publication-challenge.json"
+        self.write_publication_envelope()
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -126,6 +141,23 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
                 json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
             )
 
+    def write_publication_envelope(self, **updates):
+        now = datetime.now(timezone.utc)
+        payload = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "publication",
+            "nonce": "d" * 64,
+            "issued_at_utc": (now - timedelta(minutes=5)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "expires_at_utc": (now + timedelta(minutes=55)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "source_commit": self.commit,
+            "deb_basename": self.deb.name,
+            "deb_sha256": hashlib.sha256(self.deb.read_bytes()).hexdigest(),
+        }
+        payload.update(updates)
+        self.publication_envelope.write_text(
+            json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
     def assemble_with_verified_certification(self):
         assembler = self._load_assembler()
         args = Namespace(
@@ -136,7 +168,7 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
             certification_signature=self.signature,
             ci_evidence=self.ci_evidence,
             output=self.output,
-            challenge="d" * 64,
+            challenge_envelope=self.publication_envelope,
         )
         with patch.object(
             assembler,
@@ -146,6 +178,7 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
             return assembler.assemble(args)
 
     def command(self, *, manifest=None, challenge="d" * 64):
+        self.write_publication_envelope(nonce=challenge)
         return subprocess.run(
             [
                 "python3",
@@ -157,7 +190,7 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
                 "--certification-signature", str(self.signature),
                 "--ci-evidence", str(self.ci_evidence),
                 "--output", str(self.output),
-                "--challenge", challenge,
+                "--challenge-envelope", str(self.publication_envelope),
             ],
             cwd=ROOT,
             text=True,
@@ -210,6 +243,36 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
                 "manifest_binding": "PASS",
             },
         )
+        self.assertEqual(evidence["challenge_envelope"]["purpose"], "publication")
+        self.assertEqual(evidence["challenge_envelope"]["nonce"], "d" * 64)
+
+    def test_wrong_publication_envelope_identity_is_rejected(self):
+        assembler = self._load_assembler()
+        for update, expected in (
+            ({"purpose": "certification"}, "purpose"),
+            ({"source_commit": "b" * 40}, "source_commit"),
+            ({"deb_sha256": "f" * 64}, "deb_sha256"),
+        ):
+            with self.subTest(update=update):
+                self.write_publication_envelope(**update)
+                args = Namespace(
+                    manifest=self.manifest,
+                    deb=self.deb,
+                    policy=POLICY,
+                    certification_set=self.certification_set,
+                    certification_signature=self.signature,
+                    ci_evidence=self.ci_evidence,
+                    output=self.output,
+                    challenge_envelope=self.publication_envelope,
+                )
+                with patch.object(
+                    assembler,
+                    "_validate_certification_set",
+                    return_value=hashlib.sha256(self.signature.read_bytes()).hexdigest(),
+                ):
+                    with self.assertRaisesRegex(ValueError, expected):
+                        assembler.assemble(args)
+                self.assertFalse(self.output.exists())
 
     def test_ci_head_sha_or_conclusion_mismatch_blocks_before_output(self):
         for updates in (

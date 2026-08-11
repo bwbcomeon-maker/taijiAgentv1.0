@@ -90,6 +90,13 @@
       "version": {"kind": "product"}
     },
     {
+      "id": "installed_acceptance_challenge_envelope",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/taiji-challenge-envelope.py",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
       "id": "installed_acceptance_signing_public_key",
       "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/signing-public.pem",
       "type": "file",

@@ -433,6 +433,7 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
             "certification-matrix.json",
             "assemble-taiji-certification-set.py",
             "validate-taiji-release-evidence.py",
+            "taiji-challenge-envelope.py",
             "signing-public.pem",
         ):
             self.assertIn(filename, builder)

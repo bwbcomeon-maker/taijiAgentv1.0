@@ -3,12 +3,16 @@ import os
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SIGNER = ROOT / "scripts/sign-taiji-release-evidence.sh"
 CHALLENGE = "ab" * 32
+SOURCE_COMMIT = "a" * 40
+DEB_BASENAME = "taiji-agent_1.0.2_amd64.deb"
+DEB_SHA256 = "1" * 64
 
 
 class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
@@ -16,16 +20,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="taiji-signer-guard-")
         self.root = Path(self.temporary.name)
         self.evidence = self.root / "certification-set.json"
-        self.evidence.write_text(
-            json.dumps(
-                {
-                    "schema": "taiji-linux-certification-set/v1",
-                    "challenge_nonce": CHALLENGE,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        self.write_evidence()
         self.private_key = self.root / "release-private.pem"
         self.private_key.write_text("fixture private key\n", encoding="utf-8")
         self.private_key.chmod(0o600)
@@ -33,13 +28,49 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_signer(self, challenge: str = CHALLENGE, private_key: Path | None = None):
-        env = os.environ.copy()
-        env["TAIJI_CERTIFICATION_CHALLENGE"] = challenge
+    def write_evidence(
+        self,
+        *,
+        schema: str = "taiji-linux-certification-set/v1",
+        purpose: str = "certification",
+        envelope_updates: dict | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        envelope = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": purpose,
+            "nonce": CHALLENGE,
+            "issued_at_utc": (now - timedelta(minutes=5)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "expires_at_utc": (now + timedelta(minutes=55)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "source_commit": SOURCE_COMMIT,
+            "deb_basename": DEB_BASENAME,
+            "deb_sha256": DEB_SHA256,
+        }
+        envelope.update(envelope_updates or {})
+        self.evidence.write_text(
+            json.dumps(
+                {
+                    "schema": schema,
+                    "generated_at_utc": now.isoformat().replace("+00:00", "Z"),
+                    "challenge_nonce": CHALLENGE,
+                    "challenge_envelope": envelope,
+                    "source_commit": SOURCE_COMMIT,
+                    "deb_basename": DEB_BASENAME,
+                    "deb_sha256": DEB_SHA256,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def run_signer(self, private_key: Path | None = None):
         return subprocess.run(
             ["bash", str(SIGNER), str(self.evidence), str(private_key or self.private_key)],
             cwd=ROOT,
-            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -68,11 +99,14 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         self.assertIn("硬链接", result.stderr)
         self.assert_no_signature()
 
-    def test_rejects_independent_challenge_mismatch_before_key_use(self) -> None:
-        result = self.run_signer(challenge="cd" * 32)
+    def test_rejects_wrong_embedded_purpose_before_key_use(self) -> None:
+        self.write_evidence(purpose="publication")
+
+        result = self.run_signer()
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("challenge 不一致", result.stderr)
+        self.assertIn("purpose", result.stderr)
+        self.assertNotIn("无法读取发布私钥", result.stderr)
         self.assert_no_signature()
 
     def test_invalid_private_key_reports_a_fail_closed_error(self) -> None:
@@ -130,31 +164,27 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         source = SIGNER.read_text(encoding="utf-8")
 
         self.assertIn('SNAPSHOT_EVIDENCE="$SNAPSHOT_ROOT/evidence.json"', source)
-        self.assertIn('"$SNAPSHOT_EVIDENCE" "$EXPECTED_CHALLENGE"', source)
-        self.assertIn('"$EXPECTED_CHALLENGE" "$SNAPSHOT_EVIDENCE"', source)
+        self.assertIn(
+            'SNAPSHOT_ENVELOPE="$SNAPSHOT_ROOT/challenge-envelope.json"', source
+        )
+        self.assertIn('reserve --envelope "$SNAPSHOT_ENVELOPE"', source)
+        self.assertIn('--evidence "$SNAPSHOT_EVIDENCE"', source)
+        self.assertIn('--public-key-fingerprint "$public_fingerprint"', source)
+        self.assertNotIn(".taiji-release-evidence-used-challenges", source)
         self.assertIn('-out "$tmp_signature" "$SNAPSHOT_EVIDENCE"', source)
         self.assertIn('-signature "$tmp_signature" "$SNAPSHOT_EVIDENCE"', source)
         self.assertIn('-signature "$SIGNATURE" "$EVIDENCE"', source)
         self.assertIn('rm -f -- "$SIGNATURE"', source)
 
     def test_rejects_incomplete_publication_before_private_key_use(self) -> None:
-        self.evidence.write_text(
-            json.dumps(
-                {
-                    "schema": "taiji-release-evidence/v3",
-                    "challenge_nonce": CHALLENGE,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        self.write_evidence(
+            schema="taiji-release-evidence/v3",
+            purpose="publication",
         )
-        env = os.environ.copy()
-        env["TAIJI_PUBLICATION_CHALLENGE"] = CHALLENGE
 
         result = subprocess.run(
             ["bash", str(SIGNER), str(self.evidence), str(self.private_key)],
             cwd=ROOT,
-            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

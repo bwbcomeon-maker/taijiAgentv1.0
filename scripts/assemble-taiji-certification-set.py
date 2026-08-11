@@ -78,6 +78,26 @@ def _load_release_validator():
     return None
 
 
+def _load_challenge_helper():
+    candidates = (
+        Path(__file__).resolve().with_name("taiji-challenge-envelope.py"),
+        ROOT / "scripts/taiji-challenge-envelope.py",
+    )
+    for path in dict.fromkeys(candidates):
+        if not path.is_file() or path.is_symlink():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "taiji_certification_challenge_envelope",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise CertificationSetError("cannot load challenge-envelope helper")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    raise CertificationSetError("challenge-envelope helper is missing")
+
+
 def _strict_json(payload: bytes, label: str) -> dict[str, Any]:
     try:
         value = json.loads(
@@ -702,14 +722,13 @@ def _publish_directory_noreplace(source: Path, destination: Path) -> None:
 
 
 def assemble(args: argparse.Namespace) -> Path:
-    if not CHALLENGE_RE.fullmatch(args.challenge or ""):
-        raise CertificationSetError("challenge must be 64-128 lowercase hexadecimal characters")
     for path, label in (
         (args.matrix, "certification matrix"),
         (args.records_dir, "records directory"),
         (args.offline_evidence, "offline rehearsal evidence"),
         (args.deb, "candidate DEB"),
         (args.policy, "compatibility policy"),
+        (args.challenge_envelope, "certification challenge envelope"),
     ):
         if not path.is_absolute():
             raise CertificationSetError(f"{label} path must be absolute")
@@ -729,8 +748,6 @@ def assemble(args: argparse.Namespace) -> Path:
     if not VERSION_RE.fullmatch(version):
         raise CertificationSetError("candidate DEB version is invalid")
     records, payloads = _read_records(args.records_dir, matrix)
-    if any(record.get("challenge_nonce") != args.challenge for record in records):
-        raise CertificationSetError("every environment record must bind the certification challenge")
     if CONTRACT is not None:
         try:
             CONTRACT.validate_environment_records(records, matrix)
@@ -751,6 +768,11 @@ def assemble(args: argparse.Namespace) -> Path:
         raise CertificationSetError("environment records version or source commit is invalid")
     if bindings["compatibility_policy_id"] != policy_id or bindings["compatibility_policy_sha256"] != policy_sha:
         raise CertificationSetError("environment records do not bind the supplied compatibility policy")
+    challenge_helper = _load_challenge_helper()
+    challenge_envelope = challenge_helper.load_envelope_file(args.challenge_envelope)
+    challenge = challenge_envelope.get("nonce")
+    if any(record.get("challenge_nonce") != challenge for record in records):
+        raise CertificationSetError("every environment record must bind the certification challenge")
     _require_positive_pass(records, matrix)
     with tempfile.TemporaryDirectory(
         prefix=".offline-certification-snapshot-",
@@ -770,6 +792,10 @@ def assemble(args: argparse.Namespace) -> Path:
             policy_sha256=policy_sha,
             snapshot_root=offline_snapshot_root,
         )
+        if offline.get("challenge_nonce") != challenge:
+            raise CertificationSetError(
+                "offline rehearsal evidence must bind the certification challenge"
+            )
         positive = [
             {
                 "category_id": record["category_id"],
@@ -797,10 +823,29 @@ def assemble(args: argparse.Namespace) -> Path:
         offline_evidence_payload = offline_payloads["offline-install-rehearsal.json"]
         if type(offline_evidence_payload) is not bytes:
             raise CertificationSetError("offline rehearsal evidence snapshot is invalid")
+        challenge_helper.verify_envelope(
+            challenge_envelope,
+            purpose="certification",
+            source_commit=bindings["source_commit"],
+            deb_basename=deb_name,
+            deb_sha256=deb_sha,
+            require_active=True,
+            evidence_times=tuple(
+                value
+                for value in (
+                    generated_at,
+                    offline.get("generated_at_utc"),
+                    *(record.get("generated_at_utc") for record in records),
+                )
+                if type(value) is str
+            ),
+            evidence_not_after=generated_at,
+        )
         certification_set = {
             "schema": SET_SCHEMA,
             "generated_at_utc": generated_at,
-            "challenge_nonce": args.challenge,
+            "challenge_nonce": challenge,
+            "challenge_envelope": challenge_envelope,
             **bindings,
             "certification_profile": {
                 "matrix_schema": MATRIX_SCHEMA,
@@ -851,7 +896,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--deb", required=True, type=Path)
     parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--challenge", required=True)
+    parser.add_argument("--challenge-envelope", required=True, type=Path)
     return parser.parse_args(argv)
 
 

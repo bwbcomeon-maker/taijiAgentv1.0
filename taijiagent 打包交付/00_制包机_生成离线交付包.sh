@@ -2187,6 +2187,7 @@ stage_target_acceptance_tools() {
   local certification_matrix="$SRC_DIR/packaging/linux/certification-matrix.json"
   local certification_set_assembler="$SRC_DIR/scripts/assemble-taiji-certification-set.py"
   local validator="$SRC_DIR/scripts/validate-taiji-release-evidence.py"
+  local challenge_helper="$SRC_DIR/scripts/taiji-challenge-envelope.py"
   local public_key="$SRC_DIR/tools/taiji-release-evidence/signing-public.pem"
   local public_fingerprint expected_fingerprint
   expected_fingerprint="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
@@ -2202,9 +2203,10 @@ stage_target_acceptance_tools() {
   [ -f "$certification_matrix" ] && [ ! -L "$certification_matrix" ] || fail "源码缺少认证类别矩阵：$certification_matrix"
   [ -f "$certification_set_assembler" ] && [ ! -L "$certification_set_assembler" ] || fail "源码缺少认证集组装器：$certification_set_assembler"
   [ -f "$validator" ] && [ ! -L "$validator" ] || fail "源码缺少发布证据校验器：$validator"
+  [ -f "$challenge_helper" ] && [ ! -L "$challenge_helper" ] || fail "源码缺少 challenge envelope helper：$challenge_helper"
   [ -f "$public_key" ] && [ ! -L "$public_key" ] || fail "源码缺少发布证据验签公钥：$public_key"
   node --check "$driver" >/dev/null || fail "桌面 App 验收驱动 JavaScript 语法检查失败"
-  python3 - "$assembler" "$install_observer" "$validator" "$certification_set_assembler" <<'PY' || fail "目标证据 Python 工具语法检查失败"
+  python3 - "$assembler" "$install_observer" "$validator" "$certification_set_assembler" "$challenge_helper" <<'PY' || fail "目标证据 Python 工具语法检查失败"
 import sys
 from pathlib import Path
 
@@ -2222,6 +2224,7 @@ PY
   install -m 0644 "$certification_matrix" "$target_staging/certification-matrix.json"
   install -m 0755 "$certification_set_assembler" "$target_staging/assemble-taiji-certification-set.py"
   install -m 0644 "$validator" "$target_staging/validate-taiji-release-evidence.py"
+  install -m 0644 "$challenge_helper" "$target_staging/taiji-challenge-envelope.py"
   install -m 0644 "$public_key" "$target_staging/signing-public.pem"
   # These are management-plane helpers for the copied 02 wrapper.  They are
   # deliberately outside the customer DEB and are never staged into
@@ -2255,6 +2258,7 @@ expected_files = {
     "certification-matrix.json",
     "assemble-taiji-certification-set.py",
     "validate-taiji-release-evidence.py",
+    "taiji-challenge-envelope.py",
     "signing-public.pem",
     "management/taiji-silent-deploy.sh",
     "management/deployment_receipt.py",

@@ -53,6 +53,11 @@ CANONICAL_FILES = (
         "mode": 0o644,
     },
     {
+        "delivery_path": "taiji-challenge-envelope.py",
+        "source_path": "scripts/taiji-challenge-envelope.py",
+        "mode": 0o644,
+    },
+    {
         "delivery_path": "signing-public.pem",
         "source_path": "tools/taiji-release-evidence/signing-public.pem",
         "mode": 0o644,

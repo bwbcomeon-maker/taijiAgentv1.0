@@ -148,6 +148,26 @@ class SingleDebPublisherGateTest(unittest.TestCase):
         policy_sha = helper.canonical_sha256(policy)
         self.maintainer = policy["package"]["maintainer"]
         self.policy_sha = policy_sha
+        self.certification_challenge = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "certification",
+            "nonce": "a" * 64,
+            "issued_at_utc": "2026-08-04T23:00:00Z",
+            "expires_at_utc": "2026-08-05T01:00:00Z",
+            "source_commit": "b" * 40,
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.deb_sha,
+        }
+        self.publication_challenge = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "publication",
+            "nonce": "c" * 64,
+            "issued_at_utc": "2026-08-04T23:00:00Z",
+            "expires_at_utc": "2026-08-05T01:00:00Z",
+            "source_commit": "b" * 40,
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.deb_sha,
+        }
         self.certification = self.delivery / "certification-set.json"
         self.certification.write_text(
             json.dumps(
@@ -155,6 +175,7 @@ class SingleDebPublisherGateTest(unittest.TestCase):
                     "schema": "taiji-linux-certification-set/v1",
                     "generated_at_utc": "2026-08-05T00:00:00Z",
                     "challenge_nonce": "a" * 64,
+                    "challenge_envelope": self.certification_challenge,
                     "source_commit": "b" * 40,
                     "version": "1.0.0",
                     "architecture": "amd64",
@@ -191,6 +212,7 @@ class SingleDebPublisherGateTest(unittest.TestCase):
                     "evidence_type": "single-deb-publication",
                     "generated_at_utc": "2026-08-05T00:00:00Z",
                     "challenge_nonce": "c" * 64,
+                    "challenge_envelope": self.publication_challenge,
                     "source_commit": "b" * 40,
                     "version": "1.0.0",
                     "architecture": "amd64",

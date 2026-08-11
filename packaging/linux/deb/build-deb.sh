@@ -778,7 +778,7 @@ audit_deb_payload() {
   for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/taiji-release-manifest.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/scripts/support_bundle.py" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./opt/taiji-agent/resources/icons/taiji-agent.png" "./usr/share/applications/taiji-agent.desktop" "./usr/share/metainfo/taiji-agent.metainfo.xml" "./usr/share/icons/hicolor/32x32/apps/taiji-agent.png" "./usr/share/icons/hicolor/48x48/apps/taiji-agent.png" "./usr/share/icons/hicolor/64x64/apps/taiji-agent.png" "./usr/share/icons/hicolor/128x128/apps/taiji-agent.png" "./usr/share/icons/hicolor/192x192/apps/taiji-agent.png" "./usr/share/icons/hicolor/256x256/apps/taiji-agent.png" "./usr/share/icons/hicolor/512x512/apps/taiji-agent.png" "./usr/bin/taiji" "./usr/bin/taiji-agent" "./usr/bin/taiji-agent-support"; do
     grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
   done
-  for required in "./usr/bin/taiji-agent-acceptance" "./opt/taiji-agent/resources/taiji-acceptance-binding.json" "./opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py" "./opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py" "./opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh" "./opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json" "./opt/taiji-agent/libexec/target-acceptance/验收工具/run-installed-electron-acceptance.js" "./opt/taiji-agent/libexec/target-acceptance/验收工具/assemble-target-evidence.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/observe-single-deb-install.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/certification-matrix.json" "./opt/taiji-agent/libexec/target-acceptance/验收工具/validate-taiji-release-evidence.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/signing-public.pem"; do
+  for required in "./usr/bin/taiji-agent-acceptance" "./opt/taiji-agent/resources/taiji-acceptance-binding.json" "./opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py" "./opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py" "./opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh" "./opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json" "./opt/taiji-agent/libexec/target-acceptance/验收工具/run-installed-electron-acceptance.js" "./opt/taiji-agent/libexec/target-acceptance/验收工具/assemble-target-evidence.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/observe-single-deb-install.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/certification-matrix.json" "./opt/taiji-agent/libexec/target-acceptance/验收工具/validate-taiji-release-evidence.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/taiji-challenge-envelope.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/signing-public.pem"; do
     grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
   done
   [ -z "$missing" ] || { printf '%s' "$missing" >&2; fail "DEB payload is missing required runtime paths"; }
@@ -914,6 +914,7 @@ stage_installed_acceptance_toolchain() {
     "$REPO_ROOT/tools/taiji-desktop-acceptance/observe-single-deb-install.py" \
     "$REPO_ROOT/packaging/linux/certification-matrix.json" \
     "$REPO_ROOT/scripts/validate-taiji-release-evidence.py" \
+    "$REPO_ROOT/scripts/taiji-challenge-envelope.py" \
     "$REPO_ROOT/tools/taiji-release-evidence/signing-public.pem"; do
     [ -f "$source" ] && [ ! -L "$source" ] \
       || fail "Installed acceptance source is missing or unsafe: $source"
@@ -929,6 +930,7 @@ stage_installed_acceptance_toolchain() {
   install -m 0644 "$REPO_ROOT/tools/taiji-desktop-acceptance/observe-single-deb-install.py" "$ACCEPTANCE_TOOLS_ROOT/observe-single-deb-install.py"
   install -m 0644 "$REPO_ROOT/packaging/linux/certification-matrix.json" "$ACCEPTANCE_TOOLS_ROOT/certification-matrix.json"
   install -m 0644 "$REPO_ROOT/scripts/validate-taiji-release-evidence.py" "$ACCEPTANCE_TOOLS_ROOT/validate-taiji-release-evidence.py"
+  install -m 0644 "$REPO_ROOT/scripts/taiji-challenge-envelope.py" "$ACCEPTANCE_TOOLS_ROOT/taiji-challenge-envelope.py"
   install -m 0644 "$REPO_ROOT/tools/taiji-release-evidence/signing-public.pem" "$ACCEPTANCE_TOOLS_ROOT/signing-public.pem"
 
   manifest_path="$ACCEPTANCE_TOOLS_ROOT/acceptance-tools-manifest.json"

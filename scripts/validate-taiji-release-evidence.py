@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import builtins
+import contextvars
 import hashlib
 import importlib.util
 import json
@@ -109,6 +110,15 @@ DIAGNOSTIC_BASENAME = "taiji-support-bundle.json"
 INSTALL_OBSERVATION_BASENAME = "single-deb-install-observation.json"
 INSTALL_METHOD_ATTESTATION_BASENAME = "single-deb-install-method-attestation.json"
 GRAPHICAL_INSTALLER_EVIDENCE_BASENAME = "single-deb-graphical-installer.png"
+_CHALLENGE_TIME_WINDOW = contextvars.ContextVar(
+    "taiji_challenge_time_window",
+    default=None,
+)
+_SIGNED_EVIDENCE_REFERENCE_TIME = contextvars.ContextVar(
+    "taiji_signed_evidence_reference_time",
+    default=None,
+)
+_CHALLENGE_HELPER = None
 TARGET_CHECK_KEYS = {
     "visible_first_configuration_completion",
     "desktop_launch",
@@ -540,6 +550,30 @@ class EvidenceError(ValueError):
     pass
 
 
+def _load_challenge_helper() -> Any:
+    global _CHALLENGE_HELPER
+    if _CHALLENGE_HELPER is not None:
+        return _CHALLENGE_HELPER
+    candidates = (
+        Path(__file__).resolve().with_name("taiji-challenge-envelope.py"),
+        Path(__file__).resolve().parents[1] / "scripts/taiji-challenge-envelope.py",
+    )
+    for path in dict.fromkeys(candidates):
+        if not path.is_file() or path.is_symlink():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "taiji_release_challenge_envelope",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise EvidenceError("cannot load challenge-envelope helper")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _CHALLENGE_HELPER = module
+        return module
+    raise EvidenceError("challenge-envelope helper is missing")
+
+
 @dataclass(frozen=True)
 class BuildBinding:
     """Immutable v3 identity of the exact candidate DEB under review."""
@@ -911,6 +945,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         "验收工具/certification-matrix.json",
         "验收工具/assemble-taiji-certification-set.py",
         "验收工具/validate-taiji-release-evidence.py",
+        "验收工具/taiji-challenge-envelope.py",
         "验收工具/signing-public.pem",
     }
     require_trusted_ancestor_chain(delivery_dir, "交付目录")
@@ -1232,6 +1267,17 @@ def validate_fresh_timestamp(value: Any, key: str) -> str:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
         raise EvidenceError(f"字段 {key} 必须是 UTC ISO8601 时间") from exc
+    challenge_window = _CHALLENGE_TIME_WINDOW.get()
+    if challenge_window is not None:
+        issued, expires = challenge_window
+        if parsed < issued or parsed > expires:
+            raise EvidenceError(
+                f"字段 {key} 必须落在已签名 challenge envelope 时间窗内"
+            )
+        reference_time = _SIGNED_EVIDENCE_REFERENCE_TIME.get()
+        if reference_time is not None and parsed > reference_time:
+            raise EvidenceError(f"字段 {key} 不得晚于顶层签名证据时间")
+        return value
     now = datetime.now(timezone.utc)
     if parsed > now + timedelta(minutes=5) or parsed < now - timedelta(days=7):
         raise EvidenceError(f"字段 {key} 必须是最近 7 天内生成的当前证据")
@@ -3372,6 +3418,7 @@ RELEASE_EVIDENCE_V3_KEYS = {
     "evidence_type",
     "generated_at_utc",
     "challenge_nonce",
+    "challenge_envelope",
     "source_commit",
     "version",
     "architecture",
@@ -3455,6 +3502,7 @@ CERTIFICATION_SET_KEYS_V1 = {
     "schema",
     "generated_at_utc",
     "challenge_nonce",
+    "challenge_envelope",
     "source_commit",
     "version",
     "architecture",
@@ -3483,7 +3531,7 @@ def _load_environment_contract_for_certification() -> Any:
     return contract
 
 
-def validate_certification_set_v1(
+def _validate_certification_set_v1_inner(
     data: dict[str, Any],
     evidence_path: Path,
     args: argparse.Namespace,
@@ -3780,6 +3828,60 @@ def validate_certification_set_v1(
     )
 
 
+def validate_certification_set_v1(
+    data: dict[str, Any],
+    evidence_path: Path,
+    args: argparse.Namespace,
+    binding: BuildBinding,
+) -> None:
+    """Validate a certification set in its signed challenge time domain."""
+
+    helper = _load_challenge_helper()
+    envelope = data.get("challenge_envelope")
+    if type(envelope) is not dict:
+        raise EvidenceError("认证集缺少 canonical challenge_envelope")
+    try:
+        helper.verify_envelope(
+            envelope,
+            purpose="certification",
+            source_commit=binding.source_commit,
+            deb_basename=binding.deb_basename,
+            deb_sha256=binding.deb_sha256,
+            require_active=bool(
+                getattr(args, "pre_sign", False)
+                or getattr(args, "require_active_challenge", False)
+            ),
+            evidence_times=(data.get("generated_at_utc"),),
+        )
+        issued, expires = helper.validate_structure(envelope)
+        reference_time = helper._parse_utc(
+            data.get("generated_at_utc"),
+            "generated_at_utc",
+        )
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise EvidenceError(str(exc)) from exc
+    if data.get("challenge_nonce") != envelope["nonce"]:
+        raise EvidenceError("认证集 challenge_nonce 与 challenge_envelope 不一致")
+    supplied = getattr(args, "challenge", "")
+    if supplied and supplied != envelope["nonce"]:
+        raise EvidenceError("认证集外部 challenge 与 challenge_envelope 不一致")
+    values = vars(args).copy()
+    values["challenge"] = envelope["nonce"]
+    normalized_args = argparse.Namespace(**values)
+    token = _CHALLENGE_TIME_WINDOW.set((issued, expires))
+    reference_token = _SIGNED_EVIDENCE_REFERENCE_TIME.set(reference_time)
+    try:
+        _validate_certification_set_v1_inner(
+            data,
+            evidence_path,
+            normalized_args,
+            binding,
+        )
+    finally:
+        _SIGNED_EVIDENCE_REFERENCE_TIME.reset(reference_token)
+        _CHALLENGE_TIME_WINDOW.reset(token)
+
+
 def _ci_file_identity(value: os.stat_result) -> tuple[int, ...]:
     return (
         value.st_dev,
@@ -4028,12 +4130,16 @@ def validate_ci_evidence_binding(
     if ci_basename != CI_EVIDENCE_BASENAME:
         raise EvidenceError("release evidence 必须绑定固定 GitHub CI v2 basename")
     ci_path = evidence_path.parent / CI_EVIDENCE_BASENAME
-    result = validate_github_ci_evidence_bundle(ci_path, binding.source_commit)
+    result = validate_github_ci_evidence_bundle(
+        ci_path,
+        binding.source_commit,
+        now=_SIGNED_EVIDENCE_REFERENCE_TIME.get(),
+    )
     if data.get("ci_evidence_sha256") != result["evidence_sha256"]:
         raise EvidenceError("release evidence GitHub CI v2 SHA256 绑定不一致")
 
 
-def validate_release_evidence_v3(
+def _validate_release_evidence_v3_inner(
     data: dict[str, Any],
     evidence_path: Path,
     args: argparse.Namespace,
@@ -4095,6 +4201,64 @@ def validate_release_evidence_v3(
     if data["formal_gates"] != RELEASE_FORMAL_GATES:
         raise EvidenceError("release evidence v3 formal_gates 必须是固定且全部 PASS 的正式门禁")
     validate_ci_evidence_binding(data, evidence_path, binding)
+
+
+def validate_release_evidence_v3(
+    data: dict[str, Any],
+    evidence_path: Path,
+    args: argparse.Namespace,
+    binding: BuildBinding,
+) -> None:
+    """Validate publication evidence against its signed challenge window."""
+
+    helper = _load_challenge_helper()
+    envelope = data.get("challenge_envelope")
+    if type(envelope) is not dict:
+        raise EvidenceError("release evidence 缺少 canonical challenge_envelope")
+    try:
+        helper.verify_envelope(
+            envelope,
+            purpose="publication",
+            source_commit=binding.source_commit,
+            deb_basename=binding.deb_basename,
+            deb_sha256=binding.deb_sha256,
+            require_active=bool(
+                getattr(args, "pre_sign", False)
+                or getattr(args, "require_active_challenge", False)
+            ),
+            evidence_times=(data.get("generated_at_utc"),),
+        )
+        issued, expires = helper.validate_structure(envelope)
+        reference_time = helper._parse_utc(
+            data.get("generated_at_utc"),
+            "generated_at_utc",
+        )
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise EvidenceError(str(exc)) from exc
+    if data.get("challenge_nonce") != envelope["nonce"]:
+        raise EvidenceError(
+            "release evidence challenge_nonce 与 challenge_envelope 不一致"
+        )
+    supplied = getattr(args, "challenge", "")
+    if supplied and supplied != envelope["nonce"]:
+        raise EvidenceError(
+            "release evidence 外部 challenge 与 challenge_envelope 不一致"
+        )
+    values = vars(args).copy()
+    values["challenge"] = envelope["nonce"]
+    normalized_args = argparse.Namespace(**values)
+    window_token = _CHALLENGE_TIME_WINDOW.set((issued, expires))
+    reference_token = _SIGNED_EVIDENCE_REFERENCE_TIME.set(reference_time)
+    try:
+        _validate_release_evidence_v3_inner(
+            data,
+            evidence_path,
+            normalized_args,
+            binding,
+        )
+    finally:
+        _SIGNED_EVIDENCE_REFERENCE_TIME.reset(reference_token)
+        _CHALLENGE_TIME_WINDOW.reset(window_token)
 
 
 def validate_legacy_v2_read_only(

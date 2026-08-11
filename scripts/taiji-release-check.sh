@@ -17,8 +17,6 @@ CERTIFICATION_SET_SIGNATURE="${TAIJI_CERTIFICATION_SET_SIGNATURE:-${CERTIFICATIO
 RELEASE_EVIDENCE="${TAIJI_RELEASE_EVIDENCE:-$DELIVERY_DIR/release-evidence.json}"
 RELEASE_SIGNATURE="${TAIJI_RELEASE_SIGNATURE:-${RELEASE_EVIDENCE}.sig}"
 CERTIFICATION_MATRIX="$DELIVERY_DIR/验收工具/certification-matrix.json"
-CERTIFICATION_CHALLENGE="${TAIJI_CERTIFICATION_CHALLENGE:-}"
-PUBLICATION_CHALLENGE="${TAIJI_PUBLICATION_CHALLENGE:-}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -152,9 +150,6 @@ check_certification_and_publication() {
   [ -f "$RELEASE_EVIDENCE" ] && [ ! -L "$RELEASE_EVIDENCE" ] || { fail "缺少 release-evidence.json"; return 1; }
   [ -f "$RELEASE_SIGNATURE" ] && [ ! -L "$RELEASE_SIGNATURE" ] || { fail "缺少 release-evidence.json.sig"; return 1; }
   [ -f "$CERTIFICATION_MATRIX" ] && [ ! -L "$CERTIFICATION_MATRIX" ] || { fail "缺少认证矩阵"; return 1; }
-  printf '%s\n' "$CERTIFICATION_CHALLENGE" | grep -Eq '^[0-9a-f]{64,128}$' || { fail "TAIJI_CERTIFICATION_CHALLENGE 无效"; return 1; }
-  printf '%s\n' "$PUBLICATION_CHALLENGE" | grep -Eq '^[0-9a-f]{64,128}$' || { fail "TAIJI_PUBLICATION_CHALLENGE 无效"; return 1; }
-  [ "$CERTIFICATION_CHALLENGE" != "$PUBLICATION_CHALLENGE" ] || { fail "认证 challenge 与 publication challenge 必须独立"; return 1; }
   command -v openssl >/dev/null 2>&1 || { fail "缺少 openssl"; return 1; }
   [ -f "$LIVE_CI_REVALIDATOR" ] && [ ! -L "$LIVE_CI_REVALIDATOR" ] \
     || { fail "缺少固定 GitHub CI 实时复验器"; return 1; }
@@ -207,8 +202,7 @@ PY
     --build-marker "$DELIVERY_DIR/生成的安装包/.build-success" \
     --source-archive "$source_archive" \
     --delivery-dir "$DELIVERY_DIR" \
-    --matrix "$CERTIFICATION_MATRIX" \
-    --challenge "$CERTIFICATION_CHALLENGE" || return 1
+    --matrix "$CERTIFICATION_MATRIX" || return 1
   python3 "$EVIDENCE_VALIDATOR" release \
     --evidence "$RELEASE_EVIDENCE" \
     --source-commit "$commit" \
@@ -220,8 +214,7 @@ PY
     --delivery-dir "$DELIVERY_DIR" \
     --attestation-signature "$RELEASE_SIGNATURE" \
     --attestation-public-key "$EVIDENCE_ATTESTATION_PUBLIC_KEY" \
-    --attestation-public-key-fingerprint "$EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT" \
-    --challenge "$PUBLICATION_CHALLENGE" || return 1
+    --attestation-public-key-fingerprint "$EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT" || return 1
 }
 
 main() {

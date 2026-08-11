@@ -96,6 +96,7 @@ class AcceptanceToolsIntegrityTests(unittest.TestCase):
                 "observe-single-deb-install.py",
                 "certification-matrix.json",
                 "validate-taiji-release-evidence.py",
+                "taiji-challenge-envelope.py",
                 "signing-public.pem",
             },
         )

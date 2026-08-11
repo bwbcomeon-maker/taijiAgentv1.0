@@ -277,6 +277,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         (acceptance_tools / "validate-taiji-release-evidence.py").write_text(
             "# fixture release evidence validator\n", encoding="utf-8"
         )
+        (acceptance_tools / "taiji-challenge-envelope.py").write_text(
+            "# fixture challenge envelope helper\n", encoding="utf-8"
+        )
         (acceptance_tools / "signing-public.pem").write_text(
             "fixture release public key\n", encoding="utf-8"
         )

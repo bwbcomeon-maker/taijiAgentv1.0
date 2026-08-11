@@ -34,6 +34,7 @@ ACCEPTANCE_PAYLOAD_PATHS = {
     "opt/taiji-agent/libexec/target-acceptance/验收工具/observe-single-deb-install.py",
     "opt/taiji-agent/libexec/target-acceptance/验收工具/certification-matrix.json",
     "opt/taiji-agent/libexec/target-acceptance/验收工具/validate-taiji-release-evidence.py",
+    "opt/taiji-agent/libexec/target-acceptance/验收工具/taiji-challenge-envelope.py",
     "opt/taiji-agent/libexec/target-acceptance/验收工具/signing-public.pem",
 }
 

@@ -616,6 +616,17 @@ def main() -> int:
             fail("certification/publication challenge is invalid")
         if cert_challenge == publication_challenge:
             fail("certification and publication challenges must be independent")
+        cert_envelope = cert.get("challenge_envelope")
+        publication_envelope = release.get("challenge_envelope")
+        if (
+            type(cert_envelope) is not dict
+            or cert_envelope.get("purpose") != "certification"
+            or cert_envelope.get("nonce") != cert_challenge
+            or type(publication_envelope) is not dict
+            or publication_envelope.get("purpose") != "publication"
+            or publication_envelope.get("nonce") != publication_challenge
+        ):
+            fail("certification/publication canonical challenge envelope is invalid")
         candidate_sha = snapshots["candidate.deb"]["sha256"]
         cert_sha = snapshots["certification-set.json"]["sha256"]
         cert_sig_sha = snapshots["certification-set.json.sig"]["sha256"]
@@ -677,8 +688,6 @@ def main() -> int:
             "TAIJI_RELEASE_SKIP_GIT_CHECK": "0",
             "TAIJI_RELEASE_REQUIRE_ARTIFACTS": "1",
             "TAIJI_DELIVERY_DIR": str(delivery_dir),
-            "TAIJI_CERTIFICATION_CHALLENGE": cert_challenge,
-            "TAIJI_PUBLICATION_CHALLENGE": publication_challenge,
         })
         result = subprocess.run(
             [

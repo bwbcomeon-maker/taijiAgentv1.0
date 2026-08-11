@@ -12,7 +12,7 @@ import tempfile
 import tarfile
 import unittest
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tests.github_ci_v2_fixture import write_github_ci_v2_bundle
@@ -242,6 +242,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "certification-matrix.json",
             "assemble-taiji-certification-set.py",
             "validate-taiji-release-evidence.py",
+            "taiji-challenge-envelope.py",
             "signing-public.pem",
         ):
             (tools_dir / filename).write_text(f"fixture {filename}\n", encoding="utf-8")
@@ -277,11 +278,23 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def write_evidence(self, **updates) -> None:
+        generated = datetime.now(timezone.utc)
+        challenge_envelope = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "publication",
+            "nonce": "ab" * 32,
+            "issued_at_utc": (generated - timedelta(minutes=5)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "expires_at_utc": (generated + timedelta(minutes=55)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "source_commit": self.commit,
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.sha256(self.deb),
+        }
         evidence = {
             "schema": "taiji-release-evidence/v3",
             "evidence_type": "single-deb-publication",
-            "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "generated_at_utc": generated.isoformat().replace("+00:00", "Z"),
             "challenge_nonce": "ab" * 32,
+            "challenge_envelope": challenge_envelope,
             "source_commit": self.commit,
             "version": "1.0.0",
             "architecture": "amd64",
@@ -322,9 +335,64 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "source_archive": self.source_archive,
             "delivery_dir": self.delivery,
             "challenge": "ab" * 32,
+            "pre_sign": True,
         }
         values.update(updates)
         return argparse.Namespace(**values)
+
+    def test_signed_archive_window_is_not_invalidated_by_wall_clock_age(self):
+        old_generated = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        # A signed archive is evaluated in its signed publication time domain.
+        # Keep the physical CI trio coherent with that historical reference
+        # instead of mixing a current fixture into an old publication record.
+        write_github_ci_v2_bundle(
+            self.root,
+            self.commit,
+            now=old_generated - timedelta(minutes=1),
+        )
+        envelope = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "publication",
+            "nonce": "ab" * 32,
+            "issued_at_utc": (old_generated - timedelta(minutes=5)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "expires_at_utc": (old_generated + timedelta(minutes=5)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "source_commit": self.commit,
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.sha256(self.deb),
+        }
+        self.write_evidence(
+            generated_at_utc=old_generated.isoformat().replace("+00:00", "Z"),
+            challenge_envelope=envelope,
+        )
+        data = json.loads(self.evidence.read_text(encoding="utf-8"))
+        args = self.args(pre_sign=False)
+        binding = self.validator.validate_build_binding(args)
+
+        self.validator.validate_release_evidence_v3(data, self.evidence, args, binding)
+
+    def test_pre_sign_rejects_expired_or_future_publication_envelope(self):
+        now = datetime.now(timezone.utc)
+        for issued, expires, expected in (
+            (now - timedelta(hours=2), now - timedelta(hours=1), "expired"),
+            (now + timedelta(hours=1), now + timedelta(hours=2), "future"),
+        ):
+            with self.subTest(expected=expected):
+                envelope = json.loads(
+                    json.dumps(
+                        json.loads(self.evidence.read_text(encoding="utf-8"))[
+                            "challenge_envelope"
+                        ]
+                    )
+                )
+                envelope["issued_at_utc"] = issued.isoformat(timespec="seconds").replace("+00:00", "Z")
+                envelope["expires_at_utc"] = expires.isoformat(timespec="seconds").replace("+00:00", "Z")
+                self.write_evidence(challenge_envelope=envelope)
+                data = json.loads(self.evidence.read_text(encoding="utf-8"))
+                binding = self.validator.validate_build_binding(self.args())
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.validator.validate_release_evidence_v3(
+                        data, self.evidence, self.args(), binding
+                    )
 
     def run_cli(self, *extra):
         return subprocess.run(
@@ -1152,6 +1220,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "certification-matrix.json",
             "assemble-taiji-certification-set.py",
             "validate-taiji-release-evidence.py",
+            "taiji-challenge-envelope.py",
             "signing-public.pem",
         ):
             (tools_dir / filename).write_text(f"fixture {filename}\n", encoding="utf-8")

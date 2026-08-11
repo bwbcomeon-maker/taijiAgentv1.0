@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
@@ -47,6 +47,30 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.session_id = "b" * 32
         self.generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
             "+00:00", "Z"
+        )
+        challenge_issued = datetime.now(timezone.utc) - timedelta(days=1)
+        challenge_expires = datetime.now(timezone.utc) + timedelta(days=1)
+        self.challenge_envelope = self.root / "certification-challenge.json"
+        self.challenge_envelope.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-signing-challenge/v1",
+                    "purpose": "certification",
+                    "nonce": self.challenge,
+                    "issued_at_utc": challenge_issued.isoformat(timespec="seconds").replace(
+                        "+00:00", "Z"
+                    ),
+                    "expires_at_utc": challenge_expires.isoformat(timespec="seconds").replace(
+                        "+00:00", "Z"
+                    ),
+                    "source_commit": self.source_commit,
+                    "deb_basename": self.deb.name,
+                    "deb_sha256": self.deb_sha,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         self.policy = ROOT / "packaging/linux/compatibility-policy.json"
         self.policy_sha = load_script()._policy_identity(self.policy)[1]
@@ -786,7 +810,7 @@ class CertificationSetV1Tests(unittest.TestCase):
                 "--deb", str(self.deb),
                 "--policy", str(self.policy),
                 "--output", str(self.output),
-                "--challenge", self.challenge,
+                "--challenge-envelope", str(self.challenge_envelope),
                 *extra,
             ],
             text=True,
@@ -803,6 +827,8 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertEqual(payload["schema"], "taiji-linux-certification-set/v1")
         self.assertEqual(payload["source_commit"], self.source_commit)
         self.assertEqual(payload["deb_sha256"], self.deb_sha)
+        self.assertEqual(payload["challenge_envelope"]["nonce"], self.challenge)
+        self.assertEqual(payload["challenge_envelope"]["purpose"], "certification")
         self.assertEqual(len(payload["environments"]), 6)
         self.assertTrue(all(item["compatibility"] == "CERTIFIED" for item in payload["environments"]))
         self.assertEqual(len(payload["negative_boundaries"]), 6)
@@ -1167,10 +1193,21 @@ class CertificationSetV1Tests(unittest.TestCase):
             desktop_entry_sha256="f" * 64,
         )
         matrix_sha = hashlib.sha256(MATRIX.read_bytes()).hexdigest()
+        generated_at = datetime.now(timezone.utc)
         certification = {
             "schema": "taiji-linux-certification-set/v1",
-            "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "generated_at_utc": generated_at.isoformat().replace("+00:00", "Z"),
             "challenge_nonce": "c" * 64,
+            "challenge_envelope": {
+                "schema": "taiji-signing-challenge/v1",
+                "purpose": "certification",
+                "nonce": "c" * 64,
+                "issued_at_utc": (generated_at - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "expires_at_utc": (generated_at + timedelta(minutes=55)).isoformat().replace("+00:00", "Z"),
+                "source_commit": self.source_commit,
+                "deb_basename": self.deb.name,
+                "deb_sha256": self.deb_sha,
+            },
             "source_commit": self.source_commit,
             "version": self.version,
             "architecture": "amd64",
@@ -1509,7 +1546,7 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertIn("overwrite", second.stderr.lower())
         data = json.loads((self.output / "certification-set.json").read_text(encoding="utf-8"))
         self.assertEqual(set(data), {
-            "schema", "generated_at_utc", "challenge_nonce", "source_commit", "version",
+            "schema", "generated_at_utc", "challenge_nonce", "challenge_envelope", "source_commit", "version",
             "architecture", "deb_basename", "deb_sha256", "compatibility_policy_id",
             "compatibility_policy_sha256", "certification_profile", "offline_rehearsal",
             "environments", "negative_boundaries",
