@@ -110,6 +110,69 @@ class FrozenSourcePrepareContractTest(unittest.TestCase):
         self.assertIn("role=manifest", result.stdout)
         self.assertIn("role=sidecar", result.stdout)
 
+    def test_unsafe_tmpdir_parent_is_rejected_before_private_staging(self) -> None:
+        repository, _commit = self.make_primary_main("unsafe-tmpdir")
+        unsafe = self.root / "unsafe-tmp"
+        unsafe.mkdir(mode=0o775)
+        unsafe.chmod(0o775)
+        environment = os.environ.copy()
+        environment["TMPDIR"] = str(unsafe)
+
+        result = subprocess.run(
+            ["/bin/bash", str(repository / PREPARE_RELATIVE)],
+            cwd=repository,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertRegex(result.stdout, "TMPDIR|private staging|unsafe|\u4e0d安全")
+        self.assertEqual(list(unsafe.glob("taiji-frozen-builder-input.*")), [])
+
+    def test_prepare_cleanup_preserves_a_replacement_staging_directory(self) -> None:
+        repository, _commit = self.make_primary_main("cleanup-race")
+        environment = os.environ.copy()
+        environment["TMPDIR"] = str(self.root)
+        process = subprocess.Popen(
+            ["/bin/bash", str(repository / PREPARE_RELATIVE)],
+            cwd=repository,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+        self.assertIsNotNone(process.stdout)
+        lines = []
+        candidate = None
+        displaced = self.root / "displaced-frozen-staging"
+        for line in process.stdout:
+            lines.append(line)
+            if "从冻结 commit 生成源码包" in line and candidate is None:
+                created = list(self.root.glob("taiji-frozen-builder-input.*"))
+                self.assertEqual(len(created), 1, "".join(lines))
+                candidate = created[0]
+                candidate.rename(displaced)
+                # Keep the replacement's uid/mode indistinguishable from the
+                # original so the test specifically proves dev/ino binding.
+                candidate.mkdir(mode=0o700)
+                (candidate / "foreign-marker").write_text("foreign\n", encoding="utf-8")
+        process.stdout.close()
+        returncode = process.wait(timeout=120)
+        output = "".join(lines)
+
+        self.assertIsNotNone(candidate, output)
+        assert candidate is not None
+        self.assertNotEqual(returncode, 0, output)
+        self.assertEqual(
+            (candidate / "foreign-marker").read_text(encoding="utf-8"),
+            "foreign\n",
+        )
+        self.assertRegex(output, "清理不完整|identity|poison|foreign")
+
     def test_main_advancing_from_f1_to_f2_is_rejected_without_published_triplet(self) -> None:
         repository, frozen = self.make_primary_main("race")
         tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True).strip()
@@ -250,6 +313,25 @@ class FrozenSourcePrepareContractTest(unittest.TestCase):
             gitignore = source.extractfile("taiji-agentv1.0/.gitignore")
             self.assertIsNotNone(gitignore)
             self.assertEqual(gitignore.read(), original_gitignore)
+
+    def test_repo_info_export_ignore_cannot_remove_a_frozen_tracked_member(self) -> None:
+        repository, frozen = self.make_primary_main("info-attributes")
+        info_attributes = repository / ".git/info/attributes"
+        info_attributes.write_text(".gitignore export-ignore\n", encoding="utf-8")
+
+        result = self.run_prepare(repository)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        input_archive = repository / f"taijiagent-制包机输入-{frozen}.tar.gz"
+        source_basename = f"taiji-agentv1.0-kylin-build-src-{frozen}.tar.gz"
+        with tarfile.open(input_archive, mode="r:gz") as bundle:
+            source_member = bundle.extractfile(
+                f"taijiagent 打包交付/{source_basename}"
+            )
+            self.assertIsNotNone(source_member)
+            source_payload = source_member.read()
+        with tarfile.open(fileobj=io.BytesIO(source_payload), mode="r:gz") as source:
+            self.assertIn("taiji-agentv1.0/.gitignore", source.getnames())
 
 
 if __name__ == "__main__":

@@ -159,7 +159,30 @@ def _directory_identity(metadata: os.stat_result) -> DirectoryIdentity:
     )
 
 
-def _safe_unlink_owned(path: Path, owned_identity: FileIdentity) -> Optional[str]:
+def _unlink_private_staging_owned(
+    path: Path,
+    owned_identity: FileIdentity,
+) -> Optional[str]:
+    """Best-effort cleanup limited to process-private 0700 staging.
+
+    The private namespace prevents accidental cross-process publication-path
+    cleanup, but it is not an isolation boundary against an actively hostile
+    process running under the same uid.  Shared/public paths must use the
+    preserve-and-poison contract in ``_safe_unlink_owned_at`` instead.
+    """
+    try:
+        parent = path.parent.lstat()
+    except OSError as exc:
+        return "cannot inspect private staging parent {}: {}".format(path.parent, exc)
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        return "private staging cleanup requires an owner-only 0700 parent: {}".format(
+            path.parent
+        )
     try:
         current = path.lstat()
     except FileNotFoundError:
@@ -186,6 +209,14 @@ def _safe_unlink_owned_at(
     path: Path,
     owned_identity: FileIdentity,
 ) -> Optional[str]:
+    """Fail closed instead of unlinking a name in a shared publication directory.
+
+    POSIX has no compare-and-unlink primitive.  A successful ``stat`` followed by
+    ``unlink`` can therefore delete a foreign inode swapped into the pathname in
+    between.  Publication rollback preserves either identity and reports the
+    directory as poisoned; private staging cleanup uses
+    ``_unlink_private_staging_owned`` under its explicitly narrower threat model.
+    """
     try:
         current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -194,17 +225,10 @@ def _safe_unlink_owned_at(
         return "cannot inspect owned publication {}: {}".format(path, exc)
     if _file_identity(current) != owned_identity:
         return "publication identity was replaced; foreign inode preserved: {}".format(path)
-    try:
-        os.unlink(path.name, dir_fd=directory_fd)
-    except OSError as exc:
-        return "cannot unlink owned publication {}: {}".format(path, exc)
-    try:
-        os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        return "cannot confirm publication removal {}: {}".format(path, exc)
-    return "owned publication still exists after unlink: {}".format(path)
+    return (
+        "owned publication preserved: POSIX has no atomic compare-and-unlink; "
+        "manual recovery required for {}"
+    ).format(path)
 
 
 def _check_owned_publications_at(
@@ -280,7 +304,7 @@ def _write_exclusive_impl(
         cleanup_error = None  # type: Optional[str]
         if owned_identity is not None:
             if directory_fd is None:
-                cleanup_error = _safe_unlink_owned(path, owned_identity)
+                cleanup_error = _unlink_private_staging_owned(path, owned_identity)
             else:
                 cleanup_error = _safe_unlink_owned_at(directory_fd, path, owned_identity)
         if cleanup_error is not None:
@@ -385,7 +409,7 @@ def _cleanup_private_stage(
 ) -> List[str]:
     errors = []  # type: List[str]
     for path, identity in reversed(list(owned_files)):
-        error = _safe_unlink_owned(path, identity)
+        error = _unlink_private_staging_owned(path, identity)
         if error is not None:
             errors.append(error)
     try:
@@ -1184,22 +1208,12 @@ def withdraw_builder_input(
         manifest_path=manifest_path,
         checksum_path=checksum_path,
     )
-    owned = []  # type: List[Tuple[Path, FileIdentity]]
-    for path in (archive_path, manifest_path, checksum_path):
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            raise BuilderInputError("withdrawal path is no longer a regular file: {}".format(path))
-        owned.append((path, _file_identity(metadata)))
-    errors = []  # type: List[str]
-    for path, identity in reversed(owned):
-        error = _safe_unlink_owned(path, identity)
-        if error is not None:
-            errors.append(error)
-    if errors:
-        raise BuilderInputError(
-            "triplet withdrawal is incomplete/poisoned: {}".format("; ".join(errors))
-        )
-    return manifest
+    del manifest
+    raise BuilderInputError(
+        "automatic triplet withdrawal is disabled: POSIX has no atomic "
+        "compare-and-unlink; verified publication paths are preserved/poisoned "
+        "for explicit operator recovery"
+    )
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:

@@ -101,11 +101,13 @@ taijiagent-制包机输入-<commit>.tar.gz.sha256
 
 输入包由固定 allowlist 生成，不扫描工作目录；manifest 绑定 source commit、压缩包 basename/字节数/SHA256、源码归档/成员清单摘要以及包内每个成员。它用于隔离 Finder、聊天工具、U 盘和历史构建产物造成的元数据污染。正式制包不接受直接复制本地 `taijiagent 打包交付/` 工作目录作为等价输入。
 
-`99` 在 clean gate 后只捕获一次冻结 commit `F`。源码 archive、外层 `00/01/04`、说明文件和两个 helper 均从 `F` 的 Git object 派生到 0700 私有暂存目录；工作树只用于在开始、发布前和结束前复核 `HEAD/main/clean` 以及参与文件相对 `F` 的 blob/mode。三处源码重建统一使用 `git -c tar.umask=0022 archive ... "$F"`，不得在 gate 后再次解析 `HEAD` 作为新的输入身份。`taiji-trusted-git` 在清除外部 `GIT_*` 后会重建封闭环境：固定 `GIT_NO_REPLACE_OBJECTS=1`、将 global/system config 指向 `/dev/null`并禁用 system attributes；因此即使本地存在 `refs/replace` 且工作树已被 reset 为替换树，归档仍只能解析真实 `F`。builder create 在封装前还必须用源码 archive 中冻结的 `source-archive-integrity.py` 逻辑重新证明 inventory 确实由该 archive 派生；只重算 inventory 文件自身 SHA256 不能通过。
+`99` 在 clean gate 后只捕获一次冻结 commit `F`。源码 archive、外层 `00/01/04`、说明文件和两个 helper 均从 `F` 的 Git object 派生到 0700 私有暂存目录；工作树只用于在开始、发布前和结束前复核 `HEAD/main/clean` 以及参与文件相对 `F` 的 blob/mode。三处源码重建统一使用 `git -c tar.umask=0022 archive ... "$F"`，不得在 gate 后再次解析 `HEAD` 作为新的输入身份。`taiji-trusted-git` 在清除外部 `GIT_*` 后会重建封闭环境：固定 `GIT_NO_REPLACE_OBJECTS=1` 和 `GIT_NO_LAZY_FETCH=1`、将 global/system config 指向 `/dev/null`并禁用 system attributes；归档命令另外只接受固定 `tar.umask/format/prefix` 和完整 `F`。它先用 `pack-objects` 读取 `F` 的完整 reachable closure，在不含任何 alternates 的 0700 私有裸仓库中经 `index-pack --strict` 重算对象 OID，再用 `fsck --strict --full F` 验证完整连接性，最后才归档。因此原仓库工作树、`.git/config` 中的 `core.attributesFile`、`.git/info/attributes`、`refs/replace`、promisor 懒加载，以及源/alternate object store 中“OID 路径下换入另一 blob”都不能造成“manifest 标 F、archive 却是替换/缺员 tree”；拷贝期间源对象变化或 closure 不完整必须 fail closed。builder create 在封装前还必须用源码 archive 中冻结的 `source-archive-integrity.py` 逻辑重新证明 inventory 确实由该 archive 派生；只重算 inventory 文件自身 SHA256 不能通过。
 
 三件套 sidecar 固定为两行，只绑定 archive 与 manifest 的 basename 和 SHA256。它用于发现受控传输中的误损坏，不是 detached signature，也不是可对抗恶意替换者的签名信任根；正式来源仍由冻结 commit、canonical manifest、成员级回读门禁和后续签名证据共同约束。
 
-三件套在私有目录完成 create/verify 后才 no-overwrite 发布。发布失败只清理本轮记录的 inode；路径身份已替换时不得删除外来文件，清理失败必须报告 `incomplete/poisoned` 并停止。该状态不能靠覆盖旧文件继续，须保留现场、人工核对并从干净 `main@F` 重新开始。此保护用于并发误操作和路径替换检测，不构成对同一账户恶意进程的密码学信任根。
+三件套在私有目录完成 create/verify 后才 no-overwrite 发布。POSIX 没有原子 compare-and-unlink；如果先 `stat` 再 `unlink`，并发进程可在窗口中换入外来 inode。因此共享发布目录的失败回滚和发布后撤回都禁止自动 unlink：发布前失败不产生输出；如已发布任一成员才失败，必须保留当时路径和持有的 inode，报告 `incomplete/poisoned` 并停止，绝不得为了清理半套而误删外来文件。该状态不能靠覆盖旧文件继续，须保留现场、人工核对并从干净 `main@F` 重新开始。此保护用于并发误操作和路径替换检测，不构成对同一账户恶意进程的密码学信任根。
+
+私有 staging 的自动清理是另一个、明确收窄的边界：创建前必须验证物理 TMPDIR 父链（root 所有且不可被 group/other 写，或 root 所有的精确 `01777`；当前 uid 所有的节点不可被 group/other 写），随机创建后立即记录 `dev/ino/uid/0700`，清理前再复核同一父链和目录身份。缺失、替换、模式变化或身份不确定时保留 foreign/uncertain 路径并报告 poisoned，不执行 `rm -rf`。该边界仍明确假设没有同 uid 恶意连续写者；`0700` 不能隔离同 uid 进程。如威胁模型包含这类对手，必须使用独立账户/隔离环境或保留 staging 人工处理，不得把私有 staging 清理推广为共享发布路径的并发安全证明。
 
 ### 5.1.1 黄金编排器唯一正式入口
 

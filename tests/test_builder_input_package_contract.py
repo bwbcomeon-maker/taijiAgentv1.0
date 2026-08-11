@@ -435,7 +435,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
         self.assertFalse(self.manifest.exists())
         self.assertFalse(self.checksum.exists())
 
-    def test_exclusive_writer_removes_partial_file_on_write_failure(self):
+    def test_private_exclusive_writer_removes_partial_file_on_write_failure(self):
         helper = load_helper()
         partial = self.root / "partial-output"
 
@@ -445,7 +445,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
         self.assertFalse(partial.exists())
 
-    def test_exclusive_writer_removes_owned_file_when_descriptor_close_fails(self):
+    def test_private_exclusive_writer_removes_owned_file_when_descriptor_close_fails(self):
         helper = load_helper()
         partial = self.root / "close-failed-output"
         original_close = helper.os.close
@@ -459,6 +459,20 @@ class BuilderInputPackageContractTest(unittest.TestCase):
                 helper._write_exclusive(partial, b"payload")
 
         self.assertFalse(partial.exists())
+
+    def test_private_cleanup_refuses_a_shared_parent_and_preserves_its_inode(self):
+        helper = load_helper()
+        shared = self.root / "shared-publication"
+        shared.mkdir(mode=0o755)
+        candidate = shared / "candidate"
+        candidate.write_bytes(b"must be preserved")
+        identity = helper._file_identity(candidate.lstat())
+
+        error = helper._unlink_private_staging_owned(candidate, identity)
+
+        self.assertIsNotNone(error)
+        self.assertRegex(str(error), "private|0700|shared")
+        self.assertEqual(candidate.read_bytes(), b"must be preserved")
 
     def test_rollback_never_unlinks_a_replacement_at_an_owned_output_path(self):
         helper = load_helper()
@@ -486,6 +500,61 @@ class BuilderInputPackageContractTest(unittest.TestCase):
                 )
 
         self.assertEqual(self.output.read_bytes(), b"foreign replacement")
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.checksum.exists())
+
+    def test_publication_rollback_preserves_a_foreign_inode_swapped_after_identity_check(self):
+        helper = load_helper()
+        original_write = helper._write_exclusive_held
+        original_stat = helper.os.stat
+        displaced = self.root / "owned-output-displaced-during-rollback"
+        calls = 0
+        publication_failed = False
+        swapped = False
+
+        def fail_second(path, payload, mode=0o644, directory_fd=None):
+            nonlocal calls, publication_failed
+            calls += 1
+            if calls == 1:
+                return original_write(path, payload, mode, directory_fd)
+            publication_failed = True
+            raise helper.BuilderInputError("fixture second member failure")
+
+        def swap_after_stat(path, *args, **kwargs):
+            nonlocal swapped
+            metadata = original_stat(path, *args, **kwargs)
+            if (
+                publication_failed
+                and not swapped
+                and path == self.output.name
+                and kwargs.get("dir_fd") is not None
+            ):
+                self.output.rename(displaced)
+                self.output.write_bytes(b"foreign replacement after identity check")
+                swapped = True
+            return metadata
+
+        with mock.patch.object(
+            helper,
+            "_write_exclusive_held",
+            side_effect=fail_second,
+        ), mock.patch.object(helper.os, "stat", side_effect=swap_after_stat):
+            with self.assertRaisesRegex(Exception, "rollback|cleanup|poison|preserved"):
+                helper.create_builder_input(
+                    source_dir=self.source,
+                    source_integrity_helper=self.source_integrity_helper,
+                    output=self.output,
+                    manifest_path=self.manifest,
+                    checksum_path=self.checksum,
+                    source_commit=COMMIT,
+                )
+
+        self.assertTrue(swapped)
+        self.assertEqual(
+            self.output.read_bytes(),
+            b"foreign replacement after identity check",
+        )
+        self.assertTrue(displaced.is_file())
         self.assertFalse(self.manifest.exists())
         self.assertFalse(self.checksum.exists())
 
@@ -558,10 +627,10 @@ class BuilderInputPackageContractTest(unittest.TestCase):
                 )
 
         self.assertEqual(self.checksum.read_bytes(), replacement_payload)
-        self.assertFalse(self.output.exists())
-        self.assertFalse(self.manifest.exists())
+        self.assertTrue(self.output.exists())
+        self.assertTrue(self.manifest.exists())
 
-    def test_incomplete_rollback_is_reported_instead_of_silently_swallowed(self):
+    def test_failed_publication_reports_preserved_owned_output_as_poisoned(self):
         helper = load_helper()
         original_write = helper._write_exclusive_held
         calls = 0
@@ -573,18 +642,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
                 return original_write(path, payload, mode, directory_fd)
             raise helper.BuilderInputError("fixture second member failure")
 
-        original_unlink = helper.os.unlink
-
-        def fail_owned_unlink(path, *args, **kwargs):
-            if path == self.output.name and kwargs.get("dir_fd") is not None:
-                raise PermissionError("fixture unlink failure")
-            return original_unlink(path, *args, **kwargs)
-
-        with mock.patch.object(helper, "_write_exclusive_held", side_effect=fail_second), mock.patch.object(
-            helper.os,
-            "unlink",
-            side_effect=fail_owned_unlink,
-        ):
+        with mock.patch.object(helper, "_write_exclusive_held", side_effect=fail_second):
             with self.assertRaisesRegex(Exception, "rollback incomplete|cleanup incomplete|poison"):
                 helper.create_builder_input(
                     source_dir=self.source,
@@ -677,21 +735,61 @@ class BuilderInputPackageContractTest(unittest.TestCase):
                 )
 
         self.assertEqual((publication / "foreign-marker").read_text(encoding="utf-8"), "foreign\n")
-        self.assertEqual(list(displaced.iterdir()), [])
+        self.assertEqual(
+            [path.name for path in displaced.iterdir()],
+            [output.name],
+        )
 
-    def test_verified_triplet_can_be_safely_withdrawn_without_half_outputs(self):
+    def test_verified_triplet_withdrawal_fails_closed_without_unlinking_outputs(self):
         helper = load_helper()
         self.create()
 
-        helper.withdraw_builder_input(
-            archive_path=self.output,
-            manifest_path=self.manifest,
-            checksum_path=self.checksum,
-        )
+        with self.assertRaisesRegex(Exception, "withdrawal.*disabled|preserved|poison"):
+            helper.withdraw_builder_input(
+                archive_path=self.output,
+                manifest_path=self.manifest,
+                checksum_path=self.checksum,
+            )
 
-        self.assertFalse(self.output.exists())
-        self.assertFalse(self.manifest.exists())
-        self.assertFalse(self.checksum.exists())
+        self.assertTrue(self.output.exists())
+        self.assertTrue(self.manifest.exists())
+        self.assertTrue(self.checksum.exists())
+
+    def test_withdrawal_preserves_a_foreign_member_swapped_after_verification(self):
+        helper = load_helper()
+        self.create()
+        original_verify = helper.verify_builder_input
+        displaced = self.root / "owned-checksum-displaced-before-withdrawal"
+        swapped = False
+
+        def verify_then_swap(*args, **kwargs):
+            nonlocal swapped
+            manifest = original_verify(*args, **kwargs)
+            self.checksum.rename(displaced)
+            self.checksum.write_bytes(b"foreign replacement after verification")
+            swapped = True
+            return manifest
+
+        with mock.patch.object(
+            helper,
+            "verify_builder_input",
+            side_effect=verify_then_swap,
+        ):
+            with self.assertRaisesRegex(Exception, "withdrawal.*disabled|preserved|poison"):
+                helper.withdraw_builder_input(
+                    archive_path=self.output,
+                    manifest_path=self.manifest,
+                    checksum_path=self.checksum,
+                )
+
+        self.assertTrue(swapped)
+        self.assertTrue(self.output.exists())
+        self.assertTrue(self.manifest.exists())
+        self.assertEqual(
+            self.checksum.read_bytes(),
+            b"foreign replacement after verification",
+        )
+        self.assertTrue(displaced.is_file())
 
     def test_prepare_script_uses_pinned_helper_and_has_no_denylist_walk(self):
         source = PREPARE.read_text(encoding="utf-8")
@@ -702,6 +800,8 @@ class BuilderInputPackageContractTest(unittest.TestCase):
         self.assertNotIn("skip_dirs", source)
         self.assertNotIn("os.walk(source)", source)
         self.assertIn('"$FROZEN_BUILDER_INPUT_HELPER" verify', source)
+        self.assertNotIn('"$FROZEN_BUILDER_INPUT_HELPER" withdraw', source)
+        self.assertIn("compare-and-unlink", source)
         for role, variable in (
             ("archive", "$output"),
             ("manifest", "$manifest"),

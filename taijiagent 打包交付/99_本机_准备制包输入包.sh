@@ -9,9 +9,11 @@ TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 SOURCE_INTEGRITY_HELPER="$REPO_ROOT/packaging/linux/source-archive-integrity.py"
 SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
 BUILDER_INPUT_HELPER="$REPO_ROOT/packaging/linux/builder-input-package.py"
-BUILDER_INPUT_HELPER_SHA256="fa7e01df64abe20becec4a95190864e10320fe02aa501ba44a6eba54aac0ab5f"
+BUILDER_INPUT_HELPER_SHA256="ac5d6c1f0a1738774b4f259ef023f32bc25f39bdfd286e01f735dfaa224bffc6"
 FROZEN_SOURCE_COMMIT=""
+FROZEN_RUNTIME_PARENT=""
 FROZEN_RUNTIME_DIR=""
+FROZEN_RUNTIME_IDENTITY=""
 FROZEN_DELIVERY_DIR=""
 FROZEN_SOURCE_GATE=""
 FROZEN_TRUSTED_GIT=""
@@ -66,22 +68,91 @@ raw_git() {
     /usr/bin/git "$@"
 }
 
+validate_private_staging_parent() {
+  /usr/bin/python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+requested = Path(sys.argv[1])
+try:
+    requested_metadata = os.lstat(str(requested))
+    if stat.S_ISLNK(requested_metadata.st_mode):
+        if requested_metadata.st_uid != 0:
+            raise ValueError("temporary parent symlink is not root-owned")
+    elif not stat.S_ISDIR(requested_metadata.st_mode):
+        raise ValueError("temporary parent is not a directory")
+    resolved = requested.resolve(strict=True)
+except (OSError, RuntimeError, ValueError) as exc:
+    raise SystemExit("unsafe TMPDIR/private staging parent {}: {}".format(requested, exc))
+
+if "\n" in str(resolved) or "\r" in str(resolved):
+    raise SystemExit("unsafe TMPDIR/private staging parent contains a newline")
+for candidate in (resolved,) + tuple(resolved.parents):
+    metadata = os.lstat(str(candidate))
+    mode = stat.S_IMODE(metadata.st_mode)
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit("unsafe TMPDIR/private staging ancestor: {}".format(candidate))
+    if metadata.st_uid == 0:
+        if mode != 0o1777 and mode & 0o022:
+            raise SystemExit("unsafe root-owned TMPDIR ancestor mode: {}".format(candidate))
+    elif metadata.st_uid == os.getuid():
+        if mode & 0o022:
+            raise SystemExit("unsafe current-user TMPDIR ancestor mode: {}".format(candidate))
+    else:
+        raise SystemExit("unsafe foreign-owned TMPDIR ancestor: {}".format(candidate))
+print(str(resolved))
+PY
+}
+
+private_staging_identity() {
+  /usr/bin/python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+metadata = os.lstat(path)
+mode = stat.S_IMODE(metadata.st_mode)
+if (
+    not stat.S_ISDIR(metadata.st_mode)
+    or stat.S_ISLNK(metadata.st_mode)
+    or metadata.st_uid != os.getuid()
+    or mode != 0o700
+):
+    raise SystemExit("private staging identity is unsafe: {}".format(path))
+print("{}:{}:{}:{:o}".format(metadata.st_dev, metadata.st_ino, metadata.st_uid, mode))
+PY
+}
+
 cleanup_private_staging() {
   local status=$? cleanup_failed=0
+  local current_parent="" current_identity=""
   trap - EXIT INT TERM HUP
   if [ -n "${FROZEN_RUNTIME_DIR:-}" ]; then
     case "$FROZEN_RUNTIME_DIR" in
-      "${TMPDIR:-/tmp}"/taiji-frozen-builder-input.*)
-        if [ -d "$FROZEN_RUNTIME_DIR" ] && [ ! -L "$FROZEN_RUNTIME_DIR" ]; then
+      "${FROZEN_RUNTIME_PARENT:-}"/taiji-frozen-builder-input.*)
+        current_parent="$(validate_private_staging_parent "$FROZEN_RUNTIME_PARENT" 2>/dev/null)" \
+          || cleanup_failed=1
+        current_identity="$(private_staging_identity "$FROZEN_RUNTIME_DIR" 2>/dev/null)" \
+          || cleanup_failed=1
+        if [ "$cleanup_failed" -eq 0 ] \
+            && [ "$current_parent" = "$FROZEN_RUNTIME_PARENT" ] \
+            && [ -n "${FROZEN_RUNTIME_IDENTITY:-}" ] \
+            && [ "$current_identity" = "$FROZEN_RUNTIME_IDENTITY" ]; then
           rm -rf -- "$FROZEN_RUNTIME_DIR" >/dev/null 2>&1 || cleanup_failed=1
           [ ! -e "$FROZEN_RUNTIME_DIR" ] && [ ! -L "$FROZEN_RUNTIME_DIR" ] \
             || cleanup_failed=1
+        else
+          cleanup_failed=1
         fi
         ;;
+      *) cleanup_failed=1 ;;
     esac
   fi
   if [ "$cleanup_failed" = 1 ]; then
-    printf '[FAIL] 冻结输入私有暂存目录清理不完整：%s\n' "$FROZEN_RUNTIME_DIR" >&2
+    printf '[FAIL] 冻结输入私有暂存目录清理身份不确定；已保留 foreign/uncertain 路径并标记 poisoned：%s\n' "$FROZEN_RUNTIME_DIR" >&2
     [ "$status" -ne 0 ] || status=1
   fi
   exit "$status"
@@ -100,6 +171,7 @@ preflight_repo() {
   require_cmd python3
   require_cmd cmp
   [ -x /usr/bin/git ] || fail "缺少受信任系统 Git：/usr/bin/git"
+  [ -x /usr/bin/python3 ] || fail "缺少受信任系统 Python：/usr/bin/python3"
   [ -x "$SOURCE_GATE" ] && [ ! -L "$SOURCE_GATE" ] || fail "缺少正式源码门禁：$SOURCE_GATE"
   [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
   [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
@@ -195,9 +267,13 @@ stage_blob_from_f() {
 
 stage_frozen_helpers() {
   local member
-  FROZEN_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/taiji-frozen-builder-input.XXXXXX")" \
+  FROZEN_RUNTIME_PARENT="$(validate_private_staging_parent "${TMPDIR:-/tmp}")" \
+    || fail "TMPDIR/private staging 父链不安全"
+  FROZEN_RUNTIME_DIR="$(mktemp -d "$FROZEN_RUNTIME_PARENT/taiji-frozen-builder-input.XXXXXX")" \
     || fail "无法创建冻结输入私有暂存目录"
   chmod 0700 "$FROZEN_RUNTIME_DIR"
+  FROZEN_RUNTIME_IDENTITY="$(private_staging_identity "$FROZEN_RUNTIME_DIR")" \
+    || fail "冻结输入私有暂存目录身份不安全"
   FROZEN_DELIVERY_DIR="$FROZEN_RUNTIME_DIR/taijiagent 打包交付"
   mkdir -m 0700 "$FROZEN_DELIVERY_DIR"
   FROZEN_SOURCE_GATE="$FROZEN_RUNTIME_DIR/check-clean-worktree.sh"
@@ -251,14 +327,6 @@ run_frozen_release_preflight() {
     bash "$FROZEN_DELIVERY_DIR/01_制包机_发布预检.sh"
 }
 
-withdraw_published_triplet() {
-  local output="$1" manifest="$2" checksum="$3"
-  python3 "$FROZEN_BUILDER_INPUT_HELPER" withdraw \
-    --archive "$output" \
-    --manifest "$manifest" \
-    --checksum "$checksum"
-}
-
 write_builder_input_package() {
   local commit output manifest checksum staged_output staged_manifest staged_checksum
   commit="$FROZEN_SOURCE_COMMIT"
@@ -292,9 +360,7 @@ write_builder_input_package() {
     --output-checksum "$checksum" \
     || fail "制包机输入三件套 no-overwrite 发布失败"
   if ! verify_frozen_source_identity; then
-    withdraw_published_triplet "$output" "$manifest" "$checksum" \
-      || fail "source commit 漂移且三件套安全回滚不完整，输出目录已 poisoned"
-    fail "三件套发布后 source commit 漂移；已安全撤回本轮三件套"
+    fail "三件套发布后 source commit 漂移；POSIX 无原子 compare-and-unlink，本轮输出已保留且目录标记为 poisoned，须人工恢复"
   fi
   python3 "$FROZEN_BUILDER_INPUT_HELPER" verify \
     --archive "$output" \
@@ -302,9 +368,7 @@ write_builder_input_package() {
     --checksum "$checksum" \
     || fail "制包机输入包发布后三件套回读验证失败"
   if ! verify_frozen_source_identity; then
-    withdraw_published_triplet "$output" "$manifest" "$checksum" \
-      || fail "最终 source commit 复核失败且三件套安全回滚不完整，输出目录已 poisoned"
-    fail "最终 source commit 复核失败；已安全撤回本轮三件套"
+    fail "最终 source commit 复核失败；POSIX 无原子 compare-and-unlink，本轮输出已保留且目录标记为 poisoned，须人工恢复"
   fi
   ok "制包机输入包已生成：$output"
   record_triplet_member "archive" "$output"

@@ -22,15 +22,202 @@ GIT_CONFIG_GLOBAL="/dev/null"
 GIT_CONFIG_SYSTEM="/dev/null"
 GIT_CONFIG_NOSYSTEM="1"
 GIT_ATTR_NOSYSTEM="1"
+GIT_NO_LAZY_FETCH="1"
 HOME="/dev/null"
 XDG_CONFIG_HOME="/dev/null"
 LC_ALL="C"
 LANG="C"
 export GIT_NO_REPLACE_OBJECTS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-export GIT_CONFIG_NOSYSTEM GIT_ATTR_NOSYSTEM HOME XDG_CONFIG_HOME LC_ALL LANG
+export GIT_CONFIG_NOSYSTEM GIT_ATTR_NOSYSTEM GIT_NO_LAZY_FETCH
+export HOME XDG_CONFIG_HOME LC_ALL LANG
 
 [ -x /usr/bin/git ] || {
   printf 'trusted-git-failed\t/usr/bin/git is missing\n' >&2
   exit 127
 }
+_taiji_trusted_git_fail() {
+  printf 'trusted-git-failed\t%s\n' "$*" >&2
+  exit 2
+}
+
+_taiji_validate_private_parent() {
+  /usr/bin/python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+requested = Path(sys.argv[1])
+try:
+    requested_metadata = os.lstat(str(requested))
+    if stat.S_ISLNK(requested_metadata.st_mode):
+        if requested_metadata.st_uid != 0:
+            raise ValueError("temporary parent symlink is not root-owned")
+    elif not stat.S_ISDIR(requested_metadata.st_mode):
+        raise ValueError("temporary parent is not a directory")
+    resolved = requested.resolve(strict=True)
+except (OSError, RuntimeError, ValueError) as exc:
+    raise SystemExit("unsafe private staging parent {}: {}".format(requested, exc))
+
+if "\n" in str(resolved) or "\r" in str(resolved):
+    raise SystemExit("unsafe private staging parent contains a newline")
+for candidate in (resolved,) + tuple(resolved.parents):
+    metadata = os.lstat(str(candidate))
+    mode = stat.S_IMODE(metadata.st_mode)
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit("unsafe private staging ancestor: {}".format(candidate))
+    if metadata.st_uid == 0:
+        if mode != 0o1777 and mode & 0o022:
+            raise SystemExit("unsafe root-owned staging ancestor mode: {}".format(candidate))
+    elif metadata.st_uid == os.getuid():
+        if mode & 0o022:
+            raise SystemExit("unsafe current-user staging ancestor mode: {}".format(candidate))
+    else:
+        raise SystemExit("unsafe foreign-owned staging ancestor: {}".format(candidate))
+print(str(resolved))
+PY
+}
+
+_taiji_private_directory_identity() {
+  /usr/bin/python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+metadata = os.lstat(path)
+mode = stat.S_IMODE(metadata.st_mode)
+if (
+    not stat.S_ISDIR(metadata.st_mode)
+    or stat.S_ISLNK(metadata.st_mode)
+    or metadata.st_uid != os.getuid()
+    or mode != 0o700
+):
+    raise SystemExit("private staging identity is unsafe: {}".format(path))
+print("{}:{}:{}:{:o}".format(metadata.st_dev, metadata.st_ino, metadata.st_uid, mode))
+PY
+}
+
+_taiji_archive_parent=""
+_taiji_archive_temp=""
+_taiji_archive_identity=""
+_taiji_cleanup_archive_view() {
+  _taiji_archive_status=$?
+  _taiji_archive_cleanup_failed=0
+  trap - EXIT INT TERM HUP
+  if [ -n "${_taiji_archive_temp:-}" ]; then
+    case "$_taiji_archive_temp" in
+      "${_taiji_archive_parent:-}"/taiji-trusted-git-archive.*)
+        _taiji_archive_current_parent="$(_taiji_validate_private_parent "$_taiji_archive_parent" 2>/dev/null)" \
+          || _taiji_archive_cleanup_failed=1
+        _taiji_archive_current_identity="$(_taiji_private_directory_identity "$_taiji_archive_temp" 2>/dev/null)" \
+          || _taiji_archive_cleanup_failed=1
+        if [ "$_taiji_archive_cleanup_failed" -eq 0 ] \
+            && [ "$_taiji_archive_current_parent" = "$_taiji_archive_parent" ] \
+            && [ -n "${_taiji_archive_identity:-}" ] \
+            && [ "$_taiji_archive_current_identity" = "$_taiji_archive_identity" ]; then
+          /bin/rm -rf -- "$_taiji_archive_temp" >/dev/null 2>&1 \
+            || _taiji_archive_cleanup_failed=1
+          [ ! -e "$_taiji_archive_temp" ] && [ ! -L "$_taiji_archive_temp" ] \
+            || _taiji_archive_cleanup_failed=1
+        else
+          _taiji_archive_cleanup_failed=1
+        fi
+        ;;
+      *) _taiji_archive_cleanup_failed=1 ;;
+    esac
+  fi
+  if [ "$_taiji_archive_cleanup_failed" -ne 0 ]; then
+    printf 'trusted-git-failed\tprivate archive cleanup identity mismatch; foreign/uncertain path preserved and poisoned: %s\n' \
+      "${_taiji_archive_temp:-<unset>}" >&2
+    [ "$_taiji_archive_status" -ne 0 ] || _taiji_archive_status=1
+  fi
+  exit "$_taiji_archive_status"
+}
+
+_taiji_archive_from_frozen_object_view() {
+  _taiji_source_root="$1"
+  _taiji_source_commit="$2"
+  [ -x /usr/bin/python3 ] \
+    || _taiji_trusted_git_fail "/usr/bin/python3 is required for private archive staging"
+  printf '%s\n' "$_taiji_source_commit" | /usr/bin/grep -Eq '^[0-9a-f]{40}$' \
+    || _taiji_trusted_git_fail "archive requires one explicit full lowercase commit F"
+  [ -d "$_taiji_source_root" ] && [ ! -L "$_taiji_source_root" ] \
+    || _taiji_trusted_git_fail "archive repository root is unsafe"
+  _taiji_source_root="$(cd "$_taiji_source_root" && pwd -P)" \
+    || _taiji_trusted_git_fail "archive repository root cannot be resolved"
+  _taiji_source_objects_raw="$(/usr/bin/git -C "$_taiji_source_root" rev-parse --git-path objects)" \
+    || _taiji_trusted_git_fail "source object directory cannot be resolved"
+  case "$_taiji_source_objects_raw" in
+    /*) _taiji_source_objects_candidate="$_taiji_source_objects_raw" ;;
+    *) _taiji_source_objects_candidate="$_taiji_source_root/$_taiji_source_objects_raw" ;;
+  esac
+  _taiji_source_objects="$(cd "$_taiji_source_objects_candidate" && pwd -P)" \
+    || _taiji_trusted_git_fail "source object directory is unavailable"
+  case "$_taiji_source_objects" in
+    *$'\n'*|*$'\r'*|*:*) _taiji_trusted_git_fail "source object directory is unsafe for isolated import" ;;
+  esac
+  _taiji_archive_parent="$(_taiji_validate_private_parent /tmp)" \
+    || _taiji_trusted_git_fail "private archive parent is unsafe"
+  _taiji_archive_temp="$(/usr/bin/mktemp -d "$_taiji_archive_parent/taiji-trusted-git-archive.XXXXXX")" \
+    || _taiji_trusted_git_fail "private archive object view cannot be created"
+  trap _taiji_cleanup_archive_view EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  /bin/chmod 0700 "$_taiji_archive_temp" \
+    || _taiji_trusted_git_fail "private archive object view cannot be protected"
+  _taiji_archive_identity="$(_taiji_private_directory_identity "$_taiji_archive_temp")" \
+    || _taiji_trusted_git_fail "private archive object view identity is unsafe"
+  _taiji_private_git="$_taiji_archive_temp/repository.git"
+  _taiji_import_git="$_taiji_archive_temp/import.git"
+  /usr/bin/git init --quiet --bare "$_taiji_private_git" \
+    || _taiji_trusted_git_fail "private bare archive view cannot be initialized"
+  /usr/bin/git init --quiet --bare "$_taiji_import_git" \
+    || _taiji_trusted_git_fail "private object importer cannot be initialized"
+  [ ! -e "$_taiji_private_git/info/attributes" ] \
+    && [ ! -L "$_taiji_private_git/info/attributes" ] \
+    || _taiji_trusted_git_fail "private archive view unexpectedly has mutable attributes"
+  [ ! -e "$_taiji_private_git/objects/info/alternates" ] \
+    && [ ! -L "$_taiji_private_git/objects/info/alternates" ] \
+    || _taiji_trusted_git_fail "private archive view unexpectedly has object alternates"
+  # The importer can read the source object graph, but the archive repository
+  # cannot.  index-pack recomputes object IDs from the emitted bytes, and fsck
+  # then proves that the copied F has a complete, internally connected closure.
+  printf '%s\n' "$_taiji_source_commit" \
+    | GIT_OBJECT_DIRECTORY="$_taiji_import_git/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="$_taiji_source_objects" \
+        /usr/bin/git --git-dir="$_taiji_import_git" pack-objects --stdout --revs \
+        --no-reuse-object --no-reuse-delta \
+    | /usr/bin/git --git-dir="$_taiji_private_git" index-pack --stdin --strict \
+        >/dev/null \
+    || _taiji_trusted_git_fail "frozen reachable object closure cannot be copied and re-indexed"
+  [ ! -e "$_taiji_private_git/objects/info/alternates" ] \
+    && [ ! -L "$_taiji_private_git/objects/info/alternates" ] \
+    || _taiji_trusted_git_fail "private archive object closure escaped through alternates"
+  /usr/bin/git --git-dir="$_taiji_private_git" cat-file -e "${_taiji_source_commit}^{commit}" \
+    || _taiji_trusted_git_fail "private archive view cannot resolve frozen commit F"
+  /usr/bin/git --git-dir="$_taiji_private_git" fsck --strict --full --no-reflogs \
+    --no-dangling --no-progress "$_taiji_source_commit" \
+    || _taiji_trusted_git_fail "private archive object closure failed OID/connectivity verification"
+  /usr/bin/git --git-dir="$_taiji_private_git" -c tar.umask=0022 archive \
+    --format=tar --prefix=taiji-agentv1.0/ "$_taiji_source_commit"
+}
+
+if [ "$#" -eq 8 ] \
+    && [ "$1" = "-C" ] \
+    && [ "$3" = "-c" ] \
+    && [ "$4" = "tar.umask=0022" ] \
+    && [ "$5" = "archive" ] \
+    && [ "$6" = "--format=tar" ] \
+    && [ "$7" = "--prefix=taiji-agentv1.0/" ]; then
+  _taiji_archive_from_frozen_object_view "$2" "$8"
+  exit 0
+fi
+
+for _taiji_git_argument in "$@"; do
+  [ "$_taiji_git_argument" != "archive" ] \
+    || _taiji_trusted_git_fail "archive invocation is outside the fixed frozen-object contract"
+done
+unset _taiji_git_argument
 exec /usr/bin/git "$@"
