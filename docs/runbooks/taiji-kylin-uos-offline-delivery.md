@@ -196,6 +196,8 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 正式 certification challenge 必须在断网演练、目标安装验收和十二条环境记录采集之前签发为 canonical envelope。该 envelope 的 nonce 统一驱动离线演练、正式目标验收、六正六负记录和 certification set；这些材料属于同一个认证证据域，不能各自临时生成 challenge。certification 签名完成后，再为 publication 签发用途独立、nonce 不同的 envelope。两个 envelope 都绑定 source commit、候选 DEB basename/SHA256 和有效期；签名、release-check 或 publisher 阶段不得重新生成、跨用途复用或只依赖环境变量中的裸 nonce。
 
+本节所有正式认证与发布动作只能执行黄金编排器对应阶段生成并经审批的 `commands[].argv`：`challenge_preparation` 签发并验证 certification envelope，十二条 records 必须使用该阶段绑定的同一 nonce 完整采集后才能进入 `certification_sign`，`certification_sign` 组装并签名 certification set，`publication_sign` 签发 publication envelope 并组装、签名 publication evidence，`release_check` 执行最终放行校验，`publish` 原子生成客户单 DEB 目录。下方手工命令只用于解释参数与受控排障，不得作为正式流程旁路，也不能代替编排器 checkpoint 和审批记录。
+
 certification validator 会对六个正向和六个负向环境记录逐条比对 `source_commit/version/architecture/deb_basename/deb_sha256/compatibility_policy_id/compatibility_policy_sha256`，必须与顶层 v3 `BuildBinding` 完全一致；摘要和字段结构合法不能代替这项逐记录身份校验。认证集还必须把每条记录声明的 target/driver/screenshot/preflight 等附件和整个断网演练证据目录归档在固定子目录中，逐文件复算 SHA256/大小/清单摘要，再重跑基础会话、扩展生命周期原始日志、previous DEB basename/version/SHA256 以及 Debian `previous < candidate` 语义校验。签名器会在签名前执行同一完整实物校验；只剩顶层 JSON 或任意摘要字符串不能发布。
 
 ```bash

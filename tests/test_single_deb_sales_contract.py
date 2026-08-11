@@ -92,6 +92,11 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
             "## 10. 真实 Kylin/UOS App 最终验收",
             "## 11. 一次性诊断包流程",
         )
+        self.runbook_release = section(
+            runbook,
+            "### 5.5 签名与最终放行",
+            "## 6. 完整离线交付契约",
+        )
         self.guide_offline = section(
             guide,
             "### 在受控发布机生成离线演练证据",
@@ -155,6 +160,21 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
             with self.subTest(document=document[:80]):
                 self.assertIn("九文件 receipt", document)
                 self.assertNotIn("六个白名单文件", document)
+
+    def test_formal_certification_and_publication_docs_require_approved_orchestrator_argv(self):
+        for document in (self.runbook_release, self.guide_publication):
+            with self.subTest(document=document[:80]):
+                for stage in (
+                    "challenge_preparation",
+                    "certification_sign",
+                    "publication_sign",
+                    "release_check",
+                    "publish",
+                ):
+                    self.assertIn(f"`{stage}`", document)
+                self.assertIn("commands[].argv", document)
+                self.assertIn("只用于解释参数", document)
+                self.assertIn("不得作为正式流程旁路", document)
 
 
 if __name__ == "__main__":
