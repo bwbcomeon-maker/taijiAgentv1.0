@@ -462,7 +462,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
     def test_rollback_never_unlinks_a_replacement_at_an_owned_output_path(self):
         helper = load_helper()
-        original_write = helper._write_exclusive
+        original_write = helper._write_exclusive_held
         calls = 0
 
         def replace_then_fail(path, payload, mode=0o644, directory_fd=None):
@@ -474,7 +474,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
             self.output.write_bytes(b"foreign replacement")
             raise helper.BuilderInputError("fixture second member failure")
 
-        with mock.patch.object(helper, "_write_exclusive", side_effect=replace_then_fail):
+        with mock.patch.object(helper, "_write_exclusive_held", side_effect=replace_then_fail):
             with self.assertRaisesRegex(Exception, "rollback|cleanup|poison"):
                 helper.create_builder_input(
                     source_dir=self.source,
@@ -491,7 +491,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
     def test_publication_records_descriptor_identity_not_a_replacement_path_identity(self):
         helper = load_helper()
-        original_write = helper._write_exclusive
+        original_write = helper._write_exclusive_held
         calls = 0
 
         def replace_before_return_then_fail(path, payload, mode=0o644, directory_fd=None):
@@ -506,7 +506,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
         with mock.patch.object(
             helper,
-            "_write_exclusive",
+            "_write_exclusive_held",
             side_effect=replace_before_return_then_fail,
         ):
             with self.assertRaisesRegex(Exception, "rollback|cleanup|poison"):
@@ -528,7 +528,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
     def test_success_path_rejects_an_identical_payload_replacement_inode(self):
         helper = load_helper()
-        original_write = helper._write_exclusive
+        original_write = helper._write_exclusive_held
         calls = 0
         replacement_payload = b""
 
@@ -544,7 +544,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
         with mock.patch.object(
             helper,
-            "_write_exclusive",
+            "_write_exclusive_held",
             side_effect=replace_third_before_return,
         ):
             with self.assertRaisesRegex(Exception, "identity|rollback|cleanup|poison"):
@@ -563,7 +563,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
     def test_incomplete_rollback_is_reported_instead_of_silently_swallowed(self):
         helper = load_helper()
-        original_write = helper._write_exclusive
+        original_write = helper._write_exclusive_held
         calls = 0
 
         def fail_second(path, payload, mode=0o644, directory_fd=None):
@@ -580,7 +580,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
                 raise PermissionError("fixture unlink failure")
             return original_unlink(path, *args, **kwargs)
 
-        with mock.patch.object(helper, "_write_exclusive", side_effect=fail_second), mock.patch.object(
+        with mock.patch.object(helper, "_write_exclusive_held", side_effect=fail_second), mock.patch.object(
             helper.os,
             "unlink",
             side_effect=fail_owned_unlink,
@@ -606,7 +606,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
             calls += 1
             raise helper.BuilderInputError("fixture publication failure")
 
-        with mock.patch.object(helper, "_write_exclusive", side_effect=fail_first_final), mock.patch.object(
+        with mock.patch.object(helper, "_write_exclusive_held", side_effect=fail_first_final), mock.patch.object(
             helper,
             "_cleanup_private_stage",
             return_value=["fixture private stage cleanup failure"],
@@ -652,7 +652,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
         output = publication / self.output.name
         manifest = publication / self.manifest.name
         checksum = publication / self.checksum.name
-        original_write = helper._write_exclusive
+        original_write = helper._write_exclusive_held
         calls = 0
 
         def replace_parent_after_first_write(path, payload, mode=0o644, **kwargs):
@@ -665,7 +665,7 @@ class BuilderInputPackageContractTest(unittest.TestCase):
                 (publication / "foreign-marker").write_text("foreign\n", encoding="utf-8")
             return result
 
-        with mock.patch.object(helper, "_write_exclusive", side_effect=replace_parent_after_first_write):
+        with mock.patch.object(helper, "_write_exclusive_held", side_effect=replace_parent_after_first_write):
             with self.assertRaisesRegex(Exception, "directory.*changed|incomplete|poison"):
                 helper.create_builder_input(
                     source_dir=self.source,

@@ -101,7 +101,7 @@ taijiagent-制包机输入-<commit>.tar.gz.sha256
 
 输入包由固定 allowlist 生成，不扫描工作目录；manifest 绑定 source commit、压缩包 basename/字节数/SHA256、源码归档/成员清单摘要以及包内每个成员。它用于隔离 Finder、聊天工具、U 盘和历史构建产物造成的元数据污染。正式制包不接受直接复制本地 `taijiagent 打包交付/` 工作目录作为等价输入。
 
-`99` 在 clean gate 后只捕获一次冻结 commit `F`。源码 archive、外层 `00/01/04`、说明文件和两个 helper 均从 `F` 的 Git object 派生到 0700 私有暂存目录；工作树只用于在开始、发布前和结束前复核 `HEAD/main/clean` 以及参与文件相对 `F` 的 blob/mode。三处源码重建统一使用 `git -c tar.umask=0022 archive ... "$F"`，不得在 gate 后再次解析 `HEAD` 作为新的输入身份。builder create 在封装前还必须用源码 archive 中冻结的 `source-archive-integrity.py` 逻辑重新证明 inventory 确实由该 archive 派生；只重算 inventory 文件自身 SHA256 不能通过。
+`99` 在 clean gate 后只捕获一次冻结 commit `F`。源码 archive、外层 `00/01/04`、说明文件和两个 helper 均从 `F` 的 Git object 派生到 0700 私有暂存目录；工作树只用于在开始、发布前和结束前复核 `HEAD/main/clean` 以及参与文件相对 `F` 的 blob/mode。三处源码重建统一使用 `git -c tar.umask=0022 archive ... "$F"`，不得在 gate 后再次解析 `HEAD` 作为新的输入身份。`taiji-trusted-git` 在清除外部 `GIT_*` 后会重建封闭环境：固定 `GIT_NO_REPLACE_OBJECTS=1`、将 global/system config 指向 `/dev/null`并禁用 system attributes；因此即使本地存在 `refs/replace` 且工作树已被 reset 为替换树，归档仍只能解析真实 `F`。builder create 在封装前还必须用源码 archive 中冻结的 `source-archive-integrity.py` 逻辑重新证明 inventory 确实由该 archive 派生；只重算 inventory 文件自身 SHA256 不能通过。
 
 三件套 sidecar 固定为两行，只绑定 archive 与 manifest 的 basename 和 SHA256。它用于发现受控传输中的误损坏，不是 detached signature，也不是可对抗恶意替换者的签名信任根；正式来源仍由冻结 commit、canonical manifest、成员级回读门禁和后续签名证据共同约束。
 

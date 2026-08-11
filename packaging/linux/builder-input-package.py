@@ -229,7 +229,8 @@ def _write_exclusive_impl(
     payload: bytes,
     mode: int = 0o644,
     directory_fd: Optional[int] = None,
-) -> FileIdentity:
+    retain_descriptor: bool = False,
+) -> Any:
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -263,6 +264,13 @@ def _write_exclusive_impl(
             owned_identity = _file_identity(os.fstat(descriptor))
         except OSError:
             pass
+    if original_error is None and retain_descriptor:
+        if owned_identity is None:
+            original_error = BuilderInputError(
+                "output identity is unavailable after write: {}".format(path)
+            )
+        else:
+            return owned_identity, descriptor
     try:
         os.close(descriptor)
     except BaseException as exc:
@@ -294,6 +302,21 @@ def _write_exclusive(
     directory_fd: Optional[int] = None,
 ) -> FileIdentity:
     return _write_exclusive_impl(path, payload, mode, directory_fd)
+
+
+def _write_exclusive_held(
+    path: Path,
+    payload: bytes,
+    mode: int = 0o644,
+    directory_fd: Optional[int] = None,
+) -> Tuple[FileIdentity, int]:
+    return _write_exclusive_impl(
+        path,
+        payload,
+        mode,
+        directory_fd,
+        retain_descriptor=True,
+    )
 
 
 def _validate_publication_directory(
@@ -446,8 +469,10 @@ def _publish_triplet_controlled(
     stage_identity = _directory_identity(stage.lstat())
     stage_owned = []  # type: List[Tuple[Path, FileIdentity]]
     published = []  # type: List[Tuple[Path, FileIdentity]]
+    published_descriptors = []  # type: List[int]
     primary_error = None  # type: Optional[BaseException]
     rollback_errors = []  # type: List[str]
+    descriptor_close_errors = []  # type: List[str]
     try:
         staged_paths = []  # type: List[Path]
         for destination, payload in destinations:
@@ -466,12 +491,13 @@ def _publish_triplet_controlled(
         ]
         for (destination, _payload), frozen_payload in zip(destinations, frozen_payloads):
             _check_publication_directory(parent, parent_fd, parent_identity)
-            owned_identity = _write_exclusive(
+            owned_identity, held_descriptor = _write_exclusive_held(
                 destination,
                 frozen_payload,
                 directory_fd=parent_fd,
             )
             published.append((destination, owned_identity))
+            published_descriptors.append(held_descriptor)
             _check_owned_publications_at(parent_fd, published)
             _check_publication_directory(parent, parent_fd, parent_identity)
         _check_publication_directory(parent, parent_fd, parent_identity)
@@ -496,24 +522,39 @@ def _publish_triplet_controlled(
                 error = _safe_unlink_owned_at(parent_fd, path, identity)
                 if error is not None:
                     rollback_errors.append(error)
+        for descriptor in reversed(published_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                descriptor_close_errors.append(str(exc))
     if primary_error is not None:
-        if rollback_errors or cleanup_errors:
+        if rollback_errors or cleanup_errors or descriptor_close_errors:
             raise BuilderInputError(
-                "publication failed and cleanup is incomplete/poisoned: {}{}; original error: {}".format(
+                "publication failed and cleanup is incomplete/poisoned: {}{}{}; original error: {}".format(
                     "publication rollback: {}; ".format("; ".join(rollback_errors))
                     if rollback_errors
                     else "",
-                    "private staging cleanup: {}".format("; ".join(cleanup_errors))
+                    "private staging cleanup: {}; ".format("; ".join(cleanup_errors))
                     if cleanup_errors
+                    else "",
+                    "publication descriptor close: {}".format(
+                        "; ".join(descriptor_close_errors)
+                    )
+                    if descriptor_close_errors
                     else "",
                     primary_error,
                 )
             ) from primary_error
         raise primary_error
-    if cleanup_errors:
+    if cleanup_errors or descriptor_close_errors:
         raise BuilderInputError(
-            "private staging cleanup is incomplete/poisoned: {}{}".format(
-                "; ".join(cleanup_errors),
+            "publication cleanup is incomplete/poisoned: {}{}{}".format(
+                "private staging: {}; ".format("; ".join(cleanup_errors))
+                if cleanup_errors
+                else "",
+                "descriptor close: {}; ".format("; ".join(descriptor_close_errors))
+                if descriptor_close_errors
+                else "",
                 "; publication rollback incomplete/poisoned: {}".format(
                     "; ".join(rollback_errors)
                 )

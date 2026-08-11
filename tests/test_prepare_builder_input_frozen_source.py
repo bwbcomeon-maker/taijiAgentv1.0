@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -193,6 +195,61 @@ class FrozenSourcePrepareContractTest(unittest.TestCase):
         self.assertNotEqual(returncode, 0, output)
         self.assertIn("冻结 commit", output)
         self.assertEqual(list(repository.glob("taijiagent-制包机输入-*")), [], output)
+
+    def test_replace_ref_and_clean_reset_cannot_substitute_the_frozen_archive_tree(self) -> None:
+        repository, frozen = self.make_primary_main("replace-ref")
+        original_gitignore = (repository / ".gitignore").read_bytes()
+        replacement_marker = b"\n# replacement-tree-marker\n"
+        (repository / ".gitignore").write_bytes(original_gitignore + replacement_marker)
+        subprocess.run(["git", "add", ".gitignore"], cwd=repository, check=True)
+        replacement_tree = subprocess.check_output(
+            ["git", "write-tree"], cwd=repository, text=True
+        ).strip()
+        replacement_commit = subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "user.name=Taiji Test",
+                "-c",
+                "user.email=taiji-test@example.invalid",
+                "commit-tree",
+                replacement_tree,
+                "-m",
+                "replacement tree",
+            ],
+            cwd=repository,
+            text=True,
+        ).strip()
+        subprocess.run(["git", "reset", "--hard", frozen], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "replace", frozen, replacement_commit], cwd=repository, check=True
+        )
+        subprocess.run(["git", "reset", "--hard", frozen], cwd=repository, check=True)
+        self.assertIn(replacement_marker, (repository / ".gitignore").read_bytes())
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=repository,
+                text=True,
+            ),
+            "",
+        )
+
+        result = self.run_prepare(repository)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        input_archive = repository / f"taijiagent-制包机输入-{frozen}.tar.gz"
+        source_basename = f"taiji-agentv1.0-kylin-build-src-{frozen}.tar.gz"
+        with tarfile.open(input_archive, mode="r:gz") as bundle:
+            source_member = bundle.extractfile(
+                f"taijiagent 打包交付/{source_basename}"
+            )
+            self.assertIsNotNone(source_member)
+            source_payload = source_member.read()
+        with tarfile.open(fileobj=io.BytesIO(source_payload), mode="r:gz") as source:
+            gitignore = source.extractfile("taiji-agentv1.0/.gitignore")
+            self.assertIsNotNone(gitignore)
+            self.assertEqual(gitignore.read(), original_gitignore)
 
 
 if __name__ == "__main__":

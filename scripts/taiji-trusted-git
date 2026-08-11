@@ -13,6 +13,22 @@ while IFS= read -r -d '' _taiji_git_env_entry; do
 done < <(/usr/bin/env -0)
 unset _taiji_git_env_entry _taiji_git_env_name
 
+# Re-establish the release identity environment after removing every ambient
+# GIT_* selector.  In particular, refs/replace must never change the object
+# reached by a recorded commit F, and user/system config must not alter archive
+# attributes or other release-identity behavior.
+GIT_NO_REPLACE_OBJECTS="1"
+GIT_CONFIG_GLOBAL="/dev/null"
+GIT_CONFIG_SYSTEM="/dev/null"
+GIT_CONFIG_NOSYSTEM="1"
+GIT_ATTR_NOSYSTEM="1"
+HOME="/dev/null"
+XDG_CONFIG_HOME="/dev/null"
+LC_ALL="C"
+LANG="C"
+export GIT_NO_REPLACE_OBJECTS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+export GIT_CONFIG_NOSYSTEM GIT_ATTR_NOSYSTEM HOME XDG_CONFIG_HOME LC_ALL LANG
+
 [ -x /usr/bin/git ] || {
   printf 'trusted-git-failed\t/usr/bin/git is missing\n' >&2
   exit 127
