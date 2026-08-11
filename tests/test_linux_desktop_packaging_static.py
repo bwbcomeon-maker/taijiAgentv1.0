@@ -1903,6 +1903,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("99_本机_准备制包输入包.sh", docs)
         self.assertIn("!/taijiagent 打包交付/99_本机_准备制包输入包.sh", gitignore)
         self.assertIn("/taijiagent-制包机输入-*.tar.gz", gitignore)
+        self.assertIn("/taijiagent-制包机输入-*.tar.gz.sha256", gitignore)
+        self.assertIn("/taijiagent-制包机输入-*.manifest.json", gitignore)
         self.assertIn("check-clean-worktree.sh", preflight)
         self.assertIn("--mode formal", preflight)
         self.assertIn('--repo-root "$REPO_ROOT"', preflight)
@@ -1959,6 +1961,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
         prepare = read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh")
+        input_helper = read_text("packaging/linux/builder-input-package.py")
         docs = read_text("taijiagent 打包交付/操作说明.md")
 
         for script in (builder,):
@@ -1976,10 +1979,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("安装回执", install)
 
         self.assertIn("taijiagent-制包机输入-", prepare)
-        self.assertIn("tarfile.USTAR_FORMAT", prepare)
-        self.assertIn("PaxHeaders", prepare)
-        self.assertIn("._", prepare)
-        self.assertIn('"离线演练证据"', prepare)
+        self.assertIn("BUILDER_INPUT_HELPER_SHA256", prepare)
+        self.assertIn("tarfile.USTAR_FORMAT", input_helper)
+        self.assertIn("STATIC_INPUT_NAMES", input_helper)
+        self.assertNotIn("os.walk", input_helper)
+        self.assertNotIn("离线演练证据", input_helper)
         self.assertIn("失败诊断", docs)
 
     def test_release_preflight_cleans_macos_copy_metadata(self):

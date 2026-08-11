@@ -9,6 +9,8 @@ TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 SOURCE_INTEGRITY_HELPER="$REPO_ROOT/packaging/linux/source-archive-integrity.py"
 SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+BUILDER_INPUT_HELPER="$REPO_ROOT/packaging/linux/builder-input-package.py"
+BUILDER_INPUT_HELPER_SHA256="208a61312365341f750677b78cb3de88c34f243d17e19f31476a2feb3d6ced54"
 
 ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -35,6 +37,10 @@ preflight_repo() {
     || fail "缺少源码归档完整性工具：$SOURCE_INTEGRITY_HELPER"
   [ "$(sha256_file "$SOURCE_INTEGRITY_HELPER")" = "$SOURCE_INTEGRITY_HELPER_SHA256" ] \
     || fail "源码归档完整性工具不是固定审查版本"
+  [ -f "$BUILDER_INPUT_HELPER" ] && [ ! -L "$BUILDER_INPUT_HELPER" ] \
+    || fail "缺少制包输入固定清单工具：$BUILDER_INPUT_HELPER"
+  [ "$(sha256_file "$BUILDER_INPUT_HELPER")" = "$BUILDER_INPUT_HELPER_SHA256" ] \
+    || fail "制包输入固定清单工具不是固定审查版本"
   "$SOURCE_GATE" \
     --mode formal \
     --repo-root "$REPO_ROOT" \
@@ -68,64 +74,43 @@ write_source_archive() {
 }
 
 write_builder_input_package() {
-  local commit output
+  local commit output manifest checksum archive_sha archive_size manifest_sha manifest_size checksum_sha checksum_size
   commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
   output="$REPO_ROOT/taijiagent-制包机输入-$commit.tar.gz"
-  rm -f "$REPO_ROOT"/taijiagent-制包机输入-*.tar.gz
+  manifest="$REPO_ROOT/taijiagent-制包机输入-$commit.manifest.json"
+  checksum="$output.sha256"
+  rm -f "$REPO_ROOT"/taijiagent-制包机输入-*.tar.gz \
+    "$REPO_ROOT"/taijiagent-制包机输入-*.tar.gz.sha256 \
+    "$REPO_ROOT"/taijiagent-制包机输入-*.manifest.json
   info "生成制包机输入包：$(basename "$output")"
-  python3 - "$SCRIPT_DIR" "$output" "$SOURCE_INTEGRITY_HELPER" <<'PY'
-import os
-import sys
-import tarfile
-from pathlib import Path
-
-source = Path(sys.argv[1]).resolve()
-output = Path(sys.argv[2]).resolve()
-source_integrity_helper = Path(sys.argv[3]).resolve()
-skip_dirs = {
-    ".AppleDouble",
-    "__MACOSX",
-    ".构建工具",
-    "构建工作区",
-    "生成的安装包",
-    "构建日志",
-    "旧版备份",
-    "离线依赖",
-    "离线演练证据",
-    "目标基线",
-    "target-verification",
-    "offline-install-rehearsal",
-    "certification",
-}
-skip_names = {".DS_Store"}
-
-def should_skip(path: Path) -> bool:
-    name = path.name
-    if name in skip_names or name in skip_dirs:
-        return True
-    if name.startswith("._") or name.startswith("PaxHeaders"):
-        return True
-    if path.suffix == ".zip":
-        return True
-    return False
-
-with tarfile.open(output, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
-    for root, dirs, files in os.walk(source):
-        root_path = Path(root)
-        dirs[:] = [name for name in dirs if not should_skip(root_path / name)]
-        for name in sorted(files):
-            path = root_path / name
-            if should_skip(path):
-                continue
-            arcname = Path(source.name) / path.relative_to(source)
-            archive.add(path, arcname=str(arcname), recursive=False)
-    archive.add(
-        source_integrity_helper,
-        arcname=str(Path(source.name) / "source-archive-integrity.py"),
-        recursive=False,
-    )
-PY
+  python3 "$BUILDER_INPUT_HELPER" create \
+    --source-dir "$SCRIPT_DIR" \
+    --source-integrity-helper "$SOURCE_INTEGRITY_HELPER" \
+    --output "$output" \
+    --manifest "$manifest" \
+    --checksum "$checksum" \
+    --source-commit "$commit" \
+    || fail "制包机输入包固定清单生成失败"
+  python3 "$BUILDER_INPUT_HELPER" verify \
+    --archive "$output" \
+    --manifest "$manifest" \
+    --checksum "$checksum" \
+    || fail "制包机输入包生成后回读验证失败"
+  archive_sha="$(sha256_file "$output")"
+  archive_size="$(wc -c < "$output" | tr -d '[:space:]')"
+  manifest_sha="$(sha256_file "$manifest")"
+  manifest_size="$(wc -c < "$manifest" | tr -d '[:space:]')"
+  checksum_sha="$(sha256_file "$checksum")"
+  checksum_size="$(wc -c < "$checksum" | tr -d '[:space:]')"
   ok "制包机输入包已生成：$output"
+  ok "制包机输入包字节数：$archive_size"
+  ok "制包机输入包 SHA256：$archive_sha"
+  ok "制包机输入 manifest：$manifest"
+  ok "制包机输入 manifest 字节数：$manifest_size"
+  ok "制包机输入 manifest SHA256：$manifest_sha"
+  ok "制包机输入 sidecar：$checksum"
+  ok "制包机输入 sidecar 字节数：$checksum_size"
+  ok "制包机输入 sidecar SHA256：$checksum_sha"
 }
 
 main() {
@@ -133,7 +118,9 @@ main() {
   write_source_archive
   TAIJI_RELEASE_REQUIRE_ARTIFACTS=0 bash "$SCRIPT_DIR/01_制包机_发布预检.sh"
   write_builder_input_package
-  printf '\n[OK] 本机发布输入准备完成。优先把 taijiagent-制包机输入-*.tar.gz 复制到 Linux amd64 制包机并解压后执行：\n'
+  printf '\n[OK] 本机发布输入准备完成。请把同一 commit 的 tar.gz、manifest.json 和 tar.gz.sha256 一起复制到 Linux amd64 制包机。\n'
+  printf '传输后先在三件套所在目录执行：sha256sum -c taijiagent-制包机输入-*.tar.gz.sha256\n'
+  printf '校验通过再解压输入包并执行：\n'
   printf 'bash ./00_制包机_生成离线交付包.sh\n'
 }
 

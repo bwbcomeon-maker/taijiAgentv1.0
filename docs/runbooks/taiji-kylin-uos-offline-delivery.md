@@ -89,7 +89,25 @@ policy 是唯一 Maintainer、最小系统能力和 ELF ABI 来源；matrix 固�
 bash "taijiagent 打包交付/99_本机_准备制包输入包.sh"
 ```
 
-输出的 `taijiagent-制包机输入-<commit>.tar.gz` 是推荐的 Linux 制包机输入。它用于隔离 Finder、聊天工具、U 盘和历史构建产物造成的元数据污染。
+输出必须是同一冻结 commit 的三件套：
+
+```text
+taijiagent-制包机输入-<commit>.tar.gz
+taijiagent-制包机输入-<commit>.manifest.json
+taijiagent-制包机输入-<commit>.tar.gz.sha256
+```
+
+输入包由固定 allowlist 生成，不扫描工作目录；manifest 绑定 source commit、压缩包 basename/字节数/SHA256、源码归档/成员清单摘要以及包内每个成员。它用于隔离 Finder、聊天工具、U 盘和历史构建产物造成的元数据污染。正式制包不接受直接复制本地 `taijiagent 打包交付/` 工作目录作为等价输入。
+
+传输到制包机前后都记录三件套 basename、字节数和 SHA256；在制包机三件套所在目录先执行：
+
+```bash
+sha256sum -c taijiagent-制包机输入-<commit>.tar.gz.sha256
+```
+
+sidecar 校验、manifest 绑定或 commit 任一不一致时停止，回到冻结源码重新生成，不在远程解包目录临时修补。
+
+`00` 在安装 Python 构建依赖后、解压正式源码和构建前，必须使用输入包内固定摘要的 `builder-input-package.py verify` 再次验证三件套及解压目录的 exact allowlist。该门禁失败时不得继续制包；人工执行 `sha256sum -c` 不能替代 manifest 和成员级复核。
 
 ### 5.2 在兼容 Linux amd64 制包机生成完整交付目录
 
