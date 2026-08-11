@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import stat
 import tempfile
 import threading
@@ -105,6 +106,7 @@ _UNSET_SECRET_VALUE = object()
 _IMAGE_CAPABILITY_REVISION_NONCE_KEY = (
     "_taiji_image_capability_revision_nonce"
 )
+_MAIN_MODEL_REQUEST_ID_KEY = "_taiji_main_model_request_id"
 _IMAGE_CAPABILITY_REQUEST_CACHE_TTL_SECONDS = 10 * 60
 _IMAGE_CAPABILITY_REQUEST_CACHE_CAPACITY = 512
 _IMAGE_CAPABILITY_CREDENTIAL_MANAGER = "image-capability-center"
@@ -6759,6 +6761,14 @@ def _get_model_config_unlocked(
     return {
         "ok": True,
         "profile": _active_profile_name(),
+        "main_request_id": (
+            str(config_data.get(_MAIN_MODEL_REQUEST_ID_KEY) or "")
+            if re.fullmatch(
+                r"[0-9a-f]{32}",
+                str(config_data.get(_MAIN_MODEL_REQUEST_ID_KEY) or ""),
+            )
+            else ""
+        ),
         "config": _public_config_summary(config_path),
         "main": {
             "provider": provider,
@@ -6794,6 +6804,15 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("provider is required")
     if not model_id:
         raise ValueError("model is required")
+    if "request_id" in body:
+        raw_request_id = body.get("request_id")
+        if not isinstance(raw_request_id, str) or not re.fullmatch(
+            r"[0-9a-f]{32}", raw_request_id
+        ):
+            raise ValueError("request_id must be 32 lowercase hexadecimal characters")
+        request_id = raw_request_id
+    else:
+        request_id = secrets.token_hex(16)
 
     if provider_id in _OAUTH_PROVIDERS or _provider_is_oauth(provider_id):
         label = _PROVIDER_DISPLAY.get(provider_id, provider_id)
@@ -6825,6 +6844,8 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
         with _cfg_lock:
             config_data = load_credential_config(config_path)
             original_config = copy.deepcopy(config_data)
+            if config_data.get(_MAIN_MODEL_REQUEST_ID_KEY) == request_id:
+                raise ValueError("request_id was already committed")
             model_cfg = config_data.get("model")
             if not isinstance(model_cfg, dict):
                 model_cfg = {}
@@ -6842,6 +6863,7 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
                 model_cfg.pop("key_env", None)
                 model_cfg.pop("api_key_env", None)
             config_data["model"] = model_cfg
+            config_data[_MAIN_MODEL_REQUEST_ID_KEY] = request_id
             if env_updates:
                 from agent.provider_credentials import (
                     load_credential_snapshot,
@@ -6892,6 +6914,7 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
         warnings,
     )
     result["commit_state"] = "committed"
+    result["main_request_id"] = request_id
     result["runtime_state"] = (
         "refresh_pending" if result.get("refresh_pending") is True else "applied"
     )

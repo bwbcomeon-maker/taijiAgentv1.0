@@ -6,8 +6,9 @@
 
 ## 变更范围
 
-- 主模型保存成功响应新增脱敏公开字段：`commit_state=committed` 与 `runtime_state=applied|refresh_pending`。
-- 保存请求结果不确定时，页面进入“待核对”，清空主模型密钥输入，只读取一次权威配置，不自动重放 POST。
+- 主模型保存成功响应新增脱敏公开字段：`commit_state=committed`、`runtime_state=applied|refresh_pending` 与非秘密 `main_request_id`。
+- 每次保存使用安全随机的 128-bit 请求 ID；服务端把对应回执与 config/`.env` 在同一事务提交，避免旧的“已配置”状态冒充本次新密钥已写入。
+- 保存请求超时、5xx 或结果不确定时，页面进入“待核对”，清空主模型密钥输入，只读取一次权威配置，不自动重放 POST；4xx 仍是确定拒绝。
 - 主模型 POST 显式禁用底层 fetch 网络错误重试；其它 API 的默认重试和 30 秒超时合同不变。
 - 权威对账只合并主模型、Provider 列表和必要 profile 公开投影，不覆盖识图、生图和平台凭据的未保存草稿。
 - 页面分别展示未配置、保存中、刷新中、待核对、已生效和保存失败；运行时刷新中不再误报“待配置”。
@@ -30,11 +31,13 @@
 3. POST 明确成功但运行时待刷新：显示“刷新中”，不显示“待配置”。
 4. POST TimeoutError：不显示确定失败，不重放 POST；清空主模型密钥输入并发起一次权威 GET。
 5. POST fetch `TypeError`：底层不重试写请求，直接进入同一权威对账流程。
-6. GET 确认目标 Provider、模型和凭据已配置：显示“已核对并生效”。
-7. GET 与目标不一致：显示确定失败并提示用户检查配置。
-8. GET 本身失败：保持“待核对”，提示通过“刷新状态”继续核对，不假装成功或失败。
-9. 对账期间存在识图、生图和平台凭据草稿：对象投影、输入值和能力 Provider 草稿均保持不变。
-10. API 公开成功响应：包含提交/运行时状态，不包含提交的密钥。
+6. POST 5xx：只发送一次 POST，随后 GET；回执匹配时按权威状态显示已生效或刷新中。
+7. POST 4xx：显示确定失败，不发起权威 GET。
+8. GET 回执、Provider、模型、Base URL 和凭据状态均匹配：显示“已核对并生效”。
+9. GET 返回同一 Provider/模型且 `configured=true`，但仍是旧回执：不得误报生效，提示本次请求未提交或已被覆盖。
+10. GET 本身失败：保持“待核对”，提示通过“刷新状态”继续核对，不假装成功或失败。
+11. 对账期间存在识图、生图和平台凭据草稿：对象投影、输入值和能力 Provider 草稿均保持不变。
+12. API 公开成功响应：包含提交、运行时与非秘密回执，不包含密钥或密钥摘要。
 
 ## 功能契约摘要
 
@@ -81,6 +84,9 @@
 | 主模型配置相关回归 | `pytest -q tests/test_model_config_frontend.py tests/test_model_config_api.py` | 456 通过 | 使用当前 worktree Agent 与 `/private/tmp/taiji-golden-template-py311`。 |
 | 扩展模型配置回归 | 上述两套加 `test_model_config_responsive.py`、`test_main_model_shared_legacy_epoch_contract.py` | 459 通过 | 复核响应式静态合同与主模型共享凭据 epoch 兼容性。 |
 | 最终 API/模型配置回归 | 上述套件加 `test_api_timeout.py`、`test_issue1118_idle_session_retry.py` | 473 通过 | 主模型逐请求禁用重试；其它 API 默认重试与 30 秒超时保持兼容。 |
+| 回执精确 RED/GREEN | 新增 API 与 Node 行为测试 | API 8 项、前端 6 项按预期失败；实现后 API 9 项、前端 7 项通过 | 覆盖原子回执、非法/重复 ID、5xx/4xx、旧回执、GET 失败与刷新中。 |
+| 更新后模型配置核心回归 | `pytest -q tests/test_model_config_frontend.py tests/test_model_config_api.py` | 471 通过 | 绑定当前 worktree Agent 和隔离 Python 3.11 环境。 |
+| 更新后最终扩展回归 | 核心套件加响应式、共享凭据 epoch、API 超时与默认重试合同 | 488 通过 | 确认回执变更未破坏既有超时、重试和共享凭据兼容性。 |
 | JavaScript 语法 | `node --check static/panels.js` | 通过 | 当前 worktree。 |
 | Python 语法 | `python -m py_compile ...` | 通过 | 当前 worktree。 |
 | 真实浏览器/截图/自动可访问性/视觉回归 | 未执行 | 未验证 | 不以 Node 行为测试替代真实浏览器结论。 |
@@ -92,6 +98,8 @@
 | P1 | 服务端已经提交配置时，浏览器超时仍显示“保存失败”，旧状态又显示“待配置” | RED 覆盖 TimeoutError 后仅有 POST、权威字段缺失及刷新中误报 | 单次 POST 后进入待核对，读取脱敏权威状态并区分提交/运行时状态 | 是 |
 | P1 | 主模型 dirty guard 阻止全量 GET 更新，强行全量刷新又会覆盖其它配置草稿 | Node RED/回归夹具保留识图、生图、平台凭据对象与输入值 | 对账绕过全量加载，只合并主模型必要公开投影 | 是 |
 | P1 | 底层 API 会对 fetch `TypeError` 自动重试，主模型 POST 最多可能实际发送三次 | 受控 fetch RED 得到 `attempts=3` | 增加逐请求禁用重试选项，主模型 POST 显式使用且不向 fetch 透传该控制字段 | 是 |
+| P1 | 5xx 被当成确定失败，不执行权威对账 | Node RED 中 5xx 只有一次 POST、没有 GET | 将 status>=500 归为不确定结果，保持单 POST 后只读 GET | 是 |
+| P1 | 用户只更新密钥时，旧配置与新配置的公开 Provider/模型/`configured=true` 完全相同，旧状态会冒充新密钥已提交 | Node RED 中本次请求和权威状态都没有可比较回执 | 以原子、非秘密 `main_request_id` 绑定本次保存；回执与公开状态必须同时匹配 | 是 |
 | P2 | 真实浏览器、键盘焦点、屏幕阅读器和视觉呈现尚无本轮证据 | 本轮未运行 Playwright、axe 或截图差分 | 合并前或安装态阶段补 Chromium/Electron UX 验收 | 否 |
 
 ## 已修复问题
@@ -101,6 +109,8 @@
 - 旧主模型投影使页面与实际可调用状态不一致。
 - 通过全量刷新恢复状态会触发 dirty guard 或破坏其它草稿。
 - 保存期间缺少按钮忙碌语义。
+- 5xx 没有进入结果不确定的权威对账。
+- 只比较公开 Provider/模型/凭据布尔值，无法证明本次新密钥已经提交。
 
 ## 剩余风险
 

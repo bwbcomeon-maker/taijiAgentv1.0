@@ -941,17 +941,28 @@ let _modelConfigData={profile:'default',main:{provider:'openai',model:'gpt-4o',b
  providers:[{id:'openai'}],vision:oldVision,image_gen:oldImage,provider_credentials:oldCredentials};
 const _imageCapabilityProviderDrafts={vision:{alibaba:{Model:'vision-provider-draft',ApiKey:'vision-provider-secret'}},
  image:{dashscope:{Model:'image-provider-draft',ApiKey:'image-provider-secret'}}};
-const authoritative={profile:'default',main:{provider:'deepseek',model:'deepseek-chat',base_url:'',key_status:{configured:true,source:'env_file'}},
+const scenario=process.argv[3]||'timeout_matching';
+const expectedRequestId='00112233445566778899aabbccddeeff';
+const crypto={getRandomValues(bytes){bytes.set(Buffer.from(expectedRequestId,'hex'));return bytes;}};
+const authoritative={profile:'default',main_request_id:scenario==='nonmatching_receipt'?'ffeeddccbbaa99887766554433221100':expectedRequestId,
+ main:{provider:'deepseek',model:'deepseek-chat',base_url:'',key_status:{configured:true,source:'env_file'}},
  providers:[{id:'deepseek',display_name:'DeepSeek'}],vision:{provider:'server',model:'must-not-replace-vision'},
  image_gen:{provider:'server',model:'must-not-replace-image'},provider_credentials:[{id:'server-must-not-replace-platform'}]};
-const apiCalls=[];let busyDuringPost=null;
+if(scenario==='matching_refresh_pending'){authoritative.runtime_state='refresh_pending';authoritative.refresh_pending=true;}
+const apiCalls=[];let busyDuringPost=null;let postRequestId='';let postPayloadHasApiKey=false;
 const api=async(url,options)=>{
  apiCalls.push({url,method:options&&options.method||'GET',timeoutToast:options&&options.timeoutToast,retryNetworkErrors:options&&options.retryNetworkErrors});
  if(url==='/api/model-config/main'){
   busyDuringPost={disabled:elements.btnSaveMainModel.disabled,ariaBusy:elements.btnSaveMainModel.attrs['aria-busy']||null};
+  const body=JSON.parse(options.body||'{}');postRequestId=String(body.request_id||'');postPayloadHasApiKey=!!body.api_key;
+  if(scenario==='http_4xx'){const error=new Error('request rejected');error.status=400;throw error;}
+  if(scenario==='http_5xx_matching'||scenario==='matching_refresh_pending'){const error=new Error('server failed after commit');error.status=503;throw error;}
   const error=new Error('request timed out');error.name='TimeoutError';error.timeout=true;throw error;
  }
- if(url==='/api/model-config')return authoritative;
+ if(url==='/api/model-config'){
+  if(scenario==='get_failure')throw new TypeError('authoritative read failed');
+  return authoritative;
+ }
  throw new Error('unexpected API call '+url);
 };
 const toasts=[];
@@ -966,14 +977,15 @@ const populateModelDropdown=()=>{populateCount++;};
 const toggleModelConfigSection=()=>{closedCount++;};
 const _handleRuntimeRefreshOutcome=data=>({pending:data&&data.runtime_state==='refresh_pending'||data&&data.refresh_pending===true});
 const helperNames=['_clearCapabilityProviderDraftSecrets','_clearModelConfigSecrets','_setModelConfigDraftStatus',
- '_setMainModelConfigSaveState','_mainModelConfigSaveResultIsUncertain','_applyAuthoritativeMainModelConfig',
- '_mainModelConfigMatchesExpected','_reconcileMainModelConfigSave','saveMainModelConfig'];
+ '_setMainModelConfigSaveState','_newMainModelConfigRequestId','_mainModelConfigSaveResultIsUncertain','_applyAuthoritativeMainModelConfig',
+ '_mainModelConfigMatchesExpected','_mainModelConfigReceiptMatches','_reconcileMainModelConfigSave','saveMainModelConfig'];
 const helperSource=helperNames.map(extractFunc).filter(Boolean).join('\n');
 eval(helperSource);
 async function run(){
  await saveMainModelConfig();
  return {
   apiCalls,
+  expectedRequestId,postRequestId,postPayloadHasApiKey,mainRequestId:_modelConfigData.main_request_id||'',
   main:_modelConfigData.main,
   providers:_modelConfigData.providers,
   preserved:{vision:_modelConfigData.vision===oldVision,image:_modelConfigData.image_gen===oldImage,
@@ -1119,11 +1131,14 @@ def _run_model_config_draft_guard(tmp_path: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def _run_main_model_reconciliation(tmp_path: Path) -> dict:
+def _run_main_model_reconciliation(
+    tmp_path: Path,
+    scenario: str = "timeout_matching",
+) -> dict:
     driver = tmp_path / "main-model-reconciliation-driver.js"
     driver.write_text(_MAIN_MODEL_RECONCILIATION_DRIVER, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
         capture_output=True,
         text=True,
         timeout=10,
@@ -1288,6 +1303,9 @@ def test_main_model_timeout_reconciles_authoritative_state_without_clobbering_ot
             "timeoutToast": False,
         },
     ]
+    assert result["postRequestId"] == result["expectedRequestId"]
+    assert result["postPayloadHasApiKey"] is True
+    assert result["mainRequestId"] == result["expectedRequestId"]
     assert result["main"] == {
         "provider": "deepseek",
         "model": "deepseek-chat",
@@ -1328,6 +1346,75 @@ def test_main_model_timeout_reconciles_authoritative_state_without_clobbering_ot
     assert result["closedCount"] == 1
     assert all("保存主模型失败" not in toast["message"] for toast in result["toasts"])
     assert all("待配置" not in toast["message"] for toast in result["toasts"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_http_5xx_reconciles_matching_receipt_without_replaying_post(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path, "http_5xx_matching")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["postRequestId"] == result["expectedRequestId"]
+    assert result["status"]["state"] == "applied"
+    assert result["closedCount"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_same_public_state_with_old_receipt_never_reports_applied(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path, "nonmatching_receipt")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["main"]["key_status"]["configured"] is True
+    assert result["mainRequestId"] != result["postRequestId"]
+    assert result["status"]["state"] == "failed"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_authoritative_get_failure_stays_reconciling(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "get_failure")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["status"]["state"] == "reconciling"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_matching_receipt_with_refresh_pending_stays_refreshing(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path, "matching_refresh_pending")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["mainRequestId"] == result["postRequestId"]
+    assert result["status"]["state"] == "refreshing"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_http_4xx_is_definite_failure_without_authoritative_get(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "http_4xx")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST"]
+    assert result["postRequestId"] == result["expectedRequestId"]
+    assert result["status"]["state"] == "failed"
+    assert result["closedCount"] == 0
+
+
+def test_main_model_request_id_uses_secure_128_bit_randomness():
+    start = PANELS_JS.find("function _newMainModelConfigRequestId")
+    assert start >= 0
+    end = PANELS_JS.find("\n}", start)
+    body = PANELS_JS[start:end]
+    assert "new Uint8Array(16)" in body
+    assert "crypto.getRandomValues" in body
+    assert "Math.random" not in body
 
 
 def test_model_config_secret_inputs_start_empty():

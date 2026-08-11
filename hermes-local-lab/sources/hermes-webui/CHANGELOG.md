@@ -45,7 +45,7 @@
 
 ### Fixed
 
-- Fixed uncertain main-model saves being shown as failed or unconfigured after the server had already committed them. The Settings panel now reconciles once against the redacted authoritative state without replaying the POST or overwriting vision, image-generation, or platform-credential drafts, and reports committed runtime refreshes separately from missing configuration.
+- Fixed uncertain main-model saves being shown as failed or unconfigured after the server had already committed them. Each save now carries a durable, non-secret request receipt, so timeout or 5xx reconciliation cannot mistake an older configured key for the current write; the Settings panel never replays the POST, preserves other configuration drafts, and reports committed runtime refreshes separately from missing configuration.
 - Fixed standalone expert-team warnings being counted as blocking failures. Warnings now enter human review, while only blocking/error issues stop a stage; legacy warning-only results can resume without another Provider call.
 - Fixed ordinary and legacy sessions being hidden by the expert-team launch visibility gate. Session reads now apply the gate to the route's canonical loaded Session, while malformed launch markers and missing expert-team reverse bindings still fail closed.
 - Fixed context-compression snapshot persistence carrying one session sidecar's CAS digest across a rotated session id. The old snapshot is now bound to its exact durable revision before the continuation id is adopted, preserving concurrent writes and allowing the continuation's first save.
