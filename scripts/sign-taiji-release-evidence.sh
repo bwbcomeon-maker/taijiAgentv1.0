@@ -246,7 +246,7 @@ fi
 [ "$public_fingerprint" = "$EXPECTED_FINGERPRINT" ] || fail "固定验签公钥 fingerprint 不匹配"
 
 if [ "$MODE" = "publication" ]; then
-  python3 - "$ROOT_DIR" "$EVIDENCE" "$SNAPSHOT_ROOT" <<'PY' \
+  python3 - "$EVIDENCE" "$SNAPSHOT_ROOT" <<'PY' \
     || fail "publication physical bundle 无法创建不可替换的完整私有快照"
 import os
 import stat
@@ -254,12 +254,15 @@ import sys
 from pathlib import Path
 
 
-root = Path(sys.argv[1]).resolve()
-evidence = Path(sys.argv[2]).absolute()
-snapshot = Path(sys.argv[3]).absolute()
-canonical_evidence = root / "taijiagent 打包交付/release-evidence.json"
-if evidence != canonical_evidence or evidence.parent.resolve() != evidence.parent:
-    raise SystemExit("publication evidence is not at the canonical delivery path")
+evidence_argument = Path(sys.argv[1])
+snapshot = Path(sys.argv[2]).absolute()
+if not evidence_argument.is_absolute():
+    raise SystemExit("publication evidence must use an absolute real delivery root")
+evidence = evidence_argument
+if evidence.name != "release-evidence.json":
+    raise SystemExit("publication evidence must use fixed basename release-evidence.json")
+if evidence.parent.resolve() != evidence.parent:
+    raise SystemExit("publication evidence must use an absolute real delivery root")
 source_root = evidence.parent
 destination_root = snapshot / "delivery"
 excluded_root_directories = {
@@ -488,6 +491,7 @@ fi
 if [ "$MODE" = "certification" ]; then
   python3 - "$EVIDENCE" "$SNAPSHOT_ROOT" <<'PY' \
     || fail "certification-set 物理证据树无法创建不可替换快照"
+import json
 import os
 import stat
 import sys
@@ -498,6 +502,9 @@ evidence = Path(sys.argv[1]).absolute()
 snapshot = Path(sys.argv[2]).absolute()
 source_root = evidence.parent
 total_bytes = 0
+MAX_CERTIFICATION_SNAPSHOT_FILE_BYTES = 1024 * 1024 * 1024
+MAX_PREVIOUS_RELEASE_DEB_BYTES = 2 * 1024 * 1024 * 1024
+OFFLINE_EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 
 
 def identity(value):
@@ -512,12 +519,82 @@ def identity(value):
     )
 
 
+def no_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit("certification offline evidence contains duplicate JSON keys")
+        result[key] = value
+    return result
+
+
+def read_previous_deb_basename(path):
+    before = path.lstat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > 1024 * 1024
+    ):
+        raise SystemExit("certification offline evidence is not a bounded single-link file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if identity(before) != identity(opened):
+            raise SystemExit("certification offline evidence changed before read")
+        chunks = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise SystemExit("certification offline evidence was truncated")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise SystemExit("certification offline evidence grew")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if identity(opened) != identity(after) or identity(opened) != identity(current):
+            raise SystemExit("certification offline evidence changed during read")
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(b"".join(chunks).decode("utf-8"), object_pairs_hook=no_duplicates)
+    except (UnicodeError, ValueError) as exc:
+        raise SystemExit(f"certification offline evidence is not strict JSON: {exc}")
+    previous = payload.get("previous_release") if type(payload) is dict else None
+    previous_deb_basename = previous.get("deb_basename") if type(previous) is dict else None
+    if (
+        type(previous_deb_basename) is not str
+        or not previous_deb_basename
+        or Path(previous_deb_basename).name != previous_deb_basename
+        or "/" in previous_deb_basename
+        or "\\" in previous_deb_basename
+        or payload.get("previous_deb_basename") != previous_deb_basename
+    ):
+        raise SystemExit("certification offline previous DEB basename is unsafe or ambiguous")
+    return previous_deb_basename
+
+
+offline_root = source_root / "offline-rehearsal"
+previous_deb_basename = read_previous_deb_basename(
+    offline_root / OFFLINE_EVIDENCE_BASENAME
+)
+previous_deb_path = offline_root / previous_deb_basename
+
+
 def copy_file(source, destination):
     global total_bytes
     before = source.lstat()
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0:
         raise SystemExit("certification snapshot source is not a single-link regular file")
-    if before.st_size > 1024 * 1024 * 1024:
+    max_bytes = (
+        MAX_PREVIOUS_RELEASE_DEB_BYTES
+        if source == previous_deb_path
+        else MAX_CERTIFICATION_SNAPSHOT_FILE_BYTES
+    )
+    if before.st_size > max_bytes:
         raise SystemExit("certification snapshot source file is excessive")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     source_fd = os.open(source, flags)
@@ -549,9 +626,10 @@ def copy_file(source, destination):
         finally:
             os.close(destination_fd)
         after = os.fstat(source_fd)
+        current = source.lstat()
     finally:
         os.close(source_fd)
-    if identity(opened) != identity(after):
+    if identity(opened) != identity(after) or identity(opened) != identity(current):
         raise SystemExit("certification snapshot source changed during copy")
     total_bytes += opened.st_size
     if total_bytes > 4 * 1024 * 1024 * 1024:
@@ -580,6 +658,10 @@ def copy_tree(source, destination):
 
 for name in ("records", "offline-rehearsal"):
     copy_tree(source_root / name, snapshot / name)
+if read_previous_deb_basename(
+    snapshot / "offline-rehearsal" / OFFLINE_EVIDENCE_BASENAME
+) != previous_deb_basename:
+    raise SystemExit("certification offline previous DEB changed during snapshot")
 PY
 
   python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" <<'PY' \

@@ -865,6 +865,53 @@ def sha256_regular_file(path: Path, label: str) -> tuple[str, os.stat_result]:
     return digest.hexdigest(), file_stat
 
 
+def sha256_bounded_stable_regular_file(
+    path: Path,
+    label: str,
+    *,
+    limit: int,
+) -> tuple[str, os.stat_result]:
+    """Hash one bounded file through a single descriptor and stable identity."""
+
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"{label} 不可读取: {path}: {exc}") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise EvidenceError(f"{label} 必须是单链接普通文件: {path}")
+
+    descriptor, opened = open_regular(path, label)
+    try:
+        if regular_file_identity(before) != regular_file_identity(opened):
+            raise EvidenceError(f"{label} 在打开前发生变化: {path}")
+        if opened.st_size > limit:
+            raise EvidenceError(f"{label} 超过大小上限 {limit}: {path}")
+
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise EvidenceError(f"{label} 在摘要计算期间被截断: {path}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise EvidenceError(f"{label} 在摘要计算期间增长: {path}")
+
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            regular_file_identity(opened) != regular_file_identity(after)
+            or regular_file_identity(opened) != regular_file_identity(current)
+        ):
+            raise EvidenceError(f"{label} 在摘要计算期间发生变化: {path}")
+        return digest.hexdigest(), opened
+    except OSError as exc:
+        raise EvidenceError(f"{label} 流式摘要失败: {path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
 def sha256_regular_tar_member(path: Path, member_name: str, label: str) -> str:
     descriptor, before = open_regular(path, label)
     digest = hashlib.sha256()
@@ -3763,6 +3810,32 @@ def _validate_certification_set_v1_inner(
     offline_root = evidence_path.parent / "offline-rehearsal"
     if not offline_root.is_dir() or offline_root.is_symlink():
         raise EvidenceError("认证集 offline 目录缺失或不安全")
+
+    offline_evidence_path = offline_root / offline["evidence_basename"]
+    offline_payload, _ = read_regular_bytes(
+        offline_evidence_path,
+        "认证集 offline 主证据",
+    )
+    require_exact(
+        offline,
+        "evidence_sha256",
+        hashlib.sha256(offline_payload).hexdigest(),
+    )
+    offline_data = parse_json_bytes(offline_payload, "认证集 offline 主证据")
+    previous_release = offline_data.get("previous_release")
+    if type(previous_release) is not dict:
+        raise EvidenceError("认证集 offline 主证据缺少 previous_release")
+    previous_deb_basename = previous_release.get("deb_basename")
+    if (
+        type(previous_deb_basename) is not str
+        or not previous_deb_basename
+        or Path(previous_deb_basename).name != previous_deb_basename
+        or "/" in previous_deb_basename
+        or "\\" in previous_deb_basename
+        or offline_data.get("previous_deb_basename") != previous_deb_basename
+    ):
+        raise EvidenceError("认证集 offline 主证据 previous DEB basename 不唯一或不安全")
+
     expected_offline_names: set[str] = set()
     for index, item in enumerate(offline_files):
         if type(item) is not dict or set(item) != {"basename", "sha256", "size"}:
@@ -3778,14 +3851,25 @@ def _validate_certification_set_v1_inner(
         ):
             raise EvidenceError("认证集 offline 文件名不安全或重复")
         expected_offline_names.add(basename)
-        payload, file_stat = read_regular_bytes(
-            offline_root / basename,
-            f"认证集 offline 实物 {basename}",
-            limit=MAX_EVIDENCE_BYTES,
-        )
+        offline_file = offline_root / basename
+        if basename == previous_deb_basename:
+            actual_sha256, file_stat = sha256_bounded_stable_regular_file(
+                offline_file,
+                f"认证集 offline N-1 DEB {basename}",
+                limit=MAX_PREVIOUS_RELEASE_DEB_BYTES,
+            )
+        else:
+            payload, file_stat = read_regular_bytes(
+                offline_file,
+                f"认证集 offline 实物 {basename}",
+                limit=MAX_EVIDENCE_BYTES,
+            )
+            actual_sha256 = hashlib.sha256(payload).hexdigest()
         if type(item["size"]) is not int or item["size"] != file_stat.st_size:
             raise EvidenceError("认证集 offline 实物 size 不一致")
-        require_exact(item, "sha256", hashlib.sha256(payload).hexdigest())
+        require_exact(item, "sha256", actual_sha256)
+    if previous_deb_basename not in expected_offline_names:
+        raise EvidenceError("认证集 offline 目录缺少 previous DEB 实物")
     try:
         actual_offline_names = {entry.name for entry in offline_root.iterdir()}
     except OSError as exc:
@@ -3803,17 +3887,6 @@ def _validate_certification_set_v1_inner(
         "inventory_sha256",
         hashlib.sha256(inventory_payload).hexdigest(),
     )
-    offline_evidence_path = offline_root / offline["evidence_basename"]
-    offline_payload, _ = read_regular_bytes(
-        offline_evidence_path,
-        "认证集 offline 主证据",
-    )
-    require_exact(
-        offline,
-        "evidence_sha256",
-        hashlib.sha256(offline_payload).hexdigest(),
-    )
-    offline_data = parse_json_bytes(offline_payload, "认证集 offline 主证据")
     offline_args = argparse.Namespace(
         challenge=args.challenge,
         source_commit=binding.source_commit,

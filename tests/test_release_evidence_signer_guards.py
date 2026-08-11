@@ -196,6 +196,129 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         self.assertNotIn("无法读取发布私钥", result.stderr)
         self.assert_no_signature()
 
+    def test_publication_evidence_in_external_real_delivery_root_reaches_bundle_validation(
+        self,
+    ) -> None:
+        delivery = self.root / "review-root" / "taijiagent 打包交付"
+        delivery.mkdir(parents=True, mode=0o700)
+        delivery = delivery.resolve()
+        self.evidence = delivery / "release-evidence.json"
+        self.write_evidence(
+            schema="taiji-release-evidence/v3",
+            purpose="publication",
+        )
+
+        result = self.run_signer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "publication physical bundle 未通过完整实物和签名前合同校验",
+            result.stderr,
+        )
+        self.assertNotIn("canonical delivery path", result.stderr)
+        self.assertNotIn("无法读取发布私钥", result.stderr)
+        self.assert_no_signature()
+
+    def test_publication_evidence_requires_fixed_basename(self) -> None:
+        delivery = self.root / "review-root" / "taijiagent 打包交付"
+        delivery.mkdir(parents=True, mode=0o700)
+        self.evidence = delivery / "renamed-release-evidence.json"
+        self.write_evidence(
+            schema="taiji-release-evidence/v3",
+            purpose="publication",
+        )
+
+        result = self.run_signer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fixed basename release-evidence.json", result.stderr)
+        self.assertNotIn("无法读取发布私钥", result.stderr)
+        self.assert_no_signature()
+
+    def test_publication_evidence_rejects_relative_symlinked_or_dotdot_delivery_root(
+        self,
+    ) -> None:
+        real_delivery = self.root / "real-delivery"
+        real_delivery.mkdir(mode=0o700)
+        (self.root / "review-root").mkdir(mode=0o700)
+        linked_delivery = self.root / "linked-delivery"
+        linked_delivery.symlink_to(real_delivery, target_is_directory=True)
+        escaped_delivery = self.root / "review-root" / ".." / "real-delivery"
+
+        for label, evidence, cwd, argument in (
+            (
+                "relative",
+                real_delivery / "release-evidence.json",
+                real_delivery,
+                "release-evidence.json",
+            ),
+            (
+                "symlinked",
+                linked_delivery / "release-evidence.json",
+                ROOT,
+                str(linked_delivery / "release-evidence.json"),
+            ),
+            (
+                "dotdot",
+                escaped_delivery / "release-evidence.json",
+                ROOT,
+                str(escaped_delivery / "release-evidence.json"),
+            ),
+        ):
+            with self.subTest(label=label):
+                self.evidence = evidence
+                self.write_evidence(
+                    schema="taiji-release-evidence/v3",
+                    purpose="publication",
+                )
+                result = subprocess.run(
+                    ["bash", str(SIGNER), argument, str(self.private_key)],
+                    cwd=cwd,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("absolute real delivery root", result.stderr)
+                self.assertNotIn("无法读取发布私钥", result.stderr)
+                self.assert_no_signature()
+
+    def test_publication_snapshot_keeps_swap_and_escape_guards(self) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+        start = source.index('if [ "$MODE" = "publication" ]; then')
+        end = source.index('\n  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"', start)
+        snapshot = source[start:end]
+
+        self.assertIn('getattr(os, "O_NOFOLLOW", 0)', snapshot)
+        self.assertIn("before.st_nlink != 1", snapshot)
+        self.assertIn("identity(opened) != identity(current)", snapshot)
+        self.assertIn("selected_names(source, at_root) != names", snapshot)
+        self.assertIn("source.is_symlink()", snapshot)
+
+    def test_certification_snapshot_streams_only_the_exact_previous_deb_up_to_2gib(
+        self,
+    ) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+        start = source.index('if [ "$MODE" = "certification" ]; then')
+        end = source.index('\n  python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE"', start)
+        snapshot = source[start:end]
+        copy_start = snapshot.index("def copy_file(")
+        copy_end = snapshot.index("\ndef copy_tree(", copy_start)
+        copy_file = snapshot[copy_start:copy_end]
+
+        self.assertIn("MAX_PREVIOUS_RELEASE_DEB_BYTES = 2 * 1024 * 1024 * 1024", snapshot)
+        self.assertIn(
+            "MAX_CERTIFICATION_SNAPSHOT_FILE_BYTES = 1024 * 1024 * 1024",
+            snapshot,
+        )
+        self.assertIn("previous_deb_basename", snapshot)
+        self.assertIn("source == previous_deb_path", snapshot)
+        self.assertIn("while remaining:", snapshot)
+        self.assertIn("identity(opened) != identity(current)", copy_file)
+        self.assertNotIn("read_bytes", snapshot)
+        self.assertNotIn("before.st_size > 1024 * 1024 * 1024", snapshot)
+
     def test_publication_signer_validates_ci_trio_from_recursive_bundle_snapshot(self) -> None:
         source = SIGNER.read_text(encoding="utf-8")
 

@@ -1015,6 +1015,95 @@ class CertificationSetV1Tests(unittest.TestCase):
             self.previous_deb_sha,
         )
 
+    def test_assembled_large_previous_deb_passes_final_certification_validator(self):
+        self._rebind_previous_release_size(40 * 1024 * 1024)
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        validator = self._load_test_validator("taiji_large_previous_final_validator")
+        certification_path = self.output / "certification-set.json"
+        data = json.loads(certification_path.read_text(encoding="utf-8"))
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="c" * 64,
+            desktop_entry_sha256="d" * 64,
+        )
+        args = SimpleNamespace(challenge=self.challenge, matrix=MATRIX)
+
+        with patch.object(
+            validator,
+            "canonical_policy_identity",
+            return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+        ):
+            validator.validate_certification_set_v1(
+                data,
+                certification_path,
+                args,
+                binding,
+            )
+
+    def test_final_certification_validator_keeps_32mib_limit_for_other_offline_files(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        validator = self._load_test_validator("taiji_large_generic_final_validator")
+        certification_path = self.output / "certification-set.json"
+        data = json.loads(certification_path.read_text(encoding="utf-8"))
+        archived_log = self.output / "offline-rehearsal" / self.offline_log.name
+        with archived_log.open("wb") as handle:
+            handle.seek(40 * 1024 * 1024 - 1)
+            handle.write(b"\0")
+        archived_log_sha = hashlib.sha256(archived_log.read_bytes()).hexdigest()
+        item = next(
+            entry
+            for entry in data["offline_rehearsal"]["files"]
+            if entry["basename"] == archived_log.name
+        )
+        item["size"] = archived_log.stat().st_size
+        item["sha256"] = archived_log_sha
+        inventory_payload = json.dumps(
+            data["offline_rehearsal"]["files"],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        data["offline_rehearsal"]["inventory_sha256"] = hashlib.sha256(
+            inventory_payload
+        ).hexdigest()
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="c" * 64,
+            desktop_entry_sha256="d" * 64,
+        )
+        args = SimpleNamespace(challenge=self.challenge, matrix=MATRIX)
+
+        with patch.object(
+            validator,
+            "canonical_policy_identity",
+            return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+        ), self.assertRaisesRegex(
+            validator.EvidenceError,
+            "超过大小上限 33554432",
+        ):
+            validator.validate_certification_set_v1(
+                data,
+                certification_path,
+                args,
+                binding,
+            )
+
     def test_certification_assembler_keeps_generic_offline_attachment_limit(self):
         with self.offline_log.open("r+b") as handle:
             handle.seek(2 * 1024 * 1024 - 1)
