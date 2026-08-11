@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import subprocess
@@ -234,6 +235,137 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         self.assertIn("fixed basename release-evidence.json", result.stderr)
         self.assertNotIn("无法读取发布私钥", result.stderr)
         self.assert_no_signature()
+
+    def test_publication_evidence_rejects_group_or_other_writable_delivery_root(
+        self,
+    ) -> None:
+        delivery = self.root / "review-root" / "taijiagent 打包交付"
+        delivery.mkdir(parents=True, mode=0o700)
+        delivery.chmod(0o777)
+        delivery = delivery.resolve()
+        self.evidence = delivery / "release-evidence.json"
+        self.write_evidence(
+            schema="taiji-release-evidence/v3",
+            purpose="publication",
+        )
+
+        result = self.run_signer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "publication delivery root must be current-user-owned and not group/other writable",
+            result.stderr,
+        )
+        self.assertNotIn("publication physical bundle 未通过", result.stderr)
+        self.assertNotIn("无法读取发布私钥", result.stderr)
+        self.assert_no_signature()
+
+    def test_publication_evidence_rejects_group_or_other_writable_ancestor(
+        self,
+    ) -> None:
+        unsafe_ancestor = self.root / "unsafe-ancestor"
+        unsafe_ancestor.mkdir(mode=0o700)
+        unsafe_ancestor.chmod(0o777)
+        delivery = unsafe_ancestor / "taijiagent 打包交付"
+        delivery.mkdir(mode=0o700)
+        delivery = delivery.resolve()
+        self.evidence = delivery / "release-evidence.json"
+        self.write_evidence(
+            schema="taiji-release-evidence/v3",
+            purpose="publication",
+        )
+
+        result = self.run_signer()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "publication delivery ancestor is writable by group or other",
+            result.stderr,
+        )
+        self.assertNotIn("publication physical bundle 未通过", result.stderr)
+        self.assertNotIn("无法读取发布私钥", result.stderr)
+        self.assert_no_signature()
+
+    def test_publication_evidence_allows_root_owned_sticky_1777_ancestor(
+        self,
+    ) -> None:
+        shared_root = Path("/tmp").resolve()
+        shared_stat = shared_root.lstat()
+        self.assertEqual(shared_stat.st_uid, 0)
+        self.assertEqual(shared_stat.st_mode & 0o7777, 0o1777)
+
+        with tempfile.TemporaryDirectory(
+            prefix="taiji-publication-sticky-",
+            dir=shared_root,
+        ) as controlled_root:
+            delivery = Path(controlled_root) / "taijiagent 打包交付"
+            delivery.mkdir(mode=0o700)
+            delivery = delivery.resolve()
+            self.evidence = delivery / "release-evidence.json"
+            self.write_evidence(
+                schema="taiji-release-evidence/v3",
+                purpose="publication",
+            )
+
+            result = self.run_signer()
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "publication physical bundle 未通过完整实物和签名前合同校验",
+                result.stderr,
+            )
+            self.assertNotIn("publication delivery ancestor", result.stderr)
+            self.assertNotIn("无法读取发布私钥", result.stderr)
+            self.assert_no_signature()
+
+    def test_publication_snapshot_rechecks_trusted_delivery_root_identity(self) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+        start = source.index('if [ "$MODE" = "publication" ]; then')
+        end = source.index('\n  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"', start)
+        snapshot = source[start:end]
+
+        self.assertIn("def validate_publication_delivery_root(", snapshot)
+        self.assertIn("leaf_stat.st_uid != os.getuid()", snapshot)
+        self.assertIn("ancestor_stat.st_uid not in {0, os.getuid()}", snapshot)
+        self.assertIn("ancestor_mode == 0o1777", snapshot)
+        self.assertIn("publication delivery ancestor has an untrusted owner", snapshot)
+        self.assertIn("delivery_root_identity = validate_publication_delivery_root(", snapshot)
+        self.assertIn(
+            "validate_publication_delivery_root(\n"
+            "    source_root, expected_identity=delivery_root_identity\n"
+            ")",
+            snapshot,
+        )
+
+    def test_publication_delivery_root_identity_recheck_rejects_replacement(self) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+        publication_start = source.index('if [ "$MODE" = "publication" ]; then')
+        helper_start = source.index("def identity(value):", publication_start)
+        helper_end = source.index("\ndef copy_file(", helper_start)
+        namespace = {"os": os, "stat": __import__("stat")}
+        exec(source[helper_start:helper_end], namespace)
+        validate_root = namespace["validate_publication_delivery_root"]
+
+        delivery = (self.root / "trusted-delivery").resolve()
+        delivery.mkdir(mode=0o700)
+        original_identity = validate_root(delivery)
+        parked = delivery.with_name("parked-delivery")
+        delivery.rename(parked)
+        delivery.mkdir(mode=0o700)
+
+        with self.assertRaisesRegex(SystemExit, "changed during snapshot"):
+            validate_root(delivery, expected_identity=original_identity)
+
+    def test_publication_snapshot_heredoc_uses_python38_grammar(self) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+        publication_start = source.index('if [ "$MODE" = "publication" ]; then')
+        heredoc_start = source.index("import os\n", publication_start)
+        heredoc_end = source.index(
+            '\nPY\n\n  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"',
+            heredoc_start,
+        )
+
+        ast.parse(source[heredoc_start:heredoc_end], feature_version=8)
 
     def test_publication_evidence_rejects_relative_symlinked_or_dotdot_delivery_root(
         self,

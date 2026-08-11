@@ -282,10 +282,55 @@ def identity(value):
         value.st_ino,
         value.st_mode,
         value.st_nlink,
+        value.st_uid,
+        value.st_gid,
         value.st_size,
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+def validate_publication_delivery_root(source, expected_identity=None):
+    try:
+        leaf_stat = source.lstat()
+    except OSError as exc:
+        raise SystemExit(f"publication delivery root cannot be inspected: {exc}")
+    if (
+        source.is_symlink()
+        or not stat.S_ISDIR(leaf_stat.st_mode)
+        or leaf_stat.st_uid != os.getuid()
+        or leaf_stat.st_mode & 0o022
+    ):
+        raise SystemExit(
+            "publication delivery root must be current-user-owned and not group/other writable"
+        )
+    leaf_identity = identity(leaf_stat)
+    if expected_identity is not None and leaf_identity != expected_identity:
+        raise SystemExit("publication delivery root changed during snapshot")
+
+    ancestor = source.parent
+    while True:
+        try:
+            ancestor_stat = ancestor.lstat()
+        except OSError as exc:
+            raise SystemExit(f"publication delivery ancestor cannot be inspected: {exc}")
+        if ancestor.is_symlink() or not stat.S_ISDIR(ancestor_stat.st_mode):
+            raise SystemExit("publication delivery ancestor must be a real directory")
+        if ancestor_stat.st_uid not in {0, os.getuid()}:
+            raise SystemExit("publication delivery ancestor has an untrusted owner")
+        ancestor_mode = stat.S_IMODE(ancestor_stat.st_mode)
+        root_sticky_exception = ancestor_stat.st_uid == 0 and ancestor_mode == 0o1777
+        if ancestor_mode & 0o022 and not root_sticky_exception:
+            raise SystemExit(
+                "publication delivery ancestor is writable by group or other"
+            )
+        if ancestor == ancestor.parent:
+            break
+        ancestor = ancestor.parent
+
+    if source.resolve() != source:
+        raise SystemExit("publication evidence must use an absolute real delivery root")
+    return leaf_identity
 
 
 def copy_file(source, destination):
@@ -376,7 +421,11 @@ def copy_tree(source, destination, at_root=False):
         os.close(directory_fd)
 
 
+delivery_root_identity = validate_publication_delivery_root(source_root)
 copy_tree(source_root, destination_root, at_root=True)
+validate_publication_delivery_root(
+    source_root, expected_identity=delivery_root_identity
+)
 PY
 
   python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery" "$SNAPSHOT_EVIDENCE" <<'PY' \
