@@ -13,6 +13,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from tests.github_ci_v2_fixture import write_github_ci_v2_bundle
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLISHER = ROOT / "packaging/linux/deb/publish-single-deb.sh"
@@ -90,6 +92,10 @@ class SingleDebPublisherGateTest(unittest.TestCase):
             exit 0
             """,
         )
+        shutil.copy2(
+            ROOT / "scripts/validate-taiji-release-evidence.py",
+            self.repo / "scripts/validate-taiji-release-evidence.py",
+        )
         write_executable(
             self.fake_bin / "dpkg-deb",
             """
@@ -154,6 +160,9 @@ class SingleDebPublisherGateTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.release = self.delivery / "release-evidence.json"
+        self.ci_evidence = write_github_ci_v2_bundle(
+            self.delivery, "b" * 40
+        )
         self.release.write_text(
             json.dumps(
                 {
@@ -172,6 +181,8 @@ class SingleDebPublisherGateTest(unittest.TestCase):
                     "certification_set_sha256": hashlib.sha256(self.certification.read_bytes()).hexdigest(),
                     "certification_set_signature_basename": self.certification_signature.name,
                     "certification_set_signature_sha256": hashlib.sha256(self.certification_signature.read_bytes()).hexdigest(),
+                    "ci_evidence_basename": self.ci_evidence.name,
+                    "ci_evidence_sha256": hashlib.sha256(self.ci_evidence.read_bytes()).hexdigest(),
                     "maintainer": self.maintainer,
                     "customer_filename": self.deb.name,
                     "customer_folder_contract": "exactly-one-deb",
@@ -250,10 +261,23 @@ class SingleDebPublisherGateTest(unittest.TestCase):
                 "certification-set.json.sig",
                 "compatibility-policy.json",
                 "deb.sha256",
+                "github-ci-evidence.json",
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
             },
         )
         self.assertEqual((receipt / "deb.sha256").read_text(), f"{self.deb_sha}  {self.deb.name}\n")
         self.assertEqual(self.gate_log.read_text().splitlines(), ["release-check"])
+
+    def test_raw_ci_tamper_is_rejected_even_when_external_gate_is_stubbed(self):
+        raw = self.delivery / "github-ci-jobs-response.json"
+        raw.write_bytes(raw.read_bytes() + b" ")
+
+        result = self.run_publisher()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.receipts.exists() and any(self.receipts.iterdir()))
 
     def test_input_replacement_during_gate_fails_closed(self):
         result = self.run_publisher(extra_env={"TEST_MUTATE_INPUT": "1"})

@@ -225,7 +225,7 @@ excluded_root_directories = {
     "诊断报告",
     "旧版备份",
 }
-excluded_root_files = {"release-evidence.json", "release-evidence.json.sig"}
+excluded_root_files = {"release-evidence.json.sig"}
 total_bytes = 0
 
 
@@ -344,6 +344,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 delivery = Path(sys.argv[2]).resolve()
 evidence = Path(sys.argv[3]).resolve()
+bundle_evidence = delivery / "release-evidence.json"
 challenge = sys.argv[4]
 validator_path = root / "scripts/validate-taiji-release-evidence.py"
 spec = importlib.util.spec_from_file_location("taiji_signer_publication_validator", validator_path)
@@ -352,7 +353,12 @@ if spec is None or spec.loader is None:
 validator = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = validator
 spec.loader.exec_module(validator)
-payload, _ = validator.read_regular_bytes(evidence, "publication evidence")
+payload, _ = validator.read_regular_bytes(evidence, "publication signing evidence")
+bundle_payload, _ = validator.read_regular_bytes(
+    bundle_evidence, "publication recursive bundle evidence"
+)
+if bundle_payload != payload:
+    raise SystemExit("signing evidence and recursive bundle snapshot differ")
 data = validator.parse_json_bytes(payload, "publication evidence")
 source_commit = data.get("source_commit")
 deb_basename = data.get("deb_basename")
@@ -376,7 +382,7 @@ args = argparse.Namespace(
 binding = validator.validate_build_binding(args)
 if not isinstance(binding, validator.BuildBinding):
     raise SystemExit("publication validation did not produce a v3 BuildBinding")
-validator.validate_release_evidence_v3(data, args, binding)
+validator.validate_release_evidence_v3(data, bundle_evidence, args, binding)
 
 if data.get("certification_set_basename") != "certification-set.json":
     raise SystemExit("publication certification basename is not canonical")

@@ -166,6 +166,16 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         self.assertNotIn("无法读取发布私钥", result.stderr)
         self.assert_no_signature()
 
+    def test_publication_signer_validates_ci_trio_from_recursive_bundle_snapshot(self) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+
+        self.assertIn('bundle_evidence = delivery / "release-evidence.json"', source)
+        self.assertIn("signing evidence and recursive bundle snapshot differ", source)
+        self.assertIn(
+            "validator.validate_release_evidence_v3(data, bundle_evidence, args, binding)",
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

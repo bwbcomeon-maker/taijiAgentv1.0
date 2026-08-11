@@ -45,6 +45,9 @@ class SingleDebSalesContractTest(unittest.TestCase):
             "certification-set.json.sig",
             "compatibility-policy.json",
             "deb.sha256",
+            "github-ci-evidence.json",
+            "github-ci-run-response.json",
+            "github-ci-jobs-response.json",
         ):
             self.assertIn(name, self.publisher)
         self.assertIn("RECEIPT_NAMES", self.publisher)

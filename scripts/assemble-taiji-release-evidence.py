@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,23 +31,6 @@ VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
 DEB_RE = re.compile(r"^taiji-agent_[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}_amd64\.deb$")
 MAX_JSON_BYTES = 1024 * 1024
 MAX_SIGNATURE_BYTES = 1024 * 1024
-CI_SCHEMA = "taiji-github-ci-evidence/v1"
-CI_EVIDENCE_KEYS = {
-    "schema",
-    "provider",
-    "repository",
-    "workflow_name",
-    "required_check_name",
-    "run_id",
-    "run_attempt",
-    "event",
-    "status",
-    "conclusion",
-    "head_sha",
-    "html_url",
-    "completed_at_utc",
-    "collected_at_utc",
-}
 FORMAL_GATES = {
     "candidate_deb_unchanged": "PASS",
     "canonical_policy": "PASS",
@@ -184,19 +166,6 @@ def _canonical_policy(path: Path) -> tuple[str, str]:
         raise ReleaseEvidenceError("compatibility policy is not canonical") from exc
 
 
-def _parse_ci_timestamp(value: Any, label: str) -> datetime:
-    if type(value) is not str or not value.endswith("Z"):
-        raise ReleaseEvidenceError(f"CI {label} must be a UTC ISO8601 timestamp")
-    try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError as exc:
-        raise ReleaseEvidenceError(f"CI {label} must be a UTC ISO8601 timestamp") from exc
-    now = datetime.now(timezone.utc)
-    if parsed > now:
-        raise ReleaseEvidenceError(f"CI {label} cannot be in the future")
-    return parsed
-
-
 def _validate_ci_evidence(
     path: Path,
     *,
@@ -205,50 +174,15 @@ def _validate_ci_evidence(
 ) -> tuple[dict[str, Any], str]:
     if path.name != "github-ci-evidence.json" or path.parent.resolve() != output_parent.resolve():
         raise ReleaseEvidenceError("CI evidence must be github-ci-evidence.json beside the release evidence output")
-    data, payload = _load_json(path, "GitHub CI evidence")
-    if set(data) != CI_EVIDENCE_KEYS:
-        raise ReleaseEvidenceError("CI evidence has an invalid exact field set")
-    required = {
-        "schema": CI_SCHEMA,
-        "provider": "github-actions",
-        "workflow_name": "Pull Request CI",
-        "required_check_name": "CI Gate",
-        "status": "completed",
-        "conclusion": "success",
-        "head_sha": source_commit,
-    }
-    for key, expected in required.items():
-        if data.get(key) != expected:
-            raise ReleaseEvidenceError(f"CI {key} does not match the frozen release contract")
-    repository = _require_text(
-        data.get("repository"),
-        "CI repository",
-        re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"),
-    )
-    if data.get("event") not in {"pull_request", "push", "workflow_dispatch"}:
-        raise ReleaseEvidenceError("CI event is not an approved GitHub Actions trigger")
-    for key in ("run_id", "run_attempt"):
-        value = data.get(key)
-        if type(value) is not int or value <= 0:
-            raise ReleaseEvidenceError(f"CI {key} must be a positive integer")
-    completed = _parse_ci_timestamp(data.get("completed_at_utc"), "completed_at_utc")
-    collected = _parse_ci_timestamp(data.get("collected_at_utc"), "collected_at_utc")
-    if collected < completed:
-        raise ReleaseEvidenceError("CI collected_at_utc cannot precede completed_at_utc")
-    url = urlsplit(_require_text(data.get("html_url"), "CI html_url"))
-    expected_path = f"/{repository}/actions/runs/{data['run_id']}"
-    if (
-        url.scheme != "https"
-        or url.hostname != "github.com"
-        or url.username is not None
-        or url.password is not None
-        or url.port is not None
-        or url.path != expected_path
-        or url.query
-        or url.fragment
-    ):
-        raise ReleaseEvidenceError("CI html_url is not the exact GitHub Actions run URL")
-    return data, hashlib.sha256(payload).hexdigest()
+    validator = _load_certification_validator()
+    try:
+        result = validator.validate_github_ci_evidence_bundle(path, source_commit)
+    except Exception as exc:
+        raise ReleaseEvidenceError(f"GitHub CI v2 physical trio is invalid: {exc}") from exc
+    digest = result.get("evidence_sha256")
+    if type(digest) is not str or SHA256_RE.fullmatch(digest) is None:
+        raise ReleaseEvidenceError("GitHub CI v2 validator returned an invalid evidence hash")
+    return {}, digest
 
 
 def _manifest_toolchain(manifest: dict[str, Any], policy: dict[str, Any]) -> dict[str, str]:

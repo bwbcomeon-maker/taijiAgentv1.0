@@ -3154,19 +3154,53 @@ RELEASE_EVIDENCE_V3_KEYS = {
 CI_EVIDENCE_KEYS = {
     "schema",
     "provider",
+    "api_version",
     "repository",
+    "workflow_id",
     "workflow_name",
-    "required_check_name",
+    "workflow_path",
+    "event",
+    "head_branch",
+    "head_sha",
     "run_id",
     "run_attempt",
-    "event",
-    "status",
-    "conclusion",
-    "head_sha",
-    "html_url",
-    "completed_at_utc",
+    "run_status",
+    "run_conclusion",
+    "run_html_url",
+    "run_created_at_utc",
+    "run_updated_at_utc",
+    "required_job_id",
+    "required_job_name",
+    "required_job_status",
+    "required_job_conclusion",
+    "required_job_html_url",
+    "required_job_started_at_utc",
+    "required_job_completed_at_utc",
+    "required_step_name",
+    "required_step_status",
+    "required_step_conclusion",
     "collected_at_utc",
+    "raw_run_basename",
+    "raw_run_sha256",
+    "raw_jobs_basename",
+    "raw_jobs_sha256",
 }
+CI_SCHEMA_V2 = "taiji-github-ci-evidence/v2"
+CI_PROVIDER = "github-actions-rest-api"
+CI_API_VERSION = "2022-11-28"
+CI_REPOSITORY = "bwbcomeon-maker/taijiAgentv1.0"
+CI_WORKFLOW_NAME = "Pull Request CI"
+CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
+CI_EVENT = "push"
+CI_BRANCH = "main"
+CI_JOB_NAME = "CI Gate"
+CI_STEP_NAME = "Require every selected job to pass"
+CI_EVIDENCE_BASENAME = "github-ci-evidence.json"
+CI_RAW_RUN_BASENAME = "github-ci-run-response.json"
+CI_RAW_JOBS_BASENAME = "github-ci-jobs-response.json"
+CI_MAX_RUN_BYTES = 2 * 1024 * 1024
+CI_MAX_JOBS_BYTES = 8 * 1024 * 1024
+CI_MAX_AGE = timedelta(days=7)
 RELEASE_FORMAL_GATES = {
     "candidate_deb_unchanged": "PASS",
     "canonical_policy": "PASS",
@@ -3506,56 +3540,257 @@ def validate_certification_set_v1(
     )
 
 
+def _ci_file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_ci_regular_with_identity(
+    path: Path,
+    label: str,
+    maximum: int,
+) -> tuple[bytes, tuple[int, ...]]:
+    payload, opened = read_regular_bytes(path, label, limit=maximum)
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"{label} 读取后不可用") from exc
+    if _ci_file_identity(opened) != _ci_file_identity(current):
+        raise EvidenceError(f"{label} 读取期间发生变化")
+    return payload, _ci_file_identity(opened)
+
+
+def _parse_ci_timestamp_at(value: Any, label: str, now: datetime) -> datetime:
+    if type(value) is not str or not value.endswith("Z"):
+        raise EvidenceError(f"GitHub CI {label} 必须是 UTC ISO8601 时间")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise EvidenceError(f"GitHub CI {label} 必须是 UTC ISO8601 时间") from exc
+    if parsed.tzinfo is None or parsed > now or now - parsed > CI_MAX_AGE:
+        raise EvidenceError(f"GitHub CI {label} 必须是最近 7 天内的当前证据")
+    return parsed
+
+
+def _require_ci_positive_integer(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise EvidenceError(f"GitHub CI {label} 必须是正整数")
+    return value
+
+
+def _require_ci_repository(value: Any, label: str) -> None:
+    if type(value) is not dict or value.get("full_name") != CI_REPOSITORY:
+        raise EvidenceError(f"GitHub CI {label} 不是固定仓库")
+
+
+def validate_github_ci_evidence_bundle(
+    evidence_path: Path,
+    source_commit: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """Validate one immutable normalized/raw/raw GitHub CI v2 trio.
+
+    All three files are opened without following links, their identities are
+    retained across the complete cross-file validation, and the raw GitHub
+    responses are re-derived into the normalized exact contract.
+    """
+
+    evidence_path = Path(evidence_path)
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        raise EvidenceError("GitHub CI 当前时间必须包含时区")
+    current_time = current_time.astimezone(timezone.utc)
+    if type(source_commit) is not str or FULL_COMMIT_RE.fullmatch(source_commit) is None:
+        raise EvidenceError("GitHub CI source commit 必须是完整小写 commit")
+    if not evidence_path.is_absolute() or evidence_path.name != CI_EVIDENCE_BASENAME:
+        raise EvidenceError("GitHub CI 证据必须是绝对路径 github-ci-evidence.json")
+    parent = evidence_path.parent
+    require_safe_parent(evidence_path, "GitHub CI 证据")
+
+    paths = {
+        "evidence": evidence_path,
+        "run": parent / CI_RAW_RUN_BASENAME,
+        "jobs": parent / CI_RAW_JOBS_BASENAME,
+    }
+    payloads: dict[str, bytes] = {}
+    identities: dict[str, tuple[int, ...]] = {}
+    for key, label, maximum in (
+        ("evidence", "GitHub CI normalized evidence", MAX_JSON_BYTES),
+        ("run", "GitHub CI raw run response", CI_MAX_RUN_BYTES),
+        ("jobs", "GitHub CI raw jobs response", CI_MAX_JOBS_BYTES),
+    ):
+        payloads[key], identities[key] = _read_ci_regular_with_identity(
+            paths[key], label, maximum
+        )
+
+    evidence = parse_json_bytes(payloads["evidence"], "GitHub CI normalized evidence")
+    run = parse_json_bytes(payloads["run"], "GitHub CI raw run response")
+    jobs_payload = parse_json_bytes(payloads["jobs"], "GitHub CI raw jobs response")
+    require_exact_keys(evidence, CI_EVIDENCE_KEYS, "GitHub CI normalized evidence")
+    if evidence.get("raw_run_basename") != CI_RAW_RUN_BASENAME:
+        raise EvidenceError("GitHub CI raw run basename 发生路径逃逸或替换")
+    if evidence.get("raw_jobs_basename") != CI_RAW_JOBS_BASENAME:
+        raise EvidenceError("GitHub CI raw jobs basename 发生路径逃逸或替换")
+    raw_run_hash = hashlib.sha256(payloads["run"]).hexdigest()
+    raw_jobs_hash = hashlib.sha256(payloads["jobs"]).hexdigest()
+    if evidence.get("raw_run_sha256") != raw_run_hash:
+        raise EvidenceError("GitHub CI raw run SHA256 与实物不一致")
+    if evidence.get("raw_jobs_sha256") != raw_jobs_hash:
+        raise EvidenceError("GitHub CI raw jobs SHA256 与实物不一致")
+
+    run_id = _require_ci_positive_integer(run.get("id"), "run id")
+    expected_run = {
+        "name": CI_WORKFLOW_NAME,
+        "path": CI_WORKFLOW_PATH,
+        "event": CI_EVENT,
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": source_commit,
+        "head_branch": CI_BRANCH,
+        "html_url": f"https://github.com/{CI_REPOSITORY}/actions/runs/{run_id}",
+    }
+    for key, expected in expected_run.items():
+        if run.get(key) != expected:
+            raise EvidenceError(f"GitHub CI raw run {key} 与固定发布合同不一致")
+    _require_ci_repository(run.get("repository"), "repository")
+    _require_ci_repository(run.get("head_repository"), "head_repository")
+    run_attempt = _require_ci_positive_integer(run.get("run_attempt"), "run_attempt")
+    workflow_id = _require_ci_positive_integer(run.get("workflow_id"), "workflow_id")
+    run_created = _parse_ci_timestamp_at(run.get("created_at"), "run created_at", current_time)
+    run_updated = _parse_ci_timestamp_at(run.get("updated_at"), "run updated_at", current_time)
+    if run_updated < run_created:
+        raise EvidenceError("GitHub CI run updated_at 早于 created_at")
+
+    jobs = jobs_payload.get("jobs")
+    total_count = jobs_payload.get("total_count")
+    if (
+        type(total_count) is not int
+        or total_count < 0
+        or type(jobs) is not list
+        or total_count != len(jobs)
+        or total_count > 100
+    ):
+        raise EvidenceError("GitHub CI raw jobs 不完整或已分页")
+    required_jobs = [
+        item for item in jobs
+        if type(item) is dict and item.get("name") == CI_JOB_NAME
+    ]
+    if len(required_jobs) != 1:
+        raise EvidenceError("GitHub CI 必须且只能存在一个 CI Gate job")
+    job = required_jobs[0]
+    expected_job = {
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "workflow_name": CI_WORKFLOW_NAME,
+        "name": CI_JOB_NAME,
+        "head_sha": source_commit,
+        "status": "completed",
+        "conclusion": "success",
+    }
+    for key, expected in expected_job.items():
+        if job.get(key) != expected:
+            raise EvidenceError(f"GitHub CI Gate job {key} 与固定发布合同不一致")
+    job_id = _require_ci_positive_integer(job.get("id"), "required job id")
+    job_url = f"https://github.com/{CI_REPOSITORY}/actions/runs/{run_id}/job/{job_id}"
+    if job.get("html_url") != job_url:
+        raise EvidenceError("GitHub CI Gate job URL 与固定发布合同不一致")
+    job_started = _parse_ci_timestamp_at(job.get("started_at"), "job started_at", current_time)
+    job_completed = _parse_ci_timestamp_at(job.get("completed_at"), "job completed_at", current_time)
+    if job_completed < job_started:
+        raise EvidenceError("GitHub CI Gate completed_at 早于 started_at")
+    steps = job.get("steps")
+    if type(steps) is not list:
+        raise EvidenceError("GitHub CI Gate steps 不可用")
+    required_steps = [
+        item for item in steps
+        if type(item) is dict and item.get("name") == CI_STEP_NAME
+    ]
+    if len(required_steps) != 1:
+        raise EvidenceError("GitHub CI Gate 必须且只能存在固定合同 step")
+    step = required_steps[0]
+    if step.get("status") != "completed" or step.get("conclusion") != "success":
+        raise EvidenceError("GitHub CI Gate 固定合同 step 未成功")
+
+    collected = _parse_ci_timestamp_at(
+        evidence.get("collected_at_utc"), "collected_at_utc", current_time
+    )
+    if collected < max(run_updated, job_completed):
+        raise EvidenceError("GitHub CI collected_at_utc 早于 run/job 完成时间")
+    expected_evidence = {
+        "schema": CI_SCHEMA_V2,
+        "provider": CI_PROVIDER,
+        "api_version": CI_API_VERSION,
+        "repository": CI_REPOSITORY,
+        "workflow_id": workflow_id,
+        "workflow_name": CI_WORKFLOW_NAME,
+        "workflow_path": CI_WORKFLOW_PATH,
+        "event": CI_EVENT,
+        "head_branch": CI_BRANCH,
+        "head_sha": source_commit,
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "run_status": "completed",
+        "run_conclusion": "success",
+        "run_html_url": expected_run["html_url"],
+        "run_created_at_utc": run["created_at"],
+        "run_updated_at_utc": run["updated_at"],
+        "required_job_id": job_id,
+        "required_job_name": CI_JOB_NAME,
+        "required_job_status": "completed",
+        "required_job_conclusion": "success",
+        "required_job_html_url": job_url,
+        "required_job_started_at_utc": job["started_at"],
+        "required_job_completed_at_utc": job["completed_at"],
+        "required_step_name": CI_STEP_NAME,
+        "required_step_status": "completed",
+        "required_step_conclusion": "success",
+        "collected_at_utc": evidence["collected_at_utc"],
+        "raw_run_basename": CI_RAW_RUN_BASENAME,
+        "raw_run_sha256": raw_run_hash,
+        "raw_jobs_basename": CI_RAW_JOBS_BASENAME,
+        "raw_jobs_sha256": raw_jobs_hash,
+    }
+    if evidence != expected_evidence:
+        raise EvidenceError("GitHub CI normalized v2 无法由两个 raw response 精确重建")
+
+    for key, path in paths.items():
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise EvidenceError("GitHub CI 三件套在验证期间消失") from exc
+        if _ci_file_identity(current) != identities[key]:
+            raise EvidenceError("GitHub CI 三件套在跨文件验证期间发生变化")
+    return {
+        "evidence_basename": CI_EVIDENCE_BASENAME,
+        "evidence_sha256": hashlib.sha256(payloads["evidence"]).hexdigest(),
+        "raw_run_basename": CI_RAW_RUN_BASENAME,
+        "raw_run_sha256": raw_run_hash,
+        "raw_jobs_basename": CI_RAW_JOBS_BASENAME,
+        "raw_jobs_sha256": raw_jobs_hash,
+        "source_commit": source_commit,
+    }
+
+
 def validate_ci_evidence_binding(
     data: dict[str, Any],
     evidence_path: Path,
     binding: BuildBinding,
 ) -> None:
-    _, ci_payload, _ = validate_bound_file(
-        data,
-        evidence_path,
-        "ci_evidence_basename",
-        "ci_evidence_sha256",
-        "GitHub CI evidence",
-    )
-    ci = parse_json_bytes(ci_payload, "GitHub CI evidence")
-    require_exact_keys(ci, CI_EVIDENCE_KEYS, "GitHub CI evidence")
-    for key, expected in {
-        "schema": "taiji-github-ci-evidence/v1",
-        "provider": "github-actions",
-        "workflow_name": "Pull Request CI",
-        "required_check_name": "CI Gate",
-        "status": "completed",
-        "conclusion": "success",
-        "head_sha": binding.source_commit,
-    }.items():
-        if ci.get(key) != expected:
-            raise EvidenceError(f"GitHub CI {key} 与冻结发布合同不一致")
-    repository = require_nonempty_string(ci, "repository")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise EvidenceError("GitHub CI repository 格式不合法")
-    require_choice(ci, "event", {"pull_request", "push", "workflow_dispatch"})
-    for key in ("run_id", "run_attempt"):
-        if type(ci[key]) is not int or ci[key] <= 0:
-            raise EvidenceError(f"GitHub CI {key} 必须是正整数")
-    validate_fresh_timestamp(ci["completed_at_utc"], "CI completed_at_utc")
-    validate_fresh_timestamp(ci["collected_at_utc"], "CI collected_at_utc")
-    completed = datetime.fromisoformat(ci["completed_at_utc"][:-1] + "+00:00")
-    collected = datetime.fromisoformat(ci["collected_at_utc"][:-1] + "+00:00")
-    if collected < completed:
-        raise EvidenceError("GitHub CI collected_at_utc 不能早于 completed_at_utc")
-    url = urlsplit(require_nonempty_string(ci, "html_url"))
-    if (
-        url.scheme != "https"
-        or url.hostname != "github.com"
-        or url.username is not None
-        or url.password is not None
-        or url.port is not None
-        or url.path != f"/{repository}/actions/runs/{ci['run_id']}"
-        or url.query
-        or url.fragment
-    ):
-        raise EvidenceError("GitHub CI html_url 不是精确的 Actions run 地址")
+    ci_basename = data.get("ci_evidence_basename")
+    if ci_basename != CI_EVIDENCE_BASENAME:
+        raise EvidenceError("release evidence 必须绑定固定 GitHub CI v2 basename")
+    ci_path = evidence_path.parent / CI_EVIDENCE_BASENAME
+    result = validate_github_ci_evidence_bundle(ci_path, binding.source_commit)
+    if data.get("ci_evidence_sha256") != result["evidence_sha256"]:
+        raise EvidenceError("release evidence GitHub CI v2 SHA256 绑定不一致")
 
 
 def validate_release_evidence_v3(

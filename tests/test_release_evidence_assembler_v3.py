@@ -9,9 +9,10 @@ import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+from tests.github_ci_v2_fixture import write_github_ci_v2_bundle
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,25 +118,13 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
         return module
 
     def write_ci_evidence(self, **updates):
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        payload = {
-            "schema": "taiji-github-ci-evidence/v1",
-            "provider": "github-actions",
-            "repository": "example/taiji-agent",
-            "workflow_name": "Pull Request CI",
-            "required_check_name": "CI Gate",
-            "run_id": 123456789,
-            "run_attempt": 1,
-            "event": "pull_request",
-            "status": "completed",
-            "conclusion": "success",
-            "head_sha": self.commit,
-            "html_url": "https://github.com/example/taiji-agent/actions/runs/123456789",
-            "completed_at_utc": now,
-            "collected_at_utc": now,
-        }
-        payload.update(updates)
-        self.ci_evidence.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        write_github_ci_v2_bundle(self.root, self.commit)
+        if updates:
+            payload = json.loads(self.ci_evidence.read_text(encoding="utf-8"))
+            payload.update(updates)
+            self.ci_evidence.write_text(
+                json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+            )
 
     def assemble_with_verified_certification(self):
         assembler = self._load_assembler()
@@ -223,7 +212,10 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
         )
 
     def test_ci_head_sha_or_conclusion_mismatch_blocks_before_output(self):
-        for updates in ({"head_sha": "b" * 40}, {"conclusion": "failure"}):
+        for updates in (
+            {"head_sha": "b" * 40},
+            {"run_conclusion": "failure"},
+        ):
             with self.subTest(updates=updates):
                 if self.output.exists():
                     self.output.unlink()
@@ -231,6 +223,14 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "CI"):
                     self.assemble_with_verified_certification()
                 self.assertFalse(self.output.exists())
+
+    def test_missing_raw_ci_response_blocks_before_output(self):
+        (self.root / "github-ci-jobs-response.json").unlink()
+
+        with self.assertRaisesRegex(ValueError, "CI"):
+            self.assemble_with_verified_certification()
+
+        self.assertFalse(self.output.exists())
 
     def test_old_v3_missing_strict_toolchain_cannot_be_assembled(self):
         manifest = json.loads(self.manifest.read_text(encoding="utf-8"))

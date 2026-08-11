@@ -45,6 +45,7 @@ from pathlib import Path
 ROOT = Path(os.environ["TAIJI_PUBLISHER_REPO_ROOT"]).resolve()
 PUBLIC_KEY = ROOT / "tools/taiji-release-evidence/signing-public.pem"
 RELEASE_CHECK = ROOT / "scripts/taiji-release-check.sh"
+RELEASE_VALIDATOR = ROOT / "scripts/validate-taiji-release-evidence.py"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -63,7 +64,15 @@ RECEIPT_NAMES = {
     "certification-set.json.sig",
     "compatibility-policy.json",
     "deb.sha256",
+    "github-ci-evidence.json",
+    "github-ci-run-response.json",
+    "github-ci-jobs-response.json",
 }
+CI_NAMES = (
+    "github-ci-evidence.json",
+    "github-ci-run-response.json",
+    "github-ci-jobs-response.json",
+)
 TOOLCHAIN_FIELDS = {
     "python_dependency_lock_status",
     "python_lock_basename",
@@ -328,6 +337,24 @@ def verify_signature(payload_path: Path, signature_path: Path, label: str) -> No
         fail(f"{label} detached signature verification failed")
 
 
+def validate_ci_bundle(evidence_path: Path, source_commit: str) -> dict:
+    if not RELEASE_VALIDATOR.is_file() or RELEASE_VALIDATOR.is_symlink():
+        fail("source-controlled release validator is unavailable")
+    spec = importlib.util.spec_from_file_location(
+        "taiji_publisher_release_validator", RELEASE_VALIDATOR
+    )
+    if spec is None or spec.loader is None:
+        fail("source-controlled release validator cannot be loaded")
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    try:
+        return validator.validate_github_ci_evidence_bundle(
+            evidence_path, source_commit
+        )
+    except Exception as exc:
+        fail(f"trusted GitHub CI v2 physical trio is invalid: {exc}")
+
+
 def publish_noreplace(source: Path, destination: Path) -> None:
     if source.parent != destination.parent:
         fail("atomic publication requires source and destination to share a filesystem directory")
@@ -440,6 +467,11 @@ def main() -> int:
     cert_sig_path = args.certification_signature.resolve()
     release_path = args.release_evidence.resolve()
     release_sig_path = args.release_signature.resolve()
+    ci_paths = {name: delivery_dir / name for name in CI_NAMES}
+    for name, path in ci_paths.items():
+        if path.is_symlink() or not path.exists():
+            fail(f"trusted GitHub CI v2 artifact is missing or a symlink: {name}")
+        lstat_regular(path, f"trusted GitHub CI v2 artifact {name}")
     output_parent = args.output_dir.parent
     if not output_parent.is_dir() or output_parent.is_symlink():
         fail("customer output parent must already be a real directory")
@@ -473,7 +505,7 @@ def main() -> int:
     if candidate.name != customer_name:
         fail(f"candidate DEB basename must be {customer_name}")
 
-    work = Path(tempfile.mkdtemp(prefix="taiji-single-deb-publish-"))
+    work = Path(tempfile.mkdtemp(prefix="taiji-single-deb-publish-")).resolve()
     os.chmod(work, 0o700)
     output_staging: Path | None = None
     receipt_staging: Path | None = None
@@ -493,6 +525,9 @@ def main() -> int:
             (cert_sig_path, "certification-set.json.sig"),
             (release_path, "release-evidence.json"),
             (release_sig_path, "release-evidence.json.sig"),
+            (ci_paths["github-ci-evidence.json"], "github-ci-evidence.json"),
+            (ci_paths["github-ci-run-response.json"], "github-ci-run-response.json"),
+            (ci_paths["github-ci-jobs-response.json"], "github-ci-jobs-response.json"),
         ):
             destination = (
                 certification_bundle / name
@@ -585,6 +620,15 @@ def main() -> int:
             fail("release evidence maintainer does not match canonical policy")
         if release.get("signing_public_key_fingerprint") != "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da":
             fail("release evidence signing trust anchor is invalid")
+        ci_bundle = validate_ci_bundle(
+            snapshots["github-ci-evidence.json"]["path"],
+            release["source_commit"],
+        )
+        if (
+            release.get("ci_evidence_basename") != "github-ci-evidence.json"
+            or release.get("ci_evidence_sha256") != ci_bundle["evidence_sha256"]
+        ):
+            fail("release evidence does not bind the trusted GitHub CI v2 trio")
         cert_expected = {
             "source_commit": release["source_commit"],
             "version": version,
@@ -655,6 +699,9 @@ def main() -> int:
             ("certification-set.json", 0o600),
             ("certification-set.json.sig", 0o600),
             ("compatibility-policy.json", 0o644),
+            ("github-ci-evidence.json", 0o600),
+            ("github-ci-run-response.json", 0o600),
+            ("github-ci-jobs-response.json", 0o600),
         ):
             shutil.copyfile(snapshots[name]["path"], receipt_staging / name)
             os.chmod(receipt_staging / name, mode)
