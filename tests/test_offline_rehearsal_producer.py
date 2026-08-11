@@ -1711,14 +1711,16 @@ class OfflineRehearsalDocumentationTest(unittest.TestCase):
         for snippet in required_snippets:
             self.assertIn(snippet, document)
 
-    def test_final_release_gate_reuses_original_challenges(self):
+    def test_final_release_gate_uses_embedded_challenge_envelopes(self):
         document = DELIVERY_GUIDE.read_text(encoding="utf-8")
         final_gate = document.split("## 最终销售发布", 1)[1].split("## 第五步", 1)[0]
 
-        self.assertIn('<当轮认证集原值>', final_gate)
-        self.assertIn('<当轮发布回执原值>', final_gate)
-        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", final_gate)
-        self.assertIn("TAIJI_PUBLICATION_CHALLENGE", final_gate)
+        self.assertIn("certification envelope", final_gate)
+        self.assertIn("publication envelope", final_gate)
+        self.assertIn("--challenge-envelope", final_gate)
+        self.assertIn("embedded envelope", final_gate)
+        self.assertNotIn("TAIJI_CERTIFICATION_CHALLENGE", final_gate)
+        self.assertNotIn("TAIJI_PUBLICATION_CHALLENGE", final_gate)
         self.assertNotIn("openssl rand -hex 32", final_gate)
 
 

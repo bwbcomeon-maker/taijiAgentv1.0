@@ -40,7 +40,7 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 | 候选 DEB 已构建 | 兼容 Linux amd64 制包机以 strict 合同生成单一 DEB、sidecar、manifest、构建报告和 `.build-success`，最终发布预检通过 |
 | 离线安装已演练 | 干净 Linux amd64 容器、VM 或 chroot 在断网状态下只使用本地交付物完成安装、验证、卸载和重装，并生成当前产物绑定证据 |
 | 目标机已验证 | 真实 Kylin/UOS/openKylin 图形终端完成安装态 Electron 启动、CLI、真实模型对话、附件、关窗退出和诊断导出 |
-| 内部证据档案已闭合 | 离线生命周期、目标矩阵记录、可信 CI、认证签名、发布签名和 release-check 均绑定同一 DEB |
+| 发布前证据门禁已闭合 | 离线生命周期、目标矩阵记录、可信 CI、认证签名、发布签名和 release-check 均绑定同一 DEB；publisher 尚未运行 |
 | 客户单 DEB 已发布 | 发布器原子生成恰好只含一个 `taiji-agent_<version>_amd64.deb` 的客户目录，并在内部生成绑定回执 |
 
 源码测试、macOS Electron App、旧 commit 的 DEB、旧日志或截图都不能替代当前产物的后一级证据。最终销售放行还要求两类证据经过发布负责人复核、签名，并通过 `scripts/taiji-release-check.sh`。
@@ -190,21 +190,69 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 ### 5.5 签名与最终放行
 
-断网演练、目标安装验收、certification set 签名和 publication 签名分别使用各自用途的 challenge，不能跨用途复用。各环境记录聚合为 certification set 后，发布负责人检查原始会话、截图和诊断内容，再用独立离线私钥签名；发布回执使用另一个 publication challenge。每条证据链必须复用本用途当轮原值，不能在签名或最终门禁时重新生成：
+正式 certification challenge 必须在断网演练、目标安装验收和十二条环境记录采集之前签发为 canonical envelope。该 envelope 的 nonce 统一驱动离线演练、正式目标验收、六正六负记录和 certification set；这些材料属于同一个认证证据域，不能各自临时生成 challenge。certification 签名完成后，再为 publication 签发用途独立、nonce 不同的 envelope。两个 envelope 都绑定 source commit、候选 DEB basename/SHA256 和有效期；签名、release-check 或 publisher 阶段不得重新生成、跨用途复用或只依赖环境变量中的裸 nonce。
 
 certification validator 会对六个正向和六个负向环境记录逐条比对 `source_commit/version/architecture/deb_basename/deb_sha256/compatibility_policy_id/compatibility_policy_sha256`，必须与顶层 v3 `BuildBinding` 完全一致；摘要和字段结构合法不能代替这项逐记录身份校验。认证集还必须把每条记录声明的 target/driver/screenshot/preflight 等附件和整个断网演练证据目录归档在固定子目录中，逐文件复算 SHA256/大小/清单摘要，再重跑基础会话、扩展生命周期原始日志、previous DEB basename/version/SHA256 以及 Debian `previous < candidate` 语义校验。签名器会在签名前执行同一完整实物校验；只剩顶层 JSON 或任意摘要字符串不能发布。
 
 ```bash
-export TAIJI_CERTIFICATION_CHALLENGE="<当轮认证集原值>"
-export TAIJI_PUBLICATION_CHALLENGE="<当轮发布回执原值>"
+DELIVERY="$PWD/taijiagent 打包交付"
+DEB="$DELIVERY/生成的安装包/taiji-agent_<version>_amd64.deb"
+SOURCE_COMMIT="<冻结的40位source commit>"
+CERT_ENVELOPE="$DELIVERY/certification-challenge-envelope.json"
+PUB_ENVELOPE="$DELIVERY/publication-challenge-envelope.json"
+
+# 必须在 offline/正式 target/十二条 records 采集前执行；1..604800 秒，不能覆盖旧文件。
+python3 scripts/taiji-challenge-envelope.py issue \
+  --purpose certification \
+  --source-commit "$SOURCE_COMMIT" \
+  --deb "$DEB" \
+  --output "$CERT_ENVELOPE" \
+  --ttl-seconds 604800
+
+# offline producer、target observer/attest/installed acceptance 和十二条 records
+# 都使用经过 verify 的 CERT_ENVELOPE.nonce；旧材料不能换 nonce 后继续复用。
+python3 scripts/taiji-challenge-envelope.py verify \
+  --envelope "$CERT_ENVELOPE" \
+  --purpose certification \
+  --source-commit "$SOURCE_COMMIT" \
+  --deb "$DEB" \
+  --require-active
+
+python3 scripts/assemble-taiji-certification-set.py \
+  --matrix "$PWD/packaging/linux/certification-matrix.json" \
+  --records-dir "$DELIVERY/certification-records" \
+  --offline-evidence "$DELIVERY/offline-install-rehearsal" \
+  --deb "$DEB" \
+  --policy "$PWD/packaging/linux/compatibility-policy.json" \
+  --output "$DELIVERY/certification" \
+  --challenge-envelope "$CERT_ENVELOPE"
 bash scripts/sign-taiji-release-evidence.sh \
-  "taijiagent 打包交付/certification/certification-set.json" \
+  "$DELIVERY/certification/certification-set.json" \
   "/受控离线路径/offline-release-private-key.pem"
+
+# certification 已签名且接近 publication 组装时再签发独立 publication envelope。
+python3 scripts/taiji-challenge-envelope.py issue \
+  --purpose publication \
+  --source-commit "$SOURCE_COMMIT" \
+  --deb "$DEB" \
+  --output "$PUB_ENVELOPE" \
+  --ttl-seconds 86400
+python3 scripts/assemble-taiji-release-evidence.py \
+  --manifest "$DELIVERY/生成的安装包/taiji-package-manifest.json" \
+  --deb "$DEB" \
+  --policy "$PWD/packaging/linux/compatibility-policy.json" \
+  --certification-set "$DELIVERY/certification/certification-set.json" \
+  --certification-signature "$DELIVERY/certification/certification-set.json.sig" \
+  --ci-evidence "$DELIVERY/github-ci-evidence.json" \
+  --output "$DELIVERY/release-evidence.json" \
+  --challenge-envelope "$PUB_ENVELOPE"
 bash scripts/sign-taiji-release-evidence.sh \
-  "taijiagent 打包交付/release-evidence.json" \
+  "$DELIVERY/release-evidence.json" \
   "/受控离线路径/offline-release-private-key.pem"
 bash scripts/taiji-release-check.sh
 ```
+
+`used-nonces` 是固定登录账户、公钥 fingerprint 分区的本地防误重放状态；移动私钥目录不能重用 nonce。但账户拥有者可以删除本地状态，所以它不是跨主机、抗篡改或 HSM/远端追加账本级的全局一次性证明。
 
 门禁通过后才能生成客户目录；输出目录必须事先不存在，receipt 是内部档案，不交付客户：
 
@@ -222,7 +270,7 @@ bash packaging/linux/deb/publish-single-deb.sh \
   --receipt-root "$PWD/internal-release-receipts/single-deb"
 ```
 
-发布脚本会先快照候选 DEB、policy、两组 signed evidence，以及认证集的全部 `records/` 附件和 `offline-rehearsal/` 原始证据，再执行正式 release-check；门禁期间任何实物增删、替换或改动都会失败且不生成客户目录。最后以不可替换 rename 原子生成新客户目录，并把 `release-evidence.json`、两组签名、policy 和 `deb.sha256` 六个文件归档到内部 receipt。这六文件是 publisher 回执，不是完整认证档案；完整 certification `records/`、`offline-rehearsal/` 及其它受控原始附件必须在内部认证归档中持续保留。客户只收到该目录中的固定 basename DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
+发布脚本会先快照候选 DEB、policy、两组 signed evidence、CI v2 三件套，以及认证集的全部 `records/` 附件和 `offline-rehearsal/` 原始证据，再执行正式 release-check；门禁期间任何实物增删、替换或改动都会失败且不生成客户目录。最后以不可替换 rename 原子生成新客户目录，并把 `release-evidence.json`、其签名、`certification-set.json`、其签名、policy、`deb.sha256` 和 CI v2 normalized/run/jobs 三件套共九个文件归档到内部 receipt。这九文件是 publisher 回执，不是完整认证档案；完整 certification `records/`、`offline-rehearsal/` 及其它受控原始附件必须在内部认证归档中持续保留。客户只收到该目录中的固定 basename DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
 
 ## 6. 完整离线交付契约
 
