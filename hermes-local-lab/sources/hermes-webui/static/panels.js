@@ -11224,11 +11224,9 @@ function _mainModelConfigMatchesExpected(main,expected){
  const model=String(current.model||'').trim();
  const targetModel=String(target.model||'').trim();
  if(provider!==targetProvider||model!==targetModel||!(current.key_status&&current.key_status.configured)) return false;
- if(targetProvider==='custom'||String(target.base_url||'').trim()){
-  const base=String(current.base_url||'').trim().replace(/\/$/,'');
-  const targetBase=String(target.base_url||'').trim().replace(/\/$/,'');
-  if(base!==targetBase) return false;
- }
+ const base=String(current.base_url||'').trim().replace(/\/+$/,'');
+ const targetBase=String(target.base_url||'').trim().replace(/\/+$/,'');
+ if(base!==targetBase) return false;
  return true;
 }
 

@@ -1469,32 +1469,45 @@ def _reconcile_taiji_main_model_credential_revision(
     bound_env = _taiji_valid_secret_env(
         mutated_config.get(TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY)
     )
+    request_id_changed = desired_request_id != current_request_id
+    new_receipt = bool(
+        allow_new_receipt
+        and _TAIJI_OPAQUE_REVISION_RE.fullmatch(desired_request_id)
+        and bound_env
+        and request_id_changed
+    )
+
+    caller_metadata_changed = any(
+        (key in current_config) != (key in mutated_config)
+        or current_config.get(key) != mutated_config.get(key)
+        for key in metadata_keys
+    )
+    if caller_metadata_changed and not new_receipt:
+        if TAIJI_CREDENTIAL_REVISIONS_KEY in current_config:
+            mutated_config[TAIJI_CREDENTIAL_REVISIONS_KEY] = copy.deepcopy(
+                current_config.get(TAIJI_CREDENTIAL_REVISIONS_KEY)
+            )
+        else:
+            mutated_config.pop(TAIJI_CREDENTIAL_REVISIONS_KEY, None)
+        mutated_config.pop(TAIJI_MAIN_MODEL_REQUEST_ID_KEY, None)
+        mutated_config.pop(TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY, None)
+        mutated_config.pop(TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY, None)
+        return
+
     revisions_value = mutated_config.get(TAIJI_CREDENTIAL_REVISIONS_KEY)
     revisions = (
         copy.deepcopy(revisions_value)
         if isinstance(revisions_value, dict)
         else {}
     )
-    request_id_changed = desired_request_id != current_request_id
-    new_receipt = bool(
-        allow_new_receipt
-        and _TAIJI_OPAQUE_REVISION_RE.fullmatch(desired_request_id)
-        and request_id_changed
-    )
 
-    if new_receipt and bound_env:
+    if new_receipt:
         revision = _taiji_valid_opaque_revision(revisions.get(bound_env))
         if bound_env in changed_env_keys or not revision:
             revision = uuid.uuid4().hex
         revisions[bound_env] = revision
         mutated_config[TAIJI_CREDENTIAL_REVISIONS_KEY] = revisions
         mutated_config[TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY] = revision
-        return
-
-    if request_id_changed and not allow_new_receipt:
-        mutated_config.pop(TAIJI_MAIN_MODEL_REQUEST_ID_KEY, None)
-        mutated_config.pop(TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY, None)
-        mutated_config.pop(TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY, None)
         return
 
     receipt_revision = _taiji_valid_opaque_revision(
@@ -3740,6 +3753,18 @@ def seed_config_payload_strict(
     if len(config_payload) > _MAX_CREDENTIAL_CONFIG_BYTES:
         raise ValueError("credential config exceeds maximum size")
     parsed = _parse_config_bytes(config_payload)
+    if any(
+        key in parsed
+        for key in (
+            TAIJI_MAIN_MODEL_REQUEST_ID_KEY,
+            TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY,
+            TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY,
+            TAIJI_CREDENTIAL_REVISIONS_KEY,
+        )
+    ):
+        raise ValueError(
+            "credential config seed cannot contain Taiji receipt metadata"
+        )
 
     with credential_transaction(config_path) as spec:
         config_exists, _config_before = _read_optional_bytes(
@@ -3999,6 +4024,26 @@ def replace_config_env_payload_strict(
             mutated_config = mutation_result
         if not isinstance(mutated_config, dict):
             raise ValueError("credential config mutation must produce a mapping")
+        selected_env_keys = {
+            key: True
+            for key in projection_keys
+        }
+        try:
+            changed_env_keys = _changed_selected_env_keys(
+                env_before,
+                env_payload,
+                selected_env_keys,
+            )
+        except ValueError:
+            # This primitive exists to repair legacy env payloads that the
+            # strict parser cannot read. Its callers provide only keys whose
+            # effective values changed, so fail closed for receipt validity.
+            changed_env_keys = set(projection_keys)
+        _reconcile_taiji_main_model_credential_revision(
+            current_config,
+            mutated_config,
+            changed_env_keys,
+        )
         config_target = yaml.safe_dump(
             mutated_config,
             allow_unicode=True,

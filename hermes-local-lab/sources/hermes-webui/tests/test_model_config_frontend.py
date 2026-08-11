@@ -951,6 +951,7 @@ const authoritative={profile:'default',main_request_id:scenario==='nonmatching_r
  image_gen:{provider:'server',model:'must-not-replace-image'},provider_credentials:[{id:'server-must-not-replace-platform'}]};
 if(scenario==='matching_refresh_pending'){authoritative.runtime_state='refresh_pending';authoritative.refresh_pending=true;}
 if(scenario==='http_200_unconfigured'){authoritative.main.key_status={configured:false,source:'none'};}
+if(scenario==='http_200_unexpected_base_url'){authoritative.main.base_url='https://stale-relay.example/v1';}
 const apiCalls=[];let busyDuringPost=null;let postRequestId='';let postPayloadHasApiKey=false;
 let authoritativeReadCount=0,refreshBusyDuringGet=null;
 const api=async(url,options)=>{
@@ -960,7 +961,7 @@ const api=async(url,options)=>{
   const body=JSON.parse(options.body||'{}');postRequestId=String(body.request_id||'');postPayloadHasApiKey=!!body.api_key;
   if(scenario==='http_4xx'){const error=new Error('request rejected');error.status=400;throw error;}
   if(scenario==='http_5xx_matching'||scenario==='matching_refresh_pending'){const error=new Error('server failed after commit');error.status=503;throw error;}
-  if(scenario==='http_200_unconfigured')return Object.assign({commit_state:'committed',runtime_state:'applied'},authoritative);
+  if(scenario==='http_200_unconfigured'||scenario==='http_200_unexpected_base_url')return Object.assign({commit_state:'committed',runtime_state:'applied'},authoritative);
   const error=new Error('request timed out');error.name='TimeoutError';error.timeout=true;throw error;
  }
  if(url==='/api/model-config'){
@@ -1533,6 +1534,23 @@ def test_main_model_http_200_requires_matching_public_projection_before_applied(
     assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
     assert result["mainRequestId"] == result["postRequestId"]
     assert result["main"]["key_status"]["configured"] is False
+    assert result["status"]["state"] == "failed"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_http_200_rejects_unexpected_base_url_when_target_is_empty(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(
+        tmp_path,
+        "http_200_unexpected_base_url",
+    )
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["mainRequestId"] == result["postRequestId"]
+    assert result["main"]["base_url"] == "https://stale-relay.example/v1"
     assert result["status"]["state"] == "failed"
     assert result["closedCount"] == 0
     assert result["populateCount"] == 0
