@@ -8,11 +8,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -37,6 +38,12 @@ MAX_RUN_BYTES = 2 * 1024 * 1024
 MAX_JOBS_BYTES = 8 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 20
 MAX_RUN_AGE = timedelta(days=7)
+STAGING_PREFIX = ".taiji-github-ci-evidence."
+DELIVERY_BASENAMES = (
+    RUN_BASENAME,
+    JOBS_BASENAME,
+    EVIDENCE_BASENAME,
+)
 
 
 class GitHubCiEvidenceError(ValueError):
@@ -375,6 +382,424 @@ def _write_new(path: Path, payload: bytes) -> None:
         os.close(descriptor)
 
 
+def _file_identity(value: os.stat_result) -> Tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _directory_anchor(value: os.stat_result) -> Tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+    )
+
+
+def _open_delivery_directory(delivery_dir: Path) -> Tuple[int, Tuple[int, ...]]:
+    if not delivery_dir.is_absolute():
+        raise GitHubCiEvidenceError(
+            "delivery directory must be an existing absolute real directory"
+        )
+    try:
+        before = delivery_dir.lstat()
+    except OSError as exc:
+        raise GitHubCiEvidenceError(
+            "delivery directory must be an existing absolute real directory"
+        ) from exc
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or delivery_dir.resolve() != delivery_dir
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o022
+    ):
+        raise GitHubCiEvidenceError(
+            "delivery directory must be current-user owned, real, and not group/other writable"
+        )
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(str(delivery_dir), flags)
+    except OSError as exc:
+        raise GitHubCiEvidenceError(
+            "delivery directory cannot be opened safely"
+        ) from exc
+    opened = os.fstat(descriptor)
+    if _directory_anchor(opened) != _directory_anchor(before):
+        os.close(descriptor)
+        raise GitHubCiEvidenceError("delivery directory changed before use")
+    return descriptor, _directory_anchor(opened)
+
+
+def _assert_delivery_anchor(
+    delivery_dir: Path,
+    descriptor: int,
+    expected: Tuple[int, ...],
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        current = delivery_dir.lstat()
+    except OSError as exc:
+        raise GitHubCiEvidenceError("delivery directory changed during collection") from exc
+    if (
+        _directory_anchor(opened) != expected
+        or _directory_anchor(current) != expected
+        or stat.S_ISLNK(current.st_mode)
+        or delivery_dir.resolve() != delivery_dir
+    ):
+        raise GitHubCiEvidenceError("delivery directory changed during collection")
+
+
+def _assert_delivery_destinations_absent(descriptor: int) -> None:
+    for basename in DELIVERY_BASENAMES:
+        try:
+            os.stat(basename, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise GitHubCiEvidenceError(
+                "CI evidence destination cannot be inspected safely"
+            ) from exc
+        raise GitHubCiEvidenceError(
+            "CI evidence destination already exists; refusing to overwrite"
+        )
+
+
+def _create_staging_directory(delivery_descriptor: int) -> Tuple[str, int]:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    for _attempt in range(32):
+        name = STAGING_PREFIX + secrets.token_hex(16)
+        try:
+            os.mkdir(name, 0o700, dir_fd=delivery_descriptor)
+        except FileExistsError:
+            continue
+        try:
+            descriptor = os.open(name, flags, dir_fd=delivery_descriptor)
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise GitHubCiEvidenceError("CI evidence staging directory is unsafe")
+            return name, descriptor
+        except BaseException:
+            try:
+                os.rmdir(name, dir_fd=delivery_descriptor)
+            except OSError:
+                pass
+            raise
+    raise GitHubCiEvidenceError("cannot allocate a private CI evidence staging directory")
+
+
+def _write_new_at(directory_descriptor: int, basename: str, payload: bytes) -> None:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(basename, flags, 0o600, dir_fd=directory_descriptor)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise GitHubCiEvidenceError("CI evidence staging write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != len(payload)
+        ):
+            raise GitHubCiEvidenceError("CI evidence staging file is unsafe")
+    finally:
+        os.close(descriptor)
+
+
+def _read_regular_at(
+    directory_descriptor: int,
+    basename: str,
+    maximum: int,
+) -> Tuple[bytes, os.stat_result]:
+    try:
+        before = os.stat(
+            basename,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise GitHubCiEvidenceError("CI evidence staging file is missing") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_size <= 0
+        or before.st_size > maximum
+    ):
+        raise GitHubCiEvidenceError("CI evidence staging file is unsafe")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(basename, flags, dir_fd=directory_descriptor)
+    try:
+        opened = os.fstat(descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            raise GitHubCiEvidenceError("CI evidence staging file changed before read")
+        remaining = opened.st_size
+        chunks = []  # type: List[bytes]
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise GitHubCiEvidenceError("CI evidence staging file was truncated")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise GitHubCiEvidenceError("CI evidence staging file grew during read")
+        after = os.fstat(descriptor)
+        current = os.stat(
+            basename,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            _file_identity(after) != _file_identity(opened)
+            or _file_identity(current) != _file_identity(opened)
+        ):
+            raise GitHubCiEvidenceError("CI evidence staging file changed during read")
+        return b"".join(chunks), opened
+    finally:
+        os.close(descriptor)
+
+
+def _validate_staged_bundle(
+    staging_descriptor: int,
+    payloads: Dict[str, bytes],
+) -> None:
+    if set(os.listdir(staging_descriptor)) != set(DELIVERY_BASENAMES):
+        raise GitHubCiEvidenceError("CI evidence staging closure is not the exact trio")
+    maximums = {
+        RUN_BASENAME: MAX_RUN_BYTES,
+        JOBS_BASENAME: MAX_JOBS_BYTES,
+        EVIDENCE_BASENAME: MAX_RUN_BYTES,
+    }
+    for basename in DELIVERY_BASENAMES:
+        observed, _metadata = _read_regular_at(
+            staging_descriptor,
+            basename,
+            maximums[basename],
+        )
+        if observed != payloads[basename]:
+            raise GitHubCiEvidenceError("CI evidence staging bytes changed")
+    os.fsync(staging_descriptor)
+
+
+def _promote_staged_file(
+    staging_descriptor: int,
+    delivery_descriptor: int,
+    basename: str,
+    created_destinations: List[Tuple[str, int, int]],
+) -> None:
+    maximum = MAX_JOBS_BYTES if basename == JOBS_BASENAME else MAX_RUN_BYTES
+    payload, source_metadata = _read_regular_at(
+        staging_descriptor,
+        basename,
+        maximum,
+    )
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(basename, flags, 0o600, dir_fd=delivery_descriptor)
+    created_metadata = os.fstat(descriptor)
+    created_destinations.append(
+        (basename, created_metadata.st_dev, created_metadata.st_ino)
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise GitHubCiEvidenceError("CI evidence promotion write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        final = os.fstat(descriptor)
+        current = os.stat(
+            basename,
+            dir_fd=delivery_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(final.st_mode)
+            or final.st_uid != os.getuid()
+            or final.st_nlink != 1
+            or stat.S_IMODE(final.st_mode) != 0o600
+            or final.st_size != len(payload)
+            or _file_identity(final) != _file_identity(current)
+        ):
+            raise GitHubCiEvidenceError("promoted CI evidence file is unsafe")
+        staged_now = os.stat(
+            basename,
+            dir_fd=staging_descriptor,
+            follow_symlinks=False,
+        )
+        if _file_identity(staged_now) != _file_identity(source_metadata):
+            raise GitHubCiEvidenceError("CI evidence staging file changed during promotion")
+    finally:
+        os.close(descriptor)
+
+
+def _remove_owned_destinations(
+    delivery_descriptor: int,
+    created_destinations: List[Tuple[str, int, int]],
+) -> None:
+    for basename, device, inode in reversed(created_destinations):
+        try:
+            current = os.stat(
+                basename,
+                dir_fd=delivery_descriptor,
+                follow_symlinks=False,
+            )
+            if (current.st_dev, current.st_ino) == (device, inode):
+                os.unlink(basename, dir_fd=delivery_descriptor)
+        except OSError:
+            pass
+
+
+def _remove_staging_directory(
+    delivery_descriptor: int,
+    staging_name: Optional[str],
+    staging_descriptor: Optional[int],
+) -> bool:
+    clean = True
+    if staging_descriptor is not None:
+        for basename in DELIVERY_BASENAMES:
+            try:
+                os.unlink(basename, dir_fd=staging_descriptor)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                clean = False
+        try:
+            if os.listdir(staging_descriptor):
+                clean = False
+        except OSError:
+            clean = False
+        try:
+            os.fsync(staging_descriptor)
+        except OSError:
+            clean = False
+        try:
+            os.close(staging_descriptor)
+        except OSError:
+            clean = False
+    if staging_name is not None:
+        try:
+            os.rmdir(staging_name, dir_fd=delivery_descriptor)
+        except OSError:
+            clean = False
+    return clean
+
+
+def _publish_into_delivery(
+    delivery_dir: Path,
+    delivery_descriptor: int,
+    anchor: Tuple[int, ...],
+    payloads: Dict[str, bytes],
+) -> Path:
+    staging_name = None  # type: Optional[str]
+    staging_descriptor = None  # type: Optional[int]
+    created = []  # type: List[Tuple[str, int, int]]
+    succeeded = False
+    try:
+        _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+        _assert_delivery_destinations_absent(delivery_descriptor)
+        staging_name, staging_descriptor = _create_staging_directory(
+            delivery_descriptor
+        )
+        for basename in DELIVERY_BASENAMES:
+            _write_new_at(staging_descriptor, basename, payloads[basename])
+        _validate_staged_bundle(staging_descriptor, payloads)
+        _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+        for basename in DELIVERY_BASENAMES:
+            _promote_staged_file(
+                staging_descriptor,
+                delivery_descriptor,
+                basename,
+                created,
+            )
+        _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+        os.fsync(delivery_descriptor)
+        for basename in DELIVERY_BASENAMES:
+            observed, metadata = _read_regular_at(
+                delivery_descriptor,
+                basename,
+                MAX_JOBS_BYTES if basename == JOBS_BASENAME else MAX_RUN_BYTES,
+            )
+            if observed != payloads[basename] or metadata.st_nlink != 1:
+                raise GitHubCiEvidenceError("promoted CI evidence bundle changed")
+        _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+        if not _remove_staging_directory(
+            delivery_descriptor,
+            staging_name,
+            staging_descriptor,
+        ):
+            staging_descriptor = None
+            raise GitHubCiEvidenceError(
+                "CI evidence staging cleanup failed; publication was rolled back"
+            )
+        staging_name = None
+        staging_descriptor = None
+        os.fsync(delivery_descriptor)
+        _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+        succeeded = True
+        return delivery_dir / EVIDENCE_BASENAME
+    finally:
+        if not succeeded:
+            _remove_owned_destinations(delivery_descriptor, created)
+        _remove_staging_directory(
+            delivery_descriptor,
+            staging_name,
+            staging_descriptor,
+        )
+        try:
+            os.fsync(delivery_descriptor)
+        except OSError:
+            pass
+
+
 def _prepare_output(output_dir: Path) -> None:
     if (
         not output_dir.is_absolute()
@@ -402,7 +827,8 @@ def produce(
     *,
     source_commit: str,
     run_id: int,
-    output_dir: Path,
+    output_dir: Optional[Path] = None,
+    delivery_dir: Optional[Path] = None,
 ) -> Path:
     if (
         type(source_commit) is not str
@@ -412,8 +838,25 @@ def produce(
             "source_commit must be a full lowercase Git commit"
         )
     run_id = _require_positive_integer(run_id, "run_id")
-    output_dir = Path(output_dir)
-    _prepare_output(output_dir)
+    if (output_dir is None) == (delivery_dir is None):
+        raise GitHubCiEvidenceError(
+            "exactly one of output_dir or delivery_dir is required"
+        )
+    delivery_descriptor = None  # type: Optional[int]
+    delivery_anchor = None  # type: Optional[Tuple[int, ...]]
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        _prepare_output(output_dir)
+    else:
+        delivery_dir = Path(delivery_dir)
+        delivery_descriptor, delivery_anchor = _open_delivery_directory(
+            delivery_dir
+        )
+        try:
+            _assert_delivery_destinations_absent(delivery_descriptor)
+        finally:
+            os.close(delivery_descriptor)
+            delivery_descriptor = None
     current_time = _utc_now()
     if current_time.tzinfo is None:
         raise GitHubCiEvidenceError("current time must be timezone-aware")
@@ -493,39 +936,62 @@ def produce(
         + "\n"
     ).encode("utf-8")
 
-    os.mkdir(output_dir, 0o700)
-    created = []
     try:
-        for basename, payload in (
-            (RUN_BASENAME, run_payload),
-            (JOBS_BASENAME, jobs_payload),
-            (EVIDENCE_BASENAME, evidence_payload),
-        ):
-            path = output_dir / basename
-            created.append(path)
-            _write_new(path, payload)
-        directory_fd = os.open(
-            output_dir,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-        )
+        payloads = {
+            RUN_BASENAME: run_payload,
+            JOBS_BASENAME: jobs_payload,
+            EVIDENCE_BASENAME: evidence_payload,
+        }
+        if delivery_dir is not None:
+            delivery_descriptor, current_anchor = _open_delivery_directory(
+                delivery_dir
+            )
+            if current_anchor != delivery_anchor:
+                os.close(delivery_descriptor)
+                delivery_descriptor = None
+                raise GitHubCiEvidenceError(
+                    "delivery directory changed during collection"
+                )
+            _assert_delivery_destinations_absent(delivery_descriptor)
+            return _publish_into_delivery(
+                delivery_dir,
+                delivery_descriptor,
+                delivery_anchor,
+                payloads,
+            )
+
+        os.mkdir(output_dir, 0o700)
+        created = []  # type: List[Path]
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except BaseException:
-        for path in reversed(created):
+            for basename in DELIVERY_BASENAMES:
+                path = output_dir / basename
+                created.append(path)
+                _write_new(path, payloads[basename])
+            directory_fd = os.open(
+                output_dir,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
             try:
-                path.unlink()
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except BaseException:
+            for path in reversed(created):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            try:
+                output_dir.rmdir()
             except OSError:
                 pass
-        try:
-            output_dir.rmdir()
-        except OSError:
-            pass
-        raise
-    return output_dir / EVIDENCE_BASENAME
+            raise
+        return output_dir / EVIDENCE_BASENAME
+    finally:
+        if delivery_descriptor is not None:
+            os.close(delivery_descriptor)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -534,7 +1000,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--run-id", required=True, type=int)
-    parser.add_argument("--output-dir", required=True, type=Path)
+    output = parser.add_mutually_exclusive_group(required=True)
+    output.add_argument("--output-dir", type=Path)
+    output.add_argument("--delivery-dir", type=Path)
     return parser.parse_args(argv)
 
 
@@ -545,6 +1013,7 @@ def main(argv=None) -> int:
             source_commit=args.source_commit,
             run_id=args.run_id,
             output_dir=args.output_dir,
+            delivery_dir=args.delivery_dir,
         )
     except (
         GitHubCiEvidenceError,

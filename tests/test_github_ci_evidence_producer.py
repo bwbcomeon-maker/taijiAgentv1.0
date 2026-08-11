@@ -165,6 +165,25 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
                 output_dir=output or self.output,
             )
 
+    def call_delivery_producer(
+        self,
+        delivery: Path,
+        *,
+        source_commit=SOURCE_COMMIT,
+        run_id=RUN_ID,
+        api=None,
+    ):
+        fake_api = api or self.api()
+        with patch.object(
+            self.producer, "_github_fetch_bytes", side_effect=fake_api
+        ), patch.object(self.producer, "_utc_now", return_value=NOW):
+            return self.producer.produce(
+                source_commit=source_commit,
+                run_id=run_id,
+                output_dir=None,
+                delivery_dir=delivery,
+            )
+
     def produce(self, *, api=None, output=None):
         return self.call_producer(api=api, output=output)
 
@@ -499,6 +518,209 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
 
         self.assertFalse(self.output.exists())
 
+    def test_existing_delivery_mode_promotes_exact_trio_without_staging_residue(self):
+        delivery = self.root / "review-delivery"
+        delivery.mkdir(mode=0o700)
+
+        result = self.call_delivery_producer(delivery)
+
+        self.assertEqual(result, delivery / "github-ci-evidence.json")
+        self.assertEqual(
+            {item.name for item in delivery.iterdir()},
+            {
+                "github-ci-evidence.json",
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
+            },
+        )
+        for path in delivery.iterdir():
+            metadata = path.lstat()
+            self.assertTrue(stat.S_ISREG(metadata.st_mode))
+            self.assertEqual(metadata.st_nlink, 1)
+            self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o600)
+
+    def test_delivery_mode_rejects_relative_symlink_and_writable_directory_before_network(self):
+        real_delivery = self.root / "real-delivery"
+        real_delivery.mkdir(mode=0o700)
+        linked_delivery = self.root / "linked-delivery"
+        linked_delivery.symlink_to(real_delivery, target_is_directory=True)
+        writable_delivery = self.root / "writable-delivery"
+        writable_delivery.mkdir(mode=0o770)
+        writable_delivery.chmod(0o770)
+
+        for delivery in (
+            Path("relative-delivery"),
+            linked_delivery,
+            writable_delivery,
+        ):
+            with self.subTest(delivery=delivery):
+                api = self.api()
+                with self.assertRaises(self.producer.GitHubCiEvidenceError):
+                    self.call_delivery_producer(delivery, api=api)
+                self.assertEqual(api.calls, [])
+        self.assertEqual(list(real_delivery.iterdir()), [])
+        self.assertEqual(list(writable_delivery.iterdir()), [])
+
+    def test_delivery_mode_rejects_preexisting_regular_or_symlink_without_touching_it(self):
+        for basename in (
+            "github-ci-run-response.json",
+            "github-ci-jobs-response.json",
+            "github-ci-evidence.json",
+        ):
+            for kind in ("regular", "symlink"):
+                with self.subTest(basename=basename, kind=kind):
+                    delivery = self.root / f"preexisting-{basename}-{kind}"
+                    delivery.mkdir(mode=0o700)
+                    destination = delivery / basename
+                    if kind == "regular":
+                        destination.write_bytes(b"preexisting-must-survive")
+                    else:
+                        target = self.root / f"outside-{basename}-{kind}"
+                        target.write_bytes(b"outside-must-survive")
+                        destination.symlink_to(target)
+                    before = destination.lstat()
+                    api = self.api()
+
+                    with self.assertRaises(self.producer.GitHubCiEvidenceError):
+                        self.call_delivery_producer(delivery, api=api)
+
+                    after = destination.lstat()
+                    self.assertEqual(
+                        (before.st_dev, before.st_ino, before.st_mode),
+                        (after.st_dev, after.st_ino, after.st_mode),
+                    )
+                    if kind == "regular":
+                        self.assertEqual(destination.read_bytes(), b"preexisting-must-survive")
+                    else:
+                        self.assertTrue(destination.is_symlink())
+                        self.assertEqual(destination.resolve().read_bytes(), b"outside-must-survive")
+                    self.assertEqual(api.calls, [])
+                    self.assertFalse(
+                        any(item.name.startswith(".taiji-github-ci-evidence.") for item in delivery.iterdir())
+                    )
+
+    def test_delivery_directory_swap_during_fetch_fails_closed_and_cleans_owned_staging(self):
+        delivery = self.root / "delivery-to-swap"
+        delivery.mkdir(mode=0o700)
+        moved = self.root / "moved-original-delivery"
+        base_api = self.api()
+
+        def swapping_api(url):
+            if not base_api.calls:
+                delivery.rename(moved)
+                delivery.mkdir(mode=0o700)
+            return base_api(url)
+
+        with self.assertRaises(self.producer.GitHubCiEvidenceError):
+            self.call_delivery_producer(delivery, api=swapping_api)
+
+        expected_names = {
+            "github-ci-run-response.json",
+            "github-ci-jobs-response.json",
+            "github-ci-evidence.json",
+        }
+        self.assertTrue(expected_names.isdisjoint({item.name for item in delivery.iterdir()}))
+        self.assertTrue(expected_names.isdisjoint({item.name for item in moved.iterdir()}))
+        self.assertFalse(
+            any(item.name.startswith(".taiji-github-ci-evidence.") for item in moved.iterdir())
+        )
+
+    def test_delivery_directory_swap_during_final_promotion_rolls_back_original_directory(self):
+        delivery = self.root / "delivery-to-swap-late"
+        delivery.mkdir(mode=0o700)
+        moved = self.root / "moved-late-delivery"
+        original_promote = self.producer._promote_staged_file
+
+        def swap_after_last_promotion(*args, **kwargs):
+            result = original_promote(*args, **kwargs)
+            if args[2] == "github-ci-evidence.json":
+                delivery.rename(moved)
+                delivery.mkdir(mode=0o700)
+            return result
+
+        with patch.object(
+            self.producer,
+            "_promote_staged_file",
+            side_effect=swap_after_last_promotion,
+        ):
+            with self.assertRaises(self.producer.GitHubCiEvidenceError):
+                self.call_delivery_producer(delivery)
+
+        expected_names = {
+            "github-ci-run-response.json",
+            "github-ci-jobs-response.json",
+            "github-ci-evidence.json",
+        }
+        self.assertTrue(expected_names.isdisjoint({item.name for item in delivery.iterdir()}))
+        self.assertTrue(expected_names.isdisjoint({item.name for item in moved.iterdir()}))
+        self.assertFalse(
+            any(item.name.startswith(".taiji-github-ci-evidence.") for item in moved.iterdir())
+        )
+
+    def test_delivery_directory_swap_during_staging_cleanup_fails_closed_and_rolls_back(self):
+        delivery = self.root / "delivery-to-swap-during-cleanup"
+        delivery.mkdir(mode=0o700)
+        moved = self.root / "moved-cleanup-delivery"
+        original_cleanup = self.producer._remove_staging_directory
+        swapped = False
+
+        def swap_before_cleanup(*args, **kwargs):
+            nonlocal swapped
+            if not swapped and args[1] is not None:
+                delivery.rename(moved)
+                delivery.mkdir(mode=0o700)
+                swapped = True
+            return original_cleanup(*args, **kwargs)
+
+        with patch.object(
+            self.producer,
+            "_remove_staging_directory",
+            side_effect=swap_before_cleanup,
+        ):
+            with self.assertRaises(self.producer.GitHubCiEvidenceError):
+                self.call_delivery_producer(delivery)
+
+        expected_names = {
+            "github-ci-run-response.json",
+            "github-ci-jobs-response.json",
+            "github-ci-evidence.json",
+        }
+        self.assertTrue(expected_names.isdisjoint({item.name for item in delivery.iterdir()}))
+        self.assertTrue(expected_names.isdisjoint({item.name for item in moved.iterdir()}))
+        self.assertFalse(
+            any(item.name.startswith(".taiji-github-ci-evidence.") for item in moved.iterdir())
+        )
+
+    def test_second_or_third_delivery_promotion_failure_rolls_back_only_owned_nodes(self):
+        for failing_basename in (
+            "github-ci-jobs-response.json",
+            "github-ci-evidence.json",
+        ):
+            with self.subTest(failing_basename=failing_basename):
+                delivery = self.root / f"partial-{failing_basename}"
+                delivery.mkdir(mode=0o700)
+                sentinel = delivery / "keep-me.txt"
+                sentinel.write_bytes(b"preexisting")
+                original_promote = self.producer._promote_staged_file
+
+                def fail_after_promotion(*args, **kwargs):
+                    result = original_promote(*args, **kwargs)
+                    basename = args[2]
+                    if basename == failing_basename:
+                        raise OSError("simulated promotion failure")
+                    return result
+
+                with patch.object(
+                    self.producer,
+                    "_promote_staged_file",
+                    side_effect=fail_after_promotion,
+                ):
+                    with self.assertRaises(OSError):
+                        self.call_delivery_producer(delivery)
+
+                self.assertEqual(sentinel.read_bytes(), b"preexisting")
+                self.assertEqual({item.name for item in delivery.iterdir()}, {sentinel.name})
+
     def test_output_is_private_new_and_cli_has_no_trust_target_override(self):
         result = self.produce()
         self.assertEqual(stat.S_IMODE(self.output.lstat().st_mode), 0o700)
@@ -533,10 +755,35 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
         with self.assertRaises(self.producer.GitHubCiEvidenceError):
             self.produce()
 
+    def test_cli_requires_exactly_one_output_mode(self):
+        output = str(self.root / "new-output")
+        delivery = str(self.root / "existing-delivery")
+        base = ["--source-commit", SOURCE_COMMIT, "--run-id", str(RUN_ID)]
+
+        parsed_output = self.producer.parse_args(base + ["--output-dir", output])
+        self.assertEqual(parsed_output.output_dir, Path(output))
+        self.assertIsNone(parsed_output.delivery_dir)
+        parsed_delivery = self.producer.parse_args(base + ["--delivery-dir", delivery])
+        self.assertEqual(parsed_delivery.delivery_dir, Path(delivery))
+        self.assertIsNone(parsed_delivery.output_dir)
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.producer.parse_args(base)
+            with self.assertRaises(SystemExit):
+                self.producer.parse_args(
+                    base
+                    + [
+                        "--output-dir",
+                        output,
+                        "--delivery-dir",
+                        delivery,
+                    ]
+                )
+
     def test_production_api_has_no_network_or_clock_override(self):
         self.assertEqual(
             tuple(inspect.signature(self.producer.produce).parameters),
-            ("source_commit", "run_id", "output_dir"),
+            ("source_commit", "run_id", "output_dir", "delivery_dir"),
         )
 
     def test_invalid_identity_inputs_fail_before_any_api_request(self):

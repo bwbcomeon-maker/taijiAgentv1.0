@@ -59,7 +59,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.certification_envelope = self.root / "certification-challenge-envelope.json"
         self.publication_envelope = self.root / "publication-challenge-envelope.json"
         config = {
-            "schema": "taiji-linux-golden-orchestrator-config/v2",
+            "schema": "taiji-linux-golden-orchestrator-config/v3",
             "source_commit": SOURCE_COMMIT,
             "repo_root": str(ROOT),
             "input": {
@@ -93,6 +93,9 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
                 "environment_observation": "/home/kylin/taiji-install/environment-observation.json",
                 "target_dir": "/home/kylin/taiji-target-verification",
                 "timeout_ms": 900000,
+            },
+            "ci": {
+                "run_id": 123456789,
             },
             "release": {
                 "records_dir": str(self.root / "certification-records"),
@@ -170,6 +173,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         deb: Path | None = None,
         approve: bool = False,
         expected_deb: str | None = None,
+        evidence: list[Path] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         log = self.log(f"{stage}-{result}")
         arguments = [
@@ -186,7 +190,8 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             str(log),
         ]
         if result == "pass":
-            arguments.extend(["--evidence", str(log)])
+            for path in ([log] if evidence is None else evidence):
+                arguments.extend(["--evidence", str(path)])
         if expected_deb is not None:
             arguments.extend(["--expect-deb-sha256", expected_deb])
         if deb is not None:
@@ -202,6 +207,18 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         deb = output / "taiji-agent_1.2.3_amd64.deb"
         deb.write_bytes(b"immutable-candidate-deb")
         return deb, sha256(deb)
+
+    def create_ci_evidence_trio(self) -> list[Path]:
+        delivery = self.review_root / "taijiagent 打包交付"
+        paths = [
+            delivery / "github-ci-evidence.json",
+            delivery / "github-ci-run-response.json",
+            delivery / "github-ci-jobs-response.json",
+        ]
+        for path in paths:
+            path.write_text('{"fixture":true}\n', encoding="utf-8")
+            path.chmod(0o600)
+        return paths
 
     def issue_challenge_envelope(
         self,
@@ -300,7 +317,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         return deb, digest
 
-    def advance_to_publication_sign(self) -> tuple[Path, str]:
+    def advance_to_ci_evidence(self) -> tuple[Path, str]:
         deb, digest = self.advance_to_certification_sign()
         certified = self.checkpoint(
             "certification_sign",
@@ -310,9 +327,21 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertEqual(certified.returncode, 0, certified.stderr)
         return deb, digest
 
+    def advance_to_publication_sign(self) -> tuple[Path, str]:
+        deb, digest = self.advance_to_ci_evidence()
+        ci_evidence = self.create_ci_evidence_trio()
+        recorded = self.checkpoint(
+            "ci_evidence",
+            approve=True,
+            expected_deb=digest,
+            evidence=ci_evidence,
+        )
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        return deb, digest
+
     def test_init_and_plan_bind_input_trio_and_emit_local_verify_only(self):
         state = self.init()
-        self.assertEqual(state["schema"], "taiji-linux-golden-orchestrator-state/v2")
+        self.assertEqual(state["schema"], "taiji-linux-golden-orchestrator-state/v3")
         self.assertEqual(state["source_commit"], SOURCE_COMMIT)
         self.assertEqual(state["current_stage"], "input_verify")
         self.assertIn("checkpoint-plan-only", state["scope"])
@@ -323,7 +352,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         result = self.plan()
         self.assertEqual(result.returncode, 0, result.stderr)
         plan = json.loads(result.stdout)
-        self.assertEqual(plan["schema"], "taiji-linux-golden-orchestrator-plan/v2")
+        self.assertEqual(plan["schema"], "taiji-linux-golden-orchestrator-plan/v3")
         self.assertEqual(plan["status"], "READY")
         self.assertEqual(plan["stage"], "input_verify")
         self.assertIn("does not execute", plan["scope_note"])
@@ -340,39 +369,81 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
         self.assertEqual(json.loads(dry_run.stdout), plan)
 
-    def test_legacy_v1_config_and_state_are_rejected_instead_of_reinterpreted(self):
+    def test_legacy_v1_v2_config_and_state_are_rejected_instead_of_reinterpreted(self):
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        config["schema"] = "taiji-linux-golden-orchestrator-config/v1"
+        for legacy in ("v1", "v2"):
+            with self.subTest(config_schema=legacy):
+                config["schema"] = "taiji-linux-golden-orchestrator-config/{}".format(legacy)
+                self.config.write_text(
+                    json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                rejected_config = self.command(
+                    "init",
+                    "--config",
+                    str(self.config),
+                    "--state",
+                    str(self.state),
+                )
+                self.assertNotEqual(rejected_config.returncode, 0)
+                self.assertIn("schema", rejected_config.stderr.lower())
+
+        config["schema"] = "taiji-linux-golden-orchestrator-config/v3"
         self.config.write_text(
             json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
-        rejected_config = self.command(
+        self.init()
+        original_state = json.loads(self.state.read_text(encoding="utf-8"))
+        for legacy in ("v1", "v2"):
+            with self.subTest(state_schema=legacy):
+                state = json.loads(json.dumps(original_state))
+                state["schema"] = "taiji-linux-golden-orchestrator-state/{}".format(legacy)
+                self.state.write_text(
+                    json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                self.state.chmod(0o600)
+                rejected_state = self.plan()
+                self.assertNotEqual(rejected_state.returncode, 0)
+                self.assertIn("schema", rejected_state.stderr.lower())
+
+    def test_config_requires_exact_positive_integer_ci_run_id(self):
+        original = json.loads(self.config.read_text(encoding="utf-8"))
+        invalid_ci_values = ({}, {"run_id": 0}, {"run_id": True}, {"run_id": "123"}, {"run_id": 1, "extra": 2})
+        for ci in invalid_ci_values:
+            with self.subTest(ci=ci):
+                config = json.loads(json.dumps(original))
+                config["ci"] = ci
+                self.config.write_text(
+                    json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                result = self.command(
+                    "init",
+                    "--config",
+                    str(self.config),
+                    "--state",
+                    str(self.state),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.state.exists())
+
+        config = json.loads(json.dumps(original))
+        config.pop("ci")
+        self.config.write_text(
+            json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        missing = self.command(
             "init",
             "--config",
             str(self.config),
             "--state",
             str(self.state),
         )
-        self.assertNotEqual(rejected_config.returncode, 0)
-        self.assertIn("schema", rejected_config.stderr.lower())
-
-        config["schema"] = "taiji-linux-golden-orchestrator-config/v2"
-        self.config.write_text(
-            json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        self.init()
-        state = json.loads(self.state.read_text(encoding="utf-8"))
-        state["schema"] = "taiji-linux-golden-orchestrator-state/v1"
-        self.state.write_text(
-            json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        self.state.chmod(0o600)
-        rejected_state = self.plan()
-        self.assertNotEqual(rejected_state.returncode, 0)
-        self.assertIn("schema", rejected_state.stderr.lower())
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertFalse(self.state.exists())
 
     def test_config_accepts_only_absolute_challenge_envelopes_and_canonical_bundle_paths(self):
         accepted = self.init()
@@ -581,6 +652,134 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertNotIn("--challenge", assembler)
         self.assertEqual(certification["commands"][1]["env"], {})
 
+    def test_ci_v2_stage_is_between_certification_and_publication_and_binds_exact_trio(self):
+        deb, digest = self.advance_to_ci_evidence()
+
+        ci_plan_result = self.plan(expected_deb=digest)
+        self.assertEqual(ci_plan_result.returncode, 0, ci_plan_result.stderr)
+        ci_plan = json.loads(ci_plan_result.stdout)
+        self.assertEqual(ci_plan["stage"], "ci_evidence")
+        self.assertTrue(ci_plan["explicit_approval_required"])
+        self.assertFalse(self.publication_envelope.exists())
+        self.assertEqual(len(ci_plan["commands"]), 1)
+        ci_command = ci_plan["commands"][0]
+        self.assertEqual(
+            ci_command["argv"],
+            [
+                "python3",
+                str(ROOT / "scripts/produce-taiji-github-ci-evidence.py"),
+                "--source-commit",
+                SOURCE_COMMIT,
+                "--run-id",
+                "123456789",
+                "--delivery-dir",
+                str(self.review_root / "taijiagent 打包交付"),
+            ],
+        )
+        self.assertEqual(ci_command["boundary"], "network-and-ci-human-approval")
+
+        skipped = self.checkpoint(
+            "publication_sign",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertNotEqual(skipped.returncode, 0)
+        self.assertIn("current stage", skipped.stderr.lower())
+
+        delivery = self.review_root / "taijiagent 打包交付"
+        first_two = []
+        for basename in (
+            "github-ci-evidence.json",
+            "github-ci-run-response.json",
+        ):
+            path = delivery / basename
+            path.write_text('{"fixture":true}\n', encoding="utf-8")
+            path.chmod(0o600)
+            first_two.append(path)
+        incomplete = self.checkpoint(
+            "ci_evidence",
+            approve=True,
+            expected_deb=digest,
+            evidence=first_two,
+        )
+        self.assertNotEqual(incomplete.returncode, 0)
+        self.assertIn("three", incomplete.stderr.lower())
+
+        jobs = delivery / "github-ci-jobs-response.json"
+        jobs.write_text('{"fixture":true}\n', encoding="utf-8")
+        jobs.chmod(0o600)
+        extra = self.root / "forged-ci-evidence.txt"
+        extra.write_text("forged\n", encoding="utf-8")
+        overcomplete = self.checkpoint(
+            "ci_evidence",
+            approve=True,
+            expected_deb=digest,
+            evidence=first_two + [jobs, extra],
+        )
+        self.assertNotEqual(overcomplete.returncode, 0)
+        self.assertIn("three", overcomplete.stderr.lower())
+
+        exact_trio = [delivery / name for name in (
+            "github-ci-evidence.json",
+            "github-ci-run-response.json",
+            "github-ci-jobs-response.json",
+        )]
+        recorded = self.checkpoint(
+            "ci_evidence",
+            approve=True,
+            expected_deb=digest,
+            evidence=exact_trio,
+        )
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertEqual(json.loads(recorded.stdout)["current_stage"], "publication_sign")
+        self.assertFalse(self.publication_envelope.exists())
+
+        self.issue_publication_envelope(deb)
+        publication = self.plan(expected_deb=digest)
+        self.assertEqual(publication.returncode, 0, publication.stderr)
+        self.assertEqual(json.loads(publication.stdout)["stage"], "publication_sign")
+
+    def test_ci_stage_accepts_expired_signed_certification_binding_but_rejects_early_publication(self):
+        deb, digest = self.advance_to_ci_evidence()
+        self.expire_challenge_envelope(self.certification_envelope)
+        module = self.load_orchestrator()
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        state["challenge_envelopes"]["certification"] = module._fingerprint(
+            self.certification_envelope,
+            "certification challenge envelope",
+            module.MAX_CONTROL_FILE_BYTES,
+        )
+        self.state.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.state.chmod(0o600)
+
+        historical = self.plan(expected_deb=digest)
+        self.assertEqual(historical.returncode, 0, historical.stderr)
+        self.assertEqual(json.loads(historical.stdout)["stage"], "ci_evidence")
+
+        self.issue_publication_envelope(deb)
+        premature = self.plan(expected_deb=digest)
+        self.assertNotEqual(premature.returncode, 0)
+        self.assertIn("publication_sign", premature.stderr)
+
+    def test_ci_checkpoint_fingerprints_all_three_files_for_resume_drift_detection(self):
+        _deb, digest = self.advance_to_ci_evidence()
+        trio = self.create_ci_evidence_trio()
+        recorded = self.checkpoint(
+            "ci_evidence",
+            approve=True,
+            expected_deb=digest,
+            evidence=trio,
+        )
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+
+        trio[2].write_text('{"drifted":true}\n', encoding="utf-8")
+        drifted = self.plan(expected_deb=digest)
+        self.assertNotEqual(drifted.returncode, 0)
+        self.assertIn("ci_evidence evidence", drifted.stderr)
+
     def test_publication_bundle_and_signer_use_the_review_delivery_contract(self):
         _deb, digest = self.advance_to_offline_rehearsal()
         for stage in ("offline_rehearsal", "target_acceptance"):
@@ -613,6 +812,20 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             expected_deb=digest,
         )
         self.assertEqual(certified.returncode, 0, certified.stderr)
+
+        ci_plan_result = self.plan(expected_deb=digest)
+        self.assertEqual(ci_plan_result.returncode, 0, ci_plan_result.stderr)
+        ci_plan = json.loads(ci_plan_result.stdout)
+        self.assertEqual(ci_plan["stage"], "ci_evidence")
+        self.assertIn("--delivery-dir", ci_plan["commands"][0]["argv"])
+        ci_evidence_paths = self.create_ci_evidence_trio()
+        ci_recorded = self.checkpoint(
+            "ci_evidence",
+            approve=True,
+            expected_deb=digest,
+            evidence=ci_evidence_paths,
+        )
+        self.assertEqual(ci_recorded.returncode, 0, ci_recorded.stderr)
 
         publication_plan = self.plan(expected_deb=digest)
         self.assertEqual(publication_plan.returncode, 0, publication_plan.stderr)
@@ -889,7 +1102,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         )
 
         self.assertEqual(recorded.returncode, 0, recorded.stderr)
-        self.assertEqual(json.loads(recorded.stdout)["current_stage"], "publication_sign")
+        self.assertEqual(json.loads(recorded.stdout)["current_stage"], "ci_evidence")
 
     def test_publication_checkpoint_can_record_signer_success_after_envelope_ttl_elapsed(self):
         deb, digest = self.advance_to_publication_sign()
@@ -1127,14 +1340,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertIn("evidence", evidence_drift.stderr)
 
     def test_certification_and_publication_envelope_nonces_must_be_independent(self):
-        deb, digest = self.advance_to_offline_rehearsal()
-        for stage in ("offline_rehearsal", "target_acceptance", "certification_sign"):
-            result = self.checkpoint(
-                stage,
-                approve=True,
-                expected_deb=digest,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
+        deb, digest = self.advance_to_publication_sign()
         self.issue_publication_envelope(deb, nonce="d" * 64)
 
         result = self.plan(expected_deb=digest)
@@ -1257,6 +1463,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "offline_rehearsal": "produce-taiji-offline-rehearsal.py",
             "target_acceptance": "/usr/bin/taiji-agent-acceptance",
             "certification_sign": "assemble-taiji-certification-set.py",
+            "ci_evidence": "produce-taiji-github-ci-evidence.py",
             "publication_sign": "sign-taiji-release-evidence.sh",
             "release_check": "taiji-release-check.sh",
             "publish": "publish-single-deb.sh",
@@ -1281,6 +1488,9 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             self.assertFalse((self.logs_dir / f"{stage}.log").exists())
             if stage == "challenge_preparation":
                 self.issue_certification_envelope(deb)
+            evidence = None
+            if stage == "ci_evidence":
+                evidence = self.create_ci_evidence_trio()
             if stage == "publication_sign":
                 self.issue_publication_envelope(deb)
             result = self.checkpoint(
@@ -1289,11 +1499,13 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
                     "offline_rehearsal",
                     "target_acceptance",
                     "certification_sign",
+                    "ci_evidence",
                     "publication_sign",
                     "release_check",
                     "publish",
                 },
                 expected_deb=digest,
+                evidence=evidence,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1311,8 +1523,13 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             'CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"',
             source,
         )
+        self.assertIn(
+            'CI_EVIDENCE_PRODUCER = ROOT / "scripts/produce-taiji-github-ci-evidence.py"',
+            source,
+        )
         self.assertIn("GOLDEN_ORCHESTRATOR,", source)
         self.assertIn("CHALLENGE_ENVELOPE_HELPER,", source)
+        self.assertIn("CI_EVIDENCE_PRODUCER,", source)
 
 
 if __name__ == "__main__":

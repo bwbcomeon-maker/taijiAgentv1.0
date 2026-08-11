@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
-CONFIG_SCHEMA = "taiji-linux-golden-orchestrator-config/v2"
-STATE_SCHEMA = "taiji-linux-golden-orchestrator-state/v2"
-PLAN_SCHEMA = "taiji-linux-golden-orchestrator-plan/v2"
+CONFIG_SCHEMA = "taiji-linux-golden-orchestrator-config/v3"
+STATE_SCHEMA = "taiji-linux-golden-orchestrator-state/v3"
+PLAN_SCHEMA = "taiji-linux-golden-orchestrator-plan/v3"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REMOTE_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -41,6 +41,7 @@ STAGES = (
     "offline_rehearsal",
     "target_acceptance",
     "certification_sign",
+    "ci_evidence",
     "publication_sign",
     "release_check",
     "publish",
@@ -50,6 +51,7 @@ EXPLICIT_APPROVAL_STAGES = {
     "offline_rehearsal",
     "target_acceptance",
     "certification_sign",
+    "ci_evidence",
     "publication_sign",
     "release_check",
     "publish",
@@ -290,7 +292,7 @@ def _challenge_recovery_guidance(purpose: str) -> str:
         "publication": "publication evidence and its signature",
     }[purpose]
     return (
-        "Start a fresh v2 config/state with a fresh absolute "
+        "Start a fresh v3 config/state with a fresh absolute "
         "{}_challenge_envelope path; must not overwrite or reuse the old envelope "
         "or signer reservation, and recapture {} before signing again."
     ).format(purpose, evidence_domain)
@@ -384,6 +386,7 @@ def _validate_challenges_for_stage(state: Dict[str, Any], stage: str) -> None:
         "offline_rehearsal",
         "target_acceptance",
         "certification_sign",
+        "ci_evidence",
     }:
         _assert_publication_challenge_absent(config)
     if stage == "challenge_preparation":
@@ -406,6 +409,13 @@ def _validate_challenges_for_stage(state: Dict[str, Any], stage: str) -> None:
         )
         _assert_challenge_unreserved(certification)
         return
+    if stage == "ci_evidence":
+        _load_challenge_envelope(
+            state,
+            "certification",
+            require_active=False,
+        )
+        return
     certification = _load_challenge_envelope(
         state,
         "certification",
@@ -427,7 +437,7 @@ def _validate_challenges_for_stage(state: Dict[str, Any], stage: str) -> None:
 def _validate_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     _require_exact_keys(
         payload,
-        {"schema", "source_commit", "repo_root", "input", "remote", "workspace", "offline", "target", "release"},
+        {"schema", "source_commit", "repo_root", "input", "remote", "workspace", "offline", "target", "ci", "release"},
         "config",
     )
     if payload["schema"] != CONFIG_SCHEMA:
@@ -518,6 +528,11 @@ def _validate_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise OrchestratorError(
             "target.installer_screenshot must remain outside the observation directory until attestation"
         )
+
+    ci = _require_mapping(payload["ci"], "ci")
+    _require_exact_keys(ci, {"run_id"}, "ci")
+    if type(ci["run_id"]) is not int or ci["run_id"] <= 0:
+        raise OrchestratorError("ci.run_id must be a positive integer")
 
     release = _require_mapping(payload["release"], "release")
     release_keys = {
@@ -1220,6 +1235,27 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             ),
         ]
 
+    if stage == "ci_evidence":
+        return [
+            _command(
+                "collect trusted GitHub CI v2 evidence trio",
+                [
+                    "python3",
+                    str(repo / "scripts/produce-taiji-github-ci-evidence.py"),
+                    "--source-commit",
+                    state["source_commit"],
+                    "--run-id",
+                    str(config["ci"]["run_id"]),
+                    "--delivery-dir",
+                    str(delivery),
+                ],
+                str(repo),
+                _stage_log(config, 8, stage),
+                "network-and-ci-human-approval",
+                common_env,
+            )
+        ]
+
     if stage == "publication_sign":
         release = config["release"]
         helper = repo / "scripts/taiji-challenge-envelope.py"
@@ -1245,7 +1281,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                         str(CHALLENGE_TTL_SECONDS),
                     ],
                     str(repo),
-                    _stage_log(config, 8, stage),
+                    _stage_log(config, 9, stage),
                     "local-security-preparation",
                     common_env,
                 )
@@ -1268,7 +1304,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     "--require-active",
                 ],
                 str(repo),
-                _stage_log(config, 8, stage),
+                _stage_log(config, 9, stage),
                 "local-security-preparation",
                 common_env,
             )
@@ -1297,7 +1333,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     release["publication_challenge_envelope"],
                 ],
                 str(repo),
-                _stage_log(config, 8, stage),
+                _stage_log(config, 9, stage),
                 "offline-signing-human-approval",
                 common_env,
                 required_inputs=[
@@ -1317,7 +1353,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     release["private_key"],
                 ],
                 str(repo),
-                _stage_log(config, 8, stage),
+                _stage_log(config, 9, stage),
                 "offline-signing-human-approval",
             ),
         ])
@@ -1343,7 +1379,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     str(release_signature),
                 ],
                 str(repo),
-                _stage_log(config, 9, stage),
+                _stage_log(config, 10, stage),
                 "network-and-release-human-approval",
                 {
                     "TAIJI_RELEASE_REPO_ROOT": str(repo),
@@ -1379,7 +1415,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     release["receipt_root"],
                 ],
                 str(repo),
-                _stage_log(config, 10, stage),
+                _stage_log(config, 11, stage),
                 "publication-human-approval",
             )
         ]
@@ -1450,6 +1486,18 @@ def _next_stage(stage: str) -> Optional[str]:
     return STAGES[index + 1]
 
 
+def _canonical_ci_evidence_paths(state: Dict[str, Any]) -> set:
+    delivery = (
+        Path(state["config"]["workspace"]["review_root"])
+        / "taijiagent 打包交付"
+    )
+    return {
+        delivery / "github-ci-evidence.json",
+        delivery / "github-ci-run-response.json",
+        delivery / "github-ci-jobs-response.json",
+    }
+
+
 def checkpoint(
     state_path: Path,
     expected_source_commit: str,
@@ -1479,6 +1527,12 @@ def checkpoint(
         raise OrchestratorError("a passing checkpoint requires at least one evidence file")
     if result == "pass" and stage in EXPLICIT_APPROVAL_STAGES and approve_stage != stage:
         raise OrchestratorError("explicit approval is required for external/manual stage {}".format(stage))
+    if result == "pass" and stage == "ci_evidence":
+        supplied = list(evidence_paths)
+        if len(supplied) != 3 or set(supplied) != _canonical_ci_evidence_paths(state):
+            raise OrchestratorError(
+                "ci_evidence pass requires exactly the three canonical CI v2 files in review delivery"
+            )
     evidence = [
         _fingerprint(path, "stage evidence", MAX_EVIDENCE_FILE_BYTES)
         for path in evidence_paths
@@ -1512,6 +1566,8 @@ def checkpoint(
             "certification",
             require_active=False,
         )
+    elif result == "pass" and stage == "ci_evidence":
+        _validate_challenges_for_stage(state, stage)
     elif result == "pass" and stage == "publication_sign":
         certification = _load_challenge_envelope(
             state,

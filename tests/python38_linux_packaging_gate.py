@@ -34,6 +34,7 @@ PUBLICATION_TRUST_HELPER_BEGIN = (
     "# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_BEGIN"
 )
 PUBLICATION_TRUST_HELPER_END = "# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_END"
+CI_EVIDENCE_PRODUCER = ROOT / "scripts/produce-taiji-github-ci-evidence.py"
 PYTHON38_ENTRYPOINTS = (
     ROOT / "packaging/linux/compatibility_policy.py",
     ROOT / "packaging/linux/trusted_system_tools.py",
@@ -54,7 +55,7 @@ PYTHON38_ENTRYPOINTS = (
     ACCEPTANCE_RUNNER,
     TARGET_EVIDENCE_ASSEMBLER,
     INSTALL_OBSERVER,
-    ROOT / "scripts/produce-taiji-github-ci-evidence.py",
+    CI_EVIDENCE_PRODUCER,
     ROOT / "scripts/revalidate-taiji-github-ci-evidence.py",
     ROOT / "scripts/produce-taiji-offline-rehearsal.py",
     ROOT / "scripts/produce-taiji-negative-boundary-evidence.py",
