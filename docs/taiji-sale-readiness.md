@@ -64,12 +64,14 @@
 
 Linux 客户单一 DEB 只能按以下顺序产生：
 
+实际命令、checkpoint 和重试只从 [黄金编排器唯一正式入口](./runbooks/taiji-kylin-uos-offline-delivery.md#521-黄金编排器唯一正式入口) 执行，本文不复制命令。
+
 1. 从已复验的正式 `main` 冻结唯一 commit，生成并逐件复验输入 `tar.gz`、`manifest.json`、`tar.gz.sha256` 三件套。
 2. 在兼容 Linux amd64 制包机以 `TAIJI_UV_LOCK_MODE=strict` 运行 `00_制包机_生成离线交付包.sh`；`00` 会在固定候选 DEB 后自动以产物模式执行最终 `01_制包机_发布预检.sh`，不需要也不应再用默认 source-only 模式单独重跑 `01` 充当候选证据。
-3. 在断网的干净 Linux amd64 环境完成 fresh install、remove、purge、reinstall 和受控旧版本升级/失败回滚演练，生成结构化证据；正式旧版本入口必须验证真实 detached signature，不能在容器内伪造占位签名。
-4. 在六个正向代表环境和六个负向边界上使用同一 DEB SHA 形成认证记录；安装后的执行代码来自 `/usr/bin/taiji-agent-acceptance`。
-5. 为冻结 commit 采集可信 GitHub CI v2 三件套，并在正式签名/发布前按源码合同实时复验。
-6. 使用用途、有效期、source commit 和 DEB 身份明确的 canonical challenge envelope：certification envelope 必须在离线演练、正式目标采集和十二条记录之前签发并统一驱动该认证证据域；签名器、release-check 和 publisher 只信 embedded envelope，不能在最终门禁阶段换 nonce、跨用途复用或改用裸环境变量。
+3. 候选 DEB 通过黄金编排器 `artifact_preflight` checkpoint 后，立即在 `challenge_preparation` 签发并验证用途、有效期、source commit 和 DEB 身份明确的 certification envelope。它必须先于离线演练、正式目标采集和十二条记录，并用同一 nonce 驱动整个认证证据域。
+4. 在断网的干净 Linux amd64 环境完成 fresh install、remove、purge、reinstall 和受控旧版本升级/失败回滚演练，生成结构化证据；正式旧版本入口必须验证真实 detached signature，不能在容器内伪造占位签名。
+5. 在六个正向代表环境和六个负向边界上，并在真实目标验收中，使用同一 DEB SHA 和 certification nonce 形成正式 target 证据与十二条认证记录；安装后的执行代码来自 `/usr/bin/taiji-agent-acceptance`。
+6. 为冻结 commit 采集可信 GitHub CI v2 三件套，并在正式签名/发布前按源码合同实时复验。
 7. 将同一认证证据域中的离线演练、正式目标证据和六正六负十二条记录组装为固定 `certification-set.json` 并签名；certification 签名后再签发 nonce 不同的 publication envelope，组装并签名 v3 release evidence。
 8. 执行 `scripts/taiji-release-check.sh`，冻结发布前证据门禁；任何实物变化都必须重新组装和签名。
 9. 执行 `packaging/linux/deb/publish-single-deb.sh`，生成只含一个固定 basename DEB 的全新客户目录，并以固定 allowlist 的内部 receipt 最终闭合证据档案。

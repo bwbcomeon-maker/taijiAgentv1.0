@@ -137,6 +137,64 @@ Python；它会先通过 apt 安装 `python3`/`python3-dev` 和其余构建依�
 
 `00` 重试时只处理自己能够证明归属的路径：已知的上轮产物和安全的旧 PID `.验收工具.tmp-*` 会自动归档到内部 `旧版备份/`；符号链接、非当前用户节点、硬链接或其它不安全残留会 fail closed，不会静默覆盖。上轮输出目录整体移入本轮 PID 备份后，如果创建新目录失败或收到信号，只会在状态证明新目录由本轮创建、仍为当前用户所有的实体空目录时删除并恢复旧输出；出现任何未知内容则绝不覆盖。验收工具也先写入本轮临时目录，再把旧目录移入带本轮 PID 的备份；如果发布的第二次移动失败，或在替换窗口收到 `INT`、`TERM`、`HUP`，`EXIT` 清理会在目标路径仍缺失时恢复本轮备份。
 
+### 5.2.1 黄金编排器唯一正式入口
+
+候选 DEB 完成制包脚本的最终 `01` 产物预检后，正式证据流程统一从 `scripts/taiji-linux-golden-orchestrator.py` 进入。阶段顺序固定为 `artifact_preflight` 通过后才进入 `challenge_preparation`；必须在该阶段签发并验证 certification envelope，然后才能开始 offline、正式 target 和十二条 records 采集。不得先采集证据，再在签名时补造 envelope 或替换 nonce。
+
+以下是唯一的简短可执行骨架；配置文件字段与受控路径由当轮发布计划提供：
+
+```bash
+ORCHESTRATOR="$PWD/scripts/taiji-linux-golden-orchestrator.py"
+CONFIG="/path/to/controlled/orchestrator-config.json"
+STATE="/path/to/controlled/orchestrator-state.json"
+SOURCE_COMMIT="<冻结的40位source commit>"
+STAGE="<plan.json中的stage>"
+LOG="/path/inside/workspace.logs_dir/${STAGE}.log"
+EVIDENCE="/path/to/current-stage-evidence-file"
+APPROVAL_ARGS=()
+
+python3 "$ORCHESTRATOR" init \
+  --config "$CONFIG" \
+  --state "$STATE"
+python3 "$ORCHESTRATOR" plan \
+  --state "$STATE" \
+  --expect-source-commit "$SOURCE_COMMIT" \
+  > /path/to/controlled/plan.json
+
+# 先审批 plan.json 的 boundary/cwd/env/commands[].argv，再由人工或受控自动执行器
+# 按 argv 数组原样执行，不拼接 shell 字符串；保存日志和证据后才 checkpoint pass/fail。
+# 仅当 plan.json 显示 explicit_approval_required=true 且完成审批时，设置：
+# APPROVAL_ARGS=(--approve-stage "$STAGE")
+python3 "$ORCHESTRATOR" checkpoint \
+  --state "$STATE" \
+  --expect-source-commit "$SOURCE_COMMIT" \
+  --stage "$STAGE" \
+  --result pass \
+  --log-path "$LOG" \
+  --evidence "$EVIDENCE" \
+  "${APPROVAL_ARGS[@]}"
+
+# 若本阶段失败，用实际失败日志记录 fail，不得先记 pass：
+python3 "$ORCHESTRATOR" checkpoint \
+  --state "$STATE" \
+  --expect-source-commit "$SOURCE_COMMIT" \
+  --stage "$STAGE" \
+  --result fail \
+  --log-path "$LOG"
+
+# 排除根因后显式 retry，再重新 plan。
+python3 "$ORCHESTRATOR" retry \
+  --state "$STATE" \
+  --expect-source-commit "$SOURCE_COMMIT" \
+  --stage "$STAGE"
+python3 "$ORCHESTRATOR" plan \
+  --state "$STATE" \
+  --expect-source-commit "$SOURCE_COMMIT" \
+  > /path/to/controlled/retry-plan.json
+```
+
+候选 DEB 已在 `remote_build` checkpoint 绑定后，之后的 `plan`、`checkpoint` 和 `retry` 都必须额外携带 `--expect-deb-sha256 <已绑定摘要>`；`plan.json` 显示 `explicit_approval_required=true` 的阶段必须在 pass 时携带与当前阶段相同的 `--approve-stage`。编排器只产生命令和记录 checkpoint，不代替执行、不代替审批、不代替正式门禁；任一命令的真实返回码、日志和实物证据未闭合时，不得记录 pass。
+
 ### 5.3 在受控发布机执行断网生命周期演练
 
 ```bash
@@ -276,7 +334,7 @@ bash packaging/linux/deb/publish-single-deb.sh \
   --receipt-root "$PWD/internal-release-receipts/single-deb"
 ```
 
-发布脚本会先快照候选 DEB、policy、两组 signed evidence、CI v2 三件套，以及认证集的全部 `records/` 附件和 `offline-rehearsal/` 原始证据，再执行正式 release-check；门禁期间任何实物增删、替换或改动都会失败且不生成客户目录。最后以不可替换 rename 原子生成新客户目录，并把 `release-evidence.json`、其签名、`certification-set.json`、其签名、policy、`deb.sha256` 和 CI v2 normalized/run/jobs 三件套共九个文件归档到内部 receipt。这九文件是 publisher 回执，不是完整认证档案；完整 certification `records/`、`offline-rehearsal/` 及其它受控原始附件必须在内部认证归档中持续保留。客户只收到该目录中的固定 basename DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
+发布脚本会先快照候选 DEB、policy、两组 signed evidence、CI v2 三件套，以及认证集的全部 `records/` 附件和 `offline-rehearsal/` 原始证据，再执行正式 release-check；门禁期间任何实物增删、替换或改动都会失败且不生成客户目录。最后以不可替换 rename 原子生成新客户目录。内部固定九文件 receipt 的完整 basename 集合是：`release-evidence.json`、`release-evidence.json.sig`、`certification-set.json`、`certification-set.json.sig`、`compatibility-policy.json`、`deb.sha256`、`github-ci-evidence.json`、`github-ci-run-response.json`、`github-ci-jobs-response.json`。这九文件是 publisher 回执，不是完整认证档案；完整 certification `records/`、`offline-rehearsal/` 及其它受控原始附件必须在内部认证归档中持续保留。客户只收到该目录中的固定 basename DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
 
 ## 6. 完整离线交付契约
 
