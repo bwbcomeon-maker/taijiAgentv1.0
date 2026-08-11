@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -548,10 +549,16 @@ def _close_owned_file_descriptor(record: Dict[str, Any]) -> None:
         try:
             os.close(descriptor)
         except OSError as exc:
-            failures.append(exc)
+            if exc.errno == errno.EBADF:
+                record[key] = None
+                closed.add(descriptor)
+            else:
+                failures.append(exc)
         else:
             record[key] = None
             closed.add(descriptor)
+    if record.get("pending_descriptor") is None:
+        record["pending_identity"] = None
     if failures:
         raise failures[0]
 
@@ -564,39 +571,46 @@ def _remove_owned_file(
         return True
     if record.get("blocked") is True:
         return False
-    descriptor = record.get("descriptor")
-    if descriptor is None:
-        record["poisoned"] = True
-        return False
-    opened = None  # type: Optional[os.stat_result]
-    try:
-        opened = os.fstat(descriptor)
-    except OSError:
-        trusted_identity = record.get("identity")
-        if trusted_identity is None:
-            record["poisoned"] = True
-            return False
+    expected_identity = None  # type: Optional[Tuple[int, ...]]
+    fallback_identity = None  # type: Optional[Tuple[int, ...]]
+    for descriptor_key, identity_key in (
+        ("descriptor", "identity"),
+        ("pending_descriptor", "pending_identity"),
+    ):
+        descriptor = record.get(descriptor_key)
+        trusted_identity = record.get(identity_key)
+        if descriptor is None:
+            continue
         try:
-            fcntl.fcntl(descriptor, fcntl.F_GETFD)
+            opened = os.fstat(descriptor)
         except OSError:
-            record["poisoned"] = True
-            return False
-        expected_identity = trusted_identity
-    else:
+            if trusted_identity is None:
+                continue
+            try:
+                fcntl.fcntl(descriptor, fcntl.F_GETFD)
+            except OSError:
+                continue
+            if fallback_identity is None:
+                fallback_identity = trusted_identity
+            continue
         if not stat.S_ISREG(opened.st_mode):
-            record["blocked"] = True
-            return False
+            continue
         recorded_device = record.get("device")
         recorded_inode = record.get("inode")
         if recorded_device is not None and (
             opened.st_dev,
             opened.st_ino,
         ) != (recorded_device, recorded_inode):
-            record["blocked"] = True
-            return False
+            continue
         record["device"] = opened.st_dev
         record["inode"] = opened.st_ino
         expected_identity = _file_identity(opened)
+        break
+    if expected_identity is None:
+        expected_identity = fallback_identity
+    if expected_identity is None:
+        record["poisoned"] = True
+        return False
     try:
         current = os.stat(
             record["basename"],
@@ -675,9 +689,11 @@ def _retain_read_only_owned_file(
         raise GitHubCiEvidenceError(
             "owned CI evidence file changed before descriptor retention"
         )
+    record["pending_identity"] = _file_identity(retained)
     os.close(writer)
     record["descriptor"] = reader
     record["pending_descriptor"] = None
+    record["pending_identity"] = None
     record["device"] = retained.st_dev
     record["inode"] = retained.st_ino
     record["identity"] = _file_identity(retained)
@@ -732,6 +748,58 @@ def _remove_owned_empty_directory(
     return True
 
 
+def _recover_staging_after_lstat_failure(
+    delivery_descriptor: int,
+    name: str,
+    cause: OSError,
+) -> None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = None  # type: Optional[int]
+    identity = None  # type: Optional[Tuple[int, ...]]
+    proof_is_trusted = False
+    try:
+        delivery_metadata = os.fstat(delivery_descriptor)
+        descriptor = os.open(name, flags, dir_fd=delivery_descriptor)
+        opened = os.fstat(descriptor)
+        current = os.lstat(name, dir_fd=delivery_descriptor)
+        identity = _file_identity(opened)
+        proof_is_trusted = (
+            _file_identity(current) == identity
+            and stat.S_ISDIR(opened.st_mode)
+            and opened.st_uid == os.getuid()
+            and stat.S_IMODE(opened.st_mode) == 0o700
+            and opened.st_dev == delivery_metadata.st_dev
+        )
+    except OSError:
+        proof_is_trusted = False
+    if proof_is_trusted and identity is not None:
+        removed = _remove_owned_empty_directory(
+            delivery_descriptor,
+            name,
+            identity,
+            descriptor,
+        )
+    else:
+        removed = False
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            removed = False
+    if removed:
+        raise GitHubCiEvidenceError(
+            "CI evidence staging identity observation failed; owned directory was removed"
+        ) from cause
+    raise GitHubCiEvidenceError(
+        "CI evidence staging identity proof was poisoned; path was preserved"
+    ) from cause
+
+
 def _create_staging_directory(
     delivery_descriptor: int,
 ) -> Tuple[str, int, Tuple[int, ...]]:
@@ -751,7 +819,14 @@ def _create_staging_directory(
         descriptor = None  # type: Optional[int]
         path_identity_verified = False
         try:
-            created = os.lstat(name, dir_fd=delivery_descriptor)
+            try:
+                created = os.lstat(name, dir_fd=delivery_descriptor)
+            except OSError as exc:
+                _recover_staging_after_lstat_failure(
+                    delivery_descriptor,
+                    name,
+                    exc,
+                )
             created_identity = _file_identity(created)
             delivery_metadata = os.fstat(delivery_descriptor)
             if (
@@ -817,6 +892,7 @@ def _write_new_at(
         "basename": basename,
         "descriptor": descriptor,
         "pending_descriptor": None,
+        "pending_identity": None,
         "device": None,
         "inode": None,
         "identity": None,
@@ -1060,6 +1136,7 @@ def _promote_staged_file(
         "basename": basename,
         "descriptor": descriptor,
         "pending_descriptor": None,
+        "pending_identity": None,
         "device": None,
         "inode": None,
         "identity": None,

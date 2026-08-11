@@ -779,6 +779,55 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     original_fstat(descriptor)
 
+    def test_reader_anchor_rolls_back_when_writer_close_took_effect_before_error(self):
+        delivery = self.root / "writer-closed-before-error"
+        delivery.mkdir(mode=0o700)
+        original_open = self.producer.os.open
+        original_close = self.producer.os.close
+        original_fstat = self.producer.os.fstat
+        owned_descriptors = set()
+        writer_descriptors = set()
+        injected = False
+
+        def track_owned_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if path in {
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
+                "github-ci-evidence.json",
+            } and kwargs.get("dir_fd") is not None:
+                owned_descriptors.add(descriptor)
+                if flags & self.producer.os.O_CREAT:
+                    writer_descriptors.add(descriptor)
+            return descriptor
+
+        def close_writer_then_report_error(descriptor):
+            nonlocal injected
+            if descriptor in writer_descriptors and not injected:
+                injected = True
+                original_close(descriptor)
+                raise OSError("simulated error after writer close took effect")
+            return original_close(descriptor)
+
+        with patch.object(
+            self.producer.os,
+            "open",
+            side_effect=track_owned_open,
+        ), patch.object(
+            self.producer.os,
+            "close",
+            side_effect=close_writer_then_report_error,
+        ):
+            with self.assertRaises(OSError):
+                self.call_delivery_producer(delivery)
+
+        self.assertTrue(injected)
+        self.assertEqual(list(delivery.iterdir()), [])
+        for descriptor in owned_descriptors:
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaises(OSError):
+                    original_fstat(descriptor)
+
     def test_delivery_mode_rejects_relative_symlink_and_writable_directory_before_network(self):
         real_delivery = self.root / "real-delivery"
         real_delivery.mkdir(mode=0o700)
@@ -1250,6 +1299,81 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
 
         self.assertTrue(injected)
         self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_first_staging_lstat_failure_is_recovered_without_hidden_residue(self):
+        delivery = self.root / "staging-first-lstat-failure"
+        delivery.mkdir(mode=0o700)
+        original_lstat = self.producer.os.lstat
+        injected = False
+
+        def fail_first_staging_lstat(path, *args, **kwargs):
+            nonlocal injected
+            if (
+                not injected
+                and isinstance(path, str)
+                and path.startswith(".taiji-github-ci-evidence.")
+                and kwargs.get("dir_fd") is not None
+            ):
+                injected = True
+                raise OSError("simulated first staging lstat failure")
+            return original_lstat(path, *args, **kwargs)
+
+        with patch.object(
+            self.producer.os,
+            "lstat",
+            side_effect=fail_first_staging_lstat,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertTrue(injected)
+        self.assertIn("identity observation failed", str(caught.exception))
+        self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_lstat_recovery_preserves_concurrently_replaced_staging_directory(self):
+        delivery = self.root / "staging-lstat-recovery-replacement"
+        delivery.mkdir(mode=0o700)
+        moved = self.root / "moved-owned-staging-during-lstat-recovery"
+        original_lstat = self.producer.os.lstat
+        staging_lstat_calls = 0
+        replacement = None
+
+        def fail_then_replace_during_staging_lstat(path, *args, **kwargs):
+            nonlocal staging_lstat_calls, replacement
+            if (
+                isinstance(path, str)
+                and path.startswith(".taiji-github-ci-evidence.")
+                and kwargs.get("dir_fd") is not None
+            ):
+                staging_lstat_calls += 1
+                if staging_lstat_calls == 1:
+                    raise OSError("simulated first staging lstat failure")
+                if staging_lstat_calls == 2:
+                    created = delivery / path
+                    created.rename(moved)
+                    replacement = delivery / path
+                    replacement.mkdir(mode=0o700)
+            return original_lstat(path, *args, **kwargs)
+
+        with patch.object(
+            self.producer.os,
+            "lstat",
+            side_effect=fail_then_replace_during_staging_lstat,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertEqual(staging_lstat_calls, 2)
+        self.assertIn("poisoned", str(caught.exception))
+        self.assertIsNotNone(replacement)
+        self.assertTrue(replacement.is_dir())
+        self.assertEqual(list(replacement.iterdir()), [])
+        self.assertTrue(moved.is_dir())
+        self.assertEqual(list(moved.iterdir()), [])
 
     def test_staging_path_stat_failure_preserves_a_concurrent_foreign_directory(self):
         delivery = self.root / "staging-stat-foreign-replacement"
