@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import socket
 import urllib.error
 import urllib.request
@@ -1211,6 +1212,9 @@ def apply_onboarding_setup(body: dict) -> dict:
         else {}
     )
     desired_model = dict(model_cfg)
+    from api.model_config import _MAIN_MODEL_REQUEST_ID_KEY
+
+    request_id = secrets.token_hex(16)
     with credential_transaction(config_path):
         # Close the check/write race: another process may create config.yaml
         # after the fast guard above but before this credential lock is held.
@@ -1234,6 +1238,7 @@ def apply_onboarding_setup(body: dict) -> dict:
                 )
             }
             current["model"] = dict(desired_model)
+            current[_MAIN_MODEL_REQUEST_ID_KEY] = request_id
             if capabilities:
                 bump_capability_config_epochs(
                     current,

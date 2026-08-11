@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
@@ -19,24 +20,48 @@ const {
   ELECTRON_PATH,
   PROBE_PROMPT,
   attachFixtureThroughVisibleChooser,
+  assertCanonicalUserHome,
   buildDriverResult,
   buildElectronArgs,
+  buildSecondaryElectronArgs,
   buildInstalledAcceptanceEnv,
+  buildCoreObservation,
+  buildCoreJournalArgs,
+  buildModelConfigObservation,
   buildProbeCode,
+  captureChildIdentityOrCleanExit,
+  captureElectronHelperIdentities,
   completionSnapshotPassed,
+  coreHandlerIsTrusted,
+  coreJournalToolIsTrusted,
+  createProfileContinuityMarker,
+  deleteProfileContinuityMarker,
   filterUnexpectedHttpFailures,
   filterUnexpectedJsErrors,
   isExpectedBackgroundConsoleError,
   isExpectedDesktopHttpFailure,
   insertTextThroughVisibleComposer,
+  insertSecretThroughVisiblePasswordInput,
+  inspectProcessIdentity,
   normalizeMessageContent,
   managedProcessArgvMatches,
   parseArgs,
+  parseCoreJournalJsonCursors,
   parsePid,
+  processIdentityFromStat,
+  processIdentityStillPresent,
+  publicModelConfigProjection,
+  queryCoreJournalSnapshot,
+  querySettledCoreJournalSnapshot,
+  readHiddenCredentialFromTty,
   physicalClickVisibleElement,
   redactDesktopUrl,
+  safeErrorText,
   supportBundleIsSafe,
   terminateManagedProcess,
+  terminateOwnedChildProcess,
+  verifyProfileContinuityMarker,
+  visibleModelConfigurationMatches,
   validateDesktopAuthCookies,
   validateDesktopTarget,
   assertVisibleFirstConfigurationStart,
@@ -140,14 +165,29 @@ test("buildElectronArgs enables loopback CDP before the fixed App directory", ()
     APP_DIR,
   ]);
   assert.throws(() => buildElectronArgs(0), /CDP port/);
+  assert.deepEqual(buildSecondaryElectronArgs(), [APP_DIR]);
+  const rendered = [...buildElectronArgs(49123), ...buildSecondaryElectronArgs()].join(" ");
+  for (const forbidden of ["--user-data-dir", "--disable-gpu", "disableHardwareAcceleration"]) {
+    assert.equal(rendered.includes(forbidden), false, `${forbidden} must not weaken the installed profile`);
+  }
 });
 
 test("installed acceptance environment removes development/runtime selectors", () => {
   const env = buildInstalledAcceptanceEnv({
-    PATH: "/usr/bin",
+    HOME: "/home/operator",
+    USER: "operator",
+    LOGNAME: "operator",
+    PATH: "/untrusted/bin",
     DISPLAY: ":0",
+    WAYLAND_DISPLAY: "wayland-0",
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+    LANG: "zh_CN.UTF-8",
+    XDG_RUNTIME_DIR: "/run/user/1000",
     XDG_STATE_HOME: "/home/operator/.local/state",
+    XDG_CONFIG_DIRS: "/tmp/untrusted-config-dirs",
+    XDG_DATA_DIRS: "/tmp/untrusted-data-dirs",
     OPENAI_API_KEY: "provider-key",
+    RANDOM_VENDOR_SECRET: "must-not-reach-electron",
     TAIJI_AGENT_ROOT: "/tmp/dev-root",
     TAIJI_AGENT_AGENT_DIR: "/tmp/dev-agent",
     TAIJI_AGENT_WEBUI_DIR: "/tmp/dev-web",
@@ -162,12 +202,19 @@ test("installed acceptance environment removes development/runtime selectors", (
     PYTHONHOME: "/tmp/dev-pythonhome",
     ELECTRON_RUN_AS_NODE: "1",
     NODE_OPTIONS: "--require=/tmp/dev-hook.js",
-  });
+  }, { uid: 1000, username: "operator", homedir: "/home/operator" });
 
-  assert.equal(env.PATH, "/usr/bin");
+  assert.equal(env.PATH, "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
   assert.equal(env.DISPLAY, ":0");
+  assert.equal(env.WAYLAND_DISPLAY, "wayland-0");
+  assert.equal(env.DBUS_SESSION_BUS_ADDRESS, "unix:path=/run/user/1000/bus");
+  assert.equal(env.LANG, "zh_CN.UTF-8");
+  assert.equal(env.XDG_RUNTIME_DIR, "/run/user/1000");
   assert.equal(env.XDG_STATE_HOME, "/home/operator/.local/state");
-  assert.equal(env.OPENAI_API_KEY, "provider-key");
+  assert.equal(Object.hasOwn(env, "XDG_CONFIG_DIRS"), false);
+  assert.equal(Object.hasOwn(env, "XDG_DATA_DIRS"), false);
+  assert.equal(Object.hasOwn(env, "OPENAI_API_KEY"), false);
+  assert.equal(Object.hasOwn(env, "RANDOM_VENDOR_SECRET"), false);
   assert.equal(env.TAIJI_AGENT_ROOT, "/opt/taiji-agent");
   assert.equal(env.TAIJI_AGENT_USE_USER_DIRS, "1");
   assert.equal(Object.keys(env).some((key) => key.startsWith("HERMES_")), false);
@@ -175,6 +222,47 @@ test("installed acceptance environment removes development/runtime selectors", (
   for (const key of ["TAIJI_AGENT_AGENT_DIR", "TAIJI_AGENT_WEBUI_DIR", "TAIJI_AGENT_PYTHON", "TAIJI_WEBUI_PYTHON", "TAIJI_AGENT_RUNTIME_ENV", "TAIJI_WEBUI_CHAT_BACKEND", "TAIJI_RUNTIME_HOME", "PYTHONPATH", "PYTHONHOME", "ELECTRON_RUN_AS_NODE", "NODE_OPTIONS"]) {
     assert.equal(Object.hasOwn(env, key), false, `${key} must not reach the installed App`);
   }
+
+  assert.throws(() => buildInstalledAcceptanceEnv({
+    HOME: "/tmp/fresh-profile",
+    USER: "operator",
+    LOGNAME: "operator",
+  }, { uid: 1000, username: "operator", homedir: "/home/operator" }), /HOME.*identity/);
+  for (const xdgStateHome of ["relative/state", "/tmp/taiji-state", "/srv/foreign-profile"]) {
+    assert.throws(() => buildInstalledAcceptanceEnv({
+      HOME: "/home/operator",
+      USER: "operator",
+      LOGNAME: "operator",
+      XDG_STATE_HOME: xdgStateHome,
+    }, { uid: 1000, username: "operator", homedir: "/home/operator" }), /XDG_STATE_HOME/);
+  }
+  assert.throws(() => buildInstalledAcceptanceEnv({
+    HOME: "/home/operator",
+    USER: "operator",
+    LOGNAME: "operator",
+    XDG_RUNTIME_DIR: "/tmp/runtime-redirect",
+  }, { uid: 1000, username: "operator", homedir: "/home/operator" }), /XDG_RUNTIME_DIR/);
+});
+
+test("installed acceptance binds the canonical real home to the current uid", () => {
+  const identity = { uid: 1000, username: "operator", homedir: "/home/operator" };
+  const directory = {
+    uid: 1000,
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+  };
+  assert.doesNotThrow(() => assertCanonicalUserHome(identity, {
+    lstatFn: () => directory,
+    realpathFn: (pathname) => pathname,
+  }));
+  assert.throws(() => assertCanonicalUserHome(identity, {
+    lstatFn: () => ({ ...directory, uid: 1001 }),
+    realpathFn: (pathname) => pathname,
+  }), /owned by the current uid/);
+  assert.throws(() => assertCanonicalUserHome(identity, {
+    lstatFn: () => directory,
+    realpathFn: () => "/srv/redirected-home",
+  }), /canonical/);
 });
 
 test("managed process argv accepts only fixed installed Agent and WebUI entrypoints", () => {
@@ -193,8 +281,9 @@ test("failed acceptance cleanup escalates a verified installed process from TERM
   const argv = [python, "-m", "taiji_runtime.main", "gateway", "run", "--accept-hooks"];
   let alive = true;
   const signals = [];
-  const stopped = await terminateManagedProcess(4242, "Agent", {
-    processAliveFn: () => alive,
+  const identity = { pid: 4242, start_time_ticks: "987654" };
+  const stopped = await terminateManagedProcess(identity, "Agent", {
+    processIdentityStillPresentFn: () => alive,
     installedProcessArgvFn: () => argv,
     killFn: (_pid, signal) => {
       signals.push(signal);
@@ -210,8 +299,9 @@ test("failed acceptance cleanup escalates a verified installed process from TERM
 
 test("failed acceptance cleanup never signals an unverified or reused pid", async () => {
   const signals = [];
-  const stopped = await terminateManagedProcess(4242, "Agent", {
-    processAliveFn: () => true,
+  const identity = { pid: 4242, start_time_ticks: "987654" };
+  const stopped = await terminateManagedProcess(identity, "Agent", {
+    processIdentityStillPresentFn: () => false,
     installedProcessArgvFn: () => ["/tmp/unrelated"],
     killFn: (_pid, signal) => signals.push(signal),
     sleepFn: async () => {},
@@ -220,6 +310,62 @@ test("failed acceptance cleanup never signals an unverified or reused pid", asyn
   });
   assert.equal(stopped, false);
   assert.deepEqual(signals, []);
+});
+
+test("managed cleanup stops signalling when the original pid identity is reused", async () => {
+  const python = "/opt/taiji-agent/runtime/agent/venv/bin/python";
+  const argv = [python, "-m", "taiji_runtime.main", "gateway", "run", "--accept-hooks"];
+  const identity = { pid: 4242, start_time_ticks: "987654" };
+  let checks = 0;
+  const signals = [];
+  const stopped = await terminateManagedProcess(identity, "Agent", {
+    processIdentityStillPresentFn: () => {
+      checks += 1;
+      return checks === 1;
+    },
+    installedProcessArgvFn: () => argv,
+    killFn: (_pid, signal) => signals.push(signal),
+    sleepFn: async () => {},
+    graceMs: 2,
+    pollMs: 1,
+  });
+  assert.equal(stopped, true);
+  assert.deepEqual(signals, ["SIGTERM"]);
+});
+
+test("owned Electron cleanup escalates only the original child identity", async () => {
+  const identity = { pid: 5151, start_time_ticks: "112233" };
+  let alive = true;
+  const signals = [];
+  const child = {
+    pid: identity.pid,
+    kill(signal) {
+      signals.push(signal);
+      if (signal === "SIGKILL") alive = false;
+      return true;
+    },
+  };
+  const stopped = await terminateOwnedChildProcess(child, identity, {
+    processIdentityStillPresentFn: () => alive,
+    sleepFn: async () => {},
+    graceMs: 2,
+    pollMs: 1,
+  });
+  assert.equal(stopped, true);
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+
+  const mismatchedSignals = [];
+  const mismatched = await terminateOwnedChildProcess({
+    pid: 6161,
+    kill(signal) { mismatchedSignals.push(signal); },
+  }, identity, {
+    processIdentityStillPresentFn: () => true,
+    sleepFn: async () => {},
+    graceMs: 1,
+    pollMs: 1,
+  });
+  assert.equal(mismatched, false);
+  assert.deepEqual(mismatchedSignals, []);
 });
 
 test("attachment helper opens the chooser through the visible button before setting files", async () => {
@@ -369,6 +515,64 @@ test("redactDesktopUrl never exposes the desktop token", () => {
   assert.equal(redactDesktopUrl(stack), stack);
 });
 
+test("formal failure evidence emits only a fixed classification code", () => {
+  const error = new Error([
+    "Authorization: Bearer sk-live-short-value",
+    "sk-bare-provider-secret",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjdXN0b21lciJ9.signature",
+    "api_key=another-short-secret",
+    '"password": "desktop-password"',
+    "at /home/operator/.config/taiji-agent/runtime.log",
+    "at /data/usershare/customer/private/runtime.log",
+  ].join("\n"));
+  assert.equal(safeErrorText(error), "TAIJI-DESKTOP-E999");
+  error.code = "TAIJI-DESKTOP-E042";
+  assert.equal(safeErrorText(error), "TAIJI-DESKTOP-E042");
+});
+
+test("hidden credential input never echoes or serializes the Provider secret", async () => {
+  await assert.rejects(
+    () => readHiddenCredentialFromTty({ input: { isTTY: false }, output: { write() {} } }),
+    (error) => error?.code === "TAIJI-DESKTOP-E021",
+  );
+  const input = new EventEmitter();
+  input.isTTY = true;
+  input.isRaw = false;
+  const rawModes = [];
+  input.setRawMode = (enabled) => { input.isRaw = enabled; rawModes.push(enabled); };
+  input.resume = () => {};
+  input.pause = () => {};
+  const writes = [];
+  const output = { write: (value) => { writes.push(String(value)); } };
+  const pending = readHiddenCredentialFromTty({ input, output });
+  queueMicrotask(() => input.emit("data", Buffer.from("sk-hidden-value\r", "utf8")));
+  const secret = await pending;
+  assert.equal(secret, "sk-hidden-value");
+  assert.deepEqual(rawModes, [true, false]);
+  assert.equal(writes.join("").includes(secret), false);
+
+  const sent = [];
+  const client = {
+    async send(method, params = {}) {
+      sent.push({ method, params });
+      if (method === "Runtime.evaluate") {
+        const value = params.expression.includes("getBoundingClientRect")
+          ? { x: 10, y: 10, width: 100, height: 30, accessibleName: "API 密钥" }
+          : true;
+        return { result: { value } };
+      }
+      return {};
+    },
+  };
+  await insertSecretThroughVisiblePasswordInput(client, "#onboardingApiKeyInput", secret, Date.now() + 2000);
+  assert.equal(sent.some((call) => call.method === "Input.insertText" && call.params.text === secret), true);
+  assert.equal(sent.filter((call) => call.method !== "Input.insertText").some((call) => JSON.stringify(call).includes(secret)), false);
+  await assert.rejects(
+    () => insertSecretThroughVisiblePasswordInput(client, "#onboardingApiKeyInput", "bad\nsecret", Date.now() + 2000),
+    (error) => error?.code === "TAIJI-DESKTOP-E022",
+  );
+});
+
 test("HTTP failure filter allows only the exact same-origin missing expert run", () => {
   const origin = "http://127.0.0.1:18787";
   const expected = {
@@ -510,6 +714,30 @@ test("CdpClient rejects protocol failures instead of returning partial data", as
 });
 
 test("buildDriverResult is fail-closed and emits no desktop token", () => {
+  const restartRounds = [1, 2, 3].map((round) => ({
+    round,
+    ready: true,
+    electron_pid: 4241 + round,
+    agent_pid: 4242 + round,
+    web_pid: 4243 + round,
+    secondary_pid: 5241 + round,
+    cdp_port: 49122 + round,
+    webui_port: 18786 + round,
+    second_instance_exit_code: 0,
+    electron_exit_code: 0,
+    restored_and_focused: true,
+    page_close_sent: true,
+    process_identities_gone: {
+      electron: true,
+      agent: true,
+      webui: true,
+      secondary: true,
+    },
+    ports_closed: { cdp: true, webui: true },
+    pidfiles_absent: true,
+    model_config_observed: true,
+    profile_continuity_observed: true,
+  }));
   const measurements = {
     sessionId: "1".repeat(32),
     challenge: "2".repeat(64),
@@ -533,6 +761,33 @@ test("buildDriverResult is fail-closed and emits no desktop token", () => {
     exitCode: 0,
     jsErrors: [],
     unexpectedHttpFailures: [],
+    restartRounds,
+    persistentUserData: {
+      mode: "electron-default-persistent",
+      restart_rounds: 3,
+      user_data_override: false,
+      profile_reset: false,
+      environment_reused: true,
+      continuity_observed_rounds: 3,
+      continuity_token: "8".repeat(64),
+    },
+    coreObservation: {
+      status: "verified",
+      mechanism: "journalctl-json-user-electron",
+      baseline_entry_count: 0,
+      baseline_cursor_set_token: "7".repeat(64),
+      rounds: [1, 2, 3].map((round) => ({
+        round,
+        status: "verified",
+        added_entry_count: 0,
+        cursor_set_token: String(round).repeat(64),
+      })),
+    },
+    modelConfigObservation: {
+      observed_rounds: 3,
+      consistent: true,
+      public_projection_token: "6".repeat(64),
+    },
     checks: {
       visible_first_configuration_completion: true,
       desktop_launch: true,
@@ -540,10 +795,22 @@ test("buildDriverResult is fail-closed and emits no desktop token", () => {
       attachment_flow: true,
       window_close_exit: true,
       diagnostic_export: true,
+      three_restart_cycles: true,
+      second_instance_focus: true,
+      model_configuration_state_consistent: true,
+      no_new_electron_core: true,
     },
   };
   const result = buildDriverResult(measurements);
-  assert.equal(result.schema, "taiji.desktop.acceptance-driver.v1");
+  assert.equal(result.schema, "taiji.desktop.acceptance-driver.v2");
+  assert.equal(result.restart_rounds.length, 3);
+  assert.deepEqual(result.restart_rounds.map((round) => round.round), [1, 2, 3]);
+  assert.equal(result.electron_pid, result.restart_rounds[0].electron_pid);
+  assert.equal(result.agent_pid, result.restart_rounds[0].agent_pid);
+  assert.equal(result.web_pid, result.restart_rounds[0].web_pid);
+  assert.deepEqual(result.persistent_user_data, measurements.persistentUserData);
+  assert.deepEqual(result.core_observation, measurements.coreObservation);
+  assert.deepEqual(result.model_config_observation, measurements.modelConfigObservation);
   assert.equal(result.app_url.includes("secret"), false);
   assert.deepEqual(result.desktop_auth_cookie, measurements.desktopAuthCookie);
   assert.equal(JSON.stringify(result).includes("a".repeat(64)), false);
@@ -576,6 +843,511 @@ test("buildDriverResult is fail-closed and emits no desktop token", () => {
   );
   assert.throws(() => buildDriverResult({ ...measurements, jsErrors: ["boom"] }), /JavaScript errors/);
   assert.throws(() => buildDriverResult({ ...measurements, model: "" }), /model identity/);
+  assert.throws(() => buildDriverResult({ ...measurements, restartRounds: restartRounds.slice(0, 2) }), /exactly 3 restart rounds/);
+  assert.throws(() => buildDriverResult({
+    ...measurements,
+    restartRounds: restartRounds.map((round) => round.round === 1 ? { ...round, webui_port: 19999 } : round),
+  }), /strict round1 aliases/);
+  assert.throws(() => buildDriverResult({
+    ...measurements,
+    restartRounds: restartRounds.map((round) => round.round === 2
+      ? { ...round, process_identities_gone: { ...round.process_identities_gone, webui: false } }
+      : round),
+  }), /restart round 2 failed/);
+  assert.throws(() => buildDriverResult({
+    ...measurements,
+    modelConfigObservation: { ...measurements.modelConfigObservation, consistent: false },
+  }), /model configuration projection changed/);
+  assert.throws(() => buildDriverResult({
+    ...measurements,
+    coreObservation: {
+      status: "unverified",
+      reason: "json_unavailable",
+      mechanism: "journalctl-json-user-electron",
+      baseline_entry_count: null,
+      baseline_cursor_set_token: null,
+      rounds: [1, 2, 3].map((round) => ({ round, status: "unverified", reason: "baseline_unavailable" })),
+    },
+  }), /core observation was not verified/);
+});
+
+test("model configuration persistence compares a public projection but emits only a salted token", () => {
+  const payload = {
+    ok: true,
+    profile: "default",
+    main_request_id: "a".repeat(32),
+    config: { path: "/home/private/.config/taiji/config.yaml" },
+    main: {
+      provider: "custom",
+      model: "private-model",
+      base_url: "https://model.internal.example/v1",
+      key_env: "CUSTOM_MODEL_API_KEY",
+      key_status: { configured: true, source: "env_file", env_var: "CUSTOM_MODEL_API_KEY" },
+      api_key: "must-never-escape",
+    },
+    provider_credentials: [{ api_key: "also-secret" }],
+  };
+  assert.deepEqual(publicModelConfigProjection(payload), {
+    profile: "default",
+    main_request_id: "a".repeat(32),
+    main: {
+      provider: "custom",
+      model: "private-model",
+      base_url: "https://model.internal.example/v1",
+      key_env: "CUSTOM_MODEL_API_KEY",
+      key_configured: true,
+      key_source: "env_file",
+      key_env_status: "CUSTOM_MODEL_API_KEY",
+    },
+  });
+
+  const observation = buildModelConfigObservation([payload, structuredClone(payload), structuredClone(payload)], Buffer.alloc(32, 7));
+  assert.equal(observation.observed_rounds, 3);
+  assert.equal(observation.consistent, true);
+  assert.match(observation.public_projection_token, /^[0-9a-f]{64}$/);
+  const rendered = JSON.stringify(observation);
+  for (const forbidden of ["must-never-escape", "also-secret", "model.internal.example", "/home/private", "private-model", "CUSTOM_MODEL_API_KEY"]) {
+    assert.equal(rendered.includes(forbidden), false, `${forbidden} must not enter evidence`);
+  }
+
+  const changed = structuredClone(payload);
+  changed.main.base_url = "https://replacement.internal.example/v1";
+  assert.equal(buildModelConfigObservation([payload, structuredClone(payload), changed], Buffer.alloc(32, 7)).consistent, false);
+  assert.throws(() => buildModelConfigObservation([payload, payload], Buffer.alloc(32, 7)), /exactly 3/);
+});
+
+test("model configuration observation rejects a consistently unconfigured or receipt-less main model", () => {
+  const valid = {
+    ok: true,
+    profile: "default",
+    main_request_id: "00112233445566778899aabbccddeeff",
+    main: {
+      provider: "deepseek",
+      model: "deepseek-chat",
+      base_url: "",
+      key_env: "",
+      key_status: { configured: true, source: "env_file", env_var: "DEEPSEEK_API_KEY" },
+    },
+  };
+  assert.equal(publicModelConfigProjection(valid).main.key_env, "DEEPSEEK_API_KEY");
+  assert.throws(
+    () => publicModelConfigProjection({ ...valid, main_request_id: "" }),
+    /request receipt/,
+  );
+  assert.throws(
+    () => publicModelConfigProjection({
+      ...valid,
+      main: { ...valid.main, key_status: { ...valid.main.key_status, configured: false } },
+    }),
+    /not configured/,
+  );
+  for (const field of ["provider", "model"]) {
+    assert.throws(
+      () => publicModelConfigProjection({ ...valid, main: { ...valid.main, [field]: "" } }),
+      /incomplete/,
+    );
+  }
+  assert.throws(
+    () => publicModelConfigProjection({
+      ...valid,
+      main: { ...valid.main, key_env: "", key_status: { ...valid.main.key_status, env_var: "" } },
+    }),
+    /incomplete/,
+  );
+});
+
+test("journalctl JSON observation records exact salted cursor sets without retaining raw rows", () => {
+  const uid = 1000;
+  const electron = ELECTRON_PATH;
+  const row = (cursor, overrides = {}) => ({
+    MESSAGE_ID: "fc2e22bc6ee647b6b90729ab34a250b1",
+    __CURSOR: cursor,
+    __REALTIME_TIMESTAMP: "1786400000000000",
+    COREDUMP_PID: "4242",
+    COREDUMP_UID: String(uid),
+    COREDUMP_EXE: electron,
+    COREDUMP_SIGNAL: "5",
+    COREDUMP_TIMESTAMP: "1786400000000000",
+    ...overrides,
+  });
+  const cursors = parseCoreJournalJsonCursors([
+    JSON.stringify(row("cursor-a")),
+    JSON.stringify(row("cursor-b", { COREDUMP_PID: "4343" })),
+  ].join("\n"), uid);
+  assert.deepEqual(cursors, ["cursor-a", "cursor-b"]);
+  assert.throws(() => parseCoreJournalJsonCursors("not-json", uid), /JSON/);
+  assert.throws(() => parseCoreJournalJsonCursors(JSON.stringify(row("cursor-a", { COREDUMP_UID: "1001" })), uid), /UID/);
+  assert.throws(() => parseCoreJournalJsonCursors(JSON.stringify(row("cursor-a", { COREDUMP_EXE: "/tmp/electron" })), uid), /executable/);
+  const incomplete = row("cursor-a");
+  delete incomplete.COREDUMP_SIGNAL;
+  assert.throws(() => parseCoreJournalJsonCursors(JSON.stringify(incomplete), uid), /required fields/);
+
+  assert.deepEqual(buildCoreJournalArgs(uid), [
+    "--system",
+    "--no-pager",
+    "--output=json",
+    "MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1",
+    `COREDUMP_UID=${uid}`,
+    `COREDUMP_EXE=${ELECTRON_PATH}`,
+  ]);
+
+  const trustedHandlerStats = {
+    uid: 0,
+    gid: 0,
+    mode: 0o100755,
+    nlink: 1,
+    isSymbolicLink: () => false,
+    isFile: () => true,
+  };
+  assert.equal(coreHandlerIsTrusted({
+    readFileFn: () => "|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h\n",
+    realpathFn: () => "/usr/lib/systemd/systemd-coredump",
+    lstatFn: () => trustedHandlerStats,
+  }), true);
+  assert.equal(coreHandlerIsTrusted({
+    readFileFn: () => "|/usr/share/apport/apport %p %s %c\n",
+    realpathFn: (pathname) => pathname,
+    lstatFn: () => trustedHandlerStats,
+  }), false);
+
+  const trustedStats = (pathname) => ({
+    uid: 0,
+    gid: 0,
+    mode: pathname === "/usr/bin/journalctl" ? 0o100755 : 0o40755,
+    nlink: 1,
+    isSymbolicLink: () => false,
+    isDirectory: () => pathname !== "/usr/bin/journalctl",
+    isFile: () => pathname === "/usr/bin/journalctl",
+  });
+  assert.equal(coreJournalToolIsTrusted({ lstatFn: trustedStats, realpathFn: (pathname) => pathname }), true);
+  assert.equal(coreJournalToolIsTrusted({
+    lstatFn: (pathname) => ({
+      ...trustedStats(pathname),
+      mode: pathname === "/usr/bin" ? 0o40777 : trustedStats(pathname).mode,
+    }),
+    realpathFn: (pathname) => pathname,
+  }), false);
+  assert.equal(coreJournalToolIsTrusted({
+    lstatFn: (pathname) => ({
+      ...trustedStats(pathname),
+      nlink: pathname === "/usr/bin/journalctl" ? 2 : 1,
+    }),
+    realpathFn: (pathname) => pathname,
+  }), false);
+
+  const verified = (tokens) => ({ status: "verified", cursors: new Set(tokens) });
+  const observation = buildCoreObservation([
+    verified(["baseline-a"]),
+    verified(["baseline-a"]),
+    verified(["baseline-a", "round-two-core-private-row"]),
+    verified(["baseline-a", "round-two-core-private-row"]),
+  ], Buffer.alloc(32, 9));
+  assert.equal(observation.status, "failed");
+  assert.deepEqual(observation.rounds.map((round) => round.added_entry_count), [0, 1, 0]);
+  assert.match(observation.baseline_cursor_set_token, /^[0-9a-f]{64}$/);
+  assert.deepEqual(observation.rounds.map((round) => Object.keys(round).sort()), [
+    ["added_entry_count", "cursor_set_token", "round", "status"],
+    ["added_entry_count", "cursor_set_token", "round", "status"],
+    ["added_entry_count", "cursor_set_token", "round", "status"],
+  ]);
+  assert.equal(JSON.stringify(observation).includes("round-two-core-private-row"), false);
+  assert.match(observation.rounds[1].cursor_set_token, /^[0-9a-f]{64}$/);
+
+  const failedThenUnavailable = buildCoreObservation([
+    verified([]),
+    verified(["known-new-core"]),
+    { status: "unverified", reason: "query_failed" },
+    verified(["known-new-core"]),
+  ], Buffer.alloc(32, 9));
+  assert.equal(failedThenUnavailable.status, "failed", "a later observation gap must not hide an already observed core");
+  assert.equal(JSON.stringify(failedThenUnavailable).includes("known-new-core"), false);
+
+  const regressed = buildCoreObservation([
+    verified(["baseline-a", "baseline-b"]),
+    verified(["baseline-b"]),
+    verified(["baseline-b"]),
+    verified(["baseline-b"]),
+  ], Buffer.alloc(32, 9));
+  assert.equal(regressed.status, "unverified");
+  assert.equal(regressed.reason, "cursor_set_regressed");
+  assert.equal(JSON.stringify(regressed).includes("baseline-a"), false);
+
+  const addedAndRegressed = buildCoreObservation([
+    verified(["baseline-a"]),
+    verified(["new-core"]),
+    verified(["new-core"]),
+    verified(["new-core"]),
+  ], Buffer.alloc(32, 9));
+  assert.equal(addedAndRegressed.status, "failed");
+  assert.equal(JSON.stringify(addedAndRegressed).includes("new-core"), false);
+
+  const unavailable = buildCoreObservation([
+    { status: "unverified", reason: "json_unavailable" },
+    verified([]),
+    verified([]),
+    verified([]),
+  ], Buffer.alloc(32, 9));
+  assert.equal(unavailable.status, "unverified");
+  assert.equal(unavailable.reason, "json_unavailable");
+  assert.deepEqual(unavailable.rounds.map((round) => round.status), ["unverified", "unverified", "unverified"]);
+});
+
+test("journalctl query is fixed-path, bounded and converts tool failures into unverified evidence", async () => {
+  const uid = 1000;
+  const row = JSON.stringify({
+    MESSAGE_ID: "fc2e22bc6ee647b6b90729ab34a250b1",
+    __CURSOR: "private-cursor",
+    __REALTIME_TIMESTAMP: "1786400000000000",
+    COREDUMP_PID: "4242",
+    COREDUMP_UID: String(uid),
+    COREDUMP_EXE: ELECTRON_PATH,
+    COREDUMP_SIGNAL: "5",
+    COREDUMP_SIGNAL_NAME: "SIGTRAP",
+    COREDUMP_TIMESTAMP: "1786400000000000",
+  });
+  const fakeChild = ({ stdout = "", stderr = "", code = 0, signal = null, error = null } = {}) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdout.setEncoding = () => {};
+    child.stderr.setEncoding = () => {};
+    child.kill = () => {};
+    queueMicrotask(() => {
+      if (error) child.emit("error", error);
+      if (stdout) child.stdout.emit("data", stdout);
+      if (stderr) child.stderr.emit("data", stderr);
+      child.emit("close", code, signal);
+    });
+    return child;
+  };
+
+  let invocation = null;
+  const verified = await queryCoreJournalSnapshot({
+    uid,
+    trustFn: () => true,
+    handlerTrustFn: () => true,
+    spawnFn: (executable, args, options) => {
+      invocation = { executable, args, options };
+      return fakeChild({ stdout: row });
+    },
+  });
+  assert.equal(verified.status, "verified");
+  assert.deepEqual([...verified.cursors], ["private-cursor"]);
+  assert.equal(invocation.executable, "/usr/bin/journalctl");
+  assert.deepEqual(invocation.args, buildCoreJournalArgs(uid));
+  assert.deepEqual(invocation.options.env, {
+    PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
+    LC_ALL: "C",
+    LANG: "C",
+  });
+
+  assert.deepEqual(await queryCoreJournalSnapshot({
+    uid,
+    trustFn: () => false,
+    handlerTrustFn: () => true,
+    spawnFn: () => { throw new Error("must not spawn"); },
+  }), { status: "unverified", reason: "tool_untrusted" });
+  assert.deepEqual(await queryCoreJournalSnapshot({
+    uid,
+    trustFn: () => true,
+    handlerTrustFn: () => true,
+    spawnFn: () => { throw new Error("missing"); },
+  }), { status: "unverified", reason: "query_failed" });
+  assert.deepEqual(await queryCoreJournalSnapshot({
+    uid,
+    trustFn: () => true,
+    handlerTrustFn: () => true,
+    spawnFn: () => fakeChild({ code: 1 }),
+  }), { status: "unverified", reason: "query_failed" });
+  assert.deepEqual(await queryCoreJournalSnapshot({
+    uid,
+    trustFn: () => true,
+    handlerTrustFn: () => true,
+    spawnFn: () => fakeChild({ stdout: "not-json" }),
+  }), { status: "unverified", reason: "json_unavailable" });
+
+  assert.deepEqual(await queryCoreJournalSnapshot({
+    uid,
+    trustFn: () => true,
+    handlerTrustFn: () => false,
+    spawnFn: () => { throw new Error("must not spawn"); },
+  }), { status: "unverified", reason: "handler_unverified" });
+  assert.deepEqual(await queryCoreJournalSnapshot({
+    uid,
+    trustFn: () => true,
+    handlerTrustFn: () => true,
+    spawnFn: () => fakeChild({ stderr: "No journal files were opened due to insufficient permissions.\n" }),
+  }), { status: "unverified", reason: "journal_access_unverified" });
+});
+
+test("settled core journal observation waits through delayed systemd-coredump writes", async () => {
+  const snapshots = [
+    { status: "verified", cursors: new Set() },
+    { status: "verified", cursors: new Set() },
+    { status: "verified", cursors: new Set(["delayed-core"]) },
+    { status: "verified", cursors: new Set(["delayed-core"]) },
+    { status: "verified", cursors: new Set(["delayed-core"]) },
+  ];
+  let calls = 0;
+  const settled = await querySettledCoreJournalSnapshot({
+    sampleCount: 5,
+    intervalMs: 1,
+    queryFn: async () => snapshots[calls++],
+    sleepFn: async () => {},
+  });
+  assert.equal(calls, 5, "the observer must not accept an early empty pair as settled");
+  assert.equal(settled.status, "verified");
+  assert.deepEqual([...settled.cursors], ["delayed-core"]);
+
+  const changing = [
+    new Set(),
+    new Set(),
+    new Set(),
+    new Set(["late-core"]),
+    new Set(["late-core", "later-core"]),
+  ];
+  let changingCalls = 0;
+  assert.deepEqual(await querySettledCoreJournalSnapshot({
+    sampleCount: 5,
+    intervalMs: 1,
+    queryFn: async () => ({ status: "verified", cursors: changing[changingCalls++] }),
+    sleepFn: async () => {},
+  }), { status: "unverified", reason: "journal_not_settled" });
+});
+
+test("process identity uses Linux start time so PID reuse counts as original-process exit", () => {
+  const fields = Array.from({ length: 40 }, (_, index) => String(index + 3));
+  fields[19] = "987654";
+  const raw = `4242 (electron helper) ${fields.join(" ")}`;
+  const identity = processIdentityFromStat(4242, raw);
+  assert.deepEqual(identity, { pid: 4242, start_time_ticks: "987654" });
+  assert.deepEqual(inspectProcessIdentity(identity, () => raw), { status: "present" });
+  assert.equal(processIdentityStillPresent(identity, () => raw), true);
+  const reusedFields = [...fields];
+  reusedFields[19] = "987655";
+  assert.deepEqual(inspectProcessIdentity(identity, () => `4242 (electron helper) ${reusedFields.join(" ")}`), { status: "gone", reason: "pid_reused" });
+  assert.equal(processIdentityStillPresent(identity, () => `4242 (electron helper) ${reusedFields.join(" ")}`), false);
+  const gone = Object.assign(new Error("gone"), { code: "ENOENT" });
+  assert.deepEqual(inspectProcessIdentity(identity, () => { throw gone; }), { status: "gone", reason: "proc_absent" });
+  assert.equal(processIdentityStillPresent(identity, () => { throw gone; }), false);
+  const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+  assert.deepEqual(inspectProcessIdentity(identity, () => { throw denied; }), { status: "unverified", reason: "proc_unreadable" });
+  assert.throws(() => processIdentityStillPresent(identity, () => { throw denied; }), /could not be verified/);
+  assert.deepEqual(inspectProcessIdentity(identity, () => "truncated"), { status: "unverified", reason: "proc_malformed" });
+});
+
+test("Electron helper descendants are captured by pid and start time before close", () => {
+  const identities = new Map([
+    [101, { pid: 101, start_time_ticks: "1010" }],
+    [102, { pid: 102, start_time_ticks: "1020" }],
+    [103, { pid: 103, start_time_ticks: "1030" }],
+  ]);
+  const children = new Map([[100, "101 102\n"], [101, "103\n"], [102, ""], [103, ""]]);
+  const executables = new Map([
+    [101, ELECTRON_PATH],
+    [102, "/opt/taiji-agent/runtime/agent/venv/bin/python"],
+    [103, "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome-sandbox"],
+  ]);
+  assert.deepEqual(captureElectronHelperIdentities({ pid: 100, start_time_ticks: "1000" }, {
+    readChildrenFn: (pid) => children.get(pid) || "",
+    captureIdentityFn: (pid) => identities.get(pid),
+    readlinkFn: (pid) => executables.get(pid),
+  }), [identities.get(101), identities.get(103)]);
+  const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+  assert.throws(() => captureElectronHelperIdentities({ pid: 100, start_time_ticks: "1000" }, {
+    readChildrenFn: () => { throw denied; },
+    captureIdentityFn: (pid) => identities.get(pid),
+    readlinkFn: (pid) => executables.get(pid),
+  }), /denied/);
+});
+
+test("secondary fast clean exit is accepted only when proc reports the pid absent", async () => {
+  const gone = Object.assign(new Error("gone"), { code: "ENOENT" });
+  assert.deepEqual(await captureChildIdentityOrCleanExit({ pid: 5252 }, Promise.resolve({ code: 0, signal: null, error: null }), Date.now() + 1000, {
+    captureIdentityFn: () => { throw gone; },
+  }), { identity: null, clean_exit: true });
+  const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+  await assert.rejects(() => captureChildIdentityOrCleanExit({ pid: 5253 }, Promise.resolve({ code: 0, signal: null, error: null }), Date.now() + 1000, {
+    captureIdentityFn: () => { throw denied; },
+  }), /identity could not be established/);
+});
+
+test("visible model configuration must match the authoritative public projection", () => {
+  const payload = {
+    ok: true,
+    profile: "default",
+    main_request_id: "a".repeat(32),
+    main: {
+      provider: "deepseek",
+      model: "deepseek-chat",
+      key_env: "",
+      key_status: { configured: true, source: "env_file", env_var: "DEEPSEEK_API_KEY" },
+    },
+  };
+  const visible = {
+    pane_visible: true,
+    hero_state: "ok",
+    main_badge_state: "ok",
+    provider_summary: "DeepSeek · deepseek",
+    model_summary: "deepseek-chat",
+    key_summary: "API 密钥已配置",
+  };
+  assert.equal(visibleModelConfigurationMatches(visible, payload), true);
+  assert.equal(visibleModelConfigurationMatches({ ...visible, key_summary: "未配置" }, payload), false);
+  assert.equal(visibleModelConfigurationMatches({ ...visible, model_summary: "stale-model" }, payload), false);
+});
+
+test("persistent profile continuity uses a private cookie marker and deletes it after round three", async () => {
+  const cookies = new Map();
+  const calls = [];
+  const client = {
+    async send(method, params = {}) {
+      calls.push({ method, params });
+      if (method === "Network.setCookie") {
+        cookies.set(params.name, { ...params, domain: "127.0.0.1" });
+        return { success: true };
+      }
+      if (method === "Network.getAllCookies") return { cookies: [...cookies.values()] };
+      if (method === "Network.deleteCookies") {
+        cookies.delete(params.name);
+        return {};
+      }
+      throw new Error(`unexpected CDP method: ${method}`);
+    },
+  };
+  const marker = await createProfileContinuityMarker(
+    client,
+    "http://127.0.0.1:18789",
+    "a".repeat(64),
+    "b".repeat(32),
+    Buffer.alloc(32, 4),
+  );
+  assert.equal(await verifyProfileContinuityMarker(client, "http://127.0.0.1:18790", marker), true);
+  assert.match(marker.continuity_token, /^[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify({ continuity_token: marker.continuity_token }).includes(marker.value), false);
+  await deleteProfileContinuityMarker(client, "http://127.0.0.1:18791", marker);
+  assert.equal(await verifyProfileContinuityMarker(client, "http://127.0.0.1:18792", marker), false);
+  assert.deepEqual(calls.map((call) => call.method), [
+    "Network.setCookie",
+    "Network.getAllCookies",
+    "Network.deleteCookies",
+    "Network.getAllCookies",
+  ]);
+});
+
+test("driver source preserves the default persistent Electron profile without GPU workarounds", () => {
+  const source = fs.readFileSync(DRIVER, "utf8");
+  for (const forbidden of ["--user-data-dir", "disableHardwareAcceleration", "--disable-gpu"]) {
+    assert.equal(source.includes(forbidden), false, `${forbidden} must not be introduced`);
+  }
+  assert.match(source, /\/usr\/bin\/journalctl/);
+  assert.match(source, /fc2e22bc6ee647b6b90729ab34a250b1/);
+  assert.equal(source.includes("coredumpctl"), false);
+  assert.match(source, /Page\.close/);
+  assert.equal((source.match(/verifyVisibleModelConfiguration\(/g) || []).length >= 3, true, "definition plus first/lightweight call sites are required");
+  assert.equal((source.match(/querySettledCoreJournalSnapshot\(/g) || []).length >= 4, true, "definition plus baseline/round call sites are required");
+  assert.equal((source.match(/configureVisibleOnboardingCredential\(/g) || []).length >= 2, true, "the visible setup step must call the secure credential gate");
+  assert.equal(source.includes("outputTail"), false, "formal failures must not retain Electron output tails");
 });
 
 test("fixed desktop entry path remains under the installed product surface", () => {
