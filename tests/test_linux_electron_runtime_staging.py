@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -79,12 +81,16 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
         self.stager = load_stager()
 
     def stage(self):
+        electron_sha256 = hashlib.sha256(
+            (self.source / "dist/electron").read_bytes()
+        ).hexdigest()
         return self.stager.stage_electron_runtime(
             self.source,
             self.destination,
             archive=self.archive,
             expected_version="39.8.10",
             expected_archive_sha256=self.archive_sha256,
+            expected_executable_sha256=electron_sha256,
             require_linux_x86_64=True,
         )
 
@@ -136,6 +142,84 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
             "archive SHA256",
         ):
             self.stage()
+
+    def test_staged_runtime_is_extracted_from_archive_and_binds_the_electron_elf(self) -> None:
+        electron_sha256 = hashlib.sha256(
+            (self.source / "dist/electron").read_bytes()
+        ).hexdigest()
+        # The source tree is writable and therefore cannot be the byte/mode
+        # origin of the packaged runtime.  The fixed archive was created while
+        # this member was 0644; changing only the source mode must not affect
+        # the staged artifact.
+        (self.source / "dist/resources.pak").chmod(0o600)
+
+        result = self.stager.stage_electron_runtime(
+            self.source,
+            self.destination,
+            archive=self.archive,
+            expected_version="39.8.10",
+            expected_archive_sha256=self.archive_sha256,
+            expected_executable_sha256=electron_sha256,
+            require_linux_x86_64=True,
+        )
+
+        self.assertEqual(result["electron_executable_sha256"], electron_sha256)
+        self.assertEqual(
+            stat.S_IMODE((self.destination / "dist/resources.pak").stat().st_mode),
+            0o644,
+        )
+
+    def test_archive_path_replacement_cannot_change_bytes_after_fixed_hash_validation(self) -> None:
+        original_resource = (self.source / "dist/resources.pak").read_bytes()
+        tampered_archive = self.temp_dir / "tampered-electron.zip"
+        with zipfile.ZipFile(self.archive, "r") as source_bundle, zipfile.ZipFile(
+            tampered_archive,
+            "w",
+            compression=zipfile.ZIP_STORED,
+        ) as tampered_bundle:
+            for info in source_bundle.infolist():
+                payload = source_bundle.read(info)
+                if info.filename == "resources.pak":
+                    payload = b"attacker-controlled-after-validation"
+                tampered_bundle.writestr(info, payload)
+
+        original_extract = self.stager.extract_fixed_archive
+        preserved_archive = self.temp_dir / "preserved-electron.zip"
+
+        def replace_path_during_extract(archive_source, destination_dist):
+            os.replace(self.archive, preserved_archive)
+            os.replace(tampered_archive, self.archive)
+            try:
+                original_extract(archive_source, destination_dist)
+            finally:
+                os.replace(self.archive, tampered_archive)
+                os.replace(preserved_archive, self.archive)
+
+        self.stager.extract_fixed_archive = replace_path_during_extract
+        self.addCleanup(setattr, self.stager, "extract_fixed_archive", original_extract)
+
+        result = self.stage()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            (self.destination / "dist/resources.pak").read_bytes(),
+            original_resource,
+        )
+
+    def test_rejects_fixed_archive_when_its_electron_elf_identity_is_not_canonical(self) -> None:
+        with self.assertRaisesRegex(
+            self.stager.ElectronRuntimeStageError,
+            "Electron executable SHA256",
+        ):
+            self.stager.stage_electron_runtime(
+                self.source,
+                self.destination,
+                archive=self.archive,
+                expected_version="39.8.10",
+                expected_archive_sha256=self.archive_sha256,
+                expected_executable_sha256="0" * 64,
+                require_linux_x86_64=True,
+            )
 
     def test_build_does_not_copy_the_complete_desktop_node_modules_tree(self) -> None:
         build = (ROOT / "packaging/linux/deb/build-deb.sh").read_text(encoding="utf-8")

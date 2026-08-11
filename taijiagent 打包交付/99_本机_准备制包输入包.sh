@@ -7,6 +7,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_GATE="$REPO_ROOT/scripts/check-clean-worktree.sh"
 TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
+SOURCE_INTEGRITY_HELPER="$REPO_ROOT/packaging/linux/source-archive-integrity.py"
+SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
 
 ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -29,6 +31,10 @@ preflight_repo() {
   require_cmd python3
   [ -x "$SOURCE_GATE" ] || fail "缺少正式源码门禁：$SOURCE_GATE"
   [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
+  [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
+    || fail "缺少源码归档完整性工具：$SOURCE_INTEGRITY_HELPER"
+  [ "$(sha256_file "$SOURCE_INTEGRITY_HELPER")" = "$SOURCE_INTEGRITY_HELPER_SHA256" ] \
+    || fail "源码归档完整性工具不是固定审查版本"
   "$SOURCE_GATE" \
     --mode formal \
     --repo-root "$REPO_ROOT" \
@@ -37,16 +43,28 @@ preflight_repo() {
 }
 
 write_source_archive() {
-  local commit archive archive_path digest
+  local commit archive archive_path inventory inventory_digest digest
   commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
   archive="taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
   archive_path="$SCRIPT_DIR/$archive"
-  rm -f "$SCRIPT_DIR"/taiji-agentv1.0-kylin-build-src-*.tar.gz "$CHECKSUM_FILE"
+  inventory="${archive%.tar.gz}.inventory.json"
+  rm -f "$SCRIPT_DIR"/taiji-agentv1.0-kylin-build-src-*.tar.gz \
+    "$SCRIPT_DIR"/taiji-agentv1.0-kylin-build-src-*.inventory.json "$CHECKSUM_FILE"
   info "生成源码包：$archive"
   "$TRUSTED_GIT" -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$archive_path"
   digest="$(sha256_file "$archive_path")"
-  printf '%s  %s\n' "$digest" "$archive" > "$CHECKSUM_FILE"
+  python3 "$SOURCE_INTEGRITY_HELPER" create \
+    --archive "$archive_path" \
+    --inventory "$SCRIPT_DIR/$inventory" \
+    --source-commit "$commit" \
+    || fail "无法从正式源码归档生成不可变成员清单"
+  inventory_digest="$(sha256_file "$SCRIPT_DIR/$inventory")"
+  {
+    printf '%s  %s\n' "$digest" "$archive"
+    printf '%s  %s\n' "$inventory_digest" "$inventory"
+  } > "$CHECKSUM_FILE"
   ok "源码包 SHA256：$digest"
+  ok "源码成员清单 SHA256：$inventory_digest"
 }
 
 write_builder_input_package() {
@@ -55,7 +73,7 @@ write_builder_input_package() {
   output="$REPO_ROOT/taijiagent-制包机输入-$commit.tar.gz"
   rm -f "$REPO_ROOT"/taijiagent-制包机输入-*.tar.gz
   info "生成制包机输入包：$(basename "$output")"
-  python3 - "$SCRIPT_DIR" "$output" <<'PY'
+  python3 - "$SCRIPT_DIR" "$output" "$SOURCE_INTEGRITY_HELPER" <<'PY'
 import os
 import sys
 import tarfile
@@ -63,6 +81,7 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).resolve()
 output = Path(sys.argv[2]).resolve()
+source_integrity_helper = Path(sys.argv[3]).resolve()
 skip_dirs = {
     ".AppleDouble",
     "__MACOSX",
@@ -100,6 +119,11 @@ with tarfile.open(output, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
                 continue
             arcname = Path(source.name) / path.relative_to(source)
             archive.add(path, arcname=str(arcname), recursive=False)
+    archive.add(
+        source_integrity_helper,
+        arcname=str(Path(source.name) / "source-archive-integrity.py"),
+        recursive=False,
+    )
 PY
   ok "制包机输入包已生成：$output"
 }

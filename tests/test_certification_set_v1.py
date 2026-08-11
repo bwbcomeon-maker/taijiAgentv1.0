@@ -49,7 +49,9 @@ class CertificationSetV1Tests(unittest.TestCase):
         )
         self.policy = ROOT / "packaging/linux/compatibility-policy.json"
         self.policy_sha = load_script()._policy_identity(self.policy)[1]
-        self.offline_log = self.root / "offline-install-rehearsal-session.json"
+        self.offline_dir = self.root / "offline-rehearsal"
+        self.offline_dir.mkdir(mode=0o700)
+        self.offline_log = self.offline_dir / "offline-install-rehearsal-session.json"
         self.offline_log.write_text(
             json.dumps(
                 {
@@ -74,15 +76,15 @@ class CertificationSetV1Tests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        self.previous_deb = self.root / "taiji-agent_1.2.2_amd64.deb"
+        self.previous_deb = self.offline_dir / "taiji-agent_1.2.2_amd64.deb"
         self.previous_deb.write_bytes(b"immutable-n-minus-one-deb")
         self.previous_deb_sha = hashlib.sha256(self.previous_deb.read_bytes()).hexdigest()
-        self.previous_checksum = self.root / f"{self.previous_deb.name}.sha256"
+        self.previous_checksum = self.offline_dir / f"{self.previous_deb.name}.sha256"
         self.previous_checksum.write_text(
             f"{self.previous_deb_sha}  {self.previous_deb.name}\n",
             encoding="ascii",
         )
-        self.previous_manifest = self.root / "previous-release-manifest.json"
+        self.previous_manifest = self.offline_dir / "previous-release-manifest.json"
         self.previous_manifest.write_text(
             json.dumps(
                 {
@@ -101,8 +103,79 @@ class CertificationSetV1Tests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        stable_data_hash = "7" * 64
-        self.offline = self.root / "offline-install-rehearsal.json"
+        self.offline_lifecycle = self.offline_dir / "offline-install-rehearsal-lifecycle.json"
+        lifecycle = json.loads(self.offline_log.read_text(encoding="utf-8"))
+        lifecycle.update(
+            {
+                "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                "compatibility_policy_sha256": self.policy_sha,
+                "previous_deb_basename": "taiji-agent_1.2.2_amd64.deb",
+                "previous_deb_sha256": self.previous_deb_sha,
+                "previous_version": "1.2.2",
+                "steps": [
+                    "fresh_install_n",
+                    "same_version_reinstall_n",
+                    "seed_n_minus_one",
+                    "upgrade_n_minus_one_to_n",
+                    "data_manifest_after_upgrade",
+                    "inject_postinst_failure_same_candidate",
+                    "automatic_rollback_to_n_minus_one",
+                    "upgrade_n_again",
+                    "remove_preserves_user_data",
+                    "purge_clears_root_state_only",
+                ],
+                "receipts": [
+                    {
+                        "operation": operation,
+                        "result": result,
+                        "state": "committed",
+                        "transaction_id": transaction_id,
+                        "deb_sha256": self.deb_sha,
+                        "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                        "compatibility_policy_sha256": self.policy_sha,
+                        "network": "none",
+                    }
+                    for operation, result, transaction_id in (
+                        ("fresh_install", "installed", "fresh-n"),
+                        ("reinstall", "reinstalled", "reinstall-n"),
+                        ("upgrade", "upgraded", "upgrade-n"),
+                        ("rollback", "rolled_back", "rollback-n"),
+                        ("upgrade_again", "upgraded", "upgrade-again-n"),
+                    )
+                ],
+                "data_manifests": {
+                    "before_upgrade": "d" * 64,
+                    "after_upgrade": "d" * 64,
+                    "after_rollback": "d" * 64,
+                    "after_remove": "d" * 64,
+                    "after_purge": "d" * 64,
+                },
+                "journal": {
+                    "upgrade_transaction_id": "upgrade-n",
+                    "rollback_transaction_id": "rollback-n",
+                    "second_upgrade_transaction_id": "upgrade-again-n",
+                    "resume": "partial journal is never committed; manual_recovery_required is explicit",
+                    "power_loss_resume_checked": True,
+                    "partial_journal_treated_as_committed": False,
+                    "partial_journal_result": "manual_recovery_required",
+                    "manual_recovery_required": False,
+                },
+                "package_actions": [
+                    {
+                        "command": command,
+                        "package": "taiji-agent",
+                        "network": "none",
+                        "download": False,
+                    }
+                    for command in ("dpkg --install", "dpkg --remove", "dpkg --purge")
+                ],
+            }
+        )
+        self.offline_lifecycle.write_text(
+            json.dumps(lifecycle, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.offline = self.offline_dir / "offline-install-rehearsal.json"
         self.offline.write_text(
             json.dumps(
                 {
@@ -129,55 +202,6 @@ class CertificationSetV1Tests(unittest.TestCase):
                     "target_verified": False,
                     "log_basename": self.offline_log.name,
                     "log_sha256": hashlib.sha256(self.offline_log.read_bytes()).hexdigest(),
-                    "steps": [
-                        "fresh_install_n",
-                        "same_version_reinstall_n",
-                        "seed_n_minus_one",
-                        "upgrade_n_minus_one_to_n",
-                        "data_manifest_after_upgrade",
-                        "inject_postinst_failure_same_candidate",
-                        "automatic_rollback_to_n_minus_one",
-                        "upgrade_n_again",
-                        "remove_preserves_user_data",
-                        "purge_clears_root_state_only",
-                    ],
-                    "receipts": [
-                        {
-                            "operation": operation,
-                            "result": "PASS",
-                            "state": "committed",
-                            "transaction_id": f"tx-{index}",
-                            "deb_sha256": self.deb_sha,
-                            "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
-                            "compatibility_policy_sha256": self.policy_sha,
-                            "network": "none",
-                        }
-                        for index, operation in enumerate(
-                            ["fresh_install", "reinstall", "upgrade", "rollback", "upgrade_again"],
-                            start=1,
-                        )
-                    ],
-                    "data_manifests": {
-                        "before_upgrade": stable_data_hash,
-                        "after_upgrade": stable_data_hash,
-                        "after_rollback": stable_data_hash,
-                        "after_remove": stable_data_hash,
-                        "after_purge": stable_data_hash,
-                    },
-                    "journal": {
-                        "upgrade_transaction_id": "tx-upgrade",
-                        "rollback_transaction_id": "tx-rollback",
-                        "second_upgrade_transaction_id": "tx-upgrade-again",
-                        "resume": "verified",
-                        "power_loss_resume_checked": True,
-                        "partial_journal_treated_as_committed": False,
-                        "partial_journal_result": "manual_recovery_required",
-                        "manual_recovery_required": False,
-                    },
-                    "package_actions": [
-                        {"command": command, "package": "taiji-agent", "network": "none", "download": False}
-                        for command in ("dpkg --install", "dpkg --remove", "dpkg --purge")
-                    ],
                     "previous_release": {
                         "source_commit": "8" * 40,
                         "version": "1.2.2",
@@ -190,6 +214,18 @@ class CertificationSetV1Tests(unittest.TestCase):
                         "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
                         "compatibility_policy_sha256": self.policy_sha,
                     },
+                    "lifecycle_log_basename": self.offline_lifecycle.name,
+                    "lifecycle_log_sha256": hashlib.sha256(
+                        self.offline_lifecycle.read_bytes()
+                    ).hexdigest(),
+                    "previous_deb_basename": "taiji-agent_1.2.2_amd64.deb",
+                    "previous_deb_sha256": self.previous_deb_sha,
+                    "previous_version": "1.2.2",
+                    "steps": lifecycle["steps"],
+                    "receipts": lifecycle["receipts"],
+                    "data_manifests": lifecycle["data_manifests"],
+                    "journal": lifecycle["journal"],
+                    "package_actions": lifecycle["package_actions"],
                 },
                 sort_keys=True,
             ) + "\n",
@@ -210,24 +246,50 @@ class CertificationSetV1Tests(unittest.TestCase):
             "second_instance_focus": "PASS",
             "no_new_electron_core": "PASS",
         }
-        self.positive_attachment_payloads = {
-            basename: ("evidence:" + basename).encode("utf-8")
-            for basename in {
-                "target-verification.json",
-                "environment-observation.json",
-                "single-deb-install-observation.json",
-                "single-deb-install-method-attestation.json",
-                "single-deb-graphical-installer.png",
-                "desktop-driver-result.json",
-                "desktop-app.png",
-                "taiji-support-bundle.json",
-            }
-        }
         self._write_records()
         self.output = self.root / "certification"
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_safe_regular_never_accepts_swap_and_restore_payload(self):
+        module = load_script()
+        source = self.root / "swap-source.json"
+        source.write_bytes(b"ORIGINAL")
+        original_payload = source.read_bytes()
+        replacement = self.root / "swap-replacement.json"
+        replacement.write_bytes(b"MALICIOU")
+        parked = self.root / "swap-parked.json"
+        original_read_bytes = Path.read_bytes
+
+        def swap_restore(path):
+            if path == source:
+                source.rename(parked)
+                replacement.rename(source)
+                try:
+                    return original_read_bytes(source)
+                finally:
+                    source.rename(replacement)
+                    parked.rename(source)
+            return original_read_bytes(path)
+
+        with patch.object(Path, "read_bytes", swap_restore):
+            observed = module._safe_regular(source, "swap source")
+
+        self.assertEqual(observed, original_payload)
+
+    def test_offline_validator_consumes_the_same_private_snapshot_it_archives(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        start = source.index("def _validate_offline_evidence(")
+        end = source.index("\ndef _validate_attachment(", start)
+        function = source[start:end]
+
+        self.assertIn("offline-validation-snapshot", function)
+        self.assertIn("validation_root / basename", function)
+        self.assertNotIn(
+            '_safe_regular(evidence_path, "offline rehearsal evidence")',
+            function,
+        )
 
     def _write_records(self):
         for category in self.matrix["positive_categories"]:
@@ -243,6 +305,125 @@ class CertificationSetV1Tests(unittest.TestCase):
                 desktop_environment="none",
             )
 
+    def _positive_attachment_fixture(self, record):
+        from tests.test_release_evidence_schema_v3 import ReleaseEvidenceSchemaV3Test
+
+        fixture = ReleaseEvidenceSchemaV3Test(
+            "test_positive_certification_bundle_is_recursively_validated_not_hash_only"
+        )
+        fixture.setUp()
+        try:
+            _base_record, payloads = fixture._positive_certification_bundle_fixture()
+        finally:
+            fixture.tearDown()
+
+        payloads = dict(payloads)
+        driver = json.loads(payloads["desktop-driver-result.json"].decode("utf-8"))
+        driver["acceptance_session_id"] = record["acceptance_session_id"]
+        driver["challenge_nonce"] = record["challenge_nonce"]
+        payloads["desktop-driver-result.json"] = (
+            json.dumps(driver, sort_keys=True) + "\n"
+        ).encode("utf-8")
+
+        identity_fields = (
+            "category_id",
+            "category_kind",
+            "compatibility",
+            "source_commit",
+            "version",
+            "architecture",
+            "deb_basename",
+            "deb_sha256",
+            "compatibility_policy_id",
+            "compatibility_policy_sha256",
+            "machine_identity_commitment_sha256",
+            "os_id",
+            "os_version",
+            "desktop_environment",
+            "security_facts",
+        )
+        environment = {key: record[key] for key in identity_fields}
+        environment.update(
+            {
+                "schema": "taiji-linux-environment-observation/v1",
+                "checks": {"preflight": "PASS", "install": "PASS"},
+                "attachments": [],
+            }
+        )
+        payloads["environment-observation.json"] = (
+            json.dumps(environment, sort_keys=True) + "\n"
+        ).encode("utf-8")
+
+        observation = json.loads(
+            payloads["single-deb-install-observation.json"].decode("utf-8")
+        )
+        observation.update(
+            {
+                "challenge_nonce": record["challenge_nonce"],
+                "machine_identity_commitment_sha256": record[
+                    "machine_identity_commitment_sha256"
+                ],
+                "machine_fingerprint_sha256": record["machine_fingerprint_sha256"],
+                "source_commit": record["source_commit"],
+                "deb_observed_basename": record["deb_basename"],
+                "deb_sha256": record["deb_sha256"],
+            }
+        )
+        payloads["single-deb-install-observation.json"] = (
+            json.dumps(observation, sort_keys=True) + "\n"
+        ).encode("utf-8")
+
+        attestation = json.loads(
+            payloads["single-deb-install-method-attestation.json"].decode("utf-8")
+        )
+        attestation.update(
+            {
+                "observation_sha256": hashlib.sha256(
+                    payloads["single-deb-install-observation.json"]
+                ).hexdigest(),
+                "challenge_nonce": record["challenge_nonce"],
+                "machine_fingerprint_sha256": record["machine_fingerprint_sha256"],
+                "boot_fingerprint_sha256": observation["boot_fingerprint_sha256"],
+                "deb_sha256": record["deb_sha256"],
+                "graphical_installer_evidence_sha256": hashlib.sha256(
+                    payloads["single-deb-graphical-installer.png"]
+                ).hexdigest(),
+            }
+        )
+        payloads["single-deb-install-method-attestation.json"] = (
+            json.dumps(attestation, sort_keys=True) + "\n"
+        ).encode("utf-8")
+
+        target = json.loads(payloads["target-verification.json"].decode("utf-8"))
+        for key in identity_fields:
+            if key != "security_facts":
+                target[key] = record[key]
+        target.update(
+            {
+                "acceptance_session_id": record["acceptance_session_id"],
+                "challenge_nonce": record["challenge_nonce"],
+                "machine_fingerprint_sha256": record["machine_fingerprint_sha256"],
+                "release_artifacts_sha256": "9" * 64,
+                "checks": dict(driver["checks"]),
+            }
+        )
+        pointers = {
+            "environment_observation": "environment-observation.json",
+            "install_observation": "single-deb-install-observation.json",
+            "install_method_attestation": "single-deb-install-method-attestation.json",
+            "graphical_installer_evidence": "single-deb-graphical-installer.png",
+            "driver_result": "desktop-driver-result.json",
+            "screenshot": "desktop-app.png",
+            "diagnostic": "taiji-support-bundle.json",
+        }
+        for field, basename in pointers.items():
+            target[field + "_basename"] = basename
+            target[field + "_sha256"] = hashlib.sha256(payloads[basename]).hexdigest()
+        payloads["target-verification.json"] = (
+            json.dumps(target, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        return payloads
+
     def _write_record(
         self,
         category_id,
@@ -257,13 +438,7 @@ class CertificationSetV1Tests(unittest.TestCase):
         directory = self.records / category_id
         directory.mkdir(mode=0o700, exist_ok=True)
         attachments = []
-        if category_kind == "positive":
-            for basename, payload in sorted(self.positive_attachment_payloads.items()):
-                (directory / basename).write_bytes(payload)
-                attachments.append(
-                    {"basename": basename, "sha256": hashlib.sha256(payload).hexdigest()}
-                )
-        else:
+        if category_kind != "positive":
             boundary = next(
                 item for item in self.matrix["negative_boundaries"] if item["id"] == category_id
             )
@@ -426,6 +601,15 @@ class CertificationSetV1Tests(unittest.TestCase):
             record["machine_identity_commitment_sha256"] = (
                 machine_identity_commitment_sha256
             )
+        if category_kind == "positive":
+            for basename, payload in sorted(
+                self._positive_attachment_fixture(record).items()
+            ):
+                (directory / basename).write_bytes(payload)
+                attachments.append(
+                    {"basename": basename, "sha256": hashlib.sha256(payload).hexdigest()}
+                )
+            record["attachments"] = attachments
         (directory / "environment-evidence.json").write_text(
             json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -437,7 +621,7 @@ class CertificationSetV1Tests(unittest.TestCase):
                 str(SCRIPT),
                 "--matrix", str(MATRIX),
                 "--records-dir", str(self.records),
-                "--offline-evidence", str(self.offline),
+                "--offline-evidence", str(self.offline_dir),
                 "--deb", str(self.deb),
                 "--policy", str(self.policy),
                 "--output", str(self.output),
@@ -463,6 +647,104 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertEqual(len(payload["negative_boundaries"]), 6)
         self.assertNotEqual(self.deb.read_bytes(), b"")
 
+    def test_archives_and_binds_the_complete_offline_rehearsal_directory(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        archived = self.output / "offline-rehearsal"
+        self.assertEqual(
+            {path.name for path in archived.iterdir()},
+            {
+                self.offline.name,
+                self.offline_log.name,
+                self.offline_lifecycle.name,
+                self.previous_deb.name,
+                self.previous_checksum.name,
+                self.previous_manifest.name,
+            },
+        )
+        payload = json.loads((self.output / "certification-set.json").read_text(encoding="utf-8"))
+        summary = payload["offline_rehearsal"]
+        self.assertEqual(summary["directory_basename"], archived.name)
+        self.assertEqual(
+            {item["basename"] for item in summary["files"]},
+            {path.name for path in archived.iterdir()},
+        )
+
+    def test_formal_certification_rejects_missing_lifecycle_original(self):
+        self.offline_lifecycle.unlink()
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+
+    def test_formal_certification_rejects_rebound_newer_previous_version(self):
+        lifecycle = json.loads(self.offline_lifecycle.read_text(encoding="utf-8"))
+        lifecycle["previous_version"] = "9.9.9"
+        lifecycle["previous_deb_basename"] = "taiji-agent_9.9.9_amd64.deb"
+        self.offline_lifecycle.write_text(
+            json.dumps(lifecycle, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        evidence["previous_version"] = "9.9.9"
+        evidence["previous_deb_basename"] = "taiji-agent_9.9.9_amd64.deb"
+        evidence["lifecycle_log_sha256"] = hashlib.sha256(
+            self.offline_lifecycle.read_bytes()
+        ).hexdigest()
+        self.offline.write_text(
+            json.dumps(evidence, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("严格早于", result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_validator_rejects_tampered_archived_offline_or_environment_attachment(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        validator_path = ROOT / "scripts/validate-taiji-release-evidence.py"
+        spec = importlib.util.spec_from_file_location("taiji_certification_physical_validator", validator_path)
+        assert spec is not None and spec.loader is not None
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        data = json.loads((self.output / "certification-set.json").read_text(encoding="utf-8"))
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="c" * 64,
+            desktop_entry_sha256="d" * 64,
+        )
+        args = SimpleNamespace(challenge=self.challenge, matrix=MATRIX)
+
+        archived_attachment = self.output / "records/kylin-min-ukui/desktop-driver-result.json"
+        original_attachment = archived_attachment.read_bytes()
+        archived_attachment.write_text('{"ok":false}\n', encoding="utf-8")
+        with patch.object(validator, "canonical_policy_identity", return_value=("taiji-linux-amd64-deb-v1", self.policy_sha)):
+            with self.assertRaisesRegex(validator.EvidenceError, "attachment|附件"):
+                validator.validate_certification_set_v1(
+                    data, self.output / "certification-set.json", args, binding
+                )
+
+        archived_attachment.write_bytes(original_attachment)
+        (self.output / "offline-rehearsal/offline-install-rehearsal-session.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        with patch.object(validator, "canonical_policy_identity", return_value=("taiji-linux-amd64-deb-v1", self.policy_sha)):
+            with self.assertRaisesRegex(validator.EvidenceError, "offline|离线"):
+                validator.validate_certification_set_v1(
+                    data, self.output / "certification-set.json", args, binding
+                )
+
     def test_release_validator_exposes_and_accepts_certification_set_v1_contract(self):
         result = self.command()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -481,8 +763,8 @@ class CertificationSetV1Tests(unittest.TestCase):
             deb_sha256=self.deb_sha,
             compatibility_policy_id="taiji-linux-amd64-deb-v1",
             compatibility_policy_sha256=self.policy_sha,
-            electron_executable_sha256="e" * 64,
-            desktop_entry_sha256="f" * 64,
+            electron_executable_sha256="c" * 64,
+            desktop_entry_sha256="d" * 64,
         )
         args = SimpleNamespace(challenge="c" * 64, matrix=MATRIX)
         with patch.object(validator, "canonical_policy_identity", return_value=("taiji-linux-amd64-deb-v1", self.policy_sha)):
@@ -521,7 +803,7 @@ class CertificationSetV1Tests(unittest.TestCase):
             record_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
         result = self.command()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("challenge", result.stderr.lower())
+        self.assertRegex(result.stderr.lower(), r"challenge|fingerprint")
 
         self.tearDown()
         self.setUp()
@@ -552,7 +834,7 @@ class CertificationSetV1Tests(unittest.TestCase):
         path.write_text(json.dumps(record) + "\n", encoding="utf-8")
         result = self.command()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("DEB", result.stderr)
+        self.assertRegex(result.stderr, r"DEB|deb_sha256")
 
     def test_release_validator_compares_every_environment_record_to_build_binding(self):
         validator_path = ROOT / "scripts/validate-taiji-release-evidence.py"
@@ -699,6 +981,11 @@ class CertificationSetV1Tests(unittest.TestCase):
             "journal",
             "package_actions",
             "previous_release",
+            "previous_deb_basename",
+            "previous_deb_sha256",
+            "previous_version",
+            "lifecycle_log_basename",
+            "lifecycle_log_sha256",
         ):
             evidence.pop(key)
         self.offline.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")
@@ -730,6 +1017,9 @@ class CertificationSetV1Tests(unittest.TestCase):
 
     def test_current_certification_set_requires_kylin_policy_fixture_evidence(self):
         canonical_session = json.loads(self.offline_log.read_text(encoding="utf-8"))
+        canonical_lifecycle = json.loads(
+            self.offline_lifecycle.read_text(encoding="utf-8")
+        )
         canonical_evidence = json.loads(self.offline.read_text(encoding="utf-8"))
         cases = (
             ("environment", "container"),
@@ -746,8 +1036,17 @@ class CertificationSetV1Tests(unittest.TestCase):
                 )
                 evidence = dict(canonical_evidence)
                 evidence[field] = value
+                lifecycle = dict(canonical_lifecycle)
+                lifecycle[field] = value
+                self.offline_lifecycle.write_text(
+                    json.dumps(lifecycle, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
                 evidence["log_sha256"] = hashlib.sha256(
                     self.offline_log.read_bytes()
+                ).hexdigest()
+                evidence["lifecycle_log_sha256"] = hashlib.sha256(
+                    self.offline_lifecycle.read_bytes()
                 ).hexdigest()
                 self.offline.write_text(
                     json.dumps(evidence, sort_keys=True) + "\n",
@@ -797,8 +1096,8 @@ class CertificationSetV1Tests(unittest.TestCase):
         isolated = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(isolated)
 
-        accepted, accepted_sha = isolated._validate_offline_evidence(
-            self.offline,
+        accepted, copied, inventory, inventory_sha = isolated._validate_offline_evidence(
+            self.offline_dir,
             source_commit=self.source_commit,
             version=self.version,
             deb_basename=self.deb.name,
@@ -808,7 +1107,19 @@ class CertificationSetV1Tests(unittest.TestCase):
         )
 
         self.assertEqual(accepted["source_commit"], self.source_commit)
-        self.assertEqual(accepted_sha, hashlib.sha256(self.offline.read_bytes()).hexdigest())
+        self.assertEqual(
+            set(copied),
+            {
+                self.offline.name,
+                self.offline_log.name,
+                self.offline_lifecycle.name,
+                self.previous_deb.name,
+                self.previous_checksum.name,
+                self.previous_manifest.name,
+            },
+        )
+        self.assertEqual({item["basename"] for item in inventory}, set(copied))
+        self.assertRegex(inventory_sha, r"^[0-9a-f]{64}$")
 
     def test_unknown_fields_positive_nonpass_and_missing_negative_boundary_fail(self):
         path = self.records / "kylin-min-ukui" / "environment-evidence.json"
@@ -869,6 +1180,9 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertTrue(self.output.exists() is False or not (self.output / "certification-set.json").exists())
 
     def test_noncanonical_output_or_overwrite_is_rejected(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("os.rename(temp_dir, args.output)", source)
+        self.assertIn("_publish_directory_noreplace(temp_dir, args.output)", source)
         result = self.command()
         self.assertEqual(result.returncode, 0, result.stderr)
         second = self.command()

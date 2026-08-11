@@ -63,11 +63,16 @@ PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa
 PINNED_NODE_VERSION = "22.23.1"
 PINNED_NODE_ARCHIVE_SHA256 = "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PINNED_PYTHON_VERSION = "3.11.15"
+PINNED_PYTHON_ARCHIVE_SHA256 = "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
+PINNED_PYTHON_EXECUTABLE_SHA256 = "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
+PINNED_ELECTRON_EXECUTABLE_SHA256 = "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 TOOLCHAIN_FIELDS = {
     "python_dependency_lock_status",
     "python_lock_basename",
     "python_lock_sha256",
     "python_version",
+    "python_archive_sha256",
     "python_executable_sha256",
     "uv_version",
     "uv_archive_sha256",
@@ -256,6 +261,9 @@ def _manifest_toolchain(manifest: dict[str, Any], policy: dict[str, Any]) -> dic
     expected = {
         "python_dependency_lock_status": "strict-locked",
         "python_lock_basename": "uv.lock",
+        "python_version": PINNED_PYTHON_VERSION,
+        "python_archive_sha256": PINNED_PYTHON_ARCHIVE_SHA256,
+        "python_executable_sha256": PINNED_PYTHON_EXECUTABLE_SHA256,
         "uv_version": PINNED_UV_VERSION,
         "uv_archive_sha256": PINNED_UV_ARCHIVE_SHA256,
         "uv_executable_sha256": PINNED_UV_EXECUTABLE_SHA256,
@@ -264,12 +272,11 @@ def _manifest_toolchain(manifest: dict[str, Any], policy: dict[str, Any]) -> dic
         "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
         "electron_version": electron.get("version"),
         "electron_archive_sha256": electron.get("archive_sha256"),
+        "electron_executable_sha256": PINNED_ELECTRON_EXECUTABLE_SHA256,
     }
     for key, value in expected.items():
         if manifest.get(key) != value:
             raise ReleaseEvidenceError(f"manifest {key} is not the pinned formal identity")
-    if type(manifest.get("python_version")) is not str or re.fullmatch(r"3\.11\.[0-9]+", manifest["python_version"]) is None:
-        raise ReleaseEvidenceError("manifest python_version must be 3.11.x")
     for key in TOOLCHAIN_FIELDS:
         if key.endswith("_sha256"):
             _require_sha(manifest.get(key), f"manifest {key}")

@@ -65,13 +65,20 @@ PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa
 PINNED_NODE_VERSION = "22.23.1"
 PINNED_NODE_ARCHIVE_SHA256 = "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PINNED_PYTHON_VERSION = "3.11.15"
+PINNED_PYTHON_ARCHIVE_SHA256 = "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
+PINNED_PYTHON_EXECUTABLE_SHA256 = "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
 PINNED_ELECTRON_VERSION = "39.8.10"
 PINNED_ELECTRON_ARCHIVE_SHA256 = "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1"
+PINNED_ELECTRON_EXECUTABLE_SHA256 = "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
+PINNED_SOURCE_INTEGRITY_HELPER_SHA256 = "dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 TOOLCHAIN_MANIFEST_FIELDS = {
     "python_dependency_lock_status",
     "python_lock_basename",
     "python_lock_sha256",
     "python_version",
+    "python_archive_sha256",
     "python_executable_sha256",
     "uv_version",
     "uv_archive_sha256",
@@ -97,6 +104,10 @@ TARGET_CHECK_KEYS = {
     "attachment_flow",
     "window_close_exit",
     "diagnostic_export",
+    "three_restart_cycles",
+    "second_instance_focus",
+    "model_configuration_state_consistent",
+    "no_new_electron_core",
 }
 DRIVER_KEYS = {
     "schema",
@@ -115,10 +126,161 @@ DRIVER_KEYS = {
     "web_pid",
     "screenshot_basename",
     "diagnostic_basename",
+    "restart_rounds",
+    "persistent_user_data",
+    "core_observation",
+    "model_config_observation",
     "checks",
     "js_error_count",
     "unexpected_http_failures",
     "electron_exit_code",
+}
+DRIVER_RESTART_ROUND_KEYS = {
+    "round",
+    "ready",
+    "electron_pid",
+    "agent_pid",
+    "web_pid",
+    "secondary_pid",
+    "cdp_port",
+    "webui_port",
+    "second_instance_exit_code",
+    "electron_exit_code",
+    "restored_and_focused",
+    "page_close_sent",
+    "process_identities_gone",
+    "ports_closed",
+    "pidfiles_absent",
+    "model_config_observed",
+    "profile_continuity_observed",
+}
+DRIVER_PERSISTENT_USER_DATA_KEYS = {
+    "mode",
+    "restart_rounds",
+    "user_data_override",
+    "profile_reset",
+    "environment_reused",
+    "continuity_observed_rounds",
+    "continuity_token",
+}
+DRIVER_CORE_OBSERVATION_KEYS = {
+    "status",
+    "mechanism",
+    "baseline_entry_count",
+    "baseline_cursor_set_token",
+    "rounds",
+}
+DRIVER_CORE_ROUND_KEYS = {
+    "round",
+    "status",
+    "added_entry_count",
+    "cursor_set_token",
+}
+DRIVER_MODEL_CONFIG_OBSERVATION_KEYS = {
+    "observed_rounds",
+    "consistent",
+    "public_projection_token",
+}
+CANONICAL_TARGET_EVIDENCE_KEYS = {
+    "schema",
+    "evidence_type",
+    "generated_at_utc",
+    "acceptance_session_id",
+    "challenge_nonce",
+    "machine_identity_commitment_sha256",
+    "machine_fingerprint_sha256",
+    "release_artifacts_sha256",
+    "category_id",
+    "category_kind",
+    "compatibility",
+    "source_commit",
+    "version",
+    "architecture",
+    "deb_basename",
+    "deb_sha256",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
+    "os_id",
+    "os_version",
+    "desktop_environment",
+    "installation_method",
+    "installation_method_evidence",
+    "installation_method_machine_observed",
+    "checks",
+    "environment_observation_basename",
+    "environment_observation_sha256",
+    "install_observation_basename",
+    "install_observation_sha256",
+    "install_method_attestation_basename",
+    "install_method_attestation_sha256",
+    "graphical_installer_evidence_basename",
+    "graphical_installer_evidence_sha256",
+    "driver_result_basename",
+    "driver_result_sha256",
+    "screenshot_basename",
+    "screenshot_sha256",
+    "diagnostic_basename",
+    "diagnostic_sha256",
+}
+CANONICAL_ENVIRONMENT_OBSERVATION_KEYS = {
+    "schema",
+    "category_id",
+    "category_kind",
+    "compatibility",
+    "source_commit",
+    "version",
+    "architecture",
+    "deb_basename",
+    "deb_sha256",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
+    "machine_identity_commitment_sha256",
+    "os_id",
+    "os_version",
+    "desktop_environment",
+    "security_facts",
+    "checks",
+    "attachments",
+}
+CANONICAL_INSTALL_OBSERVATION_KEYS = {
+    "schema",
+    "generated_at_utc",
+    "started_at_utc",
+    "completed_at_utc",
+    "challenge_nonce",
+    "machine_identity_commitment_sha256",
+    "machine_fingerprint_sha256",
+    "boot_fingerprint_sha256",
+    "target_uid",
+    "canonical_home_fingerprint_sha256",
+    "user_state_paths_fingerprint_sha256",
+    "source_commit",
+    "manifest_sha256",
+    "deb_observed_basename",
+    "deb_sha256",
+    "candidate_file_count",
+    "additional_install_files_observed",
+    "package_status_before",
+    "package_status_after",
+    "package_status_transitions",
+    "network_observation",
+    "network_sample_interval_ms",
+    "network_sample_count",
+    "user_state_before",
+    "user_state_after_install_before_first_launch",
+    "first_launch_eligible",
+    "installation_method_machine_observed",
+    "observation_process_continuous",
+}
+POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES = {
+    "target-verification.json",
+    "environment-observation.json",
+    "single-deb-install-observation.json",
+    "single-deb-install-method-attestation.json",
+    "single-deb-graphical-installer.png",
+    "desktop-driver-result.json",
+    "desktop-app.png",
+    "taiji-support-bundle.json",
 }
 DESKTOP_AUTH_COOKIE_KEYS = {
     "name",
@@ -187,6 +349,11 @@ OFFLINE_V1_LIFECYCLE_KEYS = {
     "journal",
     "package_actions",
     "previous_release",
+    "previous_deb_basename",
+    "previous_deb_sha256",
+    "previous_version",
+    "lifecycle_log_basename",
+    "lifecycle_log_sha256",
 }
 OFFLINE_PREVIOUS_RELEASE_KEYS = {
     "source_commit",
@@ -250,6 +417,10 @@ TARGET_KEYS = {
     "attachment_flow",
     "window_close_exit",
     "diagnostic_export",
+    "three_restart_cycles",
+    "second_instance_focus",
+    "model_configuration_state_consistent",
+    "no_new_electron_core",
     "session_log_basename",
     "session_log_sha256",
     "screenshot_basename",
@@ -372,6 +543,7 @@ class BuildBinding:
     python_lock_basename: builtins.str = ""
     python_lock_sha256: builtins.str = ""
     python_version: builtins.str = ""
+    python_archive_sha256: builtins.str = ""
     python_executable_sha256: builtins.str = ""
     uv_version: builtins.str = ""
     uv_archive_sha256: builtins.str = ""
@@ -383,6 +555,8 @@ class BuildBinding:
     electron_archive_sha256: builtins.str = ""
     source_archive_basename: builtins.str = ""
     source_archive_sha256: builtins.str = ""
+    source_inventory_basename: builtins.str = ""
+    source_inventory_sha256: builtins.str = ""
     source_checksums_sha256: builtins.str = ""
     build_marker_sha256: builtins.str = ""
     delivery_inventory_sha256: builtins.str = ""
@@ -423,6 +597,9 @@ def validate_manifest_toolchain_identity(manifest: dict[str, Any]) -> dict[str, 
     expected = {
         "python_dependency_lock_status": "strict-locked",
         "python_lock_basename": "uv.lock",
+        "python_version": PINNED_PYTHON_VERSION,
+        "python_archive_sha256": PINNED_PYTHON_ARCHIVE_SHA256,
+        "python_executable_sha256": PINNED_PYTHON_EXECUTABLE_SHA256,
         "uv_version": PINNED_UV_VERSION,
         "uv_archive_sha256": PINNED_UV_ARCHIVE_SHA256,
         "uv_executable_sha256": PINNED_UV_EXECUTABLE_SHA256,
@@ -431,14 +608,13 @@ def validate_manifest_toolchain_identity(manifest: dict[str, Any]) -> dict[str, 
         "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
         "electron_version": PINNED_ELECTRON_VERSION,
         "electron_archive_sha256": PINNED_ELECTRON_ARCHIVE_SHA256,
+        "electron_executable_sha256": PINNED_ELECTRON_EXECUTABLE_SHA256,
     }
     for key, value in expected.items():
         require_exact(manifest, key, value)
-    python_version = require_nonempty_string(manifest, "python_version")
-    if re.fullmatch(r"3\.11\.[0-9]+", python_version) is None:
-        raise EvidenceError("当前 v3 manifest python_version 必须是 3.11.x")
     for key in (
         "python_lock_sha256",
+        "python_archive_sha256",
         "python_executable_sha256",
         "uv_archive_sha256",
         "uv_executable_sha256",
@@ -617,6 +793,7 @@ def sha256_regular_tar_member(path: Path, member_name: str, label: str) -> str:
 
 def delivery_inventory_sha256(delivery_dir: Path) -> str:
     excluded_top_level = {
+        "certification",
         "offline-install-rehearsal",
         "target-verification",
         "构建日志",
@@ -631,6 +808,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         "04_目标终端_桌面App验收并导出证据.sh",
         "99_本机_准备制包输入包.sh",
         "SHA256SUMS.txt",
+        "source-archive-integrity.py",
         "操作说明.md",
         "版本信息.txt",
         "生成的安装包/.build-success",
@@ -682,6 +860,11 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
                 (directory_path.relative_to(delivery_dir).as_posix(), permissions)
             )
         for filename in filenames:
+            if current_path == delivery_dir and filename in {
+                "release-evidence.json",
+                "release-evidence.json.sig",
+            }:
+                continue
             file_path = current_path / filename
             relative = file_path.relative_to(delivery_dir).as_posix()
             digest, file_stat = sha256_regular_file(file_path, f"交付文件 {relative}")
@@ -714,6 +897,9 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         if not isinstance(source_commit, str) or not FULL_COMMIT_RE.fullmatch(source_commit):
             raise EvidenceError("v3 交付清单 manifest source_commit 不合法")
         expected_source_name = f"taiji-agentv1.0-kylin-build-src-{source_commit}.tar.gz"
+        expected_inventory_name = (
+            f"taiji-agentv1.0-kylin-build-src-{source_commit}.inventory.json"
+        )
         source_candidates = sorted(
             relative
             for relative in paths
@@ -725,7 +911,19 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             raise EvidenceError(
                 "v3 交付清单必须且只能包含 manifest source_commit 命名的源码包"
             )
+        inventory_candidates = sorted(
+            relative
+            for relative in paths
+            if "/" not in relative
+            and relative.startswith("taiji-agentv1.0-kylin-build-src-")
+            and relative.endswith(".inventory.json")
+        )
+        if inventory_candidates != [expected_inventory_name]:
+            raise EvidenceError(
+                "v3 交付清单必须且只能包含 manifest source_commit 命名的源码成员清单"
+            )
         source_hash = file_hashes[expected_source_name]
+        source_inventory_hash = file_hashes[expected_inventory_name]
         source_lock_hash = sha256_regular_tar_member(
             delivery_dir / expected_source_name,
             "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock",
@@ -741,16 +939,52 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             source_sums_text = source_sums_payload.decode("ascii")
         except UnicodeError as exc:
             raise EvidenceError("根 SHA256SUMS 必须是 ASCII") from exc
-        source_sums_match = re.fullmatch(
-            r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?",
-            source_sums_text,
+        checksum_records: dict[str, str] = {}
+        for line in source_sums_text.splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)", line)
+            if match is None or match.group(2) in checksum_records:
+                raise EvidenceError("根 SHA256SUMS 必须是无重复的两条精确摘要记录")
+            checksum_records[match.group(2)] = match.group(1)
+        if checksum_records != {
+            expected_source_name: source_hash,
+            expected_inventory_name: source_inventory_hash,
+        }:
+            raise EvidenceError("根 SHA256SUMS 未精确绑定唯一源码包与 archive-derived 成员清单")
+        helper_path = delivery_dir / "source-archive-integrity.py"
+        if file_hashes["source-archive-integrity.py"] != PINNED_SOURCE_INTEGRITY_HELPER_SHA256:
+            raise EvidenceError("交付目录源码归档完整性工具不是固定审查版本")
+        helper_result = subprocess.run(
+            [
+                sys.executable,
+                str(helper_path),
+                "verify",
+                "--archive",
+                str(delivery_dir / expected_source_name),
+                "--inventory",
+                str(delivery_dir / expected_inventory_name),
+            ],
+            cwd=str(delivery_dir),
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
         )
-        if (
-            source_sums_match is None
-            or source_sums_match.group(1) != source_hash
-            or source_sums_match.group(2) != expected_source_name
-        ):
-            raise EvidenceError("根 SHA256SUMS 未精确绑定 manifest source_commit 对应的唯一源码包")
+        if helper_result.returncode != 0:
+            detail = (helper_result.stderr or helper_result.stdout).strip()
+            raise EvidenceError(
+                "源码包与 archive-derived 成员清单不一致"
+                + (f": {detail}" if detail else "")
+            )
+        for key, expected in {
+            "source_archive_basename": expected_source_name,
+            "source_archive_sha256": source_hash,
+            "source_inventory_basename": expected_inventory_name,
+            "source_inventory_sha256": source_inventory_hash,
+        }.items():
+            if manifest.get(key) != expected:
+                raise EvidenceError(f"v3 交付清单 manifest {key} 与源码归档实物不一致")
         deb_name = manifest.get("deb_basename")
         if not isinstance(deb_name, str) or not re.fullmatch(
             r"taiji-agent_(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)_amd64\.deb",
@@ -782,6 +1016,8 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             "version": version,
             "source_archive": expected_source_name,
             "source_sha256": source_hash,
+            "source_inventory": expected_inventory_name,
+            "source_inventory_sha256": source_inventory_hash,
             "source_commit": source_commit,
             "deb": deb_name,
             "deb_sha256": deb_hash,
@@ -979,6 +1215,140 @@ def validate_driver_desktop_auth_cookie(cookie: Any) -> None:
             raise EvidenceError(f"桌面驱动 desktop_auth_cookie.{key} 不合法")
 
 
+def validate_target_driver_v2_observations(driver: dict[str, Any]) -> None:
+    restart_rounds = driver["restart_rounds"]
+    if type(restart_rounds) is not list or len(restart_rounds) != 3:
+        raise EvidenceError("桌面 App 驱动 restart_rounds 必须恰好包含三轮")
+    for index, round_record in enumerate(restart_rounds, start=1):
+        if type(round_record) is not dict:
+            raise EvidenceError(f"桌面 App 驱动第 {index} 轮重启记录必须是 object")
+        require_exact_keys(
+            round_record,
+            DRIVER_RESTART_ROUND_KEYS,
+            f"桌面 App 驱动第 {index} 轮重启记录",
+        )
+        if type(round_record["round"]) is not int or round_record["round"] != index:
+            raise EvidenceError("桌面 App 驱动重启轮次顺序不合法")
+        for key in ("electron_pid", "agent_pid", "web_pid", "secondary_pid"):
+            validate_driver_pid(round_record[key], f"driver.restart_rounds[{index}].{key}")
+        for key in ("cdp_port", "webui_port"):
+            value = round_record[key]
+            if type(value) is not int or value < 1024 or value > 65535:
+                raise EvidenceError(f"桌面 App 驱动第 {index} 轮 {key} 不合法")
+        for key in ("second_instance_exit_code", "electron_exit_code"):
+            if type(round_record[key]) is not int or round_record[key] != 0:
+                raise EvidenceError(f"桌面 App 驱动第 {index} 轮 {key} 必须是整数零")
+        for key in (
+            "ready",
+            "restored_and_focused",
+            "page_close_sent",
+            "pidfiles_absent",
+            "model_config_observed",
+            "profile_continuity_observed",
+        ):
+            if type(round_record[key]) is not bool or round_record[key] is not True:
+                raise EvidenceError(f"桌面 App 驱动第 {index} 轮 {key} 必须为 true")
+        process_gone = round_record["process_identities_gone"]
+        if type(process_gone) is not dict:
+            raise EvidenceError(f"桌面 App 驱动第 {index} 轮进程退出证据不合法")
+        require_exact_keys(
+            process_gone,
+            {"electron", "agent", "webui", "secondary"},
+            f"桌面 App 驱动第 {index} 轮进程退出证据",
+        )
+        if any(type(value) is not bool or value is not True for value in process_gone.values()):
+            raise EvidenceError(f"桌面 App 驱动第 {index} 轮遗留了进程身份")
+        ports_closed = round_record["ports_closed"]
+        if type(ports_closed) is not dict:
+            raise EvidenceError(f"桌面 App 驱动第 {index} 轮端口关闭证据不合法")
+        require_exact_keys(
+            ports_closed,
+            {"cdp", "webui"},
+            f"桌面 App 驱动第 {index} 轮端口关闭证据",
+        )
+        if any(type(value) is not bool or value is not True for value in ports_closed.values()):
+            raise EvidenceError(f"桌面 App 驱动第 {index} 轮遗留了端口")
+
+    round_one = restart_rounds[0]
+    for driver_key, round_key in (
+        ("electron_pid", "electron_pid"),
+        ("agent_pid", "agent_pid"),
+        ("web_pid", "web_pid"),
+        ("electron_exit_code", "electron_exit_code"),
+    ):
+        if driver[driver_key] != round_one[round_key]:
+            raise EvidenceError(f"桌面 App 驱动 {driver_key} 不是第一轮的严格别名")
+    if urlsplit(driver["app_url"]).port != round_one["webui_port"]:
+        raise EvidenceError("桌面 App 驱动 URL 端口与第一轮 WebUI 端口不一致")
+
+    persistent = driver["persistent_user_data"]
+    if type(persistent) is not dict:
+        raise EvidenceError("桌面 App 驱动 persistent_user_data 必须是 object")
+    require_exact_keys(
+        persistent,
+        DRIVER_PERSISTENT_USER_DATA_KEYS,
+        "桌面 App 驱动 persistent_user_data",
+    )
+    expected_persistent = {
+        "mode": "electron-default-persistent",
+        "restart_rounds": 3,
+        "user_data_override": False,
+        "profile_reset": False,
+        "environment_reused": True,
+        "continuity_observed_rounds": 3,
+    }
+    for key, expected in expected_persistent.items():
+        if type(persistent[key]) is not type(expected) or persistent[key] != expected:
+            raise EvidenceError(f"桌面 App 驱动 persistent_user_data.{key} 不合法")
+    validate_sha256(persistent["continuity_token"], "driver.persistent_user_data.continuity_token")
+
+    core = driver["core_observation"]
+    if type(core) is not dict:
+        raise EvidenceError("桌面 App 驱动 core_observation 必须是 object")
+    require_exact_keys(core, DRIVER_CORE_OBSERVATION_KEYS, "桌面 App 驱动 core_observation")
+    if core["status"] != "verified" or core["mechanism"] != "journalctl-json-user-electron":
+        raise EvidenceError("桌面 App 驱动 Core 观测未完成验证")
+    if type(core["baseline_entry_count"]) is not int or core["baseline_entry_count"] < 0:
+        raise EvidenceError("桌面 App 驱动 Core 观测基线数量不合法")
+    validate_sha256(core["baseline_cursor_set_token"], "driver.core_observation.baseline_cursor_set_token")
+    core_rounds = core["rounds"]
+    if type(core_rounds) is not list or len(core_rounds) != 3:
+        raise EvidenceError("桌面 App 驱动 Core 观测必须覆盖三轮")
+    for index, core_round in enumerate(core_rounds, start=1):
+        if type(core_round) is not dict:
+            raise EvidenceError(f"桌面 App 驱动 Core 第 {index} 轮观测必须是 object")
+        require_exact_keys(core_round, DRIVER_CORE_ROUND_KEYS, f"桌面 App 驱动 Core 第 {index} 轮观测")
+        if (
+            type(core_round["round"]) is not int
+            or core_round["round"] != index
+            or core_round["status"] != "verified"
+            or type(core_round["added_entry_count"]) is not int
+            or core_round["added_entry_count"] != 0
+        ):
+            raise EvidenceError(f"桌面 App 驱动 Core 第 {index} 轮观测不合法")
+        validate_sha256(core_round["cursor_set_token"], f"driver.core_observation.rounds[{index}].cursor_set_token")
+
+    model_observation = driver["model_config_observation"]
+    if type(model_observation) is not dict:
+        raise EvidenceError("桌面 App 驱动 model_config_observation 必须是 object")
+    require_exact_keys(
+        model_observation,
+        DRIVER_MODEL_CONFIG_OBSERVATION_KEYS,
+        "桌面 App 驱动 model_config_observation",
+    )
+    if (
+        type(model_observation["observed_rounds"]) is not int
+        or model_observation["observed_rounds"] != 3
+        or type(model_observation["consistent"]) is not bool
+        or model_observation["consistent"] is not True
+    ):
+        raise EvidenceError("桌面 App 驱动模型配置观测不一致")
+    validate_sha256(
+        model_observation["public_projection_token"],
+        "driver.model_config_observation.public_projection_token",
+    )
+
+
 def validate_attestation(args: argparse.Namespace, evidence_payload: bytes) -> None:
     public_payload, _ = read_regular_bytes(
         args.attestation_public_key,
@@ -1141,12 +1511,16 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
     expected_source_archive = (
         delivery_dir / f"taiji-agentv1.0-kylin-build-src-{source_commit}.tar.gz"
     )
+    expected_source_inventory = delivery_dir / (
+        f"taiji-agentv1.0-kylin-build-src-{source_commit}.inventory.json"
+    )
     expected_paths = {
         "deb": delivery_dir / "生成的安装包" / deb_path.name,
         "checksum": delivery_dir / "生成的安装包" / f"{deb_path.name}.sha256",
         "manifest": delivery_dir / "生成的安装包" / "taiji-package-manifest.json",
         "build_marker": delivery_dir / "生成的安装包" / ".build-success",
         "source_archive": expected_source_archive,
+        "source_inventory": expected_source_inventory,
     }
     actual_paths = {
         "deb": deb_path,
@@ -1154,12 +1528,32 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         "manifest": Path(args.manifest),
         "build_marker": Path(required_delivery_inputs["build_marker"]),
         "source_archive": Path(required_delivery_inputs["source_archive"]),
+        "source_inventory": expected_source_inventory,
     }
     for name, expected_path in expected_paths.items():
         if Path(os.path.abspath(actual_paths[name])) != Path(os.path.abspath(expected_path)):
             raise EvidenceError(f"v3 BuildBinding {name} 必须来自同一交付目录的 canonical 路径")
     inventory_hash = delivery_inventory_sha256(delivery_dir)
     source_hash, _ = sha256_regular_file(expected_source_archive, "当前源码包")
+    source_inventory_hash, _ = sha256_regular_file(
+        expected_source_inventory, "当前源码成员清单"
+    )
+    for key, expected in {
+        "source_archive_basename": expected_source_archive.name,
+        "source_archive_sha256": source_hash,
+        "source_inventory_basename": expected_source_inventory.name,
+        "source_inventory_sha256": source_inventory_hash,
+    }.items():
+        require_exact(manifest, key, expected)
+    marker = parse_marker(expected_paths["build_marker"])
+    for key, expected in {
+        "source_archive": expected_source_archive.name,
+        "source_sha256": source_hash,
+        "source_inventory": expected_source_inventory.name,
+        "source_inventory_sha256": source_inventory_hash,
+    }.items():
+        if marker.get(key) != expected:
+            raise EvidenceError(f"构建成功标记 {key} 与 source inventory 不一致")
     source_checksums_hash, _ = sha256_regular_file(
         delivery_dir / "SHA256SUMS.txt",
         "根 SHA256SUMS",
@@ -1181,6 +1575,8 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         **{field: value for field, value in toolchain.items() if field != "electron_executable_sha256"},
         source_archive_basename=expected_source_archive.name,
         source_archive_sha256=source_hash,
+        source_inventory_basename=expected_source_inventory.name,
+        source_inventory_sha256=source_inventory_hash,
         source_checksums_sha256=source_checksums_hash,
         build_marker_sha256=build_marker_hash,
         delivery_inventory_sha256=inventory_hash,
@@ -1426,23 +1822,170 @@ def validate_offline_session(data: dict[str, Any], session: dict[str, Any], args
         require_exact(checks, key, True)
 
 
+def _split_debian_version(version: str) -> tuple[int, str, str]:
+    if type(version) is not str or not version:
+        raise EvidenceError("Debian version 不能为空")
+    epoch = 0
+    remainder = version
+    if ":" in remainder:
+        epoch_text, remainder = remainder.split(":", 1)
+        if not epoch_text.isdigit() or not remainder:
+            raise EvidenceError("Debian version epoch 不合法")
+        epoch = int(epoch_text, 10)
+    if re.fullmatch(r"[0-9A-Za-z.+~:-]+", version) is None:
+        raise EvidenceError("Debian version 包含不合法字符")
+    if "-" in remainder:
+        upstream, revision = remainder.rsplit("-", 1)
+        if not revision:
+            raise EvidenceError("Debian version revision 不合法")
+    else:
+        upstream, revision = remainder, "0"
+    if not upstream or not upstream[0].isdigit():
+        raise EvidenceError("Debian upstream version 不合法")
+    return epoch, upstream, revision
+
+
+def _debian_character_order(character: str) -> int:
+    if character == "~":
+        return -1
+    if not character:
+        return 0
+    if character.isalpha():
+        return ord(character)
+    return ord(character) + 256
+
+
+def _compare_debian_part(left: str, right: str) -> int:
+    left_index = 0
+    right_index = 0
+    while left_index < len(left) or right_index < len(right):
+        while (
+            (left_index < len(left) and not left[left_index].isdigit())
+            or (right_index < len(right) and not right[right_index].isdigit())
+        ):
+            left_character = (
+                left[left_index]
+                if left_index < len(left) and not left[left_index].isdigit()
+                else ""
+            )
+            right_character = (
+                right[right_index]
+                if right_index < len(right) and not right[right_index].isdigit()
+                else ""
+            )
+            left_order = _debian_character_order(left_character)
+            right_order = _debian_character_order(right_character)
+            if left_order != right_order:
+                return -1 if left_order < right_order else 1
+            if left_character:
+                left_index += 1
+            if right_character:
+                right_index += 1
+        while left_index < len(left) and left[left_index] == "0":
+            left_index += 1
+        while right_index < len(right) and right[right_index] == "0":
+            right_index += 1
+        left_end = left_index
+        right_end = right_index
+        while left_end < len(left) and left[left_end].isdigit():
+            left_end += 1
+        while right_end < len(right) and right[right_end].isdigit():
+            right_end += 1
+        left_digits = left[left_index:left_end]
+        right_digits = right[right_index:right_end]
+        if len(left_digits) != len(right_digits):
+            return -1 if len(left_digits) < len(right_digits) else 1
+        if left_digits != right_digits:
+            return -1 if left_digits < right_digits else 1
+        left_index = left_end
+        right_index = right_end
+    return 0
+
+
+def compare_debian_versions(left: str, right: str) -> int:
+    left_epoch, left_upstream, left_revision = _split_debian_version(left)
+    right_epoch, right_upstream, right_revision = _split_debian_version(right)
+    if left_epoch != right_epoch:
+        return -1 if left_epoch < right_epoch else 1
+    upstream_order = _compare_debian_part(left_upstream, right_upstream)
+    if upstream_order:
+        return upstream_order
+    return _compare_debian_part(left_revision, right_revision)
+
+
 def validate_offline_lifecycle_extensions(
     data: dict[str, Any],
     binding: BuildBinding,
     evidence_path: Path,
     *,
-    required: bool = False,
+    require_lifecycle: bool = False,
 ) -> None:
     present = OFFLINE_V1_LIFECYCLE_KEYS.intersection(data)
     if not present:
-        if required:
-            raise EvidenceError("正式认证要求完整 N-1 升级、回滚、卸载和重装生命周期证据")
+        if require_lifecycle:
+            raise EvidenceError("正式认证集必须包含完整 N-1 离线生命周期证据")
         return
     if present != OFFLINE_V1_LIFECYCLE_KEYS:
         missing = sorted(OFFLINE_V1_LIFECYCLE_KEYS - present)
         raise EvidenceError(f"扩展离线生命周期证据缺少字段: {', '.join(missing)}")
     if data["steps"] != OFFLINE_LIFECYCLE_STEPS:
         raise EvidenceError("扩展离线生命周期 steps 不完整或顺序错误")
+
+    previous_version = require_nonempty_string(data, "previous_version")
+    require_exact(
+        data,
+        "previous_deb_basename",
+        f"taiji-agent_{previous_version}_amd64.deb",
+    )
+    validate_sha256(data["previous_deb_sha256"], "previous_deb_sha256")
+    if compare_debian_versions(previous_version, binding.version) >= 0:
+        raise EvidenceError("N-1 previous version 必须按 Debian 版本规则严格早于 candidate")
+
+    require_exact(data, "lifecycle_log_basename", "offline-install-rehearsal-lifecycle.json")
+    _, lifecycle_payload, _ = validate_bound_file(
+        data,
+        evidence_path,
+        "lifecycle_log_basename",
+        "lifecycle_log_sha256",
+        "扩展离线生命周期原始证据",
+    )
+    lifecycle = parse_json_bytes(lifecycle_payload, "扩展离线生命周期原始证据")
+    lifecycle_keys = OFFLINE_SESSION_KEYS | {
+        "compatibility_policy_id",
+        "compatibility_policy_sha256",
+        "previous_deb_basename",
+        "previous_deb_sha256",
+        "previous_version",
+        "steps",
+        "receipts",
+        "data_manifests",
+        "journal",
+        "package_actions",
+    }
+    require_exact_keys(lifecycle, lifecycle_keys, "扩展离线生命周期原始证据")
+    for key in OFFLINE_SESSION_KEYS - {"checks"}:
+        if lifecycle.get(key) != data.get(key):
+            raise EvidenceError(f"扩展离线生命周期原始证据 {key} 与主证据不一致")
+    if lifecycle.get("checks") != {"install": True, "uninstall": True, "reinstall": True}:
+        raise EvidenceError("扩展离线生命周期原始证据 checks 不完整")
+    for key in (
+        "previous_deb_basename",
+        "previous_deb_sha256",
+        "previous_version",
+        "steps",
+        "receipts",
+        "data_manifests",
+        "journal",
+        "package_actions",
+    ):
+        if lifecycle.get(key) != data.get(key):
+            raise EvidenceError(f"扩展离线生命周期原始证据 {key} 与主证据不一致")
+    for key, expected in {
+        "compatibility_policy_id": binding.compatibility_policy_id,
+        "compatibility_policy_sha256": binding.compatibility_policy_sha256,
+    }.items():
+        if lifecycle.get(key) != expected:
+            raise EvidenceError(f"扩展离线生命周期原始证据 {key} 与候选制品不一致")
 
     receipts = data["receipts"]
     if type(receipts) is not list or len(receipts) != 5:
@@ -1554,8 +2097,8 @@ def validate_offline_lifecycle_extensions(
     if not re.fullmatch(r"[0-9a-f]{40}", previous_source_commit):
         raise EvidenceError("previous_release.source_commit 必须是 40 位小写 Git commit")
     previous_version = require_nonempty_string(previous, "version")
-    if previous_version == binding.version:
-        raise EvidenceError("previous_release.version 必须不同于当前候选版本")
+    if compare_debian_versions(previous_version, binding.version) >= 0:
+        raise EvidenceError("previous_release.version 必须按 Debian 版本规则严格早于当前候选")
     previous_policy_id = require_nonempty_string(previous, "compatibility_policy_id")
     previous_policy_sha256 = validate_sha256(
         previous["compatibility_policy_sha256"],
@@ -1569,6 +2112,12 @@ def validate_offline_lifecycle_extensions(
         "deb_sha256",
         "N-1 DEB",
     )
+    if (
+        previous_version != data["previous_version"]
+        or previous_deb_path.name != data["previous_deb_basename"]
+        or hashlib.sha256(previous_deb_payload).hexdigest() != data["previous_deb_sha256"]
+    ):
+        raise EvidenceError("previous_release 与扩展生命周期 N-1 身份不一致")
     _, checksum_payload, _ = validate_bound_file(
         previous,
         evidence_path,
@@ -1619,6 +2168,8 @@ def validate_offline_evidence_v1(
     evidence_path: Path,
     args: argparse.Namespace,
     binding: BuildBinding,
+    *,
+    require_lifecycle: bool = False,
 ) -> None:
     reject_target_baseline_fields(data, "offline rehearsal evidence v1")
     missing = sorted(OFFLINE_V1_KEYS - data.keys())
@@ -1691,7 +2242,12 @@ def validate_offline_evidence_v1(
         parse_json_bytes(log_payload, "离线演练结构化会话"),
         args,
     )
-    validate_offline_lifecycle_extensions(data, binding, evidence_path)
+    validate_offline_lifecycle_extensions(
+        data,
+        binding,
+        evidence_path,
+        require_lifecycle=require_lifecycle,
+    )
 
 
 def validate_offline(
@@ -2084,7 +2640,7 @@ def validate_target_driver(
 ) -> None:
     require_exact_keys(driver, DRIVER_KEYS, "桌面 App 驱动原始结果")
     comparisons = {
-        "schema": "taiji.desktop.acceptance-driver.v1",
+        "schema": "taiji.desktop.acceptance-driver.v2",
         "acceptance_session_id": data["acceptance_session_id"],
         "challenge_nonce": data["challenge_nonce"],
         "electron_pid": session["electron_pid"],
@@ -2111,6 +2667,7 @@ def validate_target_driver(
     validate_driver_visible_text(driver["model"], "driver.model", maximum=256)
     validate_driver_app_urls(driver["app_url"], driver["webui_origin"])
     validate_driver_desktop_auth_cookie(driver["desktop_auth_cookie"])
+    validate_target_driver_v2_observations(driver)
     if driver["screenshot_basename"] != SCREENSHOT_BASENAME:
         raise EvidenceError("桌面 App 驱动截图必须使用固定 basename")
     if driver["diagnostic_basename"] != DIAGNOSTIC_BASENAME:
@@ -2123,6 +2680,298 @@ def validate_target_driver(
         require_exact(checks, key, True)
         require_exact(session["checks"], key, True)
         require_exact(data, key, True)
+
+
+def validate_positive_certification_bundle(
+    record: dict[str, Any],
+    attachment_payloads: dict[str, bytes],
+    *,
+    expected_release_artifacts_sha256: str | None = None,
+    expected_manifest_sha256: str | None = None,
+    expected_electron_executable_sha256: str | None = None,
+    expected_desktop_entry_sha256: str | None = None,
+) -> None:
+    """Recursively validate one archived positive target-evidence bundle.
+
+    The environment record and its attachment hashes are not trusted as a
+    semantic verifier.  This function independently parses every JSON
+    attachment, binds all identities across the tree, and checks that both PNG
+    artifacts are physical images rather than arbitrary hash-matching bytes.
+    """
+
+    if type(record) is not dict:
+        raise EvidenceError("正向认证环境记录必须是 object")
+    for key, expected in {
+        "schema": "taiji-linux-environment-evidence/v2",
+        "category_kind": "positive",
+        "compatibility": "COMPATIBLE",
+    }.items():
+        if record.get(key) != expected:
+            raise EvidenceError(f"正向认证环境记录 {key} 不合法")
+    challenge = record.get("challenge_nonce")
+    if type(challenge) is not str or not CHALLENGE_RE.fullmatch(challenge):
+        raise EvidenceError("正向认证环境记录 challenge 不合法")
+    session_id = validate_session_id(
+        record.get("acceptance_session_id"),
+        "正向认证 acceptance_session_id",
+    )
+    commitment = validate_sha256(
+        record.get("machine_identity_commitment_sha256"),
+        "正向认证 machine_identity_commitment_sha256",
+    )
+    fingerprint = validate_sha256(
+        record.get("machine_fingerprint_sha256"),
+        "正向认证 machine_fingerprint_sha256",
+    )
+    derived_fingerprint = hashlib.sha256(
+        (challenge + "\0" + commitment).encode("utf-8")
+    ).hexdigest()
+    if fingerprint != derived_fingerprint:
+        raise EvidenceError("正向认证机器 fingerprint 与 commitment 不一致")
+
+    if type(attachment_payloads) is not dict or set(attachment_payloads) != POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES:
+        raise EvidenceError("正向认证附件必须是完整且封闭的八件实物")
+    attachments = record.get("attachments")
+    if type(attachments) is not list or len(attachments) != len(POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES):
+        raise EvidenceError("正向认证附件清单不完整")
+    declared_hashes: dict[str, str] = {}
+    for attachment in attachments:
+        if type(attachment) is not dict or set(attachment) != {"basename", "sha256"}:
+            raise EvidenceError("正向认证 attachment 字段集合不合法")
+        basename = attachment["basename"]
+        if (
+            type(basename) is not str
+            or basename not in POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES
+            or basename in declared_hashes
+        ):
+            raise EvidenceError("正向认证 attachment basename 不安全、未知或重复")
+        payload = attachment_payloads[basename]
+        if type(payload) is not bytes or not payload or len(payload) > MAX_EVIDENCE_BYTES:
+            raise EvidenceError("正向认证 attachment 实物不合法")
+        digest = validate_sha256(attachment["sha256"], f"正向认证 {basename} SHA256")
+        if digest != hashlib.sha256(payload).hexdigest():
+            raise EvidenceError(f"正向认证 {basename} 摘要与实物不一致")
+        declared_hashes[basename] = digest
+    if set(declared_hashes) != POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES:
+        raise EvidenceError("正向认证附件清单未覆盖完整实物")
+
+    target = parse_json_bytes(
+        attachment_payloads["target-verification.json"],
+        "正向认证 target-verification",
+    )
+    require_exact_keys(target, CANONICAL_TARGET_EVIDENCE_KEYS, "正向认证 target-verification")
+    target_generated = _parsed_fresh_timestamp(
+        target["generated_at_utc"],
+        "target-verification.generated_at_utc",
+    )
+    identity_fields = (
+        "category_id",
+        "category_kind",
+        "compatibility",
+        "source_commit",
+        "version",
+        "architecture",
+        "deb_basename",
+        "deb_sha256",
+        "compatibility_policy_id",
+        "compatibility_policy_sha256",
+        "machine_identity_commitment_sha256",
+        "machine_fingerprint_sha256",
+        "os_id",
+        "os_version",
+        "desktop_environment",
+    )
+    for key in identity_fields:
+        if target.get(key) != record.get(key):
+            raise EvidenceError(f"target-verification.{key} 与环境记录不一致")
+    for key, expected in {
+        "schema": "taiji-linux-target-verification/v2",
+        "evidence_type": "target-desktop-environment",
+        "acceptance_session_id": session_id,
+        "challenge_nonce": challenge,
+        "installation_method": "desktop-double-click",
+        "installation_method_evidence": "human-attestation",
+        "installation_method_machine_observed": False,
+    }.items():
+        require_exact(target, key, expected)
+    release_artifacts_sha256 = validate_sha256(
+        target["release_artifacts_sha256"],
+        "target-verification.release_artifacts_sha256",
+    )
+    if (
+        expected_release_artifacts_sha256 is not None
+        and release_artifacts_sha256 != validate_sha256(
+            expected_release_artifacts_sha256,
+            "expected release_artifacts_sha256",
+        )
+    ):
+        raise EvidenceError("target-verification 未绑定当前交付清单")
+    target_checks = target["checks"]
+    if type(target_checks) is not dict:
+        raise EvidenceError("target-verification checks 必须是 object")
+    require_exact_keys(target_checks, TARGET_CHECK_KEYS, "target-verification checks")
+    for key in TARGET_CHECK_KEYS:
+        require_exact(target_checks, key, True)
+    expected_record_checks = {"preflight", "install"} | TARGET_CHECK_KEYS
+    record_checks = record.get("checks")
+    if type(record_checks) is not dict:
+        raise EvidenceError("正向认证环境记录 checks 必须是 object")
+    require_exact_keys(record_checks, expected_record_checks, "正向认证环境记录 checks")
+    if any(record_checks[key] != "PASS" for key in expected_record_checks):
+        raise EvidenceError("正向认证环境记录未证明全部门禁 PASS")
+
+    pointer_basenames = {
+        "environment_observation": "environment-observation.json",
+        "install_observation": "single-deb-install-observation.json",
+        "install_method_attestation": "single-deb-install-method-attestation.json",
+        "graphical_installer_evidence": "single-deb-graphical-installer.png",
+        "driver_result": "desktop-driver-result.json",
+        "screenshot": "desktop-app.png",
+        "diagnostic": "taiji-support-bundle.json",
+    }
+    for field, basename in pointer_basenames.items():
+        require_exact(target, field + "_basename", basename)
+        require_exact(target, field + "_sha256", declared_hashes[basename])
+
+    environment = parse_json_bytes(
+        attachment_payloads["environment-observation.json"],
+        "正向认证 environment-observation",
+    )
+    require_exact_keys(
+        environment,
+        CANONICAL_ENVIRONMENT_OBSERVATION_KEYS,
+        "正向认证 environment-observation",
+    )
+    require_exact(environment, "schema", "taiji-linux-environment-observation/v1")
+    for key in identity_fields:
+        if key == "machine_fingerprint_sha256":
+            continue
+        if environment.get(key) != record.get(key):
+            raise EvidenceError(f"environment-observation.{key} 与环境记录不一致")
+    if environment["security_facts"] != record.get("security_facts"):
+        raise EvidenceError("environment-observation security_facts 与环境记录不一致")
+    if environment["checks"] != {"preflight": "PASS", "install": "PASS"}:
+        raise EvidenceError("environment-observation 必须只声明 preflight/install PASS")
+    if environment["attachments"] != []:
+        raise EvidenceError("environment-observation seed 不得自行声明最终附件")
+
+    observation_payload = attachment_payloads["single-deb-install-observation.json"]
+    observation = parse_json_bytes(observation_payload, "正向认证 install observation")
+    require_exact_keys(
+        observation,
+        CANONICAL_INSTALL_OBSERVATION_KEYS,
+        "正向认证 install observation",
+    )
+    for key, expected in {
+        "schema": "taiji.single-deb-install-observation/v2",
+        "challenge_nonce": challenge,
+        "machine_identity_commitment_sha256": commitment,
+        "machine_fingerprint_sha256": fingerprint,
+        "source_commit": record["source_commit"],
+        "deb_observed_basename": record["deb_basename"],
+        "deb_sha256": record["deb_sha256"],
+        "candidate_file_count": 1,
+        "additional_install_files_observed": False,
+        "package_status_before": "not-installed",
+        "package_status_after": "install ok installed",
+        "network_observation": "continuous-process-sampling-no-non-loopback-up",
+        "user_state_before": "absent",
+        "user_state_after_install_before_first_launch": "absent",
+        "first_launch_eligible": True,
+        "installation_method_machine_observed": False,
+        "observation_process_continuous": True,
+    }.items():
+        require_exact(observation, key, expected)
+    manifest_sha256 = validate_sha256(
+        observation["manifest_sha256"],
+        "install observation manifest_sha256",
+    )
+    if (
+        expected_manifest_sha256 is not None
+        and manifest_sha256 != validate_sha256(expected_manifest_sha256, "expected manifest_sha256")
+    ):
+        raise EvidenceError("install observation 未绑定当前 manifest")
+    for key in (
+        "boot_fingerprint_sha256",
+        "canonical_home_fingerprint_sha256",
+        "user_state_paths_fingerprint_sha256",
+    ):
+        validate_sha256(observation[key], f"install observation {key}")
+    if type(observation["target_uid"]) is not int or observation["target_uid"] < 0:
+        raise EvidenceError("install observation target_uid 不合法")
+    started = _parsed_fresh_timestamp(observation["started_at_utc"], "install observation started_at_utc")
+    completed = _parsed_fresh_timestamp(observation["completed_at_utc"], "install observation completed_at_utc")
+    generated = _parsed_fresh_timestamp(observation["generated_at_utc"], "install observation generated_at_utc")
+    if not started <= completed <= generated <= target_generated:
+        raise EvidenceError("正向认证安装观测与目标证据时间顺序不合法")
+    transitions = observation["package_status_transitions"]
+    if (
+        type(transitions) is not list
+        or not transitions
+        or any(type(value) is not str for value in transitions)
+        or transitions[0] != "not-installed"
+        or transitions[-1] != "install ok installed"
+    ):
+        raise EvidenceError("正向认证安装状态迁移不合法")
+    if type(observation["network_sample_interval_ms"]) is not int or observation["network_sample_interval_ms"] <= 0:
+        raise EvidenceError("正向认证网络采样间隔不合法")
+    if type(observation["network_sample_count"]) is not int or observation["network_sample_count"] < 2:
+        raise EvidenceError("正向认证网络采样数不足")
+
+    graphical_payload = attachment_payloads["single-deb-graphical-installer.png"]
+    screenshot_payload = attachment_payloads["desktop-app.png"]
+    validate_png(graphical_payload)
+    validate_png(screenshot_payload)
+
+    attestation = parse_json_bytes(
+        attachment_payloads["single-deb-install-method-attestation.json"],
+        "正向认证 install attestation",
+    )
+    attestation_args = argparse.Namespace(challenge=challenge)
+    validate_install_method_attestation(
+        target,
+        observation,
+        hashlib.sha256(observation_payload).hexdigest(),
+        attestation,
+        hashlib.sha256(graphical_payload).hexdigest(),
+        attestation_args,
+    )
+    attested = _parsed_fresh_timestamp(attestation["generated_at_utc"], "install attestation generated_at_utc")
+    if attested > target_generated:
+        raise EvidenceError("正向认证目标证据早于安装人工见证")
+
+    driver = parse_json_bytes(
+        attachment_payloads["desktop-driver-result.json"],
+        "正向认证 desktop driver",
+    )
+    driver_data = dict(target)
+    driver_data.update(target_checks)
+    driver_data["electron_executable_sha256"] = driver.get("electron_executable_sha256")
+    driver_data["desktop_entry_sha256"] = driver.get("desktop_entry_sha256")
+    if (
+        expected_electron_executable_sha256 is not None
+        and driver_data["electron_executable_sha256"]
+        != validate_sha256(
+            expected_electron_executable_sha256,
+            "expected electron_executable_sha256",
+        )
+    ):
+        raise EvidenceError("正向认证 driver 未绑定当前 Electron 可执行体")
+    if (
+        expected_desktop_entry_sha256 is not None
+        and driver_data["desktop_entry_sha256"]
+        != validate_sha256(expected_desktop_entry_sha256, "expected desktop_entry_sha256")
+    ):
+        raise EvidenceError("正向认证 driver 未绑定当前 desktop entry")
+    driver_session = {
+        "electron_pid": driver.get("electron_pid"),
+        "js_error_count": driver.get("js_error_count"),
+        "unexpected_http_failures": driver.get("unexpected_http_failures"),
+        "checks": dict(target_checks),
+    }
+    validate_target_driver(driver_data, driver_session, driver)
+
+    validate_support_bundle(attachment_payloads["taiji-support-bundle.json"])
 
 
 def validate_target(
@@ -2153,6 +3002,10 @@ def validate_target(
         "dpkg_status_after": "install ok installed",
         "first_configuration_cycle_completed": True,
         "visible_first_configuration_completion": True,
+        "three_restart_cycles": True,
+        "second_instance_focus": True,
+        "model_configuration_state_consistent": True,
+        "no_new_electron_core": True,
     }.items():
         require_exact(data, key, expected)
     validate_fresh_timestamp(data["generated_at_utc"], "generated_at_utc")
@@ -2421,6 +3274,11 @@ def validate_certification_set_v1(
     _safe_record_root = record_root
     if not _safe_record_root.is_dir() or _safe_record_root.is_symlink():
         raise EvidenceError("认证集 records 目录缺失或不安全")
+    manifest_sha256: str | None = None
+    manifest_path = getattr(args, "manifest", None)
+    if manifest_path is not None:
+        manifest_payload, _ = read_regular_bytes(Path(manifest_path), "认证集当前 manifest")
+        manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
 
     def validate_summary(item: Any, expected_kind: str, expected_compatibility: str) -> dict[str, Any]:
         if type(item) is not dict or set(item) != {
@@ -2471,6 +3329,77 @@ def validate_certification_set_v1(
             )
             if any(record["checks"].get(key) != "PASS" for key in required):
                 raise EvidenceError("认证集正向记录必须所有检查 PASS")
+        attachments = record.get("attachments")
+        if type(attachments) is not list:
+            raise EvidenceError("认证集环境记录 attachments 必须是数组")
+        expected_entries = {"environment-evidence.json"}
+        attachment_payloads: dict[str, bytes] = {}
+        for attachment in attachments:
+            if type(attachment) is not dict or set(attachment) != {"basename", "sha256"}:
+                raise EvidenceError("认证集环境 attachment 字段集合不合法")
+            attachment_basename = attachment["basename"]
+            if (
+                type(attachment_basename) is not str
+                or not attachment_basename
+                or Path(attachment_basename).name != attachment_basename
+                or "/" in attachment_basename
+                or "\\" in attachment_basename
+                or attachment_basename in expected_entries
+            ):
+                raise EvidenceError("认证集环境 attachment basename 路径不安全或重复")
+            expected_entries.add(attachment_basename)
+            attachment_payload, _ = read_regular_bytes(
+                record_path.parent / attachment_basename,
+                "认证集环境 attachment",
+                limit=MAX_EVIDENCE_BYTES,
+            )
+            attachment_sha256 = validate_sha256(
+                attachment["sha256"],
+                "认证集环境 attachment SHA256",
+            )
+            if attachment_sha256 != hashlib.sha256(attachment_payload).hexdigest():
+                raise EvidenceError("认证集环境 attachment 摘要与实物不一致")
+            attachment_payloads[attachment_basename] = attachment_payload
+        try:
+            actual_entries = {entry.name for entry in record_path.parent.iterdir()}
+        except OSError as exc:
+            raise EvidenceError("认证集环境记录目录无法遍历") from exc
+        if actual_entries != expected_entries:
+            raise EvidenceError("认证集环境目录必须且只能包含记录声明的 attachments")
+        if expected_kind == "positive" and matrix.get("schema") == "taiji-linux-certification-matrix/v2":
+            expected_delivery_hash = binding.delivery_inventory_sha256 or None
+            expected_electron_hash = (
+                binding.electron_executable_sha256
+                if binding.electron_executable_sha256 != "0" * 64
+                else None
+            )
+            expected_desktop_hash = (
+                binding.desktop_entry_sha256
+                if binding.desktop_entry_sha256 != "0" * 64
+                else None
+            )
+            validate_positive_certification_bundle(
+                record,
+                attachment_payloads,
+                expected_release_artifacts_sha256=expected_delivery_hash,
+                expected_manifest_sha256=manifest_sha256,
+                expected_electron_executable_sha256=expected_electron_hash,
+                expected_desktop_entry_sha256=expected_desktop_hash,
+            )
+        if expected_kind == "negative":
+            try:
+                contract.validate_negative_preflight_attachment(
+                    record,
+                    matrix,
+                    attachment_payloads["preflight-result.json"],
+                )
+                contract.validate_negative_business_data_attachment(
+                    record,
+                    matrix,
+                    attachment_payloads["business-data-inventory.json"],
+                )
+            except Exception as exc:
+                raise EvidenceError(str(exc)) from exc
         return record
 
     validated_records = [
@@ -2482,11 +3411,99 @@ def validate_certification_set_v1(
         contract.validate_environment_records(validated_records, matrix)
     except Exception as exc:
         raise EvidenceError(str(exc)) from exc
+    expected_record_root_entries = {
+        item["id"] for item in matrix["positive_categories"] + matrix["negative_boundaries"]
+    }
+    try:
+        actual_record_root_entries = {entry.name for entry in record_root.iterdir()}
+    except OSError as exc:
+        raise EvidenceError("认证集 records 根目录无法遍历") from exc
+    if actual_record_root_entries != expected_record_root_entries:
+        raise EvidenceError("认证集 records 根目录必须严格封闭")
     offline = data["offline_rehearsal"]
-    if type(offline) is not dict or set(offline) != {"basename", "sha256", "status"}:
+    if type(offline) is not dict or set(offline) != {
+        "directory_basename",
+        "evidence_basename",
+        "evidence_sha256",
+        "files",
+        "inventory_sha256",
+        "status",
+    }:
         raise EvidenceError("认证集 offline_rehearsal 字段集合不合法")
     require_exact(offline, "status", "PASS")
-    validate_sha256(offline["sha256"], "认证集 offline_rehearsal.sha256")
+    require_exact(offline, "directory_basename", "offline-rehearsal")
+    require_exact(offline, "evidence_basename", "offline-install-rehearsal.json")
+    validate_sha256(offline["evidence_sha256"], "认证集 offline evidence SHA256")
+    validate_sha256(offline["inventory_sha256"], "认证集 offline inventory SHA256")
+    offline_files = offline["files"]
+    if type(offline_files) is not list or len(offline_files) < 2:
+        raise EvidenceError("认证集 offline files 必须覆盖完整离线演练实物")
+    offline_root = evidence_path.parent / "offline-rehearsal"
+    if not offline_root.is_dir() or offline_root.is_symlink():
+        raise EvidenceError("认证集 offline 目录缺失或不安全")
+    expected_offline_names: set[str] = set()
+    for index, item in enumerate(offline_files):
+        if type(item) is not dict or set(item) != {"basename", "sha256", "size"}:
+            raise EvidenceError(f"认证集 offline files[{index}] 字段集合不合法")
+        basename = item["basename"]
+        if (
+            type(basename) is not str
+            or not basename
+            or Path(basename).name != basename
+            or "/" in basename
+            or "\\" in basename
+            or basename in expected_offline_names
+        ):
+            raise EvidenceError("认证集 offline 文件名不安全或重复")
+        expected_offline_names.add(basename)
+        payload, file_stat = read_regular_bytes(
+            offline_root / basename,
+            f"认证集 offline 实物 {basename}",
+            limit=MAX_EVIDENCE_BYTES,
+        )
+        if type(item["size"]) is not int or item["size"] != file_stat.st_size:
+            raise EvidenceError("认证集 offline 实物 size 不一致")
+        require_exact(item, "sha256", hashlib.sha256(payload).hexdigest())
+    try:
+        actual_offline_names = {entry.name for entry in offline_root.iterdir()}
+    except OSError as exc:
+        raise EvidenceError("认证集 offline 目录无法遍历") from exc
+    if actual_offline_names != expected_offline_names:
+        raise EvidenceError("认证集 offline 目录与归档清单不一致")
+    inventory_payload = json.dumps(
+        offline_files,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    require_exact(
+        offline,
+        "inventory_sha256",
+        hashlib.sha256(inventory_payload).hexdigest(),
+    )
+    offline_evidence_path = offline_root / offline["evidence_basename"]
+    offline_payload, _ = read_regular_bytes(
+        offline_evidence_path,
+        "认证集 offline 主证据",
+    )
+    require_exact(
+        offline,
+        "evidence_sha256",
+        hashlib.sha256(offline_payload).hexdigest(),
+    )
+    offline_data = parse_json_bytes(offline_payload, "认证集 offline 主证据")
+    offline_args = argparse.Namespace(
+        challenge=args.challenge,
+        source_commit=binding.source_commit,
+        deb=Path(binding.deb_basename),
+    )
+    validate_offline_evidence_v1(
+        offline_data,
+        offline_evidence_path,
+        offline_args,
+        binding,
+        require_lifecycle=True,
+    )
 
 
 def validate_ci_evidence_binding(
@@ -2588,6 +3605,11 @@ def validate_release_evidence_v3(
         "signing_public_key_fingerprint",
     ):
         validate_sha256(data[key], key)
+    require_exact(
+        data,
+        "signing_public_key_fingerprint",
+        PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT,
+    )
     for key in (
         "certification_set_basename",
         "certification_set_signature_basename",

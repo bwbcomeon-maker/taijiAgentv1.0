@@ -25,6 +25,7 @@ DESKTOP_JS_STAGER="$REPO_ROOT/packaging/linux/stage-desktop-js-closure.js"
 PRIVATE_LIB_STAGER="$REPO_ROOT/packaging/linux/stage-private-libraries.py"
 ELF_AUDITOR="$REPO_ROOT/packaging/linux/audit-elf-closure.py"
 LOCK_CONTRACT_HELPER="$REPO_ROOT/packaging/linux/verify-python-lock-contract.py"
+SOURCE_INTEGRITY_HELPER="$REPO_ROOT/packaging/linux/source-archive-integrity.py"
 PREINST_RENDERER="$SCRIPT_DIR/render-preinst.py"
 TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
@@ -37,10 +38,22 @@ PINNED_NODE_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641e
 PINNED_UV_VERSION="0.12.2"
 PINNED_UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"
 PINNED_UV_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
+PINNED_PYTHON_VERSION="3.11.15"
+PINNED_PYTHON_ARCHIVE_SHA256="2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
+PINNED_PYTHON_EXECUTABLE_SHA256="5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
+PINNED_ELECTRON_EXECUTABLE_SHA256="c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 PINNED_LOCK_CONTRACT_HELPER_SHA256="fca76118874d3846f1bddf304de0159160beff8467bef0870c3636858dedb9e6"
+PINNED_SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+SOURCE_ARCHIVE_PATH="${TAIJI_SOURCE_ARCHIVE_PATH:-}"
+SOURCE_INVENTORY_PATH="${TAIJI_SOURCE_INVENTORY_PATH:-}"
+SOURCE_INVENTORY_SHA256="${TAIJI_SOURCE_INVENTORY_SHA256:-}"
 PYTHON_DEPENDENCY_LOCK_STATUS="${TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS:-}"
 PYTHON_LOCK_BASENAME="${TAIJI_PYTHON_LOCK_BASENAME:-}"
 PYTHON_LOCK_SHA256="${TAIJI_PYTHON_LOCK_SHA256:-}"
+PYTHON_ARCHIVE_PATH="${TAIJI_PYTHON_ARCHIVE_PATH:-}"
+PYTHON_ARCHIVE_SHA256="${TAIJI_PYTHON_ARCHIVE_SHA256:-}"
+EXPECTED_PYTHON_VERSION="${TAIJI_PYTHON_VERSION:-}"
+EXPECTED_PYTHON_EXECUTABLE_SHA256="${TAIJI_PYTHON_EXECUTABLE_SHA256:-}"
 UV_EXECUTABLE="${TAIJI_UV_EXECUTABLE:-}"
 UV_ARCHIVE_PATH="${TAIJI_UV_ARCHIVE_PATH:-}"
 UV_VERSION="${TAIJI_UV_VERSION:-}"
@@ -95,6 +108,32 @@ TAIJI_GLIBC_MIN=""
 fail() { echo "$*" >&2; exit 1; }
 warn() { echo "Warning: $*" >&2; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
+
+validate_source_archive_integrity() {
+  local helper_sha inventory_sha
+  [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
+    || fail "source archive integrity helper is missing"
+  helper_sha="$(sha256sum "$SOURCE_INTEGRITY_HELPER" | awk '{print $1}')"
+  [ "$helper_sha" = "$PINNED_SOURCE_INTEGRITY_HELPER_SHA256" ] \
+    || fail "source archive integrity helper is not the reviewed implementation"
+  [ -f "$SOURCE_ARCHIVE_PATH" ] && [ ! -L "$SOURCE_ARCHIVE_PATH" ] \
+    || fail "TAIJI_SOURCE_ARCHIVE_PATH is required"
+  [ -f "$SOURCE_INVENTORY_PATH" ] && [ ! -L "$SOURCE_INVENTORY_PATH" ] \
+    || fail "TAIJI_SOURCE_INVENTORY_PATH is required"
+  inventory_sha="$(sha256sum "$SOURCE_INVENTORY_PATH" | awk '{print $1}')"
+  [ "$inventory_sha" = "$SOURCE_INVENTORY_SHA256" ] \
+    || fail "source inventory SHA256 mismatch"
+  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+    --archive "$SOURCE_ARCHIVE_PATH" \
+    --inventory "$SOURCE_INVENTORY_PATH" \
+    --root "$REPO_ROOT" \
+    --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
+    --allow-extra-prefix "apps/taiji-desktop/node_modules" \
+    --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
+    --allow-extra-prefix "runtime/package-build" \
+    --allow-extra-prefix "packages/麒麟操作系统安装包" \
+    || fail "source tree differs from the immutable archive inventory"
+}
 
 load_policy_contract() {
   [ -f "$POLICY_FILE" ] && [ ! -L "$POLICY_FILE" ] || fail "Missing compatibility policy: $POLICY_FILE"
@@ -165,8 +204,23 @@ validate_strict_toolchain_contract() {
   python_real="$(readlink -f "$SOURCE_AGENT_DIR/venv/bin/python")"
   [ -f "$python_real" ] || fail "resolved Agent Python executable is missing"
   PYTHON_VERSION="$("$SOURCE_AGENT_DIR/venv/bin/python" -c 'import platform; print(platform.python_version())')"
-  printf '%s\n' "$PYTHON_VERSION" | grep -Eq '^3\.11\.[0-9]+$' || fail "Agent Python must be 3.11.x"
+  [ "$EXPECTED_PYTHON_VERSION" = "$PINNED_PYTHON_VERSION" ] \
+    || fail "TAIJI_PYTHON_VERSION is not pinned"
+  [ "$PYTHON_VERSION" = "$PINNED_PYTHON_VERSION" ] \
+    || fail "Agent Python version is not the pinned official archive version"
+  [ "$PYTHON_ARCHIVE_SHA256" = "$PINNED_PYTHON_ARCHIVE_SHA256" ] \
+    || fail "TAIJI_PYTHON_ARCHIVE_SHA256 is not pinned"
+  [ -f "$PYTHON_ARCHIVE_PATH" ] && [ ! -L "$PYTHON_ARCHIVE_PATH" ] \
+    && [ "$(stat -c '%h' "$PYTHON_ARCHIVE_PATH")" = 1 ] \
+    || fail "TAIJI_PYTHON_ARCHIVE_PATH must be a regular single-link file"
+  actual="$(sha256sum "$PYTHON_ARCHIVE_PATH" | awk '{print $1}')"
+  [ "$actual" = "$PINNED_PYTHON_ARCHIVE_SHA256" ] \
+    || fail "Python archive SHA256 mismatch"
   PYTHON_EXECUTABLE_SHA256="$(sha256sum "$python_real" | awk '{print $1}')"
+  [ "$EXPECTED_PYTHON_EXECUTABLE_SHA256" = "$PINNED_PYTHON_EXECUTABLE_SHA256" ] \
+    || fail "TAIJI_PYTHON_EXECUTABLE_SHA256 is not pinned"
+  [ "$PYTHON_EXECUTABLE_SHA256" = "$PINNED_PYTHON_EXECUTABLE_SHA256" ] \
+    || fail "Python executable SHA256 is not the pinned official archive identity"
 
   node_bin="$PACKAGED_NODE_ROOT/bin/node"
   node_archive_marker="$PACKAGED_NODE_ROOT/.taiji-node-archive-sha256"
@@ -225,7 +279,7 @@ validate_locked_python_environment() {
 }
 
 validate_staged_toolchain_executables() {
-  local staged_python staged_node staged_electron actual expected_electron
+  local staged_python staged_node staged_electron actual
   staged_python="$AGENT_RUNTIME/venv/bin/python"
   staged_node="$INSTALL_ROOT/runtime/node/bin/node"
   staged_electron="$DESKTOP_RUNTIME/node_modules/electron/dist/electron"
@@ -233,13 +287,15 @@ validate_staged_toolchain_executables() {
     [ -f "$path" ] && [ ! -L "$path" ] || fail "Staged toolchain executable is not a regular file: $path"
   done
   actual="$(sha256sum "$staged_python" | awk '{print $1}')"
-  [ "$actual" = "$PYTHON_EXECUTABLE_SHA256" ] || fail "Staged Python executable SHA256 mismatch"
+  [ "$actual" = "$PYTHON_EXECUTABLE_SHA256" ] \
+    && [ "$actual" = "$PINNED_PYTHON_EXECUTABLE_SHA256" ] \
+    || fail "Staged Python executable SHA256 mismatch"
   actual="$(sha256sum "$staged_node" | awk '{print $1}')"
   [ "$actual" = "$NODE_EXECUTABLE_SHA256" ] && [ "$actual" = "$PINNED_NODE_EXECUTABLE_SHA256" ] \
     || fail "Staged Node executable SHA256 mismatch"
-  expected_electron="$(sha256sum "$ELECTRON_BIN" | awk '{print $1}')"
   actual="$(sha256sum "$staged_electron" | awk '{print $1}')"
-  [ "$actual" = "$expected_electron" ] || fail "Staged Electron executable SHA256 mismatch"
+  [ "$actual" = "$PINNED_ELECTRON_EXECUTABLE_SHA256" ] \
+    || fail "Staged Electron executable SHA256 mismatch"
 }
 
 validate_desktop_entry() {
@@ -544,6 +600,12 @@ audit_deb_payload() {
   mkdir -p "$audit_root" "$control_root"
   dpkg-deb -x "$OUT_DEB" "$audit_root"
   dpkg-deb -e "$OUT_DEB" "$control_root"
+  [ "$(sha256sum "$audit_root/opt/taiji-agent/runtime/agent/venv/bin/python" | awk '{print $1}')" = "$PINNED_PYTHON_EXECUTABLE_SHA256" ] \
+    || fail "Extracted DEB Python executable SHA256 is not canonical"
+  [ "$(sha256sum "$audit_root/opt/taiji-agent/runtime/node/bin/node" | awk '{print $1}')" = "$PINNED_NODE_EXECUTABLE_SHA256" ] \
+    || fail "Extracted DEB Node executable SHA256 is not canonical"
+  [ "$(sha256sum "$audit_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" | awk '{print $1}')" = "$PINNED_ELECTRON_EXECUTABLE_SHA256" ] \
+    || fail "Extracted DEB Electron executable SHA256 is not canonical"
   cmp -s "$POLICY_FILE" "$audit_root/opt/taiji-agent/resources/linux-compatibility-policy.json" || fail "DEB policy is not byte-identical"
   cmp -s "$ABI_BUILD_REPORT" "$audit_root/opt/taiji-agent/resources/elf-abi-audit.json" || fail "DEB ABI report changed during packaging"
   grep -F "$POLICY_SHA256" "$control_root/preinst" >/dev/null || fail "DEB preinst policy hash mismatch"
@@ -566,10 +628,13 @@ audit_deb_payload() {
 }
 
 write_package_manifest() {
-  local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 upgrade_contract_sha256 icon_set_sha256 built_at_utc out_deb_name
+  local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 upgrade_contract_sha256 icon_set_sha256 built_at_utc out_deb_name source_archive_sha256
   out_deb_name="$(basename "$OUT_DEB")"
   deb_sha256="$(sha256sum "$OUT_DEB" | awk '{print $1}')"
+  source_archive_sha256="$(sha256sum "$SOURCE_ARCHIVE_PATH" | awk '{print $1}')"
   electron_sha256="$(sha256sum "$DESKTOP_RUNTIME/node_modules/electron/dist/electron" | awk '{print $1}')"
+  [ "$electron_sha256" = "$PINNED_ELECTRON_EXECUTABLE_SHA256" ] \
+    || fail "Packaged Electron executable SHA256 is not canonical"
   desktop_sha256="$(sha256sum "$DESKTOP_FILE" | awk '{print $1}')"
   abi_sha256="$(sha256sum "$ABI_REPORT_PATH" | awk '{print $1}')"
   upgrade_contract_sha256="$(sha256sum "$REPO_ROOT/packaging/linux/upgrade-data-contract.json" | awk '{print $1}')"
@@ -584,6 +649,10 @@ write_package_manifest() {
   "version": "$VERSION",
   "architecture": "$TAIJI_PACKAGE_ARCHITECTURE",
   "source_commit": "$SOURCE_COMMIT",
+  "source_archive_basename": "$(basename "$SOURCE_ARCHIVE_PATH")",
+  "source_archive_sha256": "$source_archive_sha256",
+  "source_inventory_basename": "$(basename "$SOURCE_INVENTORY_PATH")",
+  "source_inventory_sha256": "$SOURCE_INVENTORY_SHA256",
   "deb_basename": "$(basename "$OUT_DEB")",
   "deb_sha256": "$deb_sha256",
   "maintainer": "$TAIJI_PACKAGE_MAINTAINER",
@@ -597,6 +666,7 @@ write_package_manifest() {
   "python_lock_basename": "$PYTHON_LOCK_BASENAME",
   "python_lock_sha256": "$PYTHON_LOCK_SHA256",
   "python_version": "$PYTHON_VERSION",
+  "python_archive_sha256": "$PYTHON_ARCHIVE_SHA256",
   "python_executable_sha256": "$PYTHON_EXECUTABLE_SHA256",
   "uv_version": "$UV_VERSION",
   "uv_archive_sha256": "$UV_ARCHIVE_SHA256",
@@ -635,6 +705,7 @@ MANIFEST
 if [ "$(uname -s)" != "Linux" ]; then fail "Refusing to build final DEB on non-Linux host"; fi
 case "$(uname -m)" in x86_64|amd64) ;; *) fail "Refusing to build on non-x86_64 host: $(uname -m)" ;; esac
 for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp readelf readlink date; do require_cmd "$cmd"; done
+validate_source_archive_integrity
 load_policy_contract
 resolve_source_commit
 validate_build_host_glibc
@@ -737,10 +808,12 @@ Description: Taiji Agent local desktop app
 CONTROL
 python3 "$PAYLOAD_VERIFIER" --root "$PKG_ROOT" >/dev/null
 scan_package_tree
+validate_source_archive_integrity
 dpkg-deb --root-owner-group -Zxz --build "$PKG_ROOT" "$OUT_DEB" >/dev/null
 scan_deb_release_artifact
 audit_deb_payload
 write_package_manifest
+validate_source_archive_integrity
 echo "Built: $OUT_DEB"
 echo "Checksum: $OUT_DEB.sha256"
 echo "Manifest: $MANIFEST_PATH"

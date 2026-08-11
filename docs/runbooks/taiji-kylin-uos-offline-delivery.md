@@ -36,7 +36,7 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 
 | 标签 | 必须具备的证据 |
 | --- | --- |
-| 源码包已准备 | 当前基线只有一个源码包；basename 与当前候选源提交一致；`SHA256SUMS.txt` 精确匹配；源码发布预检通过 |
+| 源码包已准备 | 当前基线只有一个源码包及由其导出的成员清单；basename 与当前候选源提交一致；`SHA256SUMS.txt` 精确绑定两者；源码发布预检通过 |
 | 制包机已构建 | 兼容 Linux amd64 制包机生成单一 DEB、sidecar、manifest、构建报告和 `.build-success`，最终发布预检通过 |
 | 离线安装已演练 | 干净 Linux amd64 容器、VM 或 chroot 在断网状态下只使用本地交付物完成安装、验证、卸载和重装，并生成当前产物绑定证据 |
 | 目标机已验证 | 真实 Kylin/UOS/openKylin 图形终端完成安装态 Electron 启动、CLI、真实模型对话、附件、关窗退出和诊断导出 |
@@ -107,7 +107,9 @@ Python；它会先通过 apt 安装 `python3`/`python3-dev` 和其余构建依�
 
 源码、Node/uv 工具链和所有 npm/Python 临时文件统一位于选中的构建根下，脚本导出 `TMPDIR`、`TMP`、`TEMP` 指向该根。只有脚本正常结束、最终发布预检通过，才可标记“制包机已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、sidecar 或 `.build-success` 缺失时仍属于失败。Electron 下载归档必须与 canonical policy 固定的版本、basename 和 SHA256 一致，且实际写入 DEB 的整个 `dist/` 文件清单及逐文件内容必须与该归档一致；不再只检查 8 个 ELF。构建时还会验证蓝色太极 Logo 的 RGBA PNG、hicolor 多尺寸、AppStream、desktop-id/WM_CLASS、Electron 窗口图标和安装态资源同源。
 
-正式 Python/Node 工具链采用“归档身份 + 实际可执行文件身份”双重绑定：`uv 0.12.2` 归档 SHA256 为 `d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4`，可执行文件 SHA256 为 `72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2`；Node.js `22.23.1` 归档 SHA256 为 `9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578`，可执行文件 SHA256 为 `93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068`。`00`、`build-deb`、`01`、manifest/marker、发布证据校验和组装器都必须精确匹配这些常量；只在现场伪造版本输出或 archive marker 不能通过。
+正式 Python/Node 工具链采用“归档身份 + 实际可执行文件身份”双重绑定：Python `3.11.15` standalone 归档 SHA256 为 `2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a`，`python3.11` 可执行文件 SHA256 为 `5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba`；`uv 0.12.2` 归档 SHA256 为 `d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4`，可执行文件 SHA256 为 `72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2`；Node.js `22.23.1` 归档 SHA256 为 `9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578`，可执行文件 SHA256 为 `93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068`；Electron `39.8.10` 的实际 `electron` ELF SHA256 为 `c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d`。`00`、`build-deb`、`01`、manifest/marker、发布证据校验和组装器都必须精确匹配这些常量；只在现场伪造版本输出或 archive marker 不能通过。
+
+源码身份不只是一个 commit 字符串。`99` 必须由原始 `git archive` 生成 `*.inventory.json`，记录每个成员的路径、类型、模式、大小和内容摘要；`00` 在解压前校验归档，并在解压后、构建前、DEB 打包前和最终 `01` 再次校验实体树。校验工具本身用源码固定 SHA256 验证，不允许可写树携带一个宽松验证器给自己作证。
 
 正式 Python 依赖只能对提交态 `uv.lock` 做一次写入式 strict sync；DEB 构建器随后只允许用 `uv sync --locked --check` 做只读一致性复核。未设置 `TAIJI_UV_LOCK_MODE` 与显式 `strict` 等价；`auto`、`unlocked`、任何 `TAIJI_ALLOW_UV_LOCK_REFRESH` 和二次无锁 `uv pip install -r` 都必须 fail closed。sync 前后必须重算并保持同一 `uv.lock` SHA256。WebUI requirements 只能是 Agent 直接依赖在 lock 中的精确版本子集，并在生产 venv 中核对实际安装版本和 import。`01` 在尚未生成 DEB 的 source-only 阶段也会检查源码包中的严格入口，防止降级后的制包输入被传到 Linux 制包机。旧 v3 如果缺少这些字段，当前正式门禁会明确拒绝；如需查阅，只能在门禁之外把原文件作为历史资料只读查看，不得伪补字段升级为当前正式 v3。
 
@@ -141,7 +143,9 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
   --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
 ```
 
-输出目录必须事先不存在。生产器应验证镜像角色、`ubuntu-20.04` 兼容基线和 `kylin-os-release-v1` fixture label，使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。runner 必须先在未改动的镜像状态核对真实 Ubuntu 20.04 和断网状态，之后才可在该一次性容器内原子激活 Kylin policy fixture：只把可信 `/usr/lib/os-release` 改成 `ID=kylin`、建立 canonical `/etc/os-release` 软链接并创建桌面会话目录；候选 DEB、canonical policy 和生产 `preinst` 均不得改动或绕过。
+输出目录必须事先不存在。显式全生命周期入口的 N-1 Debian 版本（包括 epoch、upstream version 和 revision）必须严格小于候选版本；同版本或更高版本不得冒充 N-1。生产器应验证镜像角色、`ubuntu-20.04` 兼容基线和 `kylin-os-release-v1` fixture label，使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。runner 必须先在未改动的镜像状态核对真实 Ubuntu 20.04 和断网状态，之后才可在该一次性容器内原子激活 Kylin policy fixture：只把可信 `/usr/lib/os-release` 改成 `ID=kylin`、建立 canonical `/etc/os-release` 软链接并创建桌面会话目录；候选 DEB、canonical policy 和生产 `preinst` 均不得改动或绕过。
+
+当前排序门禁只证明 Debian `previous < candidate`，尚不能独立证明 previous 是发布台账中紧邻的上一个已签名版本。在 prior release-evidence/signature 绑定或首发 signed waiver 门禁完成前，这项结果不得表述为“已证明紧邻 N-1”。
 
 演练镜像不得安装一整套宽泛桌面依赖来制造假绿。`tools/taiji-offline-rehearsal/ubuntu20-required-system-packages.tsv` 必须与 canonical policy 的 `required_system_sonames` 一一对应；镜像只安装这组 Ubuntu 20.04 系统边界包，并用 `ctypes.CDLL` 在镜像构建阶段逐个确认 SONAME 可加载。其余非核心依赖必须由候选 DEB 自己闭合。映射缺项、多项或把 payload 私有库偷偷放进演练基线，都应在 Docker 启动候选安装前失败。
 
@@ -164,7 +168,7 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 断网演练和代表环境验收使用不同 challenge。各环境记录聚合为 certification set 后，发布负责人检查原始会话、截图和诊断内容，再用独立离线私钥签名；发布回执另用独立 challenge。最终门禁必须复用当轮原 challenge，不能重新生成：
 
-certification validator 会对六个正向和六个负向环境记录逐条比对 `source_commit/version/architecture/deb_basename/deb_sha256/compatibility_policy_id/compatibility_policy_sha256`，必须与顶层 v3 `BuildBinding` 完全一致；摘要和字段结构合法不能代替这项逐记录身份校验。
+certification validator 会对六个正向和六个负向环境记录逐条比对 `source_commit/version/architecture/deb_basename/deb_sha256/compatibility_policy_id/compatibility_policy_sha256`，必须与顶层 v3 `BuildBinding` 完全一致；摘要和字段结构合法不能代替这项逐记录身份校验。认证集还必须把每条记录声明的 target/driver/screenshot/preflight 等附件和整个断网演练证据目录归档在固定子目录中，逐文件复算 SHA256/大小/清单摘要，再重跑基础会话、扩展生命周期原始日志、previous DEB basename/version/SHA256 以及 Debian `previous < candidate` 语义校验。签名器会在签名前执行同一完整实物校验；只剩顶层 JSON 或任意摘要字符串不能发布。
 
 ```bash
 export TAIJI_CERTIFICATION_CHALLENGE="<当轮认证集原值>"
@@ -194,7 +198,7 @@ bash packaging/linux/deb/publish-single-deb.sh \
   --receipt-root "$PWD/internal-release-receipts/single-deb"
 ```
 
-发布脚本会先快照候选 DEB、policy 和两组 signed evidence，再执行正式 release-check；最后以不可替换 rename 原子生成新客户目录，并把 `release-evidence.json`、两组签名、policy 和 `deb.sha256` 六个文件归档到内部 receipt。客户只收到该目录中的固定 basename DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
+发布脚本会先快照候选 DEB、policy、两组 signed evidence，以及认证集的全部 `records/` 附件和 `offline-rehearsal/` 原始证据，再执行正式 release-check；门禁期间任何实物增删、替换或改动都会失败且不生成客户目录。最后以不可替换 rename 原子生成新客户目录，并把 `release-evidence.json`、两组签名、policy 和 `deb.sha256` 六个文件归档到内部 receipt。这六文件是 publisher 回执，不是完整认证档案；完整 certification `records/`、`offline-rehearsal/` 及其它受控原始附件必须在内部认证归档中持续保留。客户只收到该目录中的固定 basename DEB，不收到内部工作区、私钥、receipt、manifest 或验收材料。
 
 ## 6. 完整离线交付契约
 
@@ -202,6 +206,8 @@ bash packaging/linux/deb/publish-single-deb.sh \
 
 ```text
 taiji-agentv1.0-kylin-build-src-<commit>.tar.gz
+taiji-agentv1.0-kylin-build-src-<commit>.inventory.json
+source-archive-integrity.py
 SHA256SUMS.txt
 00_制包机_生成离线交付包.sh
 01_制包机_发布预检.sh
@@ -218,8 +224,8 @@ SHA256SUMS.txt
 
 必须同时满足：
 
-- 当前源码包唯一且 SHA256 匹配。
-- v3 manifest 的完整 `source_commit` 必须唯一决定源码包 basename；根 `SHA256SUMS.txt` 只能精确记录该 basename 和内容 SHA，`.build-success` 中的 source/DEB/policy/ABI/icon/maintainer 身份也必须与 manifest 和当前文件一致。即使旧源码包内容 SHA 正确，只要 basename 不是当前完整 commit，仍必须拒绝。
+- 当前源码包和对应成员清单各自唯一且 SHA256 匹配，固定工具复验后的每个归档成员与解压树都与清单一致。
+- v3 manifest 的完整 `source_commit` 必须唯一决定源码包和成员清单 basename；根 `SHA256SUMS.txt` 只能精确记录这两个 basename 和内容 SHA，`.build-success` 中的 source/inventory/DEB/policy/ABI/icon/maintainer 身份也必须与 manifest 和当前文件一致。即使旧源码包内容 SHA 正确，只要 basename 不是当前完整 commit，仍必须拒绝。`.build-success` 只能在所有最终门禁通过后原子发布，失败路径不得留下该文件。
 - `生成的安装包/` 只有一套允许的当前产物。
 - `.deb.sha256` 只记录 basename，不记录制包机绝对路径。
 - v3 当前路径不得混入历史 `离线依赖/Packages*` 或第二个安装包；客户边界是 manifest 绑定的唯一 DEB。

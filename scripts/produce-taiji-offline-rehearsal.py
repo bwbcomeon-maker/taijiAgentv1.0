@@ -30,6 +30,7 @@ IMAGE_BASELINE_LABEL = "ubuntu-20.04"
 IMAGE_FIXTURE_LABEL = "kylin-os-release-v1"
 REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
 SESSION_BASENAME = "offline-install-rehearsal-session.json"
+LIFECYCLE_BASENAME = "offline-install-rehearsal-lifecycle.json"
 EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -67,18 +68,69 @@ def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def load_json(path: Path, label: str) -> dict[str, Any]:
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def read_regular_bytes(path: Path, label: str, *, max_bytes: int = 1024 * 1024) -> bytes:
+    """Read one bounded regular file without switching pathnames mid-read."""
+
     try:
-        file_stat = path.lstat()
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ProducerError(f"{label} 必须是单链接普通文件：{path}")
+        if before.st_size <= 0 or before.st_size > max_bytes:
+            raise ProducerError(f"{label} 大小不合法：{path}")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+    except ProducerError:
+        raise
     except OSError as exc:
         raise ProducerError(f"{label} 不存在或不可读取：{path}: {exc}") from exc
-    if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink() or file_stat.st_nlink != 1:
-        raise ProducerError(f"{label} 必须是单链接普通文件：{path}")
-    if file_stat.st_size <= 0 or file_stat.st_size > 1024 * 1024:
-        raise ProducerError(f"{label} 大小不合法：{path}")
+
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=strict_object)
-    except (OSError, UnicodeError, json.JSONDecodeError, ProducerError) as exc:
+        opened = os.fstat(descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            raise ProducerError(f"{label} 在打开时发生替换：{path}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ProducerError(f"{label} 读取期间被截断：{path}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ProducerError(f"{label} 读取期间大小发生变化：{path}")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            _file_identity(after) != _file_identity(before)
+            or _file_identity(current) != _file_identity(before)
+        ):
+            raise ProducerError(f"{label} 读取期间发生变化：{path}")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ProducerError(f"{label} 读取失败：{path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
+def load_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        raw = read_regular_bytes(path, label)
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    except (UnicodeError, json.JSONDecodeError, ProducerError) as exc:
         raise ProducerError(f"{label} 无法严格解析：{exc}") from exc
     if type(payload) is not dict:
         raise ProducerError(f"{label} 顶层必须是 JSON object")
@@ -182,12 +234,99 @@ def load_policy_identity(path: Path) -> tuple[str, str]:
 def parse_sha256_sidecar(path: Path, expected_file: Path, expected_hash: str) -> None:
     sidecar = resolve_regular_file(path, "previous DEB SHA256 sidecar")
     try:
-        text = sidecar.read_text(encoding="ascii")
-    except (OSError, UnicodeError) as exc:
+        text = read_regular_bytes(
+            sidecar, "previous DEB SHA256 sidecar", max_bytes=4096
+        ).decode("ascii")
+    except (ProducerError, UnicodeError) as exc:
         raise ProducerError(f"previous DEB SHA256 sidecar 无法读取：{sidecar}") from exc
     match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?", text)
     if not match or match.group(1) != expected_hash or match.group(2) != expected_file.name:
         raise ProducerError("previous DEB SHA256 sidecar 未准确绑定 previous DEB basename 和内容")
+
+
+def _split_debian_version(version: str) -> tuple[int, str, str]:
+    if type(version) is not str or not version:
+        raise ProducerError("Debian version 不能为空")
+    epoch = 0
+    remainder = version
+    if ":" in remainder:
+        epoch_text, remainder = remainder.split(":", 1)
+        if not epoch_text.isdigit() or not remainder:
+            raise ProducerError(f"Debian version epoch 不合法：{version}")
+        epoch = int(epoch_text, 10)
+    if not re.fullmatch(r"[0-9A-Za-z.+~:-]+", version):
+        raise ProducerError(f"Debian version 包含不合法字符：{version}")
+    if "-" in remainder:
+        upstream, revision = remainder.rsplit("-", 1)
+        if not revision:
+            raise ProducerError(f"Debian version revision 不合法：{version}")
+    else:
+        upstream, revision = remainder, "0"
+    if not upstream or not upstream[0].isdigit():
+        raise ProducerError(f"Debian upstream version 不合法：{version}")
+    return epoch, upstream, revision
+
+
+def _debian_character_order(character: str) -> int:
+    if character == "~":
+        return -1
+    if not character:
+        return 0
+    if character.isalpha():
+        return ord(character)
+    return ord(character) + 256
+
+
+def _compare_debian_part(left: str, right: str) -> int:
+    left_index = 0
+    right_index = 0
+    while left_index < len(left) or right_index < len(right):
+        while (
+            (left_index < len(left) and not left[left_index].isdigit())
+            or (right_index < len(right) and not right[right_index].isdigit())
+        ):
+            left_character = left[left_index] if left_index < len(left) and not left[left_index].isdigit() else ""
+            right_character = right[right_index] if right_index < len(right) and not right[right_index].isdigit() else ""
+            left_order = _debian_character_order(left_character)
+            right_order = _debian_character_order(right_character)
+            if left_order != right_order:
+                return -1 if left_order < right_order else 1
+            if left_character:
+                left_index += 1
+            if right_character:
+                right_index += 1
+        while left_index < len(left) and left[left_index] == "0":
+            left_index += 1
+        while right_index < len(right) and right[right_index] == "0":
+            right_index += 1
+        left_end = left_index
+        right_end = right_index
+        while left_end < len(left) and left[left_end].isdigit():
+            left_end += 1
+        while right_end < len(right) and right[right_end].isdigit():
+            right_end += 1
+        left_digits = left[left_index:left_end]
+        right_digits = right[right_index:right_end]
+        if len(left_digits) != len(right_digits):
+            return -1 if len(left_digits) < len(right_digits) else 1
+        if left_digits != right_digits:
+            return -1 if left_digits < right_digits else 1
+        left_index = left_end
+        right_index = right_end
+    return 0
+
+
+def compare_debian_versions(left: str, right: str) -> int:
+    """Return Debian/dpkg ordering for two complete package versions."""
+
+    left_epoch, left_upstream, left_revision = _split_debian_version(left)
+    right_epoch, right_upstream, right_revision = _split_debian_version(right)
+    if left_epoch != right_epoch:
+        return -1 if left_epoch < right_epoch else 1
+    upstream_order = _compare_debian_part(left_upstream, right_upstream)
+    if upstream_order:
+        return upstream_order
+    return _compare_debian_part(left_revision, right_revision)
 
 
 def resolve_output(path: Path) -> Path:
@@ -346,6 +485,8 @@ def run_lifecycle_container(
             "--env",
             f"TAIJI_EXPECTED_DEB_SHA256={release['deb_sha256']}",
             "--env",
+            f"TAIJI_EXPECTED_CANDIDATE_VERSION={release['version']}",
+            "--env",
             f"TAIJI_REHEARSAL_FIXTURE_ID={IMAGE_FIXTURE_LABEL}",
     ]
     if expanded:
@@ -359,6 +500,8 @@ def run_lifecycle_container(
                 f"TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME={previous['deb'].name}",
                 "--env",
                 f"TAIJI_EXPECTED_PREVIOUS_DEB_SHA256={previous['sha256']}",
+                "--env",
+                f"TAIJI_EXPECTED_PREVIOUS_VERSION={previous['version']}",
                 "--env",
                 "TAIJI_PREVIOUS_DEB_RELATIVE=.rehearsal-inputs/previous/"
                 f"{previous['deb'].name}",
@@ -472,11 +615,43 @@ def validate_session(session: dict[str, Any], release: dict[str, Any], challenge
 
 
 def sha256_file(path: Path) -> str:
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0:
+            raise ProducerError(f"待摘要文件必须是非空单链接普通文件：{path}")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+    except ProducerError:
+        raise
+    except OSError as exc:
+        raise ProducerError(f"待摘要文件不存在或不可读取：{path}: {exc}") from exc
+
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+    try:
+        opened = os.fstat(descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            raise ProducerError(f"待摘要文件在打开时发生替换：{path}")
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ProducerError(f"待摘要文件读取期间被截断：{path}")
             digest.update(chunk)
-    return digest.hexdigest()
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ProducerError(f"待摘要文件读取期间大小发生变化：{path}")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            _file_identity(after) != _file_identity(before)
+            or _file_identity(current) != _file_identity(before)
+        ):
+            raise ProducerError(f"待摘要文件读取期间发生变化：{path}")
+        return digest.hexdigest()
+    except OSError as exc:
+        raise ProducerError(f"待摘要文件读取失败：{path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -590,7 +765,9 @@ def prepare_explicit_inputs(
         raise ProducerError("candidate DEB 必须是交付目录生成的安装包中的唯一 amd64 DEB")
     if manifest.name != release["manifest"].name:
         raise ProducerError("build manifest basename 必须是 taiji-package-manifest.json")
-    if manifest.read_bytes() != release["manifest"].read_bytes():
+    if read_regular_bytes(manifest, "build manifest") != read_regular_bytes(
+        release["manifest"], "交付目录 build manifest"
+    ):
         raise ProducerError("build manifest 内容必须与交付目录中的 candidate manifest 完全一致")
     release["manifest"] = manifest
     previous = resolve_regular_file(previous_arg, "previous DEB")
@@ -619,12 +796,20 @@ def prepare_explicit_inputs(
         raise ProducerError("previous build manifest source_commit 不合法")
     if type(previous_version) is not str or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}", previous_version):
         raise ProducerError("previous build manifest version 不合法")
-    if previous_version == release["version"]:
-        raise ProducerError("previous build manifest 必须是不同于 candidate 的 N-1 版本")
     if type(previous_policy_id) is not str or not previous_policy_id:
         raise ProducerError("previous build manifest compatibility_policy_id 不合法")
     if type(previous_policy_sha256) is not str or not SHA256_RE.fullmatch(previous_policy_sha256):
         raise ProducerError("previous build manifest compatibility_policy_sha256 不合法")
+    previous_name = re.fullmatch(r"taiji-agent_(.+)_amd64\.deb", previous.name)
+    if previous_name is None:
+        raise ProducerError("previous DEB basename 不符合 taiji-agent_<version>_amd64.deb")
+    if previous_name.group(1) != previous_version:
+        raise ProducerError("previous DEB basename version 与 previous build manifest 不一致")
+    candidate_version = release["version"]
+    if compare_debian_versions(previous_version, candidate_version) >= 0:
+        raise ProducerError(
+            "previous DEB must be strictly older than candidate under Debian version rules"
+        )
     policy_id, policy_sha256 = load_policy_identity(policy_arg)
     manifest_payload = load_json(manifest, "build manifest")
     manifest_policy_id = manifest_payload.get("compatibility_policy_id")
@@ -731,7 +916,7 @@ def produce(
                 expanded=expanded,
             )
         session_path = output / SESSION_BASENAME
-        lifecycle_path = output / "offline-install-rehearsal-lifecycle.json"
+        lifecycle_path = output / LIFECYCLE_BASENAME
         if not session_path.is_file() and lifecycle_path.is_file():
             lifecycle_session = load_json(lifecycle_path, "扩展离线生命周期会话")
             base_session = {
@@ -753,6 +938,13 @@ def produce(
                 raise ProducerError("lifecycle evidence compatibility_policy_id 与固定 policy 不一致")
             if lifecycle_session.get("compatibility_policy_sha256") != policy["sha256"]:
                 raise ProducerError("lifecycle evidence compatibility_policy_sha256 与固定 policy 不一致")
+            for key, expected in {
+                "previous_deb_basename": previous["deb"].name,
+                "previous_deb_sha256": previous["sha256"],
+                "previous_version": previous["version"],
+            }.items():
+                if lifecycle_session.get(key) != expected:
+                    raise ProducerError(f"lifecycle evidence {key} 与固定 previous DEB 不一致")
 
         current_release = discover_release_inputs(delivery, validator)
         if (
@@ -830,12 +1022,17 @@ def produce(
                 "data_manifests",
                 "journal",
                 "package_actions",
+                "previous_deb_basename",
+                "previous_deb_sha256",
+                "previous_version",
             ):
                 if key in lifecycle_session:
                     evidence[key] = lifecycle_session[key]
             if previous_release_evidence is None:
                 raise ProducerError("扩展生命周期证据缺少 N-1 身份")
             evidence["previous_release"] = previous_release_evidence
+            evidence["lifecycle_log_basename"] = LIFECYCLE_BASENAME
+            evidence["lifecycle_log_sha256"] = sha256_file(lifecycle_path)
         evidence_path = output / EVIDENCE_BASENAME
         atomic_write_json(evidence_path, evidence)
         validate_current_offline(evidence_path, release, challenge)

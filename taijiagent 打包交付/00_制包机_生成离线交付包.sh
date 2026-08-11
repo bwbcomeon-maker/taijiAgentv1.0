@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 022
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
+SOURCE_INTEGRITY_HELPER="$SCRIPT_DIR/source-archive-integrity.py"
+SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+SOURCE_INVENTORY=""
+SOURCE_INVENTORY_SHA256=""
+SOURCE_ARCHIVE_SHA256=""
 BUILD_ROOT="${TAIJI_BUILD_ROOT:-}"
 BUILD_ROOT_OWNER_MARKER=".taiji-build-root-owner"
 BUILD_ROOT_OWNER_TOKEN="taiji-agent-build-root-v1:$(id -u 2>/dev/null || printf user)"
@@ -28,12 +34,23 @@ UV_ARCHIVE_URL="https://github.com/astral-sh/uv/releases/download/0.12.2/uv-x86_
 UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"
 UV_PINNED_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
 UV_EXECUTABLE_SHA256=""
+PYTHON_VERSION_PINNED="3.11.15"
+PYTHON_ARCHIVE="cpython-3.11.15+20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+PYTHON_ARCHIVE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260805/cpython-3.11.15%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+PYTHON_ARCHIVE_SHA256="2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
+PYTHON_PINNED_EXECUTABLE_SHA256="5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
+PYTHON_ROOT=""
+PYTHON_BIN=""
+PYTHON_ARCHIVE_PATH=""
 NODE_VERSION="22.23.1"
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 NODE_PINNED_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
 NODE_ARCHIVE_PATH=""
+FIXED_TOOL_ARCHIVE_FD_PATH=""
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
+PENDING_BUILD_MARKER=""
+PENDING_BUILD_MARKER_SHA256=""
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
 POLICY_FILE=""
@@ -45,6 +62,7 @@ ELECTRON_VERSION=""
 ELECTRON_ARCHIVE_SHA256=""
 ELECTRON_ARCHIVE=""
 ELECTRON_EXECUTABLE_SHA256=""
+ELECTRON_PINNED_EXECUTABLE_SHA256="c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 ELF_ABI_AUDIT_SHA256=""
 PYTHON_DEPENDENCY_LOCK_STATUS="unknown"
 PYTHON_LOCK_BASENAME="uv.lock"
@@ -53,6 +71,11 @@ PYTHON_VERSION=""
 PYTHON_EXECUTABLE_SHA256=""
 NODE_EXECUTABLE_SHA256=""
 CANDIDATE_DEB_FIXED=0
+MARKER_SOURCE_NAME=""
+MARKER_SOURCE_SHA256=""
+MARKER_SOURCE_COMMIT=""
+MARKER_DEB_NAME=""
+MARKER_DEB_SHA256=""
 OUTPUT_ARCHIVE_DIR=""
 OUTPUT_BACKUP=""
 OUTPUT_REPLACEMENT_PENDING=0
@@ -308,6 +331,9 @@ rollback_target_acceptance_tools() {
 
 cleanup_transient_delivery() {
   set +e
+  if [ -n "${PENDING_BUILD_MARKER:-}" ]; then
+    rm -f -- "$PENDING_BUILD_MARKER"
+  fi
   rollback_previous_build_outputs || true
   rollback_target_acceptance_tools || true
   if [ -n "${ACCEPTANCE_STAGING:-}" ] \
@@ -394,11 +420,42 @@ verify_source_archive_checksum() {
   if [ "$actual" != "$expected" ]; then
     fail "源码包 SHA256 不匹配：$archive_name"
   fi
-  printf '%s  %s\n' "$actual" "$archive_name" > "$CHECKSUM_FILE"
+  SOURCE_ARCHIVE_SHA256="$actual"
+}
+
+resolve_source_integrity_helper() {
+  local repository_copy
+  repository_copy="$SCRIPT_DIR/../packaging/linux/source-archive-integrity.py"
+  if [ ! -f "$SOURCE_INTEGRITY_HELPER" ] && [ -f "$repository_copy" ]; then
+    SOURCE_INTEGRITY_HELPER="$repository_copy"
+  fi
+  [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
+    || fail "缺少可信源码归档完整性工具：$SOURCE_INTEGRITY_HELPER"
+  [ "$(sha256sum "$SOURCE_INTEGRITY_HELPER" | awk '{print $1}')" = "$SOURCE_INTEGRITY_HELPER_SHA256" ] \
+    || fail "源码归档完整性工具不是固定审查版本"
+}
+
+resolve_and_verify_source_inventory() {
+  local expected inventory_name inventory_hash source_commit
+  resolve_source_integrity_helper
+  inventory_name="$(basename "$SRC_ARCHIVE" .tar.gz).inventory.json"
+  SOURCE_INVENTORY="$SCRIPT_DIR/$inventory_name"
+  [ -f "$SOURCE_INVENTORY" ] && [ ! -L "$SOURCE_INVENTORY" ] \
+    || fail "源码包缺少 archive-derived 不可变成员清单：$inventory_name"
+  expected="$(checksum_source_archive_hash "$inventory_name")"
+  [ -n "$expected" ] || fail "SHA256SUMS.txt 缺少源码成员清单条目：$inventory_name"
+  inventory_hash="$(sha256sum "$SOURCE_INVENTORY" | awk '{print $1}')"
+  [ "$inventory_hash" = "$expected" ] || fail "源码成员清单 SHA256 不匹配"
+  source_commit="$(basename "$SRC_ARCHIVE" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
+  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+    --archive "$SRC_ARCHIVE" \
+    --inventory "$SOURCE_INVENTORY" \
+    || fail "源码归档与不可变成员清单不一致"
+  SOURCE_INVENTORY_SHA256="$inventory_hash"
 }
 
 create_source_archive_from_git() {
-  local repo_root source_gate trusted_git commit archive_name
+  local repo_root source_gate trusted_git commit archive_name inventory_name archive_sha inventory_sha
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd -P)"
   source_gate="$repo_root/scripts/check-clean-worktree.sh"
   trusted_git="$repo_root/scripts/taiji-trusted-git"
@@ -413,9 +470,22 @@ create_source_archive_from_git() {
     || fail "发布源码包必须来自干净本地 main"
   commit="$("$trusted_git" -C "$repo_root" rev-parse HEAD)"
   archive_name="taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
+  inventory_name="${archive_name%.tar.gz}.inventory.json"
   info "使用 git archive 生成源码包：$archive_name"
   "$trusted_git" -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
-  (cd "$SCRIPT_DIR" && sha256sum "$archive_name" > SHA256SUMS.txt)
+  resolve_source_integrity_helper
+  rm -f -- "$SCRIPT_DIR/$inventory_name"
+  python3 "$SOURCE_INTEGRITY_HELPER" create \
+    --archive "$SCRIPT_DIR/$archive_name" \
+    --inventory "$SCRIPT_DIR/$inventory_name" \
+    --source-commit "$commit" \
+    || fail "无法生成源码不可变成员清单"
+  archive_sha="$(sha256sum "$SCRIPT_DIR/$archive_name" | awk '{print $1}')"
+  inventory_sha="$(sha256sum "$SCRIPT_DIR/$inventory_name" | awk '{print $1}')"
+  {
+    printf '%s  %s\n' "$archive_sha" "$archive_name"
+    printf '%s  %s\n' "$inventory_sha" "$inventory_name"
+  } > "$CHECKSUM_FILE"
   SRC_ARCHIVE="$SCRIPT_DIR/$archive_name"
   ok "源码包已生成并写入 SHA256SUMS.txt"
 }
@@ -478,6 +548,9 @@ run_release_preflight() {
   [ -x "$preflight_script" ] || fail "缺少发布预检脚本：$preflight_script"
   TAIJI_RELEASE_REQUIRE_ARTIFACTS="${TAIJI_RELEASE_REQUIRE_ARTIFACTS:-0}" \
     TAIJI_RELEASE_SKIP_GIT_CHECK="${TAIJI_RELEASE_SKIP_GIT_CHECK:-0}" \
+    TAIJI_EXTRACTED_SOURCE_ROOT="${TAIJI_EXTRACTED_SOURCE_ROOT:-}" \
+    TAIJI_BUILD_MARKER_PATH="${TAIJI_BUILD_MARKER_PATH:-}" \
+    TAIJI_EXPECT_PUBLISHED_BUILD_MARKER="${TAIJI_EXPECT_PUBLISHED_BUILD_MARKER:-1}" \
     TAIJI_REPO_ROOT="$repo_root" \
     "$preflight_script"
 }
@@ -668,7 +741,10 @@ configure_build_tmp() {
   TOOL_ROOT="$BUILD_ROOT/.build-tools"
   NODE_ROOT="$TOOL_ROOT/node"
   UV_ROOT="$TOOL_ROOT/uv"
+  PYTHON_ROOT="$TOOL_ROOT/python"
   UV_BIN="$UV_ROOT/current/uv"
+  PYTHON_BIN="$PYTHON_ROOT/current/bin/python3.11"
+  PENDING_BUILD_MARKER="$BUILD_ROOT/.build-success.pending"
   mkdir -p -- "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法创建构建临时目录或工具根"
   chmod 0700 "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法设置构建临时目录或工具根权限"
   export TMPDIR="$BUILD_TMP_DIR" TMP="$BUILD_TMP_DIR" TEMP="$BUILD_TMP_DIR"
@@ -742,12 +818,10 @@ prepare_source_release() {
   require_cmd sha256sum
   resolve_source_archive
   [ -f "$SRC_ARCHIVE" ] || fail "未找到源码包：$SRC_ARCHIVE"
-  if [ -f "$CHECKSUM_FILE" ]; then
-    verify_source_archive_checksum
-    ok "源码包校验通过"
-  else
-    warn "未找到 SHA256SUMS.txt，跳过源码包传输校验"
-  fi
+  [ -f "$CHECKSUM_FILE" ] || fail "正式制包缺少 SHA256SUMS.txt"
+  verify_source_archive_checksum
+  resolve_and_verify_source_inventory
+  ok "源码包与 archive-derived 成员清单校验通过"
   run_release_preflight
 }
 
@@ -833,6 +907,58 @@ verify_trusted_system_tools() {
   ok "可信 readelf 已就绪：$trusted_readelf"
 }
 
+close_fixed_tool_archive() {
+  exec 9<&- 2>/dev/null || true
+  FIXED_TOOL_ARCHIVE_FD_PATH=""
+}
+
+open_fixed_tool_archive() {
+  local archive_path="$1" expected_sha256="$2"
+  local before_identity opened_identity after_identity actual_sha256 current_uid
+  close_fixed_tool_archive
+  current_uid="$(id -u)"
+  [ -f "$archive_path" ] && [ ! -L "$archive_path" ] \
+    && [ "$(stat -c '%h' "$archive_path")" = 1 ] \
+    && [ "$(stat -c '%u' "$archive_path")" = "$current_uid" ] \
+    || return 1
+  before_identity="$(stat -c '%d:%i:%s:%h:%u' -- "$archive_path")" || return 1
+  exec 9<"$archive_path" || return 1
+  FIXED_TOOL_ARCHIVE_FD_PATH="/proc/self/fd/9"
+  [ -r "$FIXED_TOOL_ARCHIVE_FD_PATH" ] || {
+    close_fixed_tool_archive
+    return 1
+  }
+  opened_identity="$(stat -Lc '%d:%i:%s:%h:%u' -- "$FIXED_TOOL_ARCHIVE_FD_PATH")" || {
+    close_fixed_tool_archive
+    return 1
+  }
+  [ "$opened_identity" = "$before_identity" ] || {
+    close_fixed_tool_archive
+    return 1
+  }
+  actual_sha256="$(sha256sum "$FIXED_TOOL_ARCHIVE_FD_PATH" | awk '{print $1}')" || {
+    close_fixed_tool_archive
+    return 1
+  }
+  after_identity="$(stat -c '%d:%i:%s:%h:%u' -- "$archive_path")" || {
+    close_fixed_tool_archive
+    return 1
+  }
+  if [ "$actual_sha256" != "$expected_sha256" ] || [ "$after_identity" != "$opened_identity" ]; then
+    close_fixed_tool_archive
+    return 1
+  fi
+}
+
+require_open_fixed_tool_archive_unchanged() {
+  local expected_sha256="$1" actual_sha256
+  [ -n "$FIXED_TOOL_ARCHIVE_FD_PATH" ] && [ -r "$FIXED_TOOL_ARCHIVE_FD_PATH" ] \
+    || fail "固定工具归档的已打开文件丢失"
+  actual_sha256="$(sha256sum "$FIXED_TOOL_ARCHIVE_FD_PATH" | awk '{print $1}')"
+  [ "$actual_sha256" = "$expected_sha256" ] \
+    || fail "固定工具归档在安全检查与解压期间发生变化"
+}
+
 source_lab_dir() {
   printf '%s/%s%s%s\n' "$SRC_DIR" "her" "mes-local-" "lab"
 }
@@ -842,7 +968,7 @@ source_agent_dir() {
 }
 
 ensure_uv() {
-  local download_dir extract_dir extracted_bin actual_archive_sha current_uid
+  local download_dir extract_dir extracted_bin current_uid
   current_uid="$(id -u)"
   download_dir="$UV_ROOT/download"
   extract_dir="$UV_ROOT/extract"
@@ -859,10 +985,9 @@ ensure_uv() {
     && [ "$(stat -c '%h' "$UV_ARCHIVE_PATH")" = 1 ] \
     && [ "$(stat -c '%u' "$UV_ARCHIVE_PATH")" = "$current_uid" ] \
     || fail "uv 归档不是当前用户独占的普通文件"
-  actual_archive_sha="$(sha256sum "$UV_ARCHIVE_PATH" | awk '{print $1}')"
-  [ "$actual_archive_sha" = "$UV_ARCHIVE_SHA256" ] \
-    || fail "uv 固定归档 SHA256 校验失败"
-  python3 - "$UV_ARCHIVE_PATH" <<'PY' || fail "uv 归档成员路径不安全"
+  open_fixed_tool_archive "$UV_ARCHIVE_PATH" "$UV_ARCHIVE_SHA256" \
+    || fail "uv 固定归档不安全或 SHA256 校验失败"
+  python3 - "$FIXED_TOOL_ARCHIVE_FD_PATH" <<'PY' || fail "uv 归档成员路径不安全"
 import sys
 import tarfile
 
@@ -872,7 +997,9 @@ with tarfile.open(sys.argv[1], "r:gz") as archive:
         if member.name.startswith("/") or ".." in parts or member.issym() or member.islnk():
             raise SystemExit("unsafe uv archive member")
 PY
-  tar --no-same-owner --no-same-permissions -xzf "$UV_ARCHIVE_PATH" -C "$extract_dir"
+  tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$extract_dir"
+  require_open_fixed_tool_archive_unchanged "$UV_ARCHIVE_SHA256"
+  close_fixed_tool_archive
   extracted_bin="$extract_dir/uv-x86_64-unknown-linux-gnu/uv"
   [ -f "$extracted_bin" ] && [ ! -L "$extracted_bin" ] \
     && [ "$(stat -c '%h' "$extracted_bin")" = 1 ] \
@@ -890,6 +1017,80 @@ PY
   [ "$UV_EXECUTABLE_SHA256" = "$UV_PINNED_EXECUTABLE_SHA256" ] \
     || fail "uv 可执行文件 SHA256 不等于官方固定归档身份"
   ok "固定 uv 已验证：$UV_BIN (uv $UV_VERSION)"
+}
+
+ensure_python() {
+  local download_dir extract_dir actual_executable_sha current_uid
+  current_uid="$(id -u)"
+  download_dir="$PYTHON_ROOT/download"
+  extract_dir="$PYTHON_ROOT/extract"
+  PYTHON_ARCHIVE_PATH="$download_dir/$PYTHON_ARCHIVE"
+  [ "$PYTHON_ROOT" = "$TOOL_ROOT/python" ] \
+    || fail "Python 工具根未绑定受控 owner-only 工具根"
+  install -d -m 0700 "$PYTHON_ROOT" "$download_dir"
+  [ "$(stat -c '%u' "$PYTHON_ROOT")" = "$current_uid" ] \
+    && [ "$(stat -c '%a' "$PYTHON_ROOT")" = 700 ] \
+    || fail "Python 工具根必须由当前用户以 0700 独占"
+
+  info "下载固定版 CPython ${PYTHON_VERSION_PINNED} Linux x86_64 GNU 归档"
+  curl_download "$PYTHON_ARCHIVE_URL" "$PYTHON_ARCHIVE_PATH"
+  [ -f "$PYTHON_ARCHIVE_PATH" ] && [ ! -L "$PYTHON_ARCHIVE_PATH" ] \
+    && [ "$(stat -c '%h' "$PYTHON_ARCHIVE_PATH")" = 1 ] \
+    && [ "$(stat -c '%u' "$PYTHON_ARCHIVE_PATH")" = "$current_uid" ] \
+    || fail "Python 归档不是当前用户独占的普通文件"
+  open_fixed_tool_archive "$PYTHON_ARCHIVE_PATH" "$PYTHON_ARCHIVE_SHA256" \
+    || fail "Python 固定归档不安全或 SHA256 校验失败"
+  python3 - "$FIXED_TOOL_ARCHIVE_FD_PATH" <<'PY' || fail "Python 归档成员或链接路径不安全"
+import posixpath
+import sys
+import tarfile
+
+seen = set()
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    for member in archive:
+        raw = member.name.rstrip("/")
+        parts = raw.split("/")
+        if (
+            not raw
+            or raw.startswith("/")
+            or "\\" in raw
+            or any(part in ("", ".", "..") for part in parts)
+            or parts[0] != "python"
+            or raw in seen
+        ):
+            raise SystemExit("unsafe member")
+        seen.add(raw)
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+            raise SystemExit("unsupported member type")
+        if member.issym():
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(raw), member.linkname))
+        elif member.islnk():
+            target = posixpath.normpath(member.linkname)
+        else:
+            continue
+        if target == "python" or not target.startswith("python/"):
+            raise SystemExit("escaping link")
+PY
+  rm -rf -- "$extract_dir"
+  install -d -m 0700 "$extract_dir"
+  tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$extract_dir"
+  require_open_fixed_tool_archive_unchanged "$PYTHON_ARCHIVE_SHA256"
+  close_fixed_tool_archive
+  [ -f "$extract_dir/python/bin/python3.11" ] \
+    && [ ! -L "$extract_dir/python/bin/python3.11" ] \
+    && [ "$(stat -c '%h' "$extract_dir/python/bin/python3.11")" = 1 ] \
+    || fail "Python 固定归档解压后缺少安全的 python3.11 可执行文件"
+  ln -sfn "$extract_dir/python" "$PYTHON_ROOT/current"
+  [ -x "$PYTHON_BIN" ] && [ ! -L "$PYTHON_BIN" ] \
+    || fail "固定 Python 可执行文件不可用"
+  [ "$("$PYTHON_BIN" -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION_PINNED" ] \
+    || fail "Python 可执行文件版本不等于固定版本 $PYTHON_VERSION_PINNED"
+  file "$PYTHON_BIN" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
+    || fail "Python 可执行文件不是 Linux x86_64 ELF"
+  actual_executable_sha="$(sha256sum "$PYTHON_BIN" | awk '{print $1}')"
+  [ "$actual_executable_sha" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "Python 可执行文件 SHA256 不等于官方固定归档身份"
+  ok "固定 CPython 已验证：$PYTHON_BIN ($PYTHON_VERSION_PINNED)"
 }
 
 validate_formal_uv_contract() {
@@ -973,7 +1174,7 @@ install_portable_node() {
     return 0
   fi
 
-  local mirror release_dir tmp_dir tarball downloaded actual_sha extracted_root
+  local mirror release_dir tmp_dir tarball downloaded extracted_root
   release_dir="v${NODE_VERSION}"
   tmp_dir="$NODE_ROOT/download"
   tarball="$NODE_ARCHIVE"
@@ -991,9 +1192,8 @@ install_portable_node() {
       warn "Node.js 安装包下载失败，切换镜像：$mirror"
       continue
     fi
-    actual_sha="$(sha256sum "$tmp_dir/$tarball" | awk '{print $1}')"
-    if [ "$actual_sha" != "$NODE_ARCHIVE_SHA256" ]; then
-      warn "Node.js 安装包校验失败，切换镜像：$mirror"
+    if ! open_fixed_tool_archive "$tmp_dir/$tarball" "$NODE_ARCHIVE_SHA256"; then
+      warn "Node.js 安装包不安全或校验失败，切换镜像：$mirror"
       continue
     fi
     downloaded=1
@@ -1001,9 +1201,44 @@ install_portable_node() {
   done
 
   [ "$downloaded" = "1" ] || fail "无法下载 Node.js ${NODE_VERSION} Linux x64 离线运行时，或下载内容校验失败；请检查制包机 DNS/代理，或设置 TAIJI_NODE_MIRRORS"
+  python3 - "$FIXED_TOOL_ARCHIVE_FD_PATH" "node-v${NODE_VERSION}-linux-x64" <<'PY' \
+    || fail "Node.js 归档成员或链接路径不安全"
+import posixpath
+import sys
+import tarfile
+
+expected_root = sys.argv[2]
+seen = set()
+with tarfile.open(sys.argv[1], "r:xz") as archive:
+    for member in archive:
+        raw = member.name.rstrip("/")
+        parts = raw.split("/")
+        if (
+            not raw
+            or raw.startswith("/")
+            or "\\" in raw
+            or any(part in ("", ".", "..") for part in parts)
+            or parts[0] != expected_root
+            or raw in seen
+        ):
+            raise SystemExit("unsafe member")
+        seen.add(raw)
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+            raise SystemExit("unsupported member type")
+        if member.issym():
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(raw), member.linkname))
+        elif member.islnk():
+            target = posixpath.normpath(member.linkname)
+        else:
+            continue
+        if target != expected_root and not target.startswith(expected_root + "/"):
+            raise SystemExit("escaping link")
+PY
   extracted_root="$NODE_ROOT/${tarball%.tar.xz}"
   rm -rf "$extracted_root"
-  tar -xJf "$tmp_dir/$tarball" -C "$NODE_ROOT"
+  tar --no-same-owner --no-same-permissions -xJf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$NODE_ROOT"
+  require_open_fixed_tool_archive_unchanged "$NODE_ARCHIVE_SHA256"
+  close_fixed_tool_archive
   [ -x "$extracted_root/bin/node" ] || fail "Node.js 离线运行时解压后缺少 bin/node"
   printf '%s\n' "$NODE_VERSION" > "$extracted_root/.taiji-node-version"
   printf '%s\n' "$NODE_ARCHIVE_SHA256" > "$extracted_root/.taiji-node-archive-sha256"
@@ -1079,11 +1314,34 @@ unpack_source() {
   info "构建工作区：$BUILD_ROOT"
   reset_build_root
   require_build_capacity "$BUILD_ROOT"
-  tar -xzf "$SRC_ARCHIVE" -C "$BUILD_ROOT"
+  [ -n "$SOURCE_ARCHIVE_SHA256" ] || fail "源码包固定 SHA256 未加载"
+  open_fixed_tool_archive "$SRC_ARCHIVE" "$SOURCE_ARCHIVE_SHA256" \
+    || fail "源码包在校验与解压之间发生变化"
+  tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$BUILD_ROOT"
+  require_open_fixed_tool_archive_unchanged "$SOURCE_ARCHIVE_SHA256"
+  close_fixed_tool_archive
   [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
   repair_build_tree_permissions
+  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+    --archive "$SRC_ARCHIVE" \
+    --inventory "$SOURCE_INVENTORY" \
+    --root "$SRC_DIR" \
+    || fail "源码解压后已偏离原始归档成员清单"
   VERSION="$(read_product_version)"
   ok "源码已解压：$SRC_DIR"
+}
+
+verify_build_source_integrity() {
+  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+    --archive "$SRC_ARCHIVE" \
+    --inventory "$SOURCE_INVENTORY" \
+    --root "$SRC_DIR" \
+    --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
+    --allow-extra-prefix "apps/taiji-desktop/node_modules" \
+    --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
+    --allow-extra-prefix "runtime/package-build" \
+    --allow-extra-prefix "packages/麒麟操作系统安装包" \
+    || fail "构建源码树已偏离原始归档；拒绝继续声明原始 source commit"
 }
 
 load_source_controlled_policy() {
@@ -1216,6 +1474,8 @@ run_setup_local() {
   TAIJI_DEPENDENCY_PROFILE=production \
   TAIJI_UV_LOCK_MODE="$uv_lock_mode" \
   TAIJI_UV_EXECUTABLE="$UV_BIN" \
+  TAIJI_PYTHON_EXECUTABLE="$PYTHON_BIN" \
+  UV_PYTHON_DOWNLOADS=never \
     ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
   status="${PIPESTATUS[0]}"
   set -e
@@ -1236,9 +1496,11 @@ run_setup_local() {
   python_real="$(readlink -f "$python_bin")"
   [ -f "$python_real" ] || fail "strict sync 后 Python 真实可执行文件不存在"
   PYTHON_VERSION="$("$python_bin" -c 'import platform; print(platform.python_version())')"
-  printf '%s\n' "$PYTHON_VERSION" | grep -Eq '^3\.11\.[0-9]+$' \
-    || fail "正式 Python 运行时版本不是 3.11.x：$PYTHON_VERSION"
+  [ "$PYTHON_VERSION" = "$PYTHON_VERSION_PINNED" ] \
+    || fail "正式 Python 运行时版本不是固定版本 $PYTHON_VERSION_PINNED：$PYTHON_VERSION"
   PYTHON_EXECUTABLE_SHA256="$(sha256sum "$python_real" | awk '{print $1}')"
+  [ "$PYTHON_EXECUTABLE_SHA256" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "strict sync 后 Python 可执行文件 SHA256 不等于固定官方归档身份"
 }
 
 build_runtime_and_deb() {
@@ -1276,6 +1538,9 @@ build_runtime_and_deb() {
   node scripts/materialize-portable-resvg-dependencies.js
   npm test
 
+  info "复核 archive-derived 源码树（打包前）"
+  verify_build_source_integrity
+
   info "构建 DEB 安装包"
   cd "$SRC_DIR"
   source_commit="$(basename "$SRC_ARCHIVE" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
@@ -1283,11 +1548,18 @@ build_runtime_and_deb() {
     || fail "无法从源码包名称解析发布 commit：$(basename "$SRC_ARCHIVE")"
   TAIJI_AGENT_VERSION="$VERSION" \
   TAIJI_SOURCE_COMMIT="$source_commit" \
+  TAIJI_SOURCE_ARCHIVE_PATH="$SRC_ARCHIVE" \
+  TAIJI_SOURCE_INVENTORY_PATH="$SOURCE_INVENTORY" \
+  TAIJI_SOURCE_INVENTORY_SHA256="$SOURCE_INVENTORY_SHA256" \
   TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current" \
   TAIJI_ELECTRON_ARCHIVE="$ELECTRON_ARCHIVE" \
   TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS="$PYTHON_DEPENDENCY_LOCK_STATUS" \
   TAIJI_PYTHON_LOCK_BASENAME="$PYTHON_LOCK_BASENAME" \
   TAIJI_PYTHON_LOCK_SHA256="$PYTHON_LOCK_SHA256" \
+  TAIJI_PYTHON_ARCHIVE_PATH="$PYTHON_ARCHIVE_PATH" \
+  TAIJI_PYTHON_VERSION="$PYTHON_VERSION_PINNED" \
+  TAIJI_PYTHON_ARCHIVE_SHA256="$PYTHON_ARCHIVE_SHA256" \
+  TAIJI_PYTHON_EXECUTABLE_SHA256="$PYTHON_PINNED_EXECUTABLE_SHA256" \
   TAIJI_UV_EXECUTABLE="$UV_BIN" \
   TAIJI_UV_ARCHIVE_PATH="$UV_ARCHIVE_PATH" \
   TAIJI_UV_VERSION="$UV_VERSION" \
@@ -1295,6 +1567,7 @@ build_runtime_and_deb() {
   TAIJI_UV_EXECUTABLE_SHA256="$UV_EXECUTABLE_SHA256" \
   TAIJI_NODE_ARCHIVE_PATH="$NODE_ARCHIVE_PATH" \
     ./packaging/linux/deb/build-deb.sh
+  verify_build_source_integrity
 }
 
 collect_artifacts() {
@@ -1320,7 +1593,8 @@ collect_artifacts() {
     "$PYTHON_DEPENDENCY_LOCK_STATUS" "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256" "$PYTHON_VERSION" "$PYTHON_EXECUTABLE_SHA256" \
     "$UV_VERSION" "$UV_ARCHIVE_SHA256" "$UV_EXECUTABLE_SHA256" \
     "$NODE_VERSION" "$NODE_ARCHIVE_SHA256" "$NODE_EXECUTABLE_SHA256" \
-    "$ELECTRON_VERSION" "$ELECTRON_ARCHIVE_SHA256" <<'PY'
+    "$ELECTRON_VERSION" "$ELECTRON_ARCHIVE_SHA256" "$PYTHON_ARCHIVE_SHA256" \
+    "$source_name" "$source_sha" "$(basename "$SOURCE_INVENTORY")" "$SOURCE_INVENTORY_SHA256" <<'PY'
 import json
 import re
 import sys
@@ -1347,6 +1621,11 @@ expected = {
     "node_executable_sha256": sys.argv[18],
     "electron_version": sys.argv[19],
     "electron_archive_sha256": sys.argv[20],
+    "python_archive_sha256": sys.argv[21],
+    "source_archive_basename": sys.argv[22],
+    "source_archive_sha256": sys.argv[23],
+    "source_inventory_basename": sys.argv[24],
+    "source_inventory_sha256": sys.argv[25],
 }
 for key, value in expected.items():
     if manifest.get(key) != value:
@@ -1385,14 +1664,35 @@ print(value)
 PY
 )"
   ELECTRON_EXECUTABLE_SHA256="$electron_sha"
-  {
+  [ "$ELECTRON_EXECUTABLE_SHA256" = "$ELECTRON_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "manifest Electron 可执行文件 SHA256 不等于 canonical policy 固定身份"
+  MARKER_SOURCE_NAME="$source_name"
+  MARKER_SOURCE_SHA256="$source_sha"
+  MARKER_SOURCE_COMMIT="$source_commit"
+  MARKER_DEB_NAME="$deb_name"
+  MARKER_DEB_SHA256="$deb_sha"
+  CANDIDATE_DEB_FIXED=1
+  ok "候选 DEB、manifest 和 canonical policy/ABI 摘要已绑定"
+}
+
+write_pending_build_marker() {
+  require_candidate_deb_fixed
+  case "$PENDING_BUILD_MARKER" in
+    "$BUILD_ROOT/.build-success.pending") ;;
+    *) fail "构建成功待发布标记未绑定受控构建根" ;;
+  esac
+  [ ! -e "$PENDING_BUILD_MARKER" ] && [ ! -L "$PENDING_BUILD_MARKER" ] \
+    || fail "构建成功待发布标记已存在，拒绝覆盖"
+  (umask 077; {
     printf 'version=%s\n' "$VERSION"
-    printf 'source_archive=%s\n' "$source_name"
-    printf 'source_sha256=%s\n' "$source_sha"
-    printf 'source_commit=%s\n' "$source_commit"
-    printf 'deb=%s\n' "$deb_name"
-    printf 'deb_sha256=%s\n' "$deb_sha"
-    printf 'checksum=%s\n' "$deb_name.sha256"
+    printf 'source_archive=%s\n' "$MARKER_SOURCE_NAME"
+    printf 'source_sha256=%s\n' "$MARKER_SOURCE_SHA256"
+    printf 'source_commit=%s\n' "$MARKER_SOURCE_COMMIT"
+    printf 'source_inventory=%s\n' "$(basename "$SOURCE_INVENTORY")"
+    printf 'source_inventory_sha256=%s\n' "$SOURCE_INVENTORY_SHA256"
+    printf 'deb=%s\n' "$MARKER_DEB_NAME"
+    printf 'deb_sha256=%s\n' "$MARKER_DEB_SHA256"
+    printf 'checksum=%s\n' "$MARKER_DEB_NAME.sha256"
     printf 'built_at_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'manifest=%s\n' "$(basename "$MANIFEST_FILE")"
     printf 'compatibility_policy_id=%s\n' "$POLICY_ID"
@@ -1403,6 +1703,7 @@ PY
     printf 'python_lock_basename=%s\n' "$PYTHON_LOCK_BASENAME"
     printf 'python_lock_sha256=%s\n' "$PYTHON_LOCK_SHA256"
     printf 'python_version=%s\n' "$PYTHON_VERSION"
+    printf 'python_archive_sha256=%s\n' "$PYTHON_ARCHIVE_SHA256"
     printf 'python_executable_sha256=%s\n' "$PYTHON_EXECUTABLE_SHA256"
     printf 'uv_version=%s\n' "$UV_VERSION"
     printf 'uv_archive_sha256=%s\n' "$UV_ARCHIVE_SHA256"
@@ -1414,9 +1715,258 @@ PY
     printf 'electron_archive_sha256=%s\n' "$ELECTRON_ARCHIVE_SHA256"
     printf 'electron_executable_sha256=%s\n' "$ELECTRON_EXECUTABLE_SHA256"
     printf 'maintainer=%s\n' "$POLICY_MAINTAINER"
-  } > "$BUILD_MARKER"
-  CANDIDATE_DEB_FIXED=1
-  ok "候选 DEB、manifest 和 canonical policy/ABI 摘要已绑定"
+  } > "$PENDING_BUILD_MARKER")
+  chmod 0600 "$PENDING_BUILD_MARKER"
+  [ -f "$PENDING_BUILD_MARKER" ] && [ ! -L "$PENDING_BUILD_MARKER" ] \
+    && [ "$(stat -c '%h' "$PENDING_BUILD_MARKER")" = 1 ] \
+    || fail "构建成功待发布标记不是安全单链接普通文件"
+  PENDING_BUILD_MARKER_SHA256="$(sha256sum "$PENDING_BUILD_MARKER" | awk '{print $1}')"
+  case "$PENDING_BUILD_MARKER_SHA256" in
+    ""|*[!0-9a-f]*) fail "无法固定构建成功待发布标记 SHA256" ;;
+    *) [ "${#PENDING_BUILD_MARKER_SHA256}" -eq 64 ] \
+      || fail "构建成功待发布标记 SHA256 长度不合法" ;;
+  esac
+}
+
+publish_build_success_marker() {
+  case "$PENDING_BUILD_MARKER" in
+    "$OUTPUT_DIR/.build-success.pending.$$" ) ;;
+    *) fail "最终构建成功待发布标记未绑定本轮输出目录" ;;
+  esac
+  [ -f "$PENDING_BUILD_MARKER" ] && [ ! -L "$PENDING_BUILD_MARKER" ] \
+    || fail "最终门禁通过后缺少待发布构建成功标记"
+  case "$PENDING_BUILD_MARKER_SHA256" in
+    ""|*[!0-9a-f]*) fail "最终待发布标记缺少已验证 SHA256" ;;
+    *) [ "${#PENDING_BUILD_MARKER_SHA256}" -eq 64 ] \
+      || fail "最终待发布标记 SHA256 长度不合法" ;;
+  esac
+  [ ! -e "$BUILD_MARKER" ] && [ ! -L "$BUILD_MARKER" ] \
+    || fail "构建成功标记发布位置已被占用"
+  python3 - "$PENDING_BUILD_MARKER" "$BUILD_MARKER" "$PENDING_BUILD_MARKER_SHA256" <<'PY' \
+    || fail "构建成功标记无法以不覆盖方式原子发布"
+import hashlib
+import os
+import re
+import stat
+import sys
+
+source, destination, expected_sha256 = sys.argv[1:]
+if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+    raise SystemExit("pending marker expected hash is invalid")
+flags = os.O_RDONLY
+if hasattr(os, "O_CLOEXEC"):
+    flags |= os.O_CLOEXEC
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+
+descriptor = os.open(source, flags)
+published_created = False
+try:
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        raise SystemExit("pending marker is not a safe single-link regular file")
+    if opened.st_uid != os.getuid():
+        raise SystemExit("pending marker is not owned by current user")
+    digest = hashlib.sha256()
+    remaining = opened.st_size
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise SystemExit("pending marker was truncated")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise SystemExit("pending marker grew")
+    if digest.hexdigest() != expected_sha256:
+        raise SystemExit("pending marker content differs from the final-gate identity")
+    current = os.lstat(source)
+    opened_identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_nlink,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+    current_identity = (
+        current.st_dev,
+        current.st_ino,
+        current.st_mode,
+        current.st_nlink,
+        current.st_size,
+        current.st_mtime_ns,
+        current.st_ctime_ns,
+    )
+    if current_identity != opened_identity:
+        raise SystemExit("pending marker path changed after validation")
+    os.link(source, destination, follow_symlinks=False)
+    published_created = True
+    published = os.lstat(destination)
+    if (published.st_dev, published.st_ino) != (opened.st_dev, opened.st_ino):
+        raise SystemExit("published marker identity changed")
+    if not stat.S_ISREG(published.st_mode) or published.st_nlink != 2:
+        raise SystemExit("published marker link count is invalid")
+    os.unlink(source)
+    final = os.fstat(descriptor)
+    if final.st_nlink != 1:
+        raise SystemExit("published marker did not settle to one link")
+    os.fsync(descriptor)
+    directory_fd = os.open(
+        os.path.dirname(destination),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    if published_created:
+        try:
+            os.unlink(destination)
+        except FileNotFoundError:
+            pass
+    raise
+finally:
+    os.close(descriptor)
+PY
+  PENDING_BUILD_MARKER=""
+  PENDING_BUILD_MARKER_SHA256=""
+  printf '[OK] 所有最终门禁通过，已原子发布构建成功标记\n' || true
+}
+
+stage_pending_build_marker_for_publication() {
+  local staged_marker="$OUTPUT_DIR/.build-success.pending.$$"
+  case "$PENDING_BUILD_MARKER" in
+    "$BUILD_ROOT/.build-success.pending") ;;
+    *) fail "构建成功待发布标记不在受控构建根" ;;
+  esac
+  [ -f "$PENDING_BUILD_MARKER" ] && [ ! -L "$PENDING_BUILD_MARKER" ] \
+    && [ "$(stat -c '%h' "$PENDING_BUILD_MARKER")" = 1 ] \
+    || fail "构建成功待发布标记不安全"
+  [ "$(sha256sum "$PENDING_BUILD_MARKER" | awk '{print $1}')" = "$PENDING_BUILD_MARKER_SHA256" ] \
+    || fail "构建成功待发布标记在最终预检后发生变化"
+  python3 - "$PENDING_BUILD_MARKER" "$staged_marker" "$PENDING_BUILD_MARKER_SHA256" <<'PY' \
+    || fail "构建成功待发布标记无法以不覆盖方式转移到输出目录"
+import hashlib
+import os
+import re
+import stat
+import sys
+
+source, destination, expected_sha256 = sys.argv[1:]
+if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+    raise SystemExit("pending marker expected hash is invalid")
+read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+write_flags = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+source_descriptor = os.open(source, read_flags)
+destination_descriptor = -1
+destination_identity = None
+try:
+    opened = os.fstat(source_descriptor)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        raise SystemExit("pending marker is not a safe single-link regular file")
+    if opened.st_uid != os.getuid():
+        raise SystemExit("pending marker is not owned by current user")
+    destination_descriptor = os.open(destination, write_flags, 0o600)
+    os.fchmod(destination_descriptor, 0o600)
+    destination_identity = os.fstat(destination_descriptor)
+    digest = hashlib.sha256()
+    remaining = opened.st_size
+    while remaining:
+        chunk = os.read(source_descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise SystemExit("pending marker was truncated while staging")
+        digest.update(chunk)
+        view = memoryview(chunk)
+        while view:
+            written = os.write(destination_descriptor, view)
+            if written <= 0:
+                raise SystemExit("pending marker staging write failed")
+            view = view[written:]
+        remaining -= len(chunk)
+    if os.read(source_descriptor, 1):
+        raise SystemExit("pending marker grew while staging")
+    if digest.hexdigest() != expected_sha256:
+        raise SystemExit("pending marker differs from the final-gate identity")
+    source_after = os.fstat(source_descriptor)
+    source_current = os.lstat(source)
+    opened_identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_nlink,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+    current_identity = (
+        source_current.st_dev,
+        source_current.st_ino,
+        source_current.st_mode,
+        source_current.st_nlink,
+        source_current.st_size,
+        source_current.st_mtime_ns,
+        source_current.st_ctime_ns,
+    )
+    after_identity = (
+        source_after.st_dev,
+        source_after.st_ino,
+        source_after.st_mode,
+        source_after.st_nlink,
+        source_after.st_size,
+        source_after.st_mtime_ns,
+        source_after.st_ctime_ns,
+    )
+    if current_identity != opened_identity or after_identity != opened_identity:
+        raise SystemExit("pending marker changed while staging")
+    os.fsync(destination_descriptor)
+    destination_after = os.fstat(destination_descriptor)
+    destination_current = os.lstat(destination)
+    if (
+        not stat.S_ISREG(destination_after.st_mode)
+        or destination_after.st_nlink != 1
+        or destination_after.st_size != opened.st_size
+        or (destination_current.st_dev, destination_current.st_ino)
+        != (destination_after.st_dev, destination_after.st_ino)
+    ):
+        raise SystemExit("staged pending marker identity is invalid")
+    os.unlink(source)
+    for directory in {os.path.dirname(source), os.path.dirname(destination)}:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+except BaseException:
+    if destination_descriptor >= 0 and destination_identity is not None:
+        try:
+            current = os.lstat(destination)
+            if (current.st_dev, current.st_ino) == (
+                destination_identity.st_dev,
+                destination_identity.st_ino,
+            ):
+                os.unlink(destination)
+        except FileNotFoundError:
+            pass
+    raise
+finally:
+    if destination_descriptor >= 0:
+        os.close(destination_descriptor)
+    os.close(source_descriptor)
+PY
+  PENDING_BUILD_MARKER="$staged_marker"
+  [ "$(sha256sum "$PENDING_BUILD_MARKER" | awk '{print $1}')" = "$PENDING_BUILD_MARKER_SHA256" ] \
+    || fail "构建成功待发布标记在转移到输出目录时发生变化"
 }
 
 require_candidate_deb_fixed() {
@@ -1735,12 +2285,14 @@ main() {
   verify_trusted_system_tools
   set_stage "准备 Python 构建工具"
   ensure_uv
+  ensure_python
   set_stage "准备 Node/Electron 构建工具"
   ensure_node
   set_stage "构建运行时和 DEB"
   build_runtime_and_deb
   set_stage "收集并绑定候选产物"
   collect_artifacts
+  write_pending_build_marker
   set_stage "生成 manifest 和报告"
   write_build_report
   set_stage "收集目标终端桌面 App 验收工具"
@@ -1751,13 +2303,22 @@ main() {
   normalize_delivery_permissions
   set_stage "最终发布预检"
   require_candidate_deb_fixed
-  TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 TAIJI_RELEASE_SKIP_GIT_CHECK=1 run_release_preflight "$SRC_DIR"
+  verify_build_source_integrity
+  TAIJI_EXTRACTED_SOURCE_ROOT="$SRC_DIR" \
+    TAIJI_BUILD_MARKER_PATH="$PENDING_BUILD_MARKER" \
+    TAIJI_EXPECT_PUBLISHED_BUILD_MARKER=0 \
+    TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 \
+    TAIJI_RELEASE_SKIP_GIT_CHECK=1 \
+    run_release_preflight "$SRC_DIR"
+  stage_pending_build_marker_for_publication
   set_stage "清理临时构建工作区"
   cleanup_temporary_build_root
-  printf '\n[OK] 单一 DEB 制包候选生成完成：\n'
+  set_stage "发布构建成功标记"
+  printf '\n[INFO] 全部门禁与临时工作区清理已完成，正在原子发布单一 DEB 候选：\n'
   printf '%s\n' "$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
   printf '请将该 DEB 和当前验收工具用于干净目标机验收；此状态尚不代表真实麒麟/统信目标机已验收。\n'
   printf '\n日志：%s\n' "$LOG_FILE"
+  publish_build_success_marker
 }
 
 main "$@"

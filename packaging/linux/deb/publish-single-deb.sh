@@ -69,6 +69,7 @@ TOOLCHAIN_FIELDS = {
     "python_lock_basename",
     "python_lock_sha256",
     "python_version",
+    "python_archive_sha256",
     "python_executable_sha256",
     "uv_version",
     "uv_archive_sha256",
@@ -82,6 +83,10 @@ TOOLCHAIN_FIELDS = {
 }
 PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
 PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PINNED_PYTHON_VERSION = "3.11.15"
+PINNED_PYTHON_ARCHIVE_SHA256 = "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
+PINNED_PYTHON_EXECUTABLE_SHA256 = "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
+PINNED_ELECTRON_EXECUTABLE_SHA256 = "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 
 
 class PublisherError(RuntimeError):
@@ -231,6 +236,67 @@ def verify_identity(identity: dict) -> None:
     expected = {key: identity[key] for key in actual}
     if actual != expected or digest(payload) != identity["sha256"]:
         fail(f"publisher input changed during formal gate: {source}")
+
+
+def snapshot_directory_tree(source_root: Path, destination_root: Path, label: str) -> None:
+    """Copy one closed evidence tree into the publisher's private workspace."""
+    root_metadata = lstat_directory(source_root, label)
+    destination_root.mkdir(mode=0o700)
+
+    def visit(directory: Path, destination: Path, relative: str) -> None:
+        before = lstat_directory(directory, f"{label} directory {relative}")
+        try:
+            children = sorted(directory.iterdir(), key=lambda item: item.name)
+        except OSError:
+            fail(f"{label} cannot be enumerated safely: {directory}")
+        for child in children:
+            child_relative = child.relative_to(source_root).as_posix()
+            try:
+                metadata = child.lstat()
+            except OSError:
+                fail(f"{label} entry is unavailable: {child}")
+            if stat.S_ISLNK(metadata.st_mode):
+                fail(f"{label} cannot contain symlinks: {child_relative}")
+            child_destination = destination / child.name
+            if stat.S_ISDIR(metadata.st_mode):
+                child_destination.mkdir(mode=0o700)
+                visit(child, child_destination, child_relative)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                fail(f"{label} cannot contain special files: {child_relative}")
+            snapshot(child, child_destination)
+        after = lstat_directory(directory, f"{label} directory {relative}")
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            fail(f"{label} changed while being snapshotted: {directory}")
+
+    visit(source_root, destination_root, ".")
+    root_after = lstat_directory(source_root, label)
+    if (
+        root_metadata.st_dev,
+        root_metadata.st_ino,
+        root_metadata.st_mode,
+        root_metadata.st_mtime_ns,
+        root_metadata.st_ctime_ns,
+    ) != (
+        root_after.st_dev,
+        root_after.st_ino,
+        root_after.st_mode,
+        root_after.st_mtime_ns,
+        root_after.st_ctime_ns,
+    ):
+        fail(f"{label} changed while being snapshotted: {source_root}")
 
 
 def policy_identity(policy_path: Path) -> tuple[str, str, str]:
@@ -418,6 +484,8 @@ def main() -> int:
     receipt_dir = receipt_root / "pending"
     try:
         snapshots = {}
+        certification_bundle = work / "certification-bundle"
+        certification_bundle.mkdir(mode=0o700)
         for source, name in (
             (candidate, "candidate.deb"),
             (policy, "compatibility-policy.json"),
@@ -426,8 +494,23 @@ def main() -> int:
             (release_path, "release-evidence.json"),
             (release_sig_path, "release-evidence.json.sig"),
         ):
-            payload_hash, identity = snapshot(source, work / name)
-            snapshots[name] = {"path": work / name, "sha256": payload_hash, "identity": identity}
+            destination = (
+                certification_bundle / name
+                if name in {"certification-set.json", "certification-set.json.sig"}
+                else work / name
+            )
+            payload_hash, identity = snapshot(source, destination)
+            snapshots[name] = {"path": destination, "sha256": payload_hash, "identity": identity}
+        snapshot_directory_tree(
+            cert_path.parent / "records",
+            certification_bundle / "records",
+            "certification records",
+        )
+        snapshot_directory_tree(
+            cert_path.parent / "offline-rehearsal",
+            certification_bundle / "offline-rehearsal",
+            "certification offline rehearsal",
+        )
 
         policy_id, policy_sha, policy_maintainer = policy_identity(snapshots["compatibility-policy.json"]["path"])
         policy_document = strict_json(
@@ -452,6 +535,9 @@ def main() -> int:
         expected_toolchain = {
             "python_dependency_lock_status": "strict-locked",
             "python_lock_basename": "uv.lock",
+            "python_version": PINNED_PYTHON_VERSION,
+            "python_archive_sha256": PINNED_PYTHON_ARCHIVE_SHA256,
+            "python_executable_sha256": PINNED_PYTHON_EXECUTABLE_SHA256,
             "uv_version": "0.12.2",
             "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
             "uv_executable_sha256": PINNED_UV_EXECUTABLE_SHA256,
@@ -460,11 +546,10 @@ def main() -> int:
             "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
             "electron_version": electron.get("version"),
             "electron_archive_sha256": electron.get("archive_sha256"),
+            "electron_executable_sha256": PINNED_ELECTRON_EXECUTABLE_SHA256,
         }
         if any(release.get(key) != value for key, value in expected_toolchain.items()):
             fail("release evidence formal toolchain identity is not pinned")
-        if not re.fullmatch(r"3\.11\.[0-9]+", str(release.get("python_version"))):
-            fail("release evidence Python identity must be 3.11.x")
         for key in TOOLCHAIN_FIELDS:
             if key.endswith("_sha256") and not SHA_RE.fullmatch(str(release.get(key))):
                 fail(f"release evidence formal toolchain SHA256 is invalid: {key}")
@@ -526,7 +611,20 @@ def main() -> int:
             "TAIJI_PUBLICATION_CHALLENGE": publication_challenge,
         })
         result = subprocess.run(
-            ["bash", str(RELEASE_CHECK), "--delivery-dir", str(delivery_dir), "--certification-set", str(cert_path), "--certification-signature", str(cert_sig_path), "--release-evidence", str(release_path), "--release-signature", str(release_sig_path)],
+            [
+                "bash",
+                str(RELEASE_CHECK),
+                "--delivery-dir",
+                str(delivery_dir),
+                "--certification-set",
+                str(snapshots["certification-set.json"]["path"]),
+                "--certification-signature",
+                str(snapshots["certification-set.json.sig"]["path"]),
+                "--release-evidence",
+                str(snapshots["release-evidence.json"]["path"]),
+                "--release-signature",
+                str(snapshots["release-evidence.json.sig"]["path"]),
+            ],
             env=release_env,
             text=True,
             stdout=subprocess.PIPE,

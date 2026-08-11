@@ -413,11 +413,19 @@ expanded_lifecycle() {
   local previous_signature="$WORK_ROOT/previous.deb.sig"
   [ -f "$candidate" ] || fail "工作交付目录缺少 candidate DEB：$candidate"
   [ -f "$previous" ] || fail "工作交付目录缺少 previous DEB：$previous"
-  local actual_candidate_sha actual_previous_sha
+  local actual_candidate_sha actual_previous_sha actual_candidate_version actual_previous_version
   actual_candidate_sha="$(sha256sum -- "$candidate" | awk '{print $1}')"
   [ "$actual_candidate_sha" = "$TAIJI_EXPECTED_DEB_SHA256" ] || fail "candidate DEB 字节 SHA256 发生变化"
   actual_previous_sha="$(sha256sum -- "$previous" | awk '{print $1}')"
   [ "$actual_previous_sha" = "$TAIJI_EXPECTED_PREVIOUS_DEB_SHA256" ] || fail "previous DEB SHA256 不一致"
+  actual_candidate_version="$(dpkg-deb -f "$candidate" Version)" \
+    || fail "无法读取 candidate DEB 的 control Version"
+  [ "$actual_candidate_version" = "$TAIJI_EXPECTED_CANDIDATE_VERSION" ] \
+    || fail "candidate DEB control Version 与正式候选版本不一致"
+  actual_previous_version="$(dpkg-deb -f "$previous" Version)" \
+    || fail "无法读取 previous DEB 的 control Version"
+  [ "$actual_previous_version" = "$TAIJI_EXPECTED_PREVIOUS_VERSION" ] \
+    || fail "previous DEB control Version 与声明版本不一致"
   grep -Eq "${TAIJI_EXPECTED_PREVIOUS_DEB_SHA256}[[:space:]]+\*?${TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME}" "$previous_checksum" \
     || fail "previous DEB SHA256 sidecar 未绑定"
   printf 'offline rehearsal previous signature\n' > "$previous_signature"
@@ -557,6 +565,9 @@ session = {
 }
 lifecycle = dict(session)
 lifecycle.update({
+    "previous_deb_basename": os.environ.get("TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME", ""),
+    "previous_deb_sha256": os.environ.get("TAIJI_EXPECTED_PREVIOUS_DEB_SHA256", ""),
+    "previous_version": os.environ.get("TAIJI_EXPECTED_PREVIOUS_VERSION", ""),
     "steps": steps,
     "receipts": receipts,
     "data_manifests": {
@@ -659,14 +670,20 @@ cp -a -- "$READ_ONLY_DELIVERY/." "$WORK_DELIVERY/"
 chown -R "$REHEARSAL_USER:$REHEARSAL_USER" "$WORK_DELIVERY"
 
 if [ "${TAIJI_REHEARSAL_EXPANDED:-0}" = "1" ]; then
+  require_env TAIJI_EXPECTED_CANDIDATE_VERSION
   require_env TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME
   require_env TAIJI_EXPECTED_PREVIOUS_DEB_SHA256
+  require_env TAIJI_EXPECTED_PREVIOUS_VERSION
   require_env TAIJI_PREVIOUS_DEB_RELATIVE
   require_env TAIJI_COMPATIBILITY_POLICY_ID
   require_env TAIJI_COMPATIBILITY_POLICY_SHA256
   require_env TAIJI_TRANSACTION_HELPER_RELATIVE
   require_env TAIJI_TRANSACTION_CONTRACT_RELATIVE
   [[ "$TAIJI_EXPECTED_PREVIOUS_DEB_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "previous DEB SHA256 格式不合法"
+  [[ "$TAIJI_EXPECTED_DEB_BASENAME" == "taiji-agent_${TAIJI_EXPECTED_CANDIDATE_VERSION}_amd64.deb" ]] \
+    || fail "candidate DEB basename 与 version 不一致"
+  [[ "$TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME" == "taiji-agent_${TAIJI_EXPECTED_PREVIOUS_VERSION}_amd64.deb" ]] \
+    || fail "previous DEB basename 与 version 不一致"
   [ -f "$WORK_DELIVERY/$TAIJI_TRANSACTION_HELPER_RELATIVE" ] || fail "缺少 Task8 upgrade_transaction.py"
   [ -f "$WORK_DELIVERY/$TAIJI_TRANSACTION_CONTRACT_RELATIVE" ] || fail "缺少 Task8 upgrade-data-contract.json"
   expanded_lifecycle

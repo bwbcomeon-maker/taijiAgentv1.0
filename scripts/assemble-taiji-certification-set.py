@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -108,14 +109,43 @@ def _safe_regular(path: Path, label: str, *, max_bytes: int = 1024 * 1024) -> by
         raise CertificationSetError(f"{label} must be exactly one regular single-link file")
     if metadata.st_size <= 0 or metadata.st_size > max_bytes:
         raise CertificationSetError(f"{label} has an invalid size")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        payload = path.read_bytes()
-        after = path.lstat()
+        descriptor = os.open(str(path), flags)
+    except OSError as exc:
+        raise CertificationSetError(f"{label} cannot be opened safely: {exc}") from exc
+    identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if identity(metadata) != identity(opened):
+            raise CertificationSetError(f"{label} changed before it was opened")
+        chunks = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise CertificationSetError(f"{label} was truncated while it was read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise CertificationSetError(f"{label} grew while it was read")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if identity(opened) != identity(after) or identity(opened) != identity(current):
+            raise CertificationSetError(f"{label} changed while it was read")
+        return b"".join(chunks)
     except OSError as exc:
         raise CertificationSetError(f"{label} cannot be read: {exc}") from exc
-    if metadata.st_ino != after.st_ino or metadata.st_mtime_ns != after.st_mtime_ns or len(payload) != metadata.st_size:
-        raise CertificationSetError(f"{label} changed while it was read")
-    return payload
+    finally:
+        os.close(descriptor)
 
 
 def _safe_directory(path: Path, label: str) -> None:
@@ -186,11 +216,56 @@ def _validate_offline_evidence(
     deb_sha256: str,
     policy_id: str,
     policy_sha256: str,
-) -> tuple[dict[str, Any], str]:
-    evidence_path = path
-    if path.is_dir() and not path.is_symlink():
-        evidence_path = path / "offline-install-rehearsal.json"
-    payload = _safe_regular(evidence_path, "offline rehearsal evidence")
+) -> tuple[dict[str, Any], dict[str, bytes], list[dict[str, Any]], str]:
+    _safe_directory(path, "offline rehearsal evidence directory")
+    directory_before = path.lstat()
+    entries = list(path.iterdir())
+    if not entries:
+        raise CertificationSetError("offline rehearsal evidence directory is empty")
+    payloads: dict[str, bytes] = {}
+    files: list[dict[str, Any]] = []
+    for entry in sorted(entries, key=lambda item: item.name):
+        if (
+            entry.name in {".", ".."}
+            or Path(entry.name).name != entry.name
+            or entry.is_symlink()
+            or not entry.is_file()
+        ):
+            raise CertificationSetError(
+                "offline rehearsal evidence directory must contain only root-level regular files"
+            )
+        payload = _safe_regular(entry, f"offline rehearsal file {entry.name}")
+        payloads[entry.name] = payload
+        files.append(
+            {
+                "basename": entry.name,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        )
+    directory_after = path.lstat()
+    if (
+        {entry.name for entry in entries} != {entry.name for entry in path.iterdir()}
+        or (
+            directory_before.st_dev,
+            directory_before.st_ino,
+            directory_before.st_mode,
+            directory_before.st_mtime_ns,
+            directory_before.st_ctime_ns,
+        )
+        != (
+            directory_after.st_dev,
+            directory_after.st_ino,
+            directory_after.st_mode,
+            directory_after.st_mtime_ns,
+            directory_after.st_ctime_ns,
+        )
+    ):
+        raise CertificationSetError("offline rehearsal evidence directory changed during snapshot")
+    evidence_basename = "offline-install-rehearsal.json"
+    if evidence_basename not in payloads:
+        raise CertificationSetError("offline rehearsal evidence JSON is missing")
+    payload = payloads[evidence_basename]
     data = _strict_json(payload, "offline rehearsal evidence")
     schema = data.get("schema")
     if schema != "taiji.offline-install-rehearsal.v1":
@@ -215,18 +290,17 @@ def _validate_offline_evidence(
         deb=Path(deb_basename),
     )
     try:
-        validator.validate_offline_evidence_v1(
-            data,
-            evidence_path,
-            validation_args,
-            binding,
-        )
-        validator.validate_offline_lifecycle_extensions(
-            data,
-            binding,
-            evidence_path,
-            required=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="offline-validation-snapshot-") as temporary:
+            validation_root = Path(temporary)
+            for basename, snapshot_payload in sorted(payloads.items()):
+                _write_new_file(validation_root / basename, snapshot_payload)
+            validator.validate_offline_evidence_v1(
+                data,
+                validation_root / evidence_basename,
+                validation_args,
+                binding,
+                require_lifecycle=True,
+            )
     except Exception as exc:  # validator owns the current v1 contract wording
         raise CertificationSetError(str(exc)) from exc
     if (
@@ -239,7 +313,17 @@ def _validate_offline_evidence(
             f"environment={CURRENT_OFFLINE_REHEARSAL_ENVIRONMENT}, "
             "os_id=ubuntu, os_version=20.04"
         )
-    return data, hashlib.sha256(payload).hexdigest()
+    log_basename = data.get("log_basename")
+    if type(log_basename) is not str or log_basename not in payloads:
+        raise CertificationSetError("offline rehearsal declared session evidence is missing")
+    if hashlib.sha256(payloads[log_basename]).hexdigest() != data.get("log_sha256"):
+        raise CertificationSetError("offline rehearsal declared session evidence hash does not match")
+    inventory_sha256 = hashlib.sha256(
+        json.dumps(files, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return data, payloads, files, inventory_sha256
 
 
 def _validate_attachment(category_dir: Path, attachment: Any) -> tuple[str, str, bytes]:
@@ -280,6 +364,13 @@ def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[
         raise CertificationSetError(f"certification category set is incomplete or has extras: missing={missing} extra={extra}")
     records: list[dict[str, Any]] = []
     copied_payloads: dict[str, bytes] = {}
+    release_validator = (
+        _load_release_validator()
+        if matrix.get("schema") == "taiji-linux-certification-matrix/v2"
+        else None
+    )
+    if matrix.get("schema") == "taiji-linux-certification-matrix/v2" and release_validator is None:
+        raise CertificationSetError("current positive certification bundle validator is missing")
     for category_id in sorted(expected_categories):
         category_dir = records_dir / category_id
         _safe_directory(category_dir, f"category directory {category_id}")
@@ -292,10 +383,12 @@ def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[
         if type(attachments) is not list:
             raise CertificationSetError("environment evidence attachments must be a list")
         allowed = {RECORD_BASENAME}
+        category_attachment_payloads: dict[str, bytes] = {}
         for attachment in attachments:
             basename, _digest, attachment_payload = _validate_attachment(category_dir, attachment)
             allowed.add(basename)
             copied_payloads[f"{category_id}/{basename}"] = attachment_payload
+            category_attachment_payloads[basename] = attachment_payload
         directory_entries = {item.name for item in category_dir.iterdir()}
         if directory_entries != allowed:
             raise CertificationSetError(f"category {category_id} must contain exactly its record and declared attachments")
@@ -316,6 +409,14 @@ def _read_records(records_dir: Path, matrix: dict[str, Any]) -> tuple[list[dict[
                 )
         except Exception as exc:
             raise CertificationSetError(str(exc)) from exc
+        if record.get("category_kind") == "positive" and release_validator is not None:
+            try:
+                release_validator.validate_positive_certification_bundle(
+                    record,
+                    category_attachment_payloads,
+                )
+            except Exception as exc:
+                raise CertificationSetError(str(exc)) from exc
         records.append(record)
         copied_payloads[f"{category_id}/{RECORD_BASENAME}"] = payload
     return records, copied_payloads
@@ -353,6 +454,69 @@ def _write_new_file(path: Path, payload: bytes, mode: int = 0o600) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _publish_directory_noreplace(source: Path, destination: Path) -> None:
+    if source.parent != destination.parent:
+        raise CertificationSetError(
+            "atomic certification publication requires one parent directory"
+        )
+    if os.path.lexists(destination):
+        raise CertificationSetError("output path appeared during assembly; refusing overwrite")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_fd = os.open(str(source.parent), flags)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform.startswith("linux"):
+            primitive = getattr(libc, "renameat2", None)
+            if primitive is None:
+                raise CertificationSetError("renameat2 no-replace primitive is unavailable")
+            primitive.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            primitive.restype = ctypes.c_int
+            result = primitive(
+                parent_fd,
+                os.fsencode(source.name),
+                parent_fd,
+                os.fsencode(destination.name),
+                1,
+            )
+        elif sys.platform == "darwin":
+            primitive = getattr(libc, "renameatx_np", None)
+            if primitive is None:
+                raise CertificationSetError("renameatx_np no-replace primitive is unavailable")
+            primitive.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            primitive.restype = ctypes.c_int
+            result = primitive(
+                parent_fd,
+                os.fsencode(source.name),
+                parent_fd,
+                os.fsencode(destination.name),
+                0x00000004,
+            )
+        else:
+            raise CertificationSetError("no supported no-replace publication primitive")
+        if result != 0:
+            error = ctypes.get_errno()
+            raise CertificationSetError(
+                "output path appeared during assembly; refusing overwrite: {}".format(
+                    os.strerror(error)
+                )
+            )
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def assemble(args: argparse.Namespace) -> Path:
@@ -406,7 +570,7 @@ def assemble(args: argparse.Namespace) -> Path:
     if bindings["compatibility_policy_id"] != policy_id or bindings["compatibility_policy_sha256"] != policy_sha:
         raise CertificationSetError("environment records do not bind the supplied compatibility policy")
     _require_positive_pass(records, matrix)
-    offline, offline_sha = _validate_offline_evidence(
+    offline, offline_payloads, offline_files, offline_inventory_sha = _validate_offline_evidence(
         args.offline_evidence,
         source_commit=bindings["source_commit"],
         version=version,
@@ -451,8 +615,13 @@ def assemble(args: argparse.Namespace) -> Path:
             "negative_boundary_count": 6,
         },
         "offline_rehearsal": {
-            "basename": args.offline_evidence.name if args.offline_evidence.is_file() else "offline-install-rehearsal.json",
-            "sha256": offline_sha,
+            "directory_basename": "offline-rehearsal",
+            "evidence_basename": "offline-install-rehearsal.json",
+            "evidence_sha256": hashlib.sha256(
+                offline_payloads["offline-install-rehearsal.json"]
+            ).hexdigest(),
+            "files": offline_files,
+            "inventory_sha256": offline_inventory_sha,
             "status": "PASS",
         },
         "environments": positive,
@@ -468,8 +637,12 @@ def assemble(args: argparse.Namespace) -> Path:
             destination = records_root / relative
             destination.parent.mkdir(mode=0o700, exist_ok=True)
             _write_new_file(destination, payload)
+        offline_root = temp_dir / "offline-rehearsal"
+        offline_root.mkdir(mode=0o700)
+        for basename, payload in sorted(offline_payloads.items()):
+            _write_new_file(offline_root / basename, payload)
         _write_new_file(temp_dir / "certification-set.json", output_payload)
-        os.rename(temp_dir, args.output)
+        _publish_directory_noreplace(temp_dir, args.output)
         temp_dir = None  # type: ignore[assignment]
     except FileExistsError as exc:
         raise CertificationSetError("output path appeared during assembly; refusing overwrite") from exc

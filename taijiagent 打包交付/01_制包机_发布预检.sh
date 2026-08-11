@@ -10,7 +10,9 @@ TRUSTED_GIT="$SOURCE_TREE_ROOT/scripts/taiji-trusted-git"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
-BUILD_MARKER="$OUTPUT_DIR/.build-success"
+BUILD_MARKER_OVERRIDE="$(printenv TAIJI_BUILD_MARKER_PATH || true)"
+BUILD_MARKER="${BUILD_MARKER_OVERRIDE:-$OUTPUT_DIR/.build-success}"
+EXPECT_PUBLISHED_BUILD_MARKER="$(printenv TAIJI_EXPECT_PUBLISHED_BUILD_MARKER || printf 1)"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
 POLICY_FILE="$REPO_ROOT/packaging/linux/compatibility-policy.json"
 POLICY_HELPER="$REPO_ROOT/packaging/linux/compatibility_policy.py"
@@ -19,7 +21,11 @@ ICON_VALIDATOR="$REPO_ROOT/packaging/linux/validate_icon_assets.py"
 ACCEPTANCE_TOOLS="$SCRIPT_DIR/验收工具"
 REQUIRE_ARTIFACTS="$(printenv TAIJI_RELEASE_REQUIRE_ARTIFACTS || printf 0)"
 SKIP_GIT_CHECK="$(printenv TAIJI_RELEASE_SKIP_GIT_CHECK || printf 0)"
+EXTRACTED_SOURCE_ROOT="$(printenv TAIJI_EXTRACTED_SOURCE_ROOT || true)"
 SOURCE_ARCHIVE=""
+SOURCE_INVENTORY=""
+SOURCE_INTEGRITY_HELPER="$SCRIPT_DIR/source-archive-integrity.py"
+SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
 POLICY_ID=""
 POLICY_SHA256=""
 POLICY_MAINTAINER=""
@@ -154,6 +160,45 @@ check_source_checksum() {
   name="$(basename "$SOURCE_ARCHIVE")"; expected="$(checksum_source_archive_hash "$name")"; hex64 "$expected" || fail "源码包 SHA256 格式非法：$name"
   actual="$(cd "$SCRIPT_DIR" && sha256sum "$name" | awk '{print $1}')"; [ "$actual" = "$expected" ] || fail "源码包 SHA256 不匹配：$name"; ok "源码包 SHA256 校验通过"
 }
+check_source_inventory() {
+  local repository_helper inventory_name expected actual
+  repository_helper="$SOURCE_TREE_ROOT/packaging/linux/source-archive-integrity.py"
+  if [ ! -f "$SOURCE_INTEGRITY_HELPER" ] && [ -f "$repository_helper" ]; then
+    SOURCE_INTEGRITY_HELPER="$repository_helper"
+  fi
+  [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
+    || fail "缺少可信源码归档完整性工具"
+  [ "$(sha256sum "$SOURCE_INTEGRITY_HELPER" | awk '{print $1}')" = "$SOURCE_INTEGRITY_HELPER_SHA256" ] \
+    || fail "源码归档完整性工具不是固定审查版本"
+  inventory_name="$(basename "$SOURCE_ARCHIVE" .tar.gz).inventory.json"
+  SOURCE_INVENTORY="$SCRIPT_DIR/$inventory_name"
+  [ -f "$SOURCE_INVENTORY" ] && [ ! -L "$SOURCE_INVENTORY" ] \
+    || fail "缺少源码 archive-derived 成员清单：$inventory_name"
+  expected="$(checksum_source_archive_hash "$inventory_name")"
+  hex64 "$expected" || fail "源码成员清单 SHA256 格式非法"
+  actual="$(sha256sum "$SOURCE_INVENTORY" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || fail "源码成员清单 SHA256 不匹配"
+  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+    --archive "$SOURCE_ARCHIVE" \
+    --inventory "$SOURCE_INVENTORY" \
+    || fail "源码归档与 archive-derived 成员清单不一致"
+  ok "源码 archive-derived 成员清单校验通过"
+}
+check_extracted_source_inventory() {
+  [ -n "$EXTRACTED_SOURCE_ROOT" ] || return 0
+  [ -d "$EXTRACTED_SOURCE_ROOT" ] && [ ! -L "$EXTRACTED_SOURCE_ROOT" ] \
+    || fail "最终门禁指定的解压源码树不安全"
+  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+    --archive "$SOURCE_ARCHIVE" \
+    --inventory "$SOURCE_INVENTORY" \
+    --root "$EXTRACTED_SOURCE_ROOT" \
+    --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
+    --allow-extra-prefix "apps/taiji-desktop/node_modules" \
+    --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
+    --allow-extra-prefix "runtime/package-build" \
+    --allow-extra-prefix "packages/麒麟操作系统安装包" \
+    || fail "最终发布预检发现构建源码树已偏离原始归档"
+}
 check_formal_source_toolchain_contract() {
   python3 - "$SOURCE_ARCHIVE" <<'PY' \
     || fail "formal source toolchain contract 校验失败"
@@ -171,6 +216,7 @@ required_paths = {
     "pyproject": prefix + "hermes-local-lab/sources/hermes-agent/pyproject.toml",
     "lock": prefix + "hermes-local-lab/sources/hermes-agent/uv.lock",
     "helper": prefix + "packaging/linux/verify-python-lock-contract.py",
+    "source_integrity": prefix + "packaging/linux/source-archive-integrity.py",
     "deb_builder": prefix + "packaging/linux/deb/build-deb.sh",
 }
 
@@ -213,9 +259,14 @@ builder = require_tokens(
         'UV_ARCHIVE_URL="https://github.com/astral-sh/uv/releases/download/0.12.2/uv-x86_64-unknown-linux-gnu.tar.gz"',
         'UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"',
         'UV_PINNED_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"',
+        'PYTHON_VERSION_PINNED="3.11.15"',
+        'PYTHON_ARCHIVE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260805/cpython-3.11.15%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"',
+        'PYTHON_ARCHIVE_SHA256="2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"',
+        'PYTHON_PINNED_EXECUTABLE_SHA256="5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"',
         'NODE_VERSION="22.23.1"',
         'NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"',
         'NODE_PINNED_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"',
+        'ELECTRON_PINNED_EXECUTABLE_SHA256="c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"',
         'validate_formal_uv_contract',
         'auto|unlocked) fail',
         'uv_lock_mode="${TAIJI_UV_LOCK_MODE:-strict}"',
@@ -258,10 +309,14 @@ deb_builder = require_tokens(
         'PINNED_UV_VERSION="0.12.2"',
         'PINNED_UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"',
         'PINNED_UV_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"',
+        'PINNED_PYTHON_VERSION="3.11.15"',
+        'PINNED_PYTHON_ARCHIVE_SHA256="2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"',
+        'PINNED_PYTHON_EXECUTABLE_SHA256="5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"',
         'PINNED_LOCK_CONTRACT_HELPER_SHA256="fca76118874d3846f1bddf304de0159160beff8467bef0870c3636858dedb9e6"',
         'PACKAGED_NODE_VERSION="22.23.1"',
         'PACKAGED_NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"',
         'PINNED_NODE_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"',
+        'PINNED_ELECTRON_EXECUTABLE_SHA256="c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"',
         'TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS must be strict-locked',
         'sha256sum "$UV_EXECUTABLE"',
         'sha256sum "$UV_ARCHIVE_PATH"',
@@ -288,6 +343,11 @@ if hashlib.sha256(by_name[required_paths["helper"]]).hexdigest() != "fca76118874
     raise SystemExit("formal Python lock helper differs from the reviewed fixed implementation")
 if "import tomllib" in helper or "verify_installed" not in helper:
     raise SystemExit("formal Python lock helper is not Python 3.8-compatible or lacks installed verification")
+
+source_integrity = text("source_integrity")
+compile(source_integrity, required_paths["source_integrity"], "exec")
+if hashlib.sha256(by_name[required_paths["source_integrity"]]).hexdigest() != "dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de":
+    raise SystemExit("formal source integrity helper differs from the reviewed fixed implementation")
 
 exact_requirement = re.compile(
     r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*)$"
@@ -447,7 +507,7 @@ verify_deb_checksum_sidecar() {
 }
 verify_marker_and_manifest() {
   local deb="$1"
-  python3 - "$BUILD_MARKER" "$MANIFEST_FILE" "$deb" "$SOURCE_ARCHIVE" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" "$POLICY_FILE" <<'PY'
+  python3 - "$BUILD_MARKER" "$MANIFEST_FILE" "$deb" "$SOURCE_ARCHIVE" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" "$POLICY_FILE" "$SOURCE_INVENTORY" <<'PY'
 import hashlib
 import json
 import re
@@ -462,11 +522,13 @@ policy_id = sys.argv[5]
 policy_sha = sys.argv[6]
 maintainer = sys.argv[7]
 policy_path = Path(sys.argv[8])
+inventory_path = Path(sys.argv[9])
 toolchain_fields = {
     "python_dependency_lock_status",
     "python_lock_basename",
     "python_lock_sha256",
     "python_version",
+    "python_archive_sha256",
     "python_executable_sha256",
     "uv_version",
     "uv_archive_sha256",
@@ -478,7 +540,7 @@ toolchain_fields = {
     "electron_archive_sha256",
     "electron_executable_sha256",
 }
-required = {"version","source_archive","source_sha256","source_commit","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"} | toolchain_fields
+required = {"version","source_archive","source_sha256","source_commit","source_inventory","source_inventory_sha256","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"} | toolchain_fields
 marker = {}
 for line in marker_path.read_text(encoding="utf-8").splitlines():
     if not line or "=" not in line:
@@ -496,6 +558,10 @@ expected = {
     "package": "taiji-agent",
     "architecture": "amd64",
     "source_commit": marker["source_commit"],
+    "source_archive_basename": marker["source_archive"],
+    "source_archive_sha256": marker["source_sha256"],
+    "source_inventory_basename": marker["source_inventory"],
+    "source_inventory_sha256": marker["source_inventory_sha256"],
     "deb_basename": marker["deb"],
     "deb_sha256": marker["deb_sha256"],
     "maintainer": maintainer,
@@ -513,6 +579,8 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 if marker["source_archive"] != source_path.name or marker["source_sha256"] != sha(source_path):
     raise SystemExit("marker source binding mismatch")
+if marker["source_inventory"] != inventory_path.name or marker["source_inventory_sha256"] != sha(inventory_path):
+    raise SystemExit("marker source inventory binding mismatch")
 if marker["deb"] != deb_path.name or marker["deb_sha256"] != sha(deb_path):
     raise SystemExit("marker DEB binding mismatch")
 if marker["manifest"] != manifest_path.name or marker["checksum"] != deb_path.name + ".sha256":
@@ -543,8 +611,8 @@ if marker["python_dependency_lock_status"] != "strict-locked":
     raise SystemExit("formal build marker is not strict-locked")
 if marker["python_lock_basename"] != "uv.lock":
     raise SystemExit("formal build marker has an unexpected Python lock basename")
-if not re.fullmatch(r"3\.11\.[0-9]+", marker["python_version"]):
-    raise SystemExit("formal build marker Python version is not 3.11.x")
+if marker["python_version"] != "3.11.15" or marker["python_archive_sha256"] != "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a" or marker["python_executable_sha256"] != "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba":
+    raise SystemExit("formal build marker Python identity is not pinned")
 if marker["uv_version"] != "0.12.2" or marker["uv_archive_sha256"] != "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4" or marker["uv_executable_sha256"] != "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2":
     raise SystemExit("formal build marker uv identity is not pinned")
 if marker["node_version"] != "22.23.1" or marker["node_archive_sha256"] != "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578" or marker["node_executable_sha256"] != "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068":
@@ -553,6 +621,9 @@ policy = json.loads(policy_path.read_text(encoding="utf-8"))
 electron = policy["elf"]["electron_distribution"]
 if marker["electron_version"] != electron["version"] or marker["electron_archive_sha256"] != electron["archive_sha256"]:
     raise SystemExit("formal build marker Electron identity differs from canonical policy")
+canonical_electron = electron["elf_files"]["opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"]["sha256"]
+if canonical_electron != "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d" or marker["electron_executable_sha256"] != canonical_electron:
+    raise SystemExit("formal build marker Electron executable identity differs from canonical policy")
 lock_member = "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock"
 with tarfile.open(source_path, "r:gz") as archive:
     matches = [candidate for candidate in archive.getmembers() if candidate.name == lock_member]
@@ -602,8 +673,13 @@ paths = {
     "node_executable_sha256": root / "opt/taiji-agent/runtime/node/bin/node",
     "electron_executable_sha256": root / "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
 }
+fixed = {
+    "python_executable_sha256": "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba",
+    "node_executable_sha256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
+    "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
+}
 for field, path in paths.items():
-    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != manifest.get(field):
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != manifest.get(field) or manifest.get(field) != fixed[field]:
         raise SystemExit(field + " mismatch")
 PY
   remove_release_temp_directory "$payload_root"
@@ -611,14 +687,19 @@ PY
 verify_package_output_allowlist() {
   local deb="$1" name
   name="$(basename -- "$deb")"
-  python3 - "$OUTPUT_DIR" "$name" <<'PY'
+  python3 - "$OUTPUT_DIR" "$name" "$EXPECT_PUBLISHED_BUILD_MARKER" <<'PY'
 import os
 import stat
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
 name = sys.argv[2]
-expected = {name, name + ".sha256", ".build-success", "taiji-package-manifest.json", "构建报告.txt"}
+published_marker = sys.argv[3]
+if published_marker not in {"0", "1"}:
+    raise SystemExit("invalid published marker expectation")
+expected = {name, name + ".sha256", "taiji-package-manifest.json", "构建报告.txt"}
+if published_marker == "1":
+    expected.add(".build-success")
 entries = {p.name: p for p in root.iterdir()}
 if set(entries) != expected:
     raise SystemExit("output allowlist mismatch")
@@ -700,6 +781,22 @@ verify_target_acceptance_toolchain() {
 }
 check_delivery_artifacts() {
   [ "$REQUIRE_ARTIFACTS" = 1 ] || return 0
+  case "$EXPECT_PUBLISHED_BUILD_MARKER" in
+    1)
+      [ "$BUILD_MARKER" = "$OUTPUT_DIR/.build-success" ] \
+        || fail "已发布产物预检必须使用 canonical .build-success"
+      ;;
+    0)
+      [ "$SKIP_GIT_CHECK" = 1 ] && [ -n "$EXTRACTED_SOURCE_ROOT" ] \
+        || fail "待发布 marker 只允许 00 构建链在解压源码最终门禁中使用"
+      [ "$(basename "$BUILD_MARKER")" = ".build-success.pending" ] \
+        && [ "$(dirname "$BUILD_MARKER")" = "$(dirname "$EXTRACTED_SOURCE_ROOT")" ] \
+        || fail "待发布 marker 未与当前构建根绑定"
+      [ ! -e "$OUTPUT_DIR/.build-success" ] && [ ! -L "$OUTPUT_DIR/.build-success" ] \
+        || fail "最终门禁前不得存在已发布 .build-success"
+      ;;
+    *) fail "TAIJI_EXPECT_PUBLISHED_BUILD_MARKER 只允许 0/1" ;;
+  esac
   load_policy
   [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] && [ -f "$BUILD_MARKER" ] && [ -f "$MANIFEST_FILE" ] && [ -f "$BUILD_REPORT" ] \
     || fail "生成的安装包目录必须是真实目录且包含 marker/manifest/report"
@@ -710,7 +807,9 @@ main() {
   info "执行太极 Agent 发布预检"
   check_single_source_archive
   check_source_checksum
+  check_source_inventory
   check_formal_source_toolchain_contract
+  check_extracted_source_inventory
   check_git_clean_and_commit_match
   check_source_archive_matches_git_head
   check_no_macos_metadata_or_stale_zip

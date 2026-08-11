@@ -45,6 +45,14 @@ class ReleaseCheckV3Tests(unittest.TestCase):
         self.assertIn("certification-set", self.signer)
         self.assertIn("release-evidence/v3", self.signer)
 
+    def test_signer_validates_the_complete_certification_bundle_before_signing(self):
+        self.assertIn("validate_certification_set_v1", self.signer)
+        self.assertIn("certification-set physical bundle", self.signer)
+
+    def test_signer_validates_the_complete_publication_bundle_before_signing(self):
+        self.assertIn("validate_release_evidence_v3", self.signer)
+        self.assertIn("publication physical bundle", self.signer)
+
     def test_current_v3_release_check_does_not_require_legacy_offline_apt_repository(self):
         self.assertNotIn('"$DELIVERY_DIR/离线依赖/Packages"', self.check)
         self.assertNotIn('"$DELIVERY_DIR/离线依赖/Packages.gz"', self.check)

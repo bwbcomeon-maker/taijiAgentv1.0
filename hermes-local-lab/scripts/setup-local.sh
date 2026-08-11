@@ -9,6 +9,7 @@ WEBUI_DIR="$LAB_DIR/sources/hermes-webui"
 TAIJI_USER_BIN="${TAIJI_USER_BIN:-$HOME/.local/bin}"
 LOCK_CONTRACT_HELPER="$LAB_DIR/../packaging/linux/verify-python-lock-contract.py"
 UV_EXECUTABLE="${TAIJI_UV_EXECUTABLE:-uv}"
+PYTHON_EXECUTABLE="${TAIJI_PYTHON_EXECUTABLE:-3.11}"
 
 if [ "$UV_EXECUTABLE" = uv ]; then
   command -v uv >/dev/null 2>&1 || {
@@ -18,6 +19,16 @@ if [ "$UV_EXECUTABLE" = uv ]; then
 else
   [ -x "$UV_EXECUTABLE" ] && [ ! -L "$UV_EXECUTABLE" ] || {
     echo "TAIJI_UV_EXECUTABLE must be an executable regular file" >&2
+    exit 1
+  }
+fi
+if [ "${TAIJI_DEPENDENCY_PROFILE:-development}" = production ]; then
+  case "$PYTHON_EXECUTABLE" in
+    /*) ;;
+    *) echo "Production dependency setup requires an absolute TAIJI_PYTHON_EXECUTABLE" >&2; exit 1 ;;
+  esac
+  [ -x "$PYTHON_EXECUTABLE" ] && [ ! -L "$PYTHON_EXECUTABLE" ] || {
+    echo "Production TAIJI_PYTHON_EXECUTABLE must be an executable regular file" >&2
     exit 1
   }
 fi
@@ -75,7 +86,8 @@ python3 "$LOCK_CONTRACT_HELPER" \
   --pyproject "$AGENT_DIR/pyproject.toml" \
   --lock "$AGENT_DIR/uv.lock" \
   --requirements "$WEBUI_DIR/requirements.txt" >/dev/null
-"$UV_EXECUTABLE" venv venv --python 3.11
+UV_PYTHON_DOWNLOADS="${UV_PYTHON_DOWNLOADS:-automatic}" \
+  "$UV_EXECUTABLE" venv venv --python "$PYTHON_EXECUTABLE"
 sync_agent_dependencies
 python3 "$LOCK_CONTRACT_HELPER" \
   --pyproject "$AGENT_DIR/pyproject.toml" \

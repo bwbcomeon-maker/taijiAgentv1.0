@@ -375,6 +375,8 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
             }
             if profile is not None:
                 env["TAIJI_DEPENDENCY_PROFILE"] = profile
+            if profile == "production":
+                env["TAIJI_PYTHON_EXECUTABLE"] = str(fake_python.resolve())
             try:
                 completed = subprocess.run(
                     ["bash", str(setup)],

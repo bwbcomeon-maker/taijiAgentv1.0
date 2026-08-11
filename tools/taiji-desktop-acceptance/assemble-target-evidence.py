@@ -219,6 +219,10 @@ TARGET_KEYS = {
     "attachment_flow",
     "window_close_exit",
     "diagnostic_export",
+    "three_restart_cycles",
+    "second_instance_focus",
+    "model_configuration_state_consistent",
+    "no_new_electron_core",
     "session_log_basename",
     "session_log_sha256",
     "screenshot_basename",
@@ -2462,6 +2466,12 @@ def assemble(args: argparse.Namespace) -> None:
             "attachment_flow": True,
             "window_close_exit": True,
             "diagnostic_export": True,
+            "three_restart_cycles": checks["three_restart_cycles"],
+            "second_instance_focus": checks["second_instance_focus"],
+            "model_configuration_state_consistent": checks[
+                "model_configuration_state_consistent"
+            ],
+            "no_new_electron_core": checks["no_new_electron_core"],
             "session_log_basename": SESSION_BASENAME,
             "session_log_sha256": session_hash,
             "screenshot_basename": SCREENSHOT_BASENAME,

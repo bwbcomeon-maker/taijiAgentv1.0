@@ -24,8 +24,10 @@ FORMAL_BUILD_SOURCE_PATHS = (
     "hermes-local-lab/sources/hermes-webui/requirements.txt",
     "hermes-local-lab/sources/hermes-agent/uv.lock",
     "packaging/linux/verify-python-lock-contract.py",
+    "packaging/linux/source-archive-integrity.py",
     "packaging/linux/deb/build-deb.sh",
 )
+SOURCE_INTEGRITY_HELPER = ROOT / "packaging/linux/source-archive-integrity.py"
 
 
 def read_text(path: str) -> str:
@@ -43,6 +45,32 @@ def write_formal_build_source_archive(path: Path) -> None:
     with tarfile.open(path, "w:gz") as archive:
         for relative in FORMAL_BUILD_SOURCE_PATHS:
             archive.add(ROOT / relative, arcname=f"taiji-agentv1.0/{relative}")
+
+
+def write_source_inventory(delivery: Path, archive: Path, commit: str) -> Path:
+    helper = delivery / SOURCE_INTEGRITY_HELPER.name
+    shutil.copy2(SOURCE_INTEGRITY_HELPER, helper)
+    inventory = delivery / f"{archive.name[:-len('.tar.gz')]}.inventory.json"
+    inventory.unlink(missing_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(helper),
+            "create",
+            "--archive",
+            str(archive),
+            "--inventory",
+            str(inventory),
+            "--source-commit",
+            commit,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    return inventory
 
 
 def build_function_source(name: str, next_name: str) -> str:
@@ -1006,6 +1034,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             copy_formal_build_sources(repo_root)
             (repo_root / ".gitignore").write_text(
                 "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.tar.gz\n"
+                "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.inventory.json\n"
+                "/taijiagent 打包交付/source-archive-integrity.py\n"
                 "/taijiagent 打包交付/SHA256SUMS.txt\n",
                 encoding="utf-8",
             )
@@ -1054,8 +1084,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
             archive.write_bytes(alternate_gzip)
             digest = hashlib.sha256(alternate_gzip).hexdigest()
+            inventory = write_source_inventory(delivery, archive, commit)
             (delivery / "SHA256SUMS.txt").write_text(
-                f"{digest}  {archive.name}\n",
+                f"{digest}  {archive.name}\n"
+                f"{hashlib.sha256(inventory.read_bytes()).hexdigest()}  {inventory.name}\n",
                 encoding="utf-8",
             )
 
@@ -1081,8 +1113,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             )
             archive.write_bytes(tampered_payload)
             tampered_digest = hashlib.sha256(tampered_payload).hexdigest()
+            inventory = write_source_inventory(delivery, archive, commit)
             (delivery / "SHA256SUMS.txt").write_text(
-                f"{tampered_digest}  {archive.name}\n",
+                f"{tampered_digest}  {archive.name}\n"
+                f"{hashlib.sha256(inventory.read_bytes()).hexdigest()}  {inventory.name}\n",
                 encoding="utf-8",
             )
             rejected = subprocess.run(
@@ -1959,11 +1993,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             script = delivery / "01_制包机_发布预检.sh"
             shutil.copy2(source_script, script)
 
-            archive = delivery / "taiji-agentv1.0-kylin-build-src-test.tar.gz"
+            commit = "a" * 40
+            archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
             write_formal_build_source_archive(archive)
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            inventory = write_source_inventory(delivery, archive, commit)
             (delivery / "SHA256SUMS.txt").write_text(
-                f"{digest}  {archive.name}\n",
+                f"{digest}  {archive.name}\n"
+                f"{hashlib.sha256(inventory.read_bytes()).hexdigest()}  {inventory.name}\n",
                 encoding="utf-8",
             )
 
@@ -2046,8 +2083,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("setup-local-", builder)
 
         unpack = builder[builder.index("unpack_source() {") : builder.index("npm_ci_with_network_fallback() {")]
-        self.assertLess(unpack.index("reset_build_root"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
-        self.assertLess(unpack.index('tar -xzf "$SRC_ARCHIVE"'), unpack.index("repair_build_tree_permissions"))
+        extraction = 'tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH"'
+        self.assertLess(unpack.index("reset_build_root"), unpack.index(extraction))
+        self.assertLess(unpack.index(extraction), unpack.index("repair_build_tree_permissions"))
 
     def test_offline_builder_does_not_hardcode_tmp_as_default_build_root(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -2097,7 +2135,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             )
         ]
         self.assertLess(unpack.index("reset_build_root"), unpack.index("require_build_capacity"))
-        self.assertLess(unpack.index("require_build_capacity"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
+        self.assertLess(
+            unpack.index("require_build_capacity"),
+            unpack.index(
+                'tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH"'
+            ),
+        )
 
         helper = re.search(r"(?ms)^require_build_capacity\(\) \{.*?^\}", builder).group(0)
         harness = "\n".join(
@@ -2943,13 +2986,15 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("static/vendor/mermaid/10.9.3/mermaid.min.js", ui)
         self.assertIn("本地静态资源", terminal)
 
-    def test_offline_builder_normalizes_source_checksum_paths(self):
+    def test_offline_builder_verifies_source_checksum_without_rewriting_input(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
         self.assertIn("checksum_source_archive_hash", builder)
         self.assertIn("verify_source_archive_checksum", builder)
         self.assertIn('archive_name="$(basename "$SRC_ARCHIVE")"', builder)
-        self.assertIn('printf \'%s  %s\\n\' "$actual" "$archive_name" > "$CHECKSUM_FILE"', builder)
+        self.assertIn('actual="$(cd "$SCRIPT_DIR" && sha256sum "$archive_name"', builder)
+        self.assertIn('[ "$actual" != "$expected" ]', builder)
+        self.assertNotIn('printf \'%s  %s\\n\' "$actual" "$archive_name" > "$CHECKSUM_FILE"', builder)
         self.assertIn('verify_source_archive_checksum', builder)
         self.assertIn("length(hash) != 64", builder)
         self.assertNotIn("[[:xdigit:]]{64}", builder)
@@ -2994,8 +3039,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertIn("SRC_ARCHIVE=", result.stdout)
         self.assertIn(f"/{archive_name}", result.stdout)
-        self.assertIn(f"{expected}  {archive_name}", result.stdout)
-        self.assertNotIn(f"taijiagent 打包交付/{archive_name}", result.stdout)
+        self.assertIn(f"{expected}  taijiagent 打包交付/{archive_name}", result.stdout)
 
     def test_offline_builder_has_network_mirror_fallbacks_for_build_tools(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -3014,8 +3058,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("https://github.com/electron/electron/releases/download/", builder)
         self.assertIn("无法下载 Node.js", builder)
         self.assertIn("npm ci 失败", builder)
-        self.assertNotIn("hermes-local-lab", builder.lower())
-        self.assertNotIn("hermes-agent", builder.lower())
+        self.assertNotIn("curl https://astral.sh/uv/install.sh", builder.lower())
 
     def test_delivery_install_script_removes_legacy_runtime_without_backup(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")

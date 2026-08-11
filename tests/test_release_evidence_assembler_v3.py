@@ -25,7 +25,8 @@ TOOLCHAIN = {
     "python_lock_basename": "uv.lock",
     "python_lock_sha256": "dbab12665d98aef021ba64953c61b0ed8a908cfb56a1c01e2fcb4b052b71a2a1",
     "python_version": "3.11.15",
-    "python_executable_sha256": "5" * 64,
+    "python_archive_sha256": "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a",
+    "python_executable_sha256": "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba",
     "uv_version": "0.12.2",
     "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
     "uv_executable_sha256": "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2",
@@ -34,7 +35,7 @@ TOOLCHAIN = {
     "node_executable_sha256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
     "electron_version": "39.8.10",
     "electron_archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
-    "electron_executable_sha256": "c" * 64,
+    "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
 }
 
 
@@ -61,7 +62,7 @@ class ReleaseEvidenceAssemblerV3Tests(unittest.TestCase):
                     "deb_sha256": hashlib.sha256(self.deb.read_bytes()).hexdigest(),
                     "compatibility_policy_id": self.policy["policy_id"],
                     "compatibility_policy_sha256": self.policy_sha,
-                    "electron_executable_sha256": "c" * 64,
+                    "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
                     "desktop_entry_sha256": "d" * 64,
                     "maintainer": "Taiji Agent Product Team <noreply@localhost>",
                     **TOOLCHAIN,

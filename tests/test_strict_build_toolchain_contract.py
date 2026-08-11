@@ -29,6 +29,7 @@ PREPARE = ROOT / "taijiagent 打包交付/99_本机_准备制包输入包.sh"
 LOCK_HELPER = ROOT / "packaging/linux/verify-python-lock-contract.py"
 VALIDATOR = ROOT / "scripts/validate-taiji-release-evidence.py"
 ASSEMBLER = ROOT / "scripts/assemble-taiji-release-evidence.py"
+SOURCE_INTEGRITY_HELPER = ROOT / "packaging/linux/source-archive-integrity.py"
 
 
 TOOLCHAIN_FIELDS = {
@@ -36,6 +37,7 @@ TOOLCHAIN_FIELDS = {
     "python_lock_basename",
     "python_lock_sha256",
     "python_version",
+    "python_archive_sha256",
     "python_executable_sha256",
     "uv_version",
     "uv_archive_sha256",
@@ -49,6 +51,9 @@ TOOLCHAIN_FIELDS = {
 }
 UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
 NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PYTHON_ARCHIVE_SHA256 = "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
+PYTHON_EXECUTABLE_SHA256 = "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
+ELECTRON_EXECUTABLE_SHA256 = "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 
 
 class StrictBuildToolchainContractTests(unittest.TestCase):
@@ -74,6 +79,21 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertIn(f'NODE_PINNED_EXECUTABLE_SHA256="{NODE_EXECUTABLE_SHA256}"', builder)
         self.assertIn('[ "$NODE_EXECUTABLE_SHA256" = "$NODE_PINNED_EXECUTABLE_SHA256" ]', builder)
 
+    def test_formal_builder_pins_the_complete_python_archive_and_binary_identity(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        setup = SETUP.read_text(encoding="utf-8")
+
+        self.assertIn('PYTHON_VERSION_PINNED="3.11.15"', builder)
+        self.assertIn(
+            'PYTHON_ARCHIVE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260805/cpython-3.11.15%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"',
+            builder,
+        )
+        self.assertIn(PYTHON_ARCHIVE_SHA256, builder)
+        self.assertIn(PYTHON_EXECUTABLE_SHA256, builder)
+        self.assertIn("UV_PYTHON_DOWNLOADS=never", builder)
+        self.assertIn('TAIJI_PYTHON_EXECUTABLE', setup)
+        self.assertIn('--python "$PYTHON_EXECUTABLE"', setup)
+
     def test_formal_builder_is_strict_only_and_never_refreshes_lock(self):
         builder = BUILDER.read_text(encoding="utf-8")
 
@@ -86,6 +106,172 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertNotIn("explicit-unlocked", builder)
         self.assertIn("lock 在 strict sync 前后发生变化", builder)
         self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="strict-locked"', builder)
+
+    def test_fixed_tool_archives_are_hashed_scanned_and_extracted_from_one_open_file(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+
+        self.assertIn("open_fixed_tool_archive", builder)
+        self.assertIn('FIXED_TOOL_ARCHIVE_FD_PATH="/proc/self/fd/9"', builder)
+        self.assertIn('sha256sum "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
+        self.assertIn('python3 - "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
+        self.assertIn('-xzf "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
+        self.assertIn('-xJf "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
+        self.assertNotIn('-xzf "$UV_ARCHIVE_PATH"', builder)
+        self.assertNotIn('-xzf "$PYTHON_ARCHIVE_PATH"', builder)
+        self.assertNotIn('-xJf "$tmp_dir/$tarball"', builder)
+        self.assertIn(
+            'open_fixed_tool_archive "$SRC_ARCHIVE" "$SOURCE_ARCHIVE_SHA256"',
+            builder,
+        )
+        self.assertNotIn('tar -xzf "$SRC_ARCHIVE"', builder)
+
+    def test_success_marker_is_atomically_published_only_after_the_final_gate(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        collect_start = builder.index("collect_artifacts() {")
+        collect_end = builder.index("\n}\n", collect_start)
+        collect = builder[collect_start:collect_end]
+        main = builder[builder.index("main() {") :]
+
+        self.assertNotIn('> "$BUILD_MARKER"', collect)
+        self.assertIn("write_pending_build_marker", main)
+        self.assertIn("stage_pending_build_marker_for_publication", main)
+        self.assertIn("publish_build_success_marker", main)
+        self.assertLess(main.index("run_release_preflight"), main.index("publish_build_success_marker"))
+        self.assertLess(
+            main.index("cleanup_temporary_build_root"),
+            main.index("publish_build_success_marker"),
+        )
+        self.assertNotIn('mv -- "$PENDING_BUILD_MARKER" "$BUILD_MARKER"', builder)
+        self.assertIn('os.link(source, destination, follow_symlinks=False)', builder)
+        self.assertIn('os.unlink(source)', builder)
+        self.assertIn('rm -f -- "$PENDING_BUILD_MARKER"', builder)
+
+    def test_success_marker_publication_never_overwrites_an_existing_marker(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        start = builder.index("publish_build_success_marker() {")
+        end = builder.index("\nstage_pending_build_marker_for_publication() {", start)
+        publish_function = builder[start:end]
+        with tempfile.TemporaryDirectory(prefix="taiji-build-marker-") as temp_dir:
+            root = Path(temp_dir)
+            harness = root / "publish-marker.sh"
+            harness.write_text(
+                "\n".join(
+                    (
+                        "#!/usr/bin/env bash",
+                        "set -Eeuo pipefail",
+                        'OUTPUT_DIR="$1"',
+                        'BUILD_MARKER="$OUTPUT_DIR/.build-success"',
+                        'PENDING_BUILD_MARKER="$OUTPUT_DIR/.build-success.pending.$$"',
+                        'PENDING_BUILD_MARKER_SHA256=""',
+                        'fail() { printf "FAIL:%s\\n" "$*" >&2; exit 23; }',
+                        publish_function,
+                        'printf "candidate\\n" > "$PENDING_BUILD_MARKER"',
+                        'PENDING_BUILD_MARKER_SHA256="$(sha256sum "$PENDING_BUILD_MARKER" | awk \'{print $1}\')"',
+                        'if [ "${2:-}" = occupied ]; then printf "existing\\n" > "$BUILD_MARKER"; fi',
+                        'if [ "${2:-}" = tampered ]; then printf "malicious\\n" > "$PENDING_BUILD_MARKER"; fi',
+                        "publish_build_success_marker",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            occupied = root / "occupied"
+            occupied.mkdir()
+            blocked = subprocess.run(
+                ["bash", str(harness), str(occupied), "occupied"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 23, blocked.stdout + blocked.stderr)
+            self.assertEqual((occupied / ".build-success").read_text(), "existing\n")
+            self.assertEqual(len(list(occupied.glob(".build-success.pending.*"))), 1)
+
+            free = root / "free"
+            free.mkdir()
+            published = subprocess.run(
+                ["bash", str(harness), str(free)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+            self.assertEqual((free / ".build-success").read_text(), "candidate\n")
+            self.assertEqual(list(free.glob(".build-success.pending.*")), [])
+
+            tampered = root / "tampered"
+            tampered.mkdir()
+            blocked = subprocess.run(
+                ["bash", str(harness), str(tampered), "tampered"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 23, blocked.stdout + blocked.stderr)
+            self.assertFalse((tampered / ".build-success").exists())
+
+    def test_success_marker_staging_never_overwrites_an_existing_pending_file(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        start = builder.index("stage_pending_build_marker_for_publication() {")
+        end = builder.index("\nrequire_candidate_deb_fixed() {", start)
+        stage_function = builder[start:end]
+        self.assertNotIn('mv -- "$PENDING_BUILD_MARKER" "$staged_marker"', stage_function)
+        self.assertIn("os.O_EXCL", stage_function)
+        with tempfile.TemporaryDirectory(prefix="taiji-stage-marker-") as temp_dir:
+            root = Path(temp_dir)
+            harness = root / "stage-marker.sh"
+            harness.write_text(
+                "\n".join(
+                    (
+                        "#!/usr/bin/env bash",
+                        "set -Eeuo pipefail",
+                        'BUILD_ROOT="$1/build"',
+                        'OUTPUT_DIR="$1/output"',
+                        'mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"',
+                        'PENDING_BUILD_MARKER="$BUILD_ROOT/.build-success.pending"',
+                        'printf "candidate\\n" > "$PENDING_BUILD_MARKER"',
+                        'PENDING_BUILD_MARKER_SHA256="$(sha256sum "$PENDING_BUILD_MARKER" | awk \'{print $1}\')"',
+                        'fail() { printf "FAIL:%s\\n" "$*" >&2; exit 23; }',
+                        'stat() { printf "1\\n"; }',
+                        stage_function,
+                        'if [ "${2:-}" = occupied ]; then printf "existing\\n" > "$OUTPUT_DIR/.build-success.pending.$$"; fi',
+                        "stage_pending_build_marker_for_publication",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            occupied = root / "occupied-stage"
+            blocked = subprocess.run(
+                ["bash", str(harness), str(occupied), "occupied"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 23, blocked.stdout + blocked.stderr)
+            self.assertEqual(
+                next((occupied / "output").glob(".build-success.pending.*")).read_text(),
+                "existing\n",
+            )
+            self.assertEqual(
+                (occupied / "build/.build-success.pending").read_text(), "candidate\n"
+            )
+
+            free = root / "free-stage"
+            staged = subprocess.run(
+                ["bash", str(harness), str(free)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+            self.assertFalse((free / "build/.build-success.pending").exists())
+            self.assertEqual(
+                next((free / "output").glob(".build-success.pending.*")).read_text(),
+                "candidate\n",
+            )
 
     def test_formal_builder_rejects_unlocked_mode_before_creating_build_state(self):
         with tempfile.TemporaryDirectory(prefix="taiji-formal-entry-") as tmp:
@@ -290,6 +476,9 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         for source in (deb_builder, preflight, validator, assembler):
             self.assertIn(UV_EXECUTABLE_SHA256, source)
             self.assertIn(NODE_EXECUTABLE_SHA256, source)
+            self.assertIn(PYTHON_ARCHIVE_SHA256, source)
+            self.assertIn(PYTHON_EXECUTABLE_SHA256, source)
+            self.assertIn(ELECTRON_EXECUTABLE_SHA256, source)
         self.assertIn('[ "$NODE_EXECUTABLE_SHA256" = "$PINNED_NODE_EXECUTABLE_SHA256" ]', deb_builder)
         self.assertIn('sha256sum "$UV_ARCHIVE_PATH"', deb_builder)
         self.assertIn('sha256sum "$NODE_ARCHIVE_PATH"', deb_builder)
@@ -336,8 +525,10 @@ INSTALL_ROOT={str(install_root)!r}
 DESKTOP_RUNTIME={str(desktop_runtime)!r}
 ELECTRON_BIN={str(source_electron)!r}
 PYTHON_EXECUTABLE_SHA256={python_sha!r}
+PINNED_PYTHON_EXECUTABLE_SHA256={python_sha!r}
 NODE_EXECUTABLE_SHA256={node_sha!r}
 PINNED_NODE_EXECUTABLE_SHA256={node_sha!r}
+PINNED_ELECTRON_EXECUTABLE_SHA256={hashlib.sha256(b"electron-binary").hexdigest()!r}
 {function_source}
 validate_staged_toolchain_executables
 """
@@ -436,6 +627,9 @@ validate_locked_python_environment
                 "#!/bin/sh\nprintf '%s\\n' 3.11.15\n", encoding="utf-8"
             )
             python_bin.chmod(0o755)
+            python_archive = root / "python.tar.gz"
+            python_archive.write_bytes(b"verified-python-archive")
+            pinned_python_sha = hashlib.sha256(python_bin.read_bytes()).hexdigest()
             lock = agent / "uv.lock"
             lock.write_text("version = 1\n", encoding="utf-8")
             uv = root / "uv"
@@ -492,6 +686,13 @@ ELECTRON_ARCHIVE={str(electron_archive)!r}
 ELECTRON_ARCHIVE_SHA256=''
 TAIJI_ELECTRON_VERSION=39.8.10
 TAIJI_ELECTRON_ARCHIVE_SHA256={electron_sha!r}
+PYTHON_ARCHIVE_PATH={str(python_archive)!r}
+PYTHON_ARCHIVE_SHA256={hashlib.sha256(python_archive.read_bytes()).hexdigest()!r}
+PINNED_PYTHON_ARCHIVE_SHA256={hashlib.sha256(python_archive.read_bytes()).hexdigest()!r}
+PINNED_PYTHON_VERSION=3.11.15
+PINNED_PYTHON_EXECUTABLE_SHA256={pinned_python_sha!r}
+EXPECTED_PYTHON_VERSION=3.11.15
+EXPECTED_PYTHON_EXECUTABLE_SHA256={pinned_python_sha!r}
 {function_source}
 validate_strict_toolchain_contract
 """
@@ -525,6 +726,19 @@ validate_strict_toolchain_contract
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("official archive identity", rejected.stderr)
 
+            node_bin.write_text(
+                "#!/bin/sh\nprintf '%s\\n' v22.23.1\n", encoding="utf-8"
+            )
+            node_bin.chmod(0o755)
+            python_bin.write_text(
+                "#!/bin/sh\nprintf '%s\\n' 3.11.15\n# forged replacement\n",
+                encoding="utf-8",
+            )
+            python_bin.chmod(0o755)
+            forged_python = run()
+            self.assertNotEqual(forged_python.returncode, 0)
+            self.assertIn("Python executable SHA256", forged_python.stderr)
+
     def test_local_input_preparation_runs_source_contract_before_archiving(self):
         prepare = PREPARE.read_text(encoding="utf-8")
         main = prepare[prepare.index("main() {") :]
@@ -539,6 +753,7 @@ validate_strict_toolchain_contract
             "hermes-local-lab/sources/hermes-webui/requirements.txt",
             "hermes-local-lab/sources/hermes-agent/uv.lock",
             "packaging/linux/verify-python-lock-contract.py",
+            "packaging/linux/source-archive-integrity.py",
             "packaging/linux/deb/build-deb.sh",
         )
 
@@ -547,6 +762,7 @@ validate_strict_toolchain_contract
             delivery = root / "taijiagent 打包交付"
             delivery.mkdir()
             shutil.copy2(PREFLIGHT, delivery / PREFLIGHT.name)
+            shutil.copy2(SOURCE_INTEGRITY_HELPER, delivery / SOURCE_INTEGRITY_HELPER.name)
             commit = "a" * 40
             archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
 
@@ -568,6 +784,16 @@ validate_strict_toolchain_contract
                             b"  validate_formal_uv_contract\n  initialize_build_logging",
                             b"  # validate_formal_uv_contract retained as dead text\n  initialize_build_logging",
                         )
+                    if downgrade == "python-pin" and relative.endswith("00_制包机_生成离线交付包.sh"):
+                        payload = payload.replace(
+                            PYTHON_EXECUTABLE_SHA256.encode("ascii"),
+                            ("f" * 64).encode("ascii"),
+                        )
+                    if downgrade == "electron-pin" and relative.endswith("packaging/linux/deb/build-deb.sh"):
+                        payload = payload.replace(
+                            ELECTRON_EXECUTABLE_SHA256.encode("ascii"),
+                            ("e" * 64).encode("ascii"),
+                        )
                     if downgrade in ("pyproject-drift", "malicious-helper") and relative.endswith("pyproject.toml"):
                         payload = payload.replace(b'"pyyaml==6.0.3"', b'"pyyaml==6.0.2"')
                     if downgrade == "malicious-helper" and relative.endswith("verify-python-lock-contract.py"):
@@ -581,8 +807,30 @@ validate_strict_toolchain_contract
                 with tarfile.open(archive, "w:gz") as handle:
                     handle.add(staging / "taiji-agentv1.0", arcname="taiji-agentv1.0")
                 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+                inventory = delivery / f"{archive.name[:-len('.tar.gz')]}.inventory.json"
+                inventory.unlink(missing_ok=True)
+                created = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SOURCE_INTEGRITY_HELPER),
+                        "create",
+                        "--archive",
+                        str(archive),
+                        "--inventory",
+                        str(inventory),
+                        "--source-commit",
+                        commit,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(created.returncode, 0, created.stderr)
+                inventory_digest = hashlib.sha256(inventory.read_bytes()).hexdigest()
                 (delivery / "SHA256SUMS.txt").write_text(
-                    f"{digest}  {archive.name}\n", encoding="ascii"
+                    f"{digest}  {archive.name}\n"
+                    f"{inventory_digest}  {inventory.name}\n",
+                    encoding="ascii",
                 )
 
             env = {
@@ -604,6 +852,8 @@ validate_strict_toolchain_contract
             for downgrade in (
                 "default-auto",
                 "dead-call",
+                "python-pin",
+                "electron-pin",
                 "pyproject-drift",
                 "malicious-helper",
             ):

@@ -126,6 +126,46 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         self.assertIn("祖先符号链接", result.stderr)
         self.assert_no_signature()
 
+    def test_validation_challenge_reservation_and_signature_share_one_private_snapshot(self) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+
+        self.assertIn('SNAPSHOT_EVIDENCE="$SNAPSHOT_ROOT/evidence.json"', source)
+        self.assertIn('"$SNAPSHOT_EVIDENCE" "$EXPECTED_CHALLENGE"', source)
+        self.assertIn('"$EXPECTED_CHALLENGE" "$SNAPSHOT_EVIDENCE"', source)
+        self.assertIn('-out "$tmp_signature" "$SNAPSHOT_EVIDENCE"', source)
+        self.assertIn('-signature "$tmp_signature" "$SNAPSHOT_EVIDENCE"', source)
+        self.assertIn('-signature "$SIGNATURE" "$EVIDENCE"', source)
+        self.assertIn('rm -f -- "$SIGNATURE"', source)
+
+    def test_rejects_incomplete_publication_before_private_key_use(self) -> None:
+        self.evidence.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-release-evidence/v3",
+                    "challenge_nonce": CHALLENGE,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["TAIJI_PUBLICATION_CHALLENGE"] = CHALLENGE
+
+        result = subprocess.run(
+            ["bash", str(SIGNER), str(self.evidence), str(self.private_key)],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("publication physical bundle", result.stderr)
+        self.assertNotIn("无法读取发布私钥", result.stderr)
+        self.assert_no_signature()
+
 
 if __name__ == "__main__":
     unittest.main()

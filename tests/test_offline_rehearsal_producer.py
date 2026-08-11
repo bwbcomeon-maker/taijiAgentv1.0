@@ -12,6 +12,7 @@ import textwrap
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
 CERTIFICATION_ASSEMBLER = ROOT / "scripts" / "assemble-taiji-certification-set.py"
 POLICY = ROOT / "packaging" / "linux" / "compatibility-policy.json"
 POLICY_HELPER = ROOT / "packaging" / "linux" / "compatibility_policy.py"
+SOURCE_INTEGRITY_HELPER = ROOT / "packaging" / "linux" / "source-archive-integrity.py"
 DOCKERFILE = ROOT / "tools" / "taiji-offline-rehearsal" / "Dockerfile"
 LIFECYCLE = ROOT / "tools" / "taiji-offline-rehearsal" / "run-lifecycle.sh"
 REQUIRED_SYSTEM_PACKAGES = (
@@ -33,7 +35,8 @@ TOOLCHAIN = {
     "python_lock_basename": "uv.lock",
     "python_lock_sha256": "dbab12665d98aef021ba64953c61b0ed8a908cfb56a1c01e2fcb4b052b71a2a1",
     "python_version": "3.11.15",
-    "python_executable_sha256": "5" * 64,
+    "python_archive_sha256": "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a",
+    "python_executable_sha256": "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba",
     "uv_version": "0.12.2",
     "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
     "uv_executable_sha256": "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2",
@@ -42,7 +45,7 @@ TOOLCHAIN = {
     "node_executable_sha256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
     "electron_version": "39.8.10",
     "electron_archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
-    "electron_executable_sha256": "e" * 64,
+    "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
 }
 
 
@@ -87,6 +90,33 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_formal_input_reads_use_one_stable_file_descriptor(self) -> None:
+        source = PRODUCER.read_text(encoding="utf-8")
+
+        self.assertIn("def read_regular_bytes", source)
+        self.assertNotIn("path.read_text(encoding=\"utf-8\")", source)
+        self.assertNotIn("sidecar.read_text(encoding=\"ascii\")", source)
+        self.assertNotIn("manifest.read_bytes()", source)
+
+    def test_stable_reader_rejects_path_replacement_between_check_and_open(self) -> None:
+        producer = load_module(PRODUCER, "taiji_offline_stable_reader_test")
+        target = self.temp_path / "stable-input.json"
+        replacement = self.temp_path / "replacement.json"
+        original = self.temp_path / "original.json"
+        target.write_text('{"trusted":true}\n', encoding="utf-8")
+        replacement.write_text('{"trusted":false}\n', encoding="utf-8")
+        real_open = os.open
+
+        def replace_then_open(path, flags, *args, **kwargs):
+            if Path(path) == target:
+                os.replace(target, original)
+                os.replace(replacement, target)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(producer.os, "open", side_effect=replace_then_open):
+            with self.assertRaisesRegex(producer.ProducerError, "打开时发生替换"):
+                producer.read_regular_bytes(target, "stable input")
+
     def _write_delivery_fixture(self) -> None:
         package_dir = self.delivery / "生成的安装包"
         package_dir.mkdir(parents=True)
@@ -99,6 +129,27 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         lock_member.mode = 0o644
         with tarfile.open(source_archive, "w:gz") as archive:
             archive.addfile(lock_member, io.BytesIO(lock_payload))
+        source_inventory = self.delivery / (
+            f"taiji-agentv1.0-kylin-build-src-{self.source_commit}.inventory.json"
+        )
+        inventory_result = subprocess.run(
+            [
+                sys.executable,
+                str(SOURCE_INTEGRITY_HELPER),
+                "create",
+                "--archive",
+                str(source_archive),
+                "--inventory",
+                str(source_inventory),
+                "--source-commit",
+                self.source_commit,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(inventory_result.returncode, 0, inventory_result.stderr)
+        shutil.copy2(SOURCE_INTEGRITY_HELPER, self.delivery / SOURCE_INTEGRITY_HELPER.name)
         deb = package_dir / "taiji-agent_0.1.0_amd64.deb"
         deb.write_bytes(b"deb fixture\n")
         checksum = package_dir / f"{deb.name}.sha256"
@@ -117,6 +168,10 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "version": "0.1.0",
                     "architecture": "amd64",
                     "source_commit": self.source_commit,
+                    "source_archive_basename": source_archive.name,
+                    "source_archive_sha256": sha256(source_archive),
+                    "source_inventory_basename": source_inventory.name,
+                    "source_inventory_sha256": sha256(source_inventory),
                     "deb_basename": deb.name,
                     "deb_sha256": sha256(deb),
                     "compatibility_policy_id": self.policy_id,
@@ -141,6 +196,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     f"source_archive={source_archive.name}",
                     f"source_sha256={sha256(source_archive)}",
                     f"source_commit={self.source_commit}",
+                    f"source_inventory={source_inventory.name}",
+                    f"source_inventory_sha256={sha256(source_inventory)}",
                     f"deb={deb.name}",
                     f"deb_sha256={sha256(deb)}",
                     f"checksum={checksum.name}",
@@ -191,7 +248,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             "fixture release public key\n", encoding="utf-8"
         )
         (self.delivery / "SHA256SUMS.txt").write_text(
-            f"{sha256(source_archive)}  {source_archive.name}\n", encoding="utf-8"
+            f"{sha256(source_archive)}  {source_archive.name}\n"
+            f"{sha256(source_inventory)}  {source_inventory.name}\n",
+            encoding="utf-8",
         )
         (self.delivery / "操作说明.md").write_text("instructions\n", encoding="utf-8")
         (self.delivery / "版本信息.txt").write_text("0.1.0\n", encoding="utf-8")
@@ -343,6 +402,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 if mode == "expanded_success":
                     lifecycle = dict(session)
                     lifecycle.update({
+                        "previous_deb_basename": state["env"]["TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME"],
+                        "previous_deb_sha256": state["env"]["TAIJI_EXPECTED_PREVIOUS_DEB_SHA256"],
+                        "previous_version": state["env"]["TAIJI_EXPECTED_PREVIOUS_VERSION"],
                         "steps": [
                             "fresh_install_n",
                             "same_version_reinstall_n",
@@ -558,8 +620,8 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             check=False,
         )
 
-    def _write_previous_release(self) -> Path:
-        previous = self.temp_path / "previous" / "taiji-agent_0.0.9_amd64.deb"
+    def _write_previous_release(self, version: str = "0.0.9") -> Path:
+        previous = self.temp_path / "previous" / f"taiji-agent_{version}_amd64.deb"
         previous.parent.mkdir(parents=True, exist_ok=True)
         previous.write_bytes(b"previous deb fixture\n")
         (previous.parent / f"{previous.name}.sha256").write_text(
@@ -572,7 +634,7 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 {
                     "schema": "taiji-package-manifest/v3",
                     "package": "taiji-agent",
-                    "version": "0.0.9",
+                    "version": version,
                     "architecture": "amd64",
                     "source_commit": "8" * 40,
                     "deb_basename": previous.name,
@@ -792,12 +854,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertIn("offline-rehearsal-valid", validation.stdout)
 
         assembler = load_module(CERTIFICATION_ASSEMBLER, "taiji_offline_rehearsal_assembler_test")
-        with self.assertRaisesRegex(
-            assembler.CertificationSetError,
-            "N-1",
-        ):
+        with self.assertRaisesRegex(assembler.CertificationSetError, "完整 N-1"):
             assembler._validate_offline_evidence(
-                evidence_path,
+                evidence_path.parent,
                 source_commit=self.source_commit,
                 version="0.1.0",
                 deb_basename=evidence["deb_basename"],
@@ -983,6 +1042,15 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 "purge_clears_root_state_only",
             ],
         )
+        previous = self._write_previous_release()
+        self.assertEqual(evidence["previous_deb_basename"], previous.name)
+        self.assertEqual(evidence["previous_version"], "0.0.9")
+        self.assertEqual(evidence["previous_deb_sha256"], sha256(previous))
+        lifecycle_path = self.output / evidence["lifecycle_log_basename"]
+        self.assertEqual(evidence["lifecycle_log_sha256"], sha256(lifecycle_path))
+        lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+        for key in ("previous_deb_basename", "previous_version", "previous_deb_sha256"):
+            self.assertEqual(lifecycle[key], evidence[key])
 
     def test_expanded_evidence_archives_and_binds_previous_release_identity(self):
         previous = self._write_previous_release()
@@ -1069,6 +1137,35 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         result = self.run_producer_explicit(previous=missing)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("previous", (result.stdout + result.stderr).lower())
+        self.assertFalse(self.output.exists())
+
+    def test_previous_release_must_be_strictly_older_under_debian_version_rules(self):
+        producer = load_module(PRODUCER, "taiji_offline_previous_version_contract")
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+        producer_source = PRODUCER.read_text(encoding="utf-8")
+        self.assertIn('dpkg-deb -f "$candidate" Version', lifecycle)
+        self.assertIn('dpkg-deb -f "$previous" Version', lifecycle)
+        self.assertIn("TAIJI_EXPECTED_CANDIDATE_VERSION", producer_source)
+        self.assertIn("TAIJI_EXPECTED_PREVIOUS_VERSION", lifecycle)
+        comparisons = (
+            ("0.0.9", "0.1.0", -1),
+            ("0.1.0", "0.1.0", 0),
+            ("9.9.9", "0.1.0", 1),
+            ("9.9.9", "1:0.1.0", -1),
+            ("1:0.1.0", "0.1.0", 1),
+            ("0.1.0-1", "0.1.0-2", -1),
+            ("0.1.0-2", "0.1.0-1", 1),
+            ("0.1.0~rc1", "0.1.0", -1),
+        )
+        for previous, candidate, expected in comparisons:
+            with self.subTest(previous=previous, candidate=candidate):
+                actual = producer.compare_debian_versions(previous, candidate)
+                self.assertEqual((actual > 0) - (actual < 0), expected)
+
+        newer = self._write_previous_release("9.9.9")
+        result = self.run_producer_explicit(previous=newer)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("strictly older", (result.stdout + result.stderr).lower())
         self.assertFalse(self.output.exists())
 
     def test_power_loss_resume_never_treats_partial_journal_as_committed(self):
