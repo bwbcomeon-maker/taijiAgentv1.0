@@ -52,6 +52,7 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "scripts/assemble-taiji-certification-set.py",
     ROOT / "scripts/assemble-taiji-release-evidence.py",
     ROOT / "scripts/validate-taiji-release-evidence.py",
+    ROOT / "scripts/taiji-linux-golden-orchestrator.py",
 )
 
 
