@@ -406,27 +406,44 @@ def _directory_anchor(value: os.stat_result) -> Tuple[int, ...]:
     )
 
 
+def _assert_trusted_delivery_directory_entry(
+    opened: os.stat_result,
+    current: os.stat_result,
+    *,
+    is_leaf: bool,
+) -> None:
+    mode = stat.S_IMODE(opened.st_mode)
+    trusted_sticky_ancestor = (
+        not is_leaf
+        and opened.st_uid == 0
+        and mode == 0o1777
+    )
+    if (
+        _directory_anchor(opened) != _directory_anchor(current)
+        or not stat.S_ISDIR(opened.st_mode)
+        or opened.st_uid not in {0, os.getuid()}
+        or (mode & 0o022 and not trusted_sticky_ancestor)
+        or (is_leaf and opened.st_uid != os.getuid())
+    ):
+        raise GitHubCiEvidenceError(
+            "delivery directory ancestor chain is not trusted"
+        )
+
+
 def _open_delivery_directory(delivery_dir: Path) -> Tuple[int, Tuple[int, ...]]:
     if not delivery_dir.is_absolute():
         raise GitHubCiEvidenceError(
             "delivery directory must be an existing absolute real directory"
         )
     try:
-        before = delivery_dir.lstat()
-    except OSError as exc:
+        if delivery_dir.resolve(strict=True) != delivery_dir:
+            raise GitHubCiEvidenceError(
+                "delivery directory must be an existing absolute real directory"
+            )
+    except (OSError, RuntimeError) as exc:
         raise GitHubCiEvidenceError(
             "delivery directory must be an existing absolute real directory"
         ) from exc
-    if (
-        not stat.S_ISDIR(before.st_mode)
-        or stat.S_ISLNK(before.st_mode)
-        or delivery_dir.resolve() != delivery_dir
-        or before.st_uid != os.getuid()
-        or stat.S_IMODE(before.st_mode) & 0o022
-    ):
-        raise GitHubCiEvidenceError(
-            "delivery directory must be current-user owned, real, and not group/other writable"
-        )
     flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -434,15 +451,52 @@ def _open_delivery_directory(delivery_dir: Path) -> Tuple[int, Tuple[int, ...]]:
         | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
-        descriptor = os.open(str(delivery_dir), flags)
+        descriptor = os.open(delivery_dir.anchor, flags)
     except OSError as exc:
         raise GitHubCiEvidenceError(
-            "delivery directory cannot be opened safely"
+            "delivery directory ancestor chain cannot be opened safely"
         ) from exc
-    opened = os.fstat(descriptor)
-    if _directory_anchor(opened) != _directory_anchor(before):
+    try:
+        parts = delivery_dir.parts[1:]
+        opened = os.fstat(descriptor)
+        current = os.stat(
+            delivery_dir.anchor,
+            follow_symlinks=False,
+        )
+        _assert_trusted_delivery_directory_entry(
+            opened,
+            current,
+            is_leaf=not parts,
+        )
+        for index, part in enumerate(parts):
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise GitHubCiEvidenceError(
+                    "delivery directory ancestor chain contains an unsafe entry"
+                ) from exc
+            try:
+                opened = os.fstat(child)
+                current = os.stat(
+                    part,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+                is_leaf = index == len(parts) - 1
+                _assert_trusted_delivery_directory_entry(
+                    opened,
+                    current,
+                    is_leaf=is_leaf,
+                )
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        opened = os.fstat(descriptor)
+    except BaseException:
         os.close(descriptor)
-        raise GitHubCiEvidenceError("delivery directory changed before use")
+        raise
     return descriptor, _directory_anchor(opened)
 
 

@@ -561,6 +561,45 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
         self.assertEqual(list(real_delivery.iterdir()), [])
         self.assertEqual(list(writable_delivery.iterdir()), [])
 
+    def test_delivery_mode_rejects_untrusted_world_writable_ancestor_before_network(self):
+        for mode in (0o777, 0o1777):
+            with self.subTest(mode=oct(mode)):
+                unsafe_ancestor = self.root / "unsafe-ancestor-{:o}".format(mode)
+                unsafe_ancestor.mkdir(mode=0o700)
+                unsafe_ancestor.chmod(mode)
+                delivery = unsafe_ancestor / "review-delivery"
+                delivery.mkdir(mode=0o700)
+                api = self.api()
+
+                with self.assertRaises(self.producer.GitHubCiEvidenceError):
+                    self.call_delivery_producer(delivery, api=api)
+
+                self.assertEqual(api.calls, [])
+                self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_delivery_mode_allows_root_owned_exact_sticky_tmp_ancestor(self):
+        with tempfile.TemporaryDirectory(
+            prefix="taiji-github-ci-sticky-",
+            dir="/tmp",
+        ) as temporary:
+            sticky_metadata = Path("/tmp").resolve().lstat()
+            self.assertEqual(sticky_metadata.st_uid, 0)
+            self.assertEqual(stat.S_IMODE(sticky_metadata.st_mode), 0o1777)
+            delivery = Path(temporary).resolve() / "review-delivery"
+            delivery.mkdir(mode=0o700)
+
+            result = self.call_delivery_producer(delivery)
+
+            self.assertEqual(result, delivery / "github-ci-evidence.json")
+            self.assertEqual(
+                {item.name for item in delivery.iterdir()},
+                {
+                    "github-ci-evidence.json",
+                    "github-ci-run-response.json",
+                    "github-ci-jobs-response.json",
+                },
+            )
+
     def test_delivery_mode_rejects_preexisting_regular_or_symlink_without_touching_it(self):
         for basename in (
             "github-ci-run-response.json",
