@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
+import pwd
 import re
 import shlex
 import stat
@@ -22,11 +24,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
-CONFIG_SCHEMA = "taiji-linux-golden-orchestrator-config/v1"
-STATE_SCHEMA = "taiji-linux-golden-orchestrator-state/v1"
+CONFIG_SCHEMA = "taiji-linux-golden-orchestrator-config/v2"
+STATE_SCHEMA = "taiji-linux-golden-orchestrator-state/v2"
+PLAN_SCHEMA = "taiji-linux-golden-orchestrator-plan/v2"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 REMOTE_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 REMOTE_ROOT_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$")
@@ -35,6 +37,7 @@ STAGES = (
     "input_verify",
     "remote_build",
     "artifact_preflight",
+    "challenge_preparation",
     "offline_rehearsal",
     "target_acceptance",
     "certification_sign",
@@ -53,6 +56,10 @@ EXPLICIT_APPROVAL_STAGES = {
 }
 MAX_CONTROL_FILE_BYTES = 2 * 1024 * 1024
 MAX_EVIDENCE_FILE_BYTES = 2 * 1024 * 1024 * 1024
+CHALLENGE_TTL_SECONDS = 7 * 24 * 60 * 60
+PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = (
+    "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+)
 
 
 class OrchestratorError(RuntimeError):
@@ -255,6 +262,168 @@ def _within(path: Path, root: Path) -> bool:
     return True
 
 
+def _load_challenge_helper(repo: Path) -> Any:
+    path = repo / "scripts/taiji-challenge-envelope.py"
+    if not path.is_file() or path.is_symlink():
+        raise OrchestratorError("canonical challenge-envelope helper is missing")
+    spec = importlib.util.spec_from_file_location(
+        "taiji_linux_golden_orchestrator_challenge_envelope",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise OrchestratorError("canonical challenge-envelope helper cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _challenge_path(config: Dict[str, Any], purpose: str) -> Path:
+    return Path(config["release"]["{}_challenge_envelope".format(purpose)])
+
+
+def _challenge_recovery_guidance(purpose: str) -> str:
+    evidence_domain = {
+        "certification": (
+            "offline rehearsal, target acceptance, all certification records, "
+            "and the certification set"
+        ),
+        "publication": "publication evidence and its signature",
+    }[purpose]
+    return (
+        "Start a fresh v2 config/state with a fresh absolute "
+        "{}_challenge_envelope path; must not overwrite or reuse the old envelope "
+        "or signer reservation, and recapture {} before signing again."
+    ).format(purpose, evidence_domain)
+
+
+def _load_challenge_envelope(
+    state: Dict[str, Any],
+    purpose: str,
+    *,
+    require_active: bool,
+) -> Dict[str, Any]:
+    candidate = state.get("candidate_deb")
+    if type(candidate) is not dict:
+        raise OrchestratorError("challenge envelope requires a bound candidate DEB")
+    config = state["config"]
+    helper = _load_challenge_helper(Path(config["repo_root"]))
+    path = _challenge_path(config, purpose)
+    try:
+        envelope = helper.load_envelope_file(path)
+        helper.verify_envelope(
+            envelope,
+            purpose=purpose,
+            source_commit=state["source_commit"],
+            deb_basename=candidate["basename"],
+            deb_sha256=candidate["sha256"],
+            require_active=require_active,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        recovery = ""
+        if "expired" in str(exc).lower():
+            recovery = " " + _challenge_recovery_guidance(purpose)
+        raise OrchestratorError(
+            "{} challenge envelope is invalid: {}{}".format(
+                purpose,
+                exc,
+                recovery,
+            )
+        ) from exc
+    return envelope
+
+
+def _assert_challenges_independent(
+    certification: Dict[str, Any],
+    publication: Dict[str, Any],
+) -> None:
+    if certification["nonce"] == publication["nonce"]:
+        raise OrchestratorError("certification and publication challenge nonces must be independent")
+
+
+def _signer_home() -> Path:
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def _assert_challenge_unreserved(envelope: Dict[str, Any]) -> None:
+    home = _signer_home()
+    if not home.is_absolute() or home.is_symlink():
+        raise OrchestratorError("signing account home is unsafe")
+    reservation = (
+        home
+        / ".local/state/taiji-release-evidence/signers"
+        / PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT
+        / "used-nonces"
+        / (envelope["nonce"] + ".used")
+    )
+    try:
+        reservation.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise OrchestratorError("challenge reservation state cannot be inspected") from exc
+    raise OrchestratorError(
+        "{} challenge nonce is already reserved by the signer. {}".format(
+            envelope["purpose"],
+            _challenge_recovery_guidance(envelope["purpose"]),
+        )
+    )
+
+
+def _assert_publication_challenge_absent(config: Dict[str, Any]) -> None:
+    publication_path = _challenge_path(config, "publication")
+    if publication_path.exists() or publication_path.is_symlink():
+        raise OrchestratorError(
+            "publication challenge envelope must use a fresh path and be issued only at publication_sign"
+        )
+
+
+def _validate_challenges_for_stage(state: Dict[str, Any], stage: str) -> None:
+    config = state["config"]
+    if stage in {
+        "challenge_preparation",
+        "offline_rehearsal",
+        "target_acceptance",
+        "certification_sign",
+    }:
+        _assert_publication_challenge_absent(config)
+    if stage == "challenge_preparation":
+        certification_path = _challenge_path(config, "certification")
+        if certification_path.exists() or certification_path.is_symlink():
+            certification = _load_challenge_envelope(
+                state,
+                "certification",
+                require_active=True,
+            )
+            _assert_challenge_unreserved(certification)
+        return
+    if STAGES.index(stage) <= STAGES.index("challenge_preparation"):
+        return
+    if stage in {"offline_rehearsal", "target_acceptance", "certification_sign"}:
+        certification = _load_challenge_envelope(
+            state,
+            "certification",
+            require_active=True,
+        )
+        _assert_challenge_unreserved(certification)
+        return
+    certification = _load_challenge_envelope(
+        state,
+        "certification",
+        require_active=False,
+    )
+    publication_path = _challenge_path(config, "publication")
+    if stage == "publication_sign" and not publication_path.exists() and not publication_path.is_symlink():
+        return
+    publication = _load_challenge_envelope(
+        state,
+        "publication",
+        require_active=stage == "publication_sign",
+    )
+    _assert_challenges_independent(certification, publication)
+    if stage == "publication_sign":
+        _assert_challenge_unreserved(publication)
+
+
 def _validate_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     _require_exact_keys(
         payload,
@@ -297,13 +466,11 @@ def _validate_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     offline = _require_mapping(payload["offline"], "offline")
     _require_exact_keys(
         offline,
-        {"image", "challenge", "output_dir", "previous_deb", "previous_signature", "previous_manifest"},
+        {"image", "output_dir", "previous_deb", "previous_signature", "previous_manifest"},
         "offline",
     )
     if type(offline["image"]) is not str or not IMAGE_RE.fullmatch(offline["image"]):
         raise OrchestratorError("offline.image is invalid")
-    if type(offline["challenge"]) is not str or not CHALLENGE_RE.fullmatch(offline["challenge"]):
-        raise OrchestratorError("offline.challenge is invalid")
     for key in ("output_dir", "previous_deb", "previous_signature", "previous_manifest"):
         offline[key] = _absolute_path(offline[key], "offline.{}".format(key))
 
@@ -316,50 +483,56 @@ def _validate_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "installer_screenshot",
         "category_id",
         "operator_id",
-        "challenge",
         "environment_observation",
         "target_dir",
         "timeout_ms",
     }
     _require_exact_keys(target, target_keys, "target")
-    for key in target_keys - {"category_id", "operator_id", "challenge", "timeout_ms"}:
+    for key in target_keys - {"category_id", "operator_id", "timeout_ms"}:
         target[key] = _absolute_path(target[key], "target.{}".format(key))
     if type(target["category_id"]) is not str or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", target["category_id"]):
         raise OrchestratorError("target.category_id is invalid")
     if type(target["operator_id"]) is not str or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", target["operator_id"]):
         raise OrchestratorError("target.operator_id is invalid")
-    if type(target["challenge"]) is not str or not CHALLENGE_RE.fullmatch(target["challenge"]):
-        raise OrchestratorError("target.challenge is invalid")
     if type(target["timeout_ms"]) is not int or not 30000 <= target["timeout_ms"] <= 1800000:
         raise OrchestratorError("target.timeout_ms is outside the installed runner contract")
+    canonical_target_names = {
+        "install_observation": "single-deb-install-observation.json",
+        "method_attestation": "single-deb-install-method-attestation.json",
+        "environment_observation": "environment-observation.json",
+    }
+    observation_parent = Path(target["install_observation"]).parent
+    for key, basename in canonical_target_names.items():
+        path = Path(target[key])
+        if path.name != basename or path.parent != observation_parent:
+            raise OrchestratorError(
+                "target.{} must use basename {} in the canonical observation directory".format(
+                    key, basename
+                )
+            )
+    try:
+        Path(target["installer_screenshot"]).relative_to(observation_parent)
+    except ValueError:
+        pass
+    else:
+        raise OrchestratorError(
+            "target.installer_screenshot must remain outside the observation directory until attestation"
+        )
 
     release = _require_mapping(payload["release"], "release")
     release_keys = {
         "records_dir",
-        "certification_output_dir",
-        "certification_challenge",
-        "publication_challenge",
-        "ci_evidence",
+        "certification_challenge_envelope",
+        "publication_challenge_envelope",
         "private_key",
         "customer_output",
         "receipt_root",
     }
     _require_exact_keys(release, release_keys, "release")
-    for key in release_keys - {"certification_challenge", "publication_challenge"}:
+    for key in release_keys:
         release[key] = _absolute_path(release[key], "release.{}".format(key))
-    for key in ("certification_challenge", "publication_challenge"):
-        if type(release[key]) is not str or not CHALLENGE_RE.fullmatch(release[key]):
-            raise OrchestratorError("release.{} is invalid".format(key))
-    challenges = {
-        offline["challenge"],
-        target["challenge"],
-        release["certification_challenge"],
-        release["publication_challenge"],
-    }
-    if len(challenges) != 4:
-        raise OrchestratorError(
-            "offline, target, certification, and publication challenges must be independent"
-        )
+    if release["certification_challenge_envelope"] == release["publication_challenge_envelope"]:
+        raise OrchestratorError("certification and publication challenge envelope paths must be distinct")
     return payload
 
 
@@ -448,6 +621,7 @@ def initialize(config_path: Path, state_path: Path) -> Dict[str, Any]:
         "config": config,
         "input_identity": input_identity,
         "candidate_deb": None,
+        "challenge_envelopes": None,
         "remote_attempt_id": uuid.uuid4().hex[:16],
         "current_stage": STAGES[0],
         "stages": {
@@ -513,6 +687,42 @@ def _load_state(path: Path) -> Dict[str, Any]:
     candidate_required = current_stage is None or current_index > STAGES.index("remote_build")
     if candidate_required != (candidate is not None):
         raise OrchestratorError("orchestrator state candidate checkpoint sequence is invalid")
+    challenge_identities = state.get("challenge_envelopes")
+    if current_index <= STAGES.index("challenge_preparation"):
+        expected_challenge_purposes = set()
+    elif current_index <= STAGES.index("publication_sign"):
+        expected_challenge_purposes = {"certification"}
+    else:
+        expected_challenge_purposes = {"certification", "publication"}
+    if not expected_challenge_purposes:
+        if challenge_identities is not None:
+            raise OrchestratorError(
+                "orchestrator state challenge-envelope checkpoint sequence is invalid"
+            )
+    else:
+        if (
+            type(challenge_identities) is not dict
+            or set(challenge_identities) != expected_challenge_purposes
+        ):
+            raise OrchestratorError(
+                "orchestrator state challenge-envelope identity is incomplete"
+            )
+        loaded_challenges = {}  # type: Dict[str, Dict[str, Any]]
+        for purpose, expected in challenge_identities.items():
+            _same_fingerprint(
+                _require_mapping(expected, "challenge_envelopes.{}".format(purpose)),
+                "{} challenge envelope".format(purpose),
+            )
+            loaded_challenges[purpose] = _load_challenge_envelope(
+                state,
+                purpose,
+                require_active=False,
+            )
+        if set(loaded_challenges) == {"certification", "publication"}:
+            _assert_challenges_independent(
+                loaded_challenges["certification"],
+                loaded_challenges["publication"],
+            )
     for stage in STAGES:
         entry = _require_mapping(stages[stage], "stage {}".format(stage))
         if entry.get("status") == "passed":
@@ -555,8 +765,9 @@ def _command(
     log_path: str,
     boundary: str,
     env: Optional[Dict[str, str]] = None,
+    required_inputs: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    return {
+    result = {
         "label": label,
         "argv": list(argv),
         "cwd": cwd,
@@ -564,6 +775,9 @@ def _command(
         "log_path": log_path,
         "boundary": boundary,
     }
+    if required_inputs is not None:
+        result["required_inputs"] = list(required_inputs)
+    return result
 
 
 def _stage_log(config: Dict[str, Any], ordinal: int, stage: str) -> str:
@@ -729,9 +943,10 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
         raise OrchestratorError("stage {} requires a bound candidate DEB".format(stage))
     deb = candidate["path"]
     manifest = build_output / "taiji-package-manifest.json"
-    certification_dir = Path(config["release"]["certification_output_dir"])
+    certification_dir = delivery / "certification"
     certification_set = certification_dir / "certification-set.json"
     certification_signature = Path(str(certification_set) + ".sig")
+    ci_evidence = delivery / "github-ci-evidence.json"
     release_evidence = delivery / "release-evidence.json"
     release_signature = Path(str(release_evidence) + ".sig")
 
@@ -764,7 +979,66 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             ),
         ]
 
+    if stage == "challenge_preparation":
+        helper = repo / "scripts/taiji-challenge-envelope.py"
+        commands = []  # type: List[Dict[str, Any]]
+        envelope = _challenge_path(config, "certification")
+        if not envelope.exists() and not envelope.is_symlink():
+            commands.append(
+                _command(
+                    "issue certification challenge envelope",
+                    [
+                        "python3",
+                        str(helper),
+                        "issue",
+                        "--purpose",
+                        "certification",
+                        "--source-commit",
+                        state["source_commit"],
+                        "--deb",
+                        deb,
+                        "--output",
+                        str(envelope),
+                        "--ttl-seconds",
+                        str(CHALLENGE_TTL_SECONDS),
+                    ],
+                    str(repo),
+                    _stage_log(config, 4, stage),
+                    "local-security-preparation",
+                    common_env,
+                )
+            )
+        commands.append(
+            _command(
+                "verify certification challenge envelope",
+                [
+                    "python3",
+                    str(helper),
+                    "verify",
+                    "--envelope",
+                    str(envelope),
+                    "--purpose",
+                    "certification",
+                    "--source-commit",
+                    state["source_commit"],
+                    "--deb",
+                    deb,
+                    "--require-active",
+                ],
+                str(repo),
+                _stage_log(config, 4, stage),
+                "local-security-preparation",
+                common_env,
+            )
+        )
+        return commands
+
     if stage == "offline_rehearsal":
+        certification_challenge = _load_challenge_envelope(
+            state,
+            "certification",
+            require_active=True,
+        )["nonce"]
         offline = config["offline"]
         return [
             _command(
@@ -789,23 +1063,32 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     "--image",
                     offline["image"],
                     "--challenge",
-                    offline["challenge"],
+                    certification_challenge,
                 ],
                 str(repo),
-                _stage_log(config, 4, stage),
+                _stage_log(config, 5, stage),
                 "docker-external-approval",
                 common_env,
             )
         ]
 
     if stage == "target_acceptance":
+        certification_challenge = _load_challenge_envelope(
+            state,
+            "certification",
+            require_active=True,
+        )["nonce"]
         target = config["target"]
         target_delivery = Path(target["delivery_dir"])
         observer = target_delivery / "验收工具/observe-single-deb-install.py"
         target_manifest = target_delivery / "生成的安装包/taiji-package-manifest.json"
         target_matrix = target_delivery / "验收工具/certification-matrix.json"
         output_dir = str(Path(target["install_observation"]).parent)
-        screenshot = target["installer_screenshot"]
+        raw_screenshot = target["installer_screenshot"]
+        canonical_screenshot = str(
+            Path(target["install_observation"]).parent
+            / "single-deb-graphical-installer.png"
+        )
         return [
             _command(
                 "start controlled pre-install observer on target",
@@ -819,7 +1102,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     "--manifest",
                     str(target_manifest),
                     "--challenge",
-                    target["challenge"],
+                    certification_challenge,
                     "--matrix",
                     str(target_matrix),
                     "--category-id",
@@ -828,7 +1111,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     output_dir,
                 ],
                 target["delivery_dir"],
-                _stage_log(config, 5, stage),
+                _stage_log(config, 6, stage),
                 "target-manual-external-approval",
             ),
             {
@@ -836,7 +1119,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 "argv": [],
                 "cwd": target["customer_dir"],
                 "env": {},
-                "log_path": _stage_log(config, 5, stage),
+                "log_path": _stage_log(config, 6, stage),
                 "boundary": "target-human-gate",
                 "manual_action": "断开非必要外网，在文件管理器双击唯一 DEB，保存完整图形安装器成功 PNG；编排器不会自动越过。",
             },
@@ -850,9 +1133,9 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     "--observation",
                     target["install_observation"],
                     "--graphical-evidence",
-                    screenshot,
+                    raw_screenshot,
                     "--challenge",
-                    target["challenge"],
+                    certification_challenge,
                     "--operator-id",
                     target["operator_id"],
                     "--confirmation",
@@ -861,7 +1144,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     output_dir,
                 ],
                 target["delivery_dir"],
-                _stage_log(config, 5, stage),
+                _stage_log(config, 6, stage),
                 "target-human-gate",
             ),
             _command(
@@ -877,11 +1160,11 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     "--method-attestation",
                     target["method_attestation"],
                     "--installer-screenshot",
-                    screenshot,
+                    canonical_screenshot,
                     "--category-id",
                     target["category_id"],
                     "--challenge",
-                    target["challenge"],
+                    certification_challenge,
                     "--environment-observation",
                     target["environment_observation"],
                     "--target-dir",
@@ -890,7 +1173,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     str(target["timeout_ms"]),
                 ],
                 target["delivery_dir"],
-                _stage_log(config, 5, stage),
+                _stage_log(config, 6, stage),
                 "target-manual-external-approval",
             ),
         ]
@@ -915,11 +1198,11 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     str(policy),
                     "--output",
                     str(certification_dir),
-                    "--challenge",
-                    release["certification_challenge"],
+                    "--challenge-envelope",
+                    release["certification_challenge_envelope"],
                 ],
                 str(repo),
-                _stage_log(config, 6, stage),
+                _stage_log(config, 7, stage),
                 "offline-signing-human-approval",
                 common_env,
             ),
@@ -932,15 +1215,65 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     release["private_key"],
                 ],
                 str(repo),
-                _stage_log(config, 6, stage),
+                _stage_log(config, 7, stage),
                 "offline-signing-human-approval",
-                {"TAIJI_CERTIFICATION_CHALLENGE": release["certification_challenge"]},
             ),
         ]
 
     if stage == "publication_sign":
         release = config["release"]
-        return [
+        helper = repo / "scripts/taiji-challenge-envelope.py"
+        publication_envelope = _challenge_path(config, "publication")
+        commands = []  # type: List[Dict[str, Any]]
+        if not publication_envelope.exists() and not publication_envelope.is_symlink():
+            commands.append(
+                _command(
+                    "issue publication challenge envelope",
+                    [
+                        "python3",
+                        str(helper),
+                        "issue",
+                        "--purpose",
+                        "publication",
+                        "--source-commit",
+                        state["source_commit"],
+                        "--deb",
+                        deb,
+                        "--output",
+                        str(publication_envelope),
+                        "--ttl-seconds",
+                        str(CHALLENGE_TTL_SECONDS),
+                    ],
+                    str(repo),
+                    _stage_log(config, 8, stage),
+                    "local-security-preparation",
+                    common_env,
+                )
+            )
+        commands.append(
+            _command(
+                "verify publication challenge envelope",
+                [
+                    "python3",
+                    str(helper),
+                    "verify",
+                    "--envelope",
+                    str(publication_envelope),
+                    "--purpose",
+                    "publication",
+                    "--source-commit",
+                    state["source_commit"],
+                    "--deb",
+                    deb,
+                    "--require-active",
+                ],
+                str(repo),
+                _stage_log(config, 8, stage),
+                "local-security-preparation",
+                common_env,
+            )
+        )
+        commands.extend([
             _command(
                 "assemble v3 publication evidence",
                 [
@@ -957,16 +1290,23 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     "--certification-signature",
                     str(certification_signature),
                     "--ci-evidence",
-                    release["ci_evidence"],
+                    str(ci_evidence),
                     "--output",
                     str(release_evidence),
-                    "--challenge",
-                    release["publication_challenge"],
+                    "--challenge-envelope",
+                    release["publication_challenge_envelope"],
                 ],
                 str(repo),
-                _stage_log(config, 7, stage),
+                _stage_log(config, 8, stage),
                 "offline-signing-human-approval",
                 common_env,
+                required_inputs=[
+                    str(certification_set),
+                    str(certification_signature),
+                    str(ci_evidence),
+                    str(delivery / "github-ci-run-response.json"),
+                    str(delivery / "github-ci-jobs-response.json"),
+                ],
             ),
             _command(
                 "sign publication evidence with offline key",
@@ -977,11 +1317,11 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     release["private_key"],
                 ],
                 str(repo),
-                _stage_log(config, 7, stage),
+                _stage_log(config, 8, stage),
                 "offline-signing-human-approval",
-                {"TAIJI_PUBLICATION_CHALLENGE": release["publication_challenge"]},
             ),
-        ]
+        ])
+        return commands
 
     if stage == "release_check":
         release = config["release"]
@@ -1003,11 +1343,9 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     str(release_signature),
                 ],
                 str(repo),
-                _stage_log(config, 8, stage),
+                _stage_log(config, 9, stage),
                 "network-and-release-human-approval",
                 {
-                    "TAIJI_CERTIFICATION_CHALLENGE": release["certification_challenge"],
-                    "TAIJI_PUBLICATION_CHALLENGE": release["publication_challenge"],
                     "TAIJI_RELEASE_REPO_ROOT": str(repo),
                 },
             )
@@ -1041,12 +1379,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                     release["receipt_root"],
                 ],
                 str(repo),
-                _stage_log(config, 9, stage),
+                _stage_log(config, 10, stage),
                 "publication-human-approval",
-                {
-                    "TAIJI_CERTIFICATION_CHALLENGE": release["certification_challenge"],
-                    "TAIJI_PUBLICATION_CHALLENGE": release["publication_challenge"],
-                },
             )
         ]
     raise OrchestratorError("unknown stage: {}".format(stage))
@@ -1062,7 +1396,7 @@ def build_plan(state: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     if stage is None:
         return (
             {
-                "schema": "taiji-linux-golden-orchestrator-plan/v1",
+                "schema": PLAN_SCHEMA,
                 "status": "CHECKPOINTS_COMPLETE",
                 "stage": None,
                 "identities": identity,
@@ -1073,11 +1407,12 @@ def build_plan(state: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
             },
             0,
         )
+    _validate_challenges_for_stage(state, stage)
     stage_entry = state["stages"][stage]
     if stage_entry["status"] == "failed":
         return (
             {
-                "schema": "taiji-linux-golden-orchestrator-plan/v1",
+                "schema": PLAN_SCHEMA,
                 "status": "STOPPED",
                 "stage": stage,
                 "identities": identity,
@@ -1094,7 +1429,7 @@ def build_plan(state: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
         )
     return (
         {
-            "schema": "taiji-linux-golden-orchestrator-plan/v1",
+            "schema": PLAN_SCHEMA,
             "status": "READY",
             "stage": stage,
             "identities": identity,
@@ -1159,6 +1494,57 @@ def checkpoint(
         raise OrchestratorError("remote_build pass must bind the retrieved candidate with --deb")
     if stage not in {"input_verify", "remote_build"} and state.get("candidate_deb") is None:
         raise OrchestratorError("stage {} cannot pass before a candidate DEB is bound".format(stage))
+    if stage == "challenge_preparation" and result == "pass":
+        _validate_challenges_for_stage(state, stage)
+        state["challenge_envelopes"] = {
+            "certification": _fingerprint(
+                _challenge_path(state["config"], "certification"),
+                "certification challenge envelope",
+                MAX_CONTROL_FILE_BYTES,
+            )
+        }
+    elif result == "pass" and stage in {"offline_rehearsal", "target_acceptance"}:
+        _validate_challenges_for_stage(state, stage)
+    elif result == "pass" and stage == "certification_sign":
+        _assert_publication_challenge_absent(state["config"])
+        _load_challenge_envelope(
+            state,
+            "certification",
+            require_active=False,
+        )
+    elif result == "pass" and stage == "publication_sign":
+        certification = _load_challenge_envelope(
+            state,
+            "certification",
+            require_active=False,
+        )
+        publication = _load_challenge_envelope(
+            state,
+            "publication",
+            require_active=False,
+        )
+        _assert_challenges_independent(certification, publication)
+        challenge_identities = _require_mapping(
+            state.get("challenge_envelopes"),
+            "challenge_envelopes",
+        )
+        challenge_identities["publication"] = _fingerprint(
+            _challenge_path(state["config"], "publication"),
+            "publication challenge envelope",
+            MAX_CONTROL_FILE_BYTES,
+        )
+    elif result == "pass" and stage in {"release_check", "publish"}:
+        certification = _load_challenge_envelope(
+            state,
+            "certification",
+            require_active=False,
+        )
+        publication = _load_challenge_envelope(
+            state,
+            "publication",
+            require_active=False,
+        )
+        _assert_challenges_independent(certification, publication)
 
     recorded_at = _now()
     history = entry["history"]
@@ -1202,6 +1588,7 @@ def retry(
     entry = state["stages"][stage]
     if entry.get("status") != "failed":
         raise OrchestratorError("retry is allowed only after a recorded failure")
+    _validate_challenges_for_stage(state, stage)
     entry["history"].append({"event": "retry", "recorded_at_utc": _now()})
     entry["status"] = "pending"
     for key in ("recorded_at_utc", "log", "evidence", "explicit_approval_recorded"):
@@ -1219,6 +1606,7 @@ def _summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "schema": state["schema"],
         "source_commit": state["source_commit"],
         "candidate_deb": state.get("candidate_deb"),
+        "challenge_envelopes": state.get("challenge_envelopes"),
         "remote_attempt_id": state["remote_attempt_id"],
         "current_stage": state.get("current_stage"),
         "input_identity": state["input_identity"],

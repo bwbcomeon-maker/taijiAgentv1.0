@@ -8,12 +8,14 @@ import json
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
+CHALLENGE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
 PYTHON38_GATE = ROOT / "tests/python38_linux_packaging_gate.py"
 SOURCE_COMMIT = "a" * 40
 
@@ -54,8 +56,10 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.review_root = self.review_parent / "taiji-agentv1.0"
         self.state = self.root / "orchestrator-state.json"
         self.config = self.root / "orchestrator-config.json"
+        self.certification_envelope = self.root / "certification-challenge-envelope.json"
+        self.publication_envelope = self.root / "publication-challenge-envelope.json"
         config = {
-            "schema": "taiji-linux-golden-orchestrator-config/v1",
+            "schema": "taiji-linux-golden-orchestrator-config/v2",
             "source_commit": SOURCE_COMMIT,
             "repo_root": str(ROOT),
             "input": {
@@ -73,7 +77,6 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             },
             "offline": {
                 "image": "taiji-offline-rehearsal:local",
-                "challenge": "b" * 64,
                 "output_dir": str(self.root / "offline-evidence"),
                 "previous_deb": str(self.root / "taiji-agent_1.0.0_amd64.deb"),
                 "previous_signature": str(self.root / "taiji-agent_1.0.0_amd64.deb.sig"),
@@ -84,20 +87,17 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
                 "customer_dir": "/home/kylin/taiji-customer-deb",
                 "install_observation": "/home/kylin/taiji-install/single-deb-install-observation.json",
                 "method_attestation": "/home/kylin/taiji-install/single-deb-install-method-attestation.json",
-                "installer_screenshot": "/home/kylin/taiji-install/single-deb-graphical-installer.png",
+                "installer_screenshot": "/home/kylin/raw-installer-success.png",
                 "category_id": "kylin-v10-sp1-x86_64",
                 "operator_id": "operator-001",
-                "challenge": "c" * 64,
                 "environment_observation": "/home/kylin/taiji-install/environment-observation.json",
                 "target_dir": "/home/kylin/taiji-target-verification",
                 "timeout_ms": 900000,
             },
             "release": {
                 "records_dir": str(self.root / "certification-records"),
-                "certification_output_dir": str(self.root / "certification"),
-                "certification_challenge": "d" * 64,
-                "publication_challenge": "e" * 64,
-                "ci_evidence": str(self.root / "github-ci-evidence.json"),
+                "certification_challenge_envelope": str(self.certification_envelope),
+                "publication_challenge_envelope": str(self.publication_envelope),
                 "private_key": str(self.root / "offline-release-private-key.pem"),
                 "customer_output": str(self.root / "customer-output"),
                 "receipt_root": str(self.root / "internal-receipt"),
@@ -203,19 +203,131 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         deb.write_bytes(b"immutable-candidate-deb")
         return deb, sha256(deb)
 
+    def issue_challenge_envelope(
+        self,
+        deb: Path,
+        purpose: str,
+        nonce: str,
+    ) -> None:
+        output = {
+            "certification": self.certification_envelope,
+            "publication": self.publication_envelope,
+        }[purpose]
+        result = subprocess.run(
+            [
+                "python3",
+                str(CHALLENGE_HELPER),
+                "issue",
+                "--purpose",
+                purpose,
+                "--source-commit",
+                SOURCE_COMMIT,
+                "--deb",
+                str(deb),
+                "--output",
+                str(output),
+                "--ttl-seconds",
+                "604800",
+                "--nonce",
+                nonce,
+            ],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def issue_certification_envelope(self, deb: Path) -> None:
+        self.issue_challenge_envelope(deb, "certification", "d" * 64)
+
+    def issue_publication_envelope(
+        self,
+        deb: Path,
+        *,
+        nonce: str = "e" * 64,
+    ) -> None:
+        self.issue_challenge_envelope(deb, "publication", nonce)
+
+    @staticmethod
+    def expire_challenge_envelope(path: Path) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+        envelope["issued_at_utc"] = (now - timedelta(hours=2)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        envelope["expires_at_utc"] = (now - timedelta(hours=1)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        path.write_text(
+            json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+
+    def advance_to_challenge_preparation(self) -> tuple[Path, str]:
+        self.init()
+        self.assertEqual(self.checkpoint("input_verify").returncode, 0)
+        deb, digest = self.bind_candidate()
+        self.assertEqual(
+            self.checkpoint("remote_build", deb=deb, approve=True).returncode,
+            0,
+        )
+        self.assertEqual(
+            self.checkpoint("artifact_preflight", expected_deb=digest).returncode,
+            0,
+        )
+        return deb, digest
+
+    def advance_to_offline_rehearsal(self) -> tuple[Path, str]:
+        deb, digest = self.advance_to_challenge_preparation()
+        self.issue_certification_envelope(deb)
+        prepared = self.checkpoint(
+            "challenge_preparation",
+            expected_deb=digest,
+        )
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        return deb, digest
+
+    def advance_to_certification_sign(self) -> tuple[Path, str]:
+        deb, digest = self.advance_to_offline_rehearsal()
+        for stage in ("offline_rehearsal", "target_acceptance"):
+            result = self.checkpoint(
+                stage,
+                approve=True,
+                expected_deb=digest,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return deb, digest
+
+    def advance_to_publication_sign(self) -> tuple[Path, str]:
+        deb, digest = self.advance_to_certification_sign()
+        certified = self.checkpoint(
+            "certification_sign",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertEqual(certified.returncode, 0, certified.stderr)
+        return deb, digest
+
     def test_init_and_plan_bind_input_trio_and_emit_local_verify_only(self):
         state = self.init()
-        self.assertEqual(state["schema"], "taiji-linux-golden-orchestrator-state/v1")
+        self.assertEqual(state["schema"], "taiji-linux-golden-orchestrator-state/v2")
         self.assertEqual(state["source_commit"], SOURCE_COMMIT)
         self.assertEqual(state["current_stage"], "input_verify")
+        self.assertIn("checkpoint-plan-only", state["scope"])
+        self.assertIn("authoritative", state["scope"])
         self.assertEqual(state["input_identity"]["archive"]["sha256"], sha256(self.input_archive))
         self.assertEqual(self.state.stat().st_mode & 0o777, 0o600)
 
         result = self.plan()
         self.assertEqual(result.returncode, 0, result.stderr)
         plan = json.loads(result.stdout)
+        self.assertEqual(plan["schema"], "taiji-linux-golden-orchestrator-plan/v2")
         self.assertEqual(plan["status"], "READY")
         self.assertEqual(plan["stage"], "input_verify")
+        self.assertIn("does not execute", plan["scope_note"])
+        self.assertIn("cannot replace", plan["scope_note"])
         self.assertEqual(len(plan["commands"]), 1)
         self.assertEqual(
             Path(plan["commands"][0]["argv"][1]).name,
@@ -227,6 +339,599 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         dry_run = self.plan(dry_run=True)
         self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
         self.assertEqual(json.loads(dry_run.stdout), plan)
+
+    def test_legacy_v1_config_and_state_are_rejected_instead_of_reinterpreted(self):
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config["schema"] = "taiji-linux-golden-orchestrator-config/v1"
+        self.config.write_text(
+            json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        rejected_config = self.command(
+            "init",
+            "--config",
+            str(self.config),
+            "--state",
+            str(self.state),
+        )
+        self.assertNotEqual(rejected_config.returncode, 0)
+        self.assertIn("schema", rejected_config.stderr.lower())
+
+        config["schema"] = "taiji-linux-golden-orchestrator-config/v2"
+        self.config.write_text(
+            json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.init()
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        state["schema"] = "taiji-linux-golden-orchestrator-state/v1"
+        self.state.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.state.chmod(0o600)
+        rejected_state = self.plan()
+        self.assertNotEqual(rejected_state.returncode, 0)
+        self.assertIn("schema", rejected_state.stderr.lower())
+
+    def test_config_accepts_only_absolute_challenge_envelopes_and_canonical_bundle_paths(self):
+        accepted = self.init()
+        self.assertEqual(accepted["current_stage"], "input_verify")
+
+        unsafe_fields = (
+            ("offline", "challenge", "b" * 64),
+            ("target", "challenge", "c" * 64),
+            ("release", "certification_challenge", "d" * 64),
+            ("release", "publication_challenge", "e" * 64),
+            ("release", "certification_output_dir", str(self.root / "drifted-certification")),
+            ("release", "ci_evidence", str(self.root / "drifted-ci-evidence.json")),
+        )
+        for section, key, value in unsafe_fields:
+            with self.subTest(section=section, key=key):
+                self.state.unlink(missing_ok=True)
+                config = json.loads(self.config.read_text(encoding="utf-8"))
+                config[section][key] = value
+                self.config.write_text(
+                    json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                result = self.command(
+                    "init",
+                    "--config",
+                    str(self.config),
+                    "--state",
+                    str(self.state),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.state.exists())
+                config[section].pop(key)
+                self.config.write_text(
+                    json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config["release"]["certification_challenge_envelope"] = "relative-envelope.json"
+        self.config.write_text(
+            json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        relative = self.command(
+            "init",
+            "--config",
+            str(self.config),
+            "--state",
+            str(self.state),
+        )
+        self.assertNotEqual(relative.returncode, 0)
+        self.assertIn("absolute", relative.stderr.lower())
+
+        config["release"]["certification_challenge_envelope"] = str(
+            self.certification_envelope
+        )
+        config["release"]["publication_challenge_envelope"] = str(
+            self.certification_envelope
+        )
+        self.config.write_text(
+            json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        same_path = self.command(
+            "init",
+            "--config",
+            str(self.config),
+            "--state",
+            str(self.state),
+        )
+        self.assertNotEqual(same_path.returncode, 0)
+        self.assertIn("distinct", same_path.stderr.lower())
+
+    def test_target_install_evidence_paths_have_one_canonical_observation_directory(self):
+        original = json.loads(self.config.read_text(encoding="utf-8"))
+        unsafe_paths = (
+            (
+                "installer_screenshot",
+                "/home/kylin/taiji-install/raw-installer-success.png",
+            ),
+            (
+                "installer_screenshot",
+                "/home/kylin/taiji-install/raw/raw-installer-success.png",
+            ),
+            (
+                "install_observation",
+                "/home/kylin/taiji-install/renamed-observation.json",
+            ),
+            (
+                "method_attestation",
+                "/home/kylin/taiji-install/renamed-attestation.json",
+            ),
+            (
+                "environment_observation",
+                "/home/kylin/taiji-install/renamed-environment.json",
+            ),
+            (
+                "method_attestation",
+                "/home/kylin/other/single-deb-install-method-attestation.json",
+            ),
+            (
+                "environment_observation",
+                "/home/kylin/other/environment-observation.json",
+            ),
+        )
+        for key, value in unsafe_paths:
+            with self.subTest(key=key, value=value):
+                self.state.unlink(missing_ok=True)
+                config = json.loads(json.dumps(original))
+                config["target"][key] = value
+                self.config.write_text(
+                    json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                result = self.command(
+                    "init",
+                    "--config",
+                    str(self.config),
+                    "--state",
+                    str(self.state),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.state.exists())
+
+        self.config.write_text(
+            json.dumps(original, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_preparation_issues_only_certification_envelope_then_its_nonce_drives_evidence(self):
+        deb, digest = self.advance_to_challenge_preparation()
+
+        preparation = self.plan(expected_deb=digest)
+        self.assertEqual(preparation.returncode, 0, preparation.stderr)
+        payload = json.loads(preparation.stdout)
+        self.assertEqual(payload["stage"], "challenge_preparation")
+        command_arguments = [command["argv"] for command in payload["commands"]]
+        self.assertEqual(len(command_arguments), 2)
+        self.assertTrue(all(Path(argv[1]).name == CHALLENGE_HELPER.name for argv in command_arguments))
+        self.assertIn("issue", command_arguments[0])
+        self.assertIn("verify", command_arguments[1])
+        self.assertIn("--require-active", command_arguments[1])
+        self.assertIn(str(self.certification_envelope), command_arguments[0])
+        self.assertIn(str(self.certification_envelope), command_arguments[1])
+        self.assertNotIn(str(self.publication_envelope), "\n".join(" ".join(argv) for argv in command_arguments))
+        self.assertFalse(self.certification_envelope.exists())
+        self.assertFalse(self.publication_envelope.exists())
+
+        self.issue_certification_envelope(deb)
+        prepared = self.checkpoint(
+            "challenge_preparation",
+            expected_deb=digest,
+        )
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        prepared_state = json.loads(prepared.stdout)
+        self.assertEqual(set(prepared_state["challenge_envelopes"]), {"certification"})
+        self.assertFalse(self.publication_envelope.exists())
+
+        offline = json.loads(self.plan(expected_deb=digest).stdout)
+        self.assertEqual(offline["stage"], "offline_rehearsal")
+        self.assertEqual(
+            offline["commands"][0]["argv"][offline["commands"][0]["argv"].index("--challenge") + 1],
+            "d" * 64,
+        )
+        self.assertEqual(
+            self.checkpoint(
+                "offline_rehearsal",
+                approve=True,
+                expected_deb=digest,
+            ).returncode,
+            0,
+        )
+
+        target = json.loads(self.plan(expected_deb=digest).stdout)
+        self.assertEqual(target["stage"], "target_acceptance")
+        for command in (target["commands"][0], target["commands"][2], target["commands"][3]):
+            argv = command["argv"]
+            self.assertEqual(argv[argv.index("--challenge") + 1], "d" * 64)
+        attestation_argv = target["commands"][2]["argv"]
+        runner_argv = target["commands"][3]["argv"]
+        self.assertEqual(
+            attestation_argv[attestation_argv.index("--graphical-evidence") + 1],
+            "/home/kylin/raw-installer-success.png",
+        )
+        self.assertEqual(
+            runner_argv[runner_argv.index("--installer-screenshot") + 1],
+            "/home/kylin/taiji-install/single-deb-graphical-installer.png",
+        )
+        self.assertEqual(
+            self.checkpoint(
+                "target_acceptance",
+                approve=True,
+                expected_deb=digest,
+            ).returncode,
+            0,
+        )
+
+        certification = json.loads(self.plan(expected_deb=digest).stdout)
+        self.assertEqual(certification["stage"], "certification_sign")
+        assembler = certification["commands"][0]["argv"]
+        self.assertIn("--challenge-envelope", assembler)
+        self.assertEqual(
+            assembler[assembler.index("--challenge-envelope") + 1],
+            str(self.certification_envelope),
+        )
+        self.assertNotIn("--challenge", assembler)
+        self.assertEqual(certification["commands"][1]["env"], {})
+
+    def test_publication_bundle_and_signer_use_the_review_delivery_contract(self):
+        _deb, digest = self.advance_to_offline_rehearsal()
+        for stage in ("offline_rehearsal", "target_acceptance"):
+            result = self.checkpoint(
+                stage,
+                approve=True,
+                expected_deb=digest,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        delivery = self.review_root / "taijiagent 打包交付"
+        certification_plan = json.loads(self.plan(expected_deb=digest).stdout)
+        certification_assembler = certification_plan["commands"][0]["argv"]
+        self.assertEqual(
+            certification_assembler[certification_assembler.index("--output") + 1],
+            str(delivery / "certification"),
+        )
+        self.assertEqual(
+            certification_plan["commands"][1]["argv"],
+            [
+                "bash",
+                str(ROOT / "scripts/sign-taiji-release-evidence.sh"),
+                str(delivery / "certification/certification-set.json"),
+                str(self.root / "offline-release-private-key.pem"),
+            ],
+        )
+        certified = self.checkpoint(
+            "certification_sign",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertEqual(certified.returncode, 0, certified.stderr)
+
+        publication_plan = self.plan(expected_deb=digest)
+        self.assertEqual(publication_plan.returncode, 0, publication_plan.stderr)
+        publication = json.loads(publication_plan.stdout)
+        self.assertEqual(publication["stage"], "publication_sign")
+        issue = publication["commands"][0]["argv"]
+        verify = publication["commands"][1]["argv"]
+        self.assertIn("issue", issue)
+        self.assertIn("--purpose", issue)
+        self.assertEqual(issue[issue.index("--purpose") + 1], "publication")
+        self.assertIn(str(self.publication_envelope), issue)
+        self.assertIn("verify", verify)
+        self.assertIn("--require-active", verify)
+        self.assertIn(str(self.publication_envelope), verify)
+        self.assertFalse(self.publication_envelope.exists())
+
+        assembler_command = publication["commands"][2]
+        assembler = assembler_command["argv"]
+        self.assertEqual(
+            assembler[assembler.index("--certification-set") + 1],
+            str(delivery / "certification/certification-set.json"),
+        )
+        self.assertEqual(
+            assembler[assembler.index("--certification-signature") + 1],
+            str(delivery / "certification/certification-set.json.sig"),
+        )
+        self.assertEqual(
+            assembler[assembler.index("--ci-evidence") + 1],
+            str(delivery / "github-ci-evidence.json"),
+        )
+        self.assertEqual(
+            assembler[assembler.index("--output") + 1],
+            str(delivery / "release-evidence.json"),
+        )
+        self.assertEqual(
+            assembler[assembler.index("--challenge-envelope") + 1],
+            str(self.publication_envelope),
+        )
+        self.assertEqual(
+            assembler_command["required_inputs"],
+            [
+                str(delivery / "certification/certification-set.json"),
+                str(delivery / "certification/certification-set.json.sig"),
+                str(delivery / "github-ci-evidence.json"),
+                str(delivery / "github-ci-run-response.json"),
+                str(delivery / "github-ci-jobs-response.json"),
+            ],
+        )
+
+        signer = publication["commands"][3]
+        self.assertEqual(
+            signer["argv"],
+            [
+                "bash",
+                str(ROOT / "scripts/sign-taiji-release-evidence.sh"),
+                str(delivery / "release-evidence.json"),
+                str(self.root / "offline-release-private-key.pem"),
+            ],
+        )
+        self.assertNotIn("--delivery-dir", signer["argv"])
+        self.assertEqual(signer["env"], {})
+
+        self.issue_publication_envelope(_deb)
+        resumed_plan = self.plan(expected_deb=digest)
+        self.assertEqual(resumed_plan.returncode, 0, resumed_plan.stderr)
+        resumed_commands = json.loads(resumed_plan.stdout)["commands"]
+        self.assertEqual(len(resumed_commands), 3)
+        self.assertIn("verify", resumed_commands[0]["argv"])
+        self.assertNotIn(
+            "issue",
+            [argument for command in resumed_commands for argument in command["argv"]],
+        )
+
+    def test_publication_envelope_cannot_be_issued_before_certification_is_signed(self):
+        deb, digest = self.advance_to_offline_rehearsal()
+        self.issue_publication_envelope(deb)
+
+        premature = self.plan(expected_deb=digest)
+
+        self.assertNotEqual(premature.returncode, 0)
+        self.assertIn("publication_sign", premature.stderr)
+        self.assertIn("fresh path", premature.stderr.lower())
+
+    def test_certification_checkpoint_rejects_publication_issued_after_plan_but_before_sign_completion(self):
+        deb, digest = self.advance_to_certification_sign()
+        certification_plan = self.plan(expected_deb=digest)
+        self.assertEqual(certification_plan.returncode, 0, certification_plan.stderr)
+        self.issue_publication_envelope(deb)
+
+        raced = self.checkpoint(
+            "certification_sign",
+            approve=True,
+            expected_deb=digest,
+        )
+
+        self.assertNotEqual(raced.returncode, 0)
+        self.assertIn("publication_sign", raced.stderr)
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(state["current_stage"], "certification_sign")
+
+    def test_resume_and_retry_fail_closed_after_challenge_expiry(self):
+        _deb, digest = self.advance_to_offline_rehearsal()
+        failed = self.checkpoint(
+            "offline_rehearsal",
+            result="fail",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+
+        self.expire_challenge_envelope(self.certification_envelope)
+        module = self.load_orchestrator()
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        state["challenge_envelopes"]["certification"] = module._fingerprint(
+            self.certification_envelope,
+            "certification challenge envelope",
+            module.MAX_CONTROL_FILE_BYTES,
+        )
+        self.state.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.state.chmod(0o600)
+
+        resumed = self.plan(expected_deb=digest)
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertIn("expired", resumed.stderr.lower())
+        retried = self.command(
+            "retry",
+            "--state",
+            str(self.state),
+            "--expect-source-commit",
+            SOURCE_COMMIT,
+            "--expect-deb-sha256",
+            digest,
+            "--stage",
+            "offline_rehearsal",
+        )
+        self.assertNotEqual(retried.returncode, 0)
+        self.assertIn("expired", retried.stderr.lower())
+
+    def test_resume_and_retry_fail_closed_after_signer_reserves_nonce(self):
+        _deb, digest = self.advance_to_offline_rehearsal()
+        failed = self.checkpoint(
+            "offline_rehearsal",
+            result="fail",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        module = self.load_orchestrator()
+        state = module._load_state(self.state)
+
+        signer_home = self.root / "signer-home"
+        reservation = (
+            signer_home
+            / ".local/state/taiji-release-evidence/signers"
+            / "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+            / "used-nonces"
+            / (("d" * 64) + ".used")
+        )
+        reservation.parent.mkdir(parents=True, mode=0o700)
+        reservation.write_text("reserved\n", encoding="utf-8")
+        reservation.chmod(0o600)
+
+        with mock.patch.object(
+            module,
+            "_signer_home",
+            return_value=signer_home,
+            create=True,
+        ):
+            with self.assertRaisesRegex(module.OrchestratorError, "reserved|used"):
+                module.build_plan(state)
+            with self.assertRaisesRegex(module.OrchestratorError, "reserved|used"):
+                module.retry(
+                    self.state,
+                    SOURCE_COMMIT,
+                    digest,
+                    "offline_rehearsal",
+                )
+
+    def test_publication_resume_and_retry_fail_closed_after_envelope_expiry(self):
+        deb, digest = self.advance_to_publication_sign()
+        self.issue_publication_envelope(deb)
+        failed = self.checkpoint(
+            "publication_sign",
+            result="fail",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        self.expire_challenge_envelope(self.publication_envelope)
+
+        resumed = self.plan(expected_deb=digest)
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertIn("expired", resumed.stderr.lower())
+        retried = self.command(
+            "retry",
+            "--state",
+            str(self.state),
+            "--expect-source-commit",
+            SOURCE_COMMIT,
+            "--expect-deb-sha256",
+            digest,
+            "--stage",
+            "publication_sign",
+        )
+        self.assertNotEqual(retried.returncode, 0)
+        self.assertIn("expired", retried.stderr.lower())
+
+    def test_publication_resume_and_retry_fail_closed_after_signer_reserves_nonce(self):
+        deb, digest = self.advance_to_publication_sign()
+        self.issue_publication_envelope(deb)
+        failed = self.checkpoint(
+            "publication_sign",
+            result="fail",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        module = self.load_orchestrator()
+        state = module._load_state(self.state)
+
+        signer_home = self.root / "publication-signer-home"
+        reservation = (
+            signer_home
+            / ".local/state/taiji-release-evidence/signers"
+            / "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+            / "used-nonces"
+            / (("e" * 64) + ".used")
+        )
+        reservation.parent.mkdir(parents=True, mode=0o700)
+        reservation.write_text("reserved\n", encoding="utf-8")
+        reservation.chmod(0o600)
+
+        with mock.patch.object(module, "_signer_home", return_value=signer_home):
+            with self.assertRaisesRegex(
+                module.OrchestratorError,
+                "reserved|used",
+            ) as stopped:
+                module.build_plan(state)
+            guidance = str(stopped.exception).lower()
+            self.assertIn("fresh", guidance)
+            self.assertIn("config/state", guidance)
+            self.assertIn("must not overwrite", guidance)
+            with self.assertRaisesRegex(module.OrchestratorError, "reserved|used"):
+                module.retry(
+                    self.state,
+                    SOURCE_COMMIT,
+                    digest,
+                    "publication_sign",
+                )
+
+    def test_certification_checkpoint_can_record_signer_success_after_envelope_ttl_elapsed(self):
+        _deb, digest = self.advance_to_certification_sign()
+        self.expire_challenge_envelope(self.certification_envelope)
+        module = self.load_orchestrator()
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        state["challenge_envelopes"]["certification"] = module._fingerprint(
+            self.certification_envelope,
+            "certification challenge envelope",
+            module.MAX_CONTROL_FILE_BYTES,
+        )
+        self.state.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.state.chmod(0o600)
+
+        recorded = self.checkpoint(
+            "certification_sign",
+            approve=True,
+            expected_deb=digest,
+        )
+
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertEqual(json.loads(recorded.stdout)["current_stage"], "publication_sign")
+
+    def test_publication_checkpoint_can_record_signer_success_after_envelope_ttl_elapsed(self):
+        deb, digest = self.advance_to_publication_sign()
+        self.issue_publication_envelope(deb)
+        self.expire_challenge_envelope(self.publication_envelope)
+
+        recorded = self.checkpoint(
+            "publication_sign",
+            approve=True,
+            expected_deb=digest,
+        )
+
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertEqual(json.loads(recorded.stdout)["current_stage"], "release_check")
+
+    def test_release_resume_does_not_require_signed_publication_envelope_to_still_be_active(self):
+        deb, digest = self.advance_to_publication_sign()
+        self.issue_publication_envelope(deb)
+        published = self.checkpoint(
+            "publication_sign",
+            approve=True,
+            expected_deb=digest,
+        )
+        self.assertEqual(published.returncode, 0, published.stderr)
+
+        self.expire_challenge_envelope(self.publication_envelope)
+        module = self.load_orchestrator()
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        state["challenge_envelopes"]["publication"] = module._fingerprint(
+            self.publication_envelope,
+            "publication challenge envelope",
+            module.MAX_CONTROL_FILE_BYTES,
+        )
+        self.state.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.state.chmod(0o600)
+
+        resumed = self.plan(expected_deb=digest)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(json.loads(resumed.stdout)["stage"], "release_check")
 
     def test_checkpoint_is_ordered_and_external_stages_require_explicit_approval(self):
         self.init()
@@ -421,25 +1126,24 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertNotEqual(evidence_drift.returncode, 0)
         self.assertIn("evidence", evidence_drift.stderr)
 
-    def test_all_four_lifecycle_challenges_must_be_independent(self):
-        config = json.loads(self.config.read_text(encoding="utf-8"))
-        config["offline"]["challenge"] = config["target"]["challenge"]
-        self.config.write_text(
-            json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    def test_certification_and_publication_envelope_nonces_must_be_independent(self):
+        deb, digest = self.advance_to_offline_rehearsal()
+        for stage in ("offline_rehearsal", "target_acceptance", "certification_sign"):
+            result = self.checkpoint(
+                stage,
+                approve=True,
+                expected_deb=digest,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.issue_publication_envelope(deb, nonce="d" * 64)
 
-        result = self.command(
-            "init",
-            "--config",
-            str(self.config),
-            "--state",
-            str(self.state),
-        )
+        result = self.plan(expected_deb=digest)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("challenge", result.stderr.lower())
-        self.assertFalse(self.state.exists())
+        self.assertIn("independent", result.stderr.lower())
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(state["current_stage"], "publication_sign")
+        self.assertEqual(set(state["challenge_envelopes"]), {"certification"})
 
     def test_remote_host_cannot_be_parsed_as_an_ssh_option(self):
         config = json.loads(self.config.read_text(encoding="utf-8"))
@@ -549,10 +1253,11 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
 
         expected = {
             "artifact_preflight": "01_制包机_发布预检.sh",
+            "challenge_preparation": "taiji-challenge-envelope.py",
             "offline_rehearsal": "produce-taiji-offline-rehearsal.py",
             "target_acceptance": "/usr/bin/taiji-agent-acceptance",
             "certification_sign": "assemble-taiji-certification-set.py",
-            "publication_sign": "assemble-taiji-release-evidence.py",
+            "publication_sign": "sign-taiji-release-evidence.sh",
             "release_check": "taiji-release-check.sh",
             "publish": "publish-single-deb.sh",
         }
@@ -574,9 +1279,20 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             self.assertTrue(payload["checkpoint_required"])
             self.assertFalse(payload["auto_advance"])
             self.assertFalse((self.logs_dir / f"{stage}.log").exists())
+            if stage == "challenge_preparation":
+                self.issue_certification_envelope(deb)
+            if stage == "publication_sign":
+                self.issue_publication_envelope(deb)
             result = self.checkpoint(
                 stage,
-                approve=stage != "artifact_preflight",
+                approve=stage in {
+                    "offline_rehearsal",
+                    "target_acceptance",
+                    "certification_sign",
+                    "publication_sign",
+                    "release_check",
+                    "publish",
+                },
                 expected_deb=digest,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -585,9 +1301,18 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertEqual(complete.returncode, 0, complete.stderr)
         self.assertEqual(json.loads(complete.stdout)["status"], "CHECKPOINTS_COMPLETE")
 
-    def test_orchestrator_is_registered_in_python38_gate(self):
+    def test_challenge_helper_and_orchestrator_are_named_python38_gate_entries(self):
         source = PYTHON38_GATE.read_text(encoding="utf-8")
-        self.assertIn('ROOT / "scripts/taiji-linux-golden-orchestrator.py"', source)
+        self.assertIn(
+            'GOLDEN_ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"',
+            source,
+        )
+        self.assertIn(
+            'CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"',
+            source,
+        )
+        self.assertIn("GOLDEN_ORCHESTRATOR,", source)
+        self.assertIn("CHALLENGE_ENVELOPE_HELPER,", source)
 
 
 if __name__ == "__main__":

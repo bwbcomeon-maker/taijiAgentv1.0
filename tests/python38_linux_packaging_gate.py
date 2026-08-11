@@ -25,6 +25,8 @@ TARGET_EVIDENCE_ASSEMBLER = (
 INSTALL_OBSERVER = (
     ROOT / "tools/taiji-desktop-acceptance/observe-single-deb-install.py"
 )
+GOLDEN_ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
+CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
 PYTHON38_ENTRYPOINTS = (
     ROOT / "packaging/linux/compatibility_policy.py",
     ROOT / "packaging/linux/trusted_system_tools.py",
@@ -52,8 +54,8 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "scripts/assemble-taiji-certification-set.py",
     ROOT / "scripts/assemble-taiji-release-evidence.py",
     ROOT / "scripts/validate-taiji-release-evidence.py",
-    ROOT / "scripts/taiji-linux-golden-orchestrator.py",
-    ROOT / "scripts/taiji-challenge-envelope.py",
+    GOLDEN_ORCHESTRATOR,
+    CHALLENGE_ENVELOPE_HELPER,
 )
 
 
