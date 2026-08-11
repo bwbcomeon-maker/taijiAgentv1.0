@@ -8,6 +8,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -18,6 +20,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "packaging/linux/builder-input-package.py"
 PREPARE = ROOT / "taijiagent 打包交付/99_本机_准备制包输入包.sh"
+OPERATIONS = ROOT / "taijiagent 打包交付/操作说明.md"
+RUNBOOK = ROOT / "docs/runbooks/taiji-kylin-uos-offline-delivery.md"
 COMMIT = "a" * 40
 STATIC_INPUT_NAMES = {
     "00_制包机_生成离线交付包.sh",
@@ -36,8 +40,8 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load_helper():
-    spec = importlib.util.spec_from_file_location("taiji_builder_input_contract", HELPER)
+def load_helper(path: Path = HELPER):
+    spec = importlib.util.spec_from_file_location("taiji_builder_input_contract", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("cannot load builder-input helper")
     module = importlib.util.module_from_spec(spec)
@@ -296,6 +300,106 @@ class BuilderInputPackageContractTest(unittest.TestCase):
         self.assertFalse(self.manifest.exists())
         self.assertFalse(self.checksum.exists())
 
+    def test_assume_unchanged_replacement_cannot_bypass_frozen_member_check(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is required for the assume-unchanged regression")
+        subprocess.run(
+            ["git", "init"],
+            cwd=self.root,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Taiji Test",
+                "-c",
+                "user.email=taiji-test@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            cwd=self.root,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        relative = Path("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
+        subprocess.run(
+            ["git", "update-index", "--assume-unchanged", str(relative)],
+            cwd=self.root,
+            check=True,
+        )
+        changed = self.root / relative
+        changed.unlink()
+        changed.write_text("hidden replacement\n", encoding="utf-8")
+        changed.chmod(0o755)
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=self.root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        self.assertEqual(status.stdout, "", "fixture must reproduce a Git-hidden drift")
+
+        with self.assertRaisesRegex(Exception, "differs from frozen source commit"):
+            self.create()
+
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.checksum.exists())
+
+    def test_mode_drift_cannot_enter_frozen_bundle(self):
+        changed = self.source / "00_制包机_生成离线交付包.sh"
+        changed.chmod(0o644)
+
+        with self.assertRaisesRegex(Exception, "differs from frozen source commit"):
+            self.create()
+
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.checksum.exists())
+
+    def test_builder_helper_changed_after_freeze_is_rejected(self):
+        changed_helper = self.root / "builder-input-package.py"
+        changed_helper.write_bytes(HELPER.read_bytes() + b"\n# post-freeze drift\n")
+        changed_helper.chmod(HELPER.stat().st_mode & 0o777)
+        changed_module = load_helper(changed_helper)
+
+        with self.assertRaisesRegex(Exception, "helper differs from frozen source commit"):
+            changed_module.create_builder_input(
+                source_dir=self.source,
+                source_integrity_helper=self.source_integrity_helper,
+                output=self.output,
+                manifest_path=self.manifest,
+                checksum_path=self.checksum,
+                source_commit=COMMIT,
+            )
+
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.checksum.exists())
+
+    def test_source_integrity_helper_changed_after_freeze_is_rejected(self):
+        self.source_integrity_helper.write_text(
+            "# post-freeze source helper drift\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            Exception,
+            "source archive integrity helper differs from frozen source commit",
+        ):
+            self.create()
+
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.checksum.exists())
+
     def test_exclusive_writer_removes_partial_file_on_write_failure(self):
         helper = load_helper()
         partial = self.root / "partial-output"
@@ -315,13 +419,28 @@ class BuilderInputPackageContractTest(unittest.TestCase):
         self.assertNotIn("skip_dirs", source)
         self.assertNotIn("os.walk(source)", source)
         self.assertIn('"$BUILDER_INPUT_HELPER" verify', source)
-        self.assertIn("制包机输入 manifest 字节数", source)
-        self.assertIn("制包机输入 manifest SHA256", source)
-        self.assertIn("制包机输入 sidecar 字节数", source)
-        self.assertIn("制包机输入 sidecar SHA256", source)
+        for role, variable in (
+            ("archive", "$output"),
+            ("manifest", "$manifest"),
+            ("sidecar", "$checksum"),
+        ):
+            with self.subTest(role=role):
+                self.assertIn(
+                    f'record_triplet_member "{role}" "{variable}"',
+                    source,
+                )
+        self.assertIn(
+            "basename=%s bytes=%s sha256=%s",
+            source,
+        )
         create_call = source.index('"$BUILDER_INPUT_HELPER" create')
         verify_call = source.index('"$BUILDER_INPUT_HELPER" verify')
         self.assertLess(create_call, verify_call)
+        for role in ("archive", "manifest", "sidecar"):
+            self.assertLess(
+                verify_call,
+                source.index(f'record_triplet_member "{role}"'),
+            )
         match = re.search(
             r'^BUILDER_INPUT_HELPER_SHA256="([0-9a-f]{64})"$',
             source,
@@ -329,6 +448,12 @@ class BuilderInputPackageContractTest(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), sha256(HELPER))
+
+    def test_docs_do_not_present_the_input_sidecar_as_a_signature_trust_root(self):
+        required = "不是 detached signature，也不是可对抗恶意替换者的签名信任根"
+        for document in (OPERATIONS, RUNBOOK):
+            with self.subTest(document=document.name):
+                self.assertIn(required, document.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

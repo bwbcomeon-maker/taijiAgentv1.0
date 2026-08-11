@@ -101,6 +101,8 @@ taijiagent-制包机输入-<commit>.tar.gz.sha256
 
 输入包由固定 allowlist 生成，不扫描工作目录；manifest 绑定 source commit、压缩包 basename/字节数/SHA256、源码归档/成员清单摘要以及包内每个成员。它用于隔离 Finder、聊天工具、U 盘和历史构建产物造成的元数据污染。正式制包不接受直接复制本地 `taijiagent 打包交付/` 工作目录作为等价输入。
 
+三件套 sidecar 固定为两行，只绑定 archive 与 manifest 的 basename 和 SHA256。它用于发现受控传输中的误损坏，不是 detached signature，也不是可对抗恶意替换者的签名信任根；正式来源仍由冻结 commit、canonical manifest、成员级回读门禁和后续签名证据共同约束。
+
 ### 5.1.1 黄金编排器唯一正式入口
 
 输入三件套全部生成后，必须在首次输入校验、传输或远程制包前运行 `scripts/taiji-linux-golden-orchestrator.py init`。正式阶段顺序固定为 `input_verify` → `remote_build`（生成并绑定候选 DEB）→ `artifact_preflight` → `challenge_preparation` → offline → 正式 target → 十二条 records。certification envelope 必须在 `challenge_preparation` 签发并验证，不得先传输或采集证据，再在签名时补造 envelope 或替换 nonce。

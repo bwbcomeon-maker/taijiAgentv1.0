@@ -27,6 +27,14 @@ sha256_file() {
   fi
 }
 
+record_triplet_member() {
+  local role="$1" path="$2" digest size
+  digest="$(sha256_file "$path")"
+  size="$(wc -c < "$path" | tr -d '[:space:]')"
+  printf '[OK] 制包输入三件套 role=%s basename=%s bytes=%s sha256=%s\n' \
+    "$role" "$(basename "$path")" "$size" "$digest"
+}
+
 preflight_repo() {
   require_cmd git
   require_cmd gzip
@@ -74,7 +82,7 @@ write_source_archive() {
 }
 
 write_builder_input_package() {
-  local commit output manifest checksum archive_sha archive_size manifest_sha manifest_size checksum_sha checksum_size
+  local commit output manifest checksum
   commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
   output="$REPO_ROOT/taijiagent-制包机输入-$commit.tar.gz"
   manifest="$REPO_ROOT/taijiagent-制包机输入-$commit.manifest.json"
@@ -96,21 +104,10 @@ write_builder_input_package() {
     --manifest "$manifest" \
     --checksum "$checksum" \
     || fail "制包机输入包生成后回读验证失败"
-  archive_sha="$(sha256_file "$output")"
-  archive_size="$(wc -c < "$output" | tr -d '[:space:]')"
-  manifest_sha="$(sha256_file "$manifest")"
-  manifest_size="$(wc -c < "$manifest" | tr -d '[:space:]')"
-  checksum_sha="$(sha256_file "$checksum")"
-  checksum_size="$(wc -c < "$checksum" | tr -d '[:space:]')"
   ok "制包机输入包已生成：$output"
-  ok "制包机输入包字节数：$archive_size"
-  ok "制包机输入包 SHA256：$archive_sha"
-  ok "制包机输入 manifest：$manifest"
-  ok "制包机输入 manifest 字节数：$manifest_size"
-  ok "制包机输入 manifest SHA256：$manifest_sha"
-  ok "制包机输入 sidecar：$checksum"
-  ok "制包机输入 sidecar 字节数：$checksum_size"
-  ok "制包机输入 sidecar SHA256：$checksum_sha"
+  record_triplet_member "archive" "$output"
+  record_triplet_member "manifest" "$manifest"
+  record_triplet_member "sidecar" "$checksum"
 }
 
 main() {
