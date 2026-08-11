@@ -1201,6 +1201,8 @@ def apply_onboarding_setup(body: dict) -> dict:
         capability_epochs_for_secret_env,
     )
     from agent.provider_credentials import (
+        TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY,
+        TAIJI_MAIN_MODEL_REQUEST_ID_KEY,
         credential_transaction,
         load_credential_snapshot,
         mutate_config_env_strict,
@@ -1212,9 +1214,8 @@ def apply_onboarding_setup(body: dict) -> dict:
         else {}
     )
     desired_model = dict(model_cfg)
-    from api.model_config import _MAIN_MODEL_REQUEST_ID_KEY
-
-    request_id = secrets.token_hex(16)
+    credential_env = str(provider_meta.get("env_var") or "").strip()
+    request_id = secrets.token_hex(16) if api_key and credential_env else ""
     with credential_transaction(config_path):
         # Close the check/write race: another process may create config.yaml
         # after the fast guard above but before this credential lock is held.
@@ -1238,7 +1239,9 @@ def apply_onboarding_setup(body: dict) -> dict:
                 )
             }
             current["model"] = dict(desired_model)
-            current[_MAIN_MODEL_REQUEST_ID_KEY] = request_id
+            if request_id:
+                current[TAIJI_MAIN_MODEL_REQUEST_ID_KEY] = request_id
+                current[TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY] = credential_env
             if capabilities:
                 bump_capability_config_epochs(
                     current,
@@ -1249,6 +1252,7 @@ def apply_onboarding_setup(body: dict) -> dict:
             replace_config,
             env_updates,
             config_path=config_path,
+            allow_taiji_main_model_receipt=bool(request_id),
         )
 
     # Reload the hermes_cli provider/config cache so the next streaming call
