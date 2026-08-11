@@ -1,6 +1,7 @@
 """Static sales contract for the unified single-DEB publisher."""
 
 from pathlib import Path
+import re
 import unittest
 
 
@@ -21,6 +22,12 @@ RECEIPT_BASENAMES = {
     "github-ci-run-response.json",
     "github-ci-jobs-response.json",
 }
+DIRECT_EXTERNAL_04_COMMAND_RE = re.compile(
+    r"(?m)^\s*(?:sudo(?:\s+-\S+)*\s+)?"
+    r"(?:(?:/usr/bin/env(?:\s+-\S+)*(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S+)*\s+)?"
+    r"(?:\S*/)?(?:bash|sh)\s+)?"
+    r"(?:\./|/[^ \n]*/|\S+/)?04_[^\s\n]+(?:[ \t].*)?$"
+)
 
 
 def section(document: str, start: str, end: str) -> str:
@@ -180,9 +187,14 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
             with self.subTest(document=document[:80]):
                 self.assertIn("九文件 receipt", document)
                 self.assertNotIn("六个白名单文件", document)
-        for basename in RECEIPT_BASENAMES:
-            with self.subTest(basename=basename):
-                self.assertIn(f"`{basename}`", self.runbook_release)
+        receipt_segment = section(
+            self.runbook_release,
+            "内部固定九文件 receipt 的完整 basename 集合是：",
+            "。这九文件是 publisher 回执",
+        )
+        receipt_basenames = re.findall(r"`([^`]+)`", receipt_segment)
+        self.assertEqual(len(receipt_basenames), 9)
+        self.assertEqual(set(receipt_basenames), RECEIPT_BASENAMES)
 
     def test_formal_certification_and_publication_docs_require_approved_orchestrator_argv(self):
         for document in (self.runbook_release, self.guide_publication):
@@ -199,45 +211,70 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
                 self.assertIn("只用于解释参数", document)
                 self.assertIn("不得作为正式流程旁路", document)
 
-    def test_certification_envelope_precedes_offline_target_and_records_in_all_formal_docs(self):
-        runbook_build = self.runbook.index(
-            "### 5.2 在兼容 Linux amd64 制包机生成完整交付目录"
+    def test_golden_orchestrator_starts_after_input_trio_and_orders_all_formal_stages(self):
+        runbook_positions = tuple(
+            self.runbook.index(token)
+            for token in (
+                "输出必须是同一冻结 commit 的三件套",
+                "### 5.1.1 黄金编排器唯一正式入口",
+                "`input_verify`",
+                "`remote_build`",
+                "`artifact_preflight`",
+                "`challenge_preparation`",
+                "### 5.3 在受控发布机执行断网生命周期演练",
+                "### 5.4 在真实目标机安装并验收",
+                "### 5.5 签名与最终放行",
+            )
         )
-        runbook_challenge = self.runbook.index("`challenge_preparation`")
-        self.assertLess(runbook_build, runbook_challenge)
-        for later in (
-            "### 5.3 在受控发布机执行断网生命周期演练",
-            "### 5.4 在真实目标机安装并验收",
-            "### 5.5 签名与最终放行",
-        ):
-            self.assertLess(runbook_challenge, self.runbook.index(later))
+        self.assertEqual(runbook_positions, tuple(sorted(runbook_positions)))
+        self.assertLess(
+            self.runbook.index("### 5.1.1 黄金编排器唯一正式入口"),
+            self.runbook.index("传输到制包机前后"),
+        )
 
         release_chain = section(self.sale_readiness, "## 放行链", "## 销售口径")
-        sale_positions = (
-            release_chain.index("最终 `01_制包机_发布预检.sh`"),
-            release_chain.index("`challenge_preparation`"),
-            release_chain.index("在断网的干净 Linux amd64 环境"),
-            release_chain.index("在六个正向代表环境和六个负向边界"),
+        sale_positions = tuple(
+            release_chain.index(token)
+            for token in (
+                "输入 `tar.gz`、`manifest.json`、`tar.gz.sha256` 三件套",
+                "`init`",
+                "`input_verify`",
+                "`remote_build`",
+                "`artifact_preflight`",
+                "`challenge_preparation`",
+                "在断网的干净 Linux amd64 环境",
+                "在六个正向代表环境和六个负向边界",
+            )
         )
         self.assertEqual(sale_positions, tuple(sorted(sale_positions)))
 
-        guide_build = self.guide.index("制包成功后，你会看到")
-        guide_challenge = self.guide.index("`challenge_preparation`")
-        self.assertLess(guide_build, guide_challenge)
-        for later in (
-            "### 在受控发布机生成离线演练证据",
-            "## 第三步 B：干净目标机单 DEB 双击安装",
-            "## 最终销售发布：只生成一个客户 DEB",
-        ):
-            self.assertLess(guide_challenge, self.guide.index(later))
+        guide_positions = tuple(
+            self.guide.index(token)
+            for token in (
+                "taijiagent-制包机输入-<hash>.tar.gz.sha256",
+                "`init`（初始化编排器）",
+                "`input_verify`",
+                "`remote_build`",
+                "`artifact_preflight`",
+                "`challenge_preparation`",
+                "### 在受控发布机生成离线演练证据",
+                "## 第三步 B：干净目标机单 DEB 双击安装",
+                "## 最终销售发布：只生成一个客户 DEB",
+            )
+        )
+        self.assertEqual(guide_positions, tuple(sorted(guide_positions)))
+        self.assertLess(
+            self.guide.index("`init`（初始化编排器）"),
+            self.guide.index("把同一 commit 的三件套一起拷贝"),
+        )
 
     def test_runbook_is_the_single_executable_golden_orchestrator_entry(self):
-        heading = "### 5.2.1 黄金编排器唯一正式入口"
+        heading = "### 5.1.1 黄金编排器唯一正式入口"
         self.assertIn(heading, self.runbook)
         canonical = section(
             self.runbook,
             heading,
-            "### 5.3 在受控发布机执行断网生命周期演练",
+            "### 5.2 在兼容 Linux amd64 制包机生成完整交付目录",
         )
         self.assertIn("scripts/taiji-linux-golden-orchestrator.py", canonical)
         for command in ("init", "plan", "checkpoint", "retry"):
@@ -253,6 +290,22 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
         ):
             self.assertIn(phrase, canonical)
         self.assertIn("explicit_approval_required=true", canonical)
+        self.assertIn("EVIDENCE_ARGS=()", canonical)
+        self.assertIn("DEB_ARGS=()", canonical)
+        self.assertIn("EXPECT_DEB_ARGS=()", canonical)
+        self.assertIn('EVIDENCE_ARGS+=(--evidence "<受控证据文件>")', canonical)
+        self.assertIn('DEB_ARGS=(--deb "<review_root 下的候选 DEB>")', canonical)
+        self.assertIn(
+            'EXPECT_DEB_ARGS=(--expect-deb-sha256 "<已绑定候选摘要>")',
+            canonical,
+        )
+        self.assertGreaterEqual(canonical.count('"${EVIDENCE_ARGS[@]}"'), 2)
+        self.assertEqual(canonical.count('"${DEB_ARGS[@]}"'), 1)
+        self.assertGreaterEqual(canonical.count('"${EXPECT_DEB_ARGS[@]}"'), 5)
+        self.assertNotIn('--evidence "$EVIDENCE"', canonical)
+        self.assertIn("每个受控证据文件分别追加一个 `--evidence`", canonical)
+        self.assertIn("不得拿任意单文件充当完整阶段证据", canonical)
+        self.assertIn("候选绑定后不得重置 `EXPECT_DEB_ARGS`", canonical)
         self.assertIn("APPROVAL_ARGS=()", canonical)
         self.assertIn(
             '# APPROVAL_ARGS=(--approve-stage "$STAGE")',
@@ -269,9 +322,21 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
         self.assertIn('subparsers.add_parser("checkpoint"', self.orchestrator)
         self.assertIn('subparsers.add_parser("retry"', self.orchestrator)
         self.assertIn('entry["history"].append({"event": "retry"', self.orchestrator)
+        self.assertIn(
+            'checkpoint_parser.add_argument("--evidence", action="append"',
+            self.orchestrator,
+        )
+        self.assertIn(
+            "remote_build pass must bind the retrieved candidate with --deb",
+            self.orchestrator,
+        )
+        self.assertIn(
+            "--expect-deb-sha256 is required after the candidate DEB is bound",
+            self.orchestrator,
+        )
 
         canonical_link = (
-            "taiji-kylin-uos-offline-delivery.md#521-"
+            "taiji-kylin-uos-offline-delivery.md#511-"
             "黄金编排器唯一正式入口"
         )
         self.assertIn(canonical_link, self.sale_readiness)
@@ -281,10 +346,22 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
         for document in (self.runbook_target, self.guide_acceptance):
             with self.subTest(document=document[:80]):
                 self.assertIn("/usr/bin/taiji-agent-acceptance", document)
-                self.assertNotRegex(
-                    document,
-                    r"(?m)^\s*(?:bash|sh)\s+(?:\./|\S+/)04_[^\n]*$",
-                )
+                self.assertNotRegex(document, DIRECT_EXTERNAL_04_COMMAND_RE)
+
+    def test_external_04_command_detector_covers_common_shell_bypasses(self):
+        for command in (
+            "bash ./04_目标终端_桌面App验收并导出证据.sh",
+            "sudo bash ./04_目标终端_桌面App验收并导出证据.sh",
+            "/usr/bin/env bash ./04_目标终端_桌面App验收并导出证据.sh",
+            "sudo -n /usr/bin/env -i bash /tmp/delivery/04_目标终端_桌面App验收并导出证据.sh",
+            "./04_目标终端_桌面App验收并导出证据.sh --timeout 900",
+        ):
+            with self.subTest(command=command):
+                self.assertRegex(command, DIRECT_EXTERNAL_04_COMMAND_RE)
+        self.assertNotRegex(
+            "/usr/bin/taiji-agent-acceptance --delivery-dir /controlled/data",
+            DIRECT_EXTERNAL_04_COMMAND_RE,
+        )
 
 
 if __name__ == "__main__":
