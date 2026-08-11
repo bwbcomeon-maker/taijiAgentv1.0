@@ -69,9 +69,10 @@ Linux 客户单一 DEB 只能按以下顺序产生：
 3. 在断网的干净 Linux amd64 环境完成 fresh install、remove、purge、reinstall 和受控旧版本升级/失败回滚演练，生成结构化证据；正式旧版本入口必须验证真实 detached signature，不能在容器内伪造占位签名。
 4. 在六个正向代表环境和六个负向边界上使用同一 DEB SHA 形成认证记录；安装后的执行代码来自 `/usr/bin/taiji-agent-acceptance`。
 5. 为冻结 commit 采集可信 GitHub CI v2 三件套，并在正式签名/发布前按源码合同实时复验。
-6. 使用用途、有效期、source commit 和 DEB 身份明确的 canonical challenge envelope：certification envelope 必须在离线演练、正式目标采集和十二条记录之前签发并统一驱动该认证证据域；certification 签名后再签发 nonce 不同的 publication envelope。签名器、release-check 和 publisher 只信 embedded envelope，不能在最终门禁阶段换 nonce、跨用途复用或改用裸环境变量。
-7. 执行 `scripts/taiji-release-check.sh`，冻结发布前证据门禁；任何实物变化都必须重新组装和签名。
-8. 执行 `packaging/linux/deb/publish-single-deb.sh`，生成只含一个固定 basename DEB 的全新客户目录，并以固定 allowlist 的内部 receipt 最终闭合证据档案。
+6. 使用用途、有效期、source commit 和 DEB 身份明确的 canonical challenge envelope：certification envelope 必须在离线演练、正式目标采集和十二条记录之前签发并统一驱动该认证证据域；签名器、release-check 和 publisher 只信 embedded envelope，不能在最终门禁阶段换 nonce、跨用途复用或改用裸环境变量。
+7. 将同一认证证据域中的离线演练、正式目标证据和六正六负十二条记录组装为固定 `certification-set.json` 并签名；certification 签名后再签发 nonce 不同的 publication envelope，组装并签名 v3 release evidence。
+8. 执行 `scripts/taiji-release-check.sh`，冻结发布前证据门禁；任何实物变化都必须重新组装和签名。
+9. 执行 `packaging/linux/deb/publish-single-deb.sh`，生成只含一个固定 basename DEB 的全新客户目录，并以固定 allowlist 的内部 receipt 最终闭合证据档案。
 
 发布私钥不得复制到目标终端、安装包、客户目录或源码仓库。客户目录已存在时发布器拒绝覆盖；门禁或回执生成失败时不得留下看似成功的正式回执。
 

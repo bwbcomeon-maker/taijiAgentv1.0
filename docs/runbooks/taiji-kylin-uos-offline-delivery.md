@@ -144,7 +144,9 @@ docker build --platform linux/amd64 \
   -t taiji-offline-rehearsal:local \
   tools/taiji-offline-rehearsal
 
-export TAIJI_OFFLINE_REHEARSAL_CHALLENGE="$(openssl rand -hex 32)"
+# 正式执行以黄金编排器在 offline_rehearsal 阶段生成并经审批的 commands[].argv 为准；
+# 下列变量只用于受控手工恢复，由发布负责人从已验证 certification envelope 提供同一 nonce。
+export TAIJI_OFFLINE_REHEARSAL_CHALLENGE="<发布负责人从已验证 certification envelope 受控提供的同一 nonce>"
 # 扩展生命周期的标准入口：candidate、受控归档的 previous 正式版本、双方 manifest、
 # previous detached signature 和 canonical policy 必须显式绑定。
 # 当前入口验证 previous 版本更旧且签名可信；“直接前一版”仍须由后续发布台账门禁证明。
@@ -166,6 +168,8 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
   --image taiji-offline-rehearsal:local \
   --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
 ```
+
+演练机不得现场生成或替换 challenge。`TAIJI_OFFLINE_REHEARSAL_CHALLENGE` 必须与正式 target、六正六负十二条 records 和 `certification-set.json` 使用 certification envelope 的同一 nonce；certification 签名完成后才签发 nonce 不同的 publication envelope。
 
 输出目录必须事先不存在。显式全生命周期入口的 previous Debian 版本（包括 epoch、upstream version 和 revision）必须严格小于候选版本；同版本或更高版本不得冒充 previous。previous DEB 必须同时提供同名 `.sha256`、detached signature 和绑定 manifest；生产器先以产品固定公钥验签，runner 再通过真实 `taiji-silent-deploy.sh` 的 pinned public-key admission 执行升级，最终 validator 和认证集递归 validator 对归档的同一 DEB/signature 物理快照重新验签。生产器还应验证镜像角色、`ubuntu-20.04` 兼容基线和 `kylin-os-release-v1` fixture label，使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。runner 必须先在未改动的镜像状态核对真实 Ubuntu 20.04 和断网状态，之后才可在该一次性容器内原子激活 Kylin policy fixture：只把可信 `/usr/lib/os-release` 改成 `ID=kylin`、建立 canonical `/etc/os-release` 软链接并创建桌面会话目录；候选 DEB、canonical policy 和生产 `preinst` 均不得改动或绕过。
 
@@ -468,7 +472,7 @@ PID 复用时应优先安全超时，不得删除可能属于新进程的锁。�
 
 ## 10. 真实 Kylin/UOS App 最终验收
 
-### 10.1 干净单 DEB 验收机与目标验收 challenge
+### 10.1 干净单 DEB 验收机与 certification envelope nonce
 
 ```bash
 cat /etc/os-release
@@ -481,15 +485,15 @@ printf 'DISPLAY=%s\nWAYLAND_DISPLAY=%s\n' "${DISPLAY:-}" "${WAYLAND_DISPLAY:-}"
 
 同时确认磁盘、内存、桌面类型、管理员能力、kysec/杀软/白名单策略和模型访问条件。该环境不得先执行 `02`；生命周期验收应使用另一个 VM/快照/终端。候选目录只能有 manifest 指定 basename 的单个 DEB。
 
+正式 target 验收以黄金编排器在 `target_acceptance` 阶段生成并经审批的 `commands[].argv` 为准；编排器会验证 certification envelope，并把该 envelope 的同一 nonce 写入观察、人工见证和安装态验收 argv。下面命令只用于受控手工恢复：发布负责人必须先在受控发布机验证 certification envelope，再向目标机受控提供同一 nonce；目标机不得现场新造、替换或从其它证据域复用 challenge。该 nonce 同时驱动 offline、正式 target、六正六负十二条 records 和 `certification-set.json`；certification 签名完成后才签发 nonce 不同的 publication envelope。
+
 ```bash
-export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="$(openssl rand -hex 32)"
+export TAIJI_TARGET_ACCEPTANCE_CHALLENGE="<发布负责人从已验证 certification envelope 受控提供的同一 nonce>"
 export TAIJI_CERTIFICATION_CATEGORY_ID="<certification-matrix 中与本机匹配的 category_id>"
 export TAIJI_SINGLE_DEB_CUSTOMER_DIR="/只有manifest同名候选DEB的绝对目录"
 export TAIJI_INSTALL_EVIDENCE_DIR="$PWD/install-observation-$TAIJI_TARGET_ACCEPTANCE_CHALLENGE"
 mkdir -m 0700 "$TAIJI_INSTALL_EVIDENCE_DIR"
 ```
-
-目标验收 challenge 必须由发布负责人当轮生成并保存；安装观察、人工见证和安装态 App 驱动复用该值。后续 certification set 和 publication 各自生成不同的 challenge，不得把目标验收值跨用途复用。
 
 ### 10.2 安装前启动观察器，再由图形安装器安装
 
@@ -500,7 +504,7 @@ mkdir -m 0700 "$TAIJI_INSTALL_EVIDENCE_DIR"
   --customer-dir "$TAIJI_SINGLE_DEB_CUSTOMER_DIR" \
   --manifest "$PWD/生成的安装包/taiji-package-manifest.json" \
   --challenge "$TAIJI_TARGET_ACCEPTANCE_CHALLENGE" \
-  --matrix "$PWD/packaging/linux/certification-matrix.json" \
+  --matrix "$PWD/验收工具/certification-matrix.json" \
   --category-id "$TAIJI_CERTIFICATION_CATEGORY_ID" \
   --output-dir "$TAIJI_INSTALL_EVIDENCE_DIR"
 ```
@@ -569,7 +573,7 @@ mkdir -m 0700 "$TAIJI_TARGET_DELIVERY_DIR"
 - 若交付包含 DOCX 结果，使用目标环境的 WPS/Word 完成人工视觉检查。
 - 卸载、同版本重装、旧版升级和异常中断恢复按本次交付范围分别验收。
 
-`02_目标终端_安装并验证.sh` 的内部生命周期检查在独立环境执行；不要在上述 `04` 单 DEB 安装观察之前运行。最终客户目录由 publisher 在 certification-set 与 v3 双签名门禁后生成，basename 固定为 `taiji-agent_${VERSION}_amd64.deb`，输出 DEB 必须与本节已认证候选逐字节、SHA256 完全一致，receipt 只归档六个白名单文件。
+`02_目标终端_安装并验证.sh` 的内部生命周期检查在独立环境执行；不要在上述 `04` 单 DEB 安装观察之前运行。最终客户目录由 publisher 在 certification-set 与 v3 双签名门禁后生成，basename 固定为 `taiji-agent_${VERSION}_amd64.deb`，输出 DEB 必须与本节已认证候选逐字节、SHA256 完全一致。固定九文件 receipt 只归档 `release-evidence.json`、`release-evidence.json.sig`、`certification-set.json`、`certification-set.json.sig`、`compatibility-policy.json`、`deb.sha256`、`github-ci-evidence.json`、`github-ci-run-response.json` 和 `github-ci-jobs-response.json`；完整原始证据仍保留在内部认证档案。
 
 ## 11. 一次性诊断包流程
 

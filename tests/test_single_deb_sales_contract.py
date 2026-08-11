@@ -6,6 +6,13 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLISHER = ROOT / "packaging/linux/deb/publish-single-deb.sh"
+SALE_READINESS = ROOT / "docs/taiji-sale-readiness.md"
+DELIVERY_RUNBOOK = ROOT / "docs/runbooks/taiji-kylin-uos-offline-delivery.md"
+DELIVERY_GUIDE = ROOT / "taijiagent 打包交付/操作说明.md"
+
+
+def section(document: str, start: str, end: str) -> str:
+    return document.split(start, 1)[1].split(end, 1)[0]
 
 
 class SingleDebSalesContractTest(unittest.TestCase):
@@ -68,6 +75,86 @@ class SingleDebSalesContractTest(unittest.TestCase):
         self.assertIn("shutil.copyfile(snapshots[\"candidate.deb\"][\"path\"], output_staging / customer_name)", self.publisher)
         self.assertNotIn("dpkg-deb -x", self.publisher)
         self.assertNotIn("install -m 0600", self.publisher)
+
+
+class SingleDebDocumentationContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sale_readiness = SALE_READINESS.read_text(encoding="utf-8")
+        runbook = DELIVERY_RUNBOOK.read_text(encoding="utf-8")
+        guide = DELIVERY_GUIDE.read_text(encoding="utf-8")
+        self.runbook_offline = section(
+            runbook,
+            "### 5.3 在受控发布机执行断网生命周期演练",
+            "### 5.4 在真实目标机安装并验收",
+        )
+        self.runbook_target = section(
+            runbook,
+            "## 10. 真实 Kylin/UOS App 最终验收",
+            "## 11. 一次性诊断包流程",
+        )
+        self.guide_offline = section(
+            guide,
+            "### 在受控发布机生成离线演练证据",
+            "## 第二步：内部验收目录拷贝到完全离线目标机",
+        )
+        self.guide_target = section(
+            guide,
+            "## 第三步 B：干净目标机单 DEB 双击安装",
+            "## 第四步：用真实 Electron 桌面 App 验收并导出证据",
+        )
+        self.guide_publication = section(
+            guide,
+            "## 最终销售发布：只生成一个客户 DEB",
+            "## 第五步：人工双击启动复核",
+        )
+
+    def test_sale_readiness_release_chain_names_fixed_certification_set(self):
+        release_chain = section(self.sale_readiness, "## 放行链", "## 销售口径")
+
+        self.assertIn("certification-set.json", release_chain)
+
+    def test_formal_target_docs_reuse_certification_envelope_nonce(self):
+        for document in (self.runbook_target, self.guide_target):
+            with self.subTest(document=document[:80]):
+                self.assertNotIn("openssl rand -hex 32", document)
+                self.assertNotIn(
+                    "后续 certification set 和 publication 各自生成不同的 challenge",
+                    document,
+                )
+                self.assertNotIn("由发布负责人生成当轮 challenge", document)
+                self.assertNotIn("目标验收 challenge 必须由发布负责人当轮生成", document)
+                self.assertIn("certification envelope", document)
+                self.assertIn("同一 nonce", document)
+                self.assertIn("黄金编排器", document)
+                self.assertIn("publication envelope", document)
+                self.assertIn("nonce 不同", document)
+
+    def test_formal_offline_docs_reuse_certification_envelope_nonce(self):
+        for document in (self.runbook_offline, self.guide_offline):
+            with self.subTest(document=document[:80]):
+                self.assertNotIn("openssl rand -hex 32", document)
+                self.assertNotIn(
+                    "目标验收、certification set 签名和 publication 签名必须分别使用各自用途的 challenge",
+                    document,
+                )
+                self.assertIn("certification envelope", document)
+                self.assertIn("同一 nonce", document)
+                self.assertIn("黄金编排器", document)
+
+    def test_formal_target_docs_use_data_only_delivery_matrix(self):
+        for document in (self.runbook_target, self.guide_target):
+            with self.subTest(document=document[:80]):
+                self.assertIn("验收工具/certification-matrix.json", document)
+                self.assertNotIn(
+                    '--matrix "$PWD/packaging/linux/certification-matrix.json"',
+                    document,
+                )
+
+    def test_formal_delivery_docs_name_fixed_nine_file_receipt(self):
+        for document in (self.runbook_target, self.guide_publication):
+            with self.subTest(document=document[:80]):
+                self.assertIn("九文件 receipt", document)
+                self.assertNotIn("六个白名单文件", document)
 
 
 if __name__ == "__main__":
