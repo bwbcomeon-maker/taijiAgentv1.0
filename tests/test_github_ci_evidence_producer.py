@@ -539,6 +539,97 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
             self.assertEqual(metadata.st_nlink, 1)
             self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o600)
 
+    def test_success_closes_every_owned_staged_and_final_file_descriptor(self):
+        delivery = self.root / "owned-fd-success"
+        delivery.mkdir(mode=0o700)
+        original_open = self.producer.os.open
+        original_fstat = self.producer.os.fstat
+        owned_descriptors = set()
+
+        def track_owned_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if path in {
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
+                "github-ci-evidence.json",
+            } and kwargs.get("dir_fd") is not None:
+                owned_descriptors.add(descriptor)
+            return descriptor
+
+        with patch.object(
+            self.producer.os,
+            "open",
+            side_effect=track_owned_open,
+        ):
+            self.call_delivery_producer(delivery)
+
+        self.assertTrue(owned_descriptors)
+        for descriptor in owned_descriptors:
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaises(OSError):
+                    original_fstat(descriptor)
+
+    def test_promotion_fstat_failure_closes_residual_owned_descriptors_and_removes_canonical(self):
+        delivery = self.root / "owned-fd-fstat-failure"
+        delivery.mkdir(mode=0o700)
+        original_publish = self.producer._publish_into_delivery
+        original_open = self.producer.os.open
+        original_fstat = self.producer.os.fstat
+        delivery_descriptor = None
+        promoted_descriptors = set()
+        owned_descriptors = set()
+        injected = 0
+
+        def capture_delivery_descriptor(*args, **kwargs):
+            nonlocal delivery_descriptor
+            delivery_descriptor = args[1]
+            return original_publish(*args, **kwargs)
+
+        def track_owned_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if path in {
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
+                "github-ci-evidence.json",
+            } and kwargs.get("dir_fd") is not None:
+                owned_descriptors.add(descriptor)
+                if (
+                    kwargs.get("dir_fd") == delivery_descriptor
+                    and flags & self.producer.os.O_CREAT
+                ):
+                    promoted_descriptors.add(descriptor)
+            return descriptor
+
+        def fail_first_two_promoted_fstats(descriptor):
+            nonlocal injected
+            if descriptor in promoted_descriptors and injected < 2:
+                injected += 1
+                raise OSError("simulated promoted fstat failure")
+            return original_fstat(descriptor)
+
+        with patch.object(
+            self.producer,
+            "_publish_into_delivery",
+            side_effect=capture_delivery_descriptor,
+        ), patch.object(
+            self.producer.os,
+            "open",
+            side_effect=track_owned_open,
+        ), patch.object(
+            self.producer.os,
+            "fstat",
+            side_effect=fail_first_two_promoted_fstats,
+        ):
+            with self.assertRaises(OSError):
+                self.call_delivery_producer(delivery)
+
+        self.assertEqual(injected, 2)
+        self.assertEqual(list(delivery.iterdir()), [])
+        for descriptor in owned_descriptors:
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaises(OSError):
+                    original_fstat(descriptor)
+
     def test_delivery_mode_rejects_relative_symlink_and_writable_directory_before_network(self):
         real_delivery = self.root / "real-delivery"
         real_delivery.mkdir(mode=0o700)

@@ -549,29 +549,30 @@ def _remove_owned_file(
     directory_descriptor: int,
     record: Dict[str, Any],
 ) -> bool:
-    descriptor = record.get("descriptor")
-    opened = None
-    if descriptor is not None:
-        try:
-            opened = os.fstat(descriptor)
-        except OSError:
-            return False
-        if not stat.S_ISREG(opened.st_mode):
-            _close_owned_file_descriptor(record)
-            return False
-        recorded_device = record.get("device")
-        recorded_inode = record.get("inode")
-        if recorded_device is not None and (
-            opened.st_dev,
-            opened.st_ino,
-        ) != (recorded_device, recorded_inode):
-            _close_owned_file_descriptor(record)
-            return False
-        record["device"] = opened.st_dev
-        record["inode"] = opened.st_ino
-    expected = (record.get("device"), record.get("inode"))
-    if None in expected:
+    if record.get("removed") is True:
+        return True
+    if record.get("blocked") is True:
         return False
+    descriptor = record.get("descriptor")
+    if descriptor is None:
+        return False
+    try:
+        opened = os.fstat(descriptor)
+    except OSError:
+        return False
+    if not stat.S_ISREG(opened.st_mode):
+        record["blocked"] = True
+        return False
+    recorded_device = record.get("device")
+    recorded_inode = record.get("inode")
+    if recorded_device is not None and (
+        opened.st_dev,
+        opened.st_ino,
+    ) != (recorded_device, recorded_inode):
+        record["blocked"] = True
+        return False
+    record["device"] = opened.st_dev
+    record["inode"] = opened.st_ino
     try:
         current = os.stat(
             record["basename"],
@@ -579,21 +580,21 @@ def _remove_owned_file(
             follow_symlinks=False,
         )
     except FileNotFoundError:
-        _close_owned_file_descriptor(record)
+        record["removed"] = True
         return True
     except OSError:
         return False
-    if (current.st_dev, current.st_ino) != expected:
-        _close_owned_file_descriptor(record)
+    if _file_identity(current) != _file_identity(opened):
+        record["blocked"] = True
         return False
     try:
         os.unlink(record["basename"], dir_fd=directory_descriptor)
     except FileNotFoundError:
-        _close_owned_file_descriptor(record)
+        record["removed"] = True
         return True
     except OSError:
         return False
-    _close_owned_file_descriptor(record)
+    record["removed"] = True
     return True
 
 
@@ -601,12 +602,71 @@ def _remove_owned_files(
     directory_descriptor: int,
     records: List[Dict[str, Any]],
 ) -> bool:
-    remaining = []  # type: List[Dict[str, Any]]
     for record in reversed(records):
-        if not _remove_owned_file(directory_descriptor, record):
-            remaining.append(record)
-    records[:] = list(reversed(remaining))
-    return not records
+        _remove_owned_file(directory_descriptor, record)
+    return all(record.get("removed") is True for record in records)
+
+
+def _close_owned_file_descriptors(records: List[Dict[str, Any]]) -> bool:
+    clean = True
+    for record in records:
+        try:
+            _close_owned_file_descriptor(record)
+        except OSError:
+            clean = False
+    return clean
+
+
+def _retain_read_only_owned_file(
+    directory_descriptor: int,
+    record: Dict[str, Any],
+) -> None:
+    writer = record.get("descriptor")
+    if writer is None:
+        raise GitHubCiEvidenceError("owned CI evidence writer is unavailable")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    reader = os.open(record["basename"], flags, dir_fd=directory_descriptor)
+    try:
+        written = os.fstat(writer)
+        retained = os.fstat(reader)
+        current = os.stat(
+            record["basename"],
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            _file_identity(written) != _file_identity(retained)
+            or _file_identity(current) != _file_identity(retained)
+        ):
+            raise GitHubCiEvidenceError(
+                "owned CI evidence file changed before descriptor retention"
+            )
+    except BaseException:
+        os.close(reader)
+        raise
+    os.close(writer)
+    record["descriptor"] = reader
+    record["device"] = retained.st_dev
+    record["inode"] = retained.st_ino
+    os.fsync(directory_descriptor)
+
+
+def _list_directory_names(directory_descriptor: int) -> List[str]:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    scan_descriptor = os.open(".", flags, dir_fd=directory_descriptor)
+    try:
+        return os.listdir(scan_descriptor)
+    finally:
+        os.close(scan_descriptor)
 
 
 def _remove_owned_empty_directory(
@@ -724,6 +784,8 @@ def _write_new_at(
         "descriptor": descriptor,
         "device": None,
         "inode": None,
+        "removed": False,
+        "blocked": False,
     }
     try:
         created_files.append(record)
@@ -761,13 +823,15 @@ def _write_new_at(
             or metadata.st_size != len(payload)
         ):
             raise GitHubCiEvidenceError("CI evidence staging file is unsafe")
+        _retain_read_only_owned_file(
+            directory_descriptor,
+            record,
+        )
     except BaseException:
         if _remove_owned_file(directory_descriptor, record):
             created_files.remove(record)
-        raise
-    finally:
-        if record.get("device") is not None:
             _close_owned_file_descriptor(record)
+        raise
 
 
 def _read_regular_at(
@@ -833,7 +897,7 @@ def _validate_staged_bundle(
     staging_descriptor: int,
     payloads: Dict[str, bytes],
 ) -> None:
-    if set(os.listdir(staging_descriptor)) != set(DELIVERY_BASENAMES):
+    if set(_list_directory_names(staging_descriptor)) != set(DELIVERY_BASENAMES):
         raise GitHubCiEvidenceError("CI evidence staging closure is not the exact trio")
     maximums = {
         RUN_BASENAME: MAX_RUN_BYTES,
@@ -876,6 +940,8 @@ def _promote_staged_file(
         "descriptor": descriptor,
         "device": None,
         "inode": None,
+        "removed": False,
+        "blocked": False,
     }
     try:
         created_destinations.append(record)
@@ -924,13 +990,15 @@ def _promote_staged_file(
         )
         if _file_identity(staged_now) != _file_identity(source_metadata):
             raise GitHubCiEvidenceError("CI evidence staging file changed during promotion")
+        _retain_read_only_owned_file(
+            delivery_descriptor,
+            record,
+        )
     except BaseException:
         if _remove_owned_file(delivery_descriptor, record):
             created_destinations.remove(record)
-        raise
-    finally:
-        if record.get("device") is not None:
             _close_owned_file_descriptor(record)
+        raise
 
 
 def _remove_owned_destinations(
@@ -958,7 +1026,7 @@ def _remove_staging_directory(
         return False, staging_descriptor
     files_clean = _remove_owned_files(staging_descriptor, staged_files)
     try:
-        closure_empty = not os.listdir(staging_descriptor)
+        closure_empty = not _list_directory_names(staging_descriptor)
         os.fsync(staging_descriptor)
         opened = os.fstat(staging_descriptor)
         current = os.stat(
@@ -1045,6 +1113,13 @@ def _publish_into_delivery(
         staging_identity = None
         os.fsync(delivery_descriptor)
         _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+        if (
+            not _close_owned_file_descriptors(staged_files)
+            or not _close_owned_file_descriptors(created)
+        ):
+            raise GitHubCiEvidenceError(
+                "CI evidence owned file descriptor cleanup failed"
+            )
         succeeded = True
         return delivery_dir / EVIDENCE_BASENAME
     finally:
@@ -1068,6 +1143,14 @@ def _publish_into_delivery(
             except OSError:
                 cleanup_failed = True
             staging_descriptor = None
+        cleanup_failed = (
+            not _close_owned_file_descriptors(staged_files)
+            or cleanup_failed
+        )
+        cleanup_failed = (
+            not _close_owned_file_descriptors(created)
+            or cleanup_failed
+        )
         try:
             os.fsync(delivery_descriptor)
         except OSError:
