@@ -730,6 +730,264 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
             any(item.name.startswith(".taiji-github-ci-evidence.") for item in moved.iterdir())
         )
 
+    def test_promotion_fstat_failure_after_exclusive_create_rolls_back_created_destination(self):
+        delivery = self.root / "promotion-fstat-failure"
+        staging = self.root / "promotion-fstat-staging"
+        delivery.mkdir(mode=0o700)
+        staging.mkdir(mode=0o700)
+        staged_file = staging / "github-ci-run-response.json"
+        staged_file.write_bytes(b"staged-payload")
+        staged_file.chmod(0o600)
+        directory_flags = (
+            self.producer.os.O_RDONLY
+            | getattr(self.producer.os, "O_DIRECTORY", 0)
+            | getattr(self.producer.os, "O_CLOEXEC", 0)
+            | getattr(self.producer.os, "O_NOFOLLOW", 0)
+        )
+        delivery_descriptor = self.producer.os.open(delivery, directory_flags)
+        staging_descriptor = self.producer.os.open(staging, directory_flags)
+        original_open = self.producer.os.open
+        original_fstat = self.producer.os.fstat
+        promoted_descriptors = set()
+        injected = False
+
+        def track_promoted_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if (
+                path == "github-ci-run-response.json"
+                and kwargs.get("dir_fd") == delivery_descriptor
+            ):
+                promoted_descriptors.add(descriptor)
+            return descriptor
+
+        def fail_first_promoted_fstat(descriptor):
+            nonlocal injected
+            if not injected and descriptor in promoted_descriptors:
+                injected = True
+                raise OSError("simulated post-create fstat failure")
+            return original_fstat(descriptor)
+
+        try:
+            with patch.object(
+                self.producer.os,
+                "open",
+                side_effect=track_promoted_open,
+            ), patch.object(
+                self.producer.os,
+                "fstat",
+                side_effect=fail_first_promoted_fstat,
+            ):
+                with self.assertRaises(OSError):
+                    self.producer._promote_staged_file(
+                        staging_descriptor,
+                        delivery_descriptor,
+                        "github-ci-run-response.json",
+                        [],
+                    )
+        finally:
+            self.producer.os.close(staging_descriptor)
+            self.producer.os.close(delivery_descriptor)
+
+        self.assertTrue(injected)
+        self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_promotion_registration_failure_after_exclusive_create_rolls_back_destination(self):
+        delivery = self.root / "promotion-registration-failure"
+        staging = self.root / "promotion-registration-staging"
+        delivery.mkdir(mode=0o700)
+        staging.mkdir(mode=0o700)
+        staged_file = staging / "github-ci-run-response.json"
+        staged_file.write_bytes(b"staged-payload")
+        staged_file.chmod(0o600)
+        directory_flags = (
+            self.producer.os.O_RDONLY
+            | getattr(self.producer.os, "O_DIRECTORY", 0)
+            | getattr(self.producer.os, "O_CLOEXEC", 0)
+            | getattr(self.producer.os, "O_NOFOLLOW", 0)
+        )
+        delivery_descriptor = self.producer.os.open(delivery, directory_flags)
+        staging_descriptor = self.producer.os.open(staging, directory_flags)
+
+        class FailingRegistration(list):
+            def append(self, _record):
+                raise OSError("simulated ownership registration failure")
+
+        try:
+            with self.assertRaises(OSError):
+                self.producer._promote_staged_file(
+                    staging_descriptor,
+                    delivery_descriptor,
+                    "github-ci-run-response.json",
+                    FailingRegistration(),
+                )
+        finally:
+            self.producer.os.close(staging_descriptor)
+            self.producer.os.close(delivery_descriptor)
+
+        self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_staging_cleanup_does_not_unlink_concurrently_replaced_file(self):
+        delivery = self.root / "staging-replacement-cleanup"
+        delivery.mkdir(mode=0o700)
+        original_cleanup = self.producer._remove_staging_directory
+        replacement_identity = None
+
+        def replace_before_cleanup(*args, **kwargs):
+            nonlocal replacement_identity
+            if replacement_identity is None and args[1] is not None:
+                replacement = delivery / args[1] / "github-ci-run-response.json"
+                replacement.unlink()
+                replacement.write_bytes(b"concurrent-replacement-must-survive")
+                replacement.chmod(0o600)
+                metadata = replacement.lstat()
+                replacement_identity = (metadata.st_dev, metadata.st_ino)
+            return original_cleanup(*args, **kwargs)
+
+        with patch.object(
+            self.producer,
+            "_remove_staging_directory",
+            side_effect=replace_before_cleanup,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertIn("rollback could not remove", str(caught.exception))
+
+        staging = [
+            item
+            for item in delivery.iterdir()
+            if item.name.startswith(".taiji-github-ci-evidence.")
+        ]
+        self.assertEqual(len(staging), 1)
+        replacement = staging[0] / "github-ci-run-response.json"
+        metadata = replacement.lstat()
+        self.assertEqual((metadata.st_dev, metadata.st_ino), replacement_identity)
+        self.assertEqual(replacement.read_bytes(), b"concurrent-replacement-must-survive")
+        self.assertTrue(
+            {
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
+                "github-ci-evidence.json",
+            }.isdisjoint({item.name for item in delivery.iterdir()})
+        )
+
+    def test_transient_staging_unlink_failure_is_retried_without_residue(self):
+        delivery = self.root / "staging-unlink-retry"
+        delivery.mkdir(mode=0o700)
+        original_unlink = self.producer.os.unlink
+        injected = False
+        failed_directory_descriptor = None
+        staging_attempts = 0
+
+        def fail_first_staging_unlink(path, *args, **kwargs):
+            nonlocal injected, failed_directory_descriptor, staging_attempts
+            if not injected and path == "github-ci-run-response.json":
+                injected = True
+                failed_directory_descriptor = kwargs.get("dir_fd")
+                staging_attempts += 1
+                raise OSError("simulated transient staging unlink failure")
+            if (
+                path == "github-ci-run-response.json"
+                and kwargs.get("dir_fd") == failed_directory_descriptor
+            ):
+                staging_attempts += 1
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(
+            self.producer.os,
+            "unlink",
+            side_effect=fail_first_staging_unlink,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertTrue(injected)
+        self.assertEqual(staging_attempts, 2)
+        self.assertIn("staging cleanup failed", str(caught.exception))
+        self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_staging_directory_open_rejects_inode_replacement_without_deleting_replacement(self):
+        delivery = self.root / "staging-directory-replacement"
+        delivery.mkdir(mode=0o700)
+        original_open = self.producer.os.open
+        moved = self.root / "moved-created-staging"
+        replacement = None
+
+        def replace_before_open(path, flags, *args, **kwargs):
+            nonlocal replacement
+            if (
+                replacement is None
+                and isinstance(path, str)
+                and path.startswith(".taiji-github-ci-evidence.")
+            ):
+                created = delivery / path
+                created.rename(moved)
+                replacement = delivery / path
+                replacement.mkdir(mode=0o700)
+            return original_open(path, flags, *args, **kwargs)
+
+        with patch.object(
+            self.producer.os,
+            "open",
+            side_effect=replace_before_open,
+        ):
+            with self.assertRaises(self.producer.GitHubCiEvidenceError):
+                self.call_delivery_producer(delivery)
+
+        self.assertIsNotNone(replacement)
+        self.assertTrue(replacement.is_dir())
+        self.assertEqual(list(replacement.iterdir()), [])
+        self.assertTrue(moved.is_dir())
+        self.assertEqual(list(moved.iterdir()), [])
+
+    def test_staging_directory_must_share_delivery_filesystem(self):
+        delivery = self.root / "staging-cross-device"
+        delivery.mkdir(mode=0o700)
+        original_open = self.producer.os.open
+        original_fstat = self.producer.os.fstat
+        staging_descriptors = set()
+
+        class CrossDeviceMetadata:
+            def __init__(self, metadata):
+                self._metadata = metadata
+                self.st_dev = metadata.st_dev + 1
+
+            def __getattr__(self, name):
+                return getattr(self._metadata, name)
+
+        def track_staging_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if (
+                isinstance(path, str)
+                and path.startswith(".taiji-github-ci-evidence.")
+            ):
+                staging_descriptors.add(descriptor)
+            return descriptor
+
+        def report_cross_device(descriptor):
+            metadata = original_fstat(descriptor)
+            if descriptor in staging_descriptors:
+                return CrossDeviceMetadata(metadata)
+            return metadata
+
+        with patch.object(
+            self.producer.os,
+            "open",
+            side_effect=track_staging_open,
+        ), patch.object(
+            self.producer.os,
+            "fstat",
+            side_effect=report_cross_device,
+        ):
+            with self.assertRaises(self.producer.GitHubCiEvidenceError):
+                self.call_delivery_producer(delivery)
+
+        self.assertEqual(list(delivery.iterdir()), [])
+
     def test_second_or_third_delivery_promotion_failure_rolls_back_only_owned_nodes(self):
         for failing_basename in (
             "github-ci-jobs-response.json",
