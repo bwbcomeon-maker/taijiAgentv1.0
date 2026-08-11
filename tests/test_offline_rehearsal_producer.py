@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -12,6 +13,7 @@ import textwrap
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -117,6 +119,29 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             with self.assertRaisesRegex(producer.ProducerError, "打开时发生替换"):
                 producer.read_regular_bytes(target, "stable input")
 
+    def test_previous_deb_archive_copy_streams_large_file_without_read_bytes(self) -> None:
+        producer = load_module(PRODUCER, "taiji_offline_large_previous_archive_copy")
+        source = self.temp_path / "taiji-agent_0.0.9_amd64.deb"
+        with source.open("wb") as handle:
+            handle.seek(40 * 1024 * 1024 - 1)
+            handle.write(b"\0")
+        destination = self.temp_path / "archived-previous.deb"
+        expected = producer.sha256_file(source)
+        resolved_source = source.resolve()
+        original_read_bytes = Path.read_bytes
+
+        def reject_whole_previous_read(path: Path) -> bytes:
+            if path == resolved_source:
+                raise AssertionError("previous DEB must not be read into one bytes object")
+            return original_read_bytes(path)
+
+        with mock.patch.object(Path, "read_bytes", reject_whole_previous_read):
+            observed = producer.copy_new_evidence_file(source, destination)
+
+        self.assertEqual(observed, expected)
+        self.assertEqual(destination.stat().st_size, 40 * 1024 * 1024)
+        self.assertEqual(producer.sha256_file(destination), expected)
+
     def _write_delivery_fixture(self) -> None:
         package_dir = self.delivery / "生成的安装包"
         package_dir.mkdir(parents=True)
@@ -180,6 +205,10 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "elf_abi_audit_sha256": "a" * 64,
                     "icon_set_sha256": "1" * 64,
                     "desktop_entry_sha256": "d" * 64,
+                    "acceptance_binding_sha256": "2" * 64,
+                    "acceptance_tools_manifest_sha256": "3" * 64,
+                    "acceptance_entrypoint_sha256": "4" * 64,
+                    "installed_release_manifest_sha256": "5" * 64,
                     "maintainer": "Taiji Agent Product Team <noreply@localhost>",
                     "built_at_utc": generated_at,
                     **TOOLCHAIN,
@@ -207,6 +236,10 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     f"compatibility_policy_sha256={self.policy_sha256}",
                     f"elf_abi_audit_sha256={'a' * 64}",
                     f"icon_set_sha256={'1' * 64}",
+                    f"acceptance_binding_sha256={'2' * 64}",
+                    f"acceptance_tools_manifest_sha256={'3' * 64}",
+                    f"acceptance_entrypoint_sha256={'4' * 64}",
+                    f"installed_release_manifest_sha256={'5' * 64}",
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                     *(f"{key}={value}" for key, value in TOOLCHAIN.items()),
                 )
@@ -405,6 +438,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                         "previous_deb_basename": state["env"]["TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME"],
                         "previous_deb_sha256": state["env"]["TAIJI_EXPECTED_PREVIOUS_DEB_SHA256"],
                         "previous_version": state["env"]["TAIJI_EXPECTED_PREVIOUS_VERSION"],
+                        "previous_signature_basename": state["env"]["TAIJI_EXPECTED_PREVIOUS_SIGNATURE_BASENAME"],
+                        "previous_signature_sha256": state["env"]["TAIJI_EXPECTED_PREVIOUS_SIGNATURE_SHA256"],
+                        "previous_signature_verification": "PASS",
                         "steps": [
                             "fresh_install_n",
                             "same_version_reinstall_n",
@@ -537,10 +573,72 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         mode: str = "expanded_success",
         *,
         previous: Path | None = None,
+        previous_signature: Path | None = None,
         previous_manifest: Path | None = None,
+        expected_public_key_fingerprint: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         previous = previous or self._write_previous_release()
+        if previous_signature is None:
+            if previous.is_file():
+                previous_signature, public_key = self._write_previous_signature_fixture(previous)
+            else:
+                public_key = self._ensure_test_release_key()
+                previous_signature = Path(f"{previous}.sig")
+        else:
+            public_key = self._ensure_test_release_key()
         previous_manifest = previous_manifest or previous.parent / "taiji-package-manifest.json"
+        validator_runner = self.temp_path / "validate-offline-with-test-trust-root.py"
+        validator_runner.write_text(
+            textwrap.dedent(
+                f'''\
+                import importlib.util
+                import os
+                import pathlib
+                import sys
+
+                validator_path = pathlib.Path({str(VALIDATOR)!r})
+                spec = importlib.util.spec_from_file_location("taiji_test_release_validator", validator_path)
+                if spec is None or spec.loader is None:
+                    raise SystemExit(97)
+                _validator = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = _validator
+                spec.loader.exec_module(_validator)
+                _validator.PINNED_RELEASE_PUBLIC_KEY_PATH = pathlib.Path(os.environ["TEST_RELEASE_PUBLIC_KEY"])
+                _validator.PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = os.environ["TEST_RELEASE_PUBLIC_KEY_FINGERPRINT"]
+                for _name in dir(_validator):
+                    if not _name.startswith("__"):
+                        globals()[_name] = getattr(_validator, _name)
+                if __name__ == "__main__":
+                    raise SystemExit(_validator.main())
+                '''
+            ),
+            encoding="utf-8",
+        )
+        runner = self.temp_path / "run-offline-producer-with-test-trust-root.py"
+        runner.write_text(
+            textwrap.dedent(
+                f'''\
+                import importlib.util
+                import os
+                import pathlib
+                import sys
+
+                producer_path = pathlib.Path({str(PRODUCER)!r})
+                spec = importlib.util.spec_from_file_location("taiji_test_offline_producer", producer_path)
+                if spec is None or spec.loader is None:
+                    raise SystemExit(97)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = module
+                spec.loader.exec_module(module)
+                module.RELEASE_PUBLIC_KEY = pathlib.Path(os.environ["TEST_RELEASE_PUBLIC_KEY"])
+                module.PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = os.environ["TEST_RELEASE_PUBLIC_KEY_FINGERPRINT"]
+                module.VALIDATOR = pathlib.Path(os.environ["TEST_RELEASE_VALIDATOR"])
+                sys.argv = [str(producer_path), *sys.argv[1:]]
+                raise SystemExit(module.main())
+                '''
+            ),
+            encoding="utf-8",
+        )
         env = os.environ.copy()
         env.update(
             {
@@ -548,6 +646,12 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                 "FAKE_DOCKER_LOG": str(self.docker_log),
                 "FAKE_DOCKER_STATE": str(self.docker_state),
                 "FAKE_DOCKER_MODE": mode,
+                "TEST_RELEASE_PUBLIC_KEY": str(public_key),
+                "TEST_RELEASE_PUBLIC_KEY_FINGERPRINT": (
+                    expected_public_key_fingerprint
+                    or self._test_release_public_fingerprint()
+                ),
+                "TEST_RELEASE_VALIDATOR": str(validator_runner),
             }
         )
         package_dir = self.delivery / "生成的安装包"
@@ -555,11 +659,13 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         return subprocess.run(
             [
                 "python3",
-                str(PRODUCER),
+                str(runner),
                 "--deb",
                 str(candidate),
                 "--previous-deb",
                 str(previous),
+                "--previous-signature",
+                str(previous_signature),
                 "--previous-manifest",
                 str(previous_manifest),
                 "--build-manifest",
@@ -641,6 +747,10 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "deb_sha256": sha256(previous),
                     "compatibility_policy_id": policy["policy_id"],
                     "compatibility_policy_sha256": policy_helper.canonical_sha256(policy),
+                    "upgrade_data_contract_id": "taiji-linux-upgrade-data-v1",
+                    "upgrade_data_contract_sha256": sha256(
+                        ROOT / "packaging/linux/upgrade-data-contract.json"
+                    ),
                 },
                 sort_keys=True,
             )
@@ -648,6 +758,83 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
             encoding="utf-8",
         )
         return previous
+
+    def _ensure_test_release_key(self) -> Path:
+        private_key = self.temp_path / "test-release-private.pem"
+        public_key = self.temp_path / "test-release-public.pem"
+        if not private_key.exists():
+            generated = subprocess.run(
+                [
+                    "openssl",
+                    "genpkey",
+                    "-algorithm",
+                    "RSA",
+                    "-pkeyopt",
+                    "rsa_keygen_bits:2048",
+                    "-out",
+                    str(private_key),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+            exported = subprocess.run(
+                [
+                    "openssl",
+                    "pkey",
+                    "-in",
+                    str(private_key),
+                    "-pubout",
+                    "-out",
+                    str(public_key),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(exported.returncode, 0, exported.stderr)
+        return public_key
+
+    def _write_previous_signature_fixture(self, previous: Path) -> tuple[Path, Path]:
+        public_key = self._ensure_test_release_key()
+        private_key = self.temp_path / "test-release-private.pem"
+        signature = Path(f"{previous}.sig")
+        signed = subprocess.run(
+            [
+                "openssl",
+                "dgst",
+                "-sha256",
+                "-sign",
+                str(private_key),
+                "-out",
+                str(signature),
+                str(previous),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(signed.returncode, 0, signed.stderr)
+        return signature, public_key
+
+    def _test_release_public_fingerprint(self) -> str:
+        public_key = self._ensure_test_release_key()
+        derived = subprocess.run(
+            [
+                "openssl",
+                "pkey",
+                "-pubin",
+                "-in",
+                str(public_key),
+                "-outform",
+                "DER",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(derived.returncode, 0, derived.stderr.decode("utf-8", errors="replace"))
+        return hashlib.sha256(derived.stdout).hexdigest()
 
     def docker_calls(self) -> list[list[str]]:
         return [json.loads(line) for line in self.docker_log.read_text(encoding="utf-8").splitlines()]
@@ -1046,10 +1233,21 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertEqual(evidence["previous_deb_basename"], previous.name)
         self.assertEqual(evidence["previous_version"], "0.0.9")
         self.assertEqual(evidence["previous_deb_sha256"], sha256(previous))
+        signature = Path(f"{previous}.sig")
+        self.assertEqual(evidence["previous_signature_basename"], signature.name)
+        self.assertEqual(evidence["previous_signature_sha256"], sha256(signature))
+        self.assertEqual(evidence["previous_signature_verification"], "PASS")
         lifecycle_path = self.output / evidence["lifecycle_log_basename"]
         self.assertEqual(evidence["lifecycle_log_sha256"], sha256(lifecycle_path))
         lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
-        for key in ("previous_deb_basename", "previous_version", "previous_deb_sha256"):
+        for key in (
+            "previous_deb_basename",
+            "previous_version",
+            "previous_deb_sha256",
+            "previous_signature_basename",
+            "previous_signature_sha256",
+            "previous_signature_verification",
+        ):
             self.assertEqual(lifecycle[key], evidence[key])
 
     def test_expanded_evidence_archives_and_binds_previous_release_identity(self):
@@ -1066,10 +1264,20 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertEqual(identity["version"], "0.0.9")
         self.assertEqual(identity["deb_sha256"], sha256(previous))
         self.assertEqual(identity["manifest_sha256"], sha256(previous_manifest))
-        for key in ("deb_basename", "checksum_basename", "manifest_basename"):
+        signature = Path(f"{previous}.sig")
+        self.assertEqual(identity["signature_basename"], signature.name)
+        self.assertEqual(identity["signature_sha256"], sha256(signature))
+        self.assertEqual(identity["signature_verification"], "PASS")
+        for key in (
+            "deb_basename",
+            "checksum_basename",
+            "signature_basename",
+            "manifest_basename",
+        ):
             archived = self.output / identity[key]
             self.assertTrue(archived.is_file(), key)
             self.assertFalse(archived.is_symlink(), key)
+        self.assertEqual((self.output / identity["signature_basename"]).read_bytes(), signature.read_bytes())
 
     def test_current_validator_rejects_tampered_archived_previous_release(self):
         result = self.run_producer_explicit()
@@ -1084,6 +1292,64 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
 
         self.assertNotEqual(validation.returncode, 0)
         self.assertIn("deb_sha256", validation.stderr)
+
+    def test_validator_rejects_self_consistent_but_forged_previous_signature(self):
+        result = self.run_producer_explicit()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence_path = self.output / "offline-install-rehearsal.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        identity = evidence["previous_release"]
+        archived_signature = self.output / identity["signature_basename"]
+        archived_signature.write_bytes(b"forged-but-rehashed-previous-signature\n")
+        forged_sha = sha256(archived_signature)
+        lifecycle_path = self.output / evidence["lifecycle_log_basename"]
+        lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+        lifecycle["previous_signature_sha256"] = forged_sha
+        lifecycle_path.write_text(
+            json.dumps(lifecycle, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        evidence["previous_signature_sha256"] = forged_sha
+        identity["signature_sha256"] = forged_sha
+        evidence["lifecycle_log_sha256"] = sha256(lifecycle_path)
+        evidence_path.write_text(
+            json.dumps(evidence, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        validator = load_module(VALIDATOR, "taiji_offline_forged_previous_signature")
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version="0.1.0",
+            architecture="amd64",
+            deb_basename="taiji-agent_0.1.0_amd64.deb",
+            deb_sha256=evidence["deb_sha256"],
+            compatibility_policy_id=self.policy_id,
+            compatibility_policy_sha256=self.policy_sha256,
+            electron_executable_sha256="e" * 64,
+            desktop_entry_sha256="d" * 64,
+            delivery_inventory_sha256=evidence["delivery_inventory_sha256"],
+        )
+        public_key = self._ensure_test_release_key()
+        with (
+            mock.patch.object(validator, "PINNED_RELEASE_PUBLIC_KEY_PATH", public_key),
+            mock.patch.object(
+                validator,
+                "PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT",
+                self._test_release_public_fingerprint(),
+            ),
+            self.assertRaisesRegex(validator.EvidenceError, "detached signature|\u7b7e\u540d"),
+        ):
+            validator.validate_offline_evidence_v1(
+                evidence,
+                evidence_path,
+                SimpleNamespace(
+                    challenge=CHALLENGE,
+                    source_commit=self.source_commit,
+                    deb=Path(binding.deb_basename),
+                ),
+                binding,
+            )
 
     def test_missing_previous_manifest_blocks_expanded_rehearsal(self):
         previous = self._write_previous_release()
@@ -1138,6 +1404,247 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("previous", (result.stdout + result.stderr).lower())
         self.assertFalse(self.output.exists())
+
+    def test_explicit_lifecycle_contract_requires_external_previous_signature(self):
+        producer = load_module(PRODUCER, "taiji_offline_signature_contract")
+
+        parameters = inspect.signature(producer.prepare_explicit_inputs).parameters
+
+        self.assertIn("previous_signature_arg", parameters)
+        source = PRODUCER.read_text(encoding="utf-8")
+        self.assertIn('parser.add_argument("--previous-signature"', source)
+        self.assertIn("previous_signature_arg=args.previous_signature", source)
+
+    def test_previous_detached_signature_is_verified_with_the_pinned_public_key(self):
+        producer = load_module(PRODUCER, "taiji_offline_previous_signature_verifier")
+        previous = self._write_previous_release()
+        signature, public_key = self._write_previous_signature_fixture(previous)
+
+        self.assertTrue(
+            hasattr(producer, "verify_previous_detached_signature"),
+            "producer must expose the fixed-public-key previous signature admission",
+        )
+        with (
+            mock.patch.object(producer, "RELEASE_PUBLIC_KEY", public_key),
+            mock.patch.object(
+                producer,
+                "PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT",
+                self._test_release_public_fingerprint(),
+                create=True,
+            ),
+        ):
+            producer.verify_previous_detached_signature(previous, signature)
+            signature.write_bytes(b"forged previous signature\n")
+            with self.assertRaisesRegex(producer.ProducerError, "signature|\u7b7e\u540d"):
+                producer.verify_previous_detached_signature(previous, signature)
+
+    def test_previous_signature_verification_ignores_path_injected_fake_openssl(self):
+        producer = load_module(PRODUCER, "taiji_offline_fake_openssl_admission")
+        previous = self._write_previous_release()
+        signature, public_key = self._write_previous_signature_fixture(previous)
+        signature.write_bytes(b"forged previous signature\n")
+        write_executable(
+            self.fake_bin / "openssl",
+            """
+            #!/bin/sh
+            exit 0
+            """,
+        )
+
+        with (
+            mock.patch.object(producer, "RELEASE_PUBLIC_KEY", public_key),
+            mock.patch.object(
+                producer,
+                "PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT",
+                self._test_release_public_fingerprint(),
+                create=True,
+            ),
+            mock.patch.dict(
+                os.environ,
+                {"PATH": f"{self.fake_bin}:{os.environ['PATH']}"},
+                clear=False,
+            ),
+            self.assertRaisesRegex(producer.ProducerError, "signature|\u7b7e\u540d"),
+        ):
+            producer.verify_previous_detached_signature(previous, signature)
+
+    def test_openssl_admission_uses_fixed_root_managed_single_link_executable(self):
+        producer = load_module(PRODUCER, "taiji_offline_fixed_openssl_contract")
+
+        resolved = Path(producer.resolve_trusted_openssl())
+
+        self.assertEqual(resolved, Path("/usr/bin/openssl").resolve(strict=True))
+        for directory in (Path("/usr"), Path("/usr/bin")):
+            metadata = directory.lstat()
+            self.assertFalse(directory.is_symlink())
+            self.assertEqual(metadata.st_uid, 0)
+            self.assertEqual(metadata.st_mode & 0o022, 0)
+        metadata = resolved.lstat()
+        self.assertTrue(metadata.st_mode & 0o111)
+        self.assertEqual(metadata.st_uid, 0)
+        self.assertEqual(metadata.st_nlink, 1)
+        self.assertEqual(metadata.st_mode & 0o022, 0)
+        source = PRODUCER.read_text(encoding="utf-8")
+        self.assertIn('TRUSTED_OPENSSL = Path("/usr/bin/openssl")', source)
+        self.assertNotIn('shutil.which("openssl")', source)
+
+    def test_tracked_release_public_key_matches_the_product_fingerprint(self):
+        producer = load_module(PRODUCER, "taiji_offline_release_key_fingerprint_contract")
+
+        derived = subprocess.run(
+            [
+                producer.resolve_trusted_openssl(),
+                "pkey",
+                "-pubin",
+                "-in",
+                str(producer.RELEASE_PUBLIC_KEY),
+                "-outform",
+                "DER",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(
+            hashlib.sha256(derived.stdout).hexdigest(),
+            "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da",
+        )
+        self.assertEqual(
+            producer.PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT,
+            "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da",
+        )
+
+    def test_replaced_release_key_and_matching_signature_stop_before_docker(self):
+        previous = self._write_previous_release()
+        attacker_signature, _attacker_public_key = self._write_previous_signature_fixture(previous)
+
+        result = self.run_producer_explicit(
+            previous=previous,
+            previous_signature=attacker_signature,
+            expected_public_key_fingerprint=(
+                "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+            ),
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fingerprint", (result.stdout + result.stderr).lower())
+        self.assertFalse(self.docker_log.exists())
+        self.assertFalse(self.output.exists())
+
+    def test_missing_or_forged_previous_signature_stops_before_docker(self):
+        previous = self._write_previous_release()
+        valid_signature, _public_key = self._write_previous_signature_fixture(previous)
+        missing_signature = previous.parent / "missing-previous.deb.sig"
+
+        for label, signature in (
+            ("missing", missing_signature),
+            ("forged", valid_signature),
+        ):
+            with self.subTest(case=label):
+                if signature == valid_signature:
+                    signature.write_bytes(b"forged previous detached signature\n")
+                result = self.run_producer_explicit(
+                    previous=previous,
+                    previous_signature=signature,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("signature", (result.stdout + result.stderr).lower())
+                self.assertFalse(self.docker_log.exists())
+                self.assertFalse(self.output.exists())
+
+    def test_expanded_container_binds_external_signature_and_tracked_admission_inputs(self):
+        producer = load_module(PRODUCER, "taiji_offline_signature_container_binding")
+        previous_deb = self._write_previous_release()
+        signature, public_key = self._write_previous_signature_fixture(previous_deb)
+        previous = {
+            "deb": previous_deb,
+            "sha256": sha256(previous_deb),
+            "checksum": Path(f"{previous_deb}.sha256"),
+            "signature": signature,
+            "signature_sha256": sha256(signature),
+            "manifest": previous_deb.parent / "taiji-package-manifest.json",
+            "version": "0.0.9",
+        }
+        package_dir = self.delivery / "生成的安装包"
+        candidate = package_dir / "taiji-agent_0.1.0_amd64.deb"
+        release = {
+            "source_commit": self.source_commit,
+            "deb": candidate,
+            "deb_sha256": sha256(candidate),
+            "version": "0.1.0",
+        }
+        policy = {"id": self.policy_id, "sha256": self.policy_sha256}
+        evidence_dir = self.temp_path / "direct-container-evidence"
+        evidence_dir.mkdir()
+        fake_env = {
+            "PATH": f"{self.fake_bin}:{os.environ['PATH']}",
+            "FAKE_DOCKER_LOG": str(self.docker_log),
+            "FAKE_DOCKER_STATE": str(self.docker_state),
+            "FAKE_DOCKER_MODE": "expanded_success",
+        }
+
+        with (
+            mock.patch.object(producer, "RELEASE_PUBLIC_KEY", public_key),
+            mock.patch.dict(os.environ, fake_env, clear=False),
+            producer.staged_expanded_delivery(self.delivery, previous, POLICY) as staged,
+        ):
+            staged_inputs = staged / ".rehearsal-inputs"
+            staged_signature = staged_inputs / "previous" / signature.name
+            self.assertEqual(staged_signature.read_bytes(), signature.read_bytes())
+            self.assertEqual(
+                (staged_inputs / "signing-public.pem").read_bytes(),
+                public_key.read_bytes(),
+            )
+            self.assertTrue((staged_inputs / "taiji-silent-deploy.sh").is_file())
+            producer.run_lifecycle_container(
+                docker=str(self.fake_bin / "docker"),
+                image="taiji-offline-rehearsal:test",
+                delivery=staged.resolve(),
+                evidence_dir=evidence_dir.resolve(),
+                challenge=CHALLENGE,
+                release=release,
+                previous=previous,
+                policy=policy,
+                expanded=True,
+            )
+
+        state = json.loads(self.docker_state.read_text(encoding="utf-8"))
+        container_env = state["env"]
+        self.assertEqual(
+            container_env["TAIJI_EXPECTED_PREVIOUS_SIGNATURE_BASENAME"],
+            signature.name,
+        )
+        self.assertEqual(
+            container_env["TAIJI_EXPECTED_PREVIOUS_SIGNATURE_SHA256"],
+            sha256(signature),
+        )
+        self.assertEqual(
+            container_env["TAIJI_PREVIOUS_SIGNATURE_RELATIVE"],
+            f".rehearsal-inputs/previous/{signature.name}",
+        )
+        self.assertEqual(
+            container_env["TAIJI_EXPECTED_RELEASE_PUBLIC_KEY_SHA256"],
+            sha256(public_key),
+        )
+        self.assertEqual(
+            container_env["TAIJI_SILENT_DEPLOY_RELATIVE"],
+            ".rehearsal-inputs/taiji-silent-deploy.sh",
+        )
+
+    def test_expanded_lifecycle_uses_real_silent_deploy_admission_and_never_forges_signature(self):
+        lifecycle = LIFECYCLE.read_text(encoding="utf-8")
+        producer = PRODUCER.read_text(encoding="utf-8")
+
+        self.assertNotIn("offline rehearsal previous signature", lifecycle)
+        self.assertNotIn("transaction.run_upgrade(", lifecycle)
+        self.assertIn("taiji-silent-deploy.sh", lifecycle)
+        self.assertIn("--previous-signature", lifecycle)
+        self.assertIn("TAIJI_RELEASE_PUBLIC_KEY=", lifecycle)
+        self.assertIn(
+            'RELEASE_PUBLIC_KEY = ROOT / "tools" / "taiji-release-evidence" / "signing-public.pem"',
+            producer,
+        )
 
     def test_previous_release_must_be_strictly_older_under_debian_version_rules(self):
         producer = load_module(PRODUCER, "taiji_offline_previous_version_contract")

@@ -44,6 +44,7 @@ PUBLIC_VERSION_RE = re.compile(
 )
 MAX_JSON_BYTES = 1024 * 1024
 MAX_EVIDENCE_BYTES = 32 * 1024 * 1024
+MAX_PREVIOUS_RELEASE_DEB_BYTES = 2 * 1024 * 1024 * 1024
 PACKAGE_MANIFEST_SCHEMA_V3 = "taiji-package-manifest/v3"
 RELEASE_EVIDENCE_SCHEMA_V3 = "taiji-release-evidence/v3"
 OFFLINE_EVIDENCE_SCHEMA_V1 = "taiji.offline-install-rehearsal.v1"
@@ -73,6 +74,11 @@ PINNED_ELECTRON_ARCHIVE_SHA256 = "92e8b031fa5327c78a972279fd75fc8503fcd177340180
 PINNED_ELECTRON_EXECUTABLE_SHA256 = "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 PINNED_SOURCE_INTEGRITY_HELPER_SHA256 = "dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
 PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+PINNED_RELEASE_PUBLIC_KEY_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "tools/taiji-release-evidence/signing-public.pem"
+)
+TRUSTED_OPENSSL = Path("/usr/bin/openssl")
 TOOLCHAIN_MANIFEST_FIELDS = {
     "python_dependency_lock_status",
     "python_lock_basename",
@@ -358,6 +364,9 @@ OFFLINE_V1_LIFECYCLE_KEYS = {
     "previous_deb_basename",
     "previous_deb_sha256",
     "previous_version",
+    "previous_signature_basename",
+    "previous_signature_sha256",
+    "previous_signature_verification",
     "lifecycle_log_basename",
     "lifecycle_log_sha256",
 }
@@ -368,6 +377,9 @@ OFFLINE_PREVIOUS_RELEASE_KEYS = {
     "deb_sha256",
     "checksum_basename",
     "checksum_sha256",
+    "signature_basename",
+    "signature_sha256",
+    "signature_verification",
     "manifest_basename",
     "manifest_sha256",
     "compatibility_policy_id",
@@ -717,6 +729,67 @@ def open_regular(path: Path, label: str, *, single_link: bool = True) -> tuple[i
     except Exception:
         os.close(descriptor)
         raise
+
+
+def regular_file_identity(file_stat: os.stat_result) -> tuple[int, ...]:
+    """Return the metadata that must stay stable for one accepted file snapshot."""
+
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_mode,
+        file_stat.st_nlink,
+        file_stat.st_uid,
+        file_stat.st_gid,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def resolve_trusted_openssl() -> str:
+    """Resolve only the root-managed fixed OpenSSL verification executable."""
+
+    for directory in (Path("/usr"), Path("/usr/bin")):
+        try:
+            metadata = directory.lstat()
+        except OSError as exc:
+            raise EvidenceError(f"可信 openssl 目录不可读取: {directory}: {exc}") from exc
+        if (
+            directory.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_mode & 0o022
+        ):
+            raise EvidenceError(f"可信 openssl 目录不是 root 管理的只读系统目录: {directory}")
+
+    try:
+        alias = TRUSTED_OPENSSL.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"缺少固定可信 openssl: {TRUSTED_OPENSSL}: {exc}") from exc
+    if alias.st_uid != 0 or alias.st_nlink != 1:
+        raise EvidenceError(f"固定 openssl 必须是 root-owned 单链接入口: {TRUSTED_OPENSSL}")
+    if not (stat.S_ISREG(alias.st_mode) or stat.S_ISLNK(alias.st_mode)):
+        raise EvidenceError(f"固定 openssl 入口类型不可信: {TRUSTED_OPENSSL}")
+    if stat.S_ISREG(alias.st_mode) and alias.st_mode & 0o022:
+        raise EvidenceError(f"固定 openssl 可被组或其他用户写入: {TRUSTED_OPENSSL}")
+    try:
+        resolved = TRUSTED_OPENSSL.resolve(strict=True)
+        resolved_metadata = resolved.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise EvidenceError(f"固定 openssl 无法解析到可信实体: {exc}") from exc
+    if resolved.parent != Path("/usr/bin"):
+        raise EvidenceError(f"固定 openssl 解析后逃离 /usr/bin: {resolved}")
+    if (
+        resolved.is_symlink()
+        or not stat.S_ISREG(resolved_metadata.st_mode)
+        or resolved_metadata.st_uid != 0
+        or resolved_metadata.st_nlink != 1
+        or not resolved_metadata.st_mode & 0o111
+        or resolved_metadata.st_mode & 0o022
+    ):
+        raise EvidenceError(f"固定 openssl 实体不是 root 管理的单链接可执行普通文件: {resolved}")
+    return str(resolved)
 
 
 def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -> tuple[bytes, os.stat_result]:
@@ -1370,6 +1443,7 @@ def validate_target_driver_v2_observations(driver: dict[str, Any]) -> None:
 
 
 def validate_attestation(args: argparse.Namespace, evidence_payload: bytes) -> None:
+    openssl = resolve_trusted_openssl()
     public_payload, _ = read_regular_bytes(
         args.attestation_public_key,
         "发布证据验签公钥",
@@ -1391,7 +1465,7 @@ def validate_attestation(args: argparse.Namespace, evidence_payload: bytes) -> N
         public_path.write_bytes(public_payload)
         signature_path.write_bytes(signature_payload)
         derived = subprocess.run(
-            ["openssl", "pkey", "-pubin", "-in", str(public_path), "-outform", "DER"],
+            [openssl, "pkey", "-pubin", "-in", str(public_path), "-outform", "DER"],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1403,7 +1477,7 @@ def validate_attestation(args: argparse.Namespace, evidence_payload: bytes) -> N
             raise EvidenceError("发布证据验签公钥 fingerprint 与产品信任锚不一致")
         verified = subprocess.run(
             [
-                "openssl",
+                openssl,
                 "dgst",
                 "-sha256",
                 "-verify",
@@ -1418,6 +1492,63 @@ def validate_attestation(args: argparse.Namespace, evidence_payload: bytes) -> N
         )
         if verified.returncode != 0:
             raise EvidenceError("发布证据签名无效；必须由离线发布私钥复核签署")
+
+
+def verify_with_pinned_release_public_key(
+    payload_descriptor: int,
+    signature_payload: bytes,
+    label: str,
+) -> None:
+    """Verify a release detached signature from the caller's stable open descriptor."""
+
+    openssl = resolve_trusted_openssl()
+    source_key = PINNED_RELEASE_PUBLIC_KEY_PATH
+    if not source_key.is_file():
+        # The validator is also copied beside the tracked public key in the
+        # offline acceptance tools.  The fingerprint below keeps that copy
+        # pinned to the same product trust root.
+        source_key = Path(__file__).resolve().with_name("signing-public.pem")
+    public_payload, _ = read_regular_bytes(
+        source_key,
+        "固定发布验签公钥",
+        limit=64 * 1024,
+    )
+    with tempfile.TemporaryDirectory(prefix="taiji-previous-release-verify-") as temporary:
+        temporary_root = Path(temporary)
+        public_path = temporary_root / "signing-public.pem"
+        signature_path = temporary_root / "previous-release.deb.sig"
+        public_path.write_bytes(public_payload)
+        signature_path.write_bytes(signature_payload)
+        public_path.chmod(0o600)
+        signature_path.chmod(0o600)
+        derived = subprocess.run(
+            [openssl, "pkey", "-pubin", "-in", str(public_path), "-outform", "DER"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if derived.returncode != 0:
+            raise EvidenceError("固定发布验签公钥不是有效 PEM 公钥")
+        actual_fingerprint = hashlib.sha256(derived.stdout).hexdigest()
+        if actual_fingerprint != PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT:
+            raise EvidenceError("固定发布验签公钥 fingerprint 与产品信任锚不一致")
+        verified = subprocess.run(
+            [
+                openssl,
+                "dgst",
+                "-sha256",
+                "-verify",
+                str(public_path),
+                "-signature",
+                str(signature_path),
+            ],
+            stdin=payload_descriptor,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if verified.returncode != 0:
+            raise EvidenceError(f"{label} detached signature 未通过固定发布公钥验证")
 
 
 def parse_marker(path: Path) -> dict[str, str]:
@@ -1815,6 +1946,69 @@ def validate_bound_file(
     return bound_path, payload, file_stat
 
 
+def validate_streamed_signed_previous_deb(
+    data: dict[str, Any],
+    evidence_path: Path,
+    signature_payload: bytes,
+) -> tuple[Path, str, os.stat_result]:
+    """Hash and verify the archived previous DEB through one stable open descriptor."""
+
+    basename = data["deb_basename"]
+    if type(basename) is not str or not basename or Path(basename).name != basename:
+        raise EvidenceError("字段 deb_basename 必须是同目录文件 basename")
+    bound_path = evidence_path.parent / basename
+    try:
+        before = bound_path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"N-1 DEB 不可读取: {bound_path}: {exc}") from exc
+    if not stat.S_ISREG(before.st_mode) or bound_path.is_symlink() or before.st_nlink != 1:
+        raise EvidenceError(f"N-1 DEB 必须是单链接普通文件: {bound_path}")
+
+    descriptor, opened = open_regular(bound_path, "N-1 DEB")
+    try:
+        if regular_file_identity(before) != regular_file_identity(opened):
+            raise EvidenceError(f"N-1 DEB 在打开前发生变化: {bound_path}")
+        if opened.st_size > MAX_PREVIOUS_RELEASE_DEB_BYTES:
+            raise EvidenceError(
+                f"N-1 DEB 超过大文件大小上限 {MAX_PREVIOUS_RELEASE_DEB_BYTES}: {bound_path}"
+            )
+
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise EvidenceError(f"N-1 DEB 在摘要计算期间被截断: {bound_path}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise EvidenceError(f"N-1 DEB 在摘要计算期间增长: {bound_path}")
+
+        actual_hash = digest.hexdigest()
+        recorded_hash = validate_sha256(data["deb_sha256"], "deb_sha256")
+        if recorded_hash != actual_hash:
+            raise EvidenceError(f"deb_sha256 与 {basename} 内容不一致")
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        verify_with_pinned_release_public_key(
+            descriptor,
+            signature_payload,
+            "previous release DEB",
+        )
+        after = os.fstat(descriptor)
+        current = bound_path.lstat()
+        if (
+            regular_file_identity(opened) != regular_file_identity(after)
+            or regular_file_identity(opened) != regular_file_identity(current)
+        ):
+            raise EvidenceError(f"N-1 DEB 在流式摘要或验签期间发生变化: {bound_path}")
+        return bound_path, actual_hash, opened
+    except OSError as exc:
+        raise EvidenceError(f"N-1 DEB 流式校验失败: {bound_path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
 def validate_offline_session(data: dict[str, Any], session: dict[str, Any], args: argparse.Namespace) -> None:
     require_exact_keys(session, OFFLINE_SESSION_KEYS, "离线演练会话")
     comparisons = {
@@ -1959,6 +2153,13 @@ def validate_offline_lifecycle_extensions(
         f"taiji-agent_{previous_version}_amd64.deb",
     )
     validate_sha256(data["previous_deb_sha256"], "previous_deb_sha256")
+    require_exact(
+        data,
+        "previous_signature_basename",
+        f"{data['previous_deb_basename']}.sig",
+    )
+    validate_sha256(data["previous_signature_sha256"], "previous_signature_sha256")
+    require_exact(data, "previous_signature_verification", "PASS")
     if compare_debian_versions(previous_version, binding.version) >= 0:
         raise EvidenceError("N-1 previous version 必须按 Debian 版本规则严格早于 candidate")
 
@@ -1977,6 +2178,9 @@ def validate_offline_lifecycle_extensions(
         "previous_deb_basename",
         "previous_deb_sha256",
         "previous_version",
+        "previous_signature_basename",
+        "previous_signature_sha256",
+        "previous_signature_verification",
         "steps",
         "receipts",
         "data_manifests",
@@ -1993,6 +2197,9 @@ def validate_offline_lifecycle_extensions(
         "previous_deb_basename",
         "previous_deb_sha256",
         "previous_version",
+        "previous_signature_basename",
+        "previous_signature_sha256",
+        "previous_signature_verification",
         "steps",
         "receipts",
         "data_manifests",
@@ -2125,18 +2332,31 @@ def validate_offline_lifecycle_extensions(
         previous["compatibility_policy_sha256"],
         "previous_release.compatibility_policy_sha256",
     )
+    require_exact(previous, "signature_verification", "PASS")
 
-    previous_deb_path, previous_deb_payload, _ = validate_bound_file(
+    previous_signature_path, previous_signature_payload, _ = validate_bound_file(
         previous,
         evidence_path,
-        "deb_basename",
-        "deb_sha256",
-        "N-1 DEB",
+        "signature_basename",
+        "signature_sha256",
+        "previous release DEB detached signature",
+    )
+    if (
+        previous_signature_path.name != f"{previous['deb_basename']}.sig"
+        or previous_signature_path.name != data["previous_signature_basename"]
+        or previous["signature_sha256"] != data["previous_signature_sha256"]
+        or previous["signature_verification"] != data["previous_signature_verification"]
+    ):
+        raise EvidenceError("previous_release detached signature 与生命周期声明不一致")
+    previous_deb_path, previous_deb_sha256, _ = validate_streamed_signed_previous_deb(
+        previous,
+        evidence_path,
+        previous_signature_payload,
     )
     if (
         previous_version != data["previous_version"]
         or previous_deb_path.name != data["previous_deb_basename"]
-        or hashlib.sha256(previous_deb_payload).hexdigest() != data["previous_deb_sha256"]
+        or previous_deb_sha256 != data["previous_deb_sha256"]
     ):
         raise EvidenceError("previous_release 与扩展生命周期 N-1 身份不一致")
     _, checksum_payload, _ = validate_bound_file(
@@ -2154,7 +2374,6 @@ def validate_offline_lifecycle_extensions(
         r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?",
         checksum_text,
     )
-    previous_deb_sha256 = hashlib.sha256(previous_deb_payload).hexdigest()
     if (
         checksum_match is None
         or checksum_match.group(1) != previous_deb_sha256

@@ -243,102 +243,72 @@ dpkg_purge() {
   record_package_action "dpkg --purge" "taiji-agent"
 }
 
-transaction_upgrade() {
-  local candidate="$1" previous="$2" signature="$3" injected="$4"
-  TAIJI_TX_CANDIDATE="$candidate" \
-    TAIJI_TX_PREVIOUS="$previous" \
-    TAIJI_TX_SIGNATURE="$signature" \
-    TAIJI_TX_INJECTED="$injected" \
-    TAIJI_TX_ROOT="$WORK_ROOT/transactions" \
-    TAIJI_TX_USER="$REHEARSAL_USER" \
-    python3 - "$WORK_DELIVERY/.rehearsal-inputs/upgrade_transaction.py" <<'PY'
-import importlib.util
+silent_upgrade() {
+  local candidate="$1" previous="$2" signature="$3" attempt="$4" expected_result="$5"
+  local silent_deploy="$WORK_DELIVERY/$TAIJI_SILENT_DEPLOY_RELATIVE"
+  local build_manifest="$WORK_DELIVERY/$TAIJI_BUILD_MANIFEST_RELATIVE"
+  local policy="$WORK_DELIVERY/$TAIJI_POLICY_RELATIVE"
+  local release_public_key="$WORK_DELIVERY/$TAIJI_RELEASE_PUBLIC_KEY_RELATIVE"
+  local previous_manifest="$(dirname -- "$previous")/previous-release-manifest.json"
+  local receipt_dir="$WORK_ROOT/deployment-receipts"
+  local receipt="$receipt_dir/$attempt.json"
+  local deploy_log="$receipt_dir/$attempt.log"
+  local deployment_challenge deploy_rc=0
+
+  install -d -o 0 -g 0 -m 0700 -- "$receipt_dir"
+  deployment_challenge="$(printf '%s:%s' "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE" "$attempt" | sha256sum | awk '{print $1}')"
+  TAIJI_RELEASE_PUBLIC_KEY="$release_public_key" \
+  TAIJI_DEPLOYMENT_CHALLENGE_DIR="$WORK_ROOT/admission-challenges" \
+    bash "$silent_deploy" \
+      --deb "$candidate" \
+      --expected-version "$TAIJI_EXPECTED_CANDIDATE_VERSION" \
+      --expected-sha256 "$TAIJI_EXPECTED_DEB_SHA256" \
+      --admission-mode certification \
+      --operation upgrade \
+      --receipt "$receipt" \
+      --build-manifest "$build_manifest" \
+      --policy "$policy" \
+      --certification-challenge "$deployment_challenge" \
+      --business-user "$REHEARSAL_USER" \
+      --previous-deb "$previous" \
+      --previous-sha256 "$TAIJI_EXPECTED_PREVIOUS_DEB_SHA256" \
+      --previous-signature "$signature" \
+      --previous-manifest "$previous_manifest" \
+      >"$deploy_log" 2>&1 || deploy_rc=$?
+
+  record_package_action "dpkg --install" "$candidate"
+  if [ "$expected_result" = "rolled_back" ]; then
+    record_package_action "dpkg --install" "$previous"
+  fi
+  python3 - "$receipt" "$expected_result" "$deploy_rc" <<'PY'
 import json
-import os
 import pathlib
-import subprocess
 import sys
 
-helper_path = pathlib.Path(sys.argv[1])
-spec = importlib.util.spec_from_file_location("taiji_rehearsal_upgrade_transaction", helper_path)
-if spec is None or spec.loader is None:
-    raise SystemExit("cannot load upgrade_transaction.py")
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-account = module.resolve_account(os.environ["TAIJI_TX_USER"])
-transaction = module.UpgradeTransaction.create(
-    os.environ["TAIJI_TX_ROOT"], account=account, operation="upgrade"
-)
-candidate = pathlib.Path(os.environ["TAIJI_TX_CANDIDATE"])
-previous = pathlib.Path(os.environ["TAIJI_TX_PREVIOUS"])
-signature = pathlib.Path(os.environ["TAIJI_TX_SIGNATURE"])
-injected = os.environ["TAIJI_TX_INJECTED"] == "1"
-original = pathlib.Path("/var/lib/dpkg/info/taiji-agent.postinst")
-diverted = pathlib.Path("/var/lib/dpkg/info/taiji-agent.postinst.taiji-rehearsal-original")
-
-def dpkg_install(package: pathlib.Path) -> bool:
-    completed = subprocess.run(
-        ["dpkg", "--install", "--force-confold", "--", str(package)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    print(completed.stdout, end="", file=sys.stderr)
-    with pathlib.Path("/work/package-actions.tsv").open("a", encoding="utf-8") as handle:
-        handle.write(f"dpkg --install\t{package}\tnone\n")
-    return completed.returncode == 0
-
-def disable_injection() -> None:
-    if injected:
-        try:
-            original.unlink()
-        except FileNotFoundError:
-            pass
-        subprocess.run(
-            ["dpkg-divert", "--remove", "--rename", "--divert", str(diverted), str(original)],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
-        )
-
-def verify_package() -> bool:
-    status = subprocess.run(
-        ["dpkg-query", "-W", "-f=${Status}", "taiji-agent"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
-    )
-    if status.stdout.strip() != "install ok installed":
-        return False
-    verifier = pathlib.Path("/opt/taiji-agent/bin/taiji-native-verify")
-    if not verifier.is_file() or not verifier.stat().st_mode & 0o111:
-        return False
-    native = subprocess.run(
-        ["sudo", "-H", "-u", os.environ["TAIJI_TX_USER"], "env",
-         f"HOME=/home/{os.environ['TAIJI_TX_USER']}",
-         "TAIJI_AGENT_USE_USER_DIRS=1", str(verifier)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
-    )
-    if native.returncode != 0:
-        return False
-    cli = subprocess.run(
-        ["sudo", "-H", "-u", os.environ["TAIJI_TX_USER"], "env",
-         f"HOME=/home/{os.environ['TAIJI_TX_USER']}", "taiji", "--help"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
-    )
-    return cli.returncode == 0
-
-result = transaction.run_upgrade(
-    candidate_deb=candidate,
-    previous_deb=previous,
-    previous_sha256=os.environ["TAIJI_EXPECTED_PREVIOUS_DEB_SHA256"],
-    previous_signature=signature,
-    stop_fn=lambda: True,
-    install_fn=dpkg_install,
-    verify_fn=verify_package,
-    rollback_install_fn=lambda package: (disable_injection() or dpkg_install(package)),
-)
-print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+receipt_path = pathlib.Path(sys.argv[1])
+expected_result = sys.argv[2]
+deploy_rc = int(sys.argv[3])
+if not receipt_path.is_file():
+    raise SystemExit("silent deployment did not write a receipt")
+receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+if receipt.get("operation") != "upgrade" or receipt.get("result") != expected_result:
+    raise SystemExit("silent deployment receipt result mismatch")
+if receipt.get("native_verify") != "PASS":
+    raise SystemExit("silent deployment receipt native verify did not pass")
+if expected_result == "upgraded" and deploy_rc != 0:
+    raise SystemExit("successful silent deployment returned non-zero")
+if expected_result == "rolled_back" and deploy_rc == 0:
+    raise SystemExit("injected failure unexpectedly returned zero")
+transaction_id = receipt.get("rollback_transaction_id")
+if not isinstance(transaction_id, str) or not transaction_id:
+    raise SystemExit("silent deployment receipt lacks transaction identity")
+state = "committed" if expected_result == "upgraded" else "rolled_back"
+print(json.dumps({"state": state, "transaction_id": transaction_id}, sort_keys=True, separators=(",", ":")))
 PY
 }
 
 verify_journal_resume() {
-  python3 - "$WORK_DELIVERY/.rehearsal-inputs/upgrade_transaction.py" "$WORK_ROOT/transactions" <<'PY'
+  python3 - "$WORK_DELIVERY/.rehearsal-inputs/upgrade_transaction.py" "/var/lib/taiji-agent/upgrades" <<'PY'
 import importlib.util
 import json
 import pathlib
@@ -410,7 +380,8 @@ expanded_lifecycle() {
   local candidate="$WORK_DELIVERY/生成的安装包/$TAIJI_EXPECTED_DEB_BASENAME"
   local previous="$WORK_DELIVERY/$TAIJI_PREVIOUS_DEB_RELATIVE"
   local previous_checksum="$previous.sha256"
-  local previous_signature="$WORK_ROOT/previous.deb.sig"
+  local previous_signature="$WORK_DELIVERY/$TAIJI_PREVIOUS_SIGNATURE_RELATIVE"
+  local release_public_key="$WORK_DELIVERY/$TAIJI_RELEASE_PUBLIC_KEY_RELATIVE"
   [ -f "$candidate" ] || fail "工作交付目录缺少 candidate DEB：$candidate"
   [ -f "$previous" ] || fail "工作交付目录缺少 previous DEB：$previous"
   local actual_candidate_sha actual_previous_sha actual_candidate_version actual_previous_version
@@ -428,8 +399,16 @@ expanded_lifecycle() {
     || fail "previous DEB control Version 与声明版本不一致"
   grep -Eq "${TAIJI_EXPECTED_PREVIOUS_DEB_SHA256}[[:space:]]+\*?${TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME}" "$previous_checksum" \
     || fail "previous DEB SHA256 sidecar 未绑定"
-  printf 'offline rehearsal previous signature\n' > "$previous_signature"
-  chmod 0600 "$previous_signature"
+  [ -f "$previous_signature" ] && [ ! -L "$previous_signature" ] \
+    || fail "工作交付目录缺少 previous detached signature"
+  [ "$(basename -- "$previous_signature")" = "$TAIJI_EXPECTED_PREVIOUS_SIGNATURE_BASENAME" ] \
+    || fail "previous detached signature basename 不一致"
+  [ "$(sha256sum -- "$previous_signature" | awk '{print $1}')" = "$TAIJI_EXPECTED_PREVIOUS_SIGNATURE_SHA256" ] \
+    || fail "previous detached signature SHA256 不一致"
+  [ -f "$release_public_key" ] && [ ! -L "$release_public_key" ] \
+    || fail "缺少固定发布验签公钥"
+  [ "$(sha256sum -- "$release_public_key" | awk '{print $1}')" = "$TAIJI_EXPECTED_RELEASE_PUBLIC_KEY_SHA256" ] \
+    || fail "固定发布验签公钥 SHA256 不一致"
   : > "$WORK_ROOT/steps.txt"
   : > "$WORK_ROOT/receipts.jsonl"
   : > "$WORK_ROOT/package-actions.tsv"
@@ -453,7 +432,7 @@ expanded_lifecycle() {
 
   record_step "upgrade_n_minus_one_to_n"
   local success_result success_transaction success_state
-  success_result="$(transaction_upgrade "$candidate" "$previous" "$previous_signature" 0)"
+  success_result="$(silent_upgrade "$candidate" "$previous" "$previous_signature" upgrade-first upgraded)"
   success_transaction="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["transaction_id"])' "$success_result")"
   success_state="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state"])' "$success_result")"
   [ "$success_state" = "committed" ] || fail "N-1→N transaction 未提交：$success_result"
@@ -473,7 +452,7 @@ expanded_lifecycle() {
   printf '#!/bin/sh\nexit 73\n' > "$postinst"
   chmod 0755 "$postinst"
   local failed_result failed_transaction failed_state
-  failed_result="$(transaction_upgrade "$candidate" "$previous" "$previous_signature" 1)"
+  failed_result="$(silent_upgrade "$candidate" "$previous" "$previous_signature" upgrade-injected rolled_back)"
   failed_transaction="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["transaction_id"])' "$failed_result")"
   failed_state="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state"])' "$failed_result")"
   [ "$failed_state" = "rolled_back" ] || fail "postinst 失败未自动回滚：$failed_result"
@@ -488,12 +467,18 @@ expanded_lifecycle() {
 
   record_step "upgrade_n_again"
   local second_result second_transaction second_state
-  second_result="$(transaction_upgrade "$candidate" "$previous" "$previous_signature" 0)"
+  if [ -e "$diverted" ]; then
+    rm -f -- "$postinst"
+    dpkg-divert --remove --rename --divert "$diverted" "$postinst" >/dev/null \
+      || fail "无法清理 postinst 失败注入"
+  fi
+  second_result="$(silent_upgrade "$candidate" "$previous" "$previous_signature" upgrade-second upgraded)"
   second_transaction="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["transaction_id"])' "$second_result")"
   second_state="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state"])' "$second_result")"
   [ "$second_state" = "committed" ] || fail "解除注入后再次升级未提交：$second_result"
   verify_installed
   record_receipt "upgrade_again" "upgraded" "$second_state" "$second_transaction"
+  verify_journal_resume >/dev/null
 
   record_step "remove_preserves_user_data"
   dpkg_remove
@@ -507,7 +492,6 @@ expanded_lifecycle() {
   local after_purge
   after_purge="$(data_manifest)"
   [ "$after_purge" = "$before_upgrade" ] || fail "purge 清理了用户数据"
-  verify_journal_resume >/dev/null
   export TAIJI_POWER_LOSS_CHECK="$(power_loss_resume_check)"
   [ "$TAIJI_POWER_LOSS_CHECK" = "manual_recovery_required" ] || fail "power-loss partial journal 未进入 manual_recovery_required"
 
@@ -520,6 +504,7 @@ expanded_lifecycle() {
   export TAIJI_SUCCESS_TRANSACTION="$success_transaction"
   export TAIJI_FAILED_TRANSACTION="$failed_transaction"
   export TAIJI_SECOND_TRANSACTION="$second_transaction"
+  export TAIJI_PREVIOUS_SIGNATURE_VERIFICATION="PASS"
 }
 
 write_evidence() {
@@ -568,6 +553,9 @@ lifecycle.update({
     "previous_deb_basename": os.environ.get("TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME", ""),
     "previous_deb_sha256": os.environ.get("TAIJI_EXPECTED_PREVIOUS_DEB_SHA256", ""),
     "previous_version": os.environ.get("TAIJI_EXPECTED_PREVIOUS_VERSION", ""),
+    "previous_signature_basename": os.environ.get("TAIJI_EXPECTED_PREVIOUS_SIGNATURE_BASENAME", ""),
+    "previous_signature_sha256": os.environ.get("TAIJI_EXPECTED_PREVIOUS_SIGNATURE_SHA256", ""),
+    "previous_signature_verification": os.environ.get("TAIJI_PREVIOUS_SIGNATURE_VERIFICATION", ""),
     "steps": steps,
     "receipts": receipts,
     "data_manifests": {
@@ -668,6 +656,10 @@ rm -rf "$WORK_DELIVERY"
 install -d -m 0755 "$WORK_ROOT" "$WORK_DELIVERY"
 cp -a -- "$READ_ONLY_DELIVERY/." "$WORK_DELIVERY/"
 chown -R "$REHEARSAL_USER:$REHEARSAL_USER" "$WORK_DELIVERY"
+if [ -d "$WORK_DELIVERY/.rehearsal-inputs" ]; then
+  chown -R 0:0 -- "$WORK_DELIVERY/.rehearsal-inputs"
+  chmod 0755 -- "$WORK_DELIVERY/.rehearsal-inputs"
+fi
 
 if [ "${TAIJI_REHEARSAL_EXPANDED:-0}" = "1" ]; then
   require_env TAIJI_EXPECTED_CANDIDATE_VERSION
@@ -675,17 +667,28 @@ if [ "${TAIJI_REHEARSAL_EXPANDED:-0}" = "1" ]; then
   require_env TAIJI_EXPECTED_PREVIOUS_DEB_SHA256
   require_env TAIJI_EXPECTED_PREVIOUS_VERSION
   require_env TAIJI_PREVIOUS_DEB_RELATIVE
+  require_env TAIJI_EXPECTED_PREVIOUS_SIGNATURE_BASENAME
+  require_env TAIJI_EXPECTED_PREVIOUS_SIGNATURE_SHA256
+  require_env TAIJI_PREVIOUS_SIGNATURE_RELATIVE
   require_env TAIJI_COMPATIBILITY_POLICY_ID
   require_env TAIJI_COMPATIBILITY_POLICY_SHA256
   require_env TAIJI_TRANSACTION_HELPER_RELATIVE
   require_env TAIJI_TRANSACTION_CONTRACT_RELATIVE
+  require_env TAIJI_SILENT_DEPLOY_RELATIVE
+  require_env TAIJI_BUILD_MANIFEST_RELATIVE
+  require_env TAIJI_POLICY_RELATIVE
+  require_env TAIJI_RELEASE_PUBLIC_KEY_RELATIVE
+  require_env TAIJI_EXPECTED_RELEASE_PUBLIC_KEY_SHA256
   [[ "$TAIJI_EXPECTED_PREVIOUS_DEB_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "previous DEB SHA256 格式不合法"
+  [[ "$TAIJI_EXPECTED_PREVIOUS_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "previous signature SHA256 格式不合法"
+  [[ "$TAIJI_EXPECTED_RELEASE_PUBLIC_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "固定发布公钥 SHA256 格式不合法"
   [[ "$TAIJI_EXPECTED_DEB_BASENAME" == "taiji-agent_${TAIJI_EXPECTED_CANDIDATE_VERSION}_amd64.deb" ]] \
     || fail "candidate DEB basename 与 version 不一致"
   [[ "$TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME" == "taiji-agent_${TAIJI_EXPECTED_PREVIOUS_VERSION}_amd64.deb" ]] \
     || fail "previous DEB basename 与 version 不一致"
   [ -f "$WORK_DELIVERY/$TAIJI_TRANSACTION_HELPER_RELATIVE" ] || fail "缺少 Task8 upgrade_transaction.py"
   [ -f "$WORK_DELIVERY/$TAIJI_TRANSACTION_CONTRACT_RELATIVE" ] || fail "缺少 Task8 upgrade-data-contract.json"
+  [ -f "$WORK_DELIVERY/$TAIJI_SILENT_DEPLOY_RELATIVE" ] || fail "缺少 taiji-silent-deploy.sh"
   expanded_lifecycle
 else
   # Historical v2 compatibility markers: release-check callers still use this path.

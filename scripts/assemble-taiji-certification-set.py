@@ -30,6 +30,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
 RECORD_BASENAME = "environment-evidence.json"
 CURRENT_OFFLINE_REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
+MAX_OFFLINE_ATTACHMENT_BYTES = 1024 * 1024
+MAX_PREVIOUS_RELEASE_DEB_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class CertificationSetError(ValueError):
@@ -98,7 +100,12 @@ def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _safe_regular(path: Path, label: str, *, max_bytes: int = 1024 * 1024) -> bytes:
+def _safe_regular(
+    path: Path,
+    label: str,
+    *,
+    max_bytes: int = MAX_OFFLINE_ATTACHMENT_BYTES,
+) -> bytes:
     if not path.is_absolute() or path.is_symlink() or not path.is_file():
         raise CertificationSetError(f"{label} must be an absolute regular file")
     try:
@@ -146,6 +153,118 @@ def _safe_regular(path: Path, label: str, *, max_bytes: int = 1024 * 1024) -> by
         raise CertificationSetError(f"{label} cannot be read: {exc}") from exc
     finally:
         os.close(descriptor)
+
+
+def _regular_identity(file_stat: os.stat_result) -> tuple[int, ...]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_mode,
+        file_stat.st_nlink,
+        file_stat.st_uid,
+        file_stat.st_gid,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _stream_regular_snapshot(
+    source: Path,
+    destination: Path,
+    label: str,
+    *,
+    max_bytes: int,
+) -> tuple[str, int]:
+    """Copy one stable single-link source snapshot without buffering it in memory."""
+
+    if not source.is_absolute() or source.is_symlink():
+        raise CertificationSetError(f"{label} must be an absolute regular file")
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise CertificationSetError(f"{label} cannot be inspected: {exc}") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise CertificationSetError(f"{label} must be exactly one regular single-link file")
+    if before.st_size <= 0 or before.st_size > max_bytes:
+        raise CertificationSetError(f"{label} has an invalid size")
+    if (
+        not destination.is_absolute()
+        or destination.parent.is_symlink()
+        or not destination.parent.is_dir()
+        or os.path.lexists(destination)
+    ):
+        raise CertificationSetError(f"{label} snapshot destination must be a new file")
+
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    write_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    source_descriptor = -1
+    destination_descriptor = -1
+    succeeded = False
+    try:
+        source_descriptor = os.open(str(source), read_flags)
+        opened = os.fstat(source_descriptor)
+        if _regular_identity(before) != _regular_identity(opened):
+            raise CertificationSetError(f"{label} changed before it was opened")
+
+        destination_descriptor = os.open(str(destination), write_flags, 0o600)
+        destination_opened = os.fstat(destination_descriptor)
+        if not stat.S_ISREG(destination_opened.st_mode) or destination_opened.st_nlink != 1:
+            raise CertificationSetError(f"{label} snapshot is not a single-link regular file")
+        if destination_opened.st_mode & 0o077:
+            raise CertificationSetError(f"{label} snapshot permissions are too broad")
+
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        copied = 0
+        while remaining:
+            chunk = os.read(source_descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise CertificationSetError(f"{label} was truncated while it was copied")
+            digest.update(chunk)
+            copied += len(chunk)
+            remaining -= len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                if written <= 0:
+                    raise CertificationSetError(f"{label} snapshot could not be written")
+                view = view[written:]
+        if os.read(source_descriptor, 1):
+            raise CertificationSetError(f"{label} grew while it was copied")
+        os.fsync(destination_descriptor)
+
+        after = os.fstat(source_descriptor)
+        current = source.lstat()
+        if (
+            _regular_identity(opened) != _regular_identity(after)
+            or _regular_identity(opened) != _regular_identity(current)
+        ):
+            raise CertificationSetError(f"{label} changed while it was copied")
+        destination_after = os.fstat(destination_descriptor)
+        destination_current = destination.lstat()
+        if (
+            not stat.S_ISREG(destination_after.st_mode)
+            or destination_after.st_nlink != 1
+            or destination_after.st_size != copied
+            or destination_after.st_mode & 0o077
+            or _regular_identity(destination_after) != _regular_identity(destination_current)
+        ):
+            raise CertificationSetError(f"{label} snapshot metadata is invalid")
+        succeeded = True
+        return digest.hexdigest(), copied
+    except OSError as exc:
+        raise CertificationSetError(f"{label} cannot be snapshotted: {exc}") from exc
+    finally:
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if not succeeded and os.path.lexists(destination):
+            try:
+                destination.unlink()
+            except OSError:
+                pass
 
 
 def _safe_directory(path: Path, label: str) -> None:
@@ -216,13 +335,53 @@ def _validate_offline_evidence(
     deb_sha256: str,
     policy_id: str,
     policy_sha256: str,
-) -> tuple[dict[str, Any], dict[str, bytes], list[dict[str, Any]], str]:
+    snapshot_root: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, bytes | None], list[dict[str, Any]], str]:
+    if snapshot_root is None:
+        with tempfile.TemporaryDirectory(prefix="offline-validation-snapshot-") as temporary:
+            return _validate_offline_evidence(
+                path,
+                source_commit=source_commit,
+                version=version,
+                deb_basename=deb_basename,
+                deb_sha256=deb_sha256,
+                policy_id=policy_id,
+                policy_sha256=policy_sha256,
+                snapshot_root=Path(temporary),
+            )
+
     _safe_directory(path, "offline rehearsal evidence directory")
+    _safe_directory(snapshot_root, "offline rehearsal private snapshot directory")
+    if any(snapshot_root.iterdir()):
+        raise CertificationSetError("offline rehearsal private snapshot directory must be empty")
+
+    evidence_basename = "offline-install-rehearsal.json"
+    preliminary_payload = _safe_regular(
+        path / evidence_basename,
+        "offline rehearsal evidence",
+    )
+    preliminary = _strict_json(preliminary_payload, "offline rehearsal evidence")
+    if preliminary.get("schema") != "taiji.offline-install-rehearsal.v1":
+        raise CertificationSetError("offline rehearsal evidence schema is invalid")
+    preliminary_previous = preliminary.get("previous_release")
+    if type(preliminary_previous) is not dict:
+        raise CertificationSetError("offline rehearsal evidence requires 完整 N-1 previous_release")
+    previous_deb_basename = preliminary_previous.get("deb_basename")
+    if (
+        type(previous_deb_basename) is not str
+        or not previous_deb_basename
+        or previous_deb_basename in {".", ".."}
+        or Path(previous_deb_basename).name != previous_deb_basename
+        or "/" in previous_deb_basename
+        or "\\" in previous_deb_basename
+    ):
+        raise CertificationSetError("offline rehearsal previous DEB basename is invalid")
+
     directory_before = path.lstat()
     entries = list(path.iterdir())
     if not entries:
         raise CertificationSetError("offline rehearsal evidence directory is empty")
-    payloads: dict[str, bytes] = {}
+    payloads: dict[str, bytes | None] = {}
     files: list[dict[str, Any]] = []
     for entry in sorted(entries, key=lambda item: item.name):
         if (
@@ -234,13 +393,30 @@ def _validate_offline_evidence(
             raise CertificationSetError(
                 "offline rehearsal evidence directory must contain only root-level regular files"
             )
-        payload = _safe_regular(entry, f"offline rehearsal file {entry.name}")
-        payloads[entry.name] = payload
+        is_previous_deb = entry.name == previous_deb_basename
+        file_hash, file_size = _stream_regular_snapshot(
+            entry,
+            snapshot_root / entry.name,
+            f"offline rehearsal file {entry.name}",
+            max_bytes=(
+                MAX_PREVIOUS_RELEASE_DEB_BYTES
+                if is_previous_deb
+                else MAX_OFFLINE_ATTACHMENT_BYTES
+            ),
+        )
+        payloads[entry.name] = (
+            None
+            if is_previous_deb
+            else _safe_regular(
+                snapshot_root / entry.name,
+                f"offline rehearsal snapshot file {entry.name}",
+            )
+        )
         files.append(
             {
                 "basename": entry.name,
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "size": len(payload),
+                "sha256": file_hash,
+                "size": file_size,
             }
         )
     directory_after = path.lstat()
@@ -262,11 +438,18 @@ def _validate_offline_evidence(
         )
     ):
         raise CertificationSetError("offline rehearsal evidence directory changed during snapshot")
-    evidence_basename = "offline-install-rehearsal.json"
     if evidence_basename not in payloads:
         raise CertificationSetError("offline rehearsal evidence JSON is missing")
     payload = payloads[evidence_basename]
+    if type(payload) is not bytes:
+        raise CertificationSetError("offline rehearsal evidence JSON cannot be the previous DEB")
     data = _strict_json(payload, "offline rehearsal evidence")
+    snapshot_previous = data.get("previous_release")
+    if (
+        type(snapshot_previous) is not dict
+        or snapshot_previous.get("deb_basename") != previous_deb_basename
+    ):
+        raise CertificationSetError("offline rehearsal evidence changed during private snapshot")
     schema = data.get("schema")
     if schema != "taiji.offline-install-rehearsal.v1":
         raise CertificationSetError("offline rehearsal evidence schema is invalid")
@@ -290,17 +473,13 @@ def _validate_offline_evidence(
         deb=Path(deb_basename),
     )
     try:
-        with tempfile.TemporaryDirectory(prefix="offline-validation-snapshot-") as temporary:
-            validation_root = Path(temporary)
-            for basename, snapshot_payload in sorted(payloads.items()):
-                _write_new_file(validation_root / basename, snapshot_payload)
-            validator.validate_offline_evidence_v1(
-                data,
-                validation_root / evidence_basename,
-                validation_args,
-                binding,
-                require_lifecycle=True,
-            )
+        validator.validate_offline_evidence_v1(
+            data,
+            snapshot_root / evidence_basename,
+            validation_args,
+            binding,
+            require_lifecycle=True,
+        )
     except Exception as exc:  # validator owns the current v1 contract wording
         raise CertificationSetError(str(exc)) from exc
     if (
@@ -316,7 +495,10 @@ def _validate_offline_evidence(
     log_basename = data.get("log_basename")
     if type(log_basename) is not str or log_basename not in payloads:
         raise CertificationSetError("offline rehearsal declared session evidence is missing")
-    if hashlib.sha256(payloads[log_basename]).hexdigest() != data.get("log_sha256"):
+    log_payload = payloads[log_basename]
+    if type(log_payload) is not bytes:
+        raise CertificationSetError("offline rehearsal session evidence cannot be the previous DEB")
+    if hashlib.sha256(log_payload).hexdigest() != data.get("log_sha256"):
         raise CertificationSetError("offline rehearsal declared session evidence hash does not match")
     inventory_sha256 = hashlib.sha256(
         json.dumps(files, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
@@ -570,85 +752,92 @@ def assemble(args: argparse.Namespace) -> Path:
     if bindings["compatibility_policy_id"] != policy_id or bindings["compatibility_policy_sha256"] != policy_sha:
         raise CertificationSetError("environment records do not bind the supplied compatibility policy")
     _require_positive_pass(records, matrix)
-    offline, offline_payloads, offline_files, offline_inventory_sha = _validate_offline_evidence(
-        args.offline_evidence,
-        source_commit=bindings["source_commit"],
-        version=version,
-        deb_basename=deb_name,
-        deb_sha256=deb_sha,
-        policy_id=policy_id,
-        policy_sha256=policy_sha,
-    )
-    positive = [
-        {
-            "category_id": record["category_id"],
-            "compatibility": "CERTIFIED",
-            "record_basename": f"records/{record['category_id']}/{RECORD_BASENAME}",
-            "record_sha256": hashlib.sha256(payloads[f"{record['category_id']}/{RECORD_BASENAME}"]).hexdigest(),
+    with tempfile.TemporaryDirectory(
+        prefix=".offline-certification-snapshot-",
+        dir=args.output.parent,
+    ) as snapshot_temporary:
+        snapshot_container = Path(snapshot_temporary)
+        os.chmod(snapshot_container, 0o700)
+        offline_snapshot_root = snapshot_container / "offline-rehearsal"
+        offline_snapshot_root.mkdir(mode=0o700)
+        offline, offline_payloads, offline_files, offline_inventory_sha = _validate_offline_evidence(
+            args.offline_evidence,
+            source_commit=bindings["source_commit"],
+            version=version,
+            deb_basename=deb_name,
+            deb_sha256=deb_sha,
+            policy_id=policy_id,
+            policy_sha256=policy_sha,
+            snapshot_root=offline_snapshot_root,
+        )
+        positive = [
+            {
+                "category_id": record["category_id"],
+                "compatibility": "CERTIFIED",
+                "record_basename": f"records/{record['category_id']}/{RECORD_BASENAME}",
+                "record_sha256": hashlib.sha256(payloads[f"{record['category_id']}/{RECORD_BASENAME}"]).hexdigest(),
+            }
+            for record in sorted(records, key=lambda item: item["category_id"])
+            if record["category_kind"] == "positive"
+        ]
+        negative = [
+            {
+                "category_id": record["category_id"],
+                "compatibility": "BLOCKED",
+                "record_basename": f"records/{record['category_id']}/{RECORD_BASENAME}",
+                "record_sha256": hashlib.sha256(payloads[f"{record['category_id']}/{RECORD_BASENAME}"]).hexdigest(),
+            }
+            for record in sorted(records, key=lambda item: item["category_id"])
+            if record["category_kind"] == "negative"
+        ]
+        if len(positive) != 6 or len(negative) != 6:
+            raise CertificationSetError("certification set requires exactly six positive and six negative records")
+        matrix_sha = hashlib.sha256(_safe_regular(args.matrix, "certification matrix")).hexdigest()
+        generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        offline_evidence_payload = offline_payloads["offline-install-rehearsal.json"]
+        if type(offline_evidence_payload) is not bytes:
+            raise CertificationSetError("offline rehearsal evidence snapshot is invalid")
+        certification_set = {
+            "schema": SET_SCHEMA,
+            "generated_at_utc": generated_at,
+            "challenge_nonce": args.challenge,
+            **bindings,
+            "certification_profile": {
+                "matrix_schema": MATRIX_SCHEMA,
+                "matrix_sha256": matrix_sha,
+                "positive_category_count": 6,
+                "negative_boundary_count": 6,
+            },
+            "offline_rehearsal": {
+                "directory_basename": "offline-rehearsal",
+                "evidence_basename": "offline-install-rehearsal.json",
+                "evidence_sha256": hashlib.sha256(offline_evidence_payload).hexdigest(),
+                "files": offline_files,
+                "inventory_sha256": offline_inventory_sha,
+                "status": "PASS",
+            },
+            "environments": positive,
+            "negative_boundaries": negative,
         }
-        for record in sorted(records, key=lambda item: item["category_id"])
-        if record["category_kind"] == "positive"
-    ]
-    negative = [
-        {
-            "category_id": record["category_id"],
-            "compatibility": "BLOCKED",
-            "record_basename": f"records/{record['category_id']}/{RECORD_BASENAME}",
-            "record_sha256": hashlib.sha256(payloads[f"{record['category_id']}/{RECORD_BASENAME}"]).hexdigest(),
-        }
-        for record in sorted(records, key=lambda item: item["category_id"])
-        if record["category_kind"] == "negative"
-    ]
-    if len(positive) != 6 or len(negative) != 6:
-        raise CertificationSetError("certification set requires exactly six positive and six negative records")
-    matrix_sha = hashlib.sha256(_safe_regular(args.matrix, "certification matrix")).hexdigest()
-    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    certification_set = {
-        "schema": SET_SCHEMA,
-        "generated_at_utc": generated_at,
-        "challenge_nonce": args.challenge,
-        **bindings,
-        "certification_profile": {
-            "matrix_schema": MATRIX_SCHEMA,
-            "matrix_sha256": matrix_sha,
-            "positive_category_count": 6,
-            "negative_boundary_count": 6,
-        },
-        "offline_rehearsal": {
-            "directory_basename": "offline-rehearsal",
-            "evidence_basename": "offline-install-rehearsal.json",
-            "evidence_sha256": hashlib.sha256(
-                offline_payloads["offline-install-rehearsal.json"]
-            ).hexdigest(),
-            "files": offline_files,
-            "inventory_sha256": offline_inventory_sha,
-            "status": "PASS",
-        },
-        "environments": positive,
-        "negative_boundaries": negative,
-    }
-    output_payload = _canonical_json(certification_set)
-    temp_dir = Path(tempfile.mkdtemp(prefix=f".{args.output.name}.tmp-", dir=args.output.parent))
-    try:
-        os.chmod(temp_dir, 0o700)
-        records_root = temp_dir / "records"
-        records_root.mkdir(mode=0o700)
-        for relative, payload in sorted(payloads.items()):
-            destination = records_root / relative
-            destination.parent.mkdir(mode=0o700, exist_ok=True)
-            _write_new_file(destination, payload)
-        offline_root = temp_dir / "offline-rehearsal"
-        offline_root.mkdir(mode=0o700)
-        for basename, payload in sorted(offline_payloads.items()):
-            _write_new_file(offline_root / basename, payload)
-        _write_new_file(temp_dir / "certification-set.json", output_payload)
-        _publish_directory_noreplace(temp_dir, args.output)
-        temp_dir = None  # type: ignore[assignment]
-    except FileExistsError as exc:
-        raise CertificationSetError("output path appeared during assembly; refusing overwrite") from exc
-    finally:
-        if temp_dir is not None and temp_dir.exists():
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        output_payload = _canonical_json(certification_set)
+        temp_dir = Path(tempfile.mkdtemp(prefix=f".{args.output.name}.tmp-", dir=args.output.parent))
+        try:
+            os.chmod(temp_dir, 0o700)
+            records_root = temp_dir / "records"
+            records_root.mkdir(mode=0o700)
+            for relative, payload in sorted(payloads.items()):
+                destination = records_root / relative
+                destination.parent.mkdir(mode=0o700, exist_ok=True)
+                _write_new_file(destination, payload)
+            os.rename(offline_snapshot_root, temp_dir / "offline-rehearsal")
+            _write_new_file(temp_dir / "certification-set.json", output_payload)
+            _publish_directory_noreplace(temp_dir, args.output)
+            temp_dir = None  # type: ignore[assignment]
+        except FileExistsError as exc:
+            raise CertificationSetError("output path appeared during assembly; refusing overwrite") from exc
+        finally:
+            if temp_dir is not None and temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
     if hashlib.sha256(_safe_regular(args.deb, "candidate DEB", max_bytes=1024 * 1024 * 1024)).hexdigest() != deb_sha:
         raise CertificationSetError("candidate DEB changed while assembling certification set")
     return args.output / "certification-set.json"

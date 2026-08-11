@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -79,6 +80,52 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.previous_deb = self.offline_dir / "taiji-agent_1.2.2_amd64.deb"
         self.previous_deb.write_bytes(b"immutable-n-minus-one-deb")
         self.previous_deb_sha = hashlib.sha256(self.previous_deb.read_bytes()).hexdigest()
+        self.test_release_private_key = self.root / "test-release-private.pem"
+        self.test_release_public_key = self.root / "test-release-public.pem"
+        generated = subprocess.run(
+            [
+                "openssl", "genpkey", "-algorithm", "RSA",
+                "-pkeyopt", "rsa_keygen_bits:2048",
+                "-out", str(self.test_release_private_key),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stderr.decode(errors="replace"))
+        exported = subprocess.run(
+            [
+                "openssl", "pkey", "-in", str(self.test_release_private_key),
+                "-pubout", "-out", str(self.test_release_public_key),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(exported.returncode, 0, exported.stderr.decode(errors="replace"))
+        derived = subprocess.run(
+            [
+                "openssl", "pkey", "-pubin", "-in", str(self.test_release_public_key),
+                "-outform", "DER",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(derived.returncode, 0, derived.stderr.decode(errors="replace"))
+        self.test_release_public_fingerprint = hashlib.sha256(derived.stdout).hexdigest()
+        self.previous_signature = self.offline_dir / f"{self.previous_deb.name}.sig"
+        signed = subprocess.run(
+            [
+                "openssl", "dgst", "-sha256",
+                "-sign", str(self.test_release_private_key),
+                "-out", str(self.previous_signature),
+                str(self.previous_deb),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(signed.returncode, 0, signed.stderr.decode(errors="replace"))
+        self.previous_signature_sha = hashlib.sha256(
+            self.previous_signature.read_bytes()
+        ).hexdigest()
         self.previous_checksum = self.offline_dir / f"{self.previous_deb.name}.sha256"
         self.previous_checksum.write_text(
             f"{self.previous_deb_sha}  {self.previous_deb.name}\n",
@@ -112,6 +159,9 @@ class CertificationSetV1Tests(unittest.TestCase):
                 "previous_deb_basename": "taiji-agent_1.2.2_amd64.deb",
                 "previous_deb_sha256": self.previous_deb_sha,
                 "previous_version": "1.2.2",
+                "previous_signature_basename": self.previous_signature.name,
+                "previous_signature_sha256": self.previous_signature_sha,
+                "previous_signature_verification": "PASS",
                 "steps": [
                     "fresh_install_n",
                     "same_version_reinstall_n",
@@ -209,6 +259,9 @@ class CertificationSetV1Tests(unittest.TestCase):
                         "deb_sha256": self.previous_deb_sha,
                         "checksum_basename": self.previous_checksum.name,
                         "checksum_sha256": hashlib.sha256(self.previous_checksum.read_bytes()).hexdigest(),
+                        "signature_basename": self.previous_signature.name,
+                        "signature_sha256": self.previous_signature_sha,
+                        "signature_verification": "PASS",
                         "manifest_basename": self.previous_manifest.name,
                         "manifest_sha256": hashlib.sha256(self.previous_manifest.read_bytes()).hexdigest(),
                         "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
@@ -221,6 +274,9 @@ class CertificationSetV1Tests(unittest.TestCase):
                     "previous_deb_basename": "taiji-agent_1.2.2_amd64.deb",
                     "previous_deb_sha256": self.previous_deb_sha,
                     "previous_version": "1.2.2",
+                    "previous_signature_basename": self.previous_signature.name,
+                    "previous_signature_sha256": self.previous_signature_sha,
+                    "previous_signature_verification": "PASS",
                     "steps": lifecycle["steps"],
                     "receipts": lifecycle["receipts"],
                     "data_manifests": lifecycle["data_manifests"],
@@ -251,6 +307,74 @@ class CertificationSetV1Tests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def _load_test_validator(self, name: str):
+        spec = importlib.util.spec_from_file_location(name, VALIDATOR)
+        self.assertIsNotNone(spec)
+        assert spec is not None and spec.loader is not None
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        validator.PINNED_RELEASE_PUBLIC_KEY_PATH = self.test_release_public_key
+        validator.PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = (
+            self.test_release_public_fingerprint
+        )
+        return validator
+
+    def _rebind_previous_release_size(self, size: int) -> None:
+        with self.previous_deb.open("wb") as handle:
+            handle.seek(size - 1)
+            handle.write(b"\0")
+        self.previous_deb_sha = hashlib.sha256(self.previous_deb.read_bytes()).hexdigest()
+        self.previous_checksum.write_text(
+            f"{self.previous_deb_sha}  {self.previous_deb.name}\n",
+            encoding="ascii",
+        )
+        previous_manifest = json.loads(self.previous_manifest.read_text(encoding="utf-8"))
+        previous_manifest["deb_sha256"] = self.previous_deb_sha
+        self.previous_manifest.write_text(
+            json.dumps(previous_manifest, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        signed = subprocess.run(
+            [
+                "openssl", "dgst", "-sha256",
+                "-sign", str(self.test_release_private_key),
+                "-out", str(self.previous_signature),
+                str(self.previous_deb),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(signed.returncode, 0, signed.stderr.decode(errors="replace"))
+        self.previous_signature_sha = hashlib.sha256(
+            self.previous_signature.read_bytes()
+        ).hexdigest()
+        lifecycle = json.loads(self.offline_lifecycle.read_text(encoding="utf-8"))
+        lifecycle["previous_deb_sha256"] = self.previous_deb_sha
+        lifecycle["previous_signature_sha256"] = self.previous_signature_sha
+        self.offline_lifecycle.write_text(
+            json.dumps(lifecycle, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        evidence["previous_deb_sha256"] = self.previous_deb_sha
+        evidence["previous_signature_sha256"] = self.previous_signature_sha
+        previous = evidence["previous_release"]
+        previous["deb_sha256"] = self.previous_deb_sha
+        previous["checksum_sha256"] = hashlib.sha256(
+            self.previous_checksum.read_bytes()
+        ).hexdigest()
+        previous["signature_sha256"] = self.previous_signature_sha
+        previous["manifest_sha256"] = hashlib.sha256(
+            self.previous_manifest.read_bytes()
+        ).hexdigest()
+        evidence["lifecycle_log_sha256"] = hashlib.sha256(
+            self.offline_lifecycle.read_bytes()
+        ).hexdigest()
+        self.offline.write_text(
+            json.dumps(evidence, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     def test_safe_regular_never_accepts_swap_and_restore_payload(self):
         module = load_script()
@@ -285,7 +409,9 @@ class CertificationSetV1Tests(unittest.TestCase):
         function = source[start:end]
 
         self.assertIn("offline-validation-snapshot", function)
-        self.assertIn("validation_root / basename", function)
+        self.assertIn("_stream_regular_snapshot", function)
+        self.assertIn("snapshot_root / entry.name", function)
+        self.assertIn("snapshot_root / evidence_basename", function)
         self.assertNotIn(
             '_safe_regular(evidence_path, "offline rehearsal evidence")',
             function,
@@ -615,10 +741,45 @@ class CertificationSetV1Tests(unittest.TestCase):
         )
 
     def command(self, *extra):
+        runner = self.root / "assemble-with-test-release-trust-root.py"
+        runner.write_text(
+            textwrap.dedent(
+                f'''\
+                import importlib.util
+                import pathlib
+                import sys
+
+                validator_spec = importlib.util.spec_from_file_location(
+                    "taiji_test_certification_validator", pathlib.Path({str(VALIDATOR)!r})
+                )
+                if validator_spec is None or validator_spec.loader is None:
+                    raise SystemExit(97)
+                validator = importlib.util.module_from_spec(validator_spec)
+                sys.modules[validator_spec.name] = validator
+                validator_spec.loader.exec_module(validator)
+                validator.PINNED_RELEASE_PUBLIC_KEY_PATH = pathlib.Path({str(self.test_release_public_key)!r})
+                validator.PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = {self.test_release_public_fingerprint!r}
+
+                assembler_path = pathlib.Path({str(SCRIPT)!r})
+                assembler_spec = importlib.util.spec_from_file_location(
+                    "taiji_test_certification_assembler", assembler_path
+                )
+                if assembler_spec is None or assembler_spec.loader is None:
+                    raise SystemExit(97)
+                assembler = importlib.util.module_from_spec(assembler_spec)
+                sys.modules[assembler_spec.name] = assembler
+                assembler_spec.loader.exec_module(assembler)
+                assembler._load_release_validator = lambda: validator
+                sys.argv = [str(assembler_path), *sys.argv[1:]]
+                raise SystemExit(assembler.main())
+                '''
+            ),
+            encoding="utf-8",
+        )
         return subprocess.run(
             [
                 "python3",
-                str(SCRIPT),
+                str(runner),
                 "--matrix", str(MATRIX),
                 "--records-dir", str(self.records),
                 "--offline-evidence", str(self.offline_dir),
@@ -659,6 +820,7 @@ class CertificationSetV1Tests(unittest.TestCase):
                 self.offline_lifecycle.name,
                 self.previous_deb.name,
                 self.previous_checksum.name,
+                self.previous_signature.name,
                 self.previous_manifest.name,
             },
         )
@@ -678,10 +840,171 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.output.exists())
 
+    def test_formal_certification_reverifies_archived_previous_signature(self):
+        self.previous_signature.write_bytes(b"forged-but-rehashed-signature\n")
+        forged_sha = hashlib.sha256(self.previous_signature.read_bytes()).hexdigest()
+        lifecycle = json.loads(self.offline_lifecycle.read_text(encoding="utf-8"))
+        lifecycle["previous_signature_sha256"] = forged_sha
+        self.offline_lifecycle.write_text(
+            json.dumps(lifecycle, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        evidence["previous_signature_sha256"] = forged_sha
+        evidence["previous_release"]["signature_sha256"] = forged_sha
+        evidence["lifecycle_log_sha256"] = hashlib.sha256(
+            self.offline_lifecycle.read_bytes()
+        ).hexdigest()
+        self.offline.write_text(
+            json.dumps(evidence, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("signature", result.stderr.lower())
+        self.assertFalse(self.output.exists())
+
+    def test_final_validator_ignores_path_injected_fake_openssl_for_previous_signature(self):
+        self.previous_signature.write_bytes(b"forged-but-rehashed-signature\n")
+        forged_sha = hashlib.sha256(self.previous_signature.read_bytes()).hexdigest()
+        lifecycle = json.loads(self.offline_lifecycle.read_text(encoding="utf-8"))
+        lifecycle["previous_signature_sha256"] = forged_sha
+        self.offline_lifecycle.write_text(
+            json.dumps(lifecycle, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        evidence["previous_signature_sha256"] = forged_sha
+        evidence["previous_release"]["signature_sha256"] = forged_sha
+        evidence["lifecycle_log_sha256"] = hashlib.sha256(
+            self.offline_lifecycle.read_bytes()
+        ).hexdigest()
+        self.offline.write_text(
+            json.dumps(evidence, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        actual_der = subprocess.run(
+            [
+                "/usr/bin/openssl", "pkey", "-pubin",
+                "-in", str(self.test_release_public_key), "-outform", "DER",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+        der_path = self.root / "test-release-public.der"
+        der_path.write_bytes(actual_der)
+        fake_bin = self.root / "fake-openssl-bin"
+        fake_bin.mkdir()
+        fake_openssl = fake_bin / "openssl"
+        fake_openssl.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = pkey ]; then cat \"$FAKE_OPENSSL_DER\"; fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_openssl.chmod(0o755)
+        validator = self._load_test_validator("taiji_path_injected_fake_openssl_validator")
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="e" * 64,
+            desktop_entry_sha256="d" * 64,
+            delivery_inventory_sha256=evidence["delivery_inventory_sha256"],
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "FAKE_OPENSSL_DER": str(der_path),
+                },
+                clear=False,
+            ),
+            self.assertRaisesRegex(
+                validator.EvidenceError,
+                "openssl|fingerprint|signature|\u7b7e名",
+            ),
+        ):
+            validator.validate_offline_evidence_v1(
+                evidence,
+                self.offline,
+                SimpleNamespace(
+                    challenge=self.challenge,
+                    source_commit=self.source_commit,
+                    deb=Path(self.deb.name),
+                ),
+                binding,
+                require_lifecycle=True,
+            )
+
+    def test_final_validator_streams_previous_deb_larger_than_generic_evidence_limit(self):
+        self._rebind_previous_release_size(40 * 1024 * 1024)
+        validator = self._load_test_validator("taiji_large_previous_validator")
+        evidence = json.loads(self.offline.read_text(encoding="utf-8"))
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="e" * 64,
+            desktop_entry_sha256="d" * 64,
+            delivery_inventory_sha256=evidence["delivery_inventory_sha256"],
+        )
+
+        validator.validate_offline_evidence_v1(
+            evidence,
+            self.offline,
+            SimpleNamespace(
+                challenge=self.challenge,
+                source_commit=self.source_commit,
+                deb=Path(self.deb.name),
+            ),
+            binding,
+            require_lifecycle=True,
+        )
+
+    def test_certification_assembler_streams_large_previous_deb_snapshot(self):
+        self._rebind_previous_release_size(40 * 1024 * 1024)
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        archived_previous = self.output / "offline-rehearsal" / self.previous_deb.name
+        self.assertEqual(archived_previous.stat().st_size, 40 * 1024 * 1024)
+        self.assertEqual(
+            hashlib.sha256(archived_previous.read_bytes()).hexdigest(),
+            self.previous_deb_sha,
+        )
+
+    def test_certification_assembler_keeps_generic_offline_attachment_limit(self):
+        with self.offline_log.open("r+b") as handle:
+            handle.seek(2 * 1024 * 1024 - 1)
+            handle.write(b"\0")
+
+        result = self.command()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid size", result.stderr)
+        self.assertFalse(self.output.exists())
+
     def test_formal_certification_rejects_rebound_newer_previous_version(self):
         lifecycle = json.loads(self.offline_lifecycle.read_text(encoding="utf-8"))
         lifecycle["previous_version"] = "9.9.9"
         lifecycle["previous_deb_basename"] = "taiji-agent_9.9.9_amd64.deb"
+        lifecycle["previous_signature_basename"] = "taiji-agent_9.9.9_amd64.deb.sig"
         self.offline_lifecycle.write_text(
             json.dumps(lifecycle, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -689,6 +1012,7 @@ class CertificationSetV1Tests(unittest.TestCase):
         evidence = json.loads(self.offline.read_text(encoding="utf-8"))
         evidence["previous_version"] = "9.9.9"
         evidence["previous_deb_basename"] = "taiji-agent_9.9.9_amd64.deb"
+        evidence["previous_signature_basename"] = "taiji-agent_9.9.9_amd64.deb.sig"
         evidence["lifecycle_log_sha256"] = hashlib.sha256(
             self.offline_lifecycle.read_bytes()
         ).hexdigest()
@@ -707,11 +1031,7 @@ class CertificationSetV1Tests(unittest.TestCase):
         result = self.command()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-        validator_path = ROOT / "scripts/validate-taiji-release-evidence.py"
-        spec = importlib.util.spec_from_file_location("taiji_certification_physical_validator", validator_path)
-        assert spec is not None and spec.loader is not None
-        validator = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(validator)
+        validator = self._load_test_validator("taiji_certification_physical_validator")
         data = json.loads((self.output / "certification-set.json").read_text(encoding="utf-8"))
         binding = validator.BuildBinding(
             source_commit=self.source_commit,
@@ -748,12 +1068,7 @@ class CertificationSetV1Tests(unittest.TestCase):
     def test_release_validator_exposes_and_accepts_certification_set_v1_contract(self):
         result = self.command()
         self.assertEqual(result.returncode, 0, result.stderr)
-        validator_path = ROOT / "scripts/validate-taiji-release-evidence.py"
-        spec = importlib.util.spec_from_file_location("taiji_release_validator_certification_test", validator_path)
-        self.assertIsNotNone(spec)
-        assert spec is not None and spec.loader is not None
-        validator = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(validator)
+        validator = self._load_test_validator("taiji_release_validator_certification_test")
         data = json.loads((self.output / "certification-set.json").read_text(encoding="utf-8"))
         binding = validator.BuildBinding(
             source_commit=self.source_commit,
@@ -837,15 +1152,9 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertRegex(result.stderr, r"DEB|deb_sha256")
 
     def test_release_validator_compares_every_environment_record_to_build_binding(self):
-        validator_path = ROOT / "scripts/validate-taiji-release-evidence.py"
-        spec = importlib.util.spec_from_file_location(
-            "taiji_release_validator_environment_binding_test",
-            validator_path,
+        validator = self._load_test_validator(
+            "taiji_release_validator_environment_binding_test"
         )
-        self.assertIsNotNone(spec)
-        assert spec is not None and spec.loader is not None
-        validator = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(validator)
         binding = validator.BuildBinding(
             source_commit=self.source_commit,
             version=self.version,
@@ -984,6 +1293,9 @@ class CertificationSetV1Tests(unittest.TestCase):
             "previous_deb_basename",
             "previous_deb_sha256",
             "previous_version",
+            "previous_signature_basename",
+            "previous_signature_sha256",
+            "previous_signature_verification",
             "lifecycle_log_basename",
             "lifecycle_log_sha256",
         ):
@@ -1086,7 +1398,13 @@ class CertificationSetV1Tests(unittest.TestCase):
         isolated_tools.mkdir(parents=True)
         isolated_script = isolated_tools / SCRIPT.name
         shutil.copy2(SCRIPT, isolated_script)
-        shutil.copy2(VALIDATOR, isolated_tools / VALIDATOR.name)
+        isolated_validator = isolated_tools / VALIDATOR.name
+        validator_source = VALIDATOR.read_text(encoding="utf-8").replace(
+            'PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"',
+            f'PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = "{self.test_release_public_fingerprint}"',
+        )
+        isolated_validator.write_text(validator_source, encoding="utf-8")
+        shutil.copy2(self.test_release_public_key, isolated_tools / "signing-public.pem")
         spec = importlib.util.spec_from_file_location(
             "taiji_certification_set_isolated_copy_test",
             isolated_script,
@@ -1115,6 +1433,7 @@ class CertificationSetV1Tests(unittest.TestCase):
                 self.offline_lifecycle.name,
                 self.previous_deb.name,
                 self.previous_checksum.name,
+                self.previous_signature.name,
                 self.previous_manifest.name,
             },
         )

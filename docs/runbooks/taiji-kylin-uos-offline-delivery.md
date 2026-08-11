@@ -145,17 +145,21 @@ docker build --platform linux/amd64 \
   tools/taiji-offline-rehearsal
 
 export TAIJI_OFFLINE_REHEARSAL_CHALLENGE="$(openssl rand -hex 32)"
-# 扩展生命周期的标准入口：candidate、N-1、当前 manifest 和 canonical policy 必须显式绑定。
+# 扩展生命周期的标准入口：candidate、受控归档的 previous 正式版本、双方 manifest、
+# previous detached signature 和 canonical policy 必须显式绑定。
+# 当前入口验证 previous 版本更旧且签名可信；“直接前一版”仍须由后续发布台账门禁证明。
 python3 scripts/produce-taiji-offline-rehearsal.py \
   --deb "taijiagent 打包交付/生成的安装包/taiji-agent_<version>_amd64.deb" \
-  --previous-deb "/受控归档/N-1/taiji-agent_<n-1-version>_amd64.deb" \
+  --previous-deb "/受控归档/previous/taiji-agent_<previous-version>_amd64.deb" \
+  --previous-signature "/受控归档/previous/taiji-agent_<previous-version>_amd64.deb.sig" \
+  --previous-manifest "/受控归档/previous/taiji-package-manifest.json" \
   --build-manifest "taijiagent 打包交付/生成的安装包/taiji-package-manifest.json" \
   --policy "packaging/linux/compatibility-policy.json" \
   --output-dir "taijiagent 打包交付/offline-install-rehearsal" \
   --image taiji-offline-rehearsal:local \
   --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
 
-# 当前 v3 单 DEB 目录入口：用于 fresh/reinstall 快速演练，不能替代上面的 N-1 全生命周期。
+# 当前 v3 单 DEB 目录入口：用于 fresh/reinstall 快速演练，不能替代上面的 previous 升级全生命周期。
 python3 scripts/produce-taiji-offline-rehearsal.py \
   --delivery-dir "taijiagent 打包交付" \
   --output-dir "taijiagent 打包交付/offline-install-rehearsal" \
@@ -163,7 +167,7 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
   --challenge "$TAIJI_OFFLINE_REHEARSAL_CHALLENGE"
 ```
 
-输出目录必须事先不存在。显式全生命周期入口的 N-1 Debian 版本（包括 epoch、upstream version 和 revision）必须严格小于候选版本；同版本或更高版本不得冒充 N-1。生产器应验证镜像角色、`ubuntu-20.04` 兼容基线和 `kylin-os-release-v1` fixture label，使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。runner 必须先在未改动的镜像状态核对真实 Ubuntu 20.04 和断网状态，之后才可在该一次性容器内原子激活 Kylin policy fixture：只把可信 `/usr/lib/os-release` 改成 `ID=kylin`、建立 canonical `/etc/os-release` 软链接并创建桌面会话目录；候选 DEB、canonical policy 和生产 `preinst` 均不得改动或绕过。
+输出目录必须事先不存在。显式全生命周期入口的 previous Debian 版本（包括 epoch、upstream version 和 revision）必须严格小于候选版本；同版本或更高版本不得冒充 previous。previous DEB 必须同时提供同名 `.sha256`、detached signature 和绑定 manifest；生产器先以产品固定公钥验签，runner 再通过真实 `taiji-silent-deploy.sh` 的 pinned public-key admission 执行升级，最终 validator 和认证集递归 validator 对归档的同一 DEB/signature 物理快照重新验签。生产器还应验证镜像角色、`ubuntu-20.04` 兼容基线和 `kylin-os-release-v1` fixture label，使用 `--network none`、只读挂载交付目录，并在演练前后重新校验 v3 manifest、唯一 DEB、sidecar、canonical policy 和完整交付清单。runner 必须先在未改动的镜像状态核对真实 Ubuntu 20.04 和断网状态，之后才可在该一次性容器内原子激活 Kylin policy fixture：只把可信 `/usr/lib/os-release` 改成 `ID=kylin`、建立 canonical `/etc/os-release` 软链接并创建桌面会话目录；候选 DEB、canonical policy 和生产 `preinst` 均不得改动或绕过。
 
 当前排序门禁只证明 Debian `previous < candidate`，尚不能独立证明 previous 是发布台账中紧邻的上一个已签名版本。在 prior release-evidence/signature 绑定或首发 signed waiver 门禁完成前，这项结果不得表述为“已证明紧邻 N-1”。
 
