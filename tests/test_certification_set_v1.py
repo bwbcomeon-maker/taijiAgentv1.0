@@ -1023,9 +1023,32 @@ class CertificationSetV1Tests(unittest.TestCase):
             hashlib.sha256(large_png).hexdigest(),
         )
 
-        result = self.command()
+        module = load_script()
+        validator = self._load_test_validator("taiji_large_png_assembler_validator")
+        real_safe_regular = module._safe_regular
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        def json_only_safe_regular(path, label, **kwargs):
+            if Path(path).name in {
+                "single-deb-graphical-installer.png",
+                "desktop-app.png",
+            }:
+                raise AssertionError("PNG must never be materialized by _safe_regular")
+            return real_safe_regular(path, label, **kwargs)
+
+        args = SimpleNamespace(
+            matrix=MATRIX,
+            records_dir=self.records,
+            offline_evidence=self.offline_dir,
+            deb=self.deb,
+            policy=self.policy,
+            output=self.output,
+            challenge_envelope=self.challenge_envelope,
+        )
+        with patch.object(module, "_safe_regular", side_effect=json_only_safe_regular), patch.object(
+            module, "_load_release_validator", return_value=validator
+        ):
+            module.assemble(args)
+
         validator = self._load_test_validator("taiji_large_png_final_validator")
         certification_path = self.output / "certification-set.json"
         data = json.loads(certification_path.read_text(encoding="utf-8"))
@@ -1040,11 +1063,142 @@ class CertificationSetV1Tests(unittest.TestCase):
             electron_executable_sha256="0" * 64,
             desktop_entry_sha256="0" * 64,
         )
+        real_read_regular_bytes = validator.read_regular_bytes
+
+        def json_only_read_regular_bytes(path, label, **kwargs):
+            if Path(path).name in {
+                "single-deb-graphical-installer.png",
+                "desktop-app.png",
+            }:
+                raise AssertionError("PNG must never be materialized by read_regular_bytes")
+            return real_read_regular_bytes(path, label, **kwargs)
+
         with patch.object(
             validator,
             "canonical_policy_identity",
             return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+        ), patch.object(
+            validator, "read_regular_bytes", side_effect=json_only_read_regular_bytes
         ):
+            validator.validate_certification_set_v1(
+                data,
+                certification_path,
+                SimpleNamespace(challenge=self.challenge, matrix=MATRIX),
+                binding,
+            )
+
+    def test_certification_assembler_rejects_byte_identical_category_directory_swap(self):
+        module = load_script()
+        validator = self._load_test_validator("taiji_category_swap_assembler_validator")
+        category_id = "kylin-min-ukui"
+        category = self.records / category_id
+        replacement = self.root / (category_id + "-replacement")
+        parked = self.root / (category_id + "-parked")
+        shutil.copytree(category, replacement)
+        swapped = False
+        real_strict_json = module._strict_json
+
+        def swap_after_record_parse(payload, label):
+            nonlocal swapped
+            value = real_strict_json(payload, label)
+            if not swapped and label == "category record " + category_id:
+                category.rename(parked)
+                replacement.rename(category)
+                swapped = True
+            return value
+
+        args = SimpleNamespace(
+            matrix=MATRIX,
+            records_dir=self.records,
+            offline_evidence=self.offline_dir,
+            deb=self.deb,
+            policy=self.policy,
+            output=self.output,
+            challenge_envelope=self.challenge_envelope,
+        )
+        with patch.object(module, "_strict_json", side_effect=swap_after_record_parse), patch.object(
+            module, "_load_release_validator", return_value=validator
+        ), self.assertRaisesRegex(module.CertificationSetError, "changed|identity|directory"):
+            module.assemble(args)
+
+    def test_certification_assembler_rejects_byte_identical_png_path_swap(self):
+        module = load_script()
+        validator = self._load_test_validator("taiji_png_path_swap_assembler_validator")
+        category_id = "kylin-min-ukui"
+        source = self.records / category_id / "single-deb-graphical-installer.png"
+        replacement = self.root / "replacement-graphical-installer.png"
+        parked = self.root / "parked-graphical-installer.png"
+        replacement.write_bytes(source.read_bytes())
+        source_inode = source.stat().st_ino
+        swapped = False
+        real_validate_png = validator.validate_png_descriptor
+
+        def swap_after_stream(*args, **kwargs):
+            nonlocal swapped
+            metadata = real_validate_png(*args, **kwargs)
+            if not swapped and args[1].st_ino == source_inode:
+                source.rename(parked)
+                replacement.rename(source)
+                swapped = True
+            return metadata
+
+        args = SimpleNamespace(
+            matrix=MATRIX,
+            records_dir=self.records,
+            offline_evidence=self.offline_dir,
+            deb=self.deb,
+            policy=self.policy,
+            output=self.output,
+            challenge_envelope=self.challenge_envelope,
+        )
+        with patch.object(
+            validator, "validate_png_descriptor", side_effect=swap_after_stream
+        ), patch.object(
+            module, "_load_release_validator", return_value=validator
+        ), self.assertRaisesRegex(module.CertificationSetError, "changed|identity"):
+            module.assemble(args)
+
+    def test_final_validator_rejects_byte_identical_category_directory_swap(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validator = self._load_test_validator("taiji_category_swap_final_validator")
+        certification_path = self.output / "certification-set.json"
+        data = json.loads(certification_path.read_text(encoding="utf-8"))
+        category_id = data["environments"][0]["category_id"]
+        category = self.output / "records" / category_id
+        replacement = self.output / "records" / (category_id + "-replacement")
+        parked = self.root / (category_id + "-final-parked")
+        shutil.copytree(category, replacement)
+        swapped = False
+        real_parse = validator.parse_json_bytes
+
+        def swap_after_record_parse(payload, label):
+            nonlocal swapped
+            value = real_parse(payload, label)
+            if not swapped and label == "认证集环境记录":
+                category.rename(parked)
+                replacement.rename(category)
+                swapped = True
+            return value
+
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="0" * 64,
+            desktop_entry_sha256="0" * 64,
+        )
+        with patch.object(
+            validator, "parse_json_bytes", side_effect=swap_after_record_parse
+        ), patch.object(
+            validator,
+            "canonical_policy_identity",
+            return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+        ), self.assertRaisesRegex(validator.EvidenceError, "changed|identity|目录"):
             validator.validate_certification_set_v1(
                 data,
                 certification_path,

@@ -183,14 +183,79 @@ def _hash_descriptor(descriptor, metadata, label):
 
 
 def _load_json(path, label):
+    value, _digest = _load_json_snapshot(path, label)
+    return value
+
+
+def _json_object_without_duplicates(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ObservationError("JSON contains duplicate field: %s" % key)
+        value[key] = item
+    return value
+
+
+def _load_json_snapshot(path, label, limit=1024 * 1024):
+    """Read one bounded strict JSON object from one stable file descriptor."""
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise ObservationError("%s must be an absolute JSON file" % label)
     try:
-        raw = Path(path).read_text(encoding="utf-8")
-        value = json.loads(raw)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        before = candidate.lstat()
+    except OSError as exc:
+        raise ObservationError("cannot inspect %s JSON: %s" % (label, exc)) from exc
+    if (
+        candidate.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > limit
+    ):
+        raise ObservationError("%s must be a bounded regular single-link JSON file" % label)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(candidate), flags)
+    except OSError as exc:
+        raise ObservationError("cannot safely open %s JSON: %s" % (label, exc)) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if _file_stat_identity(before) != _file_stat_identity(opened):
+            raise ObservationError("%s JSON changed before it was opened" % label)
+        chunks = []
+        remaining = opened.st_size
+        digest = hashlib.sha256()
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ObservationError("%s JSON was truncated while it was read" % label)
+            chunks.append(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ObservationError("%s JSON grew while it was read" % label)
+        after = os.fstat(descriptor)
+        current = candidate.lstat()
+        if (
+            _file_stat_identity(opened) != _file_stat_identity(after)
+            or _file_stat_identity(opened) != _file_stat_identity(current)
+        ):
+            raise ObservationError("%s JSON identity changed while it was read" % label)
+        payload = b"".join(chunks)
+    except OSError as exc:
+        raise ObservationError("cannot read %s JSON: %s" % (label, exc)) from exc
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (UnicodeError, json.JSONDecodeError, ObservationError) as exc:
         raise ObservationError("cannot read %s JSON: %s" % (label, exc)) from exc
     if not isinstance(value, dict):
         raise ObservationError("%s must be a JSON object" % label)
-    return value
+    return value, digest.hexdigest()
 
 
 def _require_trusted_directory_chain(directory, trusted_roots, expected_owner_uid, label):
@@ -1039,6 +1104,10 @@ def _read_manifest(path):
 def _read_certification_matrix(path):
     """Load the release-owned closed category matrix without external modules."""
     matrix = _load_json(path, "certification matrix")
+    return _validate_certification_matrix(matrix)
+
+
+def _validate_certification_matrix(matrix):
     if matrix.get("schema") != CERTIFICATION_MATRIX_SCHEMA:
         raise ObservationError("certification matrix schema is invalid")
     if matrix.get("architecture") != "amd64":
@@ -1877,7 +1946,9 @@ def create_method_attestation(
     observation_file = Path(observation_path)
     if not observation_file.is_absolute() or observation_file.is_symlink() or not observation_file.is_file():
         raise ObservationError("install observation must be an absolute regular file")
-    observation = _load_json(observation_file, "install observation")
+    observation, observation_digest = _load_json_snapshot(
+        observation_file, "install observation"
+    )
     schema = observation.get("schema")
     canonical_values = (matrix_path, category_id, environment_observation_path)
     if schema == "taiji.single-deb-install-observation/v2":
@@ -1885,15 +1956,26 @@ def create_method_attestation(
             raise ObservationError(
                 "canonical install attestation requires matrix, category, and environment observation"
             )
+        matrix_file = Path(matrix_path)
+        environment_file = Path(environment_observation_path)
+        matrix, _matrix_digest = _load_json_snapshot(
+            matrix_file, "certification matrix"
+        )
+        matrix = _validate_certification_matrix(matrix)
+        environment_record, _environment_digest = _load_json_snapshot(
+            environment_file, "environment observation"
+        )
         machine_fingerprint, boot_fingerprint = _validate_canonical_attestation_context(
             observation=observation,
             observation_file=observation_file,
             challenge=challenge,
             runtime=runtime,
             user_state_paths=user_state_paths,
-            matrix_path=Path(matrix_path),
+            matrix_path=matrix_file,
+            matrix=matrix,
             category_id=category_id,
-            environment_observation_path=Path(environment_observation_path),
+            environment_observation_path=environment_file,
+            environment_record=environment_record,
         )
     elif schema == OBSERVATION_SCHEMA:
         if any(value is not None for value in canonical_values):
@@ -1913,7 +1995,7 @@ def create_method_attestation(
         "schema": ATTESTATION_SCHEMA,
         "generated_at_utc": _utc_text(runtime.utc_now()),
         "observation_basename": observation_file.name,
-        "observation_sha256": _sha256_path(observation_file),
+        "observation_sha256": observation_digest,
         "challenge_nonce": challenge,
         "machine_fingerprint_sha256": machine_fingerprint,
         "boot_fingerprint_sha256": boot_fingerprint,
@@ -1936,8 +2018,10 @@ def _validate_canonical_attestation_context(
     runtime,
     user_state_paths,
     matrix_path,
+    matrix,
     category_id,
     environment_observation_path,
+    environment_record,
 ):
     if (
         not matrix_path.is_absolute()
@@ -1955,7 +2039,6 @@ def _validate_canonical_attestation_context(
         raise ObservationError(
             "canonical attestation environment observation must be the fixed peer of the install observation"
         )
-    matrix = _read_certification_matrix(matrix_path)
     machine_fingerprint, boot_fingerprint = _validate_observation_identity(
         observation,
         challenge,
@@ -1963,7 +2046,7 @@ def _validate_canonical_attestation_context(
         user_state_paths=user_state_paths,
         canonical=True,
     )
-    record = _load_json(environment_observation_path, "environment observation")
+    record = environment_record
     if record.get("schema") != ENVIRONMENT_RECORD_SCHEMA:
         raise ObservationError("environment observation schema is invalid")
     if record.get("category_id") != category_id:

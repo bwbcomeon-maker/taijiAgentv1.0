@@ -633,20 +633,14 @@ def _validate_attachment(
 def _read_records(
     records_dir: Path,
     matrix: dict[str, Any],
+    snapshot_root: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, bytes | AttachmentCopySource]]:
     _safe_directory(records_dir, "records directory")
+    snapshot_root.mkdir(mode=0o700)
     expected_categories = {
         item["id"]
         for item in matrix["positive_categories"] + matrix["negative_boundaries"]
     }
-    entries = list(records_dir.iterdir())
-    if any(item.is_symlink() for item in entries):
-        raise CertificationSetError("records directory cannot contain symlink category entries")
-    actual_categories = {item.name for item in entries if item.is_dir()}
-    if actual_categories != expected_categories or len(entries) != len(expected_categories):
-        missing = sorted(expected_categories - actual_categories)
-        extra = sorted(actual_categories - expected_categories)
-        raise CertificationSetError(f"certification category set is incomplete or has extras: missing={missing} extra={extra}")
     records: list[dict[str, Any]] = []
     copied_payloads: dict[str, bytes | AttachmentCopySource] = {}
     release_validator = (
@@ -656,72 +650,223 @@ def _read_records(
     )
     if matrix.get("schema") == "taiji-linux-certification-matrix/v2" and release_validator is None:
         raise CertificationSetError("current positive certification bundle validator is missing")
-    for category_id in sorted(expected_categories):
-        category_dir = records_dir / category_id
-        _safe_directory(category_dir, f"category directory {category_id}")
-        record_path = category_dir / RECORD_BASENAME
-        payload = _safe_regular(record_path, f"category record {category_id}")
-        record = _strict_json(payload, f"category record {category_id}")
-        if record.get("category_id") != category_id:
-            raise CertificationSetError("category record path and category_id do not match")
-        attachments = record.get("attachments")
-        if type(attachments) is not list:
-            raise CertificationSetError("environment evidence attachments must be a list")
-        allowed = {RECORD_BASENAME}
-        category_attachment_payloads: dict[str, bytes] = {}
-        for attachment in attachments:
-            basename, digest, attachment_payload = _validate_attachment(category_dir, attachment)
-            allowed.add(basename)
-            copied_payloads[f"{category_id}/{basename}"] = attachment_payload
-            if type(attachment_payload) is bytes:
-                category_payload = attachment_payload
-            else:
-                source, expected_digest, limit = attachment_payload
-                category_payload = _safe_regular(
-                    source,
-                    f"environment evidence attachment {basename}",
-                    max_bytes=limit,
-                )
-                if hashlib.sha256(category_payload).hexdigest() != expected_digest:
-                    raise CertificationSetError(
-                        "environment evidence attachment changed before recursive validation"
-                    )
-            if hashlib.sha256(category_payload).hexdigest() != digest:
-                raise CertificationSetError(
-                    "environment evidence attachment changed before recursive validation"
-                )
-            category_attachment_payloads[basename] = category_payload
-        directory_entries = {item.name for item in category_dir.iterdir()}
-        if directory_entries != allowed:
-            raise CertificationSetError(f"category {category_id} must contain exactly its record and declared attachments")
-        if CONTRACT is None:
-            raise CertificationSetError("current environment evidence contract is missing")
-        try:
-            CONTRACT.validate_environment_record(record, matrix)
-            if record.get("category_kind") == "negative":
-                CONTRACT.validate_negative_preflight_attachment(
-                    record,
-                    matrix,
-                    category_attachment_payloads["preflight-result.json"],
-                )
-                CONTRACT.validate_negative_business_data_attachment(
-                    record,
-                    matrix,
-                    category_attachment_payloads["business-data-inventory.json"],
-                )
-        except Exception as exc:
-            raise CertificationSetError(str(exc)) from exc
-        if record.get("category_kind") == "positive" and release_validator is not None:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        records_fd = os.open(str(records_dir), directory_flags)
+    except OSError as exc:
+        raise CertificationSetError("records directory cannot be opened safely") from exc
+    records_stat = os.fstat(records_fd)
+    try:
+        initial_entries = set(os.listdir(records_fd))
+        if initial_entries != expected_categories:
+            missing = sorted(expected_categories - initial_entries)
+            extra = sorted(initial_entries - expected_categories)
+            raise CertificationSetError(
+                f"certification category set is incomplete or has extras: missing={missing} extra={extra}"
+            )
+        for category_id in sorted(expected_categories):
             try:
-                release_validator.validate_positive_certification_bundle(
-                    record,
-                    category_attachment_payloads,
+                category_fd = os.open(category_id, directory_flags, dir_fd=records_fd)
+            except OSError as exc:
+                raise CertificationSetError(
+                    f"category directory {category_id} cannot be opened safely"
+                ) from exc
+            category_stat = os.fstat(category_fd)
+            held_files: list[tuple[int, os.stat_result, str]] = []
+            try:
+                try:
+                    record_fd = os.open(RECORD_BASENAME, file_flags, dir_fd=category_fd)
+                except OSError as exc:
+                    raise CertificationSetError(
+                        f"category record {category_id} cannot be opened safely"
+                    ) from exc
+                record_stat = os.fstat(record_fd)
+                held_files.append((record_fd, record_stat, RECORD_BASENAME))
+                if (
+                    not stat.S_ISREG(record_stat.st_mode)
+                    or record_stat.st_nlink != 1
+                    or record_stat.st_size <= 0
+                    or record_stat.st_size > MAX_OFFLINE_ATTACHMENT_BYTES
+                ):
+                    raise CertificationSetError(
+                        f"category record {category_id} must be exactly one regular single-link file with valid size"
+                    )
+                payload_chunks = []
+                remaining = record_stat.st_size
+                while remaining:
+                    chunk = os.read(record_fd, min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise CertificationSetError(f"category record {category_id} was truncated")
+                    payload_chunks.append(chunk)
+                    remaining -= len(chunk)
+                if os.read(record_fd, 1):
+                    raise CertificationSetError(f"category record {category_id} grew while read")
+                payload = b"".join(payload_chunks)
+                record = _strict_json(payload, f"category record {category_id}")
+                if record.get("category_id") != category_id:
+                    raise CertificationSetError("category record path and category_id do not match")
+                attachments = record.get("attachments")
+                if type(attachments) is not list:
+                    raise CertificationSetError("environment evidence attachments must be a list")
+                category_snapshot = snapshot_root / category_id
+                category_snapshot.mkdir(mode=0o700)
+                _write_new_file(category_snapshot / RECORD_BASENAME, payload)
+                allowed = {RECORD_BASENAME}
+                json_payloads: dict[str, bytes] = {}
+                png_evidence: dict[str, Any] = {}
+                for attachment in attachments:
+                    if type(attachment) is not dict or set(attachment) != {"basename", "sha256"}:
+                        raise CertificationSetError("environment evidence attachment metadata is invalid")
+                    basename = attachment["basename"]
+                    if (
+                        type(basename) is not str
+                        or not basename
+                        or Path(basename).name != basename
+                        or "/" in basename
+                        or "\\" in basename
+                        or basename in allowed
+                    ):
+                        raise CertificationSetError("environment evidence attachment basename is invalid")
+                    declared_digest = attachment["sha256"]
+                    if type(declared_digest) is not str or not SHA256_RE.fullmatch(declared_digest):
+                        raise CertificationSetError("environment evidence attachment hash is invalid")
+                    allowed.add(basename)
+                    limit = _certification_attachment_limit(basename)
+                    attachment_fd = os.open(basename, file_flags, dir_fd=category_fd)
+                    attachment_stat = os.fstat(attachment_fd)
+                    held_files.append((attachment_fd, attachment_stat, basename))
+                    if (
+                        not stat.S_ISREG(attachment_stat.st_mode)
+                        or attachment_stat.st_nlink != 1
+                        or attachment_stat.st_size <= 0
+                        or attachment_stat.st_size > limit
+                    ):
+                        raise CertificationSetError("environment evidence attachment has an invalid size")
+                    destination = category_snapshot / basename
+                    if basename in LARGE_CERTIFICATION_PNG_BASENAMES:
+                        if release_validator is None:
+                            raise CertificationSetError("current PNG validator is missing")
+                        destination_fd = os.open(
+                            destination,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                            0o600,
+                        )
+                        try:
+                            metadata = release_validator.validate_png_descriptor(
+                                attachment_fd,
+                                attachment_stat,
+                                f"environment evidence attachment {basename}",
+                                snapshot_descriptor=destination_fd,
+                            )
+                            os.fsync(destination_fd)
+                        finally:
+                            os.close(destination_fd)
+                        actual_digest = metadata.sha256
+                        png_evidence[basename] = metadata
+                        copied_payloads[f"{category_id}/{basename}"] = (
+                            destination,
+                            actual_digest,
+                            limit,
+                        )
+                    else:
+                        chunks = []
+                        remaining = attachment_stat.st_size
+                        digest = hashlib.sha256()
+                        while remaining:
+                            chunk = os.read(attachment_fd, min(1024 * 1024, remaining))
+                            if not chunk:
+                                raise CertificationSetError("environment evidence attachment was truncated")
+                            chunks.append(chunk)
+                            digest.update(chunk)
+                            remaining -= len(chunk)
+                        if os.read(attachment_fd, 1):
+                            raise CertificationSetError("environment evidence attachment grew while read")
+                        attachment_payload = b"".join(chunks)
+                        actual_digest = digest.hexdigest()
+                        json_payloads[basename] = attachment_payload
+                        _write_new_file(destination, attachment_payload)
+                        copied_payloads[f"{category_id}/{basename}"] = attachment_payload
+                    if actual_digest != declared_digest:
+                        raise CertificationSetError("environment evidence attachment hash does not match")
+                if CONTRACT is None:
+                    raise CertificationSetError("current environment evidence contract is missing")
+                try:
+                    CONTRACT.validate_environment_record(record, matrix)
+                    if record.get("category_kind") == "negative":
+                        CONTRACT.validate_negative_preflight_attachment(
+                            record, matrix, json_payloads["preflight-result.json"]
+                        )
+                        CONTRACT.validate_negative_business_data_attachment(
+                            record, matrix, json_payloads["business-data-inventory.json"]
+                        )
+                except Exception as exc:
+                    raise CertificationSetError(str(exc)) from exc
+                if record.get("category_kind") == "positive" and release_validator is not None:
+                    try:
+                        release_validator.validate_positive_certification_bundle(
+                            record,
+                            json_payloads,
+                            png_evidence,
+                        )
+                    except Exception as exc:
+                        raise CertificationSetError(str(exc)) from exc
+                if set(os.listdir(category_fd)) != allowed:
+                    raise CertificationSetError(
+                        f"category {category_id} must contain exactly its record and declared attachments"
+                    )
+                for descriptor, before, basename in held_files:
+                    if _regular_identity(os.fstat(descriptor)) != _regular_identity(before):
+                        raise CertificationSetError(
+                            f"category {category_id} attachment {basename} changed while validated"
+                        )
+                    current_file = os.stat(
+                        basename,
+                        dir_fd=category_fd,
+                        follow_symlinks=False,
+                    )
+                    if _regular_identity(current_file) != _regular_identity(before):
+                        raise CertificationSetError(
+                            f"category {category_id} attachment {basename} identity changed while validated"
+                        )
+                current_category = os.stat(
+                    category_id,
+                    dir_fd=records_fd,
+                    follow_symlinks=False,
                 )
-            except Exception as exc:
-                raise CertificationSetError(str(exc)) from exc
-        records.append(record)
-        copied_payloads[f"{category_id}/{RECORD_BASENAME}"] = payload
-    return records, copied_payloads
+                if _regular_identity(current_category) != _regular_identity(category_stat):
+                    raise CertificationSetError(
+                        f"category directory {category_id} identity changed while validated"
+                    )
+                records.append(record)
+                copied_payloads[f"{category_id}/{RECORD_BASENAME}"] = payload
+            finally:
+                for descriptor, _before, _basename in held_files:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                os.close(category_fd)
+        if set(os.listdir(records_fd)) != expected_categories:
+            raise CertificationSetError("records directory category closure changed while validated")
+        if _regular_identity(os.fstat(records_fd)) != _regular_identity(records_stat):
+            raise CertificationSetError("records directory identity changed while validated")
+        try:
+            current_root = records_dir.lstat()
+        except OSError as exc:
+            raise CertificationSetError("records directory identity changed while validated") from exc
+        if _regular_identity(current_root) != _regular_identity(records_stat):
+            raise CertificationSetError("records directory identity changed while validated")
+        return records, copied_payloads
+    except OSError as exc:
+        raise CertificationSetError(f"certification records cannot be read safely: {exc}") from exc
+    finally:
+        os.close(records_fd)
 
 
 def _require_positive_pass(records: list[dict[str, Any]], matrix: dict[str, Any]) -> None:
@@ -821,7 +966,10 @@ def _publish_directory_noreplace(source: Path, destination: Path) -> None:
         os.close(parent_fd)
 
 
-def assemble(args: argparse.Namespace) -> Path:
+def _assemble_with_record_snapshot(
+    args: argparse.Namespace,
+    record_snapshot_root: Path,
+) -> Path:
     for path, label in (
         (args.matrix, "certification matrix"),
         (args.records_dir, "records directory"),
@@ -847,7 +995,11 @@ def assemble(args: argparse.Namespace) -> Path:
     version = deb_name[len("taiji-agent_") : -len("_amd64.deb")]
     if not VERSION_RE.fullmatch(version):
         raise CertificationSetError("candidate DEB version is invalid")
-    records, payloads = _read_records(args.records_dir, matrix)
+    records, payloads = _read_records(
+        args.records_dir,
+        matrix,
+        record_snapshot_root,
+    )
     if CONTRACT is not None:
         try:
             CONTRACT.validate_environment_records(records, matrix)
@@ -999,6 +1151,14 @@ def assemble(args: argparse.Namespace) -> Path:
     if hashlib.sha256(_safe_regular(args.deb, "candidate DEB", max_bytes=1024 * 1024 * 1024)).hexdigest() != deb_sha:
         raise CertificationSetError("candidate DEB changed while assembling certification set")
     return args.output / "certification-set.json"
+
+
+def assemble(args: argparse.Namespace) -> Path:
+    with tempfile.TemporaryDirectory(
+        prefix=".taiji-certification-record-snapshot-"
+    ) as snapshot_temporary:
+        snapshot_root = Path(snapshot_temporary) / "records"
+        return _assemble_with_record_snapshot(args, snapshot_root)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

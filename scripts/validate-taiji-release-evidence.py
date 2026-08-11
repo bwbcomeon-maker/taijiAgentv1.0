@@ -618,6 +618,17 @@ class BuildBinding:
     delivery_inventory_sha256: builtins.str = ""
 
 
+@dataclass(frozen=True)
+class ValidatedPngEvidence:
+    """Digest and semantic identity produced by one stable PNG descriptor."""
+
+    sha256: builtins.str
+    size: builtins.int
+    width: builtins.int
+    height: builtins.int
+    color_type: builtins.int
+
+
 def canonical_policy_identity() -> tuple[str, str]:
     """Return the checked-in policy identity, with a delivery-copy fallback.
 
@@ -2744,6 +2755,228 @@ def validate_png(payload: bytes) -> None:
         raise EvidenceError("桌面 App PNG 缺少足够的可见界面像素变化")
 
 
+def validate_png_descriptor(
+    descriptor: int,
+    file_stat: os.stat_result,
+    label: str,
+    *,
+    snapshot_descriptor: int | None = None,
+) -> ValidatedPngEvidence:
+    """Stream-validate one PNG from a single stable descriptor.
+
+    The encoded file is never assembled into one bytes value.  If a private
+    snapshot descriptor is supplied, each accepted byte is written to it in
+    the same pass used for the digest, CRC, PNG and pixel checks.
+    """
+    if (
+        not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_nlink != 1
+        or file_stat.st_size <= 0
+        or file_stat.st_size > MAX_EVIDENCE_BYTES
+    ):
+        raise EvidenceError(f"{label} 必须是 32MiB 内的普通单链接 PNG")
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as exc:
+        raise EvidenceError(f"{label} 无法定位到 PNG 起始位置") from exc
+    digest = hashlib.sha256()
+    total = 0
+
+    def consume_encoded(size: int) -> bytes:
+        nonlocal total
+        pieces: list[bytes] = []
+        remaining = size
+        while remaining:
+            try:
+                piece = os.read(descriptor, min(1024 * 1024, remaining))
+            except OSError as exc:
+                raise EvidenceError(f"{label} PNG 无法读取") from exc
+            if not piece:
+                raise EvidenceError(f"{label} PNG 被截断")
+            digest.update(piece)
+            total += len(piece)
+            if snapshot_descriptor is not None:
+                view = memoryview(piece)
+                while view:
+                    try:
+                        written = os.write(snapshot_descriptor, view)
+                    except OSError as exc:
+                        raise EvidenceError(f"{label} PNG 私有快照写入失败") from exc
+                    if written <= 0:
+                        raise EvidenceError(f"{label} PNG 私有快照写入失败")
+                    view = view[written:]
+            pieces.append(piece)
+            remaining -= len(piece)
+        return b"".join(pieces)
+
+    signature = consume_encoded(8)
+    if signature != b"\x89PNG\r\n\x1a\n":
+        raise EvidenceError(f"{label} 不是 PNG")
+
+    decompressor = zlib.decompressobj()
+    decoded_pending = bytearray()
+    previous = bytearray()
+    colors: set[bytes] = set()
+    any_visible_alpha = False
+    decoded_total = 0
+    row_index = 0
+    width = height = color_type = bytes_per_pixel = row_payload_bytes = row_bytes = 0
+    expected_decoded = 0
+
+    def paeth(left: int, above: int, upper_left: int) -> int:
+        estimate = left + above - upper_left
+        distances = (abs(estimate - left), abs(estimate - above), abs(estimate - upper_left))
+        if distances[0] <= distances[1] and distances[0] <= distances[2]:
+            return left
+        if distances[1] <= distances[2]:
+            return above
+        return upper_left
+
+    def consume_decoded(payload: bytes) -> None:
+        nonlocal decoded_total, row_index, previous, any_visible_alpha
+        decoded_total += len(payload)
+        if decoded_total > expected_decoded:
+            raise EvidenceError(f"{label} PNG 像素数据超出 IHDR 范围")
+        decoded_pending.extend(payload)
+        while row_bytes and len(decoded_pending) >= row_bytes:
+            if row_index >= height:
+                raise EvidenceError(f"{label} PNG 像素行过多")
+            filter_type = decoded_pending[0]
+            if filter_type > 4:
+                raise EvidenceError(f"{label} PNG 使用未知过滤器")
+            encoded = bytes(decoded_pending[1:row_bytes])
+            del decoded_pending[:row_bytes]
+            decoded = bytearray(row_payload_bytes)
+            for index, value in enumerate(encoded):
+                left = decoded[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+                above = previous[index] if previous else 0
+                upper_left = (
+                    previous[index - bytes_per_pixel]
+                    if previous and index >= bytes_per_pixel
+                    else 0
+                )
+                if filter_type == 0:
+                    predictor = 0
+                elif filter_type == 1:
+                    predictor = left
+                elif filter_type == 2:
+                    predictor = above
+                elif filter_type == 3:
+                    predictor = (left + above) // 2
+                else:
+                    predictor = paeth(left, above, upper_left)
+                decoded[index] = (value + predictor) & 0xFF
+            if len(colors) < 33:
+                for offset in range(0, row_payload_bytes, bytes_per_pixel):
+                    colors.add(bytes(decoded[offset : offset + 3]))
+                    if len(colors) >= 33:
+                        break
+            if color_type == 6 and not any_visible_alpha:
+                any_visible_alpha = any(
+                    decoded[offset] != 0 for offset in range(3, row_payload_bytes, 4)
+                )
+            previous = decoded
+            row_index += 1
+
+    saw_ihdr = False
+    saw_idat = False
+    saw_iend = False
+    chunk_index = 0
+    while total < file_stat.st_size:
+        header = consume_encoded(8)
+        length = struct.unpack(">I", header[:4])[0]
+        kind = header[4:]
+        if length > file_stat.st_size - total - 4:
+            raise EvidenceError(f"{label} PNG chunk 被截断")
+        crc = zlib.crc32(kind)
+        remaining = length
+        ihdr = bytearray()
+        while remaining:
+            piece = consume_encoded(min(1024 * 1024, remaining))
+            crc = zlib.crc32(piece, crc)
+            if kind == b"IHDR":
+                ihdr.extend(piece)
+            if kind == b"IDAT":
+                compressed = piece
+                while compressed:
+                    budget = min(1024 * 1024, expected_decoded - decoded_total + 1)
+                    try:
+                        decoded = decompressor.decompress(compressed, max(1, budget))
+                    except zlib.error as exc:
+                        raise EvidenceError(f"{label} PNG 像素数据无法解压") from exc
+                    consume_decoded(decoded)
+                    compressed = decompressor.unconsumed_tail
+            remaining -= len(piece)
+        expected_crc = struct.unpack(">I", consume_encoded(4))[0]
+        if (crc & 0xFFFFFFFF) != expected_crc:
+            raise EvidenceError(f"{label} PNG CRC 不合法")
+        if chunk_index == 0:
+            if kind != b"IHDR" or length != 13:
+                raise EvidenceError(f"{label} PNG IHDR 不合法")
+            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
+                ">IIBBBBB", bytes(ihdr)
+            )
+            if (
+                width < 800
+                or height < 600
+                or width > 7680
+                or height > 4320
+                or bit_depth != 8
+                or color_type not in {2, 6}
+                or compression
+                or filtering
+                or interlace
+            ):
+                raise EvidenceError(
+                    f"{label} 必须是 800x600 至 7680x4320 的非交错 RGB8/RGBA8 PNG"
+                )
+            bytes_per_pixel = 3 if color_type == 2 else 4
+            row_payload_bytes = width * bytes_per_pixel
+            row_bytes = row_payload_bytes + 1
+            expected_decoded = row_bytes * height
+            previous = bytearray(row_payload_bytes)
+            any_visible_alpha = color_type == 2
+            saw_ihdr = True
+        elif kind == b"IHDR":
+            raise EvidenceError(f"{label} PNG 包含重复 IHDR")
+        if kind == b"IDAT":
+            if not saw_ihdr:
+                raise EvidenceError(f"{label} PNG IDAT 早于 IHDR")
+            saw_idat = True
+        if kind == b"IEND":
+            if length != 0 or total != file_stat.st_size:
+                raise EvidenceError(f"{label} PNG IEND 或尾随数据不合法")
+            saw_iend = True
+            break
+        chunk_index += 1
+    try:
+        trailing = os.read(descriptor, 1)
+    except OSError as exc:
+        raise EvidenceError(f"{label} PNG 无法完成读取") from exc
+    if trailing or total != file_stat.st_size or not saw_ihdr or not saw_idat or not saw_iend:
+        raise EvidenceError(f"{label} PNG 结构不完整或含尾随数据")
+    if (
+        not decompressor.eof
+        or decompressor.unconsumed_tail
+        or decompressor.unused_data
+        or decoded_total != expected_decoded
+        or decoded_pending
+        or row_index != height
+    ):
+        raise EvidenceError(f"{label} PNG 像素数据不完整")
+    if len(colors) < 16 or not any_visible_alpha:
+        raise EvidenceError(f"{label} PNG 缺少足够的可见界面像素变化")
+    if regular_file_identity(os.fstat(descriptor)) != regular_file_identity(file_stat):
+        raise EvidenceError(f"{label} PNG 在读取期间发生变化")
+    return ValidatedPngEvidence(
+        sha256=digest.hexdigest(),
+        size=file_stat.st_size,
+        width=width,
+        height=height,
+        color_type=color_type,
+    )
+
+
 def validate_support_bundle(payload: bytes) -> None:
     bundle = parse_json_bytes(payload, "桌面 App 诊断导出")
     require_exact_keys(bundle, {"schema", "manifest", "diagnostics"}, "桌面 App 诊断导出")
@@ -3046,7 +3279,8 @@ def certification_attachment_limit(basename: str) -> int:
 
 def validate_positive_certification_bundle(
     record: dict[str, Any],
-    attachment_payloads: dict[str, bytes],
+    json_attachment_payloads: dict[str, bytes],
+    png_evidence: dict[str, ValidatedPngEvidence],
     *,
     expected_release_artifacts_sha256: str | None = None,
     expected_manifest_sha256: str | None = None,
@@ -3091,8 +3325,12 @@ def validate_positive_certification_bundle(
     if fingerprint != derived_fingerprint:
         raise EvidenceError("正向认证机器 fingerprint 与 commitment 不一致")
 
-    if type(attachment_payloads) is not dict or set(attachment_payloads) != POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES:
-        raise EvidenceError("正向认证附件必须是完整且封闭的八件实物")
+    expected_pngs = CERTIFICATION_LARGE_PNG_BASENAMES
+    expected_json = POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES - expected_pngs
+    if type(json_attachment_payloads) is not dict or set(json_attachment_payloads) != expected_json:
+        raise EvidenceError("正向认证 JSON 附件必须完整且封闭")
+    if type(png_evidence) is not dict or set(png_evidence) != expected_pngs:
+        raise EvidenceError("正向认证 PNG 附件必须由单 FD 流式验证且完整封闭")
     attachments = record.get("attachments")
     if type(attachments) is not list or len(attachments) != len(POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES):
         raise EvidenceError("正向认证附件清单不完整")
@@ -3107,22 +3345,25 @@ def validate_positive_certification_bundle(
             or basename in declared_hashes
         ):
             raise EvidenceError("正向认证 attachment basename 不安全、未知或重复")
-        payload = attachment_payloads[basename]
-        if (
-            type(payload) is not bytes
-            or not payload
-            or len(payload) > certification_attachment_limit(basename)
-        ):
-            raise EvidenceError("正向认证 attachment 实物不合法")
         digest = validate_sha256(attachment["sha256"], f"正向认证 {basename} SHA256")
-        if digest != hashlib.sha256(payload).hexdigest():
+        if basename in expected_pngs:
+            evidence = png_evidence[basename]
+            if not isinstance(evidence, ValidatedPngEvidence) or evidence.size > MAX_EVIDENCE_BYTES:
+                raise EvidenceError(f"正向认证 {basename} PNG 验证元数据不合法")
+            actual_digest = evidence.sha256
+        else:
+            payload = json_attachment_payloads[basename]
+            if type(payload) is not bytes or not payload or len(payload) > MAX_JSON_BYTES:
+                raise EvidenceError("正向认证 JSON attachment 实物不合法")
+            actual_digest = hashlib.sha256(payload).hexdigest()
+        if digest != actual_digest:
             raise EvidenceError(f"正向认证 {basename} 摘要与实物不一致")
         declared_hashes[basename] = digest
     if set(declared_hashes) != POSITIVE_CERTIFICATION_ATTACHMENT_BASENAMES:
         raise EvidenceError("正向认证附件清单未覆盖完整实物")
 
     target = parse_json_bytes(
-        attachment_payloads["target-verification.json"],
+        json_attachment_payloads["target-verification.json"],
         "正向认证 target-verification",
     )
     require_exact_keys(target, CANONICAL_TARGET_EVIDENCE_KEYS, "正向认证 target-verification")
@@ -3200,7 +3441,7 @@ def validate_positive_certification_bundle(
         require_exact(target, field + "_sha256", declared_hashes[basename])
 
     environment = parse_json_bytes(
-        attachment_payloads["environment-observation.json"],
+        json_attachment_payloads["environment-observation.json"],
         "正向认证 environment-observation",
     )
     require_exact_keys(
@@ -3221,7 +3462,7 @@ def validate_positive_certification_bundle(
     if environment["attachments"] != []:
         raise EvidenceError("environment-observation seed 不得自行声明最终附件")
 
-    observation_payload = attachment_payloads["single-deb-install-observation.json"]
+    observation_payload = json_attachment_payloads["single-deb-install-observation.json"]
     observation = parse_json_bytes(observation_payload, "正向认证 install observation")
     require_exact_keys(
         observation,
@@ -3284,13 +3525,8 @@ def validate_positive_certification_bundle(
     if type(observation["network_sample_count"]) is not int or observation["network_sample_count"] < 2:
         raise EvidenceError("正向认证网络采样数不足")
 
-    graphical_payload = attachment_payloads["single-deb-graphical-installer.png"]
-    screenshot_payload = attachment_payloads["desktop-app.png"]
-    validate_png(graphical_payload)
-    validate_png(screenshot_payload)
-
     attestation = parse_json_bytes(
-        attachment_payloads["single-deb-install-method-attestation.json"],
+        json_attachment_payloads["single-deb-install-method-attestation.json"],
         "正向认证 install attestation",
     )
     attestation_args = argparse.Namespace(challenge=challenge)
@@ -3299,7 +3535,7 @@ def validate_positive_certification_bundle(
         observation,
         hashlib.sha256(observation_payload).hexdigest(),
         attestation,
-        hashlib.sha256(graphical_payload).hexdigest(),
+        png_evidence["single-deb-graphical-installer.png"].sha256,
         attestation_args,
     )
     attested = _parsed_fresh_timestamp(attestation["generated_at_utc"], "install attestation generated_at_utc")
@@ -3307,7 +3543,7 @@ def validate_positive_certification_bundle(
         raise EvidenceError("正向认证目标证据早于安装人工见证")
 
     driver = parse_json_bytes(
-        attachment_payloads["desktop-driver-result.json"],
+        json_attachment_payloads["desktop-driver-result.json"],
         "正向认证 desktop driver",
     )
     driver_data = dict(target)
@@ -3337,7 +3573,7 @@ def validate_positive_certification_bundle(
     }
     validate_target_driver(driver_data, driver_session, driver)
 
-    validate_support_bundle(attachment_payloads["taiji-support-bundle.json"])
+    validate_support_bundle(json_attachment_payloads["taiji-support-bundle.json"])
 
 
 def validate_target(
@@ -3611,6 +3847,191 @@ def _load_environment_contract_for_certification() -> Any:
     return contract
 
 
+@dataclass
+class _OpenedCertificationCategory:
+    record_root_fd: builtins.int
+    category_id: builtins.str
+    category_fd: builtins.int
+    category_stat: builtins.object
+    record: builtins.dict
+    record_payload: builtins.bytes
+    json_payloads: builtins.dict
+    png_evidence: builtins.dict
+    expected_entries: builtins.set
+    held_files: builtins.list
+
+    def verify(self) -> None:
+        if set(os.listdir(self.category_fd)) != self.expected_entries:
+            raise EvidenceError("认证集环境目录必须且只能包含记录声明的 attachments")
+        for descriptor, before, basename in self.held_files:
+            if regular_file_identity(os.fstat(descriptor)) != regular_file_identity(before):
+                raise EvidenceError(f"认证集环境 attachment {basename} 读取期间发生变化")
+            current = os.stat(
+                basename,
+                dir_fd=self.category_fd,
+                follow_symlinks=False,
+            )
+            if regular_file_identity(current) != regular_file_identity(before):
+                raise EvidenceError(f"认证集环境 attachment {basename} identity changed")
+        current_category = os.stat(
+            self.category_id,
+            dir_fd=self.record_root_fd,
+            follow_symlinks=False,
+        )
+        if regular_file_identity(current_category) != regular_file_identity(self.category_stat):
+            raise EvidenceError("认证集环境目录 identity changed")
+        if regular_file_identity(os.fstat(self.category_fd)) != regular_file_identity(
+            self.category_stat
+        ):
+            raise EvidenceError("认证集环境目录读取期间发生变化")
+
+    def close(self) -> None:
+        for descriptor, _before, _basename in self.held_files:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        self.held_files.clear()
+        try:
+            os.close(self.category_fd)
+        except OSError:
+            pass
+
+    def run(self, callback: Any) -> dict[str, Any]:
+        try:
+            result = callback(self)
+            self.verify()
+            return result
+        finally:
+            self.close()
+
+
+def _read_descriptor_bytes(
+    descriptor: int,
+    file_stat: os.stat_result,
+    label: str,
+    *,
+    limit: int,
+) -> bytes:
+    if (
+        not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_nlink != 1
+        or file_stat.st_size <= 0
+        or file_stat.st_size > limit
+    ):
+        raise EvidenceError(f"{label} 实物或大小不合法")
+    chunks = []
+    remaining = file_stat.st_size
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise EvidenceError(f"{label} 读取期间被截断")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise EvidenceError(f"{label} 读取期间增长")
+    return b"".join(chunks)
+
+
+def _open_certification_category(
+    record_root_fd: int,
+    category_id: str,
+) -> _OpenedCertificationCategory:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        category_fd = os.open(category_id, directory_flags, dir_fd=record_root_fd)
+    except OSError as exc:
+        raise EvidenceError("认证集环境目录无法安全打开") from exc
+    category_stat = os.fstat(category_fd)
+    held_files: list[tuple[int, os.stat_result, str]] = []
+    try:
+        record_fd = os.open("environment-evidence.json", file_flags, dir_fd=category_fd)
+        record_stat = os.fstat(record_fd)
+        held_files.append((record_fd, record_stat, "environment-evidence.json"))
+        record_payload = _read_descriptor_bytes(
+            record_fd,
+            record_stat,
+            "认证集环境记录",
+            limit=MAX_JSON_BYTES,
+        )
+        record = parse_json_bytes(record_payload, "认证集环境记录")
+        attachments = record.get("attachments")
+        if type(attachments) is not list:
+            raise EvidenceError("认证集环境记录 attachments 必须是数组")
+        expected_entries = {"environment-evidence.json"}
+        json_payloads: dict[str, bytes] = {}
+        png_evidence: dict[str, ValidatedPngEvidence] = {}
+        for attachment in attachments:
+            if type(attachment) is not dict or set(attachment) != {"basename", "sha256"}:
+                raise EvidenceError("认证集环境 attachment 字段集合不合法")
+            basename = attachment["basename"]
+            if (
+                type(basename) is not str
+                or not basename
+                or Path(basename).name != basename
+                or "/" in basename
+                or "\\" in basename
+                or basename in expected_entries
+            ):
+                raise EvidenceError("认证集环境 attachment basename 路径不安全或重复")
+            expected_entries.add(basename)
+            try:
+                descriptor = os.open(basename, file_flags, dir_fd=category_fd)
+            except OSError as exc:
+                raise EvidenceError("认证集环境 attachment 无法安全打开") from exc
+            file_stat = os.fstat(descriptor)
+            held_files.append((descriptor, file_stat, basename))
+            if basename in CERTIFICATION_LARGE_PNG_BASENAMES:
+                metadata = validate_png_descriptor(
+                    descriptor,
+                    file_stat,
+                    f"认证集环境 {basename}",
+                )
+                actual_digest = metadata.sha256
+                png_evidence[basename] = metadata
+            else:
+                payload = _read_descriptor_bytes(
+                    descriptor,
+                    file_stat,
+                    "认证集环境 attachment",
+                    limit=MAX_JSON_BYTES,
+                )
+                actual_digest = hashlib.sha256(payload).hexdigest()
+                json_payloads[basename] = payload
+            declared_digest = validate_sha256(
+                attachment["sha256"],
+                "认证集环境 attachment SHA256",
+            )
+            if declared_digest != actual_digest:
+                raise EvidenceError("认证集环境 attachment 摘要与实物不一致")
+        return _OpenedCertificationCategory(
+            record_root_fd=record_root_fd,
+            category_id=category_id,
+            category_fd=category_fd,
+            category_stat=category_stat,
+            record=record,
+            record_payload=record_payload,
+            json_payloads=json_payloads,
+            png_evidence=png_evidence,
+            expected_entries=expected_entries,
+            held_files=held_files,
+        )
+    except Exception:
+        for descriptor, _before, _basename in held_files:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        os.close(category_fd)
+        raise
+
+
 def _validate_certification_set_v1_inner(
     data: dict[str, Any],
     evidence_path: Path,
@@ -3682,146 +4103,136 @@ def _validate_certification_set_v1_inner(
         manifest_payload, _ = read_regular_bytes(Path(manifest_path), "认证集当前 manifest")
         manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
 
-    def validate_summary(item: Any, expected_kind: str, expected_compatibility: str) -> dict[str, Any]:
-        if type(item) is not dict or set(item) != {
-            "category_id", "compatibility", "record_basename", "record_sha256"
-        }:
-            raise EvidenceError("认证集类别摘要字段集合不合法")
-        category_id = item["category_id"]
-        if category_id not in categories or categories[category_id]["kind"] != expected_kind:
-            raise EvidenceError("认证集类别摘要 category_id 不在矩阵中")
-        require_exact(item, "compatibility", expected_compatibility)
-        basename = item["record_basename"]
-        basename_path = Path(basename) if type(basename) is str else Path(".")
-        if (
-            type(basename) is not str
-            or basename_path.is_absolute()
-            or "\\" in basename
-            or ".." in basename_path.parts
-            or len(basename_path.parts) != 3
-            or basename_path.parts[0] != "records"
-            or basename_path.parts[1] != category_id
-            or basename_path.parts[2] != "environment-evidence.json"
-        ):
-            raise EvidenceError("认证集记录 basename 发生路径逃逸")
-        record_path = evidence_path.parent / basename
-        if record_path.resolve().parent.parent != record_root.resolve():
-            raise EvidenceError("认证集记录路径越界")
-        record_payload, record_stat = read_regular_bytes(record_path, "认证集环境记录")
-        require_exact(item, "record_sha256", hashlib.sha256(record_payload).hexdigest())
-        record = parse_json_bytes(record_payload, "认证集环境记录")
-        contract.validate_environment_record(record, matrix)
-        require_exact(record, "category_id", category_id)
-        require_exact(record, "category_kind", expected_kind)
-        require_exact(record, "challenge_nonce", data["challenge_nonce"])
-        for key, expected in {
-            "source_commit": binding.source_commit,
-            "version": binding.version,
-            "architecture": binding.architecture,
-            "deb_basename": binding.deb_basename,
-            "deb_sha256": binding.deb_sha256,
-            "compatibility_policy_id": binding.compatibility_policy_id,
-            "compatibility_policy_sha256": binding.compatibility_policy_sha256,
-        }.items():
-            if record.get(key) != expected:
-                raise EvidenceError(f"认证集环境记录 {key} 与顶层 BuildBinding 不一致")
-        if expected_kind == "positive":
-            required = set(categories[category_id]["required_business_checks"]) | set(
-                categories[category_id]["required_lifecycle_checks"]
-            )
-            if any(record["checks"].get(key) != "PASS" for key in required):
-                raise EvidenceError("认证集正向记录必须所有检查 PASS")
-        attachments = record.get("attachments")
-        if type(attachments) is not list:
-            raise EvidenceError("认证集环境记录 attachments 必须是数组")
-        expected_entries = {"environment-evidence.json"}
-        attachment_payloads: dict[str, bytes] = {}
-        for attachment in attachments:
-            if type(attachment) is not dict or set(attachment) != {"basename", "sha256"}:
-                raise EvidenceError("认证集环境 attachment 字段集合不合法")
-            attachment_basename = attachment["basename"]
-            if (
-                type(attachment_basename) is not str
-                or not attachment_basename
-                or Path(attachment_basename).name != attachment_basename
-                or "/" in attachment_basename
-                or "\\" in attachment_basename
-                or attachment_basename in expected_entries
-            ):
-                raise EvidenceError("认证集环境 attachment basename 路径不安全或重复")
-            expected_entries.add(attachment_basename)
-            attachment_payload, _ = read_regular_bytes(
-                record_path.parent / attachment_basename,
-                "认证集环境 attachment",
-                limit=certification_attachment_limit(attachment_basename),
-            )
-            attachment_sha256 = validate_sha256(
-                attachment["sha256"],
-                "认证集环境 attachment SHA256",
-            )
-            if attachment_sha256 != hashlib.sha256(attachment_payload).hexdigest():
-                raise EvidenceError("认证集环境 attachment 摘要与实物不一致")
-            attachment_payloads[attachment_basename] = attachment_payload
-        try:
-            actual_entries = {entry.name for entry in record_path.parent.iterdir()}
-        except OSError as exc:
-            raise EvidenceError("认证集环境记录目录无法遍历") from exc
-        if actual_entries != expected_entries:
-            raise EvidenceError("认证集环境目录必须且只能包含记录声明的 attachments")
-        if expected_kind == "positive" and matrix.get("schema") == "taiji-linux-certification-matrix/v2":
-            expected_delivery_hash = binding.delivery_inventory_sha256 or None
-            expected_electron_hash = (
-                binding.electron_executable_sha256
-                if binding.electron_executable_sha256 != "0" * 64
-                else None
-            )
-            expected_desktop_hash = (
-                binding.desktop_entry_sha256
-                if binding.desktop_entry_sha256 != "0" * 64
-                else None
-            )
-            validate_positive_certification_bundle(
-                record,
-                attachment_payloads,
-                expected_release_artifacts_sha256=expected_delivery_hash,
-                expected_manifest_sha256=manifest_sha256,
-                expected_electron_executable_sha256=expected_electron_hash,
-                expected_desktop_entry_sha256=expected_desktop_hash,
-            )
-        if expected_kind == "negative":
-            try:
-                contract.validate_negative_preflight_attachment(
-                    record,
-                    matrix,
-                    attachment_payloads["preflight-result.json"],
-                )
-                contract.validate_negative_business_data_attachment(
-                    record,
-                    matrix,
-                    attachment_payloads["business-data-inventory.json"],
-                )
-            except Exception as exc:
-                raise EvidenceError(str(exc)) from exc
-        return record
-
-    validated_records = [
-        validate_summary(item, "positive", "CERTIFIED") for item in environments
-    ] + [
-        validate_summary(item, "negative", "BLOCKED") for item in negative
-    ]
-    try:
-        contract.validate_environment_records(validated_records, matrix)
-    except Exception as exc:
-        raise EvidenceError(str(exc)) from exc
     expected_record_root_entries = {
         item["id"] for item in matrix["positive_categories"] + matrix["negative_boundaries"]
     }
-    try:
-        actual_record_root_entries = {entry.name for entry in record_root.iterdir()}
-    except OSError as exc:
-        raise EvidenceError("认证集 records 根目录无法遍历") from exc
-    if actual_record_root_entries != expected_record_root_entries:
-        raise EvidenceError("认证集 records 根目录必须严格封闭")
+
+    def validate_all_records() -> list[dict[str, Any]]:
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            record_root_fd = os.open(str(record_root), directory_flags)
+        except OSError as exc:
+            raise EvidenceError("认证集 records 根目录无法安全打开") from exc
+        root_stat = os.fstat(record_root_fd)
+
+        def validate_summary(
+            item: Any,
+            expected_kind: str,
+            expected_compatibility: str,
+        ) -> dict[str, Any]:
+            if type(item) is not dict or set(item) != {
+                "category_id", "compatibility", "record_basename", "record_sha256"
+            }:
+                raise EvidenceError("认证集类别摘要字段集合不合法")
+            category_id = item["category_id"]
+            if category_id not in categories or categories[category_id]["kind"] != expected_kind:
+                raise EvidenceError("认证集类别摘要 category_id 不在矩阵中")
+            require_exact(item, "compatibility", expected_compatibility)
+            basename = item["record_basename"]
+            expected_basename = f"records/{category_id}/environment-evidence.json"
+            if basename != expected_basename:
+                raise EvidenceError("认证集记录 basename 发生路径逃逸")
+            bundle = _open_certification_category(record_root_fd, category_id)
+
+            def validate_opened(opened: _OpenedCertificationCategory) -> dict[str, Any]:
+                require_exact(
+                    item,
+                    "record_sha256",
+                    hashlib.sha256(opened.record_payload).hexdigest(),
+                )
+                record = opened.record
+                contract.validate_environment_record(record, matrix)
+                require_exact(record, "category_id", category_id)
+                require_exact(record, "category_kind", expected_kind)
+                require_exact(record, "challenge_nonce", data["challenge_nonce"])
+                for key, expected in {
+                    "source_commit": binding.source_commit,
+                    "version": binding.version,
+                    "architecture": binding.architecture,
+                    "deb_basename": binding.deb_basename,
+                    "deb_sha256": binding.deb_sha256,
+                    "compatibility_policy_id": binding.compatibility_policy_id,
+                    "compatibility_policy_sha256": binding.compatibility_policy_sha256,
+                }.items():
+                    if record.get(key) != expected:
+                        raise EvidenceError(
+                            f"认证集环境记录 {key} 与顶层 BuildBinding 不一致"
+                        )
+                if expected_kind == "positive":
+                    required = set(categories[category_id]["required_business_checks"]) | set(
+                        categories[category_id]["required_lifecycle_checks"]
+                    )
+                    if any(record["checks"].get(key) != "PASS" for key in required):
+                        raise EvidenceError("认证集正向记录必须所有检查 PASS")
+                    expected_delivery_hash = binding.delivery_inventory_sha256 or None
+                    expected_electron_hash = (
+                        binding.electron_executable_sha256
+                        if binding.electron_executable_sha256 != "0" * 64
+                        else None
+                    )
+                    expected_desktop_hash = (
+                        binding.desktop_entry_sha256
+                        if binding.desktop_entry_sha256 != "0" * 64
+                        else None
+                    )
+                    validate_positive_certification_bundle(
+                        record,
+                        opened.json_payloads,
+                        opened.png_evidence,
+                        expected_release_artifacts_sha256=expected_delivery_hash,
+                        expected_manifest_sha256=manifest_sha256,
+                        expected_electron_executable_sha256=expected_electron_hash,
+                        expected_desktop_entry_sha256=expected_desktop_hash,
+                    )
+                else:
+                    try:
+                        contract.validate_negative_preflight_attachment(
+                            record,
+                            matrix,
+                            opened.json_payloads["preflight-result.json"],
+                        )
+                        contract.validate_negative_business_data_attachment(
+                            record,
+                            matrix,
+                            opened.json_payloads["business-data-inventory.json"],
+                        )
+                    except Exception as exc:
+                        raise EvidenceError(str(exc)) from exc
+                return record
+
+            return bundle.run(validate_opened)
+
+        try:
+            if set(os.listdir(record_root_fd)) != expected_record_root_entries:
+                raise EvidenceError("认证集 records 根目录必须严格封闭")
+            validated = [
+                validate_summary(item, "positive", "CERTIFIED") for item in environments
+            ] + [
+                validate_summary(item, "negative", "BLOCKED") for item in negative
+            ]
+            try:
+                contract.validate_environment_records(validated, matrix)
+            except Exception as exc:
+                raise EvidenceError(str(exc)) from exc
+            if set(os.listdir(record_root_fd)) != expected_record_root_entries:
+                raise EvidenceError("认证集 records 根目录 closure changed")
+            current_root = record_root.lstat()
+            if (
+                regular_file_identity(os.fstat(record_root_fd))
+                != regular_file_identity(root_stat)
+                or regular_file_identity(current_root) != regular_file_identity(root_stat)
+            ):
+                raise EvidenceError("认证集 records 根目录 identity changed")
+            return validated
+        finally:
+            os.close(record_root_fd)
+
+    validated_records = validate_all_records()
     offline = data["offline_rehearsal"]
     if type(offline) is not dict or set(offline) != {
         "directory_basename",

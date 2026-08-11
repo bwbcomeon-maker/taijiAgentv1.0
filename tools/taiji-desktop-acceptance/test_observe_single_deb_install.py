@@ -1454,6 +1454,97 @@ class SingleDebInstallObserverTests(unittest.TestCase):
                 **{**canonical_arguments, "runtime": legacy_runtime},
             )
 
+    def test_canonical_attest_rejects_strict_json_duplicates_and_identity_swaps(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+
+        duplicate_dir = self.root / "duplicate-json"
+        duplicate_dir.mkdir(mode=0o700)
+        duplicate_observation = duplicate_dir / self.observer.OBSERVATION_BASENAME
+        canonical_text = json.dumps(observation, sort_keys=True)
+        duplicate_observation.write_text(
+            canonical_text[:-1] + ',"schema":"%s"}' % observation["schema"],
+            encoding="utf-8",
+        )
+        duplicate_environment = duplicate_dir / self.observer.ENVIRONMENT_RECORD_BASENAME
+        duplicate_environment.write_text(json.dumps(environment, sort_keys=True), encoding="utf-8")
+        duplicate_matrix = duplicate_dir / "certification-matrix.json"
+        duplicate_matrix.write_bytes(MATRIX.read_bytes())
+        duplicate_png = duplicate_dir / "installer.png"
+        duplicate_png.write_bytes(png_fixture())
+        with mock.patch.object(
+            self.observer, "collect_platform_identity", return_value=platform_identity
+        ), self.assertRaisesRegex(self.observer.ObservationError, "duplicate|JSON"):
+            self.observer.create_method_attestation(
+                observation_path=duplicate_observation,
+                graphical_evidence_path=duplicate_png,
+                challenge=self.challenge,
+                operator_id="target-operator-01",
+                runtime=runtime,
+                user_state_paths=self.user_paths,
+                matrix_path=duplicate_matrix,
+                category_id=environment["category_id"],
+                environment_observation_path=duplicate_environment,
+            )
+
+        for label in ("observation", "environment", "matrix"):
+            with self.subTest(label=label):
+                case_dir = self.root / ("swap-" + label)
+                case_dir.mkdir(mode=0o700)
+                observation_path = case_dir / self.observer.OBSERVATION_BASENAME
+                environment_path = case_dir / self.observer.ENVIRONMENT_RECORD_BASENAME
+                matrix_path = case_dir / "certification-matrix.json"
+                observation_path.write_text(json.dumps(observation, sort_keys=True), encoding="utf-8")
+                environment_path.write_text(json.dumps(environment, sort_keys=True), encoding="utf-8")
+                matrix_path.write_bytes(MATRIX.read_bytes())
+                screenshot = case_dir / "installer.png"
+                screenshot.write_bytes(png_fixture())
+                target = {
+                    "observation": observation_path,
+                    "environment": environment_path,
+                    "matrix": matrix_path,
+                }[label]
+                replacement = case_dir / (label + "-replacement")
+                replacement.write_bytes(target.read_bytes())
+                parked = case_dir / (label + "-parked")
+                source_inode = target.stat().st_ino
+                swapped = False
+                real_read = self.observer.os.read
+
+                def swap_after_first_read(descriptor, size):
+                    nonlocal swapped
+                    chunk = real_read(descriptor, size)
+                    if not swapped and self.observer.os.fstat(descriptor).st_ino == source_inode:
+                        target.rename(parked)
+                        replacement.rename(target)
+                        swapped = True
+                    return chunk
+
+                with mock.patch.object(
+                    self.observer.os, "read", side_effect=swap_after_first_read
+                ), mock.patch.object(
+                    self.observer,
+                    "collect_platform_identity",
+                    return_value=platform_identity,
+                ), self.assertRaisesRegex(self.observer.ObservationError, "changed|identity"):
+                    self.observer.create_method_attestation(
+                        observation_path=observation_path,
+                        graphical_evidence_path=screenshot,
+                        challenge=self.challenge,
+                        operator_id="target-operator-01",
+                        runtime=runtime,
+                        user_state_paths=self.user_paths,
+                        matrix_path=matrix_path,
+                        category_id=environment["category_id"],
+                        environment_observation_path=environment_path,
+                    )
+
     def test_method_attestation_rejects_fake_truncated_or_small_png(self):
         runtime = FakeRuntime([None, "install ok installed"])
         observation = self.observe(runtime)

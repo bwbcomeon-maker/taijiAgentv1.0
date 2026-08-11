@@ -4,6 +4,7 @@ import hashlib
 import io
 import importlib.util
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -835,11 +836,37 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         ]
         return record, payloads
 
+    def _positive_bundle_inputs(self, payloads):
+        png_basenames = {
+            "single-deb-graphical-installer.png",
+            "desktop-app.png",
+        }
+        json_payloads = {
+            basename: payload
+            for basename, payload in payloads.items()
+            if basename not in png_basenames
+        }
+        png_evidence = {}
+        for basename in png_basenames:
+            payload = payloads[basename]
+            self.validator.validate_png(payload)
+            width, height, _depth, color_type, _compression, _filtering, _interlace = struct.unpack(
+                ">IIBBBBB", payload[16:29]
+            )
+            png_evidence[basename] = self.validator.ValidatedPngEvidence(
+                sha256=hashlib.sha256(payload).hexdigest(),
+                size=len(payload),
+                width=width,
+                height=height,
+                color_type=color_type,
+            )
+        return json_payloads, png_evidence
+
     def test_positive_certification_bundle_is_recursively_validated_not_hash_only(self):
         record, payloads = self._positive_certification_bundle_fixture()
         self.validator.validate_positive_certification_bundle(
             record,
-            payloads,
+            *self._positive_bundle_inputs(payloads),
             expected_release_artifacts_sha256="9" * 64,
             expected_manifest_sha256="7" * 64,
             expected_electron_executable_sha256="c" * 64,
@@ -851,7 +878,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         with self.assertRaisesRegex(self.validator.EvidenceError, "schema"):
             self.validator.validate_positive_certification_bundle(
                 legacy_record,
-                payloads,
+                *self._positive_bundle_inputs(payloads),
                 expected_release_artifacts_sha256="9" * 64,
                 expected_manifest_sha256="7" * 64,
                 expected_electron_executable_sha256="c" * 64,
@@ -897,7 +924,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         with self.assertRaisesRegex(self.validator.EvidenceError, "PNG"):
             self.validator.validate_positive_certification_bundle(
                 record,
-                forged_pngs,
+                *self._positive_bundle_inputs(forged_pngs),
                 expected_release_artifacts_sha256="9" * 64,
                 expected_manifest_sha256="7" * 64,
                 expected_electron_executable_sha256="c" * 64,
@@ -919,7 +946,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         with self.assertRaisesRegex(self.validator.EvidenceError, "manifest|diagnostics"):
             self.validator.validate_positive_certification_bundle(
                 record,
-                forged_support,
+                *self._positive_bundle_inputs(forged_support),
                 expected_release_artifacts_sha256="9" * 64,
                 expected_manifest_sha256="7" * 64,
                 expected_electron_executable_sha256="c" * 64,
@@ -946,12 +973,36 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         with self.assertRaises(self.validator.EvidenceError):
             self.validator.validate_positive_certification_bundle(
                 forged_record,
-                forged_payloads,
+                *self._positive_bundle_inputs(forged_payloads),
                 expected_release_artifacts_sha256="9" * 64,
                 expected_manifest_sha256="7" * 64,
                 expected_electron_executable_sha256="c" * 64,
                 expected_desktop_entry_sha256="d" * 64,
             )
+
+    def test_streaming_png_validator_rejects_bad_crc_truncation_and_trailing_data(self):
+        valid = png_fixture()
+        bad_crc = bytearray(valid)
+        bad_crc[-8] ^= 1
+        cases = {
+            "bad CRC": bytes(bad_crc),
+            "truncated": valid[:-5],
+            "trailing": valid + b"trailing-bytes",
+        }
+        for label, payload in cases.items():
+            with self.subTest(label=label):
+                candidate = self.root / (label.replace(" ", "-") + ".png")
+                candidate.write_bytes(payload)
+                descriptor = os.open(candidate, os.O_RDONLY)
+                try:
+                    with self.assertRaises(self.validator.EvidenceError):
+                        self.validator.validate_png_descriptor(
+                            descriptor,
+                            os.fstat(descriptor),
+                            "streaming PNG",
+                        )
+                finally:
+                    os.close(descriptor)
 
     def test_v3_rejects_target_baseline_fields(self):
         self.write_manifest(target_baseline_profile_id="legacy-profile")

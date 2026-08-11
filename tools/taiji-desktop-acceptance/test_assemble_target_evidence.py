@@ -17,6 +17,7 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -446,7 +447,7 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             transform(payload)
         self.driver_result.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
-    def command(self, **overrides: object) -> list[str]:
+    def argument_values(self, **overrides: object) -> dict[str, object]:
         values: dict[str, object] = {
             "driver_result": self.driver_result,
             "screenshot": self.screenshot,
@@ -465,10 +466,19 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
             "os_version": "V10 SP1",
             "desktop_environment": "UKUI",
             "output_dir": self.output,
+            "matrix": None,
+            "category_id": None,
+            "environment_observation": None,
         }
         values.update(overrides)
+        return values
+
+    def command(self, **overrides: object) -> list[str]:
+        values = self.argument_values(**overrides)
         command = [sys.executable, str(ASSEMBLER)]
         for key, value in values.items():
+            if value is None:
+                continue
             command.extend((f"--{key.replace('_', '-')}", str(value)))
         return command
 
@@ -484,6 +494,82 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
     def assert_no_partial_output(self) -> None:
         self.assertFalse(os.path.lexists(self.output))
         self.assertEqual(list(self.root.glob(".target-verification.tmp-*")), [])
+
+    def test_canonical_png_is_semantically_validated_before_publication(self) -> None:
+        original = self.graphical_installer_evidence.read_bytes()
+        corrupt_crc = bytearray(original)
+        corrupt_crc[-8] ^= 1
+        cases = {
+            "bad-crc": bytes(corrupt_crc),
+            "truncated": original[:-5],
+            "trailing": original + b"trailing-bytes",
+        }
+        for label, payload in cases.items():
+            with self.subTest(label=label):
+                self.graphical_installer_evidence.write_bytes(payload)
+                attestation = json.loads(
+                    self.install_method_attestation.read_text(encoding="utf-8")
+                )
+                attestation["graphical_installer_evidence_sha256"] = hashlib.sha256(
+                    payload
+                ).hexdigest()
+                self.install_method_attestation.write_text(
+                    json.dumps(attestation, sort_keys=True), encoding="utf-8"
+                )
+                output = self.root / ("target-" + label)
+                result = self.run_assembler(output_dir=output)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(output.exists())
+                self.graphical_installer_evidence.write_bytes(original)
+
+    def test_png_snapshot_eliminates_hash_then_reopen_swap_window(self) -> None:
+        assembler = load_module(ASSEMBLER, "taiji_target_assembler_png_swap_test")
+        original = self.graphical_installer_evidence
+        replacement = self.root / "replacement-installer.png"
+        replacement.write_bytes(original.read_bytes())
+        parked = self.root / "parked-installer.png"
+        swapped = False
+        real_hash = assembler.sha256_regular_file
+
+        def swap_after_initial_hash(path, label, **kwargs):
+            nonlocal swapped
+            digest = real_hash(path, label, **kwargs)
+            if not swapped and Path(path) == original:
+                original.rename(parked)
+                replacement.rename(original)
+                swapped = True
+            return digest
+
+        with patch.object(
+            assembler, "sha256_regular_file", side_effect=swap_after_initial_hash
+        ):
+            assembler.assemble(SimpleNamespace(**self.argument_values()))
+        self.assertFalse(swapped)
+        self.assertTrue(self.output.is_dir())
+
+    def test_png_snapshot_rejects_byte_identical_path_inode_swap_during_stream(self) -> None:
+        assembler = load_module(ASSEMBLER, "taiji_target_assembler_png_stream_swap_test")
+        original = self.graphical_installer_evidence
+        replacement = self.root / "replacement-stream-installer.png"
+        replacement.write_bytes(original.read_bytes())
+        parked = self.root / "parked-stream-installer.png"
+        source_inode = original.stat().st_ino
+        swapped = False
+        real_read = assembler.os.read
+
+        def swap_during_stream(descriptor, size):
+            nonlocal swapped
+            chunk = real_read(descriptor, size)
+            if not swapped and assembler.os.fstat(descriptor).st_ino == source_inode:
+                original.rename(parked)
+                replacement.rename(original)
+                swapped = True
+            return chunk
+
+        with patch.object(assembler.os, "read", side_effect=swap_during_stream):
+            with self.assertRaisesRegex(assembler.AssemblyError, "changed|identity"):
+                assembler.assemble(SimpleNamespace(**self.argument_values()))
+        self.assertFalse(self.output.exists())
 
     def test_publishes_validator_accepted_target_evidence(self) -> None:
         result = self.run_assembler()

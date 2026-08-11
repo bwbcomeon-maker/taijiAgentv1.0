@@ -13,8 +13,10 @@ import pwd
 import re
 import shutil
 import stat
+import struct
 import sys
 import tempfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -1394,10 +1396,22 @@ def open_regular(path: Path, label: str) -> tuple[int, os.stat_result]:
         raise
 
 
-def _verify_unchanged(descriptor: int, before: os.stat_result, label: str) -> None:
+def _verify_unchanged(
+    descriptor: int,
+    before: os.stat_result,
+    label: str,
+    path: Path | None = None,
+) -> None:
     after = os.fstat(descriptor)
     if _stable_identity(after) != _stable_identity(before):
         raise AssemblyError(f"{label} changed while it was being read")
+    if path is not None:
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise AssemblyError(f"{label} path identity changed while it was being read") from exc
+        if _stable_identity(current) != _stable_identity(before):
+            raise AssemblyError(f"{label} path identity changed while it was being read")
 
 
 def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -> bytes:
@@ -1415,7 +1429,7 @@ def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -
             total += len(chunk)
         if total != file_stat.st_size:
             raise AssemblyError(f"{label} was truncated while being read")
-        _verify_unchanged(descriptor, file_stat, label)
+        _verify_unchanged(descriptor, file_stat, label, path)
         return b"".join(chunks)
     finally:
         os.close(descriptor)
@@ -1448,7 +1462,7 @@ def sha256_regular_file(
             raise AssemblyError(f"{label} was truncated while hashing")
         if required_prefix is not None and bytes(prefix) != required_prefix:
             raise AssemblyError(f"{label} has an invalid file signature")
-        _verify_unchanged(descriptor, file_stat, label)
+        _verify_unchanged(descriptor, file_stat, label, path)
         return digest.hexdigest()
     finally:
         os.close(descriptor)
@@ -1966,9 +1980,121 @@ def copy_regular_file(
             raise AssemblyError(f"{label} was truncated while being copied")
         if required_prefix is not None and bytes(prefix) != required_prefix:
             raise AssemblyError(f"{label} has an invalid file signature")
-        _verify_unchanged(source_descriptor, source_stat, label)
+        _verify_unchanged(source_descriptor, source_stat, label, source)
         os.fsync(destination_descriptor)
         return digest.hexdigest()
+    finally:
+        os.close(source_descriptor)
+        os.close(destination_descriptor)
+
+
+def copy_validated_png(
+    source: Path,
+    destination: Path,
+    label: str,
+    *,
+    limit: int,
+) -> str:
+    """Validate and snapshot one PNG from one stable source descriptor."""
+    source_descriptor, source_stat = open_regular(source, label)
+    if source_stat.st_size > limit:
+        os.close(source_descriptor)
+        raise AssemblyError(f"{label} exceeds the {limit}-byte limit")
+    try:
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+    except Exception:
+        os.close(source_descriptor)
+        raise
+    digest = hashlib.sha256()
+    total = 0
+
+    def read_piece(size: int) -> bytes:
+        nonlocal total
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = os.read(source_descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise AssemblyError(f"{label} PNG was truncated")
+            chunks.append(chunk)
+            digest.update(chunk)
+            total += len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                if written <= 0:
+                    raise AssemblyError(f"failed to snapshot {label}")
+                view = view[written:]
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    try:
+        if read_piece(8) != b"\x89PNG\r\n\x1a\n":
+            raise AssemblyError(f"{label} has an invalid PNG signature")
+        saw_ihdr = False
+        saw_idat = False
+        saw_iend = False
+        chunk_index = 0
+        while total < source_stat.st_size:
+            header = read_piece(8)
+            length = struct.unpack(">I", header[:4])[0]
+            kind = header[4:]
+            if length > source_stat.st_size - total - 4:
+                raise AssemblyError(f"{label} PNG chunk was truncated")
+            crc = zlib.crc32(kind)
+            remaining = length
+            ihdr = bytearray()
+            while remaining:
+                piece = read_piece(min(1024 * 1024, remaining))
+                crc = zlib.crc32(piece, crc)
+                if kind == b"IHDR":
+                    ihdr.extend(piece)
+                remaining -= len(piece)
+            expected_crc = struct.unpack(">I", read_piece(4))[0]
+            if (crc & 0xFFFFFFFF) != expected_crc:
+                raise AssemblyError(f"{label} PNG CRC is invalid")
+            if chunk_index == 0:
+                if kind != b"IHDR" or length != 13:
+                    raise AssemblyError(f"{label} PNG IHDR is invalid")
+                width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
+                    ">IIBBBBB", bytes(ihdr)
+                )
+                if (
+                    width < 800
+                    or height < 600
+                    or width > 7680
+                    or height > 4320
+                    or bit_depth != 8
+                    or color_type not in {2, 6}
+                    or compression != 0
+                    or filtering != 0
+                    or interlace != 0
+                ):
+                    raise AssemblyError(f"{label} PNG IHDR encoding is invalid")
+                saw_ihdr = True
+            elif kind == b"IHDR":
+                raise AssemblyError(f"{label} PNG contains duplicate IHDR")
+            if kind == b"IDAT":
+                saw_idat = True
+            if kind == b"IEND":
+                if length != 0 or total != source_stat.st_size:
+                    raise AssemblyError(f"{label} PNG has invalid IEND or trailing data")
+                saw_iend = True
+                break
+            chunk_index += 1
+        if not saw_ihdr or not saw_idat or not saw_iend or total != source_stat.st_size:
+            raise AssemblyError(f"{label} PNG structure is incomplete")
+        if os.read(source_descriptor, 1):
+            raise AssemblyError(f"{label} PNG grew while it was read")
+        _verify_unchanged(source_descriptor, source_stat, label, source)
+        os.fsync(destination_descriptor)
+        return digest.hexdigest()
+    except OSError as exc:
+        raise AssemblyError(f"cannot snapshot {label}: {exc}") from exc
     finally:
         os.close(source_descriptor)
         os.close(destination_descriptor)
@@ -2122,34 +2248,15 @@ def assemble_canonical(args: argparse.Namespace) -> None:
     }.items():
         if environment_observation.get(key) != value:
             raise AssemblyError(f"environment observation {key} does not match the current release or target")
-    graphical_evidence_hash = sha256_regular_file(
-        args.graphical_installer_evidence,
-        "graphical installer evidence",
-        limit=MAX_SCREENSHOT_BYTES,
-        required_prefix=b"\x89PNG\r\n\x1a\n",
-    )
     attestation_payload = read_regular_bytes(
         args.install_method_attestation,
         "single-DEB install method attestation",
     )
     attestation = parse_json_bytes(attestation_payload, "single-DEB install method attestation")
-    validate_install_method_attestation(
-        attestation,
-        observation_sha256=observation_hash,
-        observation=observation,
-        graphical_evidence_sha256=graphical_evidence_hash,
-        challenge=challenge,
-    )
     if args.screenshot.name != driver["screenshot_basename"]:
         raise AssemblyError("screenshot input basename does not match the driver result")
     if args.diagnostic.name != driver["diagnostic_basename"]:
         raise AssemblyError("diagnostic input basename does not match the driver result")
-    screenshot_hash = sha256_regular_file(
-        args.screenshot,
-        "desktop App screenshot",
-        limit=MAX_SCREENSHOT_BYTES,
-        required_prefix=b"\x89PNG\r\n\x1a\n",
-    )
     diagnostic_payload = read_regular_bytes(args.diagnostic, "App diagnostic export")
     diagnostic_json = parse_json_bytes(diagnostic_payload, "App diagnostic export")
     if set(diagnostic_json) != {"schema", "manifest", "diagnostics"} or diagnostic_json["schema"] != "taiji.product.support-bundle.v1":
@@ -2159,12 +2266,11 @@ def assemble_canonical(args: argparse.Namespace) -> None:
     graphical_name = GRAPHICAL_INSTALLER_EVIDENCE_BASENAME
 
     def produce(temporary: Path) -> None:
-        copied_screenshot_hash = copy_regular_file(
+        copied_screenshot_hash = copy_validated_png(
             args.screenshot,
             temporary / SCREENSHOT_BASENAME,
             "desktop App screenshot",
             limit=MAX_SCREENSHOT_BYTES,
-            required_prefix=b"\x89PNG\r\n\x1a\n",
         )
         copied_environment_observation_hash = write_exclusive(
             temporary / ENVIRONMENT_OBSERVATION_BASENAME,
@@ -2178,19 +2284,23 @@ def assemble_canonical(args: argparse.Namespace) -> None:
             temporary / INSTALL_METHOD_ATTESTATION_BASENAME,
             attestation_payload,
         )
-        copied_graphical_hash = copy_regular_file(
+        copied_graphical_hash = copy_validated_png(
             args.graphical_installer_evidence,
             temporary / graphical_name,
             "graphical installer evidence",
             limit=MAX_SCREENSHOT_BYTES,
-            required_prefix=b"\x89PNG\r\n\x1a\n",
+        )
+        validate_install_method_attestation(
+            attestation,
+            observation_sha256=observation_hash,
+            observation=observation,
+            graphical_evidence_sha256=copied_graphical_hash,
+            challenge=challenge,
         )
         copied_driver_hash = write_exclusive(temporary / DRIVER_RESULT_BASENAME, driver_payload)
         copied_diagnostic_hash = write_exclusive(temporary / DIAGNOSTIC_BASENAME, diagnostic_payload)
         if (
-            copied_screenshot_hash != screenshot_hash
-            or copied_graphical_hash != graphical_evidence_hash
-            or copied_environment_observation_hash
+            copied_environment_observation_hash
             != hashlib.sha256(environment_payload).hexdigest()
         ):
             raise AssemblyError("canonical evidence changed while it was copied")
@@ -2335,12 +2445,6 @@ def assemble(args: argparse.Namespace) -> None:
         target_baseline_profile_id=target_baseline_profile_id,
         target_baseline_sha256=target_baseline_sha256,
     )
-    graphical_evidence_hash = sha256_regular_file(
-        args.graphical_installer_evidence,
-        "graphical installer evidence",
-        limit=MAX_SCREENSHOT_BYTES,
-        required_prefix=b"\x89PNG\r\n\x1a\n",
-    )
     attestation_payload = read_regular_bytes(
         args.install_method_attestation,
         "single-DEB install method attestation",
@@ -2348,13 +2452,6 @@ def assemble(args: argparse.Namespace) -> None:
     attestation = parse_json_bytes(
         attestation_payload,
         "single-DEB install method attestation",
-    )
-    validate_install_method_attestation(
-        attestation,
-        observation_sha256=observation_hash,
-        observation=observation,
-        graphical_evidence_sha256=graphical_evidence_hash,
-        challenge=challenge,
     )
     if args.screenshot.name != driver["screenshot_basename"]:
         raise AssemblyError("screenshot input basename does not match the driver result")
@@ -2376,12 +2473,11 @@ def assemble(args: argparse.Namespace) -> None:
     checks = {key: True for key in sorted(EXPECTED_CHECKS)}
 
     def produce(temporary: Path) -> None:
-        screenshot_hash = copy_regular_file(
+        screenshot_hash = copy_validated_png(
             args.screenshot,
             temporary / SCREENSHOT_BASENAME,
             "desktop App screenshot",
             limit=MAX_SCREENSHOT_BYTES,
-            required_prefix=b"\x89PNG\r\n\x1a\n",
         )
         diagnostic_hash = write_exclusive(
             temporary / DIAGNOSTIC_BASENAME, diagnostic_payload
@@ -2397,17 +2493,21 @@ def assemble(args: argparse.Namespace) -> None:
             temporary / INSTALL_METHOD_ATTESTATION_BASENAME,
             attestation_payload,
         )
-        copied_graphical_evidence_hash = copy_regular_file(
+        copied_graphical_evidence_hash = copy_validated_png(
             args.graphical_installer_evidence,
             temporary / GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
             "graphical installer evidence",
             limit=MAX_SCREENSHOT_BYTES,
-            required_prefix=b"\x89PNG\r\n\x1a\n",
+        )
+        validate_install_method_attestation(
+            attestation,
+            observation_sha256=observation_hash,
+            observation=observation,
+            graphical_evidence_sha256=copied_graphical_evidence_hash,
+            challenge=challenge,
         )
         if install_observation_hash != observation_hash:
             raise AssemblyError("copied install observation hash changed")
-        if copied_graphical_evidence_hash != graphical_evidence_hash:
-            raise AssemblyError("copied graphical installer evidence hash changed")
         session = {
             "schema": "taiji.desktop.acceptance.v1",
             "application": "taiji-electron-desktop",
