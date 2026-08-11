@@ -378,6 +378,13 @@ try {
             self.assertIn("schema", wrong_schema.stderr.lower())
 
     def test_deb_never_embeds_certification_or_publication_evidence(self) -> None:
+        installed_validator = (
+            "opt/taiji-agent/libexec/target-acceptance/验收工具/"
+            "validate-taiji-release-evidence.py"
+        )
+        payload_paths = {component["path"] for component in self.payload["components"]}
+        self.assertIn(installed_validator, payload_paths)
+        non_tool_paths = "\n".join(sorted(payload_paths - {installed_validator}))
         for marker in (
             "certification-set",
             "certification_set",
@@ -387,7 +394,7 @@ try {
             "target-baseline",
             "target_baseline",
         ):
-            self.assertNotIn(marker, self.build, marker)
+            self.assertNotIn(marker, non_tool_paths, marker)
 
 
 if __name__ == "__main__":

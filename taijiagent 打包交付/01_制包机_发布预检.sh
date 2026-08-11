@@ -540,7 +540,13 @@ toolchain_fields = {
     "electron_archive_sha256",
     "electron_executable_sha256",
 }
-required = {"version","source_archive","source_sha256","source_commit","source_inventory","source_inventory_sha256","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"} | toolchain_fields
+acceptance_fields = {
+    "acceptance_binding_sha256",
+    "acceptance_tools_manifest_sha256",
+    "acceptance_entrypoint_sha256",
+    "installed_release_manifest_sha256",
+}
+required = {"version","source_archive","source_sha256","source_commit","source_inventory","source_inventory_sha256","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"} | toolchain_fields | acceptance_fields
 marker = {}
 for line in marker_path.read_text(encoding="utf-8").splitlines():
     if not line or "=" not in line:
@@ -571,6 +577,7 @@ expected = {
     "elf_abi_audit_sha256": marker["elf_abi_audit_sha256"],
     "icon_set_sha256": marker["icon_set_sha256"],
     **{field: marker[field] for field in toolchain_fields},
+    **{field: marker[field] for field in acceptance_fields},
 }
 for key, value in expected.items():
     if manifest.get(key) != value:
@@ -595,6 +602,9 @@ if not re.fullmatch(r"[0-9a-f]{64}", marker["elf_abi_audit_sha256"]):
     raise SystemExit("marker ABI audit SHA256 invalid")
 if not re.fullmatch(r"[0-9a-f]{64}", marker["icon_set_sha256"]):
     raise SystemExit("marker icon set SHA256 invalid")
+for field in acceptance_fields:
+    if not re.fullmatch(r"[0-9a-f]{64}", marker[field]):
+        raise SystemExit("marker installed acceptance SHA256 invalid: " + field)
 for field in (
     "python_lock_sha256",
     "python_executable_sha256",
@@ -660,18 +670,25 @@ verify_deb_payload() {
     --print-digest)" || { remove_release_temp_directory "$payload_root"; fail "DEB 图标链验证失败"; }
   marker_icon_sha256="$(awk -F= '$1=="icon_set_sha256" {print $2}' "$BUILD_MARKER")"
   [ "$icon_sha256" = "$marker_icon_sha256" ] || { remove_release_temp_directory "$payload_root"; fail "DEB 实际图标摘要与 marker 不一致"; }
-  python3 - "$payload_root" "$MANIFEST_FILE" <<'PY' || { remove_release_temp_directory "$payload_root"; fail "DEB 工具链可执行文件摘要与 manifest 不一致"; }
+  python3 - "$payload_root" "$MANIFEST_FILE" "$REPO_ROOT/packaging/linux/acceptance_tools_manifest.py" <<'PY' || { remove_release_temp_directory "$payload_root"; fail "DEB 工具链或安装态验收信任链与 manifest 不一致"; }
 import hashlib
+import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
 manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+helper_source = Path(sys.argv[3])
 paths = {
     "python_executable_sha256": root / "opt/taiji-agent/runtime/agent/venv/bin/python",
     "node_executable_sha256": root / "opt/taiji-agent/runtime/node/bin/node",
     "electron_executable_sha256": root / "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron",
+    "acceptance_binding_sha256": root / "opt/taiji-agent/resources/taiji-acceptance-binding.json",
+    "acceptance_tools_manifest_sha256": root / "opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json",
+    "acceptance_entrypoint_sha256": root / "usr/bin/taiji-agent-acceptance",
+    "installed_release_manifest_sha256": root / "opt/taiji-agent/resources/taiji-release-manifest.json",
 }
 fixed = {
     "python_executable_sha256": "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba",
@@ -679,8 +696,74 @@ fixed = {
     "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
 }
 for field, path in paths.items():
-    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != manifest.get(field) or manifest.get(field) != fixed[field]:
+    if not path.is_file() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != manifest.get(field):
         raise SystemExit(field + " mismatch")
+    if field in fixed and manifest.get(field) != fixed[field]:
+        raise SystemExit(field + " is not the canonical executable")
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit("installed acceptance JSON contains a duplicate field")
+        result[key] = value
+    return result
+
+def canonical_json(path):
+    raw = path.read_bytes()
+    payload = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    canonical = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    if type(payload) is not dict or raw != canonical:
+        raise SystemExit("installed acceptance JSON is not canonical: " + str(path))
+    return payload
+
+release = canonical_json(paths["installed_release_manifest_sha256"])
+expected_release = {
+    "schema": "taiji-release-manifest/v1",
+    "platform": "linux",
+    "arch": "amd64",
+    "version": manifest["version"],
+    "commit": manifest["source_commit"],
+    "installRoot": "/opt/taiji-agent",
+}
+if release != expected_release:
+    raise SystemExit("installed release manifest identity mismatch")
+
+binding = canonical_json(paths["acceptance_binding_sha256"])
+code_root = root / "opt/taiji-agent/libexec/target-acceptance"
+expected_binding = {
+    "schema": "taiji-installed-acceptance-binding/v1",
+    "version": manifest["version"],
+    "source_commit": manifest["source_commit"],
+    "release_manifest_sha256": manifest["installed_release_manifest_sha256"],
+    "acceptance_tools_manifest_path": "/opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json",
+    "acceptance_tools_manifest_sha256": manifest["acceptance_tools_manifest_sha256"],
+    "launcher_path": "/opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh",
+    "launcher_sha256": hashlib.sha256((code_root / "04_目标终端_桌面App验收并导出证据.sh").read_bytes()).hexdigest(),
+    "helper_path": "/opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py",
+    "helper_sha256": hashlib.sha256((code_root / "acceptance_tools_manifest.py").read_bytes()).hexdigest(),
+    "runner_path": "/opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py",
+    "runner_sha256": hashlib.sha256((code_root / "acceptance-runner.py").read_bytes()).hexdigest(),
+    "entrypoint_path": "/usr/bin/taiji-agent-acceptance",
+    "entrypoint_sha256": manifest["acceptance_entrypoint_sha256"],
+}
+if binding != expected_binding:
+    raise SystemExit("installed acceptance binding mismatch")
+
+spec = importlib.util.spec_from_file_location("taiji_acceptance_tools_manifest", helper_source)
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load acceptance tools manifest helper")
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+helper.verify_staged(
+    code_root / "验收工具",
+    manifest["source_commit"],
+    manifest["acceptance_tools_manifest_sha256"],
+    os.geteuid(),
+)
 PY
   remove_release_temp_directory "$payload_root"
 }

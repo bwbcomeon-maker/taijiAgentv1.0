@@ -20,6 +20,90 @@
       }
     },
     {
+      "id": "installed_acceptance_binding",
+      "path": "opt/taiji-agent/resources/taiji-acceptance-binding.json",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_runner",
+      "path": "opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_manifest_helper",
+      "path": "opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_launcher",
+      "path": "opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh",
+      "type": "file",
+      "mode": "0755",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_tools_manifest",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_driver",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/run-installed-electron-acceptance.js",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_evidence_assembler",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/assemble-target-evidence.py",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_observer",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/observe-single-deb-install.py",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_matrix",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/certification-matrix.json",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_release_validator",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/validate-taiji-release-evidence.py",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_signing_public_key",
+      "path": "opt/taiji-agent/libexec/target-acceptance/验收工具/signing-public.pem",
+      "type": "file",
+      "mode": "0644",
+      "version": {"kind": "product"}
+    },
+    {
+      "id": "installed_acceptance_entrypoint",
+      "path": "usr/bin/taiji-agent-acceptance",
+      "type": "file",
+      "mode": "0755",
+      "version": {"kind": "product"}
+    },
+    {
       "id": "compatibility_policy",
       "path": "opt/taiji-agent/resources/linux-compatibility-policy.json",
       "type": "file",

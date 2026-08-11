@@ -28,6 +28,10 @@ LOCK_CONTRACT_HELPER="$REPO_ROOT/packaging/linux/verify-python-lock-contract.py"
 SOURCE_INTEGRITY_HELPER="$REPO_ROOT/packaging/linux/source-archive-integrity.py"
 PREINST_RENDERER="$SCRIPT_DIR/render-preinst.py"
 TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
+ACCEPTANCE_HELPER="$REPO_ROOT/packaging/linux/acceptance_tools_manifest.py"
+ACCEPTANCE_RUNNER_SOURCE="$REPO_ROOT/packaging/linux/acceptance_runner.py"
+ACCEPTANCE_ENTRYPOINT_SOURCE="$REPO_ROOT/packaging/linux/bin/taiji-agent-acceptance"
+ACCEPTANCE_LAUNCHER_SOURCE="$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh"
 PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
 PRIVATE_LIBRARY_SYSROOT="${TAIJI_PRIVATE_LIBRARY_SYSROOT:-/usr/lib/x86_64-linux-gnu}"
 SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
@@ -92,11 +96,18 @@ OUT_DEB="$OUT_DIR/taiji-agent_${VERSION}_${ARCH}.deb"
 ARCHIVE_DIR="$OUT_DIR/旧版本归档"
 POLICY_INSTALL_PATH="$INSTALL_ROOT/resources/linux-compatibility-policy.json"
 LAUNCH_MANIFEST_PATH="$INSTALL_ROOT/resources/taiji-release-manifest.json"
+ACCEPTANCE_ROOT="$INSTALL_ROOT/libexec/target-acceptance"
+ACCEPTANCE_TOOLS_ROOT="$ACCEPTANCE_ROOT/验收工具"
+ACCEPTANCE_BINDING_PATH="$INSTALL_ROOT/resources/taiji-acceptance-binding.json"
 ABI_REPORT_PATH="$INSTALL_ROOT/resources/elf-abi-audit.json"
 ABI_BUILD_REPORT="$BUILD_ROOT/elf-abi-audit.json"
 PRIVATE_STAGE_REPORT="$BUILD_ROOT/private-library-stage.json"
 MANIFEST_PATH="$OUT_DIR/taiji-package-manifest.json"
 ICON_SET_SHA256=""
+ACCEPTANCE_BINDING_SHA256=""
+ACCEPTANCE_TOOLS_MANIFEST_SHA256=""
+ACCEPTANCE_ENTRYPOINT_SHA256=""
+INSTALLED_RELEASE_MANIFEST_SHA256=""
 POLICY_SHA256=""
 POLICY_ID=""
 TAIJI_PACKAGE_NAME=""
@@ -504,9 +515,57 @@ scan_private_key_material() {
   rm -f -- "$private_list"
 }
 
+scan_acceptance_privacy_compatibility() {
+  local acceptance_root="$1"
+  python3 - "$acceptance_root" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+allowed = {
+    "04_目标终端_桌面App验收并导出证据.sh": {
+        "-u HERMES_HOME \\",
+        "-u HERMES_CONFIG_PATH \\",
+        "-u HERMES_CONFIG \\",
+        "-u HERMES_ENV \\",
+        "-u HERMES_WEBUI_AGENT_DIR \\",
+        "-u HERMES_WEBUI_PYTHON \\",
+    },
+    "验收工具/run-installed-electron-acceptance.js": {
+        "const UNSAFE_VERSION_RE = /(?:hermes|password|passwd|passphrase|secret|token|bearer|(?:^|[-_.])sk-|(?:^|[-_.])key(?:[-_.]|$))/i;",
+    },
+    "验收工具/validate-taiji-release-evidence.py": {
+        'r"(?i)(?:hermes|password|passwd|passphrase|secret|token|bearer|(?:^|[-_.])sk-|(?:^|[-_.])key(?:[-_.]|$))"',
+        '"taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock",',
+    },
+}
+pattern = re.compile(r"hermes|Hermes|HERMES_")
+observed = {name: set() for name in allowed}
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or path.is_symlink():
+        continue
+    relative = path.relative_to(root).as_posix()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise SystemExit("cannot inspect installed acceptance text: %s" % relative) from exc
+    for line in lines:
+        if pattern.search(line) is None:
+            continue
+        normalized = line.strip()
+        if normalized not in allowed.get(relative, set()):
+            raise SystemExit("unexpected legacy product marker in installed acceptance tool: %s" % relative)
+        observed[relative].add(normalized)
+if observed != allowed:
+    raise SystemExit("installed acceptance compatibility marker allowlist is incomplete")
+PY
+}
+
 scan_product_privacy() {
-  local name_hit privacy_list privacy_path grep_status
-  if name_hit="$(find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -iname '*hermes*' -print -quit)"; then
+  local name_hit privacy_list privacy_path grep_status acceptance_root
+  acceptance_root="${ACCEPTANCE_ROOT:-$INSTALL_ROOT/libexec/target-acceptance}"
+  if name_hit="$(find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -path "$acceptance_root" -prune -o -iname '*hermes*' -print -quit)"; then
     :
   else
     fail "Cannot scan package tree for legacy product names"
@@ -515,7 +574,7 @@ scan_product_privacy() {
 
   privacy_list="$(mktemp "${TMPDIR:-/tmp}/taiji-privacy-scan.XXXXXX")" \
     || fail "Cannot allocate privacy scan list"
-  if ! find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -type f ! -name '*.pyc' ! -name '*.so' ! -name '*.png' ! -name '*.jpg' ! -name '*.jpeg' ! -name '*.gif' -print0 > "$privacy_list"; then
+  if ! find "$INSTALL_ROOT" -path "$INSTALL_ROOT/licenses" -prune -o -path "$INSTALL_ROOT/licenses/*" -prune -o -path "$AGENT_RUNTIME/venv/lib*" -prune -o -path "$acceptance_root" -prune -o -type f ! -name '*.pyc' ! -name '*.so' ! -name '*.png' ! -name '*.jpg' ! -name '*.jpeg' ! -name '*.gif' -print0 > "$privacy_list"; then
     rm -f -- "$privacy_list"
     fail "Cannot enumerate package text files for privacy scan"
   fi
@@ -532,6 +591,9 @@ scan_product_privacy() {
     fi
   done < "$privacy_list"
   rm -f -- "$privacy_list"
+  if [ -d "$acceptance_root" ] && [ ! -L "$acceptance_root" ]; then
+    scan_acceptance_privacy_compatibility "$acceptance_root"
+  fi
 }
 
 scan_package_tree() {
@@ -589,10 +651,134 @@ scan_deb_release_artifact() {
   rm -f -- "$strings_dump"
 }
 
+verify_extracted_acceptance_payload() {
+  local audit_root="$1" owner_uid
+  owner_uid="$(id -u)"
+  python3 - \
+    "$audit_root" \
+    "$SOURCE_COMMIT" \
+    "$VERSION" \
+    "$ACCEPTANCE_BINDING_SHA256" \
+    "$ACCEPTANCE_TOOLS_MANIFEST_SHA256" \
+    "$ACCEPTANCE_ENTRYPOINT_SHA256" \
+    "$INSTALLED_RELEASE_MANIFEST_SHA256" \
+    "$ACCEPTANCE_HELPER" \
+    "$owner_uid" <<'PY'
+import hashlib
+import importlib.util
+import json
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+source_commit, version = sys.argv[2:4]
+expected_binding, expected_tools, expected_entrypoint, expected_release = sys.argv[4:8]
+helper_source = Path(sys.argv[8])
+owner_uid = int(sys.argv[9])
+
+def strict(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit("installed acceptance JSON contains a duplicate field")
+        result[key] = value
+    return result
+
+def read_regular(relative, mode):
+    path = root / relative
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise SystemExit("installed acceptance payload node is unsafe: " + relative)
+    return path.read_bytes()
+
+def canonical_json(relative, mode):
+    raw = read_regular(relative, mode)
+    payload = json.loads(raw.decode("utf-8"), object_pairs_hook=strict)
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    if type(payload) is not dict or encoded != raw:
+        raise SystemExit("installed acceptance JSON is not canonical: " + relative)
+    return raw, payload
+
+entrypoint_raw = read_regular("usr/bin/taiji-agent-acceptance", 0o755)
+release_raw, release = canonical_json(
+    "opt/taiji-agent/resources/taiji-release-manifest.json", 0o644
+)
+binding_raw, binding = canonical_json(
+    "opt/taiji-agent/resources/taiji-acceptance-binding.json", 0o644
+)
+tools_relative = (
+    "opt/taiji-agent/libexec/target-acceptance/验收工具/"
+    "acceptance-tools-manifest.json"
+)
+tools_raw, _tools = canonical_json(tools_relative, 0o644)
+
+for label, raw, expected in (
+    ("acceptance binding", binding_raw, expected_binding),
+    ("acceptance tools manifest", tools_raw, expected_tools),
+    ("acceptance entrypoint", entrypoint_raw, expected_entrypoint),
+    ("installed release manifest", release_raw, expected_release),
+):
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise SystemExit(label + " digest differs from the build identity")
+
+expected_binding_payload = {
+    "schema": "taiji-installed-acceptance-binding/v1",
+    "version": version,
+    "source_commit": source_commit,
+    "release_manifest_sha256": expected_release,
+    "acceptance_tools_manifest_path": "/opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json",
+    "acceptance_tools_manifest_sha256": expected_tools,
+    "launcher_path": "/opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh",
+    "launcher_sha256": hashlib.sha256(read_regular("opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh", 0o755)).hexdigest(),
+    "helper_path": "/opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py",
+    "helper_sha256": hashlib.sha256(read_regular("opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py", 0o644)).hexdigest(),
+    "runner_path": "/opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py",
+    "runner_sha256": hashlib.sha256(read_regular("opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py", 0o644)).hexdigest(),
+    "entrypoint_path": "/usr/bin/taiji-agent-acceptance",
+    "entrypoint_sha256": expected_entrypoint,
+}
+if binding != expected_binding_payload:
+    raise SystemExit("installed acceptance binding does not match the extracted payload")
+if release != {
+    "schema": "taiji-release-manifest/v1",
+    "platform": "linux",
+    "arch": "amd64",
+    "version": version,
+    "commit": source_commit,
+    "installRoot": "/opt/taiji-agent",
+}:
+    raise SystemExit("installed release manifest does not match the extracted payload")
+
+spec = importlib.util.spec_from_file_location("taiji_acceptance_tools_manifest", helper_source)
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load acceptance tools manifest helper")
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+helper.verify_staged(
+    root / "opt/taiji-agent/libexec/target-acceptance/验收工具",
+    source_commit,
+    expected_tools,
+    owner_uid,
+)
+PY
+}
+
 audit_deb_payload() {
   local contents="$BUILD_ROOT/deb-contents.txt" audit_root="$BUILD_ROOT/deb-audit-root" control_root="$BUILD_ROOT/deb-audit-control" extracted_abi="$BUILD_ROOT/extracted-elf-abi-audit.json" extracted_icon_sha256 required missing=""
   dpkg-deb -c "$OUT_DEB" > "$contents"
   for required in "./opt/taiji-agent/runtime/agent/venv/bin/python" "./opt/taiji-agent/runtime/node/bin/node" "./opt/taiji-agent/runtime/lib" "./opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" "./opt/taiji-agent/resources/payload-contract.json" "./opt/taiji-agent/resources/linux-compatibility-policy.json" "./opt/taiji-agent/resources/taiji-release-manifest.json" "./opt/taiji-agent/resources/elf-abi-audit.json" "./opt/taiji-agent/runtime/web/server.pyc" "./opt/taiji-agent/scripts/taiji-native-verify" "./opt/taiji-agent/scripts/support_bundle.py" "./opt/taiji-agent/apps/taiji-desktop/src/main.js" "./opt/taiji-agent/apps/taiji-desktop/src/preload.js" "./opt/taiji-agent/resources/icons/taiji-agent.png" "./usr/share/applications/taiji-agent.desktop" "./usr/share/metainfo/taiji-agent.metainfo.xml" "./usr/share/icons/hicolor/32x32/apps/taiji-agent.png" "./usr/share/icons/hicolor/48x48/apps/taiji-agent.png" "./usr/share/icons/hicolor/64x64/apps/taiji-agent.png" "./usr/share/icons/hicolor/128x128/apps/taiji-agent.png" "./usr/share/icons/hicolor/192x192/apps/taiji-agent.png" "./usr/share/icons/hicolor/256x256/apps/taiji-agent.png" "./usr/share/icons/hicolor/512x512/apps/taiji-agent.png" "./usr/bin/taiji" "./usr/bin/taiji-agent" "./usr/bin/taiji-agent-support"; do
+    grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
+  done
+  for required in "./usr/bin/taiji-agent-acceptance" "./opt/taiji-agent/resources/taiji-acceptance-binding.json" "./opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py" "./opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py" "./opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh" "./opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json" "./opt/taiji-agent/libexec/target-acceptance/验收工具/run-installed-electron-acceptance.js" "./opt/taiji-agent/libexec/target-acceptance/验收工具/assemble-target-evidence.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/observe-single-deb-install.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/certification-matrix.json" "./opt/taiji-agent/libexec/target-acceptance/验收工具/validate-taiji-release-evidence.py" "./opt/taiji-agent/libexec/target-acceptance/验收工具/signing-public.pem"; do
     grep -F "$required" "$contents" >/dev/null || missing="$missing$required"$'\n'
   done
   [ -z "$missing" ] || { printf '%s' "$missing" >&2; fail "DEB payload is missing required runtime paths"; }
@@ -606,6 +792,7 @@ audit_deb_payload() {
     || fail "Extracted DEB Node executable SHA256 is not canonical"
   [ "$(sha256sum "$audit_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" | awk '{print $1}')" = "$PINNED_ELECTRON_EXECUTABLE_SHA256" ] \
     || fail "Extracted DEB Electron executable SHA256 is not canonical"
+  verify_extracted_acceptance_payload "$audit_root"
   cmp -s "$POLICY_FILE" "$audit_root/opt/taiji-agent/resources/linux-compatibility-policy.json" || fail "DEB policy is not byte-identical"
   cmp -s "$ABI_BUILD_REPORT" "$audit_root/opt/taiji-agent/resources/elf-abi-audit.json" || fail "DEB ABI report changed during packaging"
   grep -F "$POLICY_SHA256" "$control_root/preinst" >/dev/null || fail "DEB preinst policy hash mismatch"
@@ -655,6 +842,10 @@ write_package_manifest() {
   "source_inventory_sha256": "$SOURCE_INVENTORY_SHA256",
   "deb_basename": "$(basename "$OUT_DEB")",
   "deb_sha256": "$deb_sha256",
+  "acceptance_binding_sha256": "$ACCEPTANCE_BINDING_SHA256",
+  "acceptance_tools_manifest_sha256": "$ACCEPTANCE_TOOLS_MANIFEST_SHA256",
+  "acceptance_entrypoint_sha256": "$ACCEPTANCE_ENTRYPOINT_SHA256",
+  "installed_release_manifest_sha256": "$INSTALLED_RELEASE_MANIFEST_SHA256",
   "maintainer": "$TAIJI_PACKAGE_MAINTAINER",
   "compatibility_policy_id": "$POLICY_ID",
   "compatibility_policy_sha256": "$POLICY_SHA256",
@@ -689,17 +880,132 @@ MANIFEST
 write_launch_manifest() {
   local manifest_install_root="/opt/${INSTALL_ROOT##*/}"
   [ "$manifest_install_root" = "/opt/taiji-agent" ] || fail "Unexpected launch manifest install root: $manifest_install_root"
-  cat > "$LAUNCH_MANIFEST_PATH" <<MANIFEST
-{
-  "schema": "taiji-release-manifest/v1",
-  "platform": "linux",
-  "arch": "$TAIJI_PACKAGE_ARCHITECTURE",
-  "version": "$VERSION",
-  "commit": "$SOURCE_COMMIT",
-  "installRoot": "$manifest_install_root"
+  python3 - "$LAUNCH_MANIFEST_PATH" "$TAIJI_PACKAGE_ARCHITECTURE" "$VERSION" "$SOURCE_COMMIT" "$manifest_install_root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = {
+    "schema": "taiji-release-manifest/v1",
+    "platform": "linux",
+    "arch": sys.argv[2],
+    "version": sys.argv[3],
+    "commit": sys.argv[4],
+    "installRoot": sys.argv[5],
 }
-MANIFEST
+path.write_text(
+    json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
   chmod 0644 "$LAUNCH_MANIFEST_PATH"
+}
+
+stage_installed_acceptance_toolchain() {
+  local source manifest_path owner_uid
+  for source in \
+    "$ACCEPTANCE_HELPER" \
+    "$ACCEPTANCE_RUNNER_SOURCE" \
+    "$ACCEPTANCE_ENTRYPOINT_SOURCE" \
+    "$ACCEPTANCE_LAUNCHER_SOURCE" \
+    "$REPO_ROOT/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js" \
+    "$REPO_ROOT/tools/taiji-desktop-acceptance/assemble-target-evidence.py" \
+    "$REPO_ROOT/tools/taiji-desktop-acceptance/observe-single-deb-install.py" \
+    "$REPO_ROOT/packaging/linux/certification-matrix.json" \
+    "$REPO_ROOT/scripts/validate-taiji-release-evidence.py" \
+    "$REPO_ROOT/tools/taiji-release-evidence/signing-public.pem"; do
+    [ -f "$source" ] && [ ! -L "$source" ] \
+      || fail "Installed acceptance source is missing or unsafe: $source"
+  done
+
+  install -d -m 0755 "$ACCEPTANCE_ROOT" "$ACCEPTANCE_TOOLS_ROOT"
+  install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent-acceptance" "$PKG_ROOT/usr/bin/taiji-agent-acceptance"
+  install -m 0644 "$REPO_ROOT/packaging/linux/acceptance_runner.py" "$ACCEPTANCE_ROOT/acceptance-runner.py"
+  install -m 0644 "$REPO_ROOT/packaging/linux/acceptance_tools_manifest.py" "$ACCEPTANCE_ROOT/acceptance_tools_manifest.py"
+  install -m 0755 "$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh" "$ACCEPTANCE_ROOT/04_目标终端_桌面App验收并导出证据.sh"
+  install -m 0644 "$REPO_ROOT/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js" "$ACCEPTANCE_TOOLS_ROOT/run-installed-electron-acceptance.js"
+  install -m 0644 "$REPO_ROOT/tools/taiji-desktop-acceptance/assemble-target-evidence.py" "$ACCEPTANCE_TOOLS_ROOT/assemble-target-evidence.py"
+  install -m 0644 "$REPO_ROOT/tools/taiji-desktop-acceptance/observe-single-deb-install.py" "$ACCEPTANCE_TOOLS_ROOT/observe-single-deb-install.py"
+  install -m 0644 "$REPO_ROOT/packaging/linux/certification-matrix.json" "$ACCEPTANCE_TOOLS_ROOT/certification-matrix.json"
+  install -m 0644 "$REPO_ROOT/scripts/validate-taiji-release-evidence.py" "$ACCEPTANCE_TOOLS_ROOT/validate-taiji-release-evidence.py"
+  install -m 0644 "$REPO_ROOT/tools/taiji-release-evidence/signing-public.pem" "$ACCEPTANCE_TOOLS_ROOT/signing-public.pem"
+
+  manifest_path="$ACCEPTANCE_TOOLS_ROOT/acceptance-tools-manifest.json"
+  python3 "$ACCEPTANCE_HELPER" create \
+    --repo-root "$REPO_ROOT" \
+    --source-commit "$SOURCE_COMMIT" \
+    --output "$manifest_path"
+  ACCEPTANCE_TOOLS_MANIFEST_SHA256="$(sha256sum "$manifest_path" | awk '{print $1}')"
+  owner_uid="$(id -u)"
+  python3 - "$ACCEPTANCE_HELPER" "$ACCEPTANCE_TOOLS_ROOT" "$SOURCE_COMMIT" "$ACCEPTANCE_TOOLS_MANIFEST_SHA256" "$owner_uid" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("taiji_acceptance_tools_manifest", sys.argv[1])
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load acceptance tools manifest helper")
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+helper.verify_staged(Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]))
+PY
+
+  ACCEPTANCE_ENTRYPOINT_SHA256="$(sha256sum "$PKG_ROOT/usr/bin/taiji-agent-acceptance" | awk '{print $1}')"
+  INSTALLED_RELEASE_MANIFEST_SHA256="$(sha256sum "$LAUNCH_MANIFEST_PATH" | awk '{print $1}')"
+  python3 - \
+    "$ACCEPTANCE_BINDING_PATH" \
+    "$VERSION" \
+    "$SOURCE_COMMIT" \
+    "$INSTALLED_RELEASE_MANIFEST_SHA256" \
+    "$ACCEPTANCE_TOOLS_MANIFEST_SHA256" \
+    "$(sha256sum "$ACCEPTANCE_ROOT/04_目标终端_桌面App验收并导出证据.sh" | awk '{print $1}')" \
+    "$(sha256sum "$ACCEPTANCE_ROOT/acceptance_tools_manifest.py" | awk '{print $1}')" \
+    "$(sha256sum "$ACCEPTANCE_ROOT/acceptance-runner.py" | awk '{print $1}')" \
+    "$ACCEPTANCE_ENTRYPOINT_SHA256" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+version, source_commit = sys.argv[2:4]
+digests = sys.argv[4:10]
+if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+    raise SystemExit("acceptance binding source commit is invalid")
+if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests):
+    raise SystemExit("acceptance binding digest is invalid")
+payload = {
+    "schema": "taiji-installed-acceptance-binding/v1",
+    "version": version,
+    "source_commit": source_commit,
+    "release_manifest_sha256": digests[0],
+    "acceptance_tools_manifest_path": "/opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json",
+    "acceptance_tools_manifest_sha256": digests[1],
+    "launcher_path": "/opt/taiji-agent/libexec/target-acceptance/04_目标终端_桌面App验收并导出证据.sh",
+    "launcher_sha256": digests[2],
+    "helper_path": "/opt/taiji-agent/libexec/target-acceptance/acceptance_tools_manifest.py",
+    "helper_sha256": digests[3],
+    "runner_path": "/opt/taiji-agent/libexec/target-acceptance/acceptance-runner.py",
+    "runner_sha256": digests[4],
+    "entrypoint_path": "/usr/bin/taiji-agent-acceptance",
+    "entrypoint_sha256": digests[5],
+}
+path.write_text(
+    json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+  chmod 0644 "$ACCEPTANCE_BINDING_PATH"
+  ACCEPTANCE_BINDING_SHA256="$(sha256sum "$ACCEPTANCE_BINDING_PATH" | awk '{print $1}')"
+  for source in \
+    "$ACCEPTANCE_BINDING_SHA256" \
+    "$ACCEPTANCE_TOOLS_MANIFEST_SHA256" \
+    "$ACCEPTANCE_ENTRYPOINT_SHA256" \
+    "$INSTALLED_RELEASE_MANIFEST_SHA256"; do
+    printf '%s\n' "$source" | grep -Eq '^[0-9a-f]{64}$' \
+      || fail "Installed acceptance identity is missing or invalid"
+  done
 }
 
 if [ "$(uname -s)" != "Linux" ]; then fail "Refusing to build final DEB on non-Linux host"; fi
@@ -742,6 +1048,7 @@ chmod 0644 "$WEB_RUNTIME/PRODUCT_VERSION"
 install -m 0644 "$PAYLOAD_CONTRACT" "$INSTALL_ROOT/resources/payload-contract.json"
 install -m 0644 "$POLICY_FILE" "$POLICY_INSTALL_PATH"
 write_launch_manifest
+stage_installed_acceptance_toolchain
 python3 "$RUNTIME_STAGER" --repo-root "$REPO_ROOT" --install-root "$INSTALL_ROOT" --node-root "$PACKAGED_NODE_ROOT" --public-key-fingerprint "$ISSUER_PUBLIC_KEY_FINGERPRINT"
 chmod 0755 "$INSTALL_ROOT/resources/license"
 [ "$("$INSTALL_ROOT/runtime/node/bin/node" --version)" = "v$PACKAGED_NODE_VERSION" ] || fail "Staged Node runtime version mismatch"

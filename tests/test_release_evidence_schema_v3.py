@@ -15,6 +15,8 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests.github_ci_v2_fixture import write_github_ci_v2_bundle
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "scripts/validate-taiji-release-evidence.py"
@@ -40,6 +42,15 @@ def toolchain_identity() -> dict[str, str]:
         "electron_version": "39.8.10",
         "electron_archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
         "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
+    }
+
+
+def acceptance_identity() -> dict[str, str]:
+    return {
+        "acceptance_binding_sha256": "2" * 64,
+        "acceptance_tools_manifest_sha256": "3" * 64,
+        "acceptance_entrypoint_sha256": "4" * 64,
+        "installed_release_manifest_sha256": "5" * 64,
     }
 
 
@@ -109,31 +120,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.manifest = self.package_dir / "taiji-package-manifest.json"
         self.write_manifest()
         self.write_delivery_identity_fixture()
-        self.ci_evidence = self.root / "github-ci-evidence.json"
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        self.ci_evidence.write_text(
-            json.dumps(
-                {
-                    "schema": "taiji-github-ci-evidence/v1",
-                    "provider": "github-actions",
-                    "repository": "example/taiji-agent",
-                    "workflow_name": "Pull Request CI",
-                    "required_check_name": "CI Gate",
-                    "run_id": 123456789,
-                    "run_attempt": 1,
-                    "event": "push",
-                    "status": "completed",
-                    "conclusion": "success",
-                    "head_sha": self.commit,
-                    "html_url": "https://github.com/example/taiji-agent/actions/runs/123456789",
-                    "completed_at_utc": now,
-                    "collected_at_utc": now,
-                },
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        self.ci_evidence = write_github_ci_v2_bundle(self.root, self.commit)
         self.evidence = self.root / "release-evidence.json"
         self.write_evidence()
 
@@ -163,6 +150,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
             "built_at_utc": "2026-08-05T00:00:00Z",
             **toolchain_identity(),
+            **acceptance_identity(),
         }
         if hasattr(self, "source_inventory"):
             manifest.update(
@@ -226,6 +214,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"elf_abi_audit_sha256={'e' * 64}",
                     f"icon_set_sha256={'1' * 64}",
                     *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
+                    *(f"{key}={value}" for key, value in sorted(acceptance_identity().items())),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )
@@ -965,6 +954,33 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.assertNotIn("uv_executable_sha256", json.loads(self.manifest.read_text()))
         self.assertEqual(self.manifest.read_bytes(), downgraded)
 
+    def test_v3_rejects_missing_installed_acceptance_identity(self):
+        for field in sorted(acceptance_identity()):
+            with self.subTest(field=field):
+                self.write_manifest()
+                manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+                manifest.pop(field)
+                self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    self.validator.EvidenceError,
+                    "安装态验收|acceptance",
+                ):
+                    self.validator.validate_build_binding(self.args())
+
+    def test_v3_rejects_installed_acceptance_marker_drift(self):
+        field = "acceptance_binding_sha256"
+        marker = self.build_marker.read_text(encoding="utf-8")
+        self.build_marker.write_text(
+            marker.replace(
+                f"{field}={acceptance_identity()[field]}",
+                f"{field}={'6' * 64}",
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(self.validator.EvidenceError, "构建成功标记"):
+            self.validator.validate_build_binding(self.args())
+
     def test_v3_build_binding_rejects_old_or_wrong_named_source_archive(self):
         wrong_archive = self.delivery / "taiji-agentv1.0-kylin-build-src-bbbbbbb.tar.gz"
         wrong_archive.write_bytes(self.source_archive.read_bytes())
@@ -1095,6 +1111,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "icon_set_sha256": "1" * 64,
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
             **toolchain_identity(),
+            **acceptance_identity(),
         }
         (package_dir / "taiji-package-manifest.json").write_text(
             json.dumps(manifest),
@@ -1119,6 +1136,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"elf_abi_audit_sha256={'e' * 64}",
                     f"icon_set_sha256={'1' * 64}",
                     *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
+                    *(f"{key}={value}" for key, value in sorted(acceptance_identity().items())),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )

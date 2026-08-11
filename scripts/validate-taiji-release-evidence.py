@@ -90,6 +90,12 @@ TOOLCHAIN_MANIFEST_FIELDS = {
     "electron_archive_sha256",
     "electron_executable_sha256",
 }
+ACCEPTANCE_MANIFEST_FIELDS = {
+    "acceptance_binding_sha256",
+    "acceptance_tools_manifest_sha256",
+    "acceptance_entrypoint_sha256",
+    "installed_release_manifest_sha256",
+}
 ELECTRON_PATH = "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
 DRIVER_RESULT_BASENAME = "desktop-driver-result.json"
 SCREENSHOT_BASENAME = "desktop-app.png"
@@ -627,6 +633,18 @@ def validate_manifest_toolchain_identity(manifest: dict[str, Any]) -> dict[str, 
     return {key: manifest[key] for key in TOOLCHAIN_MANIFEST_FIELDS}
 
 
+def validate_manifest_acceptance_identity(manifest: dict[str, Any]) -> dict[str, str]:
+    missing = sorted(ACCEPTANCE_MANIFEST_FIELDS - manifest.keys())
+    if missing:
+        raise EvidenceError(
+            "当前 v3 manifest 缺少安装态验收信任根字段: " + ", ".join(missing)
+        )
+    result = {}
+    for key in ACCEPTANCE_MANIFEST_FIELDS:
+        result[key] = validate_sha256(manifest.get(key), key)
+    return result
+
+
 def reject_target_baseline_fields(data: dict[str, Any], label: str) -> None:
     forbidden = {"target_baseline_profile_id", "target_baseline_sha256"}
     present = sorted(forbidden.intersection(data))
@@ -893,6 +911,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
 
     if manifest.get("schema") == "taiji-package-manifest/v3":
         toolchain = validate_manifest_toolchain_identity(manifest)
+        acceptance = validate_manifest_acceptance_identity(manifest)
         source_commit = manifest.get("source_commit")
         if not isinstance(source_commit, str) or not FULL_COMMIT_RE.fullmatch(source_commit):
             raise EvidenceError("v3 交付清单 manifest source_commit 不合法")
@@ -1029,6 +1048,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             "icon_set_sha256": manifest.get("icon_set_sha256"),
             "maintainer": manifest.get("maintainer"),
             **toolchain,
+            **acceptance,
         }
         require_exact_keys(marker, set(marker_expected) | {"built_at_utc"}, "构建成功标记")
         if not marker["built_at_utc"].strip():
@@ -1489,6 +1509,7 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         "desktop_entry_sha256",
     )
     toolchain = validate_manifest_toolchain_identity(manifest)
+    validate_manifest_acceptance_identity(manifest)
     # The ABI report is part of the v3 manifest binding.  It is deliberately
     # checked even though it is not a BuildBinding field: the report hash must
     # be a well-formed immutable release input before later certification work.

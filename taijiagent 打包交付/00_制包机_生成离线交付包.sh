@@ -64,6 +64,10 @@ ELECTRON_ARCHIVE=""
 ELECTRON_EXECUTABLE_SHA256=""
 ELECTRON_PINNED_EXECUTABLE_SHA256="c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 ELF_ABI_AUDIT_SHA256=""
+ACCEPTANCE_BINDING_SHA256=""
+ACCEPTANCE_TOOLS_MANIFEST_SHA256=""
+ACCEPTANCE_ENTRYPOINT_SHA256=""
+INSTALLED_RELEASE_MANIFEST_SHA256=""
 PYTHON_DEPENDENCY_LOCK_STATUS="unknown"
 PYTHON_LOCK_BASENAME="uv.lock"
 PYTHON_LOCK_SHA256=""
@@ -1572,7 +1576,7 @@ build_runtime_and_deb() {
 
 collect_artifacts() {
   info "收集候选 DEB 与 build-deb manifest"
-  local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha icon_sha electron_sha
+  local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha icon_sha electron_sha acceptance_hashes
   src_pkg_dir="$SRC_DIR/packages/麒麟操作系统安装包"
   deb="$src_pkg_dir/taiji-agent_${VERSION}_amd64.deb"
   manifest="$src_pkg_dir/taiji-package-manifest.json"
@@ -1637,6 +1641,33 @@ print(abi)
 PY
   )"
   ELF_ABI_AUDIT_SHA256="$abi_sha"
+  acceptance_hashes="$(python3 - "$MANIFEST_FILE" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+fields = (
+    "acceptance_binding_sha256",
+    "acceptance_tools_manifest_sha256",
+    "acceptance_entrypoint_sha256",
+    "installed_release_manifest_sha256",
+)
+values = []
+for field in fields:
+    value = manifest.get(field)
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise SystemExit("manifest installed acceptance SHA256 is invalid: " + field)
+    values.append(value)
+print(" ".join(values))
+PY
+)" || fail "manifest 安装态验收摘要无效"
+  read -r \
+    ACCEPTANCE_BINDING_SHA256 \
+    ACCEPTANCE_TOOLS_MANIFEST_SHA256 \
+    ACCEPTANCE_ENTRYPOINT_SHA256 \
+    INSTALLED_RELEASE_MANIFEST_SHA256 <<< "$acceptance_hashes"
   icon_sha="$(python3 - "$MANIFEST_FILE" <<'PY'
 import json
 import re
@@ -1698,6 +1729,10 @@ write_pending_build_marker() {
     printf 'compatibility_policy_id=%s\n' "$POLICY_ID"
     printf 'compatibility_policy_sha256=%s\n' "$POLICY_SHA256"
     printf 'elf_abi_audit_sha256=%s\n' "$ELF_ABI_AUDIT_SHA256"
+    printf 'acceptance_binding_sha256=%s\n' "$ACCEPTANCE_BINDING_SHA256"
+    printf 'acceptance_tools_manifest_sha256=%s\n' "$ACCEPTANCE_TOOLS_MANIFEST_SHA256"
+    printf 'acceptance_entrypoint_sha256=%s\n' "$ACCEPTANCE_ENTRYPOINT_SHA256"
+    printf 'installed_release_manifest_sha256=%s\n' "$INSTALLED_RELEASE_MANIFEST_SHA256"
     printf 'icon_set_sha256=%s\n' "$ICON_SET_SHA256"
     printf 'python_dependency_lock_status=%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
     printf 'python_lock_basename=%s\n' "$PYTHON_LOCK_BASENAME"
@@ -1994,6 +2029,10 @@ write_build_report() {
     printf 'compatibility policy id：%s\n' "$POLICY_ID"
     printf 'compatibility policy SHA256：%s\n' "$POLICY_SHA256"
     printf 'ELF ABI audit SHA256：%s\n' "$ELF_ABI_AUDIT_SHA256"
+    printf '安装态验收绑定 SHA256：%s\n' "$ACCEPTANCE_BINDING_SHA256"
+    printf '安装态验收工具 manifest SHA256：%s\n' "$ACCEPTANCE_TOOLS_MANIFEST_SHA256"
+    printf '安装态验收入口 SHA256：%s\n' "$ACCEPTANCE_ENTRYPOINT_SHA256"
+    printf '安装态 release manifest SHA256：%s\n' "$INSTALLED_RELEASE_MANIFEST_SHA256"
     printf '图标集合 SHA256：%s\n' "$ICON_SET_SHA256"
     printf 'Python 依赖锁状态：%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
     printf 'Python lock：%s %s\n' "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256"
