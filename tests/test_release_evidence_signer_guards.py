@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SIGNER = ROOT / "scripts/sign-taiji-release-evidence.sh"
+PYTHON38_GATE = ROOT / "tests/python38_linux_packaging_gate.py"
 CHALLENGE = "ab" * 32
 SOURCE_COMMIT = "a" * 40
 DEB_BASENAME = "taiji-agent_1.0.2_amd64.deb"
@@ -366,6 +368,35 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         )
 
         ast.parse(source[heredoc_start:heredoc_end], feature_version=8)
+
+    def test_publication_trust_helper_has_stable_python38_gate_markers(self) -> None:
+        source = SIGNER.read_text(encoding="utf-8")
+        begin = "# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_BEGIN"
+        end = "# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_END"
+
+        self.assertEqual(source.count(begin), 1)
+        self.assertEqual(source.count(end), 1)
+        self.assertLess(source.index(begin), source.index("def identity(value):"))
+        self.assertLess(
+            source.index("def validate_publication_delivery_root("),
+            source.index(end),
+        )
+
+    def test_python38_gate_executes_publication_trust_helper_behavior(self) -> None:
+        gate_source = PYTHON38_GATE.read_text(encoding="utf-8")
+        self.assertIn(
+            "exercise_publication_delivery_trust_helper(temp_root)", gate_source
+        )
+        namespace = runpy.run_path(str(PYTHON38_GATE))
+        extract_helper = namespace["extract_publication_delivery_trust_helper"]
+        exercise_helper = namespace["exercise_publication_delivery_trust_helper"]
+
+        helper_source = extract_helper()
+        compile(helper_source, str(SIGNER), "exec")
+        with tempfile.TemporaryDirectory(
+            prefix="taiji-python38-publication-trust-"
+        ) as temp_dir:
+            exercise_helper(Path(temp_dir).resolve())
 
     def test_publication_evidence_rejects_relative_symlinked_or_dotdot_delivery_root(
         self,

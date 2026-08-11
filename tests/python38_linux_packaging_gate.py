@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import os
 import py_compile
 import runpy
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +29,11 @@ INSTALL_OBSERVER = (
 )
 GOLDEN_ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
 CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
+RELEASE_EVIDENCE_SIGNER = ROOT / "scripts/sign-taiji-release-evidence.sh"
+PUBLICATION_TRUST_HELPER_BEGIN = (
+    "# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_BEGIN"
+)
+PUBLICATION_TRUST_HELPER_END = "# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_END"
 PYTHON38_ENTRYPOINTS = (
     ROOT / "packaging/linux/compatibility_policy.py",
     ROOT / "packaging/linux/trusted_system_tools.py",
@@ -59,6 +66,54 @@ PYTHON38_ENTRYPOINTS = (
 )
 
 
+def extract_publication_delivery_trust_helper() -> str:
+    source = RELEASE_EVIDENCE_SIGNER.read_text(encoding="utf-8")
+    assert source.count(PUBLICATION_TRUST_HELPER_BEGIN) == 1
+    assert source.count(PUBLICATION_TRUST_HELPER_END) == 1
+    start = source.index(PUBLICATION_TRUST_HELPER_BEGIN)
+    start += len(PUBLICATION_TRUST_HELPER_BEGIN)
+    end = source.index(PUBLICATION_TRUST_HELPER_END, start)
+    helper_source = source[start:end].strip() + "\n"
+    assert "def identity(value):" in helper_source
+    assert "def validate_publication_delivery_root(" in helper_source
+    return helper_source
+
+
+def exercise_publication_delivery_trust_helper(temp_root: Path) -> None:
+    helper_source = extract_publication_delivery_trust_helper()
+    namespace = {"os": os, "stat": stat}
+    exec(
+        compile(
+            helper_source,
+            "{}:publication-trust-helper".format(RELEASE_EVIDENCE_SIGNER),
+            "exec",
+        ),
+        namespace,
+    )
+    validate_root = namespace["validate_publication_delivery_root"]
+
+    controlled_parent = temp_root / "publication-trust"
+    controlled_parent.mkdir(mode=0o700)
+    trusted_root = controlled_parent / "taijiagent 打包交付"
+    trusted_root.mkdir(mode=0o700)
+    trusted_stat = trusted_root.lstat()
+    assert trusted_stat.st_uid == os.getuid()
+    assert stat.S_IMODE(trusted_stat.st_mode) == 0o700
+    validate_root(trusted_root.resolve())
+
+    unsafe_root = controlled_parent / "unsafe-delivery"
+    unsafe_root.mkdir(mode=0o700)
+    unsafe_root.chmod(0o777)
+    try:
+        validate_root(unsafe_root.resolve())
+    except SystemExit as exc:
+        assert "current-user-owned and not group/other writable" in str(exc)
+    else:
+        raise AssertionError("publication trust helper accepted unsafe mode")
+    finally:
+        unsafe_root.chmod(0o700)
+
+
 def main() -> int:
     assert sys.version_info[:2] == (3, 8), (
         "this compatibility gate must run on Python 3.8, got {}.{}".format(
@@ -67,6 +122,7 @@ def main() -> int:
     )
     with tempfile.TemporaryDirectory(prefix="taiji-python38-gate-") as temp_dir:
         temp_root = Path(temp_dir)
+        exercise_publication_delivery_trust_helper(temp_root)
         for index, entrypoint in enumerate(PYTHON38_ENTRYPOINTS):
             py_compile.compile(
                 str(entrypoint),

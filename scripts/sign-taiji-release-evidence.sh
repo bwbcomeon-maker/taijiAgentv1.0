@@ -276,6 +276,7 @@ excluded_root_files = {"release-evidence.json.sig"}
 total_bytes = 0
 
 
+# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_BEGIN
 def identity(value):
     return (
         value.st_dev,
@@ -331,6 +332,7 @@ def validate_publication_delivery_root(source, expected_identity=None):
     if source.resolve() != source:
         raise SystemExit("publication evidence must use an absolute real delivery root")
     return leaf_identity
+# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_END
 
 
 def copy_file(source, destination):
