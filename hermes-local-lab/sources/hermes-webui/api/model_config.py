@@ -35,12 +35,16 @@ except ImportError:  # pragma: no cover - exercised on Windows.
     _fcntl = None
 
 from agent.provider_credentials import (
+    TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY as _MAIN_MODEL_CREDENTIAL_REVISION_KEY,
+    TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY as _MAIN_MODEL_RECEIPT_ENV_KEY,
+    TAIJI_MAIN_MODEL_REQUEST_ID_KEY as _MAIN_MODEL_REQUEST_ID_KEY,
     credential_transaction,
     credential_secret_env,
     default_credential_ref,
     load_credential,
     load_credential_config,
     load_credential_snapshot,
+    main_model_request_receipt,
     mutate_config_env_strict,
     normalize_credential_id,
     provider_family,
@@ -106,7 +110,6 @@ _UNSET_SECRET_VALUE = object()
 _IMAGE_CAPABILITY_REVISION_NONCE_KEY = (
     "_taiji_image_capability_revision_nonce"
 )
-_MAIN_MODEL_REQUEST_ID_KEY = "_taiji_main_model_request_id"
 _IMAGE_CAPABILITY_REQUEST_CACHE_TTL_SECONDS = 10 * 60
 _IMAGE_CAPABILITY_REQUEST_CACHE_CAPACITY = 512
 _IMAGE_CAPABILITY_CREDENTIAL_MANAGER = "image-capability-center"
@@ -525,6 +528,14 @@ def _commit_expected_config_env(
         replace_expected,
         env_updates,
         config_path=config_path,
+        allow_taiji_main_model_receipt=bool(
+            re.fullmatch(
+                r"[0-9a-f]{32}",
+                str(desired_config.get(_MAIN_MODEL_REQUEST_ID_KEY) or ""),
+            )
+            and desired_config.get(_MAIN_MODEL_REQUEST_ID_KEY)
+            != expected_config.get(_MAIN_MODEL_REQUEST_ID_KEY)
+        ),
     )
 
 
@@ -6750,6 +6761,9 @@ def _get_model_config_unlocked(
     provider = str(model_cfg.get("provider") or "").strip()
     model = str(model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "").strip()
     key_env = str(model_cfg.get("key_env") or model_cfg.get("api_key_env") or "").strip()
+    main_credential_env = key_env or str(
+        _PROVIDER_ENV_VAR.get(provider) or ""
+    ).strip()
     image_gen_config = _get_image_gen_config_unlocked(
         refresh_runtime=False
     )
@@ -6761,13 +6775,9 @@ def _get_model_config_unlocked(
     return {
         "ok": True,
         "profile": _active_profile_name(),
-        "main_request_id": (
-            str(config_data.get(_MAIN_MODEL_REQUEST_ID_KEY) or "")
-            if re.fullmatch(
-                r"[0-9a-f]{32}",
-                str(config_data.get(_MAIN_MODEL_REQUEST_ID_KEY) or ""),
-            )
-            else ""
+        "main_request_id": main_model_request_receipt(
+            config_data,
+            main_credential_env,
         ),
         "config": _public_config_summary(config_path),
         "main": {
@@ -6864,6 +6874,19 @@ def set_main_model_config(body: dict[str, Any]) -> dict[str, Any]:
                 model_cfg.pop("api_key_env", None)
             config_data["model"] = model_cfg
             config_data[_MAIN_MODEL_REQUEST_ID_KEY] = request_id
+            receipt_env = (
+                _CUSTOM_MODEL_KEY_ENV
+                if provider_id == "custom"
+                else str(_PROVIDER_ENV_VAR.get(provider_id) or "")
+            )
+            if receipt_env:
+                config_data[_MAIN_MODEL_RECEIPT_ENV_KEY] = receipt_env
+            else:
+                config_data.pop(_MAIN_MODEL_RECEIPT_ENV_KEY, None)
+                config_data.pop(
+                    _MAIN_MODEL_CREDENTIAL_REVISION_KEY,
+                    None,
+                )
             if env_updates:
                 from agent.provider_credentials import (
                     load_credential_snapshot,

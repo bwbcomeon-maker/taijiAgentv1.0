@@ -130,6 +130,13 @@ _CREDENTIAL_ORPHAN_STAGE_RE = re.compile(
 _ENV_ASSIGNMENT_RE = re.compile(
     r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$"
 )
+TAIJI_MAIN_MODEL_REQUEST_ID_KEY = "_taiji_main_model_request_id"
+TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY = "_taiji_main_model_receipt_env"
+TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY = (
+    "_taiji_main_model_credential_revision"
+)
+TAIJI_CREDENTIAL_REVISIONS_KEY = "_taiji_credential_revisions"
+_TAIJI_OPAQUE_REVISION_RE = re.compile(r"[0-9a-f]{32}")
 
 
 @dataclass(frozen=True, repr=False)
@@ -1326,6 +1333,199 @@ def _parse_env_bytes(payload: bytes) -> dict[str, str]:
             raise ValueError("credential env contains duplicate keys")
         values[key] = _env_assignment_value(match.group("value"))
     return values
+
+
+def _selected_env_key_states(
+    payload: bytes,
+    keys: set[str],
+) -> dict[str, tuple[str, ...]]:
+    """Return ordered values for selected keys, including repairable duplicates."""
+    if b"\x00" in payload:
+        raise ValueError("credential env cannot contain NUL bytes")
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeError as exc:
+        raise ValueError("credential env must be UTF-8") from exc
+    values: dict[str, list[str]] = {key: [] for key in keys}
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _ENV_ASSIGNMENT_RE.fullmatch(raw_line)
+        if match is None:
+            raise ValueError("credential env contains an invalid assignment")
+        key = match.group("key")
+        if key in values:
+            values[key].append(_env_assignment_value(match.group("value")))
+    return {key: tuple(found) for key, found in values.items()}
+
+
+def _changed_selected_env_keys(
+    before: bytes,
+    after: bytes,
+    applied: Mapping[str, bool],
+) -> set[str]:
+    """Return keys whose effective (last-assignment) secret value changed."""
+    applied_keys = {key for key, did_apply in applied.items() if did_apply}
+    before_states = _selected_env_key_states(before, applied_keys)
+    after_states = _selected_env_key_states(after, applied_keys)
+    return {
+        key
+        for key in applied_keys
+        if before_states.get(key, ())[-1:] != after_states.get(key, ())[-1:]
+    }
+
+
+def _taiji_valid_opaque_revision(value: object) -> str:
+    text = str(value or "")
+    return text if _TAIJI_OPAQUE_REVISION_RE.fullmatch(text) else ""
+
+
+def _taiji_valid_secret_env(value: object) -> str:
+    text = str(value or "")
+    return text if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text) else ""
+
+
+def main_model_request_receipt(
+    config_data: Mapping[str, Any],
+    credential_env: str,
+) -> str:
+    """Return a receipt only while its opaque credential revision is current."""
+    request_id = str(
+        config_data.get(TAIJI_MAIN_MODEL_REQUEST_ID_KEY) or ""
+    )
+    bound_env = _taiji_valid_secret_env(
+        config_data.get(TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY)
+    )
+    expected_env = _taiji_valid_secret_env(credential_env)
+    receipt_revision = _taiji_valid_opaque_revision(
+        config_data.get(TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY)
+    )
+    revisions = config_data.get(TAIJI_CREDENTIAL_REVISIONS_KEY)
+    current_revision = (
+        _taiji_valid_opaque_revision(revisions.get(bound_env))
+        if isinstance(revisions, dict) and bound_env
+        else ""
+    )
+    if (
+        not _TAIJI_OPAQUE_REVISION_RE.fullmatch(request_id)
+        or not expected_env
+        or bound_env != expected_env
+        or not receipt_revision
+        or receipt_revision != current_revision
+    ):
+        return ""
+    return request_id
+
+
+def _taiji_main_model_receipt_projection(
+    config_data: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return the in-memory main-model fields covered by a request receipt."""
+    model = config_data.get("model")
+    if not isinstance(model, dict):
+        return ()
+    return tuple(
+        str(model.get(key) or "").strip()
+        for key in (
+            "provider",
+            "default",
+            "model",
+            "name",
+            "base_url",
+            "key_env",
+            "api_key_env",
+            "api_key",
+        )
+    )
+
+
+def _reconcile_taiji_main_model_credential_revision(
+    current_config: Mapping[str, Any],
+    mutated_config: dict[str, Any],
+    changed_env_keys: set[str],
+    *,
+    allow_new_receipt: bool = False,
+) -> None:
+    """Bind a new receipt or invalidate an old one in one credential transaction."""
+    metadata_keys = (
+        TAIJI_MAIN_MODEL_REQUEST_ID_KEY,
+        TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY,
+        TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY,
+        TAIJI_CREDENTIAL_REVISIONS_KEY,
+    )
+    if not any(
+        key in current_config or key in mutated_config
+        for key in metadata_keys
+    ):
+        return
+
+    current_request_id = str(
+        current_config.get(TAIJI_MAIN_MODEL_REQUEST_ID_KEY) or ""
+    )
+    desired_request_id = str(
+        mutated_config.get(TAIJI_MAIN_MODEL_REQUEST_ID_KEY) or ""
+    )
+    bound_env = _taiji_valid_secret_env(
+        mutated_config.get(TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY)
+    )
+    revisions_value = mutated_config.get(TAIJI_CREDENTIAL_REVISIONS_KEY)
+    revisions = (
+        copy.deepcopy(revisions_value)
+        if isinstance(revisions_value, dict)
+        else {}
+    )
+    request_id_changed = desired_request_id != current_request_id
+    new_receipt = bool(
+        allow_new_receipt
+        and _TAIJI_OPAQUE_REVISION_RE.fullmatch(desired_request_id)
+        and request_id_changed
+    )
+
+    if new_receipt and bound_env:
+        revision = _taiji_valid_opaque_revision(revisions.get(bound_env))
+        if bound_env in changed_env_keys or not revision:
+            revision = uuid.uuid4().hex
+        revisions[bound_env] = revision
+        mutated_config[TAIJI_CREDENTIAL_REVISIONS_KEY] = revisions
+        mutated_config[TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY] = revision
+        return
+
+    if request_id_changed and not allow_new_receipt:
+        mutated_config.pop(TAIJI_MAIN_MODEL_REQUEST_ID_KEY, None)
+        mutated_config.pop(TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY, None)
+        mutated_config.pop(TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY, None)
+        return
+
+    receipt_revision = _taiji_valid_opaque_revision(
+        mutated_config.get(TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY)
+    )
+    current_revision = _taiji_valid_opaque_revision(
+        revisions.get(bound_env)
+    )
+    receipt_is_current = bool(
+        _TAIJI_OPAQUE_REVISION_RE.fullmatch(desired_request_id)
+        and bound_env
+        and receipt_revision
+        and receipt_revision == current_revision
+    )
+    projection_changed = (
+        _taiji_main_model_receipt_projection(current_config)
+        != _taiji_main_model_receipt_projection(mutated_config)
+    )
+    if (
+        receipt_is_current
+        and bound_env not in changed_env_keys
+        and not projection_changed
+    ):
+        return
+
+    if bound_env and bound_env in changed_env_keys:
+        revisions[bound_env] = uuid.uuid4().hex
+        mutated_config[TAIJI_CREDENTIAL_REVISIONS_KEY] = revisions
+    mutated_config.pop(TAIJI_MAIN_MODEL_REQUEST_ID_KEY, None)
+    mutated_config.pop(TAIJI_MAIN_MODEL_RECEIPT_ENV_KEY, None)
+    mutated_config.pop(TAIJI_MAIN_MODEL_CREDENTIAL_REVISION_KEY, None)
 
 
 _AT_FDCWD = -2
@@ -3496,6 +3696,11 @@ def mutate_config_strict(
             mutated = result
         if not isinstance(mutated, dict):
             raise ValueError("credential config mutation must produce a mapping")
+        _reconcile_taiji_main_model_credential_revision(
+            current,
+            mutated,
+            set(),
+        )
         payload = yaml.safe_dump(
             mutated,
             allow_unicode=True,
@@ -3568,12 +3773,60 @@ def mutate_env_unique(
             updates,
             expected_values,
         )
+        changed_env_keys = _changed_selected_env_keys(
+            original,
+            payload,
+            applied,
+        )
         projection_keys = [
             key
             for key, did_apply in applied.items()
             if did_apply
         ]
-        if (not env_exists and payload) or payload != original:
+        config_exists = False
+        config_before = b""
+        config_target = b""
+        config_changed = False
+        if changed_env_keys:
+            config_exists, config_before = _read_optional_bytes(
+                spec.config_target
+            )
+            if config_exists:
+                current_config = _parse_config_bytes(config_before)
+                mutated_config = copy.deepcopy(current_config)
+                _reconcile_taiji_main_model_credential_revision(
+                    current_config,
+                    mutated_config,
+                    changed_env_keys,
+                )
+                config_target = yaml.safe_dump(
+                    mutated_config,
+                    allow_unicode=True,
+                    sort_keys=False,
+                ).encode("utf-8")
+                config_changed = config_target != config_before
+        env_changed = (not env_exists and bool(payload)) or payload != original
+        if config_changed and env_changed:
+            _commit_config_env_pair(
+                config_path=spec.logical_config_path,
+                config_exists=config_exists,
+                config_before=config_before,
+                config_target=config_target,
+                env_exists=env_exists,
+                env_before=original,
+                env_target=payload,
+                env_keys=projection_keys,
+            )
+        elif config_changed:
+            _atomic_write_credential_bytes(
+                spec.logical_config_path,
+                config_target,
+                mode=_existing_target_mode(spec.config_target),
+                expected_exists=config_exists,
+                expected_sha256=_sha256_bytes(config_before),
+                env_keys=projection_keys,
+            )
+        elif env_changed:
             _atomic_write_credential_bytes(
                 spec.env_path,
                 payload,
@@ -3596,12 +3849,17 @@ def mutate_config_env_strict(
     *,
     config_path: Path | None = None,
     expected_env_values: Mapping[str, str | None] | None = None,
+    allow_taiji_main_model_receipt: bool = False,
 ) -> CredentialSnapshot:
     """Mutate config and .env through one durable roll-forward intent.
 
     When ``expected_env_values`` is provided, every updated key must still
     match the caller's snapshot.  A same-key concurrent write aborts the whole
     config/.env transaction instead of being silently overwritten.
+
+    ``allow_taiji_main_model_receipt`` is reserved for the authoritative
+    main-model paired writer.  Generic config/env callers may invalidate an
+    existing receipt, but cannot mint a new trusted one.
     """
     _reject_managed_credential_write(
         "modify configuration and credentials",
@@ -3623,11 +3881,6 @@ def mutate_config_env_strict(
             mutated_config = mutation_result
         if not isinstance(mutated_config, dict):
             raise ValueError("credential config mutation must produce a mapping")
-        config_target = yaml.safe_dump(
-            mutated_config,
-            allow_unicode=True,
-            sort_keys=False,
-        ).encode("utf-8")
         env_target, applied = _mutated_env_bytes(
             env_before,
             env_updates,
@@ -3637,6 +3890,22 @@ def mutate_config_env_strict(
             raise _CredentialCompareAndSwapError(
                 "credential env changed before config/env transaction publish"
             )
+        changed_env_keys = _changed_selected_env_keys(
+            env_before,
+            env_target,
+            applied,
+        )
+        _reconcile_taiji_main_model_credential_revision(
+            current_config,
+            mutated_config,
+            changed_env_keys,
+            allow_new_receipt=allow_taiji_main_model_receipt,
+        )
+        config_target = yaml.safe_dump(
+            mutated_config,
+            allow_unicode=True,
+            sort_keys=False,
+        ).encode("utf-8")
         config_changed = (
             config_target != config_before
             if config_exists

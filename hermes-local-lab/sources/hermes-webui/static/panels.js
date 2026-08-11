@@ -8243,6 +8243,7 @@ let _platformCredentialSaveSession=null;
 let _platformCredentialDeleteGeneration=0;
 let _platformCredentialDeleteSession=null;
 let _modelConfigLoadGeneration=0;
+let _pendingMainModelConfigReconciliation=null;
 let _customVisionProviderBusy=false;
 let _customVisionProviderGeneration=0;
 let _customVisionProviderReturnFocus=null;
@@ -11237,16 +11238,33 @@ function _mainModelConfigReceiptMatches(data,expected){
  return !!(requestId&&receipt===requestId);
 }
 
+function _rememberPendingMainModelConfigReconciliation(expected){
+ _pendingMainModelConfigReconciliation={
+  provider:String(expected&&expected.provider||''),
+  model:String(expected&&expected.model||''),
+  base_url:String(expected&&expected.base_url||''),
+  request_id:String(expected&&expected.request_id||''),
+ };
+}
+
+function _clearPendingMainModelConfigReconciliation(expected){
+ const pendingId=String(_pendingMainModelConfigReconciliation&&_pendingMainModelConfigReconciliation.request_id||'');
+ const expectedId=String(expected&&expected.request_id||'');
+ if(pendingId&&pendingId===expectedId) _pendingMainModelConfigReconciliation=null;
+}
+
 async function _reconcileMainModelConfigSave(expected){
  try{
   const data=await api('/api/model-config',{timeoutToast:false});
   const main=_applyAuthoritativeMainModelConfig(data);
   if(!_mainModelConfigReceiptMatches(data,expected)||!_mainModelConfigMatchesExpected(main,expected)){
+   _clearPendingMainModelConfigReconciliation(expected);
    const message='本机权威状态未确认本次保存；请求可能未提交或配置已被后续更新，请检查后重试。';
    _setMainModelConfigSaveState('failed',message);
    if(typeof showToast==='function') showToast(message,5000,'error');
    return {state:'failed',data};
   }
+  _clearPendingMainModelConfigReconciliation(expected);
   const refreshing=!!(main&&main.runtime_refresh_pending);
   _setMainModelConfigSaveState(refreshing?'refreshing':'applied',refreshing?'主模型配置已核对，运行时仍在刷新。':'主模型配置已核对并生效。');
   if(typeof populateModelDropdown==='function') populateModelDropdown();
@@ -11260,6 +11278,24 @@ async function _reconcileMainModelConfigSave(expected){
   _setMainModelConfigSaveState('reconciling',message);
   if(typeof showToast==='function') showToast(message,7000,'warning');
   return {state:'reconciling',error};
+ }
+}
+
+async function reconcilePendingMainModelConfigSave(){
+ const pending=_pendingMainModelConfigReconciliation;
+ if(!pending) return {handled:false,state:'idle'};
+ const refreshBtn=$('btnReloadAllModelConfig');
+ const saveBtn=$('btnSaveMainModel');
+ const refreshWasDisabled=!!(refreshBtn&&refreshBtn.disabled);
+ const saveWasDisabled=!!(saveBtn&&saveBtn.disabled);
+ if(refreshBtn){refreshBtn.disabled=true;refreshBtn.setAttribute('aria-busy','true');}
+ if(saveBtn) saveBtn.disabled=true;
+ try{
+  const result=await _reconcileMainModelConfigSave(pending);
+  return Object.assign({handled:true},result||{});
+ }finally{
+  if(refreshBtn){refreshBtn.disabled=refreshWasDisabled;refreshBtn.removeAttribute('aria-busy');}
+  if(saveBtn) saveBtn.disabled=saveWasDisabled;
  }
 }
 
@@ -11353,17 +11389,19 @@ async function saveMainModelConfig(){
  _setMainModelConfigSaveState('saving');
  try{
   expected.request_id=_newMainModelConfigRequestId();
+  _rememberPendingMainModelConfigReconciliation(expected);
   const payload={provider,model,base_url:baseUrl,request_id:expected.request_id};
   if(apiKey) payload.api_key=apiKey;
   const data=await api('/api/model-config/main',{method:'POST',body:JSON.stringify(payload),timeoutToast:false,retryNetworkErrors:false});
   const refresh=_handleRuntimeRefreshOutcome(data,{savedLabel:'主模型配置',statusId:'modelConfigDraftStatus'});
   _clearModelConfigSecrets('main');
   const saved=_applyAuthoritativeMainModelConfig(data);
-  if(!_mainModelConfigReceiptMatches(data,expected)){
+  if(!_mainModelConfigReceiptMatches(data,expected)||!_mainModelConfigMatchesExpected(saved,expected)){
    _setMainModelConfigSaveState('reconciling');
    await _reconcileMainModelConfigSave(expected);
    return;
   }
+  _clearPendingMainModelConfigReconciliation(expected);
   if(saved) saved.runtime_refresh_pending=refresh.pending;
   if(saved) _renderModelConfigFocusSummary(_modelConfigData);
   if(typeof populateModelDropdown==='function') populateModelDropdown();
@@ -11380,6 +11418,7 @@ async function saveMainModelConfig(){
    _setMainModelConfigSaveState('reconciling');
    await _reconcileMainModelConfigSave(expected);
   }else{
+   _clearPendingMainModelConfigReconciliation(expected);
    const message='主模型配置保存失败：'+(e.message||e);
    _setMainModelConfigSaveState('failed',message);
    if(typeof showToast==='function') showToast(message,5000,'error');

@@ -3038,6 +3038,10 @@
     return imageCapabilityData;
   }
   async function refreshModelAndImageCapabilities(){
+    if(typeof window.reconcilePendingMainModelConfigSave==='function'){
+      const reconciliation=await window.reconcilePendingMainModelConfigSave();
+      if(reconciliation&&reconciliation.handled)return imageCapabilityData;
+    }
     if(imageCapabilityRequestInFlight||imageCapabilityLoadInFlight){
       imageCapabilityText('imageCapabilityCenterStatusDetail','当前操作尚未结束，请完成后再刷新。');
       return imageCapabilityData;
