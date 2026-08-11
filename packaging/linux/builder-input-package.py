@@ -373,6 +373,50 @@ def _verify_extracted_members(
             raise BuilderInputError("extracted builder input member differs from manifest")
 
 
+def _read_frozen_tracked_members(source_archive_payload: bytes) -> Dict[str, Tuple[bytes, int]]:
+    expected_paths = {
+        name: "taiji-agentv1.0/{}/{}".format(INPUT_ROOT_BASENAME, name)
+        for name in STATIC_INPUT_NAMES
+        if name != "SHA256SUMS.txt"
+    }
+    expected_paths[SOURCE_HELPER_BASENAME] = (
+        "taiji-agentv1.0/packaging/linux/source-archive-integrity.py"
+    )
+    expected_paths[BUILDER_HELPER_BASENAME] = (
+        "taiji-agentv1.0/packaging/linux/builder-input-package.py"
+    )
+    by_archive_path = {path: basename for basename, path in expected_paths.items()}
+    result = {}  # type: Dict[str, Tuple[bytes, int]]
+    try:
+        with tarfile.open(fileobj=io.BytesIO(source_archive_payload), mode="r:gz") as archive:
+            for member in archive:
+                basename = by_archive_path.get(member.name)
+                if basename is None:
+                    continue
+                if (
+                    basename in result
+                    or not member.isfile()
+                    or member.issym()
+                    or member.islnk()
+                    or member.size < 0
+                    or member.size > MAX_INPUT_FILE_BYTES
+                    or stat.S_IMODE(member.mode) not in (0o644, 0o755)
+                ):
+                    raise BuilderInputError("frozen source archive member is invalid")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise BuilderInputError("frozen source archive member cannot be read")
+                payload = extracted.read(member.size + 1)
+                if len(payload) != member.size:
+                    raise BuilderInputError("frozen source archive member size is invalid")
+                result[basename] = (payload, stat.S_IMODE(member.mode))
+    except (OSError, tarfile.TarError) as exc:
+        raise BuilderInputError("frozen source archive cannot be inspected") from exc
+    if set(result) != set(expected_paths):
+        raise BuilderInputError("frozen source archive lacks formal builder inputs")
+    return result
+
+
 def verify_builder_input(
     *,
     archive_path: Path,
@@ -496,29 +540,81 @@ def create_builder_input(
     if checksum_path.name != expected_output_name + ".sha256":
         raise BuilderInputError("builder input checksum basename is invalid")
 
-    paths = [source_dir / name for name in STATIC_INPUT_NAMES]
-    paths.extend(
-        (
-            source_dir / expected_archive_name,
-            source_dir / expected_inventory_name,
-        )
+    source_archive_path = source_dir / expected_archive_name
+    source_inventory_path = source_dir / expected_inventory_name
+    source_checksum_path = source_dir / "SHA256SUMS.txt"
+    source_archive_payload, source_archive_mode = _read_regular(
+        source_archive_path,
+        "builder input {}".format(expected_archive_name),
     )
+    source_inventory_payload, source_inventory_mode = _read_regular(
+        source_inventory_path,
+        "builder input {}".format(expected_inventory_name),
+    )
+    source_checksum_payload, source_checksum_mode = _read_regular(
+        source_checksum_path,
+        "builder input SHA256SUMS.txt",
+    )
+    source_checksums = _parse_source_checksums(
+        source_checksum_payload,
+        expected_archive_name,
+        expected_inventory_name,
+    )
+    if (
+        source_checksums[expected_archive_name] != _sha256(source_archive_payload)
+        or source_checksums[expected_inventory_name] != _sha256(source_inventory_payload)
+    ):
+        raise BuilderInputError("source checksum does not match frozen source inputs")
+    frozen = _read_frozen_tracked_members(source_archive_payload)
+
     members = []  # type: List[Dict[str, Any]]
-    for path in paths:
-        payload, mode = _read_regular(path, "builder input {}".format(path.name))
+    for name in STATIC_INPUT_NAMES:
+        if name == "SHA256SUMS.txt":
+            payload, mode = source_checksum_payload, source_checksum_mode
+        else:
+            current_payload, current_mode = _read_regular(
+                source_dir / name,
+                "builder input {}".format(name),
+            )
+            payload, mode = frozen[name]
+            if current_payload != payload or current_mode != mode:
+                raise BuilderInputError(
+                    "builder input {} differs from frozen source commit".format(name)
+                )
         members.append(
             {
-                "basename": path.name,
+                "basename": name,
                 "payload": payload,
                 "mode": mode,
                 "size": len(payload),
                 "sha256": _sha256(payload),
             }
         )
-    helper_payload, helper_mode = _read_regular(
+    members.extend(
+        (
+            {
+                "basename": expected_archive_name,
+                "payload": source_archive_payload,
+                "mode": source_archive_mode,
+                "size": len(source_archive_payload),
+                "sha256": _sha256(source_archive_payload),
+            },
+            {
+                "basename": expected_inventory_name,
+                "payload": source_inventory_payload,
+                "mode": source_inventory_mode,
+                "size": len(source_inventory_payload),
+                "sha256": _sha256(source_inventory_payload),
+            },
+        )
+    )
+    current_helper_payload, current_helper_mode = _read_regular(
         source_integrity_helper,
         "source archive integrity helper",
     )
+    helper_payload, helper_mode = frozen[SOURCE_HELPER_BASENAME]
+    if current_helper_payload != helper_payload or current_helper_mode != helper_mode:
+        raise BuilderInputError("source archive integrity helper differs from frozen source commit")
     members.append(
         {
             "basename": SOURCE_HELPER_BASENAME,
@@ -528,10 +624,16 @@ def create_builder_input(
             "sha256": _sha256(helper_payload),
         }
     )
-    builder_helper_payload, builder_helper_mode = _read_regular(
+    current_builder_helper_payload, current_builder_helper_mode = _read_regular(
         Path(__file__),
         "builder input helper",
     )
+    builder_helper_payload, builder_helper_mode = frozen[BUILDER_HELPER_BASENAME]
+    if (
+        current_builder_helper_payload != builder_helper_payload
+        or current_builder_helper_mode != builder_helper_mode
+    ):
+        raise BuilderInputError("builder input helper differs from frozen source commit")
     members.append(
         {
             "basename": BUILDER_HELPER_BASENAME,
@@ -545,18 +647,7 @@ def create_builder_input(
         raise BuilderInputError("builder input allowlist contains duplicate basenames")
     members.sort(key=lambda item: str(item["basename"]))
 
-    checksum_member = next(
-        item for item in members if item["basename"] == "SHA256SUMS.txt"
-    )
-    source_checksums = _parse_source_checksums(
-        checksum_member["payload"],
-        expected_archive_name,
-        expected_inventory_name,
-    )
     by_name = {str(item["basename"]): item for item in members}
-    for basename in (expected_archive_name, expected_inventory_name):
-        if source_checksums[basename] != by_name[basename]["sha256"]:
-            raise BuilderInputError("source checksum does not match {}".format(basename))
 
     archive_payload = _tar_payload(source_dir.name, members)
     archive_sha256 = _sha256(archive_payload)

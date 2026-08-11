@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -54,10 +55,44 @@ class BuilderInputPackageContractTest(unittest.TestCase):
             path = self.source / name
             path.write_text("fixture:" + name + "\n", encoding="utf-8")
             path.chmod(0o755 if name.endswith(".sh") else 0o644)
+        self.source_integrity_helper = self.root / "source-archive-integrity.py"
+        self.source_integrity_helper.write_text("# pinned helper\n", encoding="utf-8")
         self.source_archive = (
             self.source / f"taiji-agentv1.0-kylin-build-src-{COMMIT}.tar.gz"
         )
-        self.source_archive.write_bytes(b"canonical source archive\n")
+        with tarfile.open(self.source_archive, "w:gz") as archive:
+            frozen_members = []
+            for name in sorted(STATIC_INPUT_NAMES - {"SHA256SUMS.txt"}):
+                path = self.source / name
+                frozen_members.append(
+                    (
+                        f"taiji-agentv1.0/taijiagent 打包交付/{name}",
+                        path.read_bytes(),
+                        path.stat().st_mode & 0o777,
+                    )
+                )
+            frozen_members.extend(
+                (
+                    (
+                        "taiji-agentv1.0/packaging/linux/source-archive-integrity.py",
+                        self.source_integrity_helper.read_bytes(),
+                        0o644,
+                    ),
+                    (
+                        "taiji-agentv1.0/packaging/linux/builder-input-package.py",
+                        HELPER.read_bytes(),
+                        HELPER.stat().st_mode & 0o777,
+                    ),
+                )
+            )
+            for member_name, payload, mode in frozen_members:
+                info = tarfile.TarInfo(member_name)
+                info.size = len(payload)
+                info.mode = mode
+                info.uid = os.getuid()
+                info.gid = os.getgid()
+                info.mtime = 0
+                archive.addfile(info, io.BytesIO(payload))
         self.source_inventory = self.source / (
             f"taiji-agentv1.0-kylin-build-src-{COMMIT}.inventory.json"
         )
@@ -67,8 +102,6 @@ class BuilderInputPackageContractTest(unittest.TestCase):
             f"{sha256(self.source_inventory)}  {self.source_inventory.name}\n",
             encoding="ascii",
         )
-        self.source_integrity_helper = self.root / "source-archive-integrity.py"
-        self.source_integrity_helper.write_text("# pinned helper\n", encoding="utf-8")
         self.output = self.root / f"taijiagent-制包机输入-{COMMIT}.tar.gz"
         self.manifest = self.root / f"taijiagent-制包机输入-{COMMIT}.manifest.json"
         self.checksum = self.root / f"{self.output.name}.sha256"
@@ -245,6 +278,18 @@ class BuilderInputPackageContractTest(unittest.TestCase):
         self.source.chmod(0o777)
 
         with self.assertRaisesRegex(Exception, "source directory is unsafe"):
+            self.create()
+
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.checksum.exists())
+
+    def test_worktree_member_changed_after_frozen_archive_is_rejected(self):
+        changed = self.source / "00_制包机_生成离线交付包.sh"
+        changed.write_text("post-freeze mutation\n", encoding="utf-8")
+        changed.chmod(0o755)
+
+        with self.assertRaisesRegex(Exception, "differs from frozen source commit"):
             self.create()
 
         self.assertFalse(self.output.exists())
