@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -39,6 +40,7 @@ MAX_JOBS_BYTES = 8 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 20
 MAX_RUN_AGE = timedelta(days=7)
 FINAL_DESTINATION_ROLLBACK_ATTEMPTS = 3
+FILE_DESCRIPTOR_CLOSE_ATTEMPTS = 3
 STAGING_PREFIX = ".taiji-github-ci-evidence."
 DELIVERY_BASENAMES = (
     RUN_BASENAME,
@@ -536,13 +538,22 @@ def _assert_delivery_destinations_absent(descriptor: int) -> None:
 
 
 def _close_owned_file_descriptor(record: Dict[str, Any]) -> None:
-    descriptor = record.get("descriptor")
-    if descriptor is None:
-        return
-    try:
-        os.close(descriptor)
-    finally:
-        record["descriptor"] = None
+    failures = []  # type: List[OSError]
+    closed = set()
+    for key in ("descriptor", "pending_descriptor"):
+        descriptor = record.get(key)
+        if descriptor is None or descriptor in closed:
+            record[key] = None
+            continue
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            failures.append(exc)
+        else:
+            record[key] = None
+            closed.add(descriptor)
+    if failures:
+        raise failures[0]
 
 
 def _remove_owned_file(
@@ -555,24 +566,37 @@ def _remove_owned_file(
         return False
     descriptor = record.get("descriptor")
     if descriptor is None:
+        record["poisoned"] = True
         return False
+    opened = None  # type: Optional[os.stat_result]
     try:
         opened = os.fstat(descriptor)
     except OSError:
-        return False
-    if not stat.S_ISREG(opened.st_mode):
-        record["blocked"] = True
-        return False
-    recorded_device = record.get("device")
-    recorded_inode = record.get("inode")
-    if recorded_device is not None and (
-        opened.st_dev,
-        opened.st_ino,
-    ) != (recorded_device, recorded_inode):
-        record["blocked"] = True
-        return False
-    record["device"] = opened.st_dev
-    record["inode"] = opened.st_ino
+        trusted_identity = record.get("identity")
+        if trusted_identity is None:
+            record["poisoned"] = True
+            return False
+        try:
+            fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        except OSError:
+            record["poisoned"] = True
+            return False
+        expected_identity = trusted_identity
+    else:
+        if not stat.S_ISREG(opened.st_mode):
+            record["blocked"] = True
+            return False
+        recorded_device = record.get("device")
+        recorded_inode = record.get("inode")
+        if recorded_device is not None and (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (recorded_device, recorded_inode):
+            record["blocked"] = True
+            return False
+        record["device"] = opened.st_dev
+        record["inode"] = opened.st_ino
+        expected_identity = _file_identity(opened)
     try:
         current = os.stat(
             record["basename"],
@@ -584,7 +608,7 @@ def _remove_owned_file(
         return True
     except OSError:
         return False
-    if _file_identity(current) != _file_identity(opened):
+    if _file_identity(current) != expected_identity:
         record["blocked"] = True
         return False
     try:
@@ -608,13 +632,19 @@ def _remove_owned_files(
 
 
 def _close_owned_file_descriptors(records: List[Dict[str, Any]]) -> bool:
-    clean = True
-    for record in records:
-        try:
-            _close_owned_file_descriptor(record)
-        except OSError:
-            clean = False
-    return clean
+    for _attempt in range(FILE_DESCRIPTOR_CLOSE_ATTEMPTS):
+        for record in records:
+            try:
+                _close_owned_file_descriptor(record)
+            except OSError:
+                pass
+        if all(
+            record.get("descriptor") is None
+            and record.get("pending_descriptor") is None
+            for record in records
+        ):
+            return True
+    return False
 
 
 def _retain_read_only_owned_file(
@@ -630,28 +660,27 @@ def _retain_read_only_owned_file(
         | getattr(os, "O_NOFOLLOW", 0)
     )
     reader = os.open(record["basename"], flags, dir_fd=directory_descriptor)
-    try:
-        written = os.fstat(writer)
-        retained = os.fstat(reader)
-        current = os.stat(
-            record["basename"],
-            dir_fd=directory_descriptor,
-            follow_symlinks=False,
+    record["pending_descriptor"] = reader
+    written = os.fstat(writer)
+    retained = os.fstat(reader)
+    current = os.stat(
+        record["basename"],
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    if (
+        _file_identity(written) != _file_identity(retained)
+        or _file_identity(current) != _file_identity(retained)
+    ):
+        raise GitHubCiEvidenceError(
+            "owned CI evidence file changed before descriptor retention"
         )
-        if (
-            _file_identity(written) != _file_identity(retained)
-            or _file_identity(current) != _file_identity(retained)
-        ):
-            raise GitHubCiEvidenceError(
-                "owned CI evidence file changed before descriptor retention"
-            )
-    except BaseException:
-        os.close(reader)
-        raise
     os.close(writer)
     record["descriptor"] = reader
+    record["pending_descriptor"] = None
     record["device"] = retained.st_dev
     record["inode"] = retained.st_ino
+    record["identity"] = _file_identity(retained)
     os.fsync(directory_descriptor)
 
 
@@ -673,7 +702,15 @@ def _remove_owned_empty_directory(
     delivery_descriptor: int,
     name: str,
     identity: Tuple[int, ...],
+    held_descriptor: Optional[int] = None,
 ) -> bool:
+    if held_descriptor is not None:
+        try:
+            opened = os.fstat(held_descriptor)
+        except OSError:
+            return False
+        if _file_identity(opened) != identity:
+            return False
     try:
         current = os.stat(
             name,
@@ -684,7 +721,7 @@ def _remove_owned_empty_directory(
         return True
     except OSError:
         return False
-    if _directory_anchor(current) != identity:
+    if _file_identity(current) != identity:
         return False
     try:
         os.rmdir(name, dir_fd=delivery_descriptor)
@@ -710,35 +747,22 @@ def _create_staging_directory(
             os.mkdir(name, 0o700, dir_fd=delivery_descriptor)
         except FileExistsError:
             continue
-        created = os.stat(
-            name,
-            dir_fd=delivery_descriptor,
-            follow_symlinks=False,
-        )
-        created_identity = _directory_anchor(created)
-        try:
-            delivery_metadata = os.fstat(delivery_descriptor)
-        except BaseException:
-            _remove_owned_empty_directory(
-                delivery_descriptor,
-                name,
-                created_identity,
-            )
-            raise
-        if (
-            not stat.S_ISDIR(created.st_mode)
-            or created.st_uid != os.getuid()
-            or stat.S_IMODE(created.st_mode) != 0o700
-            or created.st_dev != delivery_metadata.st_dev
-        ):
-            _remove_owned_empty_directory(
-                delivery_descriptor,
-                name,
-                created_identity,
-            )
-            raise GitHubCiEvidenceError("CI evidence staging directory is unsafe")
+        created_identity = None  # type: Optional[Tuple[int, ...]]
         descriptor = None  # type: Optional[int]
+        path_identity_verified = False
         try:
+            created = os.lstat(name, dir_fd=delivery_descriptor)
+            created_identity = _file_identity(created)
+            delivery_metadata = os.fstat(delivery_descriptor)
+            if (
+                not stat.S_ISDIR(created.st_mode)
+                or created.st_uid != os.getuid()
+                or stat.S_IMODE(created.st_mode) != 0o700
+                or created.st_dev != delivery_metadata.st_dev
+            ):
+                raise GitHubCiEvidenceError(
+                    "CI evidence staging directory is unsafe"
+                )
             descriptor = os.open(name, flags, dir_fd=delivery_descriptor)
             opened = os.fstat(descriptor)
             current = os.stat(
@@ -746,21 +770,31 @@ def _create_staging_directory(
                 dir_fd=delivery_descriptor,
                 follow_symlinks=False,
             )
+            path_identity_verified = (
+                _file_identity(current) == _file_identity(created)
+            )
             if (
                 _file_identity(opened) != _file_identity(created)
-                or _file_identity(current) != _file_identity(created)
+                or not path_identity_verified
                 or opened.st_dev != delivery_metadata.st_dev
             ):
                 raise GitHubCiEvidenceError("CI evidence staging directory is unsafe")
-            return name, descriptor, created_identity
-        except BaseException:
+            return name, descriptor, _directory_anchor(created)
+        except BaseException as exc:
+            cleaned = False
+            if created_identity is not None:
+                cleaned = _remove_owned_empty_directory(
+                    delivery_descriptor,
+                    name,
+                    created_identity,
+                    None if path_identity_verified else descriptor,
+                )
             if descriptor is not None:
                 os.close(descriptor)
-            _remove_owned_empty_directory(
-                delivery_descriptor,
-                name,
-                created_identity,
-            )
+            if created_identity is not None and not cleaned:
+                raise GitHubCiEvidenceError(
+                    "CI evidence staging directory rollback preserved an unowned replacement"
+                ) from exc
             raise
     raise GitHubCiEvidenceError("cannot allocate a private CI evidence staging directory")
 
@@ -782,16 +816,23 @@ def _write_new_at(
     record = {
         "basename": basename,
         "descriptor": descriptor,
+        "pending_descriptor": None,
         "device": None,
         "inode": None,
+        "identity": None,
         "removed": False,
         "blocked": False,
+        "poisoned": False,
     }
     try:
         created_files.append(record)
-    except BaseException:
-        _remove_owned_file(directory_descriptor, record)
-        _close_owned_file_descriptor(record)
+    except BaseException as exc:
+        removed = _remove_owned_file(directory_descriptor, record)
+        closed = _close_owned_file_descriptors([record])
+        if not removed or not closed:
+            raise GitHubCiEvidenceError(
+                "CI evidence staging registration rollback was poisoned"
+            ) from exc
         raise
     try:
         metadata = os.fstat(descriptor)
@@ -813,6 +854,7 @@ def _write_new_at(
             view = view[written:]
         os.fsync(descriptor)
         metadata = os.fstat(descriptor)
+        record["identity"] = _file_identity(metadata)
         if (
             (metadata.st_dev, metadata.st_ino)
             != (record["device"], record["inode"])
@@ -829,8 +871,8 @@ def _write_new_at(
         )
     except BaseException:
         if _remove_owned_file(directory_descriptor, record):
-            created_files.remove(record)
-            _close_owned_file_descriptor(record)
+            if _close_owned_file_descriptors([record]):
+                created_files.remove(record)
         raise
 
 
@@ -915,6 +957,85 @@ def _validate_staged_bundle(
     os.fsync(staging_descriptor)
 
 
+def _validate_retained_delivery_bundle(
+    delivery_dir: Path,
+    delivery_descriptor: int,
+    anchor: Tuple[int, ...],
+    payloads: Dict[str, bytes],
+    records: List[Dict[str, Any]],
+) -> None:
+    _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+    basenames = [record.get("basename") for record in records]
+    if (
+        len(basenames) != len(DELIVERY_BASENAMES)
+        or set(basenames) != set(DELIVERY_BASENAMES)
+    ):
+        raise GitHubCiEvidenceError(
+            "retained CI evidence bundle is not the exact canonical trio"
+        )
+    directory_names = set(_list_directory_names(delivery_descriptor))
+    if not set(DELIVERY_BASENAMES).issubset(directory_names):
+        raise GitHubCiEvidenceError(
+            "retained CI evidence bundle is not the exact canonical trio"
+        )
+    for record in records:
+        descriptor = record.get("descriptor")
+        trusted_identity = record.get("identity")
+        basename = record["basename"]
+        if descriptor is None or trusted_identity is None:
+            raise GitHubCiEvidenceError(
+                "retained CI evidence ownership proof is unavailable"
+            )
+        before = os.fstat(descriptor)
+        current = os.stat(
+            basename,
+            dir_fd=delivery_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or _file_identity(before) != trusted_identity
+            or _file_identity(current) != trusted_identity
+        ):
+            raise GitHubCiEvidenceError(
+                "retained CI evidence path changed before final publication"
+            )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        remaining = before.st_size
+        chunks = []  # type: List[bytes]
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise GitHubCiEvidenceError(
+                    "retained CI evidence was truncated before publication"
+                )
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise GitHubCiEvidenceError(
+                "retained CI evidence grew before publication"
+            )
+        after = os.fstat(descriptor)
+        current_after = os.stat(
+            basename,
+            dir_fd=delivery_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            b"".join(chunks) != payloads[basename]
+            or _file_identity(after) != trusted_identity
+            or _file_identity(current_after) != trusted_identity
+        ):
+            raise GitHubCiEvidenceError(
+                "retained CI evidence bytes or path changed before publication"
+            )
+    os.fsync(delivery_descriptor)
+    _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
+
+
 def _promote_staged_file(
     staging_descriptor: int,
     delivery_descriptor: int,
@@ -938,16 +1059,23 @@ def _promote_staged_file(
     record = {
         "basename": basename,
         "descriptor": descriptor,
+        "pending_descriptor": None,
         "device": None,
         "inode": None,
+        "identity": None,
         "removed": False,
         "blocked": False,
+        "poisoned": False,
     }
     try:
         created_destinations.append(record)
-    except BaseException:
-        _remove_owned_file(delivery_descriptor, record)
-        _close_owned_file_descriptor(record)
+    except BaseException as exc:
+        removed = _remove_owned_file(delivery_descriptor, record)
+        closed = _close_owned_file_descriptors([record])
+        if not removed or not closed:
+            raise GitHubCiEvidenceError(
+                "CI evidence destination registration rollback was poisoned"
+            ) from exc
         raise
     try:
         created_metadata = os.fstat(descriptor)
@@ -969,6 +1097,7 @@ def _promote_staged_file(
             view = view[written:]
         os.fsync(descriptor)
         final = os.fstat(descriptor)
+        record["identity"] = _file_identity(final)
         current = os.stat(
             basename,
             dir_fd=delivery_descriptor,
@@ -996,8 +1125,8 @@ def _promote_staged_file(
         )
     except BaseException:
         if _remove_owned_file(delivery_descriptor, record):
-            created_destinations.remove(record)
-            _close_owned_file_descriptor(record)
+            if _close_owned_file_descriptors([record]):
+                created_destinations.remove(record)
         raise
 
 
@@ -1112,11 +1241,18 @@ def _publish_into_delivery(
         staging_name = None
         staging_identity = None
         os.fsync(delivery_descriptor)
-        _assert_delivery_anchor(delivery_dir, delivery_descriptor, anchor)
-        if (
-            not _close_owned_file_descriptors(staged_files)
-            or not _close_owned_file_descriptors(created)
-        ):
+        if not _close_owned_file_descriptors(staged_files):
+            raise GitHubCiEvidenceError(
+                "CI evidence staging file descriptor cleanup failed"
+            )
+        _validate_retained_delivery_bundle(
+            delivery_dir,
+            delivery_descriptor,
+            anchor,
+            payloads,
+            created,
+        )
+        if not _close_owned_file_descriptors(created):
             raise GitHubCiEvidenceError(
                 "CI evidence owned file descriptor cleanup failed"
             )
@@ -1156,8 +1292,18 @@ def _publish_into_delivery(
         except OSError:
             cleanup_failed = True
         if cleanup_failed:
+            poisoned = any(
+                record.get("poisoned") is True
+                for record in staged_files + created
+            )
+            suffix = (
+                "; an ownership proof was poisoned and its path was preserved"
+                if poisoned
+                else ""
+            )
             raise GitHubCiEvidenceError(
                 "CI evidence rollback could not remove every owned node safely"
+                + suffix
             )
 
 

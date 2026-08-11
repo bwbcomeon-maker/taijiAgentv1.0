@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import inspect
@@ -630,6 +631,154 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     original_fstat(descriptor)
 
+    def test_persistent_owned_fstat_failure_uses_trusted_identity_and_leaves_no_canonical_residue(self):
+        delivery = self.root / "persistent-owned-fstat-failure"
+        delivery.mkdir(mode=0o700)
+        original_promote = self.producer._promote_staged_file
+        original_fstat = self.producer.os.fstat
+        retained_destinations = set()
+        rollback_started = False
+
+        def fail_after_second_promotion(*args, **kwargs):
+            nonlocal rollback_started
+            result = original_promote(*args, **kwargs)
+            retained_destinations.update(
+                record["descriptor"] for record in args[3]
+            )
+            if args[2] == "github-ci-jobs-response.json":
+                rollback_started = True
+                raise OSError("simulated failure after second promotion")
+            return result
+
+        def fail_retained_destination_fstat(descriptor):
+            if rollback_started and descriptor in retained_destinations:
+                raise OSError("simulated persistent retained fstat failure")
+            return original_fstat(descriptor)
+
+        with patch.object(
+            self.producer,
+            "_promote_staged_file",
+            side_effect=fail_after_second_promotion,
+        ), patch.object(
+            self.producer.os,
+            "fstat",
+            side_effect=fail_retained_destination_fstat,
+        ):
+            with self.assertRaises(OSError) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertIn("failure after second promotion", str(caught.exception))
+        self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_unprovable_persistent_fstat_failure_is_poisoned_and_preserves_the_path(self):
+        delivery = self.root / "poisoned-owned-fstat-failure"
+        delivery.mkdir(mode=0o700)
+        original_promote = self.producer._promote_staged_file
+        original_fstat = self.producer.os.fstat
+        retained_destinations = set()
+        rollback_started = False
+
+        def fail_after_second_promotion(*args, **kwargs):
+            nonlocal rollback_started
+            result = original_promote(*args, **kwargs)
+            retained_destinations.update(
+                record["descriptor"] for record in args[3]
+            )
+            if args[2] == "github-ci-jobs-response.json":
+                rollback_started = True
+                raise OSError("simulated failure after second promotion")
+            return result
+
+        def fail_retained_destination_fstat(descriptor):
+            if rollback_started and descriptor in retained_destinations:
+                raise OSError("simulated persistent retained fstat failure")
+            return original_fstat(descriptor)
+
+        original_fcntl = fcntl.fcntl
+
+        def fail_retained_destination_fcntl(descriptor, command, *args):
+            if rollback_started and descriptor in retained_destinations:
+                raise OSError("simulated invalid retained descriptor")
+            return original_fcntl(descriptor, command, *args)
+
+        with patch.object(
+            self.producer,
+            "_promote_staged_file",
+            side_effect=fail_after_second_promotion,
+        ), patch.object(
+            self.producer.os,
+            "fstat",
+            side_effect=fail_retained_destination_fstat,
+        ), patch.object(
+            fcntl,
+            "fcntl",
+            side_effect=fail_retained_destination_fcntl,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertIn("poisoned", str(caught.exception))
+        self.assertTrue(
+            {
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
+            }.intersection({item.name for item in delivery.iterdir()})
+        )
+        for descriptor in retained_destinations:
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaises(OSError):
+                    original_fstat(descriptor)
+
+    def test_reader_opened_before_writer_close_failure_is_not_leaked(self):
+        delivery = self.root / "writer-close-failure"
+        delivery.mkdir(mode=0o700)
+        original_open = self.producer.os.open
+        original_close = self.producer.os.close
+        original_fstat = self.producer.os.fstat
+        owned_descriptors = set()
+        writer_descriptors = set()
+        injected = False
+
+        def track_owned_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if path in {
+                "github-ci-run-response.json",
+                "github-ci-jobs-response.json",
+                "github-ci-evidence.json",
+            } and kwargs.get("dir_fd") is not None:
+                owned_descriptors.add(descriptor)
+                if flags & self.producer.os.O_CREAT:
+                    writer_descriptors.add(descriptor)
+            return descriptor
+
+        def fail_first_writer_close(descriptor):
+            nonlocal injected
+            if descriptor in writer_descriptors and not injected:
+                injected = True
+                raise OSError("simulated writer close failure")
+            return original_close(descriptor)
+
+        with patch.object(
+            self.producer.os,
+            "open",
+            side_effect=track_owned_open,
+        ), patch.object(
+            self.producer.os,
+            "close",
+            side_effect=fail_first_writer_close,
+        ):
+            with self.assertRaises(OSError):
+                self.call_delivery_producer(delivery)
+
+        self.assertTrue(injected)
+        self.assertEqual(list(delivery.iterdir()), [])
+        for descriptor in owned_descriptors:
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaises(OSError):
+                    original_fstat(descriptor)
+
     def test_delivery_mode_rejects_relative_symlink_and_writable_directory_before_network(self):
         real_delivery = self.root / "real-delivery"
         real_delivery.mkdir(mode=0o700)
@@ -820,6 +969,44 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
         self.assertFalse(
             any(item.name.startswith(".taiji-github-ci-evidence.") for item in moved.iterdir())
         )
+
+    def test_canonical_replacement_during_staging_cleanup_cannot_be_published_as_success(self):
+        delivery = self.root / "canonical-replacement-during-cleanup"
+        delivery.mkdir(mode=0o700)
+        original_cleanup = self.producer._remove_staging_directory
+        replacement_identity = None
+
+        def replace_after_staging_cleanup(*args, **kwargs):
+            nonlocal replacement_identity
+            result = original_cleanup(*args, **kwargs)
+            if replacement_identity is None and args[1] is not None and result[0]:
+                replacement = delivery / "github-ci-run-response.json"
+                replacement.unlink()
+                replacement.write_bytes(b"foreign-after-final-byte-check")
+                replacement.chmod(0o600)
+                metadata = replacement.lstat()
+                replacement_identity = (metadata.st_dev, metadata.st_ino)
+            return result
+
+        with patch.object(
+            self.producer,
+            "_remove_staging_directory",
+            side_effect=replace_after_staging_cleanup,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertIn("rollback could not remove", str(caught.exception))
+        replacement = delivery / "github-ci-run-response.json"
+        metadata = replacement.lstat()
+        self.assertEqual((metadata.st_dev, metadata.st_ino), replacement_identity)
+        self.assertEqual(
+            replacement.read_bytes(),
+            b"foreign-after-final-byte-check",
+        )
+        self.assertEqual({item.name for item in delivery.iterdir()}, {replacement.name})
 
     def test_promotion_fstat_failure_after_exclusive_create_rolls_back_created_destination(self):
         delivery = self.root / "promotion-fstat-failure"
@@ -1029,6 +1216,74 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
             with self.assertRaises(self.producer.GitHubCiEvidenceError):
                 self.call_delivery_producer(delivery)
 
+        self.assertIsNotNone(replacement)
+        self.assertTrue(replacement.is_dir())
+        self.assertEqual(list(replacement.iterdir()), [])
+        self.assertTrue(moved.is_dir())
+        self.assertEqual(list(moved.iterdir()), [])
+
+    def test_first_staging_path_stat_failure_removes_the_anchored_empty_directory(self):
+        delivery = self.root / "staging-first-stat-failure"
+        delivery.mkdir(mode=0o700)
+        original_stat = self.producer.os.stat
+        injected = False
+
+        def fail_first_staging_stat(path, *args, **kwargs):
+            nonlocal injected
+            if (
+                not injected
+                and isinstance(path, str)
+                and path.startswith(".taiji-github-ci-evidence.")
+                and kwargs.get("dir_fd") is not None
+            ):
+                injected = True
+                raise OSError("simulated first staging path stat failure")
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(
+            self.producer.os,
+            "stat",
+            side_effect=fail_first_staging_stat,
+        ):
+            with self.assertRaises(OSError):
+                self.call_delivery_producer(delivery)
+
+        self.assertTrue(injected)
+        self.assertEqual(list(delivery.iterdir()), [])
+
+    def test_staging_path_stat_failure_preserves_a_concurrent_foreign_directory(self):
+        delivery = self.root / "staging-stat-foreign-replacement"
+        delivery.mkdir(mode=0o700)
+        moved = self.root / "moved-owned-staging-after-stat-failure"
+        original_stat = self.producer.os.stat
+        replacement = None
+
+        def replace_during_first_staging_stat(path, *args, **kwargs):
+            nonlocal replacement
+            if (
+                replacement is None
+                and isinstance(path, str)
+                and path.startswith(".taiji-github-ci-evidence.")
+                and kwargs.get("dir_fd") is not None
+            ):
+                created = delivery / path
+                created.rename(moved)
+                replacement = delivery / path
+                replacement.mkdir(mode=0o700)
+                raise OSError("simulated staging replacement during path stat")
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(
+            self.producer.os,
+            "stat",
+            side_effect=replace_during_first_staging_stat,
+        ):
+            with self.assertRaises(
+                self.producer.GitHubCiEvidenceError
+            ) as caught:
+                self.call_delivery_producer(delivery)
+
+        self.assertIn("unowned replacement", str(caught.exception))
         self.assertIsNotNone(replacement)
         self.assertTrue(replacement.is_dir())
         self.assertEqual(list(replacement.iterdir()), [])
