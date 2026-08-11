@@ -2071,6 +2071,54 @@ def validate_bound_file(
     return bound_path, payload, file_stat
 
 
+def validate_bound_png(
+    data: dict[str, Any],
+    evidence_path: Path,
+    basename_key: str,
+    hash_key: str,
+    label: str,
+) -> tuple[Path, ValidatedPngEvidence, os.stat_result]:
+    """Validate one bound PNG without materializing or reopening its bytes."""
+
+    basename = data[basename_key]
+    if type(basename) is not str or not basename or Path(basename).name != basename:
+        raise EvidenceError(f"字段 {basename_key} 必须是同目录文件 basename")
+    bound_path = evidence_path.parent / basename
+    try:
+        before = bound_path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"{label} 不可读取: {bound_path}: {exc}") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+    ):
+        raise EvidenceError(f"{label} 必须是普通单链接 PNG: {bound_path}")
+    descriptor, opened = open_regular(bound_path, label)
+    try:
+        if regular_file_identity(before) != regular_file_identity(opened):
+            raise EvidenceError(f"{label} 在打开前发生变化: {bound_path}")
+        png = validate_png_descriptor(descriptor, opened, label)
+        recorded_hash = validate_sha256(data[hash_key], hash_key)
+        if recorded_hash != png.sha256:
+            raise EvidenceError(f"{hash_key} 与 {basename} 内容不一致")
+        try:
+            after = os.fstat(descriptor)
+            current = bound_path.lstat()
+        except OSError as exc:
+            raise EvidenceError(
+                f"{label} PNG 读取后身份无法验证: {bound_path}: {exc}"
+            ) from exc
+        if (
+            regular_file_identity(opened) != regular_file_identity(after)
+            or regular_file_identity(opened) != regular_file_identity(current)
+        ):
+            raise EvidenceError(f"{label} PNG identity changed after validation: {bound_path}")
+        return bound_path, png, opened
+    finally:
+        os.close(descriptor)
+
+
 def validate_streamed_signed_previous_deb(
     data: dict[str, Any],
     evidence_path: Path,
@@ -2886,6 +2934,10 @@ def validate_png_descriptor(
         header = consume_encoded(8)
         length = struct.unpack(">I", header[:4])[0]
         kind = header[4:]
+        if chunk_index == 0 and (kind != b"IHDR" or length != 13):
+            raise EvidenceError(f"{label} PNG IHDR 不合法")
+        if chunk_index != 0 and kind == b"IHDR":
+            raise EvidenceError(f"{label} PNG 包含重复 IHDR")
         if length > file_stat.st_size - total - 4:
             raise EvidenceError(f"{label} PNG chunk 被截断")
         crc = zlib.crc32(kind)
@@ -2911,8 +2963,6 @@ def validate_png_descriptor(
         if (crc & 0xFFFFFFFF) != expected_crc:
             raise EvidenceError(f"{label} PNG CRC 不合法")
         if chunk_index == 0:
-            if kind != b"IHDR" or length != 13:
-                raise EvidenceError(f"{label} PNG IHDR 不合法")
             width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
                 ">IIBBBBB", bytes(ihdr)
             )
@@ -2937,8 +2987,6 @@ def validate_png_descriptor(
             previous = bytearray(row_payload_bytes)
             any_visible_alpha = color_type == 2
             saw_ihdr = True
-        elif kind == b"IHDR":
-            raise EvidenceError(f"{label} PNG 包含重复 IHDR")
         if kind == b"IDAT":
             if not saw_ihdr:
                 raise EvidenceError(f"{label} PNG IDAT 早于 IHDR")
@@ -3630,7 +3678,7 @@ def validate_target(
     session_path, session_payload, session_stat = validate_bound_file(
         data, evidence_path, "session_log_basename", "session_log_sha256", "桌面验收结构化会话"
     )
-    screenshot_path, screenshot_payload, screenshot_stat = validate_bound_file(
+    screenshot_path, screenshot_png, screenshot_stat = validate_bound_png(
         data, evidence_path, "screenshot_basename", "screenshot_sha256", "桌面 App 截图"
     )
     diagnostic_path, diagnostic_payload, diagnostic_stat = validate_bound_file(
@@ -3669,7 +3717,7 @@ def validate_target(
         "graphical_installer_evidence_basename",
         GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
     )
-    graphical_path, graphical_payload, graphical_stat = validate_bound_file(
+    graphical_path, graphical_png, graphical_stat = validate_bound_png(
         data,
         evidence_path,
         "graphical_installer_evidence_basename",
@@ -3721,11 +3769,9 @@ def validate_target(
         observation,
         hashlib.sha256(observation_payload).hexdigest(),
         parse_json_bytes(attestation_payload, "桌面双击安装人工见证"),
-        hashlib.sha256(graphical_payload).hexdigest(),
+        graphical_png.sha256,
         args,
     )
-    validate_png(screenshot_payload)
-    validate_png(graphical_payload)
     validate_support_bundle(diagnostic_payload)
 
 

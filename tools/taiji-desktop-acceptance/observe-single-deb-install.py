@@ -35,6 +35,7 @@ OBSERVATION_BASENAME = "single-deb-install-observation.json"
 ATTESTATION_BASENAME = "single-deb-install-method-attestation.json"
 ENVIRONMENT_RECORD_BASENAME = "environment-observation.json"
 GRAPHICAL_EVIDENCE_BASENAME = "single-deb-graphical-installer.png"
+GRAPHICAL_EVIDENCE_POISON_BASENAME = ".single-deb-graphical-installer.poisoned"
 PACKAGE_NAME = "taiji-agent"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -115,6 +116,55 @@ CANONICAL_PLATFORM_PROFILES = {
 
 class ObservationError(RuntimeError):
     """Raised when the installation observation cannot prove the contract."""
+
+
+def _mark_snapshot_poisoned_at(parent_descriptor):
+    """Create a fixed fail-closed marker without replacing any directory entry."""
+
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        marker_descriptor = os.open(
+            GRAPHICAL_EVIDENCE_POISON_BASENAME,
+            flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+    except OSError:
+        return
+    try:
+        payload = b"poisoned: retained for manual inspection\n"
+        view = memoryview(payload)
+        while view:
+            written = os.write(marker_descriptor, view)
+            if written <= 0:
+                return
+            view = view[written:]
+        os.fsync(marker_descriptor)
+        os.fsync(parent_descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(marker_descriptor)
+
+
+def _mark_snapshot_poisoned_path(snapshot_path):
+    """Best-effort poison marker; never removes or replaces the snapshot path."""
+
+    destination = Path(snapshot_path)
+    try:
+        parent_descriptor = _open_safe_output_parent(destination.parent)
+    except (ObservationError, OSError):
+        return
+    try:
+        _mark_snapshot_poisoned_at(parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
 
 
 def _utc_text(value):
@@ -1804,85 +1854,311 @@ ATTESTATION_KEYS = {
 }
 
 
-def _validate_png_evidence(path):
+class _ValidatedPngEvidence:
+    """One still-open, streamed PNG validation result.
+
+    Holding the source descriptor until the caller has consumed the digest is
+    intentional: it lets the caller reject a pathname replacement after the
+    semantic pass without reopening or rehashing attacker-controlled bytes.
+    """
+
+    def __init__(
+        self,
+        source_path,
+        evidence_path,
+        descriptor,
+        source_stat,
+        digest,
+        snapshot_descriptor=None,
+        snapshot_stat=None,
+        snapshot_parent_descriptor=None,
+    ):
+        self.source_path = Path(source_path)
+        self.evidence_path = Path(evidence_path)
+        self.descriptor = descriptor
+        self.source_stat = source_stat
+        self.sha256 = digest
+        self.size = source_stat.st_size
+        self.snapshot_descriptor = snapshot_descriptor
+        self.snapshot_stat = snapshot_stat
+        self.snapshot_parent_descriptor = snapshot_parent_descriptor
+
+    @property
+    def name(self):
+        return self.evidence_path.name
+
+    def verify_identity(self):
+        try:
+            source_after = os.fstat(self.descriptor)
+            source_current = self.source_path.lstat()
+            if (
+                _file_stat_identity(self.source_stat)
+                != _file_stat_identity(source_after)
+                or _file_stat_identity(self.source_stat)
+                != _file_stat_identity(source_current)
+            ):
+                raise ObservationError(
+                    "graphical installer PNG identity changed after validation"
+                )
+            if self.snapshot_descriptor is not None:
+                snapshot_after = os.fstat(self.snapshot_descriptor)
+                snapshot_current = self.evidence_path.lstat()
+                if (
+                    _file_stat_identity(self.snapshot_stat)
+                    != _file_stat_identity(snapshot_after)
+                    or _file_stat_identity(self.snapshot_stat)
+                    != _file_stat_identity(snapshot_current)
+                ):
+                    raise ObservationError(
+                        "graphical installer PNG snapshot identity changed after validation"
+                    )
+        except OSError as exc:
+            raise ObservationError(
+                "graphical installer PNG identity cannot be verified: %s" % exc
+            ) from exc
+
+    def close(self):
+        if self.descriptor is not None:
+            os.close(self.descriptor)
+            self.descriptor = None
+        if self.snapshot_descriptor is not None:
+            os.close(self.snapshot_descriptor)
+            self.snapshot_descriptor = None
+        if self.snapshot_parent_descriptor is not None:
+            os.close(self.snapshot_parent_descriptor)
+            self.snapshot_parent_descriptor = None
+
+    def mark_poisoned(self):
+        if self.snapshot_parent_descriptor is not None:
+            _mark_snapshot_poisoned_at(self.snapshot_parent_descriptor)
+        elif self.snapshot_descriptor is not None:
+            _mark_snapshot_poisoned_path(self.evidence_path)
+
+
+def _validate_png_evidence(path, snapshot_path=None):
+    """Validate and hash one bounded PNG through a single stable descriptor."""
+
     evidence = Path(path)
-    if not evidence.is_absolute() or evidence.is_symlink() or not evidence.is_file():
-        raise ObservationError("graphical installer evidence must be an absolute regular PNG file")
+    if not evidence.is_absolute():
+        raise ObservationError(
+            "graphical installer evidence must be an absolute regular PNG file"
+        )
+    try:
+        before = evidence.lstat()
+    except OSError as exc:
+        raise ObservationError(
+            "cannot inspect graphical installer evidence: %s" % exc
+        ) from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ObservationError(
+            "graphical installer evidence must be a regular single-link PNG file"
+        )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(str(evidence), flags)
     except OSError as exc:
-        raise ObservationError("cannot safely open graphical installer evidence: %s" % exc) from exc
+        raise ObservationError(
+            "cannot safely open graphical installer evidence: %s" % exc
+        ) from exc
+
+    snapshot_descriptor = None
+    snapshot_stat = None
+    snapshot_parent_descriptor = None
+    destination = None
+    succeeded = False
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise ObservationError("graphical installer evidence must be a regular single-link PNG file")
-        if metadata.st_size < 57 or metadata.st_size > 20 * 1024 * 1024:
-            raise ObservationError("graphical installer evidence must be a bounded PNG file")
-        payload = bytearray()
-        while len(payload) < metadata.st_size:
-            chunk = os.read(descriptor, min(1024 * 1024, metadata.st_size - len(payload)))
-            if not chunk:
-                break
-            payload.extend(chunk)
-        if len(payload) != metadata.st_size or _file_stat_identity(metadata) != _file_stat_identity(os.fstat(descriptor)):
-            raise ObservationError("graphical installer PNG changed while it was read")
-    except OSError as exc:
-        raise ObservationError("cannot read graphical installer evidence PNG: %s" % exc) from exc
-    finally:
-        os.close(descriptor)
-    _validate_png_structure(bytes(payload))
-    return evidence
-
-
-def _validate_png_structure(payload):
-    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise ObservationError("graphical installer evidence has an invalid PNG signature")
-    offset = 8
-    chunk_index = 0
-    saw_ihdr = False
-    saw_idat = False
-    saw_iend = False
-    while offset < len(payload):
-        if offset + 12 > len(payload):
-            raise ObservationError("graphical installer evidence PNG is truncated")
-        length = struct.unpack(">I", payload[offset:offset + 4])[0]
-        kind = payload[offset + 4:offset + 8]
-        chunk_end = offset + 12 + length
-        if chunk_end > len(payload):
-            raise ObservationError("graphical installer evidence PNG chunk is truncated")
-        chunk_payload = payload[offset + 8:offset + 8 + length]
-        recorded_crc = struct.unpack(">I", payload[offset + 8 + length:chunk_end])[0]
-        actual_crc = zlib.crc32(kind + chunk_payload) & 0xFFFFFFFF
-        if recorded_crc != actual_crc:
-            raise ObservationError("graphical installer evidence PNG chunk CRC is invalid")
-        if chunk_index == 0:
-            if kind != b"IHDR" or length != 13:
-                raise ObservationError("graphical installer evidence PNG must start with a valid IHDR")
-            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
-                ">IIBBBBB", chunk_payload
+        if _file_stat_identity(before) != _file_stat_identity(metadata):
+            raise ObservationError(
+                "graphical installer PNG changed before it was opened"
             )
-            if width < 800 or height < 600 or width > 8192 or height > 8192:
-                raise ObservationError("graphical installer evidence PNG must be at least 800x600 with bounded dimensions")
-            if bit_depth not in {1, 2, 4, 8, 16} or color_type not in {0, 2, 3, 4, 6}:
-                raise ObservationError("graphical installer evidence PNG IHDR pixel format is invalid")
-            if compression != 0 or filtering != 0 or interlace not in {0, 1}:
-                raise ObservationError("graphical installer evidence PNG IHDR encoding is invalid")
-            saw_ihdr = True
-        elif kind == b"IHDR":
-            raise ObservationError("graphical installer evidence PNG contains duplicate IHDR")
-        if kind == b"IDAT":
-            saw_idat = True
-        if kind == b"IEND":
-            if length != 0 or chunk_end != len(payload):
-                raise ObservationError("graphical installer evidence PNG has an invalid IEND or trailing data")
-            saw_iend = True
-            offset = chunk_end
-            break
-        offset = chunk_end
-        chunk_index += 1
-    if not saw_ihdr or not saw_idat or not saw_iend or offset != len(payload):
-        raise ObservationError("graphical installer evidence PNG is incomplete")
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size < 57
+            or metadata.st_size > 32 * 1024 * 1024
+        ):
+            raise ObservationError(
+                "graphical installer evidence must be a bounded 32MiB PNG file"
+            )
+
+        if snapshot_path is not None:
+            destination = Path(snapshot_path)
+            if not destination.is_absolute() or destination.name != GRAPHICAL_EVIDENCE_BASENAME:
+                raise ObservationError(
+                    "graphical installer evidence snapshot must use the fixed absolute basename"
+                )
+            snapshot_parent_descriptor = _open_safe_output_parent(destination.parent)
+            output_flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            snapshot_descriptor = os.open(
+                destination.name,
+                output_flags,
+                0o600,
+                dir_fd=snapshot_parent_descriptor,
+            )
+
+        digest = hashlib.sha256()
+        total = 0
+
+        def consume(size):
+            nonlocal total
+            pieces = []
+            remaining = size
+            while remaining:
+                piece = os.read(descriptor, min(1024 * 1024, remaining))
+                if not piece:
+                    raise ObservationError(
+                        "graphical installer evidence PNG is truncated"
+                    )
+                digest.update(piece)
+                total += len(piece)
+                if snapshot_descriptor is not None:
+                    view = memoryview(piece)
+                    while view:
+                        written = os.write(snapshot_descriptor, view)
+                        if written <= 0:
+                            raise ObservationError(
+                                "graphical installer PNG snapshot could not be written"
+                            )
+                        view = view[written:]
+                pieces.append(piece)
+                remaining -= len(piece)
+            return b"".join(pieces)
+
+        if consume(8) != b"\x89PNG\r\n\x1a\n":
+            raise ObservationError(
+                "graphical installer evidence has an invalid PNG signature"
+            )
+        chunk_index = 0
+        saw_ihdr = False
+        saw_idat = False
+        saw_iend = False
+        while total < metadata.st_size:
+            header = consume(8)
+            length = struct.unpack(">I", header[:4])[0]
+            kind = header[4:]
+            if chunk_index == 0 and (kind != b"IHDR" or length != 13):
+                raise ObservationError(
+                    "graphical installer evidence PNG must start with a valid IHDR"
+                )
+            if chunk_index != 0 and kind == b"IHDR":
+                raise ObservationError(
+                    "graphical installer evidence PNG contains duplicate IHDR"
+                )
+            if length > metadata.st_size - total - 4:
+                raise ObservationError(
+                    "graphical installer evidence PNG chunk is truncated"
+                )
+            crc = zlib.crc32(kind)
+            remaining = length
+            ihdr = bytearray()
+            while remaining:
+                piece = consume(min(1024 * 1024, remaining))
+                crc = zlib.crc32(piece, crc)
+                if kind == b"IHDR":
+                    ihdr.extend(piece)
+                remaining -= len(piece)
+            recorded_crc = struct.unpack(">I", consume(4))[0]
+            if (crc & 0xFFFFFFFF) != recorded_crc:
+                raise ObservationError(
+                    "graphical installer evidence PNG chunk CRC is invalid"
+                )
+            if chunk_index == 0:
+                width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
+                    ">IIBBBBB", bytes(ihdr)
+                )
+                if width < 800 or height < 600 or width > 8192 or height > 8192:
+                    raise ObservationError(
+                        "graphical installer evidence PNG must be at least 800x600 with bounded dimensions"
+                    )
+                if bit_depth not in {1, 2, 4, 8, 16} or color_type not in {0, 2, 3, 4, 6}:
+                    raise ObservationError(
+                        "graphical installer evidence PNG IHDR pixel format is invalid"
+                    )
+                if compression != 0 or filtering != 0 or interlace not in {0, 1}:
+                    raise ObservationError(
+                        "graphical installer evidence PNG IHDR encoding is invalid"
+                )
+                saw_ihdr = True
+            if kind == b"IDAT":
+                saw_idat = True
+            if kind == b"IEND":
+                if length != 0 or total != metadata.st_size:
+                    raise ObservationError(
+                        "graphical installer evidence PNG has an invalid IEND or trailing data"
+                    )
+                saw_iend = True
+                break
+            chunk_index += 1
+        if (
+            os.read(descriptor, 1)
+            or total != metadata.st_size
+            or not saw_ihdr
+            or not saw_idat
+            or not saw_iend
+        ):
+            raise ObservationError(
+                "graphical installer evidence PNG is incomplete or has trailing data"
+            )
+        if _file_stat_identity(metadata) != _file_stat_identity(os.fstat(descriptor)):
+            raise ObservationError("graphical installer PNG changed while it was read")
+
+        if snapshot_descriptor is not None:
+            os.fsync(snapshot_descriptor)
+            snapshot_stat = os.fstat(snapshot_descriptor)
+            if (
+                not stat.S_ISREG(snapshot_stat.st_mode)
+                or snapshot_stat.st_nlink != 1
+                or snapshot_stat.st_size != metadata.st_size
+            ):
+                raise ObservationError(
+                    "graphical installer PNG snapshot is not a stable regular file"
+                )
+            os.fsync(snapshot_parent_descriptor)
+            snapshot_current = destination.lstat()
+            if _file_stat_identity(snapshot_stat) != _file_stat_identity(snapshot_current):
+                raise ObservationError(
+                    "graphical installer PNG snapshot identity changed while it was published"
+                )
+        result = _ValidatedPngEvidence(
+            evidence,
+            destination if destination is not None else evidence,
+            descriptor,
+            metadata,
+            digest.hexdigest(),
+            snapshot_descriptor=snapshot_descriptor,
+            snapshot_stat=snapshot_stat,
+            snapshot_parent_descriptor=snapshot_parent_descriptor,
+        )
+        succeeded = True
+        return result
+    except ObservationError as exc:
+        if snapshot_parent_descriptor is not None:
+            _mark_snapshot_poisoned_at(snapshot_parent_descriptor)
+            raise ObservationError(
+                "%s; graphical installer snapshot output is poisoned and retained"
+                % exc
+            ) from exc
+        raise
+    except OSError as exc:
+        message = "cannot read graphical installer evidence PNG: %s" % exc
+        if snapshot_parent_descriptor is not None:
+            _mark_snapshot_poisoned_at(snapshot_parent_descriptor)
+            message += "; graphical installer snapshot output is poisoned and retained"
+        raise ObservationError(message) from exc
+    finally:
+        if not succeeded:
+            if snapshot_descriptor is not None:
+                os.close(snapshot_descriptor)
+            if snapshot_parent_descriptor is not None:
+                os.close(snapshot_parent_descriptor)
+            os.close(descriptor)
 
 
 def _validate_observation_identity(observation, challenge, runtime, user_state_paths=None, canonical=False):
@@ -1933,6 +2209,7 @@ def create_method_attestation(
     matrix_path=None,
     category_id=None,
     environment_observation_path=None,
+    graphical_evidence_snapshot_path=None,
 ):
     """Create an explicit human attestation bound to machine evidence.
 
@@ -1990,24 +2267,43 @@ def create_method_attestation(
         raise ObservationError("install observation schema is invalid")
     if runtime.package_status() != "install ok installed":
         raise ObservationError("taiji-agent is not installed while method is being attested")
-    evidence = _validate_png_evidence(graphical_evidence_path)
-    return {
-        "schema": ATTESTATION_SCHEMA,
-        "generated_at_utc": _utc_text(runtime.utc_now()),
-        "observation_basename": observation_file.name,
-        "observation_sha256": observation_digest,
-        "challenge_nonce": challenge,
-        "machine_fingerprint_sha256": machine_fingerprint,
-        "boot_fingerprint_sha256": boot_fingerprint,
-        "deb_sha256": observation["deb_sha256"],
-        "installation_method_attested": "desktop-double-click",
-        "installation_method_machine_observed": False,
-        "attestation_scope": "human-observed-system-graphical-installer",
-        "operator_id": operator_id,
-        "confirmation": True,
-        "graphical_installer_evidence_basename": evidence.name,
-        "graphical_installer_evidence_sha256": _sha256_path(evidence),
-    }
+    evidence = None
+    try:
+        evidence = _validate_png_evidence(
+            graphical_evidence_path,
+            snapshot_path=graphical_evidence_snapshot_path,
+        )
+        attestation = {
+            "schema": ATTESTATION_SCHEMA,
+            "generated_at_utc": _utc_text(runtime.utc_now()),
+            "observation_basename": observation_file.name,
+            "observation_sha256": observation_digest,
+            "challenge_nonce": challenge,
+            "machine_fingerprint_sha256": machine_fingerprint,
+            "boot_fingerprint_sha256": boot_fingerprint,
+            "deb_sha256": observation["deb_sha256"],
+            "installation_method_attested": "desktop-double-click",
+            "installation_method_machine_observed": False,
+            "attestation_scope": "human-observed-system-graphical-installer",
+            "operator_id": operator_id,
+            "confirmation": True,
+            "graphical_installer_evidence_basename": evidence.name,
+            "graphical_installer_evidence_sha256": evidence.sha256,
+        }
+        evidence.verify_identity()
+        return attestation
+    except BaseException as exc:
+        if graphical_evidence_snapshot_path is not None and evidence is not None:
+            evidence.mark_poisoned()
+            if isinstance(exc, ObservationError):
+                raise ObservationError(
+                    "%s; graphical installer snapshot output is poisoned and retained"
+                    % exc
+                ) from exc
+        raise
+    finally:
+        if evidence is not None:
+            evidence.close()
 
 
 def _validate_canonical_attestation_context(
@@ -2118,34 +2414,38 @@ def verify_method_attestation(
         canonical=canonical,
     )
     evidence = _validate_png_evidence(graphical_evidence_path)
-    fixed = {
-        "schema": ATTESTATION_SCHEMA,
-        "observation_basename": Path(observation_path).name,
-        "observation_sha256": _sha256_path(observation_path),
-        "challenge_nonce": challenge,
-        "machine_fingerprint_sha256": machine_fingerprint,
-        "boot_fingerprint_sha256": boot_fingerprint,
-        "deb_sha256": observation["deb_sha256"],
-        "installation_method_attested": "desktop-double-click",
-        "installation_method_machine_observed": False,
-        "attestation_scope": "human-observed-system-graphical-installer",
-        "confirmation": True,
-        "graphical_installer_evidence_basename": evidence.name,
-        "graphical_installer_evidence_sha256": _sha256_path(evidence),
-    }
-    for key, expected in fixed.items():
-        if attestation.get(key) != expected:
-            if key == "graphical_installer_evidence_sha256":
-                raise ObservationError("graphical installer evidence hash does not match the method attestation")
-            raise ObservationError("install method attestation %s does not match" % key)
-    if not isinstance(attestation.get("operator_id"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}", attestation["operator_id"]):
-        raise ObservationError("install method attestation operator_id is invalid")
-    generated = _parse_utc(attestation.get("generated_at_utc"), "install method attestation generated_at_utc")
-    completed = _parse_utc(observation.get("completed_at_utc"), "install observation completed_at_utc")
-    now = runtime.utc_now()
-    if not completed <= generated <= now:
-        raise ObservationError("install method attestation timestamp is not ordered")
-    return attestation
+    try:
+        fixed = {
+            "schema": ATTESTATION_SCHEMA,
+            "observation_basename": Path(observation_path).name,
+            "observation_sha256": _sha256_path(observation_path),
+            "challenge_nonce": challenge,
+            "machine_fingerprint_sha256": machine_fingerprint,
+            "boot_fingerprint_sha256": boot_fingerprint,
+            "deb_sha256": observation["deb_sha256"],
+            "installation_method_attested": "desktop-double-click",
+            "installation_method_machine_observed": False,
+            "attestation_scope": "human-observed-system-graphical-installer",
+            "confirmation": True,
+            "graphical_installer_evidence_basename": evidence.name,
+            "graphical_installer_evidence_sha256": evidence.sha256,
+        }
+        for key, expected in fixed.items():
+            if attestation.get(key) != expected:
+                if key == "graphical_installer_evidence_sha256":
+                    raise ObservationError("graphical installer evidence hash does not match the method attestation")
+                raise ObservationError("install method attestation %s does not match" % key)
+        if not isinstance(attestation.get("operator_id"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}", attestation["operator_id"]):
+            raise ObservationError("install method attestation operator_id is invalid")
+        generated = _parse_utc(attestation.get("generated_at_utc"), "install method attestation generated_at_utc")
+        completed = _parse_utc(observation.get("completed_at_utc"), "install observation completed_at_utc")
+        now = runtime.utc_now()
+        if not completed <= generated <= now:
+            raise ObservationError("install method attestation timestamp is not ordered")
+        evidence.verify_identity()
+        return attestation
+    finally:
+        evidence.close()
 
 
 def verify_observation(
@@ -2391,57 +2691,6 @@ def _require_observation_only_output_directory(directory, observation_path):
         os.close(descriptor)
 
 
-def _exclusive_copy(source, destination):
-    source_path = Path(source)
-    destination_path = Path(destination)
-    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        source_descriptor = os.open(str(source_path), source_flags)
-    except OSError as exc:
-        raise ObservationError("source evidence cannot be opened safely: %s" % exc) from exc
-    source_stat = os.fstat(source_descriptor)
-    if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
-        os.close(source_descriptor)
-        raise ObservationError("source evidence must be a regular single-link file")
-    parent_descriptor = _open_safe_output_parent(destination_path.parent)
-    temporary_name = ".%s.%s" % (destination_path.name, secrets.token_hex(12))
-    output_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        try:
-            os.stat(destination_path.name, dir_fd=parent_descriptor, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            raise ObservationError("refusing to overwrite existing evidence: %s" % destination_path)
-        output_descriptor = os.open(temporary_name, output_flags, 0o600, dir_fd=parent_descriptor)
-        with os.fdopen(output_descriptor, "wb") as output_handle:
-            while True:
-                chunk = os.read(source_descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                output_handle.write(chunk)
-            output_handle.flush()
-            os.fsync(output_handle.fileno())
-        if _file_stat_identity(source_stat) != _file_stat_identity(os.fstat(source_descriptor)):
-            raise ObservationError("source evidence changed while it was copied")
-        os.replace(
-            temporary_name,
-            destination_path.name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
-        os.fsync(parent_descriptor)
-    except BaseException:
-        try:
-            os.unlink(temporary_name, dir_fd=parent_descriptor)
-        except OSError:
-            pass
-        raise
-    finally:
-        os.close(source_descriptor)
-        os.close(parent_descriptor)
-
-
 def _build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2541,13 +2790,11 @@ def main(argv=None):
         if not observation_path.is_absolute() or not source_evidence.is_absolute() or not output_dir.is_absolute():
             raise ObservationError("all paths must be absolute")
         _require_observation_only_output_directory(output_dir, observation_path)
-        _validate_png_evidence(source_evidence)
         copied_evidence = output_dir / GRAPHICAL_EVIDENCE_BASENAME
-        _exclusive_copy(source_evidence, copied_evidence)
         try:
             attestation = create_method_attestation(
                 observation_path=observation_path,
-                graphical_evidence_path=copied_evidence,
+                graphical_evidence_path=source_evidence,
                 challenge=args.challenge,
                 operator_id=args.operator_id,
                 runtime=runtime,
@@ -2558,14 +2805,16 @@ def main(argv=None):
                     if args.environment_observation
                     else None
                 ),
+                graphical_evidence_snapshot_path=copied_evidence,
             )
             output = output_dir / ATTESTATION_BASENAME
             _atomic_json(output, attestation)
-        except BaseException:
-            try:
-                copied_evidence.unlink()
-            except OSError:
-                pass
+        except BaseException as exc:
+            _mark_snapshot_poisoned_path(copied_evidence)
+            if isinstance(exc, ObservationError):
+                raise ObservationError(
+                    "%s; attestation output is poisoned and retained" % exc
+                ) from exc
             raise
         print(json.dumps({
             "status": "taiji-single-deb-install-method-attested",
@@ -2597,7 +2846,7 @@ def main(argv=None):
             challenge=args.challenge,
             runtime=runtime,
         )
-    verify_method_attestation(
+    verified_attestation = verify_method_attestation(
         attestation_path=Path(args.attestation),
         observation_path=Path(args.observation),
         graphical_evidence_path=Path(args.graphical_evidence),
@@ -2609,7 +2858,9 @@ def main(argv=None):
         "status": "taiji-single-deb-install-evidence-valid",
         "observation_sha256": _sha256_path(args.observation),
         "attestation_sha256": _sha256_path(args.attestation),
-        "graphical_installer_evidence_sha256": _sha256_path(args.graphical_evidence),
+        "graphical_installer_evidence_sha256": verified_attestation[
+            "graphical_installer_evidence_sha256"
+        ],
         "deb_sha256": observation["deb_sha256"],
         "machine_fingerprint_sha256": observation["machine_fingerprint_sha256"],
     }, sort_keys=True))

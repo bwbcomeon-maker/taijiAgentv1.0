@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import importlib.util
 import json
@@ -12,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 import zlib
 from datetime import datetime, timezone
@@ -71,8 +73,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def png_fixture() -> bytes:
-    width, height = 800, 600
+def png_fixture(width: int = 800, height: int = 600) -> bytes:
     rows = []
     for row in range(height):
         pixels = bytearray()
@@ -92,6 +93,24 @@ def png_fixture() -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(
         b"IDAT", zlib.compress(b"".join(rows))
     ) + chunk(b"IEND", b"")
+
+
+def padded_png_fixture(exact_size: int) -> bytes:
+    base = png_fixture()
+    payload_size = exact_size - len(base) - 12
+    if payload_size < 0:
+        raise ValueError("requested PNG size is too small")
+    payload = b"x" * payload_size
+    chunk = (
+        struct.pack(">I", len(payload))
+        + b"tEXt"
+        + payload
+        + struct.pack(">I", zlib.crc32(b"tEXt" + payload) & 0xFFFFFFFF)
+    )
+    result = base[:-12] + chunk + base[-12:]
+    if len(result) != exact_size:
+        raise AssertionError("PNG fixture size mismatch")
+    return result
 
 
 def support_bundle() -> dict[str, object]:
@@ -663,6 +682,166 @@ class TargetEvidenceAssemblerTests(unittest.TestCase):
         rendered = json.dumps(session, ensure_ascii=False)
         self.assertNotIn("openai/gpt-test", rendered)
         self.assertNotIn("taiji_desktop_token", rendered)
+
+    def test_final_validator_eliminates_png_bound_file_reopen_window(self) -> None:
+        result = self.run_assembler()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validator = load_module(VALIDATOR, "taiji_final_png_reopen_window_test")
+        evidence_path = self.output / "target-verification.json"
+        evidence = validator.load_json(evidence_path, "target evidence")
+        screenshot = self.output / evidence["screenshot_basename"]
+        replacement = self.root / "different-final-screenshot.png"
+        replacement.write_bytes(png_fixture(801, 600))
+        parked = self.root / "parked-final-screenshot.png"
+        swapped = False
+        real_validate_bound_file = validator.validate_bound_file
+
+        def swap_after_old_bound_read(data, path, basename_key, hash_key, label):
+            nonlocal swapped
+            result_value = real_validate_bound_file(
+                data, path, basename_key, hash_key, label
+            )
+            if basename_key == "screenshot_basename":
+                screenshot.rename(parked)
+                replacement.rename(screenshot)
+                swapped = True
+            return result_value
+
+        args = SimpleNamespace(
+            source_commit=self.source_commit,
+            challenge=self.challenge,
+            deb=self.deb,
+            manifest=self.manifest,
+        )
+        with patch.object(
+            validator,
+            "validate_bound_file",
+            side_effect=swap_after_old_bound_read,
+        ):
+            validator.validate_target(
+                evidence,
+                evidence_path,
+                args,
+                sha256(self.deb),
+                self.version,
+                self.release_hash,
+                sha256(self.electron),
+                sha256(self.desktop_entry),
+                self.profile_id,
+                self.profile_sha256,
+            )
+        self.assertFalse(swapped, "PNG must bypass the bytes-returning bound-file path")
+
+    def test_final_validator_rejects_different_valid_png_swap_during_stream(self) -> None:
+        result = self.run_assembler()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validator = load_module(VALIDATOR, "taiji_final_png_stream_swap_test")
+        evidence_path = self.output / "target-verification.json"
+        evidence = validator.load_json(evidence_path, "target evidence")
+        screenshot = self.output / evidence["screenshot_basename"]
+        replacement = self.root / "different-stream-screenshot.png"
+        replacement.write_bytes(png_fixture(801, 600))
+        parked = self.root / "parked-stream-screenshot.png"
+        source_inode = screenshot.stat().st_ino
+        swapped = False
+        real_validate_png = validator.validate_png_descriptor
+
+        def swap_after_stream(descriptor, file_stat, label, **kwargs):
+            nonlocal swapped
+            metadata = real_validate_png(descriptor, file_stat, label, **kwargs)
+            if not swapped and file_stat.st_ino == source_inode:
+                screenshot.rename(parked)
+                replacement.rename(screenshot)
+                swapped = True
+            return metadata
+
+        args = SimpleNamespace(
+            source_commit=self.source_commit,
+            challenge=self.challenge,
+            deb=self.deb,
+            manifest=self.manifest,
+        )
+        with patch.object(
+            validator,
+            "validate_png_descriptor",
+            side_effect=swap_after_stream,
+        ), self.assertRaisesRegex(validator.EvidenceError, "changed|identity|变化"):
+            validator.validate_target(
+                evidence,
+                evidence_path,
+                args,
+                sha256(self.deb),
+                self.version,
+                self.release_hash,
+                sha256(self.electron),
+                sha256(self.desktop_entry),
+                self.profile_id,
+                self.profile_sha256,
+            )
+
+    def test_final_validator_streams_exact_32_mib_png_and_rejects_one_byte_more(self) -> None:
+        exact = padded_png_fixture(32 * 1024 * 1024)
+        self.screenshot.write_bytes(exact)
+        del exact
+        gc.collect()
+        result = self.run_assembler()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validator = load_module(VALIDATOR, "taiji_final_png_32mib_test")
+        evidence_path = self.output / "target-verification.json"
+        evidence = validator.load_json(evidence_path, "target evidence")
+        real_read_regular_bytes = validator.read_regular_bytes
+
+        def json_only_read(path, label, **kwargs):
+            if Path(path).name in {
+                evidence["screenshot_basename"],
+                GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+            }:
+                raise AssertionError("final validator must not materialize PNG bytes")
+            return real_read_regular_bytes(path, label, **kwargs)
+
+        args = SimpleNamespace(
+            source_commit=self.source_commit,
+            challenge=self.challenge,
+            deb=self.deb,
+            manifest=self.manifest,
+        )
+        tracemalloc.start()
+        try:
+            with patch.object(validator, "read_regular_bytes", side_effect=json_only_read):
+                validator.validate_target(
+                    evidence,
+                    evidence_path,
+                    args,
+                    sha256(self.deb),
+                    self.version,
+                    self.release_hash,
+                    sha256(self.electron),
+                    sha256(self.desktop_entry),
+                    self.profile_id,
+                    self.profile_sha256,
+                )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 8 * 1024 * 1024)
+
+        oversized = padded_png_fixture(32 * 1024 * 1024 + 1)
+        screenshot = self.output / evidence["screenshot_basename"]
+        screenshot.write_bytes(oversized)
+        evidence["screenshot_sha256"] = hashlib.sha256(oversized).hexdigest()
+        with self.assertRaisesRegex(validator.EvidenceError, "32|大小|上限|PNG"):
+            validator.validate_target(
+                evidence,
+                evidence_path,
+                args,
+                sha256(self.deb),
+                self.version,
+                self.release_hash,
+                sha256(self.electron),
+                sha256(self.desktop_entry),
+                self.profile_id,
+                self.profile_sha256,
+            )
 
     def test_validator_rejects_preserved_driver_schema_or_binding_tampering(self) -> None:
         result = self.run_assembler()
