@@ -164,6 +164,18 @@ class FormalBuildDriverContractTests(unittest.TestCase):
         self.assertNotIn("run_formal_build_tests()", main)
         self.assertNotIn("/usr/bin/sudo -n -- /usr/bin/python3 -I -B -c", main)
 
+    def test_builder_removes_the_retired_privileged_formal_test_implementation(self):
+        builder = (ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh").read_text(encoding="utf-8")
+        for retired in (
+            "formal_build_root_supervisor_python_source()",
+            "formal_build_supervisor_bootstrap_python_source()",
+            "formal_build_supervisor_log_relay_python_source()",
+            "seal_formal_build_supervisor()",
+            "run_formal_test_step()",
+            "run_formal_build_tests()",
+        ):
+            self.assertNotIn(retired, builder)
+
     def test_formal_consumers_expose_fd_and_basename_contract(self):
         build_deb = (ROOT / "packaging/linux/deb/build-deb.sh").read_text(encoding="utf-8")
         stager = (ROOT / "packaging/linux/stage-electron-runtime.py").read_text(encoding="utf-8")

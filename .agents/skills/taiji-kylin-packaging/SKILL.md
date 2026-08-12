@@ -15,9 +15,9 @@ This Skill is a self-contained router and diagnostic guide. The Taiji repository
 
 Do not scan the disk for a repository or artifact.
 
-1. For a source checkout, run the bundled doctor with `--repo <operator-supplied-path>`.
-2. For a build host that only has the frozen input trio and no `.git`, run it with `--input-dir <operator-supplied-directory>`.
-3. For installation health, run it with `--selftest`.
+1. For a source checkout, run `python3 -I -B scripts/doctor.py --repo <operator-supplied-path>` from this Skill root.
+2. For a build host that only has the frozen input trio and no `.git`, run `python3 -I -B scripts/doctor.py --input-dir <operator-supplied-directory>` from this Skill root. The supplied directory must contain **恰好一个同一 commit 的 `tar.gz`、`manifest.json` 与 `tar.gz.sha256` 三件套**。
+3. For the bundled diagnostic itself, run `python3 -I -B scripts/doctor.py --selftest` from this Skill root.
 
 Invoke `scripts/doctor.py` through a known Python 3.8+ interpreter with `-I -B`. Read its one JSON result before proposing any next action. The doctor does not execute repository code, install tools, verify the full frozen archive, or authorize an action.
 
@@ -96,7 +96,7 @@ Local source tests cannot prove a Linux DEB exists. A build-host install cannot 
 | Screenshot, log, or interrupted run | `references/failure-playbook.md` first |
 | Readiness and evidence claims | `references/release-gates.md` |
 | Hermes, secrets, logs, processes, diagnostics | `references/privacy-surface-gate.md` |
-| Positively identified historical v2 package | `references/kylin-deb-version-history.md` |
+| Positively identified historical v2 package | `references/kylin-deb-version-history.md`, then `references/failure-playbook.md` for the current v3 diagnostic path |
 | Installing this Skill in another Agent product | `references/agent-installation.md` |
 
 ## Failure response
@@ -116,6 +116,8 @@ For every failure, report:
 ```
 
 Fix product or packaging defects in reviewed source, add a regression, freeze a new commit, and restart from the earliest invalidated stage. Never patch an unpacked build-host source tree or installed payload in place.
+
+For a separately approved target acceptance, the executable trust root is the installed, root-owned `/usr/bin/taiji-agent-acceptance`; a copied `04` directory can carry data but is not an equivalent executable authority.
 
 ## Hard prohibitions
 

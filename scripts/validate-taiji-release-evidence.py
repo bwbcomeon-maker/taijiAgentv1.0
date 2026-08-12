@@ -2207,14 +2207,6 @@ def validate_formal_build_test_payloads(
             raise EvidenceError(f"正式构建测试日志 v2 {label} 不合法")
         index += 1
 
-    legacy_supervisor_header = index < len(lines) and lines[index].startswith(
-        "supervisor_source_sha256="
-    )
-    if legacy_supervisor_header:
-        require_header_pattern(
-            r"supervisor_source_sha256=[0-9a-f]{64}",
-            "supervisor source 身份",
-        )
     expected_toolchain_header = [
         "python_version=" + PINNED_PYTHON_VERSION,
         "python_executable_sha256=" + PINNED_PYTHON_EXECUTABLE_SHA256,
@@ -2227,10 +2219,6 @@ def validate_formal_build_test_payloads(
         raise EvidenceError("正式构建测试日志 v2 固定工具链 header 不一致")
     index += len(expected_toolchain_header)
     require_header_pattern(r"eslint_cli_sha256=[0-9a-f]{64}", "eslint CLI 身份")
-    if legacy_supervisor_header:
-        require_header_pattern(r"closure_sha256=[0-9a-f]{64}", "closure 身份")
-        require_header_pattern(r"closure_file_count=[1-9][0-9]*", "closure 文件数")
-        require_header_pattern(r"closure_total_bytes=[1-9][0-9]*", "closure 字节数")
     exact_target_header = [
         "target_count=" + str(FORMAL_BUILD_TEST_TARGET_COUNT),
         "target_contract_sha256=" + FORMAL_BUILD_TEST_TARGET_CONTRACT_SHA256,

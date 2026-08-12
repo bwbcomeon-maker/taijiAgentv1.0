@@ -8,6 +8,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import zipfile
@@ -35,10 +36,20 @@ MAX_TOTAL_BYTES = 8 * 1024 * 1024
 FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 TEXT_MODE = 0o644
 SCRIPT_MODE = 0o755
+SENSITIVE_CONTENT_PATTERNS = (
+    re.compile(br"-----BEGIN(?: [A-Z0-9]+){0,4} PRIVATE KEY-----"),
+    re.compile(br"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b"),
+    re.compile(br"/(?:Users|home)/[A-Za-z0-9._-]+(?:/|$)"),
+)
 
 
 class PackageError(RuntimeError):
     """The Skill source or generated archive violated its allowlist."""
+
+
+def _reject_sensitive_content(payload: bytes, relative: str) -> None:
+    if any(pattern.search(payload) for pattern in SENSITIVE_CONTENT_PATTERNS):
+        raise PackageError("Skill member contains sensitive content: {}".format(relative))
 
 
 def _sha256(payload: bytes) -> str:
@@ -56,6 +67,32 @@ def _existing_directory(path: Path, label: str) -> Path:
     if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
         raise PackageError("{} must be a real canonical directory".format(label))
     return path
+
+
+def _new_output_directory(path: Path, skill_root: Path) -> Path:
+    if not path.is_absolute():
+        raise PackageError("output directory must be an absolute path")
+    parent = _existing_directory(path.parent, "output directory parent")
+    candidate = parent.resolve(strict=True) / path.name
+    try:
+        candidate.relative_to(skill_root.resolve(strict=True))
+    except ValueError:
+        pass
+    else:
+        raise PackageError("output directory must be outside the Skill source tree")
+    if os.path.lexists(str(candidate)):
+        raise PackageError("output directory must not already exist")
+    try:
+        os.mkdir(str(candidate), 0o700)
+    except OSError as exc:
+        raise PackageError("output directory cannot be created") from exc
+    try:
+        metadata = candidate.lstat()
+    except OSError as exc:
+        raise PackageError("output directory disappeared after creation") from exc
+    if candidate.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise PackageError("output directory creation was unsafe")
+    return candidate
 
 
 def _source_paths(root: Path) -> Dict[str, Path]:
@@ -152,7 +189,9 @@ def _read_member(path: Path, relative: str) -> Tuple[bytes, int]:
         )
         if after_identity != opened_identity:
             raise PackageError("Skill member changed during read: {}".format(relative))
-        return b"".join(chunks), SCRIPT_MODE if relative == "scripts/doctor.py" else TEXT_MODE
+        payload = b"".join(chunks)
+        _reject_sensitive_content(payload, relative)
+        return payload, SCRIPT_MODE if relative == "scripts/doctor.py" else TEXT_MODE
     finally:
         os.close(descriptor)
 
@@ -229,15 +268,9 @@ def _verify_archive(payload: bytes, members: Sequence[Dict[str, Any]]) -> None:
 
 def package(skill_root: Path, output_dir: Path) -> Dict[str, Any]:
     skill_root = _existing_directory(skill_root, "skill root")
-    output_dir = _existing_directory(output_dir, "output directory")
     if skill_root.name != SKILL_NAME:
         raise PackageError("skill root basename must be {}".format(SKILL_NAME))
-    try:
-        output_dir.resolve(strict=True).relative_to(skill_root.resolve(strict=True))
-    except ValueError:
-        pass
-    else:
-        raise PackageError("output directory must be outside the Skill source tree")
+    output_dir = _new_output_directory(output_dir, skill_root)
     sources = _source_paths(skill_root)
     members = []  # type: List[Dict[str, Any]]
     total = 0

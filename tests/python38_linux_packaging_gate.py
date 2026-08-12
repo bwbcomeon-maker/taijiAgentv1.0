@@ -34,6 +34,7 @@ GOLDEN_ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
 CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
 RELEASE_TEST_RUNNER = ROOT / "scripts/run-taiji-release-python-tests.py"
 FORMAL_BUILDER = ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
+FORMAL_BUILD_DRIVER = ROOT / "scripts/run-taiji-formal-build-tests.py"
 AGENT_PARALLEL_RUNNER = (
     ROOT / "hermes-local-lab/sources/hermes-agent/scripts/run_tests_parallel.py"
 )
@@ -74,19 +75,13 @@ PYTHON38_ENTRYPOINTS = (
     GOLDEN_ORCHESTRATOR,
     CHALLENGE_ENVELOPE_HELPER,
     RELEASE_TEST_RUNNER,
+    FORMAL_BUILD_DRIVER,
     AGENT_PARALLEL_RUNNER,
 )
 PYTHON38_RUNTIME_SOURCES = (
     AGENT_PARALLEL_RUNNER,
     ROOT / "tests/test_linux_desktop_packaging_static.py",
 )
-FORMAL_BUILDER_EMBEDDED_PYTHON = (
-    "formal_build_root_supervisor_python_source",
-    "formal_build_supervisor_bootstrap_python_source",
-    "formal_build_supervisor_log_relay_python_source",
-)
-
-
 def extract_single_deb_publisher_python() -> str:
     source = SINGLE_DEB_PUBLISHER.read_text(encoding="utf-8")
     marker = "/usr/bin/python3 -I -B - \"$@\" <<'PY'\n"
@@ -103,14 +98,6 @@ def extract_sealed_snapshot_python() -> str:
     embedded = source.split(marker, 1)[1].split("\nPY\n}", 1)[0]
     assert embedded.startswith("from __future__ import annotations\n")
     return embedded
-
-
-def extract_formal_builder_embedded_python(function_name: str) -> str:
-    assert function_name in FORMAL_BUILDER_EMBEDDED_PYTHON
-    source = FORMAL_BUILDER.read_text(encoding="utf-8")
-    marker = function_name + "() {\n  /usr/bin/cat <<'PY'\n"
-    assert source.count(marker) == 1
-    return source.split(marker, 1)[1].split("\nPY\n}", 1)[0]
 
 
 def exercise_sealed_snapshot_python(temp_root: Path) -> None:
@@ -355,12 +342,6 @@ def main() -> int:
             "{}:embedded-python".format(SINGLE_DEB_PUBLISHER),
             "exec",
         )
-        for function_name in FORMAL_BUILDER_EMBEDDED_PYTHON:
-            compile(
-                extract_formal_builder_embedded_python(function_name),
-                "{}:{}".format(FORMAL_BUILDER, function_name),
-                "exec",
-            )
         exercise_sealed_snapshot_python(temp_root)
         for index, entrypoint in enumerate(PYTHON38_ENTRYPOINTS):
             py_compile.compile(

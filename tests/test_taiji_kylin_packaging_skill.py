@@ -203,6 +203,9 @@ class SkillSourceContractTests(unittest.TestCase):
             "签名",
             "发布",
             "客户目录恰好只有一个 DEB",
+            "python3 -I -B scripts/doctor.py --repo <operator-supplied-path>",
+            "恰好一个同一 commit 的 `tar.gz`、`manifest.json` 与 `tar.gz.sha256` 三件套",
+            "`/usr/bin/taiji-agent-acceptance`",
         ):
             self.assertIn(required, content)
 
@@ -335,8 +338,6 @@ class SkillPackagerContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             first = Path(temporary) / "first"
             second = Path(temporary) / "second"
-            first.mkdir()
-            second.mkdir()
             first_result = run_python(PACKAGER, "--skill-root", str(SKILL_ROOT), "--output-dir", str(first))
             second_result = run_python(PACKAGER, "--skill-root", str(SKILL_ROOT), "--output-dir", str(second))
             self.assertEqual(first_result.returncode, 0, first_result.stderr)
@@ -383,18 +384,35 @@ class SkillPackagerContractTests(unittest.TestCase):
                     (copied / "references/release-gates.md").unlink()
                 mutate(copied, outside)
                 output = temporary_root / "output"
-                output.mkdir()
                 result = run_python(PACKAGER, "--skill-root", str(copied), "--output-dir", str(output))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((output / "taiji-kylin-packaging.skill").exists())
 
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary)
-            artifact = output / "taiji-kylin-packaging.skill"
-            artifact.write_bytes(b"reserved")
+            output = Path(temporary) / "reserved-output"
+            output.mkdir()
             result = run_python(PACKAGER, "--skill-root", str(SKILL_ROOT), "--output-dir", str(output))
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(artifact.read_bytes(), b"reserved")
+            self.assertIn("output directory must not already exist", result.stderr)
+            self.assertEqual(list(output.iterdir()), [])
+
+    def test_packager_rejects_private_key_and_development_path_leaks(self) -> None:
+        mutations = {
+            "private-key": "\n-----BEGIN PRIVATE KEY-----\n",
+            "development-path": "\n/Users/example/private-worktree\n",
+        }
+        for name, leaked_text in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                temporary_root = Path(temporary)
+                copied = temporary_root / "taiji-kylin-packaging"
+                shutil.copytree(SKILL_ROOT, copied)
+                skill = copied / "SKILL.md"
+                skill.write_text(skill.read_text(encoding="utf-8") + leaked_text, encoding="utf-8")
+                output = temporary_root / "output"
+                result = run_python(PACKAGER, "--skill-root", str(copied), "--output-dir", str(output))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("sensitive content", result.stderr)
+                self.assertFalse((output / "taiji-kylin-packaging.skill").exists())
 
     def test_packager_rejects_output_inside_skill_source(self) -> None:
         output = SKILL_ROOT / "dist"

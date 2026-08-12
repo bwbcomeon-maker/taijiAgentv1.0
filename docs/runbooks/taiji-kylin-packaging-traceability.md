@@ -24,4 +24,4 @@
 
 ## 当前已知偏差
 
-生产主流程已经调用 direct `formal-build-tests/v2`；`00` 中旧 root-supervisor 嵌入实现仍作为历史兼容测试代码保留，不能被 Skill 或正式文档当作当前入口。若后续删除，必须单独建立迁移提交并重跑本矩阵中所有 formal 合同测试。
+生产主流程调用无特权 direct `formal-build-tests/v2`；旧 root-supervisor、sudo/bootstrap、临时 UID 和 NSS shim 已从正式测试实现及专属测试中移除。该收口不扩大威胁模型：持续恶意同 UID 写入者和主机级隔离仍不属于本轮 DoD-A。
