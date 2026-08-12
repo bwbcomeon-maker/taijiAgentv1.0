@@ -1,6 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Verify one policy-bound amd64 DEB before release.
 set -Eeuo pipefail
+PATH=/usr/bin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+unset OPENSSL_CONF OPENSSL_MODULES
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 SOURCE_TREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
@@ -10,6 +17,7 @@ TRUSTED_GIT="$SOURCE_TREE_ROOT/scripts/taiji-trusted-git"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
+FORMAL_BUILD_TEST_LOG="$OUTPUT_DIR/formal-build-tests.log"
 BUILD_MARKER_OVERRIDE="$(printenv TAIJI_BUILD_MARKER_PATH || true)"
 BUILD_MARKER="${BUILD_MARKER_OVERRIDE:-$OUTPUT_DIR/.build-success}"
 EXPECT_PUBLISHED_BUILD_MARKER="$(printenv TAIJI_EXPECT_PUBLISHED_BUILD_MARKER || printf 1)"
@@ -25,7 +33,7 @@ EXTRACTED_SOURCE_ROOT="$(printenv TAIJI_EXTRACTED_SOURCE_ROOT || true)"
 SOURCE_ARCHIVE=""
 SOURCE_INVENTORY=""
 SOURCE_INTEGRITY_HELPER="$SCRIPT_DIR/source-archive-integrity.py"
-SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+SOURCE_INTEGRITY_HELPER_SHA256="eaebadbe2f86d76d09f19ed210ad407e5926a242c46f53fb89e26253db8d8d7a"
 POLICY_ID=""
 POLICY_SHA256=""
 POLICY_MAINTAINER=""
@@ -42,6 +50,15 @@ info() { printf '[INFO] %s\n' "$*"; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 hex64() { [ "$(printf '%s' "$1" | wc -c | tr -d ' ')" = 64 ] && printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'; }
+sha256sum() {
+  if [ -x /usr/bin/sha256sum ]; then
+    /usr/bin/sha256sum "$@"
+  elif [ -x /usr/bin/shasum ]; then
+    /usr/bin/shasum -a 256 "$@"
+  else
+    fail "缺少受信 SHA256 工具（/usr/bin/sha256sum 或 /usr/bin/shasum）"
+  fi
+}
 
 validate_release_temp_root() {
   case "$RELEASE_TEMP_ROOT" in
@@ -178,7 +195,7 @@ check_source_inventory() {
   hex64 "$expected" || fail "源码成员清单 SHA256 格式非法"
   actual="$(sha256sum "$SOURCE_INVENTORY" | awk '{print $1}')"
   [ "$actual" = "$expected" ] || fail "源码成员清单 SHA256 不匹配"
-  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+  /usr/bin/python3 -I -B "$SOURCE_INTEGRITY_HELPER" verify \
     --archive "$SOURCE_ARCHIVE" \
     --inventory "$SOURCE_INVENTORY" \
     || fail "源码归档与 archive-derived 成员清单不一致"
@@ -188,11 +205,12 @@ check_extracted_source_inventory() {
   [ -n "$EXTRACTED_SOURCE_ROOT" ] || return 0
   [ -d "$EXTRACTED_SOURCE_ROOT" ] && [ ! -L "$EXTRACTED_SOURCE_ROOT" ] \
     || fail "最终门禁指定的解压源码树不安全"
-  python3 "$SOURCE_INTEGRITY_HELPER" verify \
+  /usr/bin/python3 -I -B "$SOURCE_INTEGRITY_HELPER" verify \
     --archive "$SOURCE_ARCHIVE" \
     --inventory "$SOURCE_INVENTORY" \
     --root "$EXTRACTED_SOURCE_ROOT" \
     --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
+    --allow-extra-prefix "hermes-local-lab/sources/hermes-webui/node_modules" \
     --allow-extra-prefix "apps/taiji-desktop/node_modules" \
     --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
     --allow-extra-prefix "runtime/package-build" \
@@ -200,7 +218,7 @@ check_extracted_source_inventory() {
     || fail "最终发布预检发现构建源码树已偏离原始归档"
 }
 check_formal_source_toolchain_contract() {
-  python3 - "$SOURCE_ARCHIVE" <<'PY' \
+  /usr/bin/python3 -I -B - "$SOURCE_ARCHIVE" <<'PY' \
     || fail "formal source toolchain contract 校验失败"
 import hashlib
 import re
@@ -346,7 +364,7 @@ if "import tomllib" in helper or "verify_installed" not in helper:
 
 source_integrity = text("source_integrity")
 compile(source_integrity, required_paths["source_integrity"], "exec")
-if hashlib.sha256(by_name[required_paths["source_integrity"]]).hexdigest() != "dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de":
+if hashlib.sha256(by_name[required_paths["source_integrity"]]).hexdigest() != "eaebadbe2f86d76d09f19ed210ad407e5926a242c46f53fb89e26253db8d8d7a":
     raise SystemExit("formal source integrity helper differs from the reviewed fixed implementation")
 
 exact_requirement = re.compile(
@@ -496,9 +514,9 @@ check_no_macos_metadata_or_stale_zip() {
 load_policy() {
   [ -f "$POLICY_FILE" ] && [ ! -L "$POLICY_FILE" ] || fail "缺少 canonical compatibility policy：$POLICY_FILE"
   [ -f "$POLICY_HELPER" ] && [ ! -L "$POLICY_HELPER" ] || fail "缺少 compatibility policy helper：$POLICY_HELPER"
-  POLICY_ID="$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-id)"
-  POLICY_SHA256="$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-sha256)"
-  POLICY_MAINTAINER="$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-maintainer)"
+  POLICY_ID="$(/usr/bin/python3 -I -B "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-id)"
+  POLICY_SHA256="$(/usr/bin/python3 -I -B "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-sha256)"
+  POLICY_MAINTAINER="$(/usr/bin/python3 -I -B "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-maintainer)"
   hex64 "$POLICY_SHA256" || fail "canonical policy SHA256 格式非法"
 }
 verify_deb_checksum_sidecar() {
@@ -507,7 +525,8 @@ verify_deb_checksum_sidecar() {
 }
 verify_marker_and_manifest() {
   local deb="$1"
-  python3 - "$BUILD_MARKER" "$MANIFEST_FILE" "$deb" "$SOURCE_ARCHIVE" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" "$POLICY_FILE" "$SOURCE_INVENTORY" <<'PY'
+  local -a formal_log_args
+  /usr/bin/python3 -I -B - "$BUILD_MARKER" "$MANIFEST_FILE" "$deb" "$SOURCE_ARCHIVE" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" "$POLICY_FILE" "$SOURCE_INVENTORY" <<'PY'
 import hashlib
 import json
 import re
@@ -546,7 +565,12 @@ acceptance_fields = {
     "acceptance_entrypoint_sha256",
     "installed_release_manifest_sha256",
 }
-required = {"version","source_archive","source_sha256","source_commit","source_inventory","source_inventory_sha256","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"} | toolchain_fields | acceptance_fields
+formal_build_test_fields = {
+    "formal_build_tests_status",
+    "formal_build_tests_log_basename",
+    "formal_build_tests_log_sha256",
+}
+required = {"version","source_archive","source_sha256","source_commit","source_inventory","source_inventory_sha256","deb","deb_sha256","checksum","built_at_utc","manifest","compatibility_policy_id","compatibility_policy_sha256","elf_abi_audit_sha256","icon_set_sha256","maintainer"} | toolchain_fields | acceptance_fields | formal_build_test_fields
 marker = {}
 for line in marker_path.read_text(encoding="utf-8").splitlines():
     if not line or "=" not in line:
@@ -576,6 +600,7 @@ expected = {
     "elf_abi_audit_basename": "elf-abi-audit.json",
     "elf_abi_audit_sha256": marker["elf_abi_audit_sha256"],
     "icon_set_sha256": marker["icon_set_sha256"],
+    **{field: marker[field] for field in formal_build_test_fields},
     **{field: marker[field] for field in toolchain_fields},
     **{field: marker[field] for field in acceptance_fields},
 }
@@ -596,6 +621,12 @@ if marker["compatibility_policy_id"] != policy_id or marker["compatibility_polic
     raise SystemExit("marker policy binding mismatch")
 if marker["maintainer"] != maintainer:
     raise SystemExit("marker maintainer binding mismatch")
+if marker["formal_build_tests_status"] != "pass":
+    raise SystemExit("formal build tests did not pass")
+if marker["formal_build_tests_log_basename"] != "formal-build-tests.log":
+    raise SystemExit("formal build test log basename is not canonical")
+if not re.fullmatch(r"[0-9a-f]{64}", marker["formal_build_tests_log_sha256"]):
+    raise SystemExit("formal build test log SHA256 is invalid")
 if not re.fullmatch(r"[0-9a-f]{40}", marker["source_commit"]):
     raise SystemExit("marker source_commit must be full SHA")
 if not re.fullmatch(r"[0-9a-f]{64}", marker["elf_abi_audit_sha256"]):
@@ -647,6 +678,18 @@ with tarfile.open(source_path, "r:gz") as archive:
     if len(payload) != member.size or hashlib.sha256(payload).hexdigest() != marker["python_lock_sha256"]:
         raise SystemExit("source archive uv.lock SHA256 differs from formal build identity")
 PY
+  formal_log_args=(
+    formal-build-test-log
+    --manifest "$MANIFEST_FILE"
+    --build-marker "$BUILD_MARKER"
+    --log "$FORMAL_BUILD_TEST_LOG"
+  )
+  if [ "$EXPECT_PUBLISHED_BUILD_MARKER" = 0 ]; then
+    formal_log_args+=(--pending-marker-parent "$(dirname "$EXTRACTED_SOURCE_ROOT")")
+  fi
+  /usr/bin/python3 -I -B "$REPO_ROOT/scripts/validate-taiji-release-evidence.py" \
+    "${formal_log_args[@]}" \
+    || fail "正式构建测试日志摘要或 strict v1 语义无效"
 }
 verify_deb_payload() {
   local deb="$1" payload_root abi embedded_policy abi_sha icon_sha256 marker_icon_sha256
@@ -661,16 +704,16 @@ verify_deb_payload() {
   abi_sha="$(sha256sum "$abi" | awk '{print $1}')"
   [ "$abi_sha" = "$(awk -F= '$1=="elf_abi_audit_sha256" {print $2}' "$BUILD_MARKER")" ] || { remove_release_temp_directory "$payload_root"; fail "DEB embedded ABI audit 与 marker 不一致"; }
   [ -f "$PAYLOAD_VERIFIER" ] && [ ! -L "$PAYLOAD_VERIFIER" ] || { remove_release_temp_directory "$payload_root"; fail "缺少可信 DEB payload verifier：$PAYLOAD_VERIFIER"; }
-  python3 "$PAYLOAD_VERIFIER" --root "$payload_root" >/dev/null || { remove_release_temp_directory "$payload_root"; fail "DEB payload contract 验证失败"; }
+  /usr/bin/python3 -I -B "$PAYLOAD_VERIFIER" --root "$payload_root" >/dev/null || { remove_release_temp_directory "$payload_root"; fail "DEB payload contract 验证失败"; }
   [ -f "$ICON_VALIDATOR" ] && [ ! -L "$ICON_VALIDATOR" ] || { remove_release_temp_directory "$payload_root"; fail "缺少可信图标校验器：$ICON_VALIDATOR"; }
-  icon_sha256="$(python3 "$ICON_VALIDATOR" \
+  icon_sha256="$(/usr/bin/python3 -I -B "$ICON_VALIDATOR" \
     --web-static "$payload_root/opt/taiji-agent/runtime/web/static" \
     --install-icons "$payload_root/usr/share/icons/hicolor" \
     --resource-icon "$payload_root/opt/taiji-agent/resources/icons/taiji-agent.png" \
     --print-digest)" || { remove_release_temp_directory "$payload_root"; fail "DEB 图标链验证失败"; }
   marker_icon_sha256="$(awk -F= '$1=="icon_set_sha256" {print $2}' "$BUILD_MARKER")"
   [ "$icon_sha256" = "$marker_icon_sha256" ] || { remove_release_temp_directory "$payload_root"; fail "DEB 实际图标摘要与 marker 不一致"; }
-  python3 - "$payload_root" "$MANIFEST_FILE" "$REPO_ROOT/packaging/linux/acceptance_tools_manifest.py" <<'PY' || { remove_release_temp_directory "$payload_root"; fail "DEB 工具链或安装态验收信任链与 manifest 不一致"; }
+  /usr/bin/python3 -I -B - "$payload_root" "$MANIFEST_FILE" "$REPO_ROOT/packaging/linux/acceptance_tools_manifest.py" <<'PY' || { remove_release_temp_directory "$payload_root"; fail "DEB 工具链或安装态验收信任链与 manifest 不一致"; }
 import hashlib
 import importlib.util
 import json
@@ -770,7 +813,7 @@ PY
 verify_package_output_allowlist() {
   local deb="$1" name
   name="$(basename -- "$deb")"
-  python3 - "$OUTPUT_DIR" "$name" "$EXPECT_PUBLISHED_BUILD_MARKER" <<'PY'
+  /usr/bin/python3 -I -B - "$OUTPUT_DIR" "$name" "$EXPECT_PUBLISHED_BUILD_MARKER" <<'PY'
 import os
 import stat
 import sys
@@ -780,7 +823,7 @@ name = sys.argv[2]
 published_marker = sys.argv[3]
 if published_marker not in {"0", "1"}:
     raise SystemExit("invalid published marker expectation")
-expected = {name, name + ".sha256", "taiji-package-manifest.json", "构建报告.txt"}
+expected = {name, name + ".sha256", "formal-build-tests.log", "taiji-package-manifest.json", "构建报告.txt"}
 if published_marker == "1":
     expected.add(".build-success")
 entries = {p.name: p for p in root.iterdir()}
@@ -885,8 +928,12 @@ check_delivery_artifacts() {
     *) fail "TAIJI_EXPECT_PUBLISHED_BUILD_MARKER 只允许 0/1" ;;
   esac
   load_policy
-  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] && [ -f "$BUILD_MARKER" ] && [ -f "$MANIFEST_FILE" ] && [ -f "$BUILD_REPORT" ] \
-    || fail "生成的安装包目录必须是真实目录且包含 marker/manifest/report"
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] \
+    && [ -f "$BUILD_MARKER" ] && [ ! -L "$BUILD_MARKER" ] \
+    && [ -f "$MANIFEST_FILE" ] && [ ! -L "$MANIFEST_FILE" ] \
+    && [ -f "$BUILD_REPORT" ] && [ ! -L "$BUILD_REPORT" ] \
+    && [ -f "$FORMAL_BUILD_TEST_LOG" ] && [ ! -L "$FORMAL_BUILD_TEST_LOG" ] \
+    || fail "生成的安装包目录必须是真实目录且包含 marker/manifest/report/formal test log"
   local count deb; count="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | wc -l | tr -d ' ')"; [ "$count" = 1 ] || fail "生成的安装包必须且只能有一个 amd64 DEB，当前数量：$count"; deb="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'taiji-agent_*_amd64.deb' | head -1)"
   verify_marker_and_manifest "$deb"; verify_deb_checksum_sidecar "$deb"; verify_package_output_allowlist "$deb"; verify_deb_payload "$deb"; verify_target_acceptance_toolchain; ok "单一 DEB、policy、manifest、ABI audit 和输出清单验证通过"
 }

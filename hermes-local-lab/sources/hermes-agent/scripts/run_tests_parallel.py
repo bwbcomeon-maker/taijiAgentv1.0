@@ -81,6 +81,267 @@ _DEFAULT_FILE_TIMEOUT_SECONDS = 600.0  # 10 minutes
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+_REQUIRE_NONEMPTY_EXPLICIT_FILES = False
+
+_FORMAL_COUNT_KEYS = (
+    "collected",
+    "deselected",
+    "executed",
+    "passed",
+    "failed",
+    "errors",
+    "skipped",
+)
+
+
+def _empty_formal_counts() -> Dict[str, int]:
+    return {key: 0 for key in _FORMAL_COUNT_KEYS}
+
+
+def _require_complete_formal_counts(counts: Dict[str, int]) -> None:
+    if set(counts) != set(_FORMAL_COUNT_KEYS):
+        raise RuntimeError("formal pytest count fields are not exact")
+    if any(
+        not isinstance(counts[key], int)
+        or isinstance(counts[key], bool)
+        or counts[key] < 0
+        for key in _FORMAL_COUNT_KEYS
+    ):
+        raise RuntimeError("formal pytest count is not a nonnegative integer")
+    if (
+        counts["collected"] <= 0
+        or counts["deselected"] != 0
+        or counts["executed"] != counts["collected"]
+        or counts["passed"] != counts["collected"]
+        or counts["failed"] != 0
+        or counts["errors"] != 0
+        or counts["skipped"] != 0
+    ):
+        raise RuntimeError("formal pytest target was not completely executed")
+
+
+class _FormalPytestCounter:
+    """Collect exact per-selector counts from one pytest session."""
+
+    def __init__(self, selectors: Tuple[str, ...], first_ordinal: int):
+        if not selectors or len(set(selectors)) != len(selectors):
+            raise ValueError("formal pytest selectors are not unique and nonempty")
+        if (
+            not isinstance(first_ordinal, int)
+            or isinstance(first_ordinal, bool)
+            or first_ordinal < 0
+        ):
+            raise ValueError("formal pytest first ordinal is invalid")
+        self.selectors = tuple(value.replace("\\", "/") for value in selectors)
+        self.first_ordinal = first_ordinal
+        self.counts = [_empty_formal_counts() for _unused in self.selectors]
+        self.started = set()
+        self.outcomes: Dict[str, Tuple[int, str]] = {}
+
+    def _owner(self, nodeid: str) -> int:
+        canonical = nodeid.replace("\\", "/")
+        matches = [
+            index
+            for index, selector in enumerate(self.selectors)
+            if canonical == selector or canonical.startswith(selector + "::")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "formal pytest item does not have exactly one selector owner: "
+                + canonical
+            )
+        return matches[0]
+
+    def _set_outcome(self, nodeid: str, outcome: str) -> None:
+        owner = self._owner(nodeid)
+        previous = self.outcomes.get(nodeid)
+        if previous is not None:
+            previous_owner, previous_outcome = previous
+            self.counts[previous_owner][previous_outcome] -= 1
+        self.counts[owner][outcome] += 1
+        self.outcomes[nodeid] = (owner, outcome)
+
+    def pytest_itemcollected(self, item) -> None:
+        self.counts[self._owner(item.nodeid)]["collected"] += 1
+
+    def pytest_deselected(self, items) -> None:
+        for item in items:
+            self.counts[self._owner(item.nodeid)]["deselected"] += 1
+
+    def pytest_runtest_logstart(self, nodeid, location) -> None:
+        del location
+        if nodeid in self.started:
+            raise RuntimeError("formal pytest item started more than once: " + nodeid)
+        self.started.add(nodeid)
+        self.counts[self._owner(nodeid)]["executed"] += 1
+
+    def pytest_runtest_logreport(self, report) -> None:
+        if report.skipped:
+            self._set_outcome(report.nodeid, "skipped")
+            return
+        if report.when in ("setup", "teardown") and report.failed:
+            self._set_outcome(report.nodeid, "errors")
+            return
+        if report.when != "call":
+            return
+        if hasattr(report, "wasxfail"):
+            self._set_outcome(report.nodeid, "failed")
+        elif report.passed:
+            self._set_outcome(report.nodeid, "passed")
+        elif report.failed:
+            self._set_outcome(report.nodeid, "failed")
+        else:
+            self._set_outcome(report.nodeid, "errors")
+
+    def validated_records(self) -> Tuple[Dict[str, int], ...]:
+        records = []
+        for index, raw_counts in enumerate(self.counts):
+            counts = dict(raw_counts)
+            _require_complete_formal_counts(counts)
+            record = {"ordinal": self.first_ordinal + index}
+            record.update(counts)
+            records.append(record)
+        return tuple(records)
+
+
+def _validate_formal_selectors(root: Path, selectors: Tuple[str, ...]) -> Tuple[str, ...]:
+    root = root.resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise RuntimeError("formal pytest root is not a canonical directory")
+    if not selectors or len(set(selectors)) != len(selectors):
+        raise RuntimeError("formal pytest selectors are not exact")
+    canonical = []
+    for selector in selectors:
+        if (
+            not isinstance(selector, str)
+            or not selector
+            or selector.startswith(("/", "\\"))
+            or any(character in selector for character in "\r\n\x00")
+        ):
+            raise RuntimeError("formal pytest selector is unsafe")
+        file_part = selector.split("::", 1)[0]
+        parts = Path(file_part).parts
+        if not parts or any(part in ("", ".", "..") for part in parts):
+            raise RuntimeError("formal pytest selector is not canonical")
+        candidate = (root / file_part).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError("formal pytest selector escaped its root") from exc
+        if not candidate.is_file() or candidate.is_symlink():
+            raise RuntimeError("formal pytest selector file is missing or unsafe")
+        canonical.append(selector.replace("\\", "/"))
+    return tuple(canonical)
+
+
+def _run_formal_pytest_session(
+    root: Path,
+    selectors: Tuple[str, ...],
+    first_ordinal: int,
+    pytest_module,
+) -> Tuple[Dict[str, int], ...]:
+    root = root.resolve()
+    selectors = _validate_formal_selectors(root, selectors)
+    counter = _FormalPytestCounter(selectors, first_ordinal)
+    arguments = [
+        *selectors,
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "pytest_asyncio.plugin",
+        "-p",
+        "pytest_timeout",
+    ]
+    previous = Path.cwd()
+    try:
+        os.chdir(root)
+        exit_code = pytest_module.main(arguments, plugins=[counter])
+    finally:
+        os.chdir(previous)
+    if int(exit_code) != 0:
+        raise RuntimeError("formal pytest session exited nonzero: {}".format(exit_code))
+    return counter.validated_records()
+
+
+def _write_formal_records(descriptor: int, records: Tuple[Dict[str, int], ...]) -> None:
+    for record in records:
+        payload = (json.dumps(record, separators=(",", ":")) + "\n").encode(
+            "ascii"
+        )
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("formal pytest result write was truncated")
+            offset += written
+
+
+def _formal_pytest_main(
+    root: Path,
+    selectors: Tuple[str, ...],
+    first_ordinal: int,
+    result_fd: int,
+) -> int:
+    if result_fd < 3:
+        raise RuntimeError("formal pytest result descriptor is unsafe")
+    os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    import pytest  # imported only after plugin autoload is disabled
+
+    records = _run_formal_pytest_session(
+        root,
+        selectors,
+        first_ordinal,
+        pytest,
+    )
+    _write_formal_records(result_fd, records)
+    return 0
+
+_FORMAL_PYTEST_BOOTSTRAP = """
+import runpy
+import sys
+
+site_packages = sys.argv[1]
+pytest_args = sys.argv[2:]
+sys.path.insert(0, site_packages)
+sys.argv = ["pytest", *pytest_args]
+runpy.run_module("pytest", run_name="__main__", alter_sys=True)
+"""
+
+
+def _pytest_command(pytest_args: List[str]) -> List[str]:
+    """Return the normal pytest argv or the builder's held-FD launcher.
+
+    The formal Kylin builder owns and continuously validates the executable
+    descriptor referenced by ``TAIJI_FORMAL_PYTHON_EXECUTABLE``.  Reusing that
+    exact launcher for collection and per-file workers prevents this runner
+    from silently falling back to a mutable venv pathname.
+    """
+
+    executable = os.environ.get("TAIJI_FORMAL_PYTHON_EXECUTABLE", "")
+    site_packages = os.environ.get("TAIJI_FORMAL_SITE_PACKAGES", "")
+    if not executable and not site_packages:
+        return [sys.executable, "-m", "pytest", *pytest_args]
+    if not executable or not site_packages:
+        raise RuntimeError("formal pytest launcher requires executable and site-packages")
+    if (
+        not os.path.isabs(executable)
+        or not os.path.isabs(site_packages)
+        or "\n" in executable
+        or "\r" in executable
+        or "\n" in site_packages
+        or "\r" in site_packages
+    ):
+        raise RuntimeError("formal pytest launcher paths must be safe absolute paths")
+    return [
+        executable,
+        "-I",
+        "-B",
+        "-c",
+        _FORMAL_PYTEST_BOOTSTRAP,
+        site_packages,
+        *pytest_args,
+    ]
 
 
 def _count_tests(
@@ -111,13 +372,12 @@ def _count_tests(
             if d.is_dir():
                 ignore_args.extend(["--ignore", str(d)])
 
-    cmd = [
-        sys.executable, "-m", "pytest",
+    cmd = _pytest_command([
         "--co", "-q",
         *ignore_args,
         *[str(f) for f in files],
         *pytest_passthrough,
-    ]
+    ])
     try:
         result = subprocess.run(
             cmd,
@@ -278,7 +538,7 @@ def _run_one_file(
     timeouts inside the subprocess; this outer timeout exists only to
     bound a pathologically slow or hung file as a whole.
     """
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    cmd = _pytest_command([str(file), *pytest_args])
     subproc_start = time.monotonic()
     proc = subprocess.Popen(
         cmd,
@@ -335,7 +595,7 @@ def _run_one_file(
         # dead processes are a no-op.
         _kill_tree(proc, pgid=pgid)
 
-    if rc == 5:
+    if rc == 5 and not _REQUIRE_NONEMPTY_EXPLICIT_FILES:
         # No tests collected — every test in the file was filtered out.
         # Treat as a pass; surface info in a slightly distinct status
         # so the operator can spot it.
@@ -644,6 +904,37 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-duration-cache",
+        action="store_true",
+        help=(
+            "Do not read or write test_durations.json for this run. "
+            "Formal package builds use this to keep the extracted source tree immutable."
+        ),
+    )
+    parser.add_argument(
+        "--require-nonempty-explicit-files",
+        action="store_true",
+        help=(
+            "Fail unless every explicitly named test file collects at least one test. "
+            "Formal package builds use this to prevent empty-file false passes."
+        ),
+    )
+    parser.add_argument(
+        "--formal-results-fd",
+        type=int,
+        help="Write exact formal per-target counts to this dedicated descriptor.",
+    )
+    parser.add_argument(
+        "--formal-first-ordinal",
+        type=int,
+        help="Global registry ordinal assigned to the first formal selector.",
+    )
+    parser.add_argument(
+        "--formal-test-root",
+        type=Path,
+        help="Controlled source root used to resolve exact formal selectors.",
+    )
+    parser.add_argument(
         "paths_positional",
         nargs="*",
         metavar="PATH",
@@ -664,6 +955,36 @@ def main() -> int:
     else:
         our_args, pytest_passthrough = argv, []
     args = parser.parse_args(our_args)
+    global _REQUIRE_NONEMPTY_EXPLICIT_FILES  # noqa: PLW0603 -- formal mode switch
+    _REQUIRE_NONEMPTY_EXPLICIT_FILES = args.require_nonempty_explicit_files
+
+    formal_values = (
+        args.formal_results_fd,
+        args.formal_first_ordinal,
+        args.formal_test_root,
+    )
+    if any(value is not None for value in formal_values):
+        if (
+            any(value is None for value in formal_values)
+            or not args.no_duration_cache
+            or not args.require_nonempty_explicit_files
+            or args.slice is not None
+            or args.include_integration
+            or pytest_passthrough
+            or not args.paths_positional
+        ):
+            print("formal pytest mode arguments are not exact", file=sys.stderr)
+            return 2
+        try:
+            return _formal_pytest_main(
+                args.formal_test_root,
+                tuple(args.paths_positional),
+                args.formal_first_ordinal,
+                args.formal_results_fd,
+            )
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            print("formal pytest mode failed: {}".format(exc), file=sys.stderr)
+            return 1
 
     # Parse --slice (or HERMES_TEST_SLICE) early so we can exit on bad input
     # before doing any expensive discovery.
@@ -705,10 +1026,41 @@ def main() -> int:
     test_counts = _count_tests(files, repo_root, pytest_passthrough)
     total_tests = sum(test_counts.values())
 
+    if args.require_nonempty_explicit_files:
+        if not args.paths_positional:
+            print(
+                "--require-nonempty-explicit-files requires explicit test file paths",
+                file=sys.stderr,
+            )
+            return 1
+        requested = {repo_root / value for value in args.paths_positional}
+        discovered = set(files)
+        missing = sorted(requested - discovered, key=str)
+        empty = sorted(
+            (file for file in files if test_counts.get(file, 0) <= 0),
+            key=str,
+        )
+        if missing or empty:
+            for file in missing:
+                print(
+                    "Formal test file was not discovered: {}".format(
+                        _format_file(file, repo_root)
+                    ),
+                    file=sys.stderr,
+                )
+            for file in empty:
+                print(
+                    "Formal test file collected zero tests: {}".format(
+                        _format_file(file, repo_root)
+                    ),
+                    file=sys.stderr,
+                )
+            return 1
+
     # Apply slicing if requested — distribute files across CI jobs by
     # estimated duration so no one job gets all the slow files.
     if slice_index is not None:
-        durations = _load_durations(repo_root)
+        durations = {} if args.no_duration_cache else _load_durations(repo_root)
         files = _slice_files(files, slice_index, slice_count, durations, repo_root)
         # Recount after slicing.
         test_counts = {f: test_counts[f] for f in files if f in test_counts}
@@ -716,7 +1068,7 @@ def main() -> int:
 
     print(
         f"Discovered {len(files)} test files ({total_tests} tests) under "
-        f"{[str(r.relative_to(repo_root)) if r.is_relative_to(repo_root) else str(r) for r in roots]}; "
+        f"{[_format_file(r, repo_root) for r in roots]}; "
         f"running with -j {args.jobs}",
         flush=True,
     )
@@ -800,7 +1152,7 @@ def main() -> int:
     # partial test_durations.json; a CI merge step joins them later.
     # Locally, _save_durations merges with any existing cache so entries
     # from previous runs aren't lost.
-    if file_times:
+    if file_times and not args.no_duration_cache:
         _save_durations(file_times, repo_root)
         print(f"  Durations cached to {_DURATIONS_FILE} ({len(file_times)} files)")
 

@@ -112,7 +112,10 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
 
         self.assertIn("open_fixed_tool_archive", builder)
         self.assertIn('FIXED_TOOL_ARCHIVE_FD_PATH="/proc/self/fd/9"', builder)
-        self.assertIn('sha256sum "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
+        self.assertIn(
+            'verify_sealed_snapshot "$FIXED_TOOL_ARCHIVE_FD_PATH"',
+            builder,
+        )
         self.assertIn('python3 - "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
         self.assertIn('-xzf "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
         self.assertIn('-xJf "$FIXED_TOOL_ARCHIVE_FD_PATH"', builder)
@@ -124,6 +127,147 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             builder,
         )
         self.assertNotIn('tar -xzf "$SRC_ARCHIVE"', builder)
+        for tool in ("uv", "python", "node"):
+            self.assertIn(
+                "retain_fixed_tool_archive_snapshot {}".format(tool),
+                builder,
+            )
+        deb_builder = DEB_BUILDER.read_text(encoding="utf-8")
+        self.assertIn("adopt_sealed_build_inputs", deb_builder)
+        self.assertLess(
+            deb_builder.rindex("\nadopt_sealed_build_inputs\n"),
+            deb_builder.rindex("\nvalidate_strict_toolchain_contract\n"),
+        )
+        for required in (
+            "fcntl.F_GET_SEALS",
+            "fcntl.F_SEAL_WRITE",
+            "fcntl.F_SEAL_GROW",
+            "fcntl.F_SEAL_SHRINK",
+            "fcntl.F_SEAL_SEAL",
+        ):
+            self.assertIn(required, deb_builder)
+        self.assertIn("stat.S_IMODE(metadata.st_mode)", deb_builder)
+        self.assertIn('expected_mode_text not in ("0400", "0500")', deb_builder)
+        self.assertIn("!= expected_mode", deb_builder)
+        adopt_start = deb_builder.index("adopt_sealed_build_inputs() {")
+        adopt_end = deb_builder.index("\n}\n\nvalidate_source_archive_integrity", adopt_start)
+        adopt_function = deb_builder[adopt_start:adopt_end]
+        python_start = adopt_function.index("<<'PY'\n") + len("<<'PY'\n")
+        python_end = adopt_function.index("\nPY", python_start)
+        ast.parse(
+            adopt_function[python_start:python_end],
+            filename="build-deb-sealed-inputs.py",
+            feature_version=(3, 8),
+        )
+
+    def test_fixed_tool_archives_use_one_kernel_sealed_snapshot(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        source_start = builder.index("sealed_snapshot_python_source() {")
+        heredoc_start = builder.index("<<'PY'\n", source_start) + len("<<'PY'\n")
+        heredoc_end = builder.index("\nPY\n", heredoc_start)
+        snapshot_python = builder[heredoc_start:heredoc_end]
+        ast.parse(
+            snapshot_python,
+            filename="sealed-snapshot-embedded.py",
+            feature_version=(3, 8),
+        )
+        self.assertIn(
+            'required_os = ("memfd_create", "MFD_ALLOW_SEALING", "MFD_CLOEXEC")',
+            snapshot_python,
+        )
+        self.assertIn("os.MFD_CLOEXEC", snapshot_python)
+
+        for required in (
+            "os.memfd_create",
+            "os.MFD_ALLOW_SEALING",
+            "fcntl.F_ADD_SEALS",
+            "fcntl.F_GET_SEALS",
+            "fcntl.F_SEAL_WRITE",
+            "fcntl.F_SEAL_GROW",
+            "fcntl.F_SEAL_SHRINK",
+            "fcntl.F_SEAL_SEAL",
+        ):
+            self.assertIn(required, snapshot_python)
+
+        open_start = builder.index("open_fixed_tool_archive() {")
+        open_end = builder.index("\n}\n\nrequire_open_fixed_tool_archive_unchanged", open_start)
+        open_function = builder[open_start:open_end]
+        self.assertIn("sealed_snapshot_python_source", open_function)
+        self.assertIn("adopt_sealed_snapshot", open_function)
+        self.assertIn('FIXED_TOOL_ARCHIVE_FD_PATH="$adopted_path"', builder)
+        self.assertNotIn('exec 9<"$archive_path"', open_function)
+        self.assertIn('"$snapshot_python" create', builder)
+
+        with tempfile.TemporaryDirectory(prefix="taiji-unsealed-snapshot-") as temp:
+            candidate = Path(temp) / "candidate.tar.gz"
+            candidate.write_bytes(b"ordinary mutable file")
+            expected = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    snapshot_python,
+                    "verify",
+                    str(candidate),
+                    expected,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sealed", result.stderr.lower())
+        python38_gate = (ROOT / "tests/python38_linux_packaging_gate.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("extract_sealed_snapshot_python", python38_gate)
+        self.assertIn("exercise_sealed_snapshot_python(temp_root)", python38_gate)
+
+    def test_candidate_build_uses_sealed_node_and_npm_before_any_build_argv(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        deb_builder = DEB_BUILDER.read_text(encoding="utf-8")
+        main = builder[builder.index("main() {") :]
+        build_start = builder.index("build_runtime_and_deb() {")
+        build_end = builder.index("\n}\n\ncollect_artifacts", build_start)
+        build = builder[build_start:build_end]
+
+        self.assertLess(
+            main.index("seal_build_node_runtime"),
+            main.index("build_runtime_and_deb"),
+        )
+        for required in (
+            "BUILD_NODE_HELD_PATH",
+            "BUILD_NPM_CLI_HELD_PATH",
+            "run_build_node_script",
+            "run_build_npm",
+        ):
+            self.assertIn(required, builder)
+        self.assertIn("run_build_npm", build)
+        self.assertIn("run_build_node", build)
+        self.assertNotIn("\n  npm --version", build)
+        self.assertNotIn("\n  node scripts/", build)
+        self.assertIn(
+            'TAIJI_PACKAGED_NODE_EXECUTABLE="$BUILD_NODE_HELD_PATH"',
+            build,
+        )
+
+        self.assertIn(
+            'PACKAGED_NODE_EXECUTABLE="${TAIJI_PACKAGED_NODE_EXECUTABLE:-}"',
+            deb_builder,
+        )
+        validation_start = deb_builder.index("validate_strict_toolchain_contract() {")
+        validation_end = deb_builder.index("\n}\n\nvalidate_locked_python_environment", validation_start)
+        validation = deb_builder[validation_start:validation_end]
+        self.assertLess(
+            validation.index('sha256sum "$PACKAGED_NODE_EXECUTABLE"'),
+            validation.index('"$PACKAGED_NODE_EXECUTABLE" --version'),
+        )
+        self.assertIn(
+            '"$PACKAGED_NODE_EXECUTABLE" "$DESKTOP_JS_STAGER"',
+            deb_builder,
+        )
 
     def test_success_marker_is_atomically_published_only_after_the_final_gate(self):
         builder = BUILDER.read_text(encoding="utf-8")
@@ -144,7 +288,27 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertNotIn('mv -- "$PENDING_BUILD_MARKER" "$BUILD_MARKER"', builder)
         self.assertIn('os.link(source, destination, follow_symlinks=False)', builder)
         self.assertIn('os.unlink(source)', builder)
-        self.assertIn('rm -f -- "$PENDING_BUILD_MARKER"', builder)
+        self.assertNotIn('rm -f -- "$PENDING_BUILD_MARKER"', builder)
+
+    def test_candidate_deb_and_sidecar_are_no_clobber_held_fd_outputs(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        collect_start = builder.index("collect_artifacts() {")
+        collect_end = builder.index("\n}\n\nvalidate_formal_test_python_identity", collect_start)
+        collect = builder[collect_start:collect_end]
+        require_start = builder.index("candidate_deb_identity_matches() {")
+        require_end = builder.index("\n}\n", require_start)
+        require = builder[require_start:require_end]
+        main = builder[builder.index("main() {") :]
+
+        self.assertNotIn("rm -f", collect)
+        self.assertNotIn("cp -f", collect)
+        self.assertNotIn('> "$OUTPUT_DIR/$deb_name.sha256"', collect)
+        self.assertIn("set -o noclobber", collect)
+        self.assertIn("CANDIDATE_DEB_FD", collect)
+        self.assertIn("CANDIDATE_DEB_SIDECAR_FD", collect)
+        self.assertIn("held_file_identity_and_sha256", require)
+        self.assertIn("CANDIDATE_DEB_SIDECAR_EXPECTED_SHA256", require)
+        self.assertGreaterEqual(builder.count("require_candidate_deb_fixed"), 12)
 
     def test_success_marker_publication_never_overwrites_an_existing_marker(self):
         builder = BUILDER.read_text(encoding="utf-8")
@@ -163,7 +327,14 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
                         'BUILD_MARKER="$OUTPUT_DIR/.build-success"',
                         'PENDING_BUILD_MARKER="$OUTPUT_DIR/.build-success.pending.$$"',
                         'PENDING_BUILD_MARKER_SHA256=""',
+                        'PUBLISHED_BUILD_MARKER_IDENTITY=""',
+                        'PUBLISHED_BUILD_MARKER_SHA256=""',
+                        'PUBLISHED_BUILD_MARKER_POISON="$OUTPUT_DIR/.build-success.poisoned.$$"',
                         'fail() { printf "FAIL:%s\\n" "$*" >&2; exit 23; }',
+                        'require_candidate_deb_fixed() { :; }',
+                        'require_pending_build_marker_identity() { :; }',
+                        'close_pending_build_marker_fd() { :; }',
+                        'require_published_build_marker_identity() { :; }',
                         publish_function,
                         'printf "candidate\\n" > "$PENDING_BUILD_MARKER"',
                         'PENDING_BUILD_MARKER_SHA256="$(sha256sum "$PENDING_BUILD_MARKER" | awk \'{print $1}\')"',
@@ -211,11 +382,84 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             self.assertEqual(blocked.returncode, 23, blocked.stdout + blocked.stderr)
             self.assertFalse((tampered / ".build-success").exists())
 
+    def test_success_marker_publication_detects_fsync_path_replacement(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("publish_build_success_marker() {")
+        function_end = builder.index(
+            "\nstage_pending_build_marker_for_publication() {", function_start
+        )
+        publish_function = builder[function_start:function_end]
+        python_start = publish_function.index("import hashlib\n")
+        python_end = publish_function.index("\nPY\n", python_start)
+        embedded_python = publish_function[python_start:python_end]
+
+        with tempfile.TemporaryDirectory(prefix="taiji-build-marker-swap-") as temp_dir:
+            root = Path(temp_dir)
+            source = root / ".build-success.pending"
+            destination = root / ".build-success"
+            legitimate = root / "legitimate-marker"
+            poison = root / ".build-success.poisoned"
+            source.write_text("candidate\n", encoding="utf-8")
+            expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            embedded_uses_poison = "poison_path" in embedded_python
+            wrapper = root / "replace-marker-on-fsync.py"
+            wrapper.write_text(
+                "\n".join(
+                    (
+                        "import os",
+                        "import sys",
+                        "source, destination, expected_sha256, poison, legitimate = sys.argv[1:]",
+                        "real_fsync = os.fsync",
+                        "swapped = False",
+                        "def replacing_fsync(descriptor):",
+                        "    global swapped",
+                        "    if not swapped:",
+                        "        swapped = True",
+                        "        os.replace(destination, legitimate)",
+                        "        with open(destination, 'w', encoding='utf-8') as stream:",
+                        "            stream.write('FOREIGN_REPLACEMENT\\n')",
+                        "    return real_fsync(descriptor)",
+                        "os.fsync = replacing_fsync",
+                        "sys.argv = ['publish-marker', source, destination, expected_sha256] + "
+                        "([poison] if {!r} else [])".format(embedded_uses_poison),
+                        "exec(compile({!r}, 'publish-marker-embedded.py', 'exec'))".format(
+                            embedded_python
+                        ),
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(wrapper),
+                    str(source),
+                    str(destination),
+                    expected_sha256,
+                    str(poison),
+                    str(legitimate),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "FOREIGN_REPLACEMENT\n")
+            self.assertEqual(legitimate.read_text(encoding="utf-8"), "candidate\n")
+            self.assertTrue(poison.is_file())
+
     def test_success_marker_staging_never_overwrites_an_existing_pending_file(self):
         builder = BUILDER.read_text(encoding="utf-8")
         start = builder.index("stage_pending_build_marker_for_publication() {")
         end = builder.index("\nrequire_candidate_deb_fixed() {", start)
         stage_function = builder[start:end]
+        stage_function = stage_function.replace(
+            'exec {PENDING_BUILD_MARKER_FD}< "$PENDING_BUILD_MARKER"',
+            'PENDING_BUILD_MARKER_FD=9\n  exec 9< "$PENDING_BUILD_MARKER"',
+        )
         self.assertNotIn('mv -- "$PENDING_BUILD_MARKER" "$staged_marker"', stage_function)
         self.assertIn("os.O_EXCL", stage_function)
         with tempfile.TemporaryDirectory(prefix="taiji-stage-marker-") as temp_dir:
@@ -229,10 +473,16 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
                         'BUILD_ROOT="$1/build"',
                         'OUTPUT_DIR="$1/output"',
                         'mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"',
+                        'PUBLISHED_BUILD_MARKER_POISON="$OUTPUT_DIR/.build-success.poisoned.$$"',
                         'PENDING_BUILD_MARKER="$BUILD_ROOT/.build-success.pending"',
                         'printf "candidate\\n" > "$PENDING_BUILD_MARKER"',
                         'PENDING_BUILD_MARKER_SHA256="$(sha256sum "$PENDING_BUILD_MARKER" | awk \'{print $1}\')"',
                         'fail() { printf "FAIL:%s\\n" "$*" >&2; exit 23; }',
+                        'require_candidate_deb_fixed() { :; }',
+                        'require_pending_build_marker_identity() { :; }',
+                        'close_pending_build_marker_fd() { :; }',
+                        'poison_pending_build_marker() { :; }',
+                        'held_file_identity_and_sha256() { printf "fixture\\t%s\\n" "$(shasum -a 256 "$PENDING_BUILD_MARKER" | awk \'{print $1}\')"; }',
                         'stat() { printf "1\\n"; }',
                         stage_function,
                         'if [ "${2:-}" = occupied ]; then printf "existing\\n" > "$OUTPUT_DIR/.build-success.pending.$$"; fi',
@@ -267,11 +517,96 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
-            self.assertFalse((free / "build/.build-success.pending").exists())
+            self.assertEqual(
+                (free / "build/.build-success.pending").read_text(), "candidate\n"
+            )
             self.assertEqual(
                 next((free / "output").glob(".build-success.pending.*")).read_text(),
                 "candidate\n",
             )
+
+    def test_pending_marker_staging_never_deletes_a_replacement_on_error(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("stage_pending_build_marker_for_publication() {")
+        function_end = builder.index("\nrequire_candidate_deb_fixed() {", function_start)
+        stage_function = builder[function_start:function_end]
+        python_start = stage_function.index("import hashlib\n")
+        python_end = stage_function.index("\nPY\n", python_start)
+        embedded_python = stage_function[python_start:python_end]
+
+        with tempfile.TemporaryDirectory(prefix="taiji-stage-marker-swap-") as temp_dir:
+            root = Path(temp_dir)
+            source = root / ".build-success.pending.private"
+            destination = root / ".build-success.pending.public"
+            legitimate = root / "legitimate-staged-marker"
+            poison = root / ".build-success.poisoned"
+            source.write_text("candidate\n", encoding="utf-8")
+            expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            embedded_uses_poison = "poison_path" in embedded_python
+            unsafe_cleanup_present = "os.unlink(destination)" in embedded_python
+            wrapper = root / "replace-staged-marker-on-error.py"
+            wrapper.write_text(
+                "\n".join(
+                    (
+                        "import os",
+                        "import sys",
+                        "source, destination, expected_sha256, poison, legitimate = sys.argv[1:]",
+                        "real_fsync = os.fsync",
+                        "real_lstat = os.lstat",
+                        "failed = False",
+                        "swapped = False",
+                        "def install_replacement():",
+                        "    global swapped",
+                        "    if not swapped:",
+                        "        os.replace(destination, legitimate)",
+                        "        with open(destination, 'w', encoding='utf-8') as stream:",
+                        "            stream.write('FOREIGN_REPLACEMENT\\n')",
+                        "        swapped = True",
+                        "def failing_fsync(descriptor):",
+                        "    global failed",
+                        "    if not failed:",
+                        "        failed = True",
+                        "        if not {!r}:".format(unsafe_cleanup_present),
+                        "            install_replacement()",
+                        "        raise OSError('injected staging fsync failure')",
+                        "    return real_fsync(descriptor)",
+                        "def replacing_lstat(path):",
+                        "    if failed and not swapped and os.fspath(path) == destination:",
+                        "        opened = real_lstat(destination)",
+                        "        install_replacement()",
+                        "        return opened",
+                        "    return real_lstat(path)",
+                        "os.fsync = failing_fsync",
+                        "os.lstat = replacing_lstat",
+                        "sys.argv = ['stage-marker', source, destination, expected_sha256] + "
+                        "([poison] if {!r} else [])".format(embedded_uses_poison),
+                        "exec(compile({!r}, 'stage-marker-embedded.py', 'exec'))".format(
+                            embedded_python
+                        ),
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(wrapper),
+                    str(source),
+                    str(destination),
+                    expected_sha256,
+                    str(poison),
+                    str(legitimate),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "FOREIGN_REPLACEMENT\n")
+            self.assertEqual(legitimate.read_text(encoding="utf-8"), "candidate\n")
+            self.assertTrue(poison.is_file())
 
     def test_formal_builder_rejects_unlocked_mode_before_creating_build_state(self):
         with tempfile.TemporaryDirectory(prefix="taiji-formal-entry-") as tmp:
@@ -678,6 +1013,7 @@ PINNED_UV_VERSION=0.12.2
 PINNED_UV_ARCHIVE_SHA256={uv_archive_sha!r}
 PINNED_UV_EXECUTABLE_SHA256={uv_sha!r}
 PACKAGED_NODE_ROOT={str(node_root)!r}
+PACKAGED_NODE_EXECUTABLE={str(node_bin)!r}
 PACKAGED_NODE_VERSION=22.23.1
 PACKAGED_NODE_ARCHIVE_SHA256={node_archive_sha!r}
 PINNED_NODE_EXECUTABLE_SHA256={node_sha!r}
@@ -692,6 +1028,7 @@ PINNED_PYTHON_ARCHIVE_SHA256={hashlib.sha256(python_archive.read_bytes()).hexdig
 PINNED_PYTHON_VERSION=3.11.15
 PINNED_PYTHON_EXECUTABLE_SHA256={pinned_python_sha!r}
 EXPECTED_PYTHON_VERSION=3.11.15
+EXPECTED_PYTHON_EXECUTABLE={str(python_bin)!r}
 EXPECTED_PYTHON_EXECUTABLE_SHA256={pinned_python_sha!r}
 {function_source}
 validate_strict_toolchain_contract

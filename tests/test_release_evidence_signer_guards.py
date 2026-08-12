@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import ast
 import json
 import os
@@ -72,7 +74,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
 
     def run_signer(self, private_key: Path | None = None):
         return subprocess.run(
-            ["bash", str(SIGNER), str(self.evidence), str(private_key or self.private_key)],
+            ["/bin/bash", "-p", str(SIGNER), str(self.evidence), str(private_key or self.private_key)],
             cwd=ROOT,
             text=True,
             stdout=subprocess.PIPE,
@@ -186,7 +188,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         )
 
         result = subprocess.run(
-            ["bash", str(SIGNER), str(self.evidence), str(self.private_key)],
+            ["/bin/bash", "-p", str(SIGNER), str(self.evidence), str(self.private_key)],
             cwd=ROOT,
             text=True,
             stdout=subprocess.PIPE,
@@ -323,7 +325,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
     def test_publication_snapshot_rechecks_trusted_delivery_root_identity(self) -> None:
         source = SIGNER.read_text(encoding="utf-8")
         start = source.index('if [ "$MODE" = "publication" ]; then')
-        end = source.index('\n  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"', start)
+        end = source.index('\n  /usr/bin/python3 -I -B - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"', start)
         snapshot = source[start:end]
 
         self.assertIn("def validate_publication_delivery_root(", snapshot)
@@ -363,7 +365,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         publication_start = source.index('if [ "$MODE" = "publication" ]; then')
         heredoc_start = source.index("import os\n", publication_start)
         heredoc_end = source.index(
-            '\nPY\n\n  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"',
+            '\nPY\n\n  /usr/bin/python3 -I -B - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"',
             heredoc_start,
         )
 
@@ -435,7 +437,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
                     purpose="publication",
                 )
                 result = subprocess.run(
-                    ["bash", str(SIGNER), argument, str(self.private_key)],
+                    ["/bin/bash", "-p", str(SIGNER), argument, str(self.private_key)],
                     cwd=cwd,
                     text=True,
                     stdout=subprocess.PIPE,
@@ -450,7 +452,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
     def test_publication_snapshot_keeps_swap_and_escape_guards(self) -> None:
         source = SIGNER.read_text(encoding="utf-8")
         start = source.index('if [ "$MODE" = "publication" ]; then')
-        end = source.index('\n  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"', start)
+        end = source.index('\n  /usr/bin/python3 -I -B - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery"', start)
         snapshot = source[start:end]
 
         self.assertIn('getattr(os, "O_NOFOLLOW", 0)', snapshot)
@@ -464,7 +466,7 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
     ) -> None:
         source = SIGNER.read_text(encoding="utf-8")
         start = source.index('if [ "$MODE" = "certification" ]; then')
-        end = source.index('\n  python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE"', start)
+        end = source.index('\n  /usr/bin/python3 -I -B - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE"', start)
         snapshot = source[start:end]
         copy_start = snapshot.index("def copy_file(")
         copy_end = snapshot.index("\ndef copy_tree(", copy_start)

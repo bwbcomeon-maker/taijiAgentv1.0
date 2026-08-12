@@ -4,6 +4,7 @@ import hashlib
 import io
 import importlib.util
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -14,8 +15,10 @@ import unittest
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from tests.github_ci_v2_fixture import write_github_ci_v2_bundle
+from tests.test_formal_build_test_evidence_contract import canonical_formal_v2_log
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +54,27 @@ def acceptance_identity() -> dict[str, str]:
         "acceptance_tools_manifest_sha256": "3" * 64,
         "acceptance_entrypoint_sha256": "4" * 64,
         "installed_release_manifest_sha256": "5" * 64,
+    }
+
+
+def formal_build_test_log(source_commit: str) -> bytes:
+    identity = toolchain_identity()
+    return canonical_formal_v2_log(
+        source_commit,
+        identity["python_version"],
+        identity["python_executable_sha256"],
+        identity["node_version"],
+        identity["node_executable_sha256"],
+        "10.9.8",
+        "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    )
+
+
+def formal_build_test_identity(path: Path) -> dict[str, str]:
+    return {
+        "formal_build_tests_status": "pass",
+        "formal_build_tests_log_basename": "formal-build-tests.log",
+        "formal_build_tests_log_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }
 
 
@@ -117,6 +141,8 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.package_dir.mkdir(parents=True)
         self.deb = self.package_dir / "taiji-agent_1.0.0_amd64.deb"
         self.deb.write_bytes(b"deb-v3")
+        self.formal_build_test_log = self.package_dir / "formal-build-tests.log"
+        self.formal_build_test_log.write_bytes(formal_build_test_log(self.commit))
         self.manifest = self.package_dir / "taiji-package-manifest.json"
         self.write_manifest()
         self.write_delivery_identity_fixture()
@@ -142,6 +168,8 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "deb_sha256": self.sha256(self.deb),
             "compatibility_policy_id": self.policy_id,
             "compatibility_policy_sha256": self.policy_sha256,
+            "upgrade_data_contract_id": "taiji-upgrade-data-contract-v1",
+            "upgrade_data_contract_sha256": "6" * 64,
             "elf_abi_audit_basename": "elf-abi-audit.json",
             "elf_abi_audit_sha256": "e" * 64,
             "icon_set_sha256": "1" * 64,
@@ -151,6 +179,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "built_at_utc": "2026-08-05T00:00:00Z",
             **toolchain_identity(),
             **acceptance_identity(),
+            **formal_build_test_identity(self.formal_build_test_log),
         }
         if hasattr(self, "source_inventory"):
             manifest.update(
@@ -215,6 +244,12 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"icon_set_sha256={'1' * 64}",
                     *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
                     *(f"{key}={value}" for key, value in sorted(acceptance_identity().items())),
+                    *(
+                        f"{key}={value}"
+                        for key, value in sorted(
+                            formal_build_test_identity(self.formal_build_test_log).items()
+                        )
+                    ),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )
@@ -447,6 +482,119 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         result = self.run_cli()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("release-evidence-pre-sign-valid", result.stdout)
+
+    def test_v3_build_binding_rejects_delivery_root_swap_after_snapshot(self):
+        replica = self.root / "delivery-replica"
+        displaced = self.root / "delivery-displaced"
+        shutil.copytree(self.delivery, replica)
+        capture = self.validator._delivery_inventory_snapshot
+
+        def capture_then_swap(delivery_dir):
+            snapshot = capture(delivery_dir)
+            self.delivery.rename(displaced)
+            replica.rename(self.delivery)
+            return snapshot
+
+        with mock.patch.object(
+            self.validator,
+            "_delivery_inventory_snapshot",
+            side_effect=capture_then_swap,
+        ):
+            with self.assertRaisesRegex(self.validator.EvidenceError, "快照.*变化"):
+                self.validator.validate_build_binding(self.args())
+
+    def test_v3_build_binding_rejects_same_inode_control_payload_rewrite(self):
+        capture = self.validator._delivery_inventory_snapshot
+        for target in (self.build_marker, self.formal_build_test_log):
+            with self.subTest(target=target.name):
+                original = target.read_bytes()
+                inode = target.stat().st_ino
+
+                def capture_then_rewrite(delivery_dir, *, _target=target, _original=original):
+                    snapshot = capture(delivery_dir)
+                    replacement = bytes([_original[0] ^ 1]) + _original[1:]
+                    _target.write_bytes(replacement)
+                    self.assertEqual(_target.stat().st_ino, inode)
+                    return snapshot
+
+                with mock.patch.object(
+                    self.validator,
+                    "_delivery_inventory_snapshot",
+                    side_effect=capture_then_rewrite,
+                ):
+                    with self.assertRaisesRegex(
+                        self.validator.EvidenceError,
+                        "快照.*(?:身份|内容|变化)",
+                    ):
+                        self.validator.validate_build_binding(self.args())
+                target.write_bytes(original)
+
+    def test_v3_build_binding_rejects_new_member_after_snapshot(self):
+        capture = self.validator._delivery_inventory_snapshot
+
+        def capture_then_add_member(delivery_dir):
+            snapshot = capture(delivery_dir)
+            (self.package_dir / "unexpected-after-snapshot.txt").write_text(
+                "foreign\n",
+                encoding="utf-8",
+            )
+            return snapshot
+
+        with mock.patch.object(
+            self.validator,
+            "_delivery_inventory_snapshot",
+            side_effect=capture_then_add_member,
+        ):
+            with self.assertRaisesRegex(self.validator.EvidenceError, "快照.*(?:目录项|变化)"):
+                self.validator.validate_build_binding(self.args())
+
+    def test_inventory_helper_ignores_hostile_python_environment(self):
+        hostile = self.root / "hostile-python"
+        hostile.mkdir()
+        sentinel = self.root / "sitecustomize-executed"
+        (hostile / "sitecustomize.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        actual_run = subprocess.run
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOME": str(hostile),
+                "PYTHONPATH": str(hostile),
+                "PYTHONHOME": str(hostile / "fake-home"),
+                "BASH_ENV": str(hostile / "bash-env"),
+            },
+            clear=False,
+        ), mock.patch.object(
+            self.validator.subprocess,
+            "run",
+            wraps=actual_run,
+        ) as run:
+            digest = self.validator.delivery_inventory_sha256(self.delivery)
+
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertFalse(sentinel.exists())
+        helper_calls = [
+            call
+            for call in run.call_args_list
+            if call.args
+            and call.args[0][:3] == ["/usr/bin/python3", "-I", "-B"]
+            and "verify" in call.args[0]
+        ]
+        self.assertEqual(len(helper_calls), 1)
+        argv = helper_calls[0].args[0]
+        helper_env = helper_calls[0].kwargs["env"]
+        self.assertEqual(argv[:3], ["/usr/bin/python3", "-I", "-B"])
+        self.assertIn("--archive-fd", argv)
+        self.assertIn("--archive-basename", argv)
+        self.assertIn("--inventory-fd", argv)
+        self.assertNotIn("--archive", argv)
+        self.assertNotIn("--inventory", argv)
+        self.assertEqual(helper_env["PATH"], "/usr/bin:/bin")
+        for forbidden in ("PYTHONPATH", "PYTHONHOME", "BASH_ENV", "LD_PRELOAD"):
+            self.assertNotIn(forbidden, helper_env)
 
     def _target_driver_v2_fixture(self):
         checks = {
@@ -1175,12 +1323,20 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "deb_sha256": self.sha256(deb),
             "compatibility_policy_id": self.policy_id,
             "compatibility_policy_sha256": self.policy_sha256,
+            "upgrade_data_contract_id": "taiji-upgrade-data-contract-v1",
+            "upgrade_data_contract_sha256": "6" * 64,
+            "elf_abi_audit_basename": "elf-abi-audit.json",
             "elf_abi_audit_sha256": "e" * 64,
             "icon_set_sha256": "1" * 64,
+            "desktop_entry_sha256": "d" * 64,
+            "built_at_utc": "2026-08-05T00:00:00Z",
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
             **toolchain_identity(),
             **acceptance_identity(),
         }
+        formal_log = package_dir / "formal-build-tests.log"
+        formal_log.write_bytes(formal_build_test_log(self.commit))
+        manifest.update(formal_build_test_identity(formal_log))
         (package_dir / "taiji-package-manifest.json").write_text(
             json.dumps(manifest),
             encoding="utf-8",
@@ -1205,6 +1361,10 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"icon_set_sha256={'1' * 64}",
                     *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
                     *(f"{key}={value}" for key, value in sorted(acceptance_identity().items())),
+                    *(
+                        f"{key}={value}"
+                        for key, value in sorted(formal_build_test_identity(formal_log).items())
+                    ),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )

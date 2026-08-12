@@ -77,6 +77,37 @@ def _stable_regular_file(
         handle.close()
 
 
+@contextlib.contextmanager
+def _stable_regular_descriptor(
+    descriptor: int, label: str, max_bytes: int
+) -> Iterator[Tuple[BinaryIO, os.stat_result]]:
+    if descriptor < 0:
+        raise SourceIntegrityError("{} descriptor is invalid".format(label))
+    try:
+        duplicate = os.dup(descriptor)
+    except OSError as exc:
+        raise SourceIntegrityError("{} descriptor cannot be duplicated".format(label)) from exc
+    handle = os.fdopen(duplicate, "rb", closefd=True)
+    try:
+        opened = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink not in (0, 1)
+            or opened.st_size <= 0
+            or opened.st_size > max_bytes
+        ):
+            raise SourceIntegrityError(
+                "{} descriptor must reference a bounded regular file".format(label)
+            )
+        os.lseek(handle.fileno(), 0, os.SEEK_SET)
+        yield handle, opened
+        after = os.fstat(handle.fileno())
+        if _stable_identity(opened) != _stable_identity(after):
+            raise SourceIntegrityError("{} descriptor changed while it was read".format(label))
+    finally:
+        handle.close()
+
+
 def _canonical_bytes(value: Dict[str, Any]) -> bytes:
     return (
         json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -153,17 +184,39 @@ def _member_record(bundle: tarfile.TarFile, member: tarfile.TarInfo, relative: s
     }
 
 
-def build_inventory(archive: Path, source_commit: str) -> Dict[str, Any]:
+def build_inventory(
+    archive: Optional[Path],
+    source_commit: str,
+    *,
+    archive_descriptor: Optional[int] = None,
+    archive_basename: Optional[str] = None,
+) -> Dict[str, Any]:
     if not COMMIT_RE.fullmatch(source_commit):
         raise SourceIntegrityError("source commit must be a full lowercase SHA")
-    match = ARCHIVE_RE.fullmatch(archive.name)
+    if archive_descriptor is None:
+        if archive is None:
+            raise SourceIntegrityError("source archive path is required")
+        logical_basename = archive.name
+        archive_context = _stable_regular_file(
+            archive, "source archive", MAX_ARCHIVE_BYTES
+        )
+    else:
+        if archive is not None:
+            raise SourceIntegrityError("source archive path and descriptor are mutually exclusive")
+        if archive_basename is None:
+            raise SourceIntegrityError("source archive basename is required with a descriptor")
+        logical_basename = archive_basename
+        archive_context = _stable_regular_descriptor(
+            archive_descriptor, "source archive", MAX_ARCHIVE_BYTES
+        )
+    match = ARCHIVE_RE.fullmatch(logical_basename)
     if match is None or match.group(1) != source_commit:
         raise SourceIntegrityError("source archive basename does not bind the source commit")
     records: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     total_file_bytes = 0
     try:
-        with _stable_regular_file(archive, "source archive", MAX_ARCHIVE_BYTES) as opened:
+        with archive_context as opened:
             archive_handle, archive_metadata = opened
             digest = hashlib.sha256()
             while True:
@@ -202,7 +255,7 @@ def build_inventory(archive: Path, source_commit: str) -> Dict[str, Any]:
         _canonical_bytes({"members": records})
     ).hexdigest()
     return {
-        "archive_basename": archive.name,
+        "archive_basename": logical_basename,
         "archive_sha256": archive_sha256,
         "members": records,
         "members_sha256": members_sha256,
@@ -212,7 +265,9 @@ def build_inventory(archive: Path, source_commit: str) -> Dict[str, Any]:
     }
 
 
-def _load_inventory(path: Path) -> Dict[str, Any]:
+def _load_inventory(
+    path: Optional[Path], descriptor: Optional[int] = None
+) -> Dict[str, Any]:
     try:
         pairs_seen: List[str] = []
 
@@ -225,7 +280,21 @@ def _load_inventory(path: Path) -> Dict[str, Any]:
             pairs_seen.extend(result)
             return result
 
-        with _stable_regular_file(path, "source inventory", MAX_INVENTORY_BYTES) as opened:
+        if descriptor is None:
+            if path is None:
+                raise SourceIntegrityError("source inventory path is required")
+            inventory_context = _stable_regular_file(
+                path, "source inventory", MAX_INVENTORY_BYTES
+            )
+        else:
+            if path is not None:
+                raise SourceIntegrityError(
+                    "source inventory path and descriptor are mutually exclusive"
+                )
+            inventory_context = _stable_regular_descriptor(
+                descriptor, "source inventory", MAX_INVENTORY_BYTES
+            )
+        with inventory_context as opened:
             inventory_handle, inventory_metadata = opened
             payload = inventory_handle.read(inventory_metadata.st_size + 1)
             if len(payload) != inventory_metadata.st_size:
@@ -255,6 +324,39 @@ def _is_allowed_extra(relative: PurePosixPath, prefixes: Iterable[PurePosixPath]
         if relative == prefix or prefix in relative.parents or relative in prefix.parents:
             return True
     return False
+
+
+def _is_within_allowed_extra(
+    relative: PurePosixPath, prefixes: Iterable[PurePosixPath]
+) -> bool:
+    return any(relative == prefix or prefix in relative.parents for prefix in prefixes)
+
+
+def _extra_symlink_contracts(
+    raw_contracts: List[List[str]], prefixes: List[PurePosixPath]
+) -> Dict[str, str]:
+    contracts: Dict[str, str] = {}
+    for raw_path, target in raw_contracts:
+        path = _safe_extra_prefix(raw_path)
+        if not _is_within_allowed_extra(path, prefixes):
+            raise SourceIntegrityError(
+                "allow-extra-symlink path is outside allow-extra-prefix: {}".format(
+                    raw_path
+                )
+            )
+        if not target or "\x00" in target or not PurePosixPath(target).is_absolute():
+            raise SourceIntegrityError(
+                "allow-extra-symlink target must be an absolute path: {}".format(
+                    raw_path
+                )
+            )
+        canonical_path = path.as_posix()
+        if canonical_path in contracts:
+            raise SourceIntegrityError(
+                "allow-extra-symlink path is duplicated: {}".format(raw_path)
+            )
+        contracts[canonical_path] = target
+    return contracts
 
 
 def _tree_file_record(path: Path, relative: str) -> Dict[str, Any]:
@@ -300,7 +402,11 @@ def _tree_file_record(path: Path, relative: str) -> Dict[str, Any]:
         os.close(descriptor)
 
 
-def _tree_inventory(root: Path) -> Dict[str, Dict[str, Any]]:
+def _tree_inventory(
+    root: Path,
+    expected_paths: Set[str],
+    allowed_extra_symlinks: Dict[str, str],
+) -> Dict[str, Dict[str, Any]]:
     metadata = root.lstat()
     if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
         raise SourceIntegrityError("extracted source root must be a real directory")
@@ -338,7 +444,13 @@ def _tree_inventory(root: Path) -> Dict[str, Dict[str, Any]]:
             mode = stat.S_IMODE(info.st_mode)
             if stat.S_ISLNK(info.st_mode):
                 target = os.readlink(str(candidate))
-                _normalized_relative_target(PurePosixPath(relative).parent, target)
+                relative_path = PurePosixPath(relative)
+                is_allowed_generated_link = (
+                    relative not in expected_paths
+                    and allowed_extra_symlinks.get(relative) == target
+                )
+                if not is_allowed_generated_link:
+                    _normalized_relative_target(relative_path.parent, target)
                 if _stable_identity(info) != _stable_identity(candidate.lstat()):
                     raise SourceIntegrityError(
                         "extracted source symlink changed while being verified: {}".format(relative)
@@ -370,13 +482,19 @@ def _tree_inventory(root: Path) -> Dict[str, Dict[str, Any]]:
     return actual
 
 
-def verify_tree(root: Path, expected: Dict[str, Any], allowed_prefixes: List[str]) -> None:
+def verify_tree(
+    root: Path,
+    expected: Dict[str, Any],
+    allowed_prefixes: List[str],
+    allowed_extra_symlinks: List[List[str]],
+) -> None:
     expected_records = {item["path"]: item for item in expected["members"]}
-    actual = _tree_inventory(root)
+    prefixes = [_safe_extra_prefix(value) for value in allowed_prefixes]
+    symlink_contracts = _extra_symlink_contracts(allowed_extra_symlinks, prefixes)
+    actual = _tree_inventory(root, set(expected_records), symlink_contracts)
     for path, record in expected_records.items():
         if actual.get(path) != record:
             raise SourceIntegrityError("source tree member drift: {}".format(path))
-    prefixes = [_safe_extra_prefix(value) for value in allowed_prefixes]
     for path in sorted(set(actual) - set(expected_records)):
         if not _is_allowed_extra(PurePosixPath(path), prefixes):
             raise SourceIntegrityError("unexpected source tree member: {}".format(path))
@@ -415,16 +533,31 @@ def create_inventory(archive: Path, inventory: Path, source_commit: str) -> None
         raise
 
 
-def verify(archive: Path, inventory: Path, root: Optional[Path], allowed_prefixes: List[str]) -> None:
-    supplied = _load_inventory(inventory)
+def verify(
+    archive: Optional[Path],
+    inventory: Optional[Path],
+    root: Optional[Path],
+    allowed_prefixes: List[str],
+    allowed_extra_symlinks: List[List[str]],
+    *,
+    archive_descriptor: Optional[int] = None,
+    archive_basename: Optional[str] = None,
+    inventory_descriptor: Optional[int] = None,
+) -> None:
+    supplied = _load_inventory(inventory, inventory_descriptor)
     commit = supplied.get("source_commit")
     if type(commit) is not str:
         raise SourceIntegrityError("source inventory source_commit is invalid")
-    expected = build_inventory(archive, commit)
+    expected = build_inventory(
+        archive,
+        commit,
+        archive_descriptor=archive_descriptor,
+        archive_basename=archive_basename,
+    )
     if supplied != expected:
         raise SourceIntegrityError("source inventory differs from the archive-derived inventory")
     if root is not None:
-        verify_tree(root, expected, allowed_prefixes)
+        verify_tree(root, expected, allowed_prefixes, allowed_extra_symlinks)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -435,10 +568,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     create.add_argument("--inventory", required=True, type=Path)
     create.add_argument("--source-commit", required=True)
     check = subparsers.add_parser("verify", allow_abbrev=False)
-    check.add_argument("--archive", required=True, type=Path)
-    check.add_argument("--inventory", required=True, type=Path)
+    archive_input = check.add_mutually_exclusive_group(required=True)
+    archive_input.add_argument("--archive", type=Path)
+    archive_input.add_argument("--archive-fd", type=int)
+    check.add_argument("--archive-basename")
+    inventory_input = check.add_mutually_exclusive_group(required=True)
+    inventory_input.add_argument("--inventory", type=Path)
+    inventory_input.add_argument("--inventory-fd", type=int)
     check.add_argument("--root", type=Path)
     check.add_argument("--allow-extra-prefix", action="append", default=[])
+    check.add_argument(
+        "--allow-extra-symlink",
+        action="append",
+        default=[],
+        nargs=2,
+        metavar=("PATH", "TARGET"),
+    )
     return parser.parse_args(argv)
 
 
@@ -448,7 +593,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "create":
             create_inventory(args.archive, args.inventory, args.source_commit)
         else:
-            verify(args.archive, args.inventory, args.root, args.allow_extra_prefix)
+            verify(
+                args.archive,
+                args.inventory,
+                args.root,
+                args.allow_extra_prefix,
+                args.allow_extra_symlink,
+                archive_descriptor=args.archive_fd,
+                archive_basename=args.archive_basename,
+                inventory_descriptor=args.inventory_fd,
+            )
     except (OSError, SourceIntegrityError) as exc:
         print("[FAIL] {}".format(exc), file=sys.stderr)
         return 1

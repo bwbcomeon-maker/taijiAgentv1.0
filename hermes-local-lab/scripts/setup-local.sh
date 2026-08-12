@@ -1,6 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Install local Python dependencies for Hermes Agent and Hermes WebUI.
 set -euo pipefail
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+if [ "${TAIJI_DEPENDENCY_PROFILE:-development}" = production ]; then
+  PATH=/usr/bin:/bin
+  export PATH
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

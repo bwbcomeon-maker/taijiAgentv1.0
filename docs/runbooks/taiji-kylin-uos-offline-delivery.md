@@ -37,7 +37,7 @@ RPM-only 终端需要单独的 RPM 制品；无包管理器或强隔离终端需
 | 标签 | 必须具备的证据 |
 | --- | --- |
 | 制包输入已准备 | 冻结 commit 的输入三件套、源码归档成员清单、basename/字节数/SHA256 和源码发布预检通过 |
-| 候选 DEB 已构建 | 兼容 Linux amd64 制包机以 strict 合同生成单一 DEB、sidecar、manifest、构建报告和 `.build-success`，最终发布预检通过 |
+| 候选 DEB 已构建 | 兼容 Linux amd64 制包机以 strict 合同生成单一 DEB、sidecar、manifest、`formal-build-tests.log`、构建报告和 `.build-success`，最终发布预检通过 |
 | 离线安装已演练 | 干净 Linux amd64 容器、VM 或 chroot 在断网状态下只使用本地交付物完成安装、验证、卸载和重装，并生成当前产物绑定证据 |
 | 目标机已验证 | 真实 Kylin/UOS/openKylin 图形终端完成安装态 Electron 启动、CLI、真实模型对话、附件、关窗退出和诊断导出 |
 | 发布前证据门禁已闭合 | 离线生命周期、目标矩阵记录、可信 CI、认证签名、发布签名和 release-check 均绑定同一 DEB；publisher 尚未运行 |
@@ -88,7 +88,7 @@ policy 是唯一 Maintainer、最小系统能力和 ELF ABI 来源；matrix 固�
 在干净的源码基线执行：
 
 ```bash
-bash "taijiagent 打包交付/99_本机_准备制包输入包.sh"
+/bin/bash -p "taijiagent 打包交付/99_本机_准备制包输入包.sh"
 ```
 
 输出必须是同一冻结 commit 的三件套：
@@ -107,6 +107,12 @@ taijiagent-制包机输入-<commit>.tar.gz.sha256
 
 输入三件套全部生成后，必须在首次输入校验、传输或远程制包前运行 `scripts/taiji-linux-golden-orchestrator.py init`。正式阶段顺序固定为 `input_verify` → `remote_build`（生成并绑定候选 DEB）→ `artifact_preflight` → `challenge_preparation` → offline → 正式 target → 十二条 records。certification envelope 必须在 `challenge_preparation` 签发并验证，不得先传输或采集证据，再在签名时补造 envelope 或替换 nonce。
 
+当前配置 schema 固定为 `taiji-linux-golden-orchestrator-config/v5`。除原有字段外，`workspace.execution_home` 与 `workspace.execution_tmp` 必须指向两个已存在、当前账户拥有且 group/other 不可写的独立目录；`remote.account_home` 必须是远端固定登录账户的绝对 home。前两者只是本机命令的隔离 `HOME`/`TMPDIR`，不会改变签名器 `used-nonces` 的位置；nonce 防重放状态仍从固定登录账户的 passwd home 推导，不能通过 plan 中的 `HOME` 改到其它目录。
+
+v5 的每个可执行命令都必须同时包含 `env_mode=replace`、完整 `env`、`env_passthrough` 和 `env_sensitive`。受控执行器必须按 `commands[].argv` 直接调用 `execve`/等价的显式 argv API，并用 `env` 新建环境；只可从执行器启动环境复制 `env_passthrough` 点名且通过校验的键，绝不能在原环境上 overlay。`env_sensitive` 必须是 passthrough 的子集，日志和审批界面只显示键名、不得显示值；未列出的 `BASH_ENV`、`ENV`、`PYTHON*`、`LD_*` 和导出函数全部丢弃。远程 SSH/SCP 只可选择性传入经验证属于当前用户的 Unix socket `SSH_AUTH_SOCK`；GitHub CI 采集、publication 签名实时复验、release-check 和 publisher 只可选择性传入并脱敏 `GITHUB_TOKEN`。
+
+目标机自动命令同样使用 replace，但只从现场会话复制固定图形/locale 白名单，其中包括 `DISPLAY`、`WAYLAND_DISPLAY`、`XAUTHORITY`、`DBUS_SESSION_BUS_ADDRESS`、`XDG_RUNTIME_DIR` 和 `XDG_SESSION_*`；不得复制 `HOME`、`PYTHON*` 或用户 XDG 配置/缓存目录。这样安装态入口仍从 passwd 身份推导账户 home，同时不会破坏 UKUI/UOS 的显示、D-Bus 和 Wayland 会话。双击安装步骤标记为 `env_mode=human-session`，表示它必须留在人工图形会话中执行，自动执行器不得把它解释成空 argv 的程序。
+
 以下是唯一的简短可执行骨架；配置文件字段与受控路径由当轮发布计划提供：
 
 ```bash
@@ -121,16 +127,16 @@ DEB_ARGS=()
 APPROVAL_ARGS=()
 EXPECT_DEB_ARGS=()
 
-python3 "$ORCHESTRATOR" init \
+/usr/bin/python3 -I -B "$ORCHESTRATOR" init \
   --config "$CONFIG" \
   --state "$STATE"
-python3 "$ORCHESTRATOR" plan \
+/usr/bin/python3 -I -B "$ORCHESTRATOR" plan \
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
   "${EXPECT_DEB_ARGS[@]}" \
   > /path/to/controlled/plan.json
 
-# 先审批 plan.json 的 boundary/cwd/env/commands[].argv，再由人工或受控自动执行器
+# 先审批 plan.json 的 boundary/cwd/env_mode/env/env_passthrough/env_sensitive/commands[].argv，再由人工或受控自动执行器
 # 按 argv 数组原样执行，不拼接 shell 字符串；保存日志和证据后才 checkpoint pass/fail。
 # 每个阶段先重置 EVIDENCE_ARGS、DEB_ARGS、APPROVAL_ARGS 三组阶段参数，
 # 再对每个受控证据文件分别追加一个 --evidence：
@@ -139,7 +145,7 @@ python3 "$ORCHESTRATOR" plan \
 # DEB_ARGS=(--deb "<review_root 下的候选 DEB>")
 # 仅当 plan.json 显示 explicit_approval_required=true 且完成审批时设置：
 # APPROVAL_ARGS=(--approve-stage "$STAGE")
-python3 "$ORCHESTRATOR" checkpoint \
+/usr/bin/python3 -I -B "$ORCHESTRATOR" checkpoint \
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
   "${EXPECT_DEB_ARGS[@]}" \
@@ -154,7 +160,7 @@ python3 "$ORCHESTRATOR" checkpoint \
 # EXPECT_DEB_ARGS=(--expect-deb-sha256 "<已绑定候选摘要>")
 
 # 若本阶段失败，用实际失败日志和受控失败证据记录 fail，不得先记 pass：
-python3 "$ORCHESTRATOR" checkpoint \
+/usr/bin/python3 -I -B "$ORCHESTRATOR" checkpoint \
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
   "${EXPECT_DEB_ARGS[@]}" \
@@ -164,12 +170,12 @@ python3 "$ORCHESTRATOR" checkpoint \
   "${EVIDENCE_ARGS[@]}"
 
 # 排除根因后显式 retry，再重新 plan。
-python3 "$ORCHESTRATOR" retry \
+/usr/bin/python3 -I -B "$ORCHESTRATOR" retry \
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
   "${EXPECT_DEB_ARGS[@]}" \
   --stage "$STAGE"
-python3 "$ORCHESTRATOR" plan \
+/usr/bin/python3 -I -B "$ORCHESTRATOR" plan \
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
   "${EXPECT_DEB_ARGS[@]}" \
@@ -197,7 +203,7 @@ sidecar 校验、manifest 绑定或 commit 任一不一致时停止，回到冻�
 解压输入包后进入 `taijiagent 打包交付/`：
 
 ```bash
-bash ./00_制包机_生成离线交付包.sh
+/bin/bash -p ./00_制包机_生成离线交付包.sh
 ```
 
 脚本只预先要求可用的 `apt`/`dpkg` 和 `sudo` 管理员能力，不要求制包机预装
@@ -208,11 +214,19 @@ Python；它会先通过 apt 安装 `python3`/`python3-dev` 和其余构建依�
 
 源码、Node/uv 工具链和所有 npm/Python 临时文件统一位于选中的构建根下，脚本导出 `TMPDIR`、`TMP`、`TEMP` 指向该根。只有脚本正常结束、最终发布预检通过，才可标记“候选 DEB 已构建”。脚本会在解包正式源码后再次逐字核对维护人；看到 DEB 文件但 manifest、报告、sidecar 或 `.build-success` 缺失时仍属于失败。Electron 下载归档必须与 canonical policy 固定的版本、basename 和 SHA256 一致，且实际写入 DEB 的整个 `dist/` 文件清单及逐文件内容必须与该归档一致；不再只检查 8 个 ELF。构建时还会验证蓝色太极 Logo 的 RGBA PNG、hicolor 多尺寸、AppStream、desktop-id/WM_CLASS、Electron 窗口图标和安装态资源同源。
 
-正式 Python/Node 工具链采用“归档身份 + 实际可执行文件身份”双重绑定：Python `3.11.15` standalone 归档 SHA256 为 `2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a`，`python3.11` 可执行文件 SHA256 为 `5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba`；`uv 0.12.2` 归档 SHA256 为 `d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4`，可执行文件 SHA256 为 `72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2`；Node.js `22.23.1` 归档 SHA256 为 `9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578`，可执行文件 SHA256 为 `93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068`；Electron `39.8.10` 的实际 `electron` ELF SHA256 为 `c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d`。`00`、`build-deb`、`01`、manifest/marker、发布证据校验和组装器都必须精确匹配这些常量；只在现场伪造版本输出或 archive marker 不能通过。
+正式 Python/Node 工具链采用“归档身份 + 实际可执行文件身份”双重绑定：Python `3.11.15` standalone 归档 SHA256 为 `2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a`，`python3.11` 可执行文件 SHA256 为 `5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba`；`uv 0.12.2` 归档 SHA256 为 `d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4`，可执行文件 SHA256 为 `72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2`；Node.js `22.23.1` 归档 SHA256 为 `9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578`，可执行文件 SHA256 为 `93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068`；Electron `39.8.10` 的实际 `electron` ELF SHA256 为 `c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d`。`00`、`build-deb`、`01`、manifest/marker、发布证据校验和组装器都必须精确匹配这些常量；只在现场伪造版本输出或 archive marker 不能通过。uv、Python、Node 和源码归档不再把普通只读 FD 当成不可变实体：`00` 必须一次复制到 Linux sealed memfd，同时核对固定 SHA256 和源文件完整身份，再施加并读回 `F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL`。成员扫描、npm CLI/version 派生、解压以及 `build-deb.sh` 的归档复核只能消费收养后的同一 snapshot；`build-deb.sh` 还要先收养自己的 FD。缺少 `memfd_create`、`MFD_ALLOW_SEALING`、任一 fcntl seal 或 `/proc` FD 传递能力时，在扫描、解压或执行前 fail closed，不得回退到普通临时文件。Python 3.8/Linux 门禁会实际创建、收养和复核该 snapshot。
 
 源码身份不只是一个 commit 字符串。`99` 必须由原始 `git archive` 生成 `*.inventory.json`，记录每个成员的路径、类型、模式、大小和内容摘要；`00` 在解压前校验归档，并在解压后、构建前、DEB 打包前和最终 `01` 再次校验实体树。校验工具本身用源码固定 SHA256 验证，不允许可写树携带一个宽松验证器给自己作证。
 
 正式 Python 依赖只能对提交态 `uv.lock` 做一次写入式 strict sync；DEB 构建器随后只允许用 `uv sync --locked --check` 做只读一致性复核。未设置 `TAIJI_UV_LOCK_MODE` 与显式 `strict` 等价；`auto`、`unlocked`、任何 `TAIJI_ALLOW_UV_LOCK_REFRESH` 和二次无锁 `uv pip install -r` 都必须 fail closed。sync 前后必须重算并保持同一 `uv.lock` SHA256。WebUI requirements 只能是 Agent 直接依赖在 lock 中的精确版本子集，并在生产 venv 中核对实际安装版本和 import。`01` 在尚未生成 DEB 的 source-only 阶段也会检查源码包中的严格入口，防止降级后的制包输入被传到 Linux 制包机。旧 v3 如果缺少这些字段，当前正式门禁会明确拒绝；如需查阅，只能在门禁之外把原文件作为历史资料只读查看，不得伪补字段升级为当前正式 v3。
+
+运行时相关回归只在 Linux amd64 `00` 构建阶段执行，并且必须晚于 DEB 字节和外部 v3 manifest 的首次生成。Node 与 archive-derived npm CLI 叶节点在任何 Node/npm 版本 argv、依赖安装或 `build-deb.sh` argv 之前各自复制到 sealed memfd；构建期 npm、Node 脚本、`build-deb.sh` 的 desktop JS stager 和后续 `node --check` 都必须使用该 Node snapshot，不能重新执行 mutable `current/bin/node`。此后用固定 uv 为源码 venv 同步 lock 中的 dev extra，并用固定 Node/npm 按 WebUI lock 准备 `node_modules`；两者都只存在于 owner-only 构建根，不能反向进入已生成的 DEB。源码完整性工具只允许归档外精确路径 `hermes-local-lab/sources/hermes-agent/venv/bin/python` 使用由 `00`/`build-deb.sh` 显式绑定到固定 CPython 路径的绝对 symlink；同一 allow-extra 前缀内任何未列出的绝对或越界 symlink、归档声明 symlink、前缀祖先和非允许节点仍按原合同拒绝。该链接的安全父链、解析后路径、版本和可执行文件 SHA256 还必须在依赖准备前后及测试前后精确等于固定 CPython；六组测试结束后清理构建 venv，最终 `01` 不继承该例外。`hermes-webui/node_modules` 仅是 `00`/`01` archive-derived 源码核对共同允许的构建期额外前缀，`build-deb.sh` 仍明确排除源码 `node_modules`。
+
+正式构建测试固定为六组：root runtime、desktop evidence Node、Kylin 安装仿真、Agent 五个固定文件、WebUI runtime lint、WebUI 十一个固定 Python 回归。所有测试均使用 execve-replace 等价的干净环境和固定解释器；任何 suite 失败必须在成功 marker 发布前停止。Agent 并行 runner 对每个显式文件要求 collection count 大于零，固定本机 Python runner 也逐模块/路径拒绝零收集；不允许用另一个文件的测试数量掩盖空目标。成功日志固定为 `生成的安装包/formal-build-tests.log`，是非 symlink、单链接、受限大小的普通文件。其 strict v1 语义要求工具链/commit 头精确匹配 manifest、六个 suite 各恰好一次有序 begin/pass、无 fail，且 `overall_status=pass` 是唯一末行。外部 manifest 和 `.build-success` 必须共同绑定 `formal_build_tests_status=pass`、canonical basename 与日志 SHA256；`01`、证据 validator 和本机 release-check 复算摘要并复用同一语义解析器。本机门禁不得再借用 ambient Node/npm、用户 PATH 或 gitignored Agent venv；固定 Python runner 必须由 `/usr/bin/env -i` 以新建 `0700` HOME/TMPDIR、`PYTHONNOUSERSITE=1` 和 `/usr/bin/python3 -I -B` 启动，任何 unittest skip 均作为门禁失败。
+
+上述 sealed archive 和 Node/npm 叶节点只闭合“归档字节”与“入口可执行文件/入口脚本”，不能冒充完整执行闭包。当前 Python 的 `pyvenv.cfg`、base stdlib、`lib-dynload`、site-packages、pytest/plugin/native `.so`，以及 Node/npm/eslint 的 require/ESM closure、`node_modules`、测试源码和配置仍按 pathname 加载。owner-only 目录、held leaf FD、前后 hash 可以发现误改或普通漂移，但不是针对持续恶意同 UID writer 的权限边界；对方可在两次检查之间换入并恢复内容。要把 formal log 提升为该威胁模型下的可信证据，必须由独立受信主体把完整闭包置于 root/独立 UID 所有的只读树或只读挂载/等价隔离中，再以临时非特权 UID 执行测试。该方案涉及 root、sudo、临时 UID 或 mount，未取得专项批准前不得实施；在此之前不得宣称第二个结构性 P1 已关闭，也不得据此进行正式制包或发布。
+
+证据 validator 不得在 inventory 后再按 pathname 组合另一套 manifest/marker/log。v3 BuildBinding 必须复用同一次交付目录快照的原始 payload 与文件摘要，返回前重新核对 root/每个目录的完整身份、精确目录项、每个文件的完整身份和 SHA256。源码成员 helper 只允许由固定 `/usr/bin/python3 -I -B`、白名单环境和已绑定 inherited FD 运行，不得继承 `HOME`/`PYTHONPATH`/user-site `sitecustomize`。helper 的正式 CLI 必须显式接收 `--archive-fd`、canonical `--archive-basename` 和 `--inventory-fd`；Linux `/proc/self/fd/N` 既不能冒充 single-link pathname，也不能用数字 FD basename 绕过 archive/commit 绑定。
 
 最终 ELF 闭包审计必须采用 **payload closed-world** 口径：每个最终 ELF 的 `DT_NEEDED` 只能由 DEB payload 内的 ELF、policy 明确允许的 Electron companion、审计器固定的基础运行时边界或 `required_system_sonames` 解决。制包机 sysroot 可以作为私有库暂存阶段的受信来源，但绝不能替最终 DEB“证明运行时已经有这个库”。否则制包机安装的完整 GTK/Electron 构建依赖会掩盖 DEB 中实际缺失的传递依赖，直到干净终端的 `postinst` 才以 `ldd ... not found` 失败。需要随产品携带的库必须进入 `/opt/taiji-agent/runtime/lib` 并受 `allowed_private_sonames` 约束；由目标系统提供的少量核心图形/安全库必须进入 `required_system_sonames`，不能留作未分类依赖。
 
@@ -313,7 +327,7 @@ python3 scripts/assemble-taiji-certification-set.py \
   --policy "$PWD/packaging/linux/compatibility-policy.json" \
   --output "$DELIVERY/certification" \
   --challenge-envelope "$CERT_ENVELOPE"
-bash scripts/sign-taiji-release-evidence.sh \
+/bin/bash -p scripts/sign-taiji-release-evidence.sh \
   "$DELIVERY/certification/certification-set.json" \
   "/受控离线路径/offline-release-private-key.pem"
 
@@ -333,10 +347,10 @@ python3 scripts/assemble-taiji-release-evidence.py \
   --ci-evidence "$DELIVERY/github-ci-evidence.json" \
   --output "$DELIVERY/release-evidence.json" \
   --challenge-envelope "$PUB_ENVELOPE"
-bash scripts/sign-taiji-release-evidence.sh \
+/bin/bash -p scripts/sign-taiji-release-evidence.sh \
   "$DELIVERY/release-evidence.json" \
   "/受控离线路径/offline-release-private-key.pem"
-bash scripts/taiji-release-check.sh
+/bin/bash -p scripts/taiji-release-check.sh
 ```
 
 `used-nonces` 是固定登录账户、公钥 fingerprint 分区的本地防误重放状态；移动私钥目录不能重用 nonce。但账户拥有者可以删除本地状态，所以它不是跨主机、抗篡改或 HSM/远端追加账本级的全局一次性证明。
@@ -345,7 +359,7 @@ bash scripts/taiji-release-check.sh
 
 ```bash
 mkdir -p customer-output internal-release-receipts
-bash packaging/linux/deb/publish-single-deb.sh \
+/bin/bash -p packaging/linux/deb/publish-single-deb.sh \
   --delivery-dir "$PWD/taijiagent 打包交付" \
   --candidate-deb "$PWD/taijiagent 打包交付/生成的安装包/taiji-agent_<version>_amd64.deb" \
   --policy "$PWD/packaging/linux/compatibility-policy.json" \
@@ -375,6 +389,7 @@ SHA256SUMS.txt
 04_目标终端_桌面App验收并导出证据.sh
 生成的安装包/taiji-agent_<version>_amd64.deb
 生成的安装包/taiji-agent_<version>_amd64.deb.sha256
+生成的安装包/formal-build-tests.log
 生成的安装包/taiji-package-manifest.json
 生成的安装包/构建报告.txt
 生成的安装包/.build-success
@@ -384,7 +399,7 @@ SHA256SUMS.txt
 必须同时满足：
 
 - 当前源码包和对应成员清单各自唯一且 SHA256 匹配，固定工具复验后的每个归档成员与解压树都与清单一致。
-- v3 manifest 的完整 `source_commit` 必须唯一决定源码包和成员清单 basename；根 `SHA256SUMS.txt` 只能精确记录这两个 basename 和内容 SHA，`.build-success` 中的 source/inventory/DEB/policy/ABI/icon/maintainer 身份也必须与 manifest 和当前文件一致。即使旧源码包内容 SHA 正确，只要 basename 不是当前完整 commit，仍必须拒绝。`.build-success` 只能在所有最终门禁通过后原子发布，失败路径不得留下该文件。
+- v3 manifest 的完整 `source_commit` 必须唯一决定源码包和成员清单 basename；根 `SHA256SUMS.txt` 只能精确记录这两个 basename 和内容 SHA，`.build-success` 中的 source/inventory/DEB/policy/ABI/icon/maintainer 以及 formal build test 状态/basename/SHA256 身份也必须与 manifest 和当前文件一致。即使旧源码包内容 SHA 正确，只要 basename 不是当前完整 commit，仍必须拒绝。`.build-success` 只能在所有最终门禁通过后原子发布，失败路径不得留下该文件。
 - `生成的安装包/` 只有一套允许的当前产物。
 - `.deb.sha256` 只记录 basename，不记录制包机绝对路径。
 - v3 当前路径不得混入历史 `离线依赖/Packages*` 或第二个安装包；客户边界是 manifest 绑定的唯一 DEB。
@@ -499,7 +514,7 @@ SHA256SUMS.txt
 | Linux 签名预检误报“源码包内容与当前 Git HEAD 不一致” | macOS Apple gzip 与 Linux GNU gzip 会把同一 tar 压成不同字节；比较 `.tar.gz` 本身把编码器差异误判为源码漂移 | 仍用当前 Git HEAD 重建确定性 tar，但与源码包解压后的 tar 流逐字节比较 | 不同 gzip 编码器的同一 git archive 必须通过；解压后 tar 增加任意字节必须拒绝 | 在 `15c058b4` 签名前真实暴露；两端解压 tar SHA256 相同后修复 |
 | Linux `execute_code` 报 `OSError: AF_UNIX path too long` | `TAIJI_AGENT_TMP_DIR` 或工作树路径过深；`sockaddr_un.sun_path` 按编码字节计，Linux 约 108 B，旧逻辑只处理 Darwin 长路径 | 脚本和数据继续留在 Taiji 临时目录；仅 RPC socket 放入随机 owner-only `/tmp/taiji_rpc_*`，目录 `0700`、socket `0600`；POSIX 建立安全 UDS 失败时 fail closed，不降级到无鉴权 TCP | Ubuntu 多字节中文长路径必须成功且退出后无残留；短目录创建失败时必须返回错误且不得打开 AF_INET | Docker Linux release-check 中真实暴露；13 项聚焦测试已覆盖成功和失败路径，最终发布仍以冻结提交重跑为准 |
 | Linux 统一 release-check 的安装仿真大量报“无法读取硬链接计数” | 产品安装脚本正确使用 GNU `stat -c`；测试 fake stat 却调用了 BSD/macOS `/usr/bin/stat -f` | 只把测试桩改为 Python `os.stat().st_nlink` 与 `stat.S_IMODE`，不修改目标机安装脚本 | 同一 31 项安装仿真在 macOS 与 Ubuntu 20.04 必须全部通过 | 两端均已 31/31；该问题属于测试基础设施兼容，不是目标包安装失败 |
-| Linux 统一 release-check 的授权测试报 `node: not found` | 干净 gate clone 的 `PATH` 没有包含制包输入中准备好的固定 Node 工具链 | 在运行源码级门禁前显式检查并加入固定 Node/npm 工具链；不得因为 DEB 已生成而跳过授权和 WebUI 测试 | `command -v node npm` 后再运行完整 root/WebUI gate | 属于门禁环境准备问题，不代表安装态 Node 缺失 |
+| Linux 统一 release-check 的授权测试报 `node: not found` | 旧门禁错误地让本机/后续发布阶段重新执行依赖 Linux 固定工具链的 Node、Agent 和 WebUI 测试，干净环境自然没有 ambient Node 或 gitignored venv | 把完整 runtime-dependent 清单迁到 `00` 的已验证固定工具链，DEB 生成后执行并产出 strict `formal-build-tests.log`；后续门禁只复验 manifest/marker/日志语义，不恢复用户 PATH | 安全 `env -i PATH=/usr/bin:/bin` 的本机 runner 不调用 Node/npm/ignored venv；日志缺 suite、重复 pass、fail、错身份或尾部追加均拒绝 | 属于门禁职责边界修复；只有绑定当前 DEB 的构建日志才能证明这些测试通过 |
 | 核心代码执行测试批量返回 `capability_blocked` | 产品默认 restricted 是正确策略，但沙箱机制测试没有显式进入受控 full profile，导致根本未执行被测逻辑 | 机制测试 fixture 显式设置 full；默认拒绝、显式授权和失败关闭继续由独立安全套件验证 | 代码执行机制 131 项通过、3 项平台预期跳过；安全/授权相关 80/80 | 只调整测试前置条件，不放宽产品默认安全模式 |
 | `--network none` 被未启用的 tunnel 设备误报；sudo 提示 hostname 解析失败 | 只按网络节点存在判断；容器 hostname 未进入本地 hosts | 只拒绝启用链路、全局地址和非 loopback route；sudo 前确保本地 hostname 解析 | Docker inspect、网络负向测试和结构化会话记录 | 历史候选 `1d56849a` 已完成断网三阶段；后续源码提交仍须重跑 |
 | 无图形容器执行安装后可能被误写成目标机成功 | CLI 和包状态不能证明 Electron/UKUI | 无图形会话默认失败；仅显式 headless rehearsal 可继续，并强制 `desktop_app_verified=false`、`target_verified=false` | release gate 分开验证离线证据与真机证据 | 目标机仍必须执行 `04` |
@@ -667,7 +682,7 @@ mkdir -m 0700 "$TAIJI_TARGET_DELIVERY_DIR"
 - 任一安装态或桌面异常：现场只执行一次：
 
 ```bash
-bash ./03_目标终端_导出诊断报告.sh
+/bin/bash -p ./03_目标终端_导出诊断报告.sh
 ```
 
 当前脚本生成 `诊断报告/taiji-agent-diagnose-<时间>.txt`。优先发送该文件，不再只发截图。截图只用于补充可见 UI 异常，不能替代日志和发布身份。

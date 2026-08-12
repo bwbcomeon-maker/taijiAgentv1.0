@@ -1,13 +1,19 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -Eeuo pipefail
 umask 022
+PATH=/usr/bin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+unset OPENSSL_CONF OPENSSL_MODULES
 export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 SOURCE_INTEGRITY_HELPER="$SCRIPT_DIR/source-archive-integrity.py"
-SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+SOURCE_INTEGRITY_HELPER_SHA256="eaebadbe2f86d76d09f19ed210ad407e5926a242c46f53fb89e26253db8d8d7a"
 BUILDER_INPUT_HELPER="$SCRIPT_DIR/builder-input-package.py"
 BUILDER_INPUT_HELPER_SHA256="8c4b378bc762eb7dc10d4cb260cf5499c54f8a348f202d49fb9af754349af1dd"
 SOURCE_INVENTORY=""
@@ -48,13 +54,54 @@ NODE_VERSION="22.23.1"
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 NODE_PINNED_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+NODE_NPM_CLI_ARCHIVE_SHA256=""
+NODE_NPM_VERSION_ARCHIVE=""
 NODE_ARCHIVE_PATH=""
 FIXED_TOOL_ARCHIVE_FD_PATH=""
+SOURCE_ARCHIVE_SNAPSHOT_PATH=""
+FORMAL_BUILD_SUPERVISOR_FD_PATH=""
+FORMAL_BUILD_SUPERVISOR_SHA256=""
+BUILD_NODE_PATH=""
+BUILD_NODE_HELD_PATH=""
+BUILD_NPM_CLI_PATH=""
+BUILD_NPM_CLI_HELD_PATH=""
+BUILD_NODE_RUNTIME_SEALED=0
+SEALED_SNAPSHOT_HOLDER_PID=""
+SEALED_SNAPSHOT_TRANSPORT_DIR=""
+SEALED_SNAPSHOT_CONTROL_OPEN=0
+SEALED_SNAPSHOT_STATUS_OPEN=0
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 PENDING_BUILD_MARKER=""
+PENDING_BUILD_MARKER_FD=""
+PENDING_BUILD_MARKER_IDENTITY=""
 PENDING_BUILD_MARKER_SHA256=""
+PENDING_BUILD_MARKER_POISON=""
+PUBLISHED_BUILD_MARKER_IDENTITY=""
+PUBLISHED_BUILD_MARKER_SHA256=""
+PUBLISHED_BUILD_MARKER_POISON="$OUTPUT_DIR/.build-success.poisoned.$$"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
+BUILD_REPORT_FD=""
+BUILD_REPORT_IDENTITY=""
+BUILD_REPORT_SHA256=""
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
+SOURCE_PACKAGE_MANIFEST_FD=""
+SOURCE_PACKAGE_MANIFEST_PATH=""
+SOURCE_PACKAGE_MANIFEST_IDENTITY=""
+SOURCE_PACKAGE_MANIFEST_SHA256=""
+FORMAL_PACKAGE_MANIFEST_FD=""
+FORMAL_PACKAGE_MANIFEST_READ_FD=""
+FORMAL_PACKAGE_MANIFEST_IDENTITY=""
+FORMAL_PACKAGE_MANIFEST_SHA256=""
+FORMAL_PACKAGE_MANIFEST_COMPLETE=0
+FORMAL_PACKAGE_MANIFEST_POISON="$OUTPUT_DIR/.formal-package-manifest.poisoned.$$"
+FORMAL_BUILD_TEST_LOG="$OUTPUT_DIR/formal-build-tests.log"
+FORMAL_BUILD_TEST_LOG_FD=""
+FORMAL_BUILD_TEST_LOG_READ_FD=""
+FORMAL_BUILD_TEST_LOG_IDENTITY=""
+FORMAL_BUILD_TEST_LOG_POISON="$OUTPUT_DIR/.formal-build-tests.poisoned.$$"
+FORMAL_BUILD_TESTS_STATUS=""
+FORMAL_BUILD_TESTS_LOG_BASENAME="formal-build-tests.log"
+FORMAL_BUILD_TESTS_LOG_SHA256=""
 POLICY_FILE=""
 POLICY_HELPER=""
 POLICY_ID=""
@@ -75,8 +122,46 @@ PYTHON_LOCK_BASENAME="uv.lock"
 PYTHON_LOCK_SHA256=""
 PYTHON_VERSION=""
 PYTHON_EXECUTABLE_SHA256=""
+AGENT_PYTHON_SYMLINK_TARGET=""
 NODE_EXECUTABLE_SHA256=""
+FORMAL_AGENT_VENV=""
+FORMAL_AGENT_SITE_PACKAGES=""
+FORMAL_PYTHON_PATH=""
+FORMAL_PYTHON_FD=""
+FORMAL_PYTHON_IDENTITY=""
+FORMAL_PYTHON_SHA256=""
+FORMAL_NODE_CURRENT_PATH=""
+FORMAL_NODE_CURRENT_RAW_TARGET=""
+FORMAL_NODE_CURRENT_IDENTITY=""
+FORMAL_NODE_PATH=""
+FORMAL_NODE_FD=""
+FORMAL_NODE_IDENTITY=""
+FORMAL_NODE_SHA256=""
+FORMAL_NPM_CLI_PATH=""
+FORMAL_NPM_CLI_FD=""
+FORMAL_NPM_CLI_IDENTITY=""
+FORMAL_NPM_CLI_SHA256=""
+FORMAL_NPM_REGISTRY=""
+FORMAL_ESLINT_PATH=""
+FORMAL_ESLINT_FD=""
+FORMAL_ESLINT_IDENTITY=""
+FORMAL_ESLINT_SHA256=""
+FORMAL_TEST_RUNTIME_SEALED=0
+FORMAL_PYTHON_HELD_PATH=""
+FORMAL_NODE_HELD_PATH=""
+FORMAL_NPM_CLI_HELD_PATH=""
+FORMAL_ESLINT_HELD_PATH=""
 CANDIDATE_DEB_FIXED=0
+CANDIDATE_DEB_FD=""
+CANDIDATE_DEB_PATH=""
+CANDIDATE_DEB_IDENTITY=""
+CANDIDATE_DEB_SHA256=""
+CANDIDATE_DEB_SIDECAR_FD=""
+CANDIDATE_DEB_SIDECAR_PATH=""
+CANDIDATE_DEB_SIDECAR_IDENTITY=""
+CANDIDATE_DEB_SIDECAR_SHA256=""
+CANDIDATE_DEB_SIDECAR_EXPECTED_SHA256=""
+CANDIDATE_ARTIFACT_POISON="$OUTPUT_DIR/.candidate-artifacts.poisoned.$$"
 MARKER_SOURCE_NAME=""
 MARKER_SOURCE_SHA256=""
 MARKER_SOURCE_COMMIT=""
@@ -101,6 +186,16 @@ info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 set_stage() { CURRENT_STAGE="$1"; info "阶段：$CURRENT_STAGE"; }
+sha256sum() {
+  if [ -x /usr/bin/sha256sum ]; then
+    /usr/bin/sha256sum "$@"
+  elif [ -x /usr/bin/shasum ]; then
+    /usr/bin/shasum -a 256 "$@"
+  else
+    printf '[FAIL] 缺少受信 SHA256 工具（/usr/bin/sha256sum 或 /usr/bin/shasum）\n' >&2
+    return 127
+  fi
+}
 
 initialize_build_logging() {
   case "$STATE_HOME" in
@@ -186,7 +281,7 @@ failure_next_steps() {
   local reason="${1:-}"
   case "$reason" in
     *"最终 DEB 必须在 Linux amd64"*|*"不是 x86_64/amd64"*|*"dpkg 架构不是 amd64"*)
-      printf 'next=换到 Linux x86_64/amd64 + apt/dpkg 制包机后重新执行 bash ./00_制包机_生成离线交付包.sh\n'
+      printf 'next=换到 Linux x86_64/amd64 + apt/dpkg 制包机后重新执行 /bin/bash -p ./00_制包机_生成离线交付包.sh\n'
       ;;
     *"管理员权限"*|*"sudo"*)
       printf 'next=先在制包机终端执行 sudo -v，确认当前用户具备管理员权限后重试\n'
@@ -337,8 +432,53 @@ rollback_target_acceptance_tools() {
 
 cleanup_transient_delivery() {
   set +e
+  cleanup_sealed_snapshot_transport
+  close_fixed_tool_archive
+  close_retained_formal_archive_snapshots
+  close_build_node_runtime_fds
+  close_formal_test_runtime_fds
+  if [ -n "${CANDIDATE_DEB_FD:-}" ] || [ -n "${CANDIDATE_DEB_SIDECAR_FD:-}" ]; then
+    if [ "${CANDIDATE_DEB_FIXED:-0}" != 1 ] || ! candidate_deb_identity_matches; then
+      poison_candidate_artifacts "cleanup observed incomplete or replaced candidate artifacts"
+      warn "候选 DEB/sidecar 未完成或身份漂移；保留外来文件和失败现场"
+    fi
+    close_candidate_artifact_fds
+  fi
+  if [ -n "${FORMAL_PACKAGE_MANIFEST_FD:-}" ]; then
+    if [ "${FORMAL_PACKAGE_MANIFEST_COMPLETE:-0}" != 1 ]; then
+      poison_formal_package_manifest "cleanup observed an incomplete formal package manifest"
+      warn "正式 package manifest 未完成；已保留失败现场"
+    elif ! formal_package_manifest_identity_matches; then
+      poison_formal_package_manifest "cleanup observed a replaced formal package manifest"
+      warn "正式 package manifest canonical 路径已被替换；保留外来文件和失败现场"
+    fi
+    close_formal_package_manifest_fds
+  elif [ -n "${SOURCE_PACKAGE_MANIFEST_FD:-}" ]; then
+    close_formal_package_manifest_fds
+  fi
+  if [ -n "${FORMAL_BUILD_TEST_LOG_FD:-}" ]; then
+    if ! formal_build_test_log_identity_matches; then
+      poison_formal_build_test_log "cleanup observed a replaced formal build test log"
+      warn "正式构建测试日志 canonical 路径已被替换；保留外来文件和失败现场"
+    fi
+    close_formal_build_test_log_fds
+  fi
   if [ -n "${PENDING_BUILD_MARKER:-}" ]; then
-    rm -f -- "$PENDING_BUILD_MARKER"
+    if [ -n "${PENDING_BUILD_MARKER_FD:-}" ] \
+        && ! pending_build_marker_identity_matches; then
+      poison_pending_build_marker "cleanup observed a replaced pending build marker"
+      warn "待发布构建成功标记身份漂移；保留外来文件和失败现场"
+    fi
+    close_pending_build_marker_fd
+    case "$PENDING_BUILD_MARKER" in
+      "$OUTPUT_DIR"/.build-success.pending.*)
+        poison_published_build_marker "cleanup preserved a public pending marker after failure"
+        warn "已保留输出目录中的待发布标记与 poison，未按路径删除任何文件"
+        ;;
+      *)
+        warn "已保留本轮私有构建根中的待发布标记，未做无身份绑定的删除"
+        ;;
+    esac
   fi
   rollback_previous_build_outputs || true
   rollback_target_acceptance_tools || true
@@ -896,7 +1036,10 @@ archive_previous_build_outputs() {
     entry_count=$((entry_count + 1))
     name="${path##*/}"
     case "$name" in
-      .build-success|taiji-package-manifest.json|构建报告.txt) ;;
+      .formal-package-manifest.poisoned.*|.formal-build-tests.poisoned.*|.build-success.poisoned.*|.candidate-artifacts.poisoned.*)
+        fail "生成的安装包目录含上次并发替换 poison，请人工核对 canonical 文件与该 poison 后移出整个失败现场：$path"
+        ;;
+      .build-success|taiji-package-manifest.json|构建报告.txt|formal-build-tests.log) ;;
       taiji-agent_*_amd64.deb|taiji-agent_*_amd64.deb.sha256)
         printf '%s\n' "$name" | grep -Eq '^taiji-agent_(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)_amd64\.deb(\.sha256)?$' \
           || fail "生成的安装包目录含未知文件，未移动任何内容：$path"
@@ -947,7 +1090,7 @@ verify_build_command_contract() {
   for command in \
     curl git tar gzip xz sha256sum openssl python3 cc rsync dpkg dpkg-deb \
     file desktop-file-validate lsof readelf strings perl cmp ldd getconf \
-    stat mktemp date df find grep sed awk sort head tail wc tr install chmod cp mv readlink; do
+    stat mktemp mkfifo date df find grep sed awk sort head tail wc tr install chmod cp mv readlink; do
     if ! have "$command"; then
       missing="$missing $command"
     fi
@@ -968,56 +1111,467 @@ verify_trusted_system_tools() {
   ok "可信 readelf 已就绪：$trusted_readelf"
 }
 
-close_fixed_tool_archive() {
-  exec 9<&- 2>/dev/null || true
-  FIXED_TOOL_ARCHIVE_FD_PATH=""
+sealed_snapshot_python_source() {
+  /usr/bin/cat <<'PY'
+from __future__ import annotations
+
+import ctypes
+import fcntl
+import hashlib
+import os
+import stat
+import sys
+
+
+def fail(message):
+    raise RuntimeError("sealed snapshot: " + message)
+
+
+def required_seals():
+    required_os = ("memfd_create", "MFD_ALLOW_SEALING", "MFD_CLOEXEC")
+    required_fcntl = (
+        "F_ADD_SEALS",
+        "F_GET_SEALS",
+        "F_SEAL_WRITE",
+        "F_SEAL_GROW",
+        "F_SEAL_SHRINK",
+        "F_SEAL_SEAL",
+    )
+    missing = [name for name in required_os if not hasattr(os, name)]
+    missing.extend(name for name in required_fcntl if not hasattr(fcntl, name))
+    if missing:
+        fail("Linux memfd sealing is unavailable: " + ",".join(missing))
+    return (
+        fcntl.F_SEAL_WRITE
+        | fcntl.F_SEAL_GROW
+        | fcntl.F_SEAL_SHRINK
+        | fcntl.F_SEAL_SEAL
+    )
+
+
+def stable_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def valid_sha256(value):
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def write_all(descriptor, payload):
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            fail("memfd write was truncated")
+        offset += written
+
+
+def hash_descriptor(descriptor, size):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            fail("snapshot was truncated")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        fail("snapshot grew while it was read")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def verify_descriptor(descriptor, expected_sha256):
+    seals = required_seals()
+    metadata = os.fstat(descriptor)
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size <= 0
+        or mode not in (0o400, 0o500)
+    ):
+        fail("snapshot is not a non-empty regular file")
+    actual_seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+    if actual_seals & seals != seals:
+        fail("snapshot does not have every required write/grow/shrink/seal bit")
+    actual_sha256 = hash_descriptor(descriptor, metadata.st_size)
+    if actual_sha256 != expected_sha256:
+        fail("snapshot SHA256 does not match the pinned identity")
+    return metadata, actual_sha256, actual_seals
+
+
+def create_snapshot(path, expected_sha256, mode_text):
+    if not valid_sha256(expected_sha256):
+        fail("expected SHA256 is invalid")
+    if mode_text not in ("0400", "0500"):
+        fail("snapshot mode must be 0400 or 0500")
+    snapshot_mode = int(mode_text, 8)
+    before = os.stat(path, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_uid != os.getuid()
+        or before.st_size <= 0
+    ):
+        fail("source must be a current-user single-link regular file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_descriptor = os.open(path, flags)
+    snapshot_descriptor = -1
+    try:
+        opened = os.fstat(source_descriptor)
+        if stable_identity(opened) != stable_identity(before):
+            fail("source changed before it was opened")
+        memfd_flags = os.MFD_ALLOW_SEALING | os.MFD_CLOEXEC
+        snapshot_descriptor = os.memfd_create("taiji-fixed-snapshot", memfd_flags)
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(source_descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                fail("source was truncated while it was copied")
+            digest.update(chunk)
+            write_all(snapshot_descriptor, chunk)
+            remaining -= len(chunk)
+        if os.read(source_descriptor, 1):
+            fail("source grew while it was copied")
+        after = os.fstat(source_descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        if (
+            stable_identity(opened) != stable_identity(after)
+            or stable_identity(opened) != stable_identity(current)
+        ):
+            fail("source changed while the immutable snapshot was created")
+        if digest.hexdigest() != expected_sha256:
+            fail("source SHA256 does not match the pinned identity")
+        os.fchmod(snapshot_descriptor, snapshot_mode)
+        seals = required_seals()
+        fcntl.fcntl(snapshot_descriptor, fcntl.F_ADD_SEALS, seals)
+        metadata, actual_sha256, actual_seals = verify_descriptor(
+            snapshot_descriptor, expected_sha256
+        )
+        print(
+            "READY\t{}\t{}\t{}\t{}".format(
+                snapshot_descriptor,
+                actual_sha256,
+                metadata.st_size,
+                actual_seals,
+            ),
+            flush=True,
+        )
+        if os.read(0, 1) != b"A":
+            fail("snapshot was not adopted by the parent")
+    finally:
+        os.close(source_descriptor)
+        if snapshot_descriptor >= 0:
+            os.close(snapshot_descriptor)
+
+
+def create_payload_snapshot(path, mode_text):
+    if mode_text not in ("0400", "0500"):
+        fail("snapshot mode must be 0400 or 0500")
+    source_descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    snapshot_descriptor = -1
+    try:
+        snapshot_descriptor = os.memfd_create(
+            "taiji-fixed-payload-snapshot",
+            os.MFD_ALLOW_SEALING | os.MFD_CLOEXEC,
+        )
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 4 * 1024 * 1024:
+                fail("payload snapshot exceeds 4 MiB")
+            digest.update(chunk)
+            write_all(snapshot_descriptor, chunk)
+        if total <= 0:
+            fail("payload snapshot is empty")
+        expected_sha256 = digest.hexdigest()
+        os.fchmod(snapshot_descriptor, int(mode_text, 8))
+        seals = required_seals()
+        fcntl.fcntl(snapshot_descriptor, fcntl.F_ADD_SEALS, seals)
+        metadata, actual_sha256, actual_seals = verify_descriptor(
+            snapshot_descriptor, expected_sha256
+        )
+        print(
+            "READY\t{}\t{}\t{}\t{}".format(
+                snapshot_descriptor,
+                actual_sha256,
+                metadata.st_size,
+                actual_seals,
+            ),
+            flush=True,
+        )
+        if os.read(0, 1) != b"A":
+            fail("snapshot was not adopted by the parent")
+    finally:
+        os.close(source_descriptor)
+        if snapshot_descriptor >= 0:
+            os.close(snapshot_descriptor)
+
+
+def verify_snapshot(path, expected_sha256):
+    if not valid_sha256(expected_sha256):
+        fail("expected SHA256 is invalid")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        verify_descriptor(descriptor, expected_sha256)
+    finally:
+        os.close(descriptor)
+
+
+def main(argv):
+    if not argv or argv[0] not in ("create", "create-payload", "verify"):
+        fail("usage: create|create-payload|verify ...")
+    if argv[0] == "create":
+        if len(argv) != 4:
+            fail("create requires PATH EXPECTED_SHA256 MODE")
+        create_snapshot(argv[1], argv[2], argv[3])
+    elif argv[0] == "create-payload":
+        if len(argv) != 3:
+            fail("create-payload requires FD_PATH MODE")
+        create_payload_snapshot(argv[1], argv[2])
+    else:
+        if len(argv) != 3:
+            fail("verify requires PATH EXPECTED_SHA256")
+        verify_snapshot(argv[1], argv[2])
+
+
+try:
+    main(sys.argv[1:])
+except (OSError, RuntimeError) as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PY
 }
 
-open_fixed_tool_archive() {
-  local archive_path="$1" expected_sha256="$2"
-  local before_identity opened_identity after_identity actual_sha256 current_uid
-  close_fixed_tool_archive
-  current_uid="$(id -u)"
-  [ -f "$archive_path" ] && [ ! -L "$archive_path" ] \
-    && [ "$(stat -c '%h' "$archive_path")" = 1 ] \
-    && [ "$(stat -c '%u' "$archive_path")" = "$current_uid" ] \
-    || return 1
-  before_identity="$(stat -c '%d:%i:%s:%h:%u' -- "$archive_path")" || return 1
-  exec 9<"$archive_path" || return 1
-  FIXED_TOOL_ARCHIVE_FD_PATH="/proc/self/fd/9"
-  [ -r "$FIXED_TOOL_ARCHIVE_FD_PATH" ] || {
-    close_fixed_tool_archive
-    return 1
-  }
-  opened_identity="$(stat -Lc '%d:%i:%s:%h:%u' -- "$FIXED_TOOL_ARCHIVE_FD_PATH")" || {
-    close_fixed_tool_archive
-    return 1
-  }
-  [ "$opened_identity" = "$before_identity" ] || {
-    close_fixed_tool_archive
-    return 1
-  }
-  actual_sha256="$(sha256sum "$FIXED_TOOL_ARCHIVE_FD_PATH" | awk '{print $1}')" || {
-    close_fixed_tool_archive
-    return 1
-  }
-  after_identity="$(stat -c '%d:%i:%s:%h:%u' -- "$archive_path")" || {
-    close_fixed_tool_archive
-    return 1
-  }
-  if [ "$actual_sha256" != "$expected_sha256" ] || [ "$after_identity" != "$opened_identity" ]; then
-    close_fixed_tool_archive
-    return 1
+cleanup_sealed_snapshot_transport() {
+  local control_fifo status_fifo
+  if [ "$SEALED_SNAPSHOT_STATUS_OPEN" = 1 ]; then
+    exec 8<&- 2>/dev/null || true
+    SEALED_SNAPSHOT_STATUS_OPEN=0
+  fi
+  if [ "$SEALED_SNAPSHOT_CONTROL_OPEN" = 1 ]; then
+    printf 'A' >&7 2>/dev/null || true
+    exec 7>&- 2>/dev/null || true
+    SEALED_SNAPSHOT_CONTROL_OPEN=0
+  fi
+  if [ -n "$SEALED_SNAPSHOT_HOLDER_PID" ]; then
+    wait "$SEALED_SNAPSHOT_HOLDER_PID" 2>/dev/null || true
+    SEALED_SNAPSHOT_HOLDER_PID=""
+  fi
+  if [ -n "$SEALED_SNAPSHOT_TRANSPORT_DIR" ]; then
+    control_fifo="$SEALED_SNAPSHOT_TRANSPORT_DIR/control"
+    status_fifo="$SEALED_SNAPSHOT_TRANSPORT_DIR/status"
+    [ ! -e "$control_fifo" ] || [ -p "$control_fifo" ] || return 1
+    [ ! -e "$status_fifo" ] || [ -p "$status_fifo" ] || return 1
+    [ ! -p "$control_fifo" ] || rm -f -- "$control_fifo"
+    [ ! -p "$status_fifo" ] || rm -f -- "$status_fifo"
+    rmdir -- "$SEALED_SNAPSHOT_TRANSPORT_DIR" 2>/dev/null || return 1
+    SEALED_SNAPSHOT_TRANSPORT_DIR=""
   fi
 }
 
+close_sealed_snapshot_slot() {
+  case "$1" in
+    archive) exec 9<&- 2>/dev/null || true ; FIXED_TOOL_ARCHIVE_FD_PATH="" ;;
+    node) exec 4<&- 2>/dev/null || true ; BUILD_NODE_HELD_PATH="" ;;
+    npm) exec 5<&- 2>/dev/null || true ; BUILD_NPM_CLI_HELD_PATH="" ;;
+    supervisor) exec 6<&- 2>/dev/null || true ; FORMAL_BUILD_SUPERVISOR_FD_PATH="" ; FORMAL_BUILD_SUPERVISOR_SHA256="" ;;
+    *) return 1 ;;
+  esac
+}
+
+verify_sealed_snapshot() {
+  local snapshot_path="$1" expected_sha256="$2" snapshot_python
+  snapshot_python="$(sealed_snapshot_python_source)" || return 1
+  /usr/bin/env -i \
+    HOME="$BUILD_ROOT" TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    /usr/bin/python3 -I -B -c "$snapshot_python" verify \
+    "$snapshot_path" "$expected_sha256"
+}
+
+adopt_sealed_snapshot() {
+  local source_path="$1" expected_sha256="$2" slot="$3"
+  local snapshot_python control_fifo status_fifo ready snapshot_descriptor
+  local reported_sha256 reported_size reported_seals holder_path adopted_path holder_status snapshot_mode
+  cleanup_sealed_snapshot_transport || return 1
+  close_sealed_snapshot_slot "$slot" || return 1
+  snapshot_python="$(sealed_snapshot_python_source)" || return 1
+  SEALED_SNAPSHOT_TRANSPORT_DIR="$(
+    mktemp -d "$BUILD_TMP_DIR/taiji-sealed-snapshot.XXXXXX"
+  )" || return 1
+  [ -d "$SEALED_SNAPSHOT_TRANSPORT_DIR" ] \
+    && [ ! -L "$SEALED_SNAPSHOT_TRANSPORT_DIR" ] \
+    && [ "$(stat -c '%u' "$SEALED_SNAPSHOT_TRANSPORT_DIR")" = "$(id -u)" ] \
+    && [ "$(stat -c '%a' "$SEALED_SNAPSHOT_TRANSPORT_DIR")" = 700 ] \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  control_fifo="$SEALED_SNAPSHOT_TRANSPORT_DIR/control"
+  status_fifo="$SEALED_SNAPSHOT_TRANSPORT_DIR/status"
+  mkfifo -m 0600 -- "$control_fifo" "$status_fifo" \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  exec 7<> "$control_fifo" \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  SEALED_SNAPSHOT_CONTROL_OPEN=1
+  case "$slot" in
+    node) snapshot_mode=0500 ;;
+    archive|npm) snapshot_mode=0400 ;;
+  esac
+  /usr/bin/env -i \
+    HOME="$BUILD_ROOT" TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    /usr/bin/python3 -I -B -c "$snapshot_python" create \
+    "$source_path" "$expected_sha256" "$snapshot_mode" <&7 > "$status_fifo" &
+  SEALED_SNAPSHOT_HOLDER_PID="$!"
+  exec 8< "$status_fifo" \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  SEALED_SNAPSHOT_STATUS_OPEN=1
+  if ! IFS=$'\t' read -r ready snapshot_descriptor reported_sha256 reported_size reported_seals <&8; then
+    cleanup_sealed_snapshot_transport || true
+    return 1
+  fi
+  exec 8<&-
+  SEALED_SNAPSHOT_STATUS_OPEN=0
+  [ "$ready" = READY ] \
+    && printf '%s\n' "$snapshot_descriptor" | grep -Eq '^[0-9]+$' \
+    && [ "$reported_sha256" = "$expected_sha256" ] \
+    && printf '%s\n' "$reported_size" | grep -Eq '^[1-9][0-9]*$' \
+    && printf '%s\n' "$reported_seals" | grep -Eq '^[0-9]+$' \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  holder_path="/proc/$SEALED_SNAPSHOT_HOLDER_PID/fd/$snapshot_descriptor"
+  case "$slot" in
+    archive)
+      exec 9< "$holder_path" || { cleanup_sealed_snapshot_transport || true; return 1; }
+      adopted_path="/proc/self/fd/9"
+      ;;
+    node)
+      exec 4< "$holder_path" || { cleanup_sealed_snapshot_transport || true; return 1; }
+      adopted_path="/proc/$$/fd/4"
+      ;;
+    npm)
+      exec 5< "$holder_path" || { cleanup_sealed_snapshot_transport || true; return 1; }
+      adopted_path="/proc/$$/fd/5"
+      ;;
+  esac
+  if ! verify_sealed_snapshot "$adopted_path" "$expected_sha256"; then
+    close_sealed_snapshot_slot "$slot" || true
+    cleanup_sealed_snapshot_transport || true
+    return 1
+  fi
+  printf 'A' >&7 || {
+    close_sealed_snapshot_slot "$slot" || true
+    cleanup_sealed_snapshot_transport || true
+    return 1
+  }
+  exec 7>&-
+  SEALED_SNAPSHOT_CONTROL_OPEN=0
+  holder_status=0
+  wait "$SEALED_SNAPSHOT_HOLDER_PID" || holder_status="$?"
+  SEALED_SNAPSHOT_HOLDER_PID=""
+  cleanup_sealed_snapshot_transport || holder_status=1
+  [ "$holder_status" = 0 ] || {
+    close_sealed_snapshot_slot "$slot" || true
+    return 1
+  }
+  case "$slot" in
+    archive) FIXED_TOOL_ARCHIVE_FD_PATH="$adopted_path" ;;
+    node) BUILD_NODE_HELD_PATH="$adopted_path" ;;
+    npm) BUILD_NPM_CLI_HELD_PATH="$adopted_path" ;;
+  esac
+}
+
+close_fixed_tool_archive() {
+  close_sealed_snapshot_slot archive
+}
+
+retain_fixed_tool_archive_snapshot() {
+  local tool="$1" expected_sha256="$2" retained_path
+  [ -n "$FIXED_TOOL_ARCHIVE_FD_PATH" ] || return 1
+  case "$tool" in
+    uv)
+      exec 10< "$FIXED_TOOL_ARCHIVE_FD_PATH" || return 1
+      retained_path="/proc/$$/fd/10"
+      ;;
+    python)
+      exec 11< "$FIXED_TOOL_ARCHIVE_FD_PATH" || return 1
+      retained_path="/proc/$$/fd/11"
+      ;;
+    node)
+      exec 12< "$FIXED_TOOL_ARCHIVE_FD_PATH" || return 1
+      retained_path="/proc/$$/fd/12"
+      ;;
+    *) return 1 ;;
+  esac
+  if ! verify_sealed_snapshot "$retained_path" "$expected_sha256"; then
+    case "$tool" in
+      uv) exec 10<&- ;;
+      python) exec 11<&- ;;
+      node) exec 12<&- ;;
+    esac
+    return 1
+  fi
+  close_fixed_tool_archive
+  case "$tool" in
+    uv) UV_ARCHIVE_PATH="$retained_path" ;;
+    python) PYTHON_ARCHIVE_PATH="$retained_path" ;;
+    node) NODE_ARCHIVE_PATH="$retained_path" ;;
+  esac
+}
+
+close_retained_tool_archive_snapshots() {
+  exec 10<&- 2>/dev/null || true
+  exec 11<&- 2>/dev/null || true
+  exec 12<&- 2>/dev/null || true
+}
+
+retain_source_archive_snapshot() {
+  local retained_path
+  [ -n "$FIXED_TOOL_ARCHIVE_FD_PATH" ] || return 1
+  exec 13< "$FIXED_TOOL_ARCHIVE_FD_PATH" || return 1
+  retained_path="/proc/$$/fd/13"
+  verify_sealed_snapshot "$retained_path" "$SOURCE_ARCHIVE_SHA256" \
+    || { exec 13<&-; return 1; }
+  close_fixed_tool_archive
+  SOURCE_ARCHIVE_SNAPSHOT_PATH="$retained_path"
+}
+
+close_retained_formal_archive_snapshots() {
+  close_retained_tool_archive_snapshots
+  exec 13<&- 2>/dev/null || true
+  exec 6<&- 2>/dev/null || true
+  SOURCE_ARCHIVE_SNAPSHOT_PATH=""
+  FORMAL_BUILD_SUPERVISOR_FD_PATH=""
+  FORMAL_BUILD_SUPERVISOR_SHA256=""
+}
+
+open_fixed_tool_archive() {
+  local archive_path="$1" expected_sha256="$2" snapshot_python
+  snapshot_python="$(sealed_snapshot_python_source)" || return 1
+  adopt_sealed_snapshot "$archive_path" "$expected_sha256" archive || return 1
+  FIXED_TOOL_ARCHIVE_FD_PATH="/proc/self/fd/9"
+}
+
 require_open_fixed_tool_archive_unchanged() {
-  local expected_sha256="$1" actual_sha256
+  local expected_sha256="$1"
   [ -n "$FIXED_TOOL_ARCHIVE_FD_PATH" ] && [ -r "$FIXED_TOOL_ARCHIVE_FD_PATH" ] \
-    || fail "固定工具归档的已打开文件丢失"
-  actual_sha256="$(sha256sum "$FIXED_TOOL_ARCHIVE_FD_PATH" | awk '{print $1}')"
-  [ "$actual_sha256" = "$expected_sha256" ] \
-    || fail "固定工具归档在安全检查与解压期间发生变化"
+    || fail "固定工具归档的 sealed memfd 快照丢失"
+  verify_sealed_snapshot "$FIXED_TOOL_ARCHIVE_FD_PATH" "$expected_sha256" \
+    || fail "固定工具归档不再是预期的 sealed memfd 快照"
 }
 
 source_lab_dir() {
@@ -1060,7 +1614,8 @@ with tarfile.open(sys.argv[1], "r:gz") as archive:
 PY
   tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$extract_dir"
   require_open_fixed_tool_archive_unchanged "$UV_ARCHIVE_SHA256"
-  close_fixed_tool_archive
+  retain_fixed_tool_archive_snapshot uv "$UV_ARCHIVE_SHA256" \
+    || fail "无法保留 uv sealed memfd 归档快照"
   extracted_bin="$extract_dir/uv-x86_64-unknown-linux-gnu/uv"
   [ -f "$extracted_bin" ] && [ ! -L "$extracted_bin" ] \
     && [ "$(stat -c '%h' "$extracted_bin")" = 1 ] \
@@ -1070,13 +1625,13 @@ PY
     && [ "$(stat -c '%h' "$UV_BIN")" = 1 ] \
     && [ "$(stat -c '%u' "$UV_BIN")" = "$current_uid" ] \
     || fail "uv 可执行文件不是当前用户独占的普通文件"
+  UV_EXECUTABLE_SHA256="$(sha256sum "$UV_BIN" | awk '{print $1}')"
+  [ "$UV_EXECUTABLE_SHA256" = "$UV_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "uv 可执行文件 SHA256 不等于官方固定归档身份"
   [ "$("$UV_BIN" --version)" = "uv $UV_VERSION" ] \
     || fail "uv 可执行文件版本不等于固定版本 $UV_VERSION"
   file "$UV_BIN" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
     || fail "uv 可执行文件不是 Linux x86_64 ELF"
-  UV_EXECUTABLE_SHA256="$(sha256sum "$UV_BIN" | awk '{print $1}')"
-  [ "$UV_EXECUTABLE_SHA256" = "$UV_PINNED_EXECUTABLE_SHA256" ] \
-    || fail "uv 可执行文件 SHA256 不等于官方固定归档身份"
   ok "固定 uv 已验证：$UV_BIN (uv $UV_VERSION)"
 }
 
@@ -1136,7 +1691,8 @@ PY
   install -d -m 0700 "$extract_dir"
   tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$extract_dir"
   require_open_fixed_tool_archive_unchanged "$PYTHON_ARCHIVE_SHA256"
-  close_fixed_tool_archive
+  retain_fixed_tool_archive_snapshot python "$PYTHON_ARCHIVE_SHA256" \
+    || fail "无法保留 Python sealed memfd 归档快照"
   [ -f "$extract_dir/python/bin/python3.11" ] \
     && [ ! -L "$extract_dir/python/bin/python3.11" ] \
     && [ "$(stat -c '%h' "$extract_dir/python/bin/python3.11")" = 1 ] \
@@ -1144,13 +1700,13 @@ PY
   ln -sfn "$extract_dir/python" "$PYTHON_ROOT/current"
   [ -x "$PYTHON_BIN" ] && [ ! -L "$PYTHON_BIN" ] \
     || fail "固定 Python 可执行文件不可用"
+  actual_executable_sha="$(sha256sum "$PYTHON_BIN" | awk '{print $1}')"
+  [ "$actual_executable_sha" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "Python 可执行文件 SHA256 不等于官方固定归档身份"
   [ "$("$PYTHON_BIN" -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION_PINNED" ] \
     || fail "Python 可执行文件版本不等于固定版本 $PYTHON_VERSION_PINNED"
   file "$PYTHON_BIN" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
     || fail "Python 可执行文件不是 Linux x86_64 ELF"
-  actual_executable_sha="$(sha256sum "$PYTHON_BIN" | awk '{print $1}')"
-  [ "$actual_executable_sha" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
-    || fail "Python 可执行文件 SHA256 不等于官方固定归档身份"
   ok "固定 CPython 已验证：$PYTHON_BIN ($PYTHON_VERSION_PINNED)"
 }
 
@@ -1214,7 +1770,7 @@ electron_mirrors() {
     | awk 'NF && !seen[$0]++'
 }
 
-portable_node_is_exact() {
+portable_node_files_are_exact() {
   local root="$NODE_ROOT/current"
   [ -x "$root/bin/node" ] || return 1
   [ -x "$root/bin/npm" ] || return 1
@@ -1222,20 +1778,108 @@ portable_node_is_exact() {
   [ -f "$root/.taiji-node-archive-sha256" ] || return 1
   [ "$(tr -d '\r\n' < "$root/.taiji-node-version")" = "$NODE_VERSION" ] || return 1
   [ "$(tr -d '\r\n' < "$root/.taiji-node-archive-sha256")" = "$NODE_ARCHIVE_SHA256" ] || return 1
-  [ "$("$root/bin/node" --version 2>/dev/null)" = "v$NODE_VERSION" ] || return 1
   [ "$(sha256sum "$root/bin/node" | awk '{print $1}')" = "$NODE_PINNED_EXECUTABLE_SHA256" ] || return 1
+  [ -n "$NODE_NPM_CLI_ARCHIVE_SHA256" ] \
+    && [ -n "$NODE_NPM_VERSION_ARCHIVE" ] \
+    || return 1
+  [ "$(sha256sum "$root/lib/node_modules/npm/bin/npm-cli.js" | awk '{print $1}')" \
+      = "$NODE_NPM_CLI_ARCHIVE_SHA256" ] \
+    || return 1
   file "$root/bin/node" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' || return 1
+}
+
+run_build_node_script() {
+  local held_script="$1" canonical_script="$2"
+  shift 2
+  [ "$BUILD_NODE_RUNTIME_SEALED" = 1 ] || return 1
+  NODE_OPTIONS= NODE_PATH= \
+  NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/dev/null \
+  npm_node_execpath="$BUILD_NODE_HELD_PATH" \
+  npm_execpath="$BUILD_NPM_CLI_HELD_PATH" \
+    "$BUILD_NODE_HELD_PATH" -e '
+const fs = require("fs");
+const Module = require("module");
+const path = require("path");
+const heldPath = process.argv[1];
+const canonicalPath = process.argv[2];
+const args = process.argv.slice(3);
+let source = fs.readFileSync(heldPath, "utf8");
+source = source.replace(/^#![^\n]*(?:\n|$)/, "\n");
+process.argv = [process.execPath, canonicalPath, ...args];
+const scriptModule = new Module(canonicalPath, module);
+scriptModule.filename = canonicalPath;
+scriptModule.paths = Module._nodeModulePaths(path.dirname(canonicalPath));
+scriptModule._compile(source, canonicalPath);
+' "$held_script" "$canonical_script" "$@"
+}
+
+run_build_node() {
+  [ "$BUILD_NODE_RUNTIME_SEALED" = 1 ] || return 1
+  NODE_OPTIONS= NODE_PATH= "$BUILD_NODE_HELD_PATH" "$@"
+}
+
+run_build_npm() {
+  run_build_node_script \
+    "$BUILD_NPM_CLI_HELD_PATH" "$BUILD_NPM_CLI_PATH" "$@"
+}
+
+portable_node_is_exact() {
+  portable_node_files_are_exact || return 1
+  [ "$BUILD_NODE_RUNTIME_SEALED" = 1 ] || return 1
+  verify_sealed_snapshot "$BUILD_NODE_HELD_PATH" "$NODE_PINNED_EXECUTABLE_SHA256" \
+    || return 1
+  verify_sealed_snapshot "$BUILD_NPM_CLI_HELD_PATH" "$NODE_NPM_CLI_ARCHIVE_SHA256" \
+    || return 1
+  [ "$(run_build_node --version 2>/dev/null)" = "v$NODE_VERSION" ] || return 1
+  [ "$(run_build_npm --version 2>/dev/null)" = "$NODE_NPM_VERSION_ARCHIVE" ] \
+    || return 1
+}
+
+seal_build_node_runtime() {
+  local current_uid
+  current_uid="$(id -u)"
+  BUILD_NODE_PATH="$(readlink -f "$NODE_ROOT/current/bin/node")" \
+    || fail "无法解析候选构建 Node 实体"
+  BUILD_NPM_CLI_PATH="$(readlink -f \
+    "$NODE_ROOT/current/lib/node_modules/npm/bin/npm-cli.js")" \
+    || fail "无法解析候选构建 npm-cli.js 实体"
+  for path in "$BUILD_NODE_PATH" "$BUILD_NPM_CLI_PATH"; do
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      && [ "$(stat -c '%h' "$path")" = 1 ] \
+      && [ "$(stat -c '%u' "$path")" = "$current_uid" ] \
+      || fail "候选构建 Node/npm 叶节点不是当前用户的单链接普通文件：$path"
+  done
+  portable_node_files_are_exact \
+    || fail "候选构建 Node/npm 文件身份未通过被动校验"
+  adopt_sealed_snapshot \
+    "$BUILD_NODE_PATH" "$NODE_PINNED_EXECUTABLE_SHA256" node \
+    || fail "无法固定候选构建 Node sealed memfd"
+  adopt_sealed_snapshot \
+    "$BUILD_NPM_CLI_PATH" "$NODE_NPM_CLI_ARCHIVE_SHA256" npm \
+    || fail "无法固定候选构建 npm-cli.js sealed memfd"
+  BUILD_NODE_RUNTIME_SEALED=1
+  portable_node_is_exact \
+    || fail "候选构建 Node/npm sealed memfd 版本或身份无效"
+  ok "候选构建 Node/npm 叶节点已固定为 sealed memfd"
+}
+
+close_build_node_runtime_fds() {
+  exec 4<&- 2>/dev/null || true
+  exec 5<&- 2>/dev/null || true
+  BUILD_NODE_HELD_PATH=""
+  BUILD_NPM_CLI_HELD_PATH=""
+  BUILD_NODE_RUNTIME_SEALED=0
 }
 
 install_portable_node() {
   mkdir -p "$NODE_ROOT"
   NODE_ARCHIVE_PATH="$NODE_ROOT/download/$NODE_ARCHIVE"
-  if portable_node_is_exact; then
-    export PATH="$NODE_ROOT/current/bin:$PATH"
+  if portable_node_files_are_exact; then
+    export PATH="$NODE_ROOT/current/bin:/usr/bin:/bin"
     return 0
   fi
 
-  local mirror release_dir tmp_dir tarball downloaded extracted_root
+  local mirror release_dir tmp_dir tarball downloaded extracted_root npm_archive_identity
   release_dir="v${NODE_VERSION}"
   tmp_dir="$NODE_ROOT/download"
   tarball="$NODE_ARCHIVE"
@@ -1295,24 +1939,87 @@ with tarfile.open(sys.argv[1], "r:xz") as archive:
         if target != expected_root and not target.startswith(expected_root + "/"):
             raise SystemExit("escaping link")
 PY
+  npm_archive_identity="$(/usr/bin/python3 -I -B - \
+    "$FIXED_TOOL_ARCHIVE_FD_PATH" "node-v${NODE_VERSION}-linux-x64" <<'PY'
+import hashlib
+import json
+import re
+import sys
+import tarfile
+
+archive_path, expected_root = sys.argv[1:]
+cli_name = expected_root + "/lib/node_modules/npm/bin/npm-cli.js"
+package_name = expected_root + "/lib/node_modules/npm/package.json"
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit("duplicate npm package field: " + key)
+        result[key] = value
+    return result
+
+with tarfile.open(archive_path, "r:xz") as archive:
+    members = archive.getmembers()
+    cli_members = [member for member in members if member.name == cli_name]
+    package_members = [member for member in members if member.name == package_name]
+    if len(cli_members) != 1 or len(package_members) != 1:
+        raise SystemExit("fixed Node archive does not contain exact npm identities")
+    cli_member = cli_members[0]
+    package_member = package_members[0]
+    if (
+        not cli_member.isfile()
+        or cli_member.size <= 0
+        or cli_member.size > 1024 * 1024
+        or not package_member.isfile()
+        or package_member.size <= 0
+        or package_member.size > 1024 * 1024
+    ):
+        raise SystemExit("fixed Node archive npm identity members are unsafe")
+    cli_stream = archive.extractfile(cli_member)
+    package_stream = archive.extractfile(package_member)
+    cli_payload = cli_stream.read(cli_member.size + 1) if cli_stream else b""
+    package_payload = package_stream.read(package_member.size + 1) if package_stream else b""
+    if len(cli_payload) != cli_member.size or len(package_payload) != package_member.size:
+        raise SystemExit("fixed Node archive npm identity member changed while reading")
+
+try:
+    package = json.loads(package_payload.decode("utf-8"), object_pairs_hook=strict_object)
+except (UnicodeError, json.JSONDecodeError) as exc:
+    raise SystemExit("fixed Node archive npm package metadata is invalid") from exc
+version = package.get("version") if isinstance(package, dict) else None
+if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+    raise SystemExit("fixed Node archive npm version is invalid")
+print(hashlib.sha256(cli_payload).hexdigest() + "\t" + version)
+PY
+)" || fail "无法从已固定 Node 归档派生 npm CLI 身份"
+  IFS=$'\t' read -r NODE_NPM_CLI_ARCHIVE_SHA256 NODE_NPM_VERSION_ARCHIVE \
+    <<< "$npm_archive_identity"
+  printf '%s\n' "$NODE_NPM_CLI_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "已固定 Node 归档派生的 npm CLI SHA256 无效"
+  printf '%s\n' "$NODE_NPM_VERSION_ARCHIVE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || fail "已固定 Node 归档派生的 npm 版本无效"
   extracted_root="$NODE_ROOT/${tarball%.tar.xz}"
   rm -rf "$extracted_root"
   tar --no-same-owner --no-same-permissions -xJf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$NODE_ROOT"
   require_open_fixed_tool_archive_unchanged "$NODE_ARCHIVE_SHA256"
-  close_fixed_tool_archive
+  retain_fixed_tool_archive_snapshot node "$NODE_ARCHIVE_SHA256" \
+    || fail "无法保留 Node sealed memfd 归档快照"
   [ -x "$extracted_root/bin/node" ] || fail "Node.js 离线运行时解压后缺少 bin/node"
   printf '%s\n' "$NODE_VERSION" > "$extracted_root/.taiji-node-version"
   printf '%s\n' "$NODE_ARCHIVE_SHA256" > "$extracted_root/.taiji-node-archive-sha256"
   ln -sfn "$extracted_root" "$NODE_ROOT/current"
-  export PATH="$NODE_ROOT/current/bin:$PATH"
-  portable_node_is_exact || fail "Node.js ${NODE_VERSION} Linux x64 离线运行时验证失败"
+  export PATH="$NODE_ROOT/current/bin:/usr/bin:/bin"
+  portable_node_files_are_exact \
+    || fail "Node.js ${NODE_VERSION} Linux x64 离线运行时文件身份验证失败"
 }
 
 ensure_node() {
-  export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+  export PATH="$NODE_ROOT/current/bin:/usr/bin:/bin"
   install_portable_node
-  portable_node_is_exact || fail "固定版 Node.js 离线运行时不可用，禁止回退到系统 Node"
-  ok "Node.js 离线运行时已准备：$NODE_ROOT/current ($(node --version), npm $(npm -v))"
+  portable_node_files_are_exact \
+    || fail "固定版 Node.js 离线运行时文件身份不可用，禁止回退到系统 Node"
+  ok "Node.js 离线运行时文件已准备，尚未执行任何 Node/npm argv"
 }
 
 restore_owned_build_root_directory_writes() {
@@ -1380,7 +2087,8 @@ unpack_source() {
     || fail "源码包在校验与解压之间发生变化"
   tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$BUILD_ROOT"
   require_open_fixed_tool_archive_unchanged "$SOURCE_ARCHIVE_SHA256"
-  close_fixed_tool_archive
+  retain_source_archive_snapshot \
+    || fail "无法保留源码 sealed memfd 归档快照"
   [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
   repair_build_tree_permissions
   python3 "$SOURCE_INTEGRITY_HELPER" verify \
@@ -1393,15 +2101,34 @@ unpack_source() {
 }
 
 verify_build_source_integrity() {
+  local agent_python actual_target
+  local -a extra_symlink_args=()
+  agent_python="$(source_agent_dir)/venv/bin/python"
+  if [ -e "$agent_python" ] || [ -L "$agent_python" ]; then
+    [ -L "$agent_python" ] || fail "Agent 构建 Python 必须是 uv 创建的 symlink"
+    [ -n "$AGENT_PYTHON_SYMLINK_TARGET" ] \
+      || fail "Agent 构建 Python symlink 的固定 raw target 未加载"
+    actual_target="$(readlink "$agent_python")" \
+      || fail "无法读取 Agent 构建 Python symlink"
+    [ "$actual_target" = "$AGENT_PYTHON_SYMLINK_TARGET" ] \
+      || fail "Agent 构建 Python symlink raw target 已漂移"
+    extra_symlink_args=(
+      --allow-extra-symlink
+      "hermes-local-lab/sources/hermes-agent/venv/bin/python"
+      "$AGENT_PYTHON_SYMLINK_TARGET"
+    )
+  fi
   python3 "$SOURCE_INTEGRITY_HELPER" verify \
     --archive "$SRC_ARCHIVE" \
     --inventory "$SOURCE_INVENTORY" \
     --root "$SRC_DIR" \
     --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
+    --allow-extra-prefix "hermes-local-lab/sources/hermes-webui/node_modules" \
     --allow-extra-prefix "apps/taiji-desktop/node_modules" \
     --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
     --allow-extra-prefix "runtime/package-build" \
     --allow-extra-prefix "packages/麒麟操作系统安装包" \
+    "${extra_symlink_args[@]}" \
     || fail "构建源码树已偏离原始归档；拒绝继续声明原始 source commit"
 }
 
@@ -1465,7 +2192,8 @@ npm_ci_with_network_fallback() {
       info "尝试 npm registry：$registry"
       info "尝试 Electron mirror：$electron_mirror"
       rm -rf node_modules
-      if NPM_CONFIG_REGISTRY="$registry" ELECTRON_MIRROR="$electron_mirror" npm ci "${npm_args[@]}"; then
+      if NPM_CONFIG_REGISTRY="$registry" ELECTRON_MIRROR="$electron_mirror" \
+        run_build_npm ci "${npm_args[@]}"; then
         export NPM_CONFIG_REGISTRY="$registry"
         export ELECTRON_MIRROR="$electron_mirror"
         installed=1
@@ -1520,12 +2248,12 @@ print(host)
     fail "TAIJI_NPM_AUDIT_REGISTRY 必须是单个 ASCII HTTPS URL，且不得包含凭据、空白、控制字符、查询参数或片段"
   fi
   info "使用 npm audit registry 主机：$audit_registry_host"
-  npm audit --omit=dev --audit-level=high --registry="$audit_registry" \
+  run_build_npm audit --omit=dev --audit-level=high --registry="$audit_registry" \
     || fail "DOCX Engine 生产依赖包含 high/critical 漏洞或 npm audit 不可用，拒绝生成正式安装包"
 }
 
 run_setup_local() {
-  local uv_lock_mode="$1" setup_log status lock_path lock_before lock_after python_bin python_real
+  local uv_lock_mode="$1" setup_log status lock_path lock_before lock_after python_bin python_real expected_python_real python_symlink_target
   setup_log="$LOG_DIR/setup-local-$(date +%Y%m%d_%H%M%S)_$$.log"
   lock_path="$(source_agent_dir)/$PYTHON_LOCK_BASENAME"
   [ -f "$lock_path" ] && [ ! -L "$lock_path" ] || fail "正式制包缺少普通文件 uv.lock"
@@ -1537,7 +2265,7 @@ run_setup_local() {
   TAIJI_UV_EXECUTABLE="$UV_BIN" \
   TAIJI_PYTHON_EXECUTABLE="$PYTHON_BIN" \
   UV_PYTHON_DOWNLOADS=never \
-    ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
+    /bin/bash -p ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
   status="${PIPESTATUS[0]}"
   set -e
 
@@ -1553,19 +2281,35 @@ run_setup_local() {
   PYTHON_LOCK_SHA256="$lock_after"
   PYTHON_DEPENDENCY_LOCK_STATUS="strict-locked"
   python_bin="$(source_agent_dir)/venv/bin/python"
-  [ -x "$python_bin" ] || fail "strict sync 后 Python 可执行文件不可执行"
+  [ -x "$python_bin" ] && [ -L "$python_bin" ] \
+    || fail "strict sync 后 Python 必须是 uv 创建的可执行 symlink"
+  python_symlink_target="$(readlink "$python_bin")" \
+    || fail "strict sync 后无法读取 Python symlink raw target"
+  case "$python_symlink_target" in
+    /*) ;;
+    *) fail "strict sync 后 Python symlink raw target 必须是绝对路径" ;;
+  esac
+  case "$python_symlink_target" in
+    *$'\n'*|*$'\r'*) fail "strict sync 后 Python symlink raw target 含换行" ;;
+  esac
   python_real="$(readlink -f "$python_bin")"
   [ -f "$python_real" ] || fail "strict sync 后 Python 真实可执行文件不存在"
+  expected_python_real="$(readlink -f "$PYTHON_BIN")"
+  [ -n "$expected_python_real" ] && [ "$python_real" = "$expected_python_real" ] \
+    || fail "strict sync 后 Python symlink 未解析到固定 CPython"
+  [ "$(readlink -f "$python_symlink_target")" = "$python_real" ] \
+    || fail "strict sync 后 Python symlink raw target 与解析身份不一致"
   PYTHON_VERSION="$("$python_bin" -c 'import platform; print(platform.python_version())')"
   [ "$PYTHON_VERSION" = "$PYTHON_VERSION_PINNED" ] \
     || fail "正式 Python 运行时版本不是固定版本 $PYTHON_VERSION_PINNED：$PYTHON_VERSION"
   PYTHON_EXECUTABLE_SHA256="$(sha256sum "$python_real" | awk '{print $1}')"
   [ "$PYTHON_EXECUTABLE_SHA256" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
     || fail "strict sync 后 Python 可执行文件 SHA256 不等于固定官方归档身份"
+  readonly AGENT_PYTHON_SYMLINK_TARGET="$python_symlink_target"
 }
 
 build_runtime_and_deb() {
-  local uv_lock_mode source_commit
+  local uv_lock_mode source_commit packaged_node_root
   export PATH="$NODE_ROOT/current/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   # Keep the packaging host's shell/profile from injecting a higher-priority
   # Python package source into uv. UV_NO_CONFIG blocks config files, but these
@@ -1575,11 +2319,14 @@ build_runtime_and_deb() {
   export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   uv_lock_mode="${TAIJI_UV_LOCK_MODE:-strict}"
   [ "$uv_lock_mode" = strict ] || fail "正式制包只允许 strict Python lock 模式"
+  portable_node_is_exact \
+    || fail "候选构建开始前 Node/npm sealed memfd 已漂移"
 
   info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=${uv_lock_mode}）"
   cd "$(source_lab_dir)"
   run_setup_local "$uv_lock_mode"
-  NODE_EXECUTABLE_SHA256="$(sha256sum "$NODE_ROOT/current/bin/node" | awk '{print $1}')"
+  validate_formal_test_python_identity
+  NODE_EXECUTABLE_SHA256="$(sha256sum "$BUILD_NODE_HELD_PATH" | awk '{print $1}')"
   [ "$NODE_EXECUTABLE_SHA256" = "$NODE_PINNED_EXECUTABLE_SHA256" ] \
     || fail "Node.js 可执行文件 SHA256 不等于固定官方归档身份"
 
@@ -1588,7 +2335,7 @@ build_runtime_and_deb() {
   electron_config_cache="$BUILD_ROOT/electron-cache"
   export electron_config_cache
   install -d -m 0700 "$electron_config_cache"
-  npm --version
+  run_build_npm --version
   npm_ci_with_network_fallback --omit=dev
   locate_verified_electron_archive
 
@@ -1596,14 +2343,20 @@ build_runtime_and_deb() {
   cd "$(source_lab_dir)/sources/docx-engine-v2"
   npm_ci_with_network_fallback --omit=dev
   npm_audit_fail_closed
-  node scripts/materialize-portable-resvg-dependencies.js
-  npm test
+  run_build_node scripts/materialize-portable-resvg-dependencies.js
+  run_build_npm test
 
   info "复核 archive-derived 源码树（打包前）"
   verify_build_source_integrity
 
   info "构建 DEB 安装包"
   cd "$SRC_DIR"
+  packaged_node_root="$(readlink -f "$NODE_ROOT/current")" \
+    || fail "无法固定 build-deb 使用的 Node 运行时实体目录"
+  [ -d "$packaged_node_root" ] && [ ! -L "$packaged_node_root" ] \
+    || fail "build-deb 使用的 Node 运行时实体目录不安全"
+  portable_node_is_exact \
+    || fail "build-deb 执行前 Node/npm sealed memfd 已漂移"
   source_commit="$(basename "$SRC_ARCHIVE" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
   printf '%s\n' "$source_commit" | grep -Eq '^[0-9a-f]{40}$' \
     || fail "无法从源码包名称解析发布 commit：$(basename "$SRC_ARCHIVE")"
@@ -1612,7 +2365,8 @@ build_runtime_and_deb() {
   TAIJI_SOURCE_ARCHIVE_PATH="$SRC_ARCHIVE" \
   TAIJI_SOURCE_INVENTORY_PATH="$SOURCE_INVENTORY" \
   TAIJI_SOURCE_INVENTORY_SHA256="$SOURCE_INVENTORY_SHA256" \
-  TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current" \
+  TAIJI_PACKAGED_NODE_ROOT="$packaged_node_root" \
+  TAIJI_PACKAGED_NODE_EXECUTABLE="$BUILD_NODE_HELD_PATH" \
   TAIJI_ELECTRON_ARCHIVE="$ELECTRON_ARCHIVE" \
   TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS="$PYTHON_DEPENDENCY_LOCK_STATUS" \
   TAIJI_PYTHON_LOCK_BASENAME="$PYTHON_LOCK_BASENAME" \
@@ -1620,6 +2374,8 @@ build_runtime_and_deb() {
   TAIJI_PYTHON_ARCHIVE_PATH="$PYTHON_ARCHIVE_PATH" \
   TAIJI_PYTHON_VERSION="$PYTHON_VERSION_PINNED" \
   TAIJI_PYTHON_ARCHIVE_SHA256="$PYTHON_ARCHIVE_SHA256" \
+  TAIJI_PYTHON_EXECUTABLE="$PYTHON_BIN" \
+  TAIJI_AGENT_PYTHON_SYMLINK_TARGET="$AGENT_PYTHON_SYMLINK_TARGET" \
   TAIJI_PYTHON_EXECUTABLE_SHA256="$PYTHON_PINNED_EXECUTABLE_SHA256" \
   TAIJI_UV_EXECUTABLE="$UV_BIN" \
   TAIJI_UV_ARCHIVE_PATH="$UV_ARCHIVE_PATH" \
@@ -1627,30 +2383,127 @@ build_runtime_and_deb() {
   TAIJI_UV_ARCHIVE_SHA256="$UV_ARCHIVE_SHA256" \
   TAIJI_UV_EXECUTABLE_SHA256="$UV_EXECUTABLE_SHA256" \
   TAIJI_NODE_ARCHIVE_PATH="$NODE_ARCHIVE_PATH" \
-    ./packaging/linux/deb/build-deb.sh
+    /bin/bash -p ./packaging/linux/deb/build-deb.sh
+  portable_node_is_exact \
+    || fail "build-deb 返回后 Node/npm sealed memfd 已漂移"
+  validate_formal_test_python_identity
   verify_build_source_integrity
 }
 
 collect_artifacts() {
   info "收集候选 DEB 与 build-deb manifest"
   local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha icon_sha electron_sha acceptance_hashes
+  local source_manifest_result source_deb_fd source_deb_result source_deb_identity
+  local candidate_deb_write_fd candidate_sidecar_write_fd candidate_result previous_umask had_noclobber
   src_pkg_dir="$SRC_DIR/packages/麒麟操作系统安装包"
   deb="$src_pkg_dir/taiji-agent_${VERSION}_amd64.deb"
   manifest="$src_pkg_dir/taiji-package-manifest.json"
   [ -f "$deb" ] || fail "未找到候选 DEB：$deb"
   [ -f "$deb.sha256" ] || fail "未找到候选 DEB SHA256 sidecar：$deb.sha256"
-  [ -f "$manifest" ] || fail "未找到 build-deb manifest：$manifest"
-  rm -f "$OUTPUT_DIR"/taiji-agent_*_amd64.deb "$OUTPUT_DIR"/taiji-agent_*_amd64.deb.sha256 "$BUILD_MARKER" "$MANIFEST_FILE" "$BUILD_REPORT"
-  cp -f "$deb" "$OUTPUT_DIR/"
-  cp -f "$manifest" "$MANIFEST_FILE"
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+    && [ "$(stat -c '%h' "$manifest")" = 1 ] \
+    && [ "$(stat -c '%u' "$manifest")" = "$(id -u)" ] \
+    || fail "build-deb manifest 不是当前用户单链接普通文件：$manifest"
+  [ ! -e "$MANIFEST_FILE" ] && [ ! -L "$MANIFEST_FILE" ] \
+    || fail "正式 package manifest 发布路径在测试前已存在"
+  exec {SOURCE_PACKAGE_MANIFEST_FD}< "$manifest" \
+    || fail "无法固定 build-deb manifest 文件描述符"
+  SOURCE_PACKAGE_MANIFEST_PATH="$manifest"
+  source_manifest_result="$(held_file_identity_and_sha256 \
+    "/proc/$$/fd/$SOURCE_PACKAGE_MANIFEST_FD" "$SOURCE_PACKAGE_MANIFEST_PATH")" \
+    || fail "build-deb manifest 在打开或摘要固定时发生替换"
+  IFS=$'\t' read -r \
+    SOURCE_PACKAGE_MANIFEST_IDENTITY SOURCE_PACKAGE_MANIFEST_SHA256 \
+    <<< "$source_manifest_result"
   deb_name="taiji-agent_${VERSION}_amd64.deb"
-  deb_sha="$(sha256sum "$OUTPUT_DIR/$deb_name" | awk '{print $1}')"
-  printf '%s  %s\n' "$deb_sha" "$deb_name" > "$OUTPUT_DIR/$deb_name.sha256"
-  (cd "$OUTPUT_DIR" && sha256sum -c "$deb_name.sha256")
+  CANDIDATE_DEB_PATH="$OUTPUT_DIR/$deb_name"
+  CANDIDATE_DEB_SIDECAR_PATH="$OUTPUT_DIR/$deb_name.sha256"
+  [ ! -e "$CANDIDATE_ARTIFACT_POISON" ] && [ ! -L "$CANDIDATE_ARTIFACT_POISON" ] \
+    || fail "候选制品 poison 路径已被占用"
+  [ -z "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || { poison_candidate_artifacts "collect found a non-empty output directory"; \
+      fail "上次产物归档后输出目录被并发占用，未覆盖任何文件"; }
+  exec {source_deb_fd}< "$deb" \
+    || fail "无法固定 build-deb 候选 DEB held FD"
+  source_deb_result="$(held_file_identity_and_sha256 "/proc/$$/fd/$source_deb_fd" "$deb")" \
+    || fail "build-deb 候选 DEB 身份或摘要不稳定"
+  IFS=$'\t' read -r source_deb_identity deb_sha <<< "$source_deb_result"
+
+  previous_umask="$(umask)"
+  had_noclobber=0
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {candidate_deb_write_fd}> "$CANDIDATE_DEB_PATH"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    poison_candidate_artifacts "candidate DEB path was occupied"
+    fail "候选 DEB 发布路径已被占用，未覆盖外来文件"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  if ! /usr/bin/cat <&"$source_deb_fd" >&"$candidate_deb_write_fd"; then
+    poison_candidate_artifacts "candidate DEB copy failed"
+    fail "候选 DEB held-FD 复制失败"
+  fi
+  chmod 0644 "/proc/$$/fd/$candidate_deb_write_fd"
+  fsync_held_file "/proc/$$/fd/$candidate_deb_write_fd" \
+    || { poison_candidate_artifacts "candidate DEB fsync failed"; fail "候选 DEB 持久化失败"; }
+  exec {CANDIDATE_DEB_FD}< "/proc/$$/fd/$candidate_deb_write_fd" \
+    || fail "无法固定输出候选 DEB held read FD"
+  exec {candidate_deb_write_fd}>&-
+  exec {source_deb_fd}<&-
+  candidate_result="$(held_file_identity_and_sha256 \
+    "/proc/$$/fd/$CANDIDATE_DEB_FD" "$CANDIDATE_DEB_PATH")" \
+    || { poison_candidate_artifacts "candidate DEB identity drifted after copy"; \
+      fail "输出候选 DEB 身份不稳定"; }
+  IFS=$'\t' read -r CANDIDATE_DEB_IDENTITY CANDIDATE_DEB_SHA256 <<< "$candidate_result"
+  [ "$CANDIDATE_DEB_SHA256" = "$deb_sha" ] \
+    || { poison_candidate_artifacts "candidate DEB digest differs from source"; \
+      fail "输出候选 DEB 与 build-deb held FD 摘要不一致"; }
+
+  previous_umask="$(umask)"
+  had_noclobber=0
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {candidate_sidecar_write_fd}> "$CANDIDATE_DEB_SIDECAR_PATH"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    poison_candidate_artifacts "candidate sidecar path was occupied"
+    fail "候选 DEB sidecar 发布路径已被占用，未覆盖外来文件"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  printf '%s  %s\n' "$CANDIDATE_DEB_SHA256" "$deb_name" \
+    >&"$candidate_sidecar_write_fd"
+  chmod 0644 "/proc/$$/fd/$candidate_sidecar_write_fd"
+  fsync_held_file "/proc/$$/fd/$candidate_sidecar_write_fd" \
+    || { poison_candidate_artifacts "candidate sidecar fsync failed"; fail "候选 DEB sidecar 持久化失败"; }
+  exec {CANDIDATE_DEB_SIDECAR_FD}< "/proc/$$/fd/$candidate_sidecar_write_fd" \
+    || fail "无法固定候选 DEB sidecar held read FD"
+  exec {candidate_sidecar_write_fd}>&-
+  candidate_result="$(held_file_identity_and_sha256 \
+    "/proc/$$/fd/$CANDIDATE_DEB_SIDECAR_FD" "$CANDIDATE_DEB_SIDECAR_PATH")" \
+    || { poison_candidate_artifacts "candidate sidecar identity drifted"; \
+      fail "候选 DEB sidecar 身份不稳定"; }
+  IFS=$'\t' read -r CANDIDATE_DEB_SIDECAR_IDENTITY CANDIDATE_DEB_SIDECAR_SHA256 \
+    <<< "$candidate_result"
+  CANDIDATE_DEB_SIDECAR_EXPECTED_SHA256="$(
+    printf '%s  %s\n' "$CANDIDATE_DEB_SHA256" "$deb_name" | sha256sum | awk '{print $1}'
+  )"
+  [ "$CANDIDATE_DEB_SIDECAR_SHA256" = "$CANDIDATE_DEB_SIDECAR_EXPECTED_SHA256" ] \
+    || { poison_candidate_artifacts "candidate sidecar content mismatch"; \
+      fail "候选 DEB sidecar 内容不是 exact basename/SHA 合同"; }
+  fsync_directory "$OUTPUT_DIR" \
+    || { poison_candidate_artifacts "candidate output directory fsync failed"; \
+      fail "候选 DEB 输出目录持久化失败"; }
+  CANDIDATE_DEB_FIXED=1
+  require_candidate_deb_fixed
   source_name="$(basename "$SRC_ARCHIVE")"
   source_sha="$(cd "$SCRIPT_DIR" && sha256sum "$source_name" | awk '{print $1}')"
   source_commit="$(printf '%s\n' "$source_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
-  abi_sha="$(python3 - "$MANIFEST_FILE" "$deb_name" "$deb_sha" "$source_commit" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" \
+  abi_sha="$(python3 - "/proc/$$/fd/$SOURCE_PACKAGE_MANIFEST_FD" "$deb_name" "$deb_sha" "$source_commit" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" \
     "$PYTHON_DEPENDENCY_LOCK_STATUS" "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256" "$PYTHON_VERSION" "$PYTHON_EXECUTABLE_SHA256" \
     "$UV_VERSION" "$UV_ARCHIVE_SHA256" "$UV_EXECUTABLE_SHA256" \
     "$NODE_VERSION" "$NODE_ARCHIVE_SHA256" "$NODE_EXECUTABLE_SHA256" \
@@ -1698,7 +2551,7 @@ print(abi)
 PY
   )"
   ELF_ABI_AUDIT_SHA256="$abi_sha"
-  acceptance_hashes="$(python3 - "$MANIFEST_FILE" <<'PY'
+  acceptance_hashes="$(python3 - "/proc/$$/fd/$SOURCE_PACKAGE_MANIFEST_FD" <<'PY'
 import json
 import re
 import sys
@@ -1725,7 +2578,7 @@ PY
     ACCEPTANCE_TOOLS_MANIFEST_SHA256 \
     ACCEPTANCE_ENTRYPOINT_SHA256 \
     INSTALLED_RELEASE_MANIFEST_SHA256 <<< "$acceptance_hashes"
-  icon_sha="$(python3 - "$MANIFEST_FILE" <<'PY'
+  icon_sha="$(python3 - "/proc/$$/fd/$SOURCE_PACKAGE_MANIFEST_FD" <<'PY'
 import json
 import re
 import sys
@@ -1739,7 +2592,7 @@ print(value)
 PY
 )"
   ICON_SET_SHA256="$icon_sha"
-  electron_sha="$(python3 - "$MANIFEST_FILE" <<'PY'
+  electron_sha="$(python3 - "/proc/$$/fd/$SOURCE_PACKAGE_MANIFEST_FD" <<'PY'
 import json
 import re
 import sys
@@ -1763,15 +2616,4211 @@ PY
   ok "候选 DEB、manifest 和 canonical policy/ABI 摘要已绑定"
 }
 
-write_pending_build_marker() {
+validate_formal_test_python_identity() {
+  local agent_dir agent_python expected_real actual_real current_uid path mode actual_sha actual_version
+  agent_dir="$(source_agent_dir)"
+  agent_python="$agent_dir/venv/bin/python"
+  current_uid="$(id -u)"
+  for path in \
+    "$SRC_DIR" \
+    "$(source_lab_dir)" \
+    "$(source_lab_dir)/sources" \
+    "$agent_dir" \
+    "$agent_dir/venv" \
+    "$agent_dir/venv/bin" \
+    "$PYTHON_ROOT" \
+    "$PYTHON_ROOT/extract" \
+    "$PYTHON_ROOT/extract/python" \
+    "$PYTHON_ROOT/extract/python/bin"; do
+    [ -d "$path" ] && [ ! -L "$path" ] \
+      || fail "正式测试 Python 父链不是安全真实目录：$path"
+    [ "$(stat -c '%u' "$path")" = "$current_uid" ] \
+      || fail "正式测试 Python 父链不属于当前制包用户：$path"
+    mode="$(stat -c '%a' "$path")"
+    [ $((8#$mode & 8#022)) -eq 0 ] \
+      || fail "正式测试 Python 父链允许 group/other 写入：$path"
+  done
+  [ -x "$agent_python" ] \
+    || fail "正式构建测试缺少可执行 Agent Python：$agent_python"
+  actual_real="$(readlink -f "$agent_python")" \
+    || fail "无法解析正式 Agent 测试 Python"
+  expected_real="$(readlink -f "$PYTHON_BIN")" \
+    || fail "无法解析固定 Python 运行时"
+  [ "$actual_real" = "$expected_real" ] \
+    || fail "Agent venv Python 未精确指向固定 Python 运行时"
+  [ -f "$actual_real" ] && [ ! -L "$actual_real" ] \
+    && [ "$(stat -c '%h' "$actual_real")" = 1 ] \
+    && [ "$(stat -c '%u' "$actual_real")" = "$current_uid" ] \
+    || fail "固定 Agent 测试 Python 目标不是当前用户单链接普通文件"
+  mode="$(stat -c '%a' "$actual_real")"
+  [ $((8#$mode & 8#022)) -eq 0 ] \
+    || fail "固定 Agent 测试 Python 目标允许 group/other 写入"
+  actual_sha="$(sha256sum "$actual_real" | awk '{print $1}')"
+  [ "$actual_sha" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "正式 Agent 测试 Python 已偏离固定可执行文件身份"
+  actual_version="$(/usr/bin/env -i \
+    HOME="$BUILD_ROOT" TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+    "$agent_python" -I -B -c 'import platform; print(platform.python_version())')"
+  [ "$actual_version" = "$PYTHON_VERSION_PINNED" ] \
+    || fail "正式 Agent 测试 Python 版本已偏离固定版本"
+}
+
+symlink_identity_and_target() {
+  /usr/bin/python3 -I -B - "$1" <<'PY'
+import os
+import stat
+import sys
+
+metadata = os.lstat(sys.argv[1])
+if not stat.S_ISLNK(metadata.st_mode):
+    raise SystemExit("path is not a symlink")
+identity = (
+    metadata.st_dev,
+    metadata.st_ino,
+    metadata.st_mode,
+    metadata.st_nlink,
+    metadata.st_size,
+    metadata.st_uid,
+    metadata.st_gid,
+    metadata.st_mtime_ns,
+    metadata.st_ctime_ns,
+)
+target = os.readlink(sys.argv[1])
+if not target or "\n" in target or "\r" in target:
+    raise SystemExit("symlink target is invalid")
+print(":".join(str(part) for part in identity) + "\t" + target)
+PY
+}
+
+seal_formal_test_node_runtime() {
+  local result version
+  FORMAL_NODE_CURRENT_PATH="$NODE_ROOT/current"
+  result="$(symlink_identity_and_target "$FORMAL_NODE_CURRENT_PATH")" \
+    || fail "无法固定正式测试 Node current 符号链接身份"
+  IFS=$'\t' read -r FORMAL_NODE_CURRENT_IDENTITY FORMAL_NODE_CURRENT_RAW_TARGET \
+    <<< "$result"
+  FORMAL_NODE_PATH="$(readlink -f "$FORMAL_NODE_CURRENT_PATH/bin/node")" \
+    || fail "无法解析正式测试 Node 实体"
+  FORMAL_NPM_CLI_PATH="$(readlink -f \
+    "$FORMAL_NODE_CURRENT_PATH/lib/node_modules/npm/bin/npm-cli.js")" \
+    || fail "无法解析固定 npm-cli.js 实体"
+  exec {FORMAL_NODE_FD}< "$FORMAL_NODE_PATH" \
+    || fail "无法固定正式测试 Node held FD"
+  FORMAL_NODE_HELD_PATH="/proc/$$/fd/$FORMAL_NODE_FD"
+  result="$(held_file_identity_and_sha256 "$FORMAL_NODE_HELD_PATH" \
+    "$FORMAL_NODE_PATH")" \
+    || fail "正式测试 Node 身份不稳定"
+  IFS=$'\t' read -r FORMAL_NODE_IDENTITY FORMAL_NODE_SHA256 <<< "$result"
+  [ "$FORMAL_NODE_SHA256" = "$NODE_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "正式测试 Node held FD 不是固定实体"
+  exec {FORMAL_NPM_CLI_FD}< "$FORMAL_NPM_CLI_PATH" \
+    || fail "无法固定 npm-cli.js held FD"
+  FORMAL_NPM_CLI_HELD_PATH="/proc/$$/fd/$FORMAL_NPM_CLI_FD"
+  result="$(held_file_identity_and_sha256 "$FORMAL_NPM_CLI_HELD_PATH" \
+    "$FORMAL_NPM_CLI_PATH")" \
+    || fail "npm-cli.js 身份不稳定"
+  IFS=$'\t' read -r FORMAL_NPM_CLI_IDENTITY FORMAL_NPM_CLI_SHA256 <<< "$result"
+  [ "$FORMAL_NPM_CLI_SHA256" = "$NODE_NPM_CLI_ARCHIVE_SHA256" ] \
+    || fail "npm-cli.js held FD 不是已固定 Node 归档成员"
+  version="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
+    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    "$FORMAL_NODE_HELD_PATH" --version)" \
+    || fail "无法执行 held Node FD"
+  [ "$version" = "v$NODE_VERSION" ] \
+    || fail "held Node FD 版本不是固定版本"
+  version="$(run_held_node_script \
+    "$FORMAL_NPM_CLI_HELD_PATH" "$FORMAL_NPM_CLI_PATH" --version)" \
+    || fail "无法使用 held Node/npm CLI 读取版本"
+  [ "$version" = "$NODE_NPM_VERSION_ARCHIVE" ] \
+    || fail "held npm CLI 版本与已固定 Node 归档不一致"
+}
+
+seal_formal_test_python_runtime() {
+  local result version prefix current_uid mode
+  FORMAL_PYTHON_PATH="$FORMAL_AGENT_VENV/bin/python"
+  current_uid="$(id -u)"
+  [ -f "$FORMAL_PYTHON_PATH" ] && [ ! -L "$FORMAL_PYTHON_PATH" ] \
+    && [ -x "$FORMAL_PYTHON_PATH" ] && [ "$(stat -c '%h' "$FORMAL_PYTHON_PATH")" = 1 ] \
+    && [ "$(stat -c '%u' "$FORMAL_PYTHON_PATH")" = "$current_uid" ] \
+    || fail "正式 Agent 测试 Python 不是 --copies 生成的单链接实体"
+  mode="$(stat -c '%a' "$FORMAL_PYTHON_PATH")"
+  [ $((8#$mode & 8#022)) -eq 0 ] \
+    || fail "正式 Agent 测试 Python 允许 group/other 写入"
+  [ -f "$FORMAL_AGENT_VENV/pyvenv.cfg" ] \
+    && [ ! -L "$FORMAL_AGENT_VENV/pyvenv.cfg" ] \
+    && [ "$(stat -c '%h' "$FORMAL_AGENT_VENV/pyvenv.cfg")" = 1 ] \
+    && [ "$(stat -c '%u' "$FORMAL_AGENT_VENV/pyvenv.cfg")" = "$current_uid" ] \
+    || fail "正式 Agent 测试 pyvenv.cfg 不安全"
+  exec {FORMAL_PYTHON_FD}< "$FORMAL_PYTHON_PATH" \
+    || fail "无法固定正式 Agent 测试 Python held FD"
+  FORMAL_PYTHON_HELD_PATH="/proc/$$/fd/$FORMAL_PYTHON_FD"
+  result="$(held_file_identity_and_sha256 "$FORMAL_PYTHON_HELD_PATH" \
+    "$FORMAL_PYTHON_PATH")" \
+    || fail "正式 Agent 测试 Python 身份不稳定"
+  IFS=$'\t' read -r FORMAL_PYTHON_IDENTITY FORMAL_PYTHON_SHA256 <<< "$result"
+  [ "$FORMAL_PYTHON_SHA256" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
+    || fail "正式 Agent 测试 Python held FD 不是固定实体"
+  version="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
+    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    "$FORMAL_PYTHON_HELD_PATH" -I -B -c \
+    'import platform; print(platform.python_version())')" \
+    || fail "无法执行 held Python FD"
+  [ "$version" = "$PYTHON_VERSION_PINNED" ] \
+    || fail "held Python FD 版本不是固定版本"
+  prefix="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
+    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    "$FORMAL_PYTHON_HELD_PATH" -I -B -c \
+    'import pathlib, sys; import pytest; print(pathlib.Path(sys.prefix).resolve())')" \
+    || fail "held Python FD 未保留正式 venv/site-packages 语义"
+  [ "$prefix" = "$(readlink -f "$FORMAL_AGENT_VENV")" ] \
+    || fail "held Python FD 的 sys.prefix 未精确指向正式测试 venv"
+}
+
+seal_formal_test_eslint() {
+  local result
+  FORMAL_ESLINT_PATH="$(readlink -f \
+    "$(source_lab_dir)/sources/hermes-webui/node_modules/eslint/bin/eslint.js")" \
+    || fail "无法解析正式 WebUI eslint 实体"
+  exec {FORMAL_ESLINT_FD}< "$FORMAL_ESLINT_PATH" \
+    || fail "无法固定 eslint.js held FD"
+  FORMAL_ESLINT_HELD_PATH="/proc/$$/fd/$FORMAL_ESLINT_FD"
+  result="$(held_file_identity_and_sha256 "$FORMAL_ESLINT_HELD_PATH" \
+    "$FORMAL_ESLINT_PATH")" \
+    || fail "eslint.js 身份不稳定"
+  IFS=$'\t' read -r FORMAL_ESLINT_IDENTITY FORMAL_ESLINT_SHA256 <<< "$result"
+}
+
+run_held_node_script() {
+  local held_script="$1" canonical_script="$2"
+  local -a clean_environment
+  shift 2
+  clean_environment=(
+    /usr/bin/env -i
+    HOME="$BUILD_ROOT/formal-build-test-home"
+    TMPDIR="$BUILD_TMP_DIR"
+    PATH=/usr/bin:/bin
+    LANG=C.UTF-8
+    LC_ALL=C.UTF-8
+    NPM_CONFIG_USERCONFIG=/dev/null
+    NPM_CONFIG_GLOBALCONFIG=/dev/null
+    NPM_CONFIG_CACHE="$BUILD_ROOT/npm-formal-test-cache"
+    NPM_CONFIG_AUDIT=false
+    NPM_CONFIG_FUND=false
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+    NPM_CONFIG_IGNORE_SCRIPTS=true
+  )
+  if [ -n "${FORMAL_NPM_REGISTRY:-}" ]; then
+    clean_environment+=("NPM_CONFIG_REGISTRY=$FORMAL_NPM_REGISTRY")
+  fi
+  "${clean_environment[@]}" "$FORMAL_NODE_HELD_PATH" -e '
+const fs = require("fs");
+const Module = require("module");
+const path = require("path");
+const heldPath = process.argv[1];
+const canonicalPath = process.argv[2];
+const args = process.argv.slice(3);
+let source = fs.readFileSync(heldPath, "utf8");
+source = source.replace(/^#![^\n]*(?:\n|$)/, "\n");
+process.argv = [process.execPath, canonicalPath, ...args];
+const scriptModule = new Module(canonicalPath, module);
+scriptModule.filename = canonicalPath;
+scriptModule.paths = Module._nodeModulePaths(path.dirname(canonicalPath));
+scriptModule._compile(source, canonicalPath);
+' "$held_script" "$canonical_script" "$@"
+}
+
+validate_formal_test_runtime_identity() {
+  local result identity digest symlink_result symlink_identity symlink_target version
+  [ "${FORMAL_TEST_RUNTIME_SEALED:-0}" = 1 ] || return 0
+  symlink_result="$(symlink_identity_and_target "$FORMAL_NODE_CURRENT_PATH")" \
+    || return 1
+  IFS=$'\t' read -r symlink_identity symlink_target <<< "$symlink_result"
+  [ "$symlink_identity" = "$FORMAL_NODE_CURRENT_IDENTITY" ] \
+    && [ "$symlink_target" = "$FORMAL_NODE_CURRENT_RAW_TARGET" ] \
+    && [ "$(readlink -f "$FORMAL_NODE_CURRENT_PATH/bin/node")" = "$FORMAL_NODE_PATH" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 "$FORMAL_NODE_HELD_PATH" \
+    "$FORMAL_NODE_PATH")" || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$FORMAL_NODE_IDENTITY" ] && [ "$digest" = "$FORMAL_NODE_SHA256" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 "$FORMAL_NPM_CLI_HELD_PATH" \
+    "$FORMAL_NPM_CLI_PATH")" || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$FORMAL_NPM_CLI_IDENTITY" ] \
+    && [ "$digest" = "$FORMAL_NPM_CLI_SHA256" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 "$FORMAL_PYTHON_HELD_PATH" \
+    "$FORMAL_PYTHON_PATH")" || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$FORMAL_PYTHON_IDENTITY" ] \
+    && [ "$digest" = "$FORMAL_PYTHON_SHA256" ] \
+    || return 1
+  if [ -n "${FORMAL_ESLINT_FD:-}" ]; then
+    result="$(held_file_identity_and_sha256 "$FORMAL_ESLINT_HELD_PATH" \
+      "$FORMAL_ESLINT_PATH")" || return 1
+    IFS=$'\t' read -r identity digest <<< "$result"
+    [ "$identity" = "$FORMAL_ESLINT_IDENTITY" ] \
+      && [ "$digest" = "$FORMAL_ESLINT_SHA256" ] \
+      || return 1
+  fi
+  version="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
+    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    "$FORMAL_NODE_HELD_PATH" --version)" || return 1
+  [ "$version" = "v$NODE_VERSION" ] || return 1
+  version="$(run_held_node_script \
+    "$FORMAL_NPM_CLI_HELD_PATH" "$FORMAL_NPM_CLI_PATH" --version)" \
+    || return 1
+  [ "$version" = "$NODE_NPM_VERSION_ARCHIVE" ] || return 1
+  version="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
+    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    "$FORMAL_PYTHON_HELD_PATH" -I -B -c \
+    'import platform, pytest; print(platform.python_version())')" \
+    || return 1
+  [ "$version" = "$PYTHON_VERSION_PINNED" ]
+}
+
+close_formal_test_runtime_fds() {
+  if [ -n "${FORMAL_ESLINT_FD:-}" ]; then
+    exec {FORMAL_ESLINT_FD}<&- || true
+    FORMAL_ESLINT_FD=""
+  fi
+  if [ -n "${FORMAL_NPM_CLI_FD:-}" ]; then
+    exec {FORMAL_NPM_CLI_FD}<&- || true
+    FORMAL_NPM_CLI_FD=""
+  fi
+  if [ -n "${FORMAL_NODE_FD:-}" ]; then
+    exec {FORMAL_NODE_FD}<&- || true
+    FORMAL_NODE_FD=""
+  fi
+  if [ -n "${FORMAL_PYTHON_FD:-}" ]; then
+    exec {FORMAL_PYTHON_FD}<&- || true
+    FORMAL_PYTHON_FD=""
+  fi
+  FORMAL_PYTHON_HELD_PATH=""
+  FORMAL_NODE_HELD_PATH=""
+  FORMAL_NPM_CLI_HELD_PATH=""
+  FORMAL_ESLINT_HELD_PATH=""
+  FORMAL_TEST_RUNTIME_SEALED=0
+}
+
+prepare_formal_build_test_dependencies() {
   require_candidate_deb_fixed
+  local agent_dir webui_dir test_home registry installed current_uid mode
+  agent_dir="$(source_agent_dir)"
+  webui_dir="$(source_lab_dir)/sources/hermes-webui"
+  test_home="$BUILD_ROOT/formal-build-test-home"
+  FORMAL_AGENT_VENV="$BUILD_ROOT/formal-agent-venv"
+  FORMAL_AGENT_SITE_PACKAGES="$FORMAL_AGENT_VENV/lib/python3.11/site-packages"
+  current_uid="$(id -u)"
+  [ -f "$agent_dir/uv.lock" ] && [ ! -L "$agent_dir/uv.lock" ] \
+    || fail "正式构建测试缺少普通文件 uv.lock"
+  [ -f "$webui_dir/package-lock.json" ] && [ ! -L "$webui_dir/package-lock.json" ] \
+    || fail "正式构建测试缺少普通文件 WebUI package-lock.json"
+  [ ! -e "$test_home" ] && [ ! -L "$test_home" ] \
+    || fail "正式构建测试 HOME 已存在：$test_home"
+  [ ! -e "$FORMAL_AGENT_VENV" ] && [ ! -L "$FORMAL_AGENT_VENV" ] \
+    || fail "正式 Agent 测试专用 venv 路径已存在：$FORMAL_AGENT_VENV"
+  install -d -m 0700 "$test_home"
+
+  info "在受控构建根中用固定 CPython 创建 --copies 正式测试 venv"
+  /usr/bin/env -i \
+    HOME="$test_home" TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+    "$PYTHON_BIN" -I -B -m venv --copies "$FORMAL_AGENT_VENV" \
+    || fail "固定 CPython 无法创建正式 Agent 测试专用 venv"
+  [ -d "$FORMAL_AGENT_VENV" ] && [ ! -L "$FORMAL_AGENT_VENV" ] \
+    && [ "$(stat -c '%u' "$FORMAL_AGENT_VENV")" = "$current_uid" ] \
+    || fail "正式 Agent 测试专用 venv 不是当前制包用户的真实目录"
+  mode="$(stat -c '%a' "$FORMAL_AGENT_VENV")"
+  [ $((8#$mode & 8#022)) -eq 0 ] \
+    || fail "正式 Agent 测试专用 venv 允许 group/other 写入"
+
+  info "用固定 uv 和当前 uv.lock 准备正式 Agent 测试依赖"
+  cd "$agent_dir"
+  /usr/bin/env -i \
+    HOME="$test_home" \
+    TMPDIR="$BUILD_TMP_DIR" \
+    PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_NO_CONFIG=1 \
+    UV_PROJECT_ENVIRONMENT="$FORMAL_AGENT_VENV" \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_INDEX_URL="$UV_INDEX_URL" \
+    "$UV_BIN" sync --extra all --extra dev --locked \
+    || fail "固定 uv 无法按当前 uv.lock 准备正式 Agent 测试依赖"
+  [ -d "$FORMAL_AGENT_SITE_PACKAGES" ] \
+    && [ ! -L "$FORMAL_AGENT_SITE_PACKAGES" ] \
+    && [ "$(stat -c '%u' "$FORMAL_AGENT_SITE_PACKAGES")" = "$current_uid" ] \
+    || fail "正式 Agent 测试 site-packages 不安全"
+  seal_formal_test_python_runtime
+  seal_formal_test_node_runtime
+  FORMAL_TEST_RUNTIME_SEALED=1
+  validate_formal_test_runtime_identity \
+    || fail "正式测试 Python/Node 运行时初始固定后漂移"
+
+  info "用固定 Node/npm 和 package-lock 准备正式 WebUI lint 依赖"
+  installed=0
+  cd "$webui_dir"
+  for registry in $(npm_registries); do
+    registry="${registry%/}"
+    [ -n "$registry" ] || continue
+    rm -rf -- "$webui_dir/node_modules"
+    FORMAL_NPM_REGISTRY="$registry"
+    if run_held_node_script \
+      "$FORMAL_NPM_CLI_HELD_PATH" "$FORMAL_NPM_CLI_PATH" \
+      ci --ignore-scripts; then
+      installed=1
+      break
+    fi
+    warn "正式 WebUI lint 依赖安装失败，切换受控 npm registry"
+  done
+  FORMAL_NPM_REGISTRY=""
+  [ "$installed" = 1 ] || fail "固定 npm 无法按 WebUI package-lock.json 准备正式 lint 依赖"
+  /usr/bin/python3 -I -B - "$webui_dir/package.json" <<'PY' \
+    || fail "WebUI lint:runtime 脚本已偏离 canonical 正式测试命令"
+import json
+import sys
+from pathlib import Path
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit("duplicate package.json field: " + key)
+        result[key] = value
+    return result
+
+package = json.loads(
+    Path(sys.argv[1]).read_text(encoding="utf-8"),
+    object_pairs_hook=strict_object,
+)
+expected = 'eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"'
+if not isinstance(package, dict) or package.get("scripts", {}).get("lint:runtime") != expected:
+    raise SystemExit("lint:runtime script mismatch")
+PY
+  seal_formal_test_eslint
+  validate_formal_test_runtime_identity \
+    || fail "正式测试依赖准备后 Python/Node/npm/eslint 运行时漂移"
+}
+
+formal_build_root_supervisor_python_source() {
+  /usr/bin/cat <<'PY'
+import base64
+import ctypes
+import errno
+import fcntl
+import grp
+import hashlib
+import json
+import os
+import pwd
+import re
+import secrets
+import select
+import signal
+import stat
+import sys
+import tarfile
+import time
+import unittest
+import urllib.parse
+
+
+FORMAL_SUITE_NAMES = (
+    "root-runtime",
+    "desktop-evidence-node",
+    "kylin-install-simulation",
+    "agent",
+    "webui-runtime-lint",
+    "webui-python",
+)
+FORMAL_TARGET_CONTRACT_SHA256 = "5fdcd9335ac9c722b224c06b03d817bd505cff4abc514b09f8d9ba604c11953b"
+FORMAL_TARGET_CONTRACT_BYTES = 1864
+FORMAL_TARGET_REGISTRY = (
+    ("root-runtime", "unittest", "tests/test_taiji_license_issuer_gui.py"),
+    (
+        "desktop-evidence-node",
+        "node-test",
+        "tools/taiji-desktop-acceptance/run-installed-electron-acceptance.test.js",
+    ),
+    (
+        "kylin-install-simulation",
+        "unittest",
+        "tests/test_kylin_install_script_simulation.py",
+    ),
+    (
+        "agent",
+        "pytest",
+        "hermes-local-lab/sources/hermes-agent/tests/tools/test_taiji_security_mode.py",
+    ),
+    (
+        "agent",
+        "pytest",
+        "hermes-local-lab/sources/hermes-agent/tests/test_taiji_license.py",
+    ),
+    (
+        "agent",
+        "pytest",
+        "hermes-local-lab/sources/hermes-agent/tests/gateway/test_api_server_license.py",
+    ),
+    (
+        "agent",
+        "pytest",
+        "hermes-local-lab/sources/hermes-agent/tests/gateway/test_session_api.py",
+    ),
+    (
+        "agent",
+        "pytest",
+        "hermes-local-lab/sources/hermes-agent/tests/tools/test_image_generation_readiness.py",
+    ),
+    (
+        "webui-runtime-lint",
+        "eslint",
+        "hermes-local-lab/sources/hermes-webui/static/**/*.js",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_brand_privacy.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_model_config_api.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_model_config_frontend.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_approval_queue.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_approval_sse.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_pr1350_sse_notify_correctness.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_expert_team_frontend.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_ui_visibility_config.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_issue1800_file_html_interactions.py",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell",
+    ),
+    (
+        "webui-python",
+        "pytest",
+        "hermes-local-lab/sources/hermes-webui/tests/test_issue1116_composer_placeholder.py",
+    ),
+)
+FORMAL_SUITE_TARGET_COUNTS = (1, 1, 1, 5, 1, 11)
+FORMAL_TARGET_RESULT_FD = 20
+
+
+def serialize_formal_target_registry(registry):
+    parts = []
+    for record in registry:
+        if (
+            not isinstance(record, tuple)
+            or len(record) != 3
+            or any(not isinstance(value, str) or not value for value in record)
+            or any(any(character in value for character in "\t\r\n\x00") for value in record)
+        ):
+            raise ValueError("formal target registry record is not canonical")
+        parts.append("\t".join(record) + "\n")
+    return "".join(parts).encode("utf-8")
+
+
+def validate_formal_target_registry(registry):
+    registry = tuple(registry)
+    if len(registry) != 20 or len(set(registry)) != len(registry):
+        raise ValueError("formal target registry cardinality is not exact")
+    observed_counts = tuple(
+        sum(1 for record in registry if record[0] == suite)
+        for suite in FORMAL_SUITE_NAMES
+    )
+    if observed_counts != FORMAL_SUITE_TARGET_COUNTS:
+        raise ValueError("formal target registry suite distribution changed")
+    payload = serialize_formal_target_registry(registry)
+    digest = hashlib.sha256(payload).hexdigest()
+    if len(payload) != FORMAL_TARGET_CONTRACT_BYTES or digest != FORMAL_TARGET_CONTRACT_SHA256:
+        raise ValueError("formal target registry identity changed")
+    return digest
+
+
+def formal_suite_target_ordinals(suite):
+    if suite not in FORMAL_SUITE_NAMES:
+        raise ValueError("unknown formal suite")
+    ordinals = tuple(
+        ordinal
+        for ordinal, record in enumerate(FORMAL_TARGET_REGISTRY)
+        if record[0] == suite
+    )
+    expected = FORMAL_SUITE_TARGET_COUNTS[FORMAL_SUITE_NAMES.index(suite)]
+    if len(ordinals) != expected:
+        raise RuntimeError("formal target registry suite ordinals changed")
+    return ordinals
+
+
+TARGET_COUNT_KEYS = (
+    "collected",
+    "deselected",
+    "executed",
+    "passed",
+    "failed",
+    "errors",
+    "skipped",
+)
+TARGET_RESULT_KEYS = ("ordinal",) + TARGET_COUNT_KEYS
+
+
+def require_complete_target_counts(counts):
+    if not isinstance(counts, dict) or set(counts) != set(TARGET_COUNT_KEYS):
+        raise ValueError("formal target counts fields are not exact")
+    for key in TARGET_COUNT_KEYS:
+        value = counts[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("formal target count is not a nonnegative integer: " + key)
+    if (
+        counts["collected"] <= 0
+        or counts["deselected"] != 0
+        or counts["executed"] != counts["collected"]
+        or counts["passed"] != counts["collected"]
+        or counts["failed"] != 0
+        or counts["errors"] != 0
+        or counts["skipped"] != 0
+    ):
+        raise ValueError("formal target did not execute every collected test successfully")
+    return counts
+
+
+def parse_target_result_payload(payload, expected_ordinals):
+    expected_ordinals = tuple(expected_ordinals)
+    if (
+        not expected_ordinals
+        or len(set(expected_ordinals)) != len(expected_ordinals)
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in expected_ordinals
+        )
+    ):
+        raise ValueError("formal expected target ordinals are invalid")
+    if (
+        not isinstance(payload, bytes)
+        or not payload
+        or len(payload) > 64 * 1024
+        or not payload.endswith(b"\n")
+        or b"\r" in payload
+        or b"\x00" in payload
+    ):
+        raise ValueError("formal target result payload is not canonical")
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeError as error:
+        raise ValueError("formal target result payload is not UTF-8") from error
+    lines = text.splitlines()
+    if len(lines) != len(expected_ordinals):
+        raise ValueError("formal target result cardinality is not exact")
+    records = []
+    for raw_line, expected_ordinal in zip(lines, expected_ordinals):
+        def strict_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate formal target result key")
+                result[key] = value
+            return result
+
+        try:
+            record = json.loads(raw_line, object_pairs_hook=strict_object)
+        except (TypeError, ValueError) as error:
+            raise ValueError("formal target result JSON is invalid") from error
+        if not isinstance(record, dict) or tuple(record) != TARGET_RESULT_KEYS:
+            raise ValueError("formal target result keys or key order are not exact")
+        if record["ordinal"] != expected_ordinal or isinstance(record["ordinal"], bool):
+            raise ValueError("formal target result ordinal is not exact")
+        counts = {key: record[key] for key in TARGET_COUNT_KEYS}
+        require_complete_target_counts(counts)
+        canonical = json.dumps(record, ensure_ascii=True, separators=(",", ":"))
+        if canonical != raw_line:
+            raise ValueError("formal target result JSON is not canonical")
+        records.append(record)
+    return tuple(records)
+
+
+def encode_child_output_record(suite, channel, payload):
+    if suite not in FORMAL_SUITE_NAMES or channel not in ("stdout", "stderr"):
+        raise ValueError("formal child output identity is invalid")
+    if not isinstance(payload, bytes) or len(payload) > 1024 * 1024:
+        raise ValueError("formal child output exceeded its fixed bound")
+    encoded = base64.b64encode(payload).decode("ascii")
+    return "child_output=" + suite + "\t" + channel + "\t" + encoded
+
+
+def formal_target_result_line(suite, record):
+    if (
+        suite not in FORMAL_SUITE_NAMES
+        or not isinstance(record, dict)
+        or tuple(record) != TARGET_RESULT_KEYS
+    ):
+        raise ValueError("formal target result record is not exact")
+    ordinal = record["ordinal"]
+    if (
+        not isinstance(ordinal, int)
+        or isinstance(ordinal, bool)
+        or ordinal < 0
+        or ordinal >= len(FORMAL_TARGET_REGISTRY)
+    ):
+        raise ValueError("formal target result ordinal is out of range")
+    target_suite, runner, target = FORMAL_TARGET_REGISTRY[ordinal]
+    if target_suite != suite:
+        raise ValueError("formal target result escaped its suite")
+    counts = {key: record[key] for key in TARGET_COUNT_KEYS}
+    require_complete_target_counts(counts)
+    return "\t".join(
+        (
+            "target_result=" + str(ordinal),
+            target_suite,
+            runner,
+            target,
+        )
+        + tuple(str(counts[key]) for key in TARGET_COUNT_KEYS)
+    )
+
+
+def formal_suite_result_lines(suite, records):
+    records = tuple(records)
+    expected_ordinals = formal_suite_target_ordinals(suite)
+    if tuple(record.get("ordinal") for record in records) != expected_ordinals:
+        raise ValueError("formal suite target result order is not exact")
+    target_lines = tuple(
+        formal_target_result_line(suite, record) for record in records
+    )
+    totals = {
+        key: sum(record[key] for record in records) for key in TARGET_COUNT_KEYS
+    }
+    summary = "\t".join(
+        ("suite_counts=" + suite, str(len(records)))
+        + tuple(str(totals[key]) for key in TARGET_COUNT_KEYS)
+    )
+    return target_lines + (summary,)
+
+
+class FormalUnittestResult(unittest.TestResult):
+    def __init__(self):
+        unittest.TestResult.__init__(self)
+        self.counts = {key: 0 for key in TARGET_COUNT_KEYS}
+
+    def startTest(self, test):
+        unittest.TestResult.startTest(self, test)
+        self.counts["executed"] += 1
+
+    def addSuccess(self, test):
+        unittest.TestResult.addSuccess(self, test)
+        self.counts["passed"] += 1
+
+    def addFailure(self, test, error):
+        unittest.TestResult.addFailure(self, test, error)
+        self.counts["failed"] += 1
+
+    def addError(self, test, error):
+        unittest.TestResult.addError(self, test, error)
+        self.counts["errors"] += 1
+
+    def addSkip(self, test, reason):
+        unittest.TestResult.addSkip(self, test, reason)
+        self.counts["skipped"] += 1
+
+    def addExpectedFailure(self, test, error):
+        unittest.TestResult.addExpectedFailure(self, test, error)
+        self.counts["skipped"] += 1
+
+    def addUnexpectedSuccess(self, test):
+        unittest.TestResult.addUnexpectedSuccess(self, test)
+        self.counts["failed"] += 1
+
+
+def collect_unittest_suite_counts(suite):
+    if not isinstance(suite, unittest.TestSuite):
+        raise TypeError("formal unittest adapter requires a TestSuite")
+    result = FormalUnittestResult()
+    result.counts["collected"] = suite.countTestCases()
+    suite.run(result)
+    return dict(result.counts)
+
+
+def formal_unittest_adapter_python_source():
+    return r'''import importlib.util
+import json
+import os
+import pathlib
+import sys
+import unittest
+
+KEYS = ("collected", "deselected", "executed", "passed", "failed", "errors", "skipped")
+
+class CountingResult(unittest.TestResult):
+    def __init__(self):
+        unittest.TestResult.__init__(self)
+        self.counts = {key: 0 for key in KEYS}
+    def startTest(self, test):
+        unittest.TestResult.startTest(self, test); self.counts["executed"] += 1
+    def addSuccess(self, test):
+        unittest.TestResult.addSuccess(self, test); self.counts["passed"] += 1
+    def addFailure(self, test, error):
+        unittest.TestResult.addFailure(self, test, error); self.counts["failed"] += 1
+    def addError(self, test, error):
+        unittest.TestResult.addError(self, test, error); self.counts["errors"] += 1
+    def addSkip(self, test, reason):
+        unittest.TestResult.addSkip(self, test, reason); self.counts["skipped"] += 1
+    def addExpectedFailure(self, test, error):
+        unittest.TestResult.addExpectedFailure(self, test, error); self.counts["skipped"] += 1
+    def addUnexpectedSuccess(self, test):
+        unittest.TestResult.addUnexpectedSuccess(self, test); self.counts["failed"] += 1
+
+def complete(record):
+    return (
+        record["collected"] > 0
+        and record["deselected"] == 0
+        and record["executed"] == record["collected"]
+        and record["passed"] == record["collected"]
+        and record["failed"] == 0
+        and record["errors"] == 0
+        and record["skipped"] == 0
+    )
+
+if len(sys.argv) != 5:
+    raise SystemExit("unittest adapter argv is not exact")
+result_fd = int(sys.argv[1])
+ordinal = int(sys.argv[2])
+root = pathlib.Path(sys.argv[3]).resolve()
+target = pathlib.Path(sys.argv[4]).resolve()
+if result_fd < 3 or ordinal < 0 or root not in target.parents or not target.is_file():
+    raise SystemExit("unittest adapter target is unsafe")
+sys.path.insert(0, str(root))
+spec = importlib.util.spec_from_file_location("taiji_formal_unittest_target", str(target))
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load formal unittest target")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+result = CountingResult()
+result.counts["collected"] = suite.countTestCases()
+suite.run(result)
+record = {"ordinal": ordinal}
+record.update(result.counts)
+os.write(result_fd, (json.dumps(record, separators=(",", ":")) + "\n").encode("ascii"))
+if not complete(record):
+    raise SystemExit(1)
+'''
+
+
+def formal_node_test_adapter_javascript_source():
+    return r'''"use strict";
+const fs = require("node:fs");
+const { run } = require("node:test");
+
+function complete(record) {
+  return record.collected > 0 &&
+    record.deselected === 0 &&
+    record.executed === record.collected &&
+    record.passed === record.collected &&
+    record.failed === 0 && record.errors === 0 && record.skipped === 0;
+}
+
+async function main() {
+  if (process.argv.length !== 4) throw new Error("node adapter argv is not exact");
+  const resultFd = Number(process.argv[1]);
+  const ordinal = Number(process.argv[2]);
+  const target = process.argv[3];
+  if (!Number.isSafeInteger(resultFd) || resultFd < 3 ||
+      !Number.isSafeInteger(ordinal) || ordinal < 0 || !target) {
+    throw new Error("node adapter argument is invalid");
+  }
+  let summary = null;
+  const stream = run({
+    files: [target],
+    concurrency: false,
+    isolation: "none",
+    execArgv: [],
+  });
+  for await (const event of stream) {
+    if (event.type === "test:summary") {
+      if (summary !== null) throw new Error("duplicate node test summary");
+      summary = event.data;
+    }
+  }
+  if (!summary || typeof summary.success !== "boolean" || !summary.counts) {
+    throw new Error("node test summary is missing");
+  }
+  const counts = summary.counts;
+  for (const key of ["tests", "passed", "failed", "cancelled", "skipped", "todo"]) {
+    if (!Number.isSafeInteger(counts[key]) || counts[key] < 0) {
+      throw new Error("node test count is invalid: " + key);
+    }
+  }
+  const record = {
+    ordinal,
+    collected: counts.tests,
+    deselected: 0,
+    executed: counts.tests,
+    passed: counts.passed,
+    failed: counts.failed,
+    errors: counts.cancelled,
+    skipped: counts.skipped + counts.todo,
+  };
+  fs.writeSync(resultFd, JSON.stringify(record) + "\n", null, "utf8");
+  if (!summary.success || !complete(record)) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  process.stderr.write("formal node-test adapter failed: " + String(error) + "\n");
+  process.exitCode = 1;
+});
+'''
+
+
+def formal_eslint_adapter_javascript_source():
+    return r'''"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const { createRequire } = require("node:module");
+
+function complete(record) {
+  return record.collected > 0 &&
+    record.deselected === 0 &&
+    record.executed === record.collected &&
+    record.passed === record.collected &&
+    record.failed === 0 && record.errors === 0 && record.skipped === 0;
+}
+
+async function main() {
+  if (process.argv.length !== 6) throw new Error("eslint adapter argv is not exact");
+  const resultFd = Number(process.argv[1]);
+  const ordinal = Number(process.argv[2]);
+  const root = path.resolve(process.argv[3]);
+  const config = path.resolve(process.argv[4]);
+  const pattern = process.argv[5];
+  if (!Number.isSafeInteger(resultFd) || resultFd < 3 ||
+      !Number.isSafeInteger(ordinal) || ordinal < 0 || !pattern) {
+    throw new Error("eslint adapter argument is invalid");
+  }
+  const requireFromRoot = createRequire(path.join(root, "package.json"));
+  const { ESLint } = requireFromRoot("eslint");
+  const eslint = new ESLint({
+    cwd: root,
+    overrideConfigFile: config,
+    errorOnUnmatchedPattern: true,
+  });
+  const results = await eslint.lintFiles([pattern]);
+  if (results.length === 0) throw new Error("eslint matched zero files");
+  const record = {
+    ordinal,
+    collected: results.length,
+    deselected: 0,
+    executed: results.length,
+    passed: results.filter((item) => item.errorCount === 0).length,
+    failed: results.filter((item) => item.errorCount > 0 && item.fatalErrorCount === 0).length,
+    errors: results.filter((item) => item.fatalErrorCount > 0).length,
+    skipped: 0,
+  };
+  fs.writeSync(resultFd, JSON.stringify(record) + "\n", null, "utf8");
+  if (!complete(record)) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  process.stderr.write("formal eslint adapter failed: " + String(error) + "\n");
+  process.exitCode = 1;
+});
+'''
+
+
+SEALED_ARCHIVE_NAMES = ("source", "uv", "python", "node")
+SEALED_FRAME_NAMES = ("supervisor",) + SEALED_ARCHIVE_NAMES
+def require_memfd_seal_capabilities(os_module=os, fcntl_module=fcntl):
+    required_os = ("memfd_create", "MFD_CLOEXEC", "MFD_ALLOW_SEALING")
+    required_fcntl = (
+        "F_ADD_SEALS",
+        "F_GET_SEALS",
+        "F_SEAL_WRITE",
+        "F_SEAL_GROW",
+        "F_SEAL_SHRINK",
+        "F_SEAL_SEAL",
+    )
+    missing = [name for name in required_os if not hasattr(os_module, name)]
+    missing.extend(name for name in required_fcntl if not hasattr(fcntl_module, name))
+    if missing:
+        raise RuntimeError("Linux memfd sealing is unavailable: " + ",".join(missing))
+    return (
+        fcntl_module.F_SEAL_WRITE
+        | fcntl_module.F_SEAL_GROW
+        | fcntl_module.F_SEAL_SHRINK
+        | fcntl_module.F_SEAL_SEAL
+    )
+
+
+REQUIRED_SEALS = None
+MAX_FRAME_BYTES = {
+    "supervisor": 4 * 1024 * 1024,
+    "source": 512 * 1024 * 1024,
+    "uv": 128 * 1024 * 1024,
+    "python": 1024 * 1024 * 1024,
+    "node": 512 * 1024 * 1024,
+}
+MAX_TOTAL_FRAME_BYTES = 2 * 1024 * 1024 * 1024
+ARCHIVE_LIMITS = {
+    "source": {
+        "max_members": 200000,
+        "max_file_size": 512 * 1024 * 1024,
+        "max_total_size": 4 * 1024 * 1024 * 1024,
+        "max_path_length": 1024,
+        "max_path_depth": 64,
+    },
+    "uv": {
+        "max_members": 1000,
+        "max_file_size": 256 * 1024 * 1024,
+        "max_total_size": 512 * 1024 * 1024,
+        "max_path_length": 512,
+        "max_path_depth": 32,
+    },
+    "python": {
+        "max_members": 200000,
+        "max_file_size": 1024 * 1024 * 1024,
+        "max_total_size": 8 * 1024 * 1024 * 1024,
+        "max_path_length": 1024,
+        "max_path_depth": 64,
+    },
+    "node": {
+        "max_members": 100000,
+        "max_file_size": 512 * 1024 * 1024,
+        "max_total_size": 4 * 1024 * 1024 * 1024,
+        "max_path_length": 1024,
+        "max_path_depth": 64,
+    },
+}
+CONTROL_PREFIXES = (
+    b"schema=",
+    b"source_commit=",
+    b"python_version=",
+    b"python_executable_sha256=",
+    b"node_version=",
+    b"node_executable_sha256=",
+    b"npm_version=",
+    b"npm_cli_sha256=",
+    b"eslint_cli_sha256=",
+    b"suite_begin=",
+    b"suite_status=",
+    b"overall_status=",
+    b"closure_sha256=",
+    b"closure_file_count=",
+    b"closure_total_bytes=",
+    b"supervisor_source_sha256=",
+    b"target_count=",
+    b"target_contract_sha256=",
+    b"child_output=",
+    b"target_result=",
+    b"suite_counts=",
+)
+
+
+def drop_privileges(adapter, uid, gid):
+    adapter.setgroups([])
+    adapter.setresgid(gid, gid, gid)
+    adapter.setresuid(uid, uid, uid)
+    adapter.no_new_privs()
+
+
+def drop_system_privileges(uid, gid):
+    os.setgroups([])
+    os.setresgid(gid, gid, gid)
+    os.setresuid(uid, uid, uid)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        value = ctypes.get_errno()
+        raise OSError(value, os.strerror(value))
+
+
+PR_SET_NO_NEW_PRIVS = 38
+PR_SET_PDEATHSIG = 1
+
+
+class SystemPrivilegeAdapter:
+    def setgroups(self, groups):
+        os.setgroups(groups)
+
+    def setresgid(self, real, effective, saved):
+        os.setresgid(real, effective, saved)
+
+    def setresuid(self, real, effective, saved):
+        os.setresuid(real, effective, saved)
+
+    def no_new_privs(self):
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            value = ctypes.get_errno()
+            raise OSError(value, os.strerror(value))
+
+
+class SystemParentDeathAdapter:
+    def set_parent_death_signal(self, value):
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(PR_SET_PDEATHSIG, value, 0, 0, 0) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+
+    def getppid(self):
+        return os.getppid()
+
+
+def arm_parent_death_signal(adapter, expected_parent_pid):
+    adapter.set_parent_death_signal(signal.SIGKILL)
+    if adapter.getppid() != expected_parent_pid:
+        raise RuntimeError("formal child parent changed while arming PDEATHSIG")
+
+
+def write_all_fd(adapter, descriptor, payload):
+    view = memoryview(payload)
+    while view:
+        written = adapter.write(descriptor, view)
+        if not isinstance(written, int) or isinstance(written, bool) or written <= 0 or written > len(view):
+            raise OSError("descriptor write was truncated")
+        view = view[written:]
+
+
+class SystemWriteAdapter:
+    def write(self, descriptor, payload):
+        return os.write(descriptor, payload)
+
+
+SYSTEM_WRITER = SystemWriteAdapter()
+
+
+def _os_write_all(descriptor, payload):
+    write_all_fd(SYSTEM_WRITER, descriptor, payload)
+
+
+def read_and_reseal_frames(
+    adapter,
+    stream,
+    specs,
+    max_frame_size=None,
+    max_total_size=None,
+    existing=None,
+    chunk_size=1024 * 1024,
+):
+    names = tuple(item[0] for item in specs)
+    if names != SEALED_FRAME_NAMES:
+        raise ValueError("sealed frame order is not canonical")
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate sealed frame")
+    existing = dict(existing or {})
+    frame_limit = max_frame_size
+    total_limit = MAX_TOTAL_FRAME_BYTES if max_total_size is None else max_total_size
+    total = 0
+    adopted = {}
+    if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) or not 0 < chunk_size <= 1024 * 1024:
+        raise ValueError("invalid sealed frame streaming chunk size")
+    try:
+        for name, size, digest in specs:
+            if not isinstance(size, int) or size <= 0:
+                raise ValueError("invalid sealed frame size")
+            if re.fullmatch(r"[0-9a-f]{64}", digest or "") is None:
+                raise ValueError("invalid sealed frame digest")
+            allowed = MAX_FRAME_BYTES[name] if frame_limit is None else frame_limit
+            if size > allowed:
+                raise ValueError("sealed frame exceeds its bound")
+            total += size
+            if total > total_limit:
+                raise ValueError("sealed frame total exceeds its bound")
+            if name in existing:
+                descriptor = existing.pop(name)
+            else:
+                descriptor = adapter.create(name)
+                adopted[name] = descriptor
+                hasher = hashlib.sha256()
+                remaining = size
+                while remaining:
+                    chunk = stream.read(min(chunk_size, remaining))
+                    if not chunk or len(chunk) > remaining:
+                        raise ValueError("short or oversized sealed frame chunk")
+                    adapter.write(descriptor, chunk)
+                    hasher.update(chunk)
+                    remaining -= len(chunk)
+                if hasher.hexdigest() != digest:
+                    raise ValueError("sealed frame stream digest mismatch: " + name)
+                adapter.seal(descriptor)
+            adopted[name] = descriptor
+            if not adapter.verify(descriptor, size, digest):
+                raise ValueError("sealed frame verification failed: " + name)
+        if existing:
+            raise ValueError("unexpected pre-adopted sealed frame")
+        if stream.read(1) != b"":
+            raise ValueError("trailing bytes after sealed frames")
+        return adopted
+    except BaseException:
+        for descriptor in adopted.values():
+            try:
+                adapter.close(descriptor)
+            except OSError:
+                pass
+        for descriptor in existing.values():
+            try:
+                adapter.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+class SystemFrameAdapter:
+    def create(self, name):
+        require_memfd_seal_capabilities()
+        return os.memfd_create(
+            "taiji-formal-" + name,
+            os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+        )
+
+    def write(self, descriptor, payload):
+        _os_write_all(descriptor, payload)
+
+    def seal(self, descriptor):
+        required_seals = require_memfd_seal_capabilities()
+        os.fsync(descriptor)
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, required_seals)
+
+    def verify(self, descriptor, size, digest):
+        required_seals = require_memfd_seal_capabilities()
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 0 or info.st_uid != 0:
+            return False
+        if info.st_size != size:
+            return False
+        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+        if seals & required_seals != required_seals:
+            return False
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        hasher = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return hasher.hexdigest() == digest
+
+    def close(self, descriptor):
+        os.close(descriptor)
+
+
+def adopt_archive_descriptors(adapter, inputs):
+    if tuple(item[0] for item in inputs) != SEALED_ARCHIVE_NAMES:
+        raise ValueError("archive descriptor order is not canonical")
+    adopted = {}
+    try:
+        for name, descriptor, digest in inputs:
+            new_descriptor = adapter.adopt(name, descriptor, digest)
+            adopted[name] = new_descriptor
+            if not adapter.verify(new_descriptor, digest):
+                raise ValueError("archive descriptor is not sealed")
+        return adopted
+    except BaseException:
+        for descriptor in adopted.values():
+            try:
+                adapter.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _normalized_member_name(name):
+    if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
+        raise ValueError("invalid archive member name")
+    if name.startswith("/"):
+        raise ValueError("absolute archive member")
+    parts = []
+    for part in name.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise ValueError("parent traversal in archive member")
+        parts.append(part)
+    if not parts:
+        raise ValueError("empty normalized archive member")
+    return "/".join(parts)
+
+
+def _normalized_link_target(member_name, link_name, symbolic):
+    if not link_name or "\x00" in link_name or "\\" in link_name:
+        raise ValueError("invalid archive link target")
+    if link_name.startswith("/"):
+        raise ValueError("absolute archive link target")
+    base = member_name.rsplit("/", 1)[0].split("/") if symbolic and "/" in member_name else []
+    parts = list(base)
+    for part in link_name.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError("escaping archive link")
+            parts.pop()
+        else:
+            parts.append(part)
+    if not parts:
+        raise ValueError("empty archive link target")
+    return "/".join(parts)
+
+
+def _remove_tree_path(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        with os.scandir(path) as entries:
+            for entry in entries:
+                _remove_tree_path(os.path.join(path, entry.name))
+        os.rmdir(path)
+    else:
+        os.unlink(path)
+
+
+def collect_bounded_tar_members(archive, limits):
+    maximum = limits.get("max_members")
+    if not isinstance(maximum, int) or maximum <= 0:
+        raise ValueError("invalid archive member limit")
+    members = []
+    iterator = iter(archive)
+    while True:
+        try:
+            member = next(iterator)
+        except StopIteration:
+            return members
+        if len(members) >= maximum:
+            raise ValueError("archive member limit exceeded")
+        members.append(member)
+
+
+def safe_extract_archive(fileobj, destination, label, limits=None):
+    limits = dict(ARCHIVE_LIMITS.get(label, ARCHIVE_LIMITS["source"]) if limits is None else limits)
+    required_limits = (
+        "max_members",
+        "max_file_size",
+        "max_total_size",
+        "max_path_length",
+        "max_path_depth",
+    )
+    if any(not isinstance(limits.get(key), int) or limits[key] <= 0 for key in required_limits):
+        raise ValueError("invalid archive resource limits")
+    destination = os.path.abspath(destination)
+    if os.path.lexists(destination):
+        raise FileExistsError(destination)
+    with tarfile.open(fileobj=fileobj, mode="r:*") as archive:
+        members = collect_bounded_tar_members(archive, limits)
+        records = {}
+        total = 0
+        for member in members:
+            name = _normalized_member_name(member.name)
+            if name in records:
+                raise ValueError("duplicate archive member")
+            if len(name.encode("utf-8")) > limits["max_path_length"]:
+                raise ValueError("archive path length exceeded")
+            if len(name.split("/")) > limits["max_path_depth"]:
+                raise ValueError("archive path depth exceeded")
+            if any(key.startswith("GNU.sparse") for key in member.pax_headers):
+                raise ValueError("sparse archive member rejected")
+            if getattr(member, "sparse", None):
+                raise ValueError("sparse archive member rejected")
+            if not (member.isdir() or member.isfile() or member.issym() or member.islnk()):
+                raise ValueError("non-regular archive member rejected")
+            if member.isfile():
+                if member.size < 0 or member.size > limits["max_file_size"]:
+                    raise ValueError("archive file size exceeded")
+                total += member.size
+                if total > limits["max_total_size"]:
+                    raise ValueError("archive total size exceeded")
+            records[name] = (member, None)
+        for name, pair in list(records.items()):
+            member = pair[0]
+            for index in range(1, len(name.split("/"))):
+                parent = "/".join(name.split("/")[:index])
+                if parent in records and records[parent][0].issym():
+                    raise ValueError("archive member traverses a parent symlink")
+            if member.issym() or member.islnk():
+                target = _normalized_link_target(name, member.linkname, member.issym())
+                if target not in records:
+                    raise ValueError("dangling archive link")
+                target_member = records[target][0]
+                if member.islnk() and not target_member.isfile():
+                    raise ValueError("hardlink target is not a regular file")
+                records[name] = (member, target)
+
+        stage = destination + ".partial." + secrets.token_hex(12)
+        if os.path.lexists(stage):
+            raise FileExistsError(stage)
+        os.mkdir(stage, 0o700)
+        try:
+            for name, pair in records.items():
+                member = pair[0]
+                output = os.path.join(stage, *name.split("/"))
+                parent = os.path.dirname(output)
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+                if member.isdir():
+                    os.makedirs(output, mode=0o700, exist_ok=True)
+                elif member.isfile():
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise ValueError("regular archive member has no data")
+                    descriptor = os.open(
+                        output,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                        0o700 if member.mode & 0o111 else 0o600,
+                    )
+                    remaining = member.size
+                    try:
+                        while remaining:
+                            chunk = source.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                raise ValueError("short archive member")
+                            _os_write_all(descriptor, chunk)
+                            remaining -= len(chunk)
+                        if source.read(1):
+                            raise ValueError("long archive member")
+                    finally:
+                        os.close(descriptor)
+                        source.close()
+            for name, pair in records.items():
+                member, target = pair
+                output = os.path.join(stage, *name.split("/"))
+                if member.issym():
+                    os.symlink(member.linkname, output)
+                elif member.islnk():
+                    source_path = os.path.join(stage, *target.split("/"))
+                    source_descriptor = os.open(source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                    target_descriptor = os.open(
+                        output,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                        0o700 if member.mode & 0o111 else 0o600,
+                    )
+                    try:
+                        while True:
+                            chunk = os.read(source_descriptor, 1024 * 1024)
+                            if not chunk:
+                                break
+                            _os_write_all(target_descriptor, chunk)
+                    finally:
+                        os.close(source_descriptor)
+                        os.close(target_descriptor)
+            os.rename(stage, destination)
+        except BaseException:
+            _remove_tree_path(stage)
+            raise
+
+
+def _sha256_file(path):
+    hasher = hashlib.sha256()
+    with open(path, "rb", buffering=0) as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def validate_node_metadata(info, xattr_names):
+    if info.st_uid < 0 or info.st_gid < 0 or info.st_nlink <= 0:
+        raise ValueError("closure node identity is invalid")
+    if not (
+        stat.S_ISDIR(info.st_mode)
+        or stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+    ):
+        raise ValueError("non-regular closure node rejected")
+    names = tuple(xattr_names)
+    if names:
+        raise ValueError("closure ACL, capability, or extended attribute rejected")
+
+
+def _validate_path_metadata(path, info):
+    if not hasattr(os, "listxattr"):
+        if sys.platform == "linux":
+            raise RuntimeError("extended-attribute inspection is unavailable")
+        names = ()
+    else:
+        names = os.listxattr(path, follow_symlinks=False)
+    validate_node_metadata(info, names)
+
+
+def inventory_tree(root):
+    root = os.path.realpath(root)
+    root_info = os.lstat(root)
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise ValueError("inventory root is not a directory")
+    _validate_path_metadata(root, root_info)
+    records = [
+        (
+            "d",
+            ".",
+            stat.S_IMODE(root_info.st_mode),
+            0,
+            root_info.st_uid,
+            root_info.st_gid,
+            root_info.st_nlink,
+            "",
+        )
+    ]
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        directories.sort()
+        files.sort()
+        names = list(directories) + list(files)
+        for name in names:
+            path = os.path.join(current, name)
+            relative = os.path.relpath(path, root).replace(os.sep, "/")
+            info = os.lstat(path)
+            _validate_path_metadata(path, info)
+            if stat.S_ISLNK(info.st_mode):
+                target = os.readlink(path)
+                resolved = os.path.realpath(path)
+                if not (resolved == root or resolved.startswith(root + os.sep)) or not os.path.exists(resolved):
+                    raise ValueError("escaping or dangling closure symlink")
+                records.append(
+                    (
+                        "l",
+                        relative,
+                        stat.S_IMODE(info.st_mode),
+                        len(target.encode()),
+                        info.st_uid,
+                        info.st_gid,
+                        info.st_nlink,
+                        target,
+                    )
+                )
+                if name in directories:
+                    directories.remove(name)
+            elif stat.S_ISDIR(info.st_mode):
+                records.append(
+                    (
+                        "d",
+                        relative,
+                        stat.S_IMODE(info.st_mode),
+                        0,
+                        info.st_uid,
+                        info.st_gid,
+                        info.st_nlink,
+                        "",
+                    )
+                )
+            elif stat.S_ISREG(info.st_mode):
+                if info.st_nlink != 1:
+                    raise ValueError("closure hardlink rejected")
+                records.append(
+                    (
+                        "f",
+                        relative,
+                        stat.S_IMODE(info.st_mode),
+                        info.st_size,
+                        info.st_uid,
+                        info.st_gid,
+                        info.st_nlink,
+                        _sha256_file(path),
+                    )
+                )
+            else:
+                raise ValueError("non-regular closure node rejected")
+    return tuple(records)
+
+
+def inventory_summary(records):
+    encoded = json.dumps(records, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    file_count = sum(1 for record in records if record[0] in ("f", "l"))
+    total_bytes = sum(record[3] for record in records if record[0] == "f")
+    return hashlib.sha256(encoded).hexdigest(), file_count, total_bytes
+
+
+class SystemFreezeAdapter:
+    def open_nofollow(self, path, is_directory):
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        if is_directory:
+            flags |= os.O_DIRECTORY
+        return os.open(path, flags)
+
+    def fstat(self, descriptor):
+        return os.fstat(descriptor)
+
+    def fchown(self, descriptor, uid, gid):
+        os.fchown(descriptor, uid, gid)
+
+    def fchmod(self, descriptor, mode):
+        os.fchmod(descriptor, mode)
+
+    def close(self, descriptor):
+        os.close(descriptor)
+
+
+def freeze_nonsymlink_node(adapter, path, original, uid, gid, mode, chown):
+    is_directory = stat.S_ISDIR(original.st_mode)
+    descriptor = adapter.open_nofollow(path, is_directory)
+    try:
+        opened = adapter.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino, stat.S_IFMT(opened.st_mode), opened.st_nlink)
+            != (original.st_dev, original.st_ino, stat.S_IFMT(original.st_mode), original.st_nlink)
+        ):
+            raise RuntimeError("closure node changed before held-FD freeze")
+        if chown:
+            adapter.fchown(descriptor, uid, gid)
+        adapter.fchmod(descriptor, mode)
+        frozen = adapter.fstat(descriptor)
+        expected_uid = uid if chown else opened.st_uid
+        expected_gid = gid if chown else opened.st_gid
+        if (
+            (frozen.st_dev, frozen.st_ino, stat.S_IFMT(frozen.st_mode), frozen.st_nlink)
+            != (opened.st_dev, opened.st_ino, stat.S_IFMT(opened.st_mode), opened.st_nlink)
+            or frozen.st_uid != expected_uid
+            or frozen.st_gid != expected_gid
+            or stat.S_IMODE(frozen.st_mode) != mode
+        ):
+            raise RuntimeError("closure held-FD freeze did not reach its exact identity")
+    finally:
+        adapter.close(descriptor)
+
+
+def freeze_closure(root, uid=0, gid=0, chown=True, adapter=None):
+    root = os.path.abspath(root)
+    adapter = SystemFreezeAdapter() if adapter is None else adapter
+    entries = []
+    for current, directories, files in os.walk(root, topdown=False, followlinks=False):
+        for name in files + directories:
+            entries.append(os.path.join(current, name))
+        entries.append(current)
+    seen = set()
+    for path in entries:
+        if path in seen:
+            continue
+        seen.add(path)
+        info = os.lstat(path)
+        _validate_path_metadata(path, info)
+        if stat.S_ISLNK(info.st_mode):
+            if chown:
+                os.lchown(path, uid, gid)
+                frozen_link = os.lstat(path)
+                if (
+                    (frozen_link.st_dev, frozen_link.st_ino, stat.S_IFMT(frozen_link.st_mode))
+                    != (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+                    or frozen_link.st_uid != uid
+                    or frozen_link.st_gid != gid
+                ):
+                    raise RuntimeError("closure symlink changed during lchown freeze")
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            mode = 0o555
+        elif stat.S_ISREG(info.st_mode):
+            if info.st_nlink != 1:
+                raise ValueError("closure hardlink rejected during freeze")
+            mode = 0o555 if stat.S_IMODE(info.st_mode) & 0o111 else 0o444
+        else:
+            raise ValueError("non-regular closure node during freeze")
+        freeze_nonsymlink_node(adapter, path, info, uid, gid, mode, chown)
+
+
+def validate_relocation_paths(root, forbidden_roots):
+    root = os.path.realpath(root)
+    forbidden = tuple(value.encode("utf-8") for value in forbidden_roots if value)
+    RPATH = b"RPATH"
+    RUNPATH = b"RUNPATH"
+    for current, directories, files in os.walk(root, followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in files:
+            path = os.path.join(current, name)
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("unexpected relocation node")
+            with open(path, "rb") as handle:
+                payload = handle.read(min(info.st_size, 16 * 1024 * 1024) + 1)
+            if any(marker in payload for marker in forbidden):
+                raise ValueError("build path leaked into closure")
+            if name.endswith((".pth", ".egg-link")):
+                for raw_line in payload.splitlines():
+                    line = raw_line.strip()
+                    if line.startswith(b"import "):
+                        raise ValueError("executable .pth rejected")
+                    if line.startswith(b"/") and not line.startswith(root.encode("utf-8") + b"/"):
+                        raise ValueError("external .pth or .egg-link rejected")
+            if payload.startswith(b"#!"):
+                shebang = payload.splitlines()[0][2:].split(None, 1)[0]
+                allowed = (root.encode("utf-8") + b"/", b"/usr/bin/env", b"/usr/bin/", b"/bin/")
+                if shebang.startswith(b"/") and not shebang.startswith(allowed):
+                    raise ValueError("external shebang rejected")
+            if payload.startswith(b"\x7fELF") and (RPATH in payload or RUNPATH in payload):
+                for match in re.findall(br"/(?:[^\x00:\r\n]+)", payload):
+                    if not match.startswith(root.encode("utf-8") + b"/"):
+                        raise ValueError("external RPATH or RUNPATH rejected")
+
+
+def sanitize_child_output(payload):
+    if len(payload) > 1024 * 1024:
+        raise ValueError("child output exceeded the fixed 1 MiB bound")
+    result = bytearray()
+    for line in payload.splitlines(keepends=True):
+        if any(line.startswith(prefix) for prefix in CONTROL_PREFIXES):
+            result.extend(b"child_data:[root-control-line-redacted]\n")
+        else:
+            result.extend(line)
+        if len(result) >= 1024 * 1024:
+            break
+    return bytes(result[: 1024 * 1024])
+
+
+def synthetic_nss_source(uid=63000, gid=63001, home="/formal-home"):
+    template = r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <grp.h>
+#include <pwd.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/types.h>
+
+static const uid_t wanted_uid = @UID@;
+static const gid_t wanted_gid = @GID@;
+static const char wanted_name[] = "taiji-formal";
+static const char wanted_home[] = "@HOME@";
+static char wanted_shell[] = "/usr/sbin/nologin";
+static struct passwd static_pw;
+static struct group static_gr;
+static char *static_members[] = { (char *)wanted_name, NULL };
+
+static int put_string(char **cursor, size_t *left, const char *value, char **out) {
+    size_t needed = strlen(value) + 1;
+    if (needed > *left) return ERANGE;
+    memcpy(*cursor, value, needed);
+    *out = *cursor;
+    *cursor += needed;
+    *left -= needed;
+    return 0;
+}
+
+struct passwd *getpwuid(uid_t uid) {
+    if (uid != wanted_uid) return NULL;
+    static_pw.pw_name = (char *)wanted_name;
+    static_pw.pw_passwd = (char *)"x";
+    static_pw.pw_uid = wanted_uid;
+    static_pw.pw_gid = wanted_gid;
+    static_pw.pw_gecos = (char *)wanted_name;
+    static_pw.pw_dir = (char *)wanted_home;
+    static_pw.pw_shell = wanted_shell;
+    return &static_pw;
+}
+
+int getpwuid_r(uid_t uid, struct passwd *pw, char *buf, size_t len, struct passwd **result) {
+    char *cursor = buf; size_t left = len; int rc;
+    *result = NULL;
+    if (uid != wanted_uid) return 0;
+    if ((rc = put_string(&cursor, &left, wanted_name, &pw->pw_name))) return rc;
+    if ((rc = put_string(&cursor, &left, "x", &pw->pw_passwd))) return rc;
+    if ((rc = put_string(&cursor, &left, wanted_name, &pw->pw_gecos))) return rc;
+    if ((rc = put_string(&cursor, &left, wanted_home, &pw->pw_dir))) return rc;
+    if ((rc = put_string(&cursor, &left, wanted_shell, &pw->pw_shell))) return rc;
+    pw->pw_uid = wanted_uid; pw->pw_gid = wanted_gid; *result = pw; return 0;
+}
+
+struct passwd *getpwnam(const char *name) {
+    if (!name || strcmp(name, wanted_name)) return NULL;
+    return getpwuid(wanted_uid);
+}
+
+int getpwnam_r(const char *name, struct passwd *pw, char *buf, size_t len, struct passwd **result) {
+    if (!name || strcmp(name, wanted_name)) { *result = NULL; return 0; }
+    return getpwuid_r(wanted_uid, pw, buf, len, result);
+}
+
+struct group *getgrgid(gid_t gid) {
+    if (gid != wanted_gid) return NULL;
+    static_gr.gr_name = (char *)wanted_name;
+    static_gr.gr_passwd = (char *)"x";
+    static_gr.gr_gid = wanted_gid;
+    static_gr.gr_mem = static_members;
+    return &static_gr;
+}
+
+int getgrgid_r(gid_t gid, struct group *gr, char *buf, size_t len, struct group **result) {
+    char *cursor = buf; size_t left = len; int rc; char *member;
+    *result = NULL;
+    if (gid != wanted_gid) return 0;
+    if ((rc = put_string(&cursor, &left, wanted_name, &gr->gr_name))) return rc;
+    if ((rc = put_string(&cursor, &left, "x", &gr->gr_passwd))) return rc;
+    if ((rc = put_string(&cursor, &left, wanted_name, &member))) return rc;
+    uintptr_t aligned = ((uintptr_t)cursor + sizeof(char *) - 1) & ~(sizeof(char *) - 1);
+    size_t padding = aligned - (uintptr_t)cursor;
+    if (padding + 2 * sizeof(char *) > left) return ERANGE;
+    gr->gr_mem = (char **)aligned; gr->gr_mem[0] = member; gr->gr_mem[1] = NULL;
+    gr->gr_gid = wanted_gid; *result = gr; return 0;
+}
+
+struct group *getgrnam(const char *name) {
+    if (!name || strcmp(name, wanted_name)) return NULL;
+    return getgrgid(wanted_gid);
+}
+
+int getgrnam_r(const char *name, struct group *gr, char *buf, size_t len, struct group **result) {
+    if (!name || strcmp(name, wanted_name)) { *result = NULL; return 0; }
+    return getgrgid_r(wanted_gid, gr, buf, len, result);
+}
+'''
+    escaped_home = home.replace("\\", "\\\\").replace('"', '\\"')
+    return template.replace("@UID@", str(uid)).replace("@GID@", str(gid)).replace("@HOME@", escaped_home)
+
+
+class SystemIdentityAdapter:
+    def __init__(self, caller_uid, caller_gids):
+        self.caller_uid = caller_uid
+        self.caller_gids = set(caller_gids)
+
+    def passwd_registered(self, value):
+        try:
+            pwd.getpwuid(value)
+            return True
+        except KeyError:
+            return False
+
+    def group_registered(self, value):
+        try:
+            grp.getgrgid(value)
+            return True
+        except KeyError:
+            return False
+
+    def live_process_ids(self):
+        uids = set()
+        gids = set()
+        for process_name in os.listdir("/proc"):
+            if not process_name.isdigit():
+                continue
+            try:
+                task_root = "/proc/" + process_name + "/task/"
+                thread_names = os.listdir(task_root)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            for thread_name in thread_names:
+                if not thread_name.isdigit():
+                    raise RuntimeError("non-numeric procfs thread entry")
+                try:
+                    with open(
+                        task_root + thread_name + "/status",
+                        "r",
+                        encoding="ascii",
+                        errors="strict",
+                    ) as handle:
+                        thread_uids, thread_gids = parse_proc_status_identity_lines(handle)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                uids.update(thread_uids)
+                gids.update(thread_gids)
+        return uids, gids
+
+
+def parse_proc_status_identity_lines(lines):
+    uids = set()
+    gids = set()
+    for line in lines:
+        if line.startswith("Uid:"):
+            values = line.split()[1:]
+            if len(values) != 4:
+                raise RuntimeError("invalid procfs Uid status")
+            uids.update(int(value) for value in values)
+        elif line.startswith("Gid:"):
+            values = line.split()[1:]
+            if len(values) != 4:
+                raise RuntimeError("invalid procfs Gid status")
+            gids.update(int(value) for value in values)
+        elif line.startswith("Groups:"):
+            gids.update(int(value) for value in line.split()[1:])
+    if not uids or not gids:
+        raise RuntimeError("procfs status omitted numeric identities")
+    return uids, gids
+
+
+def choose_temporary_identity(adapter, candidates):
+    values = tuple(candidates)
+    live_uids, live_gids = adapter.live_process_ids()
+    uid = None
+    gid = None
+    for value in values:
+        if (
+            value != adapter.caller_uid
+            and value not in adapter.caller_gids
+            and value not in live_uids
+            and not adapter.passwd_registered(value)
+        ):
+            uid = value
+            break
+    for value in values:
+        if (
+            value != adapter.caller_uid
+            and value not in adapter.caller_gids
+            and value not in live_gids
+            and not adapter.group_registered(value)
+            and value != uid
+        ):
+            gid = value
+            break
+    if uid is None or gid is None:
+        raise RuntimeError("no unused temporary numeric identity")
+    return uid, gid
+
+
+def _validate_https_endpoint(value, label):
+    if not isinstance(value, str) or not value or any(character in value for character in "\r\n\x00"):
+        raise ValueError(label + " is not a canonical URL")
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(label + " must be an authority-only HTTPS endpoint")
+    try:
+        parsed.port
+    except ValueError:
+        raise ValueError(label + " has an invalid port")
+    if parsed.path and not parsed.path.startswith("/"):
+        raise ValueError(label + " has a non-canonical path")
+    return value
+
+
+def validate_supervisor_config(config):
+    expected = {
+        "source_commit",
+        "python_version",
+        "node_version",
+        "uv_index",
+        "npm_registry",
+        "caller_uid",
+        "caller_gids",
+        "forbidden_roots",
+    }
+    if not isinstance(config, dict) or set(config) != expected:
+        raise ValueError("formal supervisor config fields are not exact")
+    if re.fullmatch(r"[0-9a-f]{40}", config["source_commit"] or "") is None:
+        raise ValueError("formal supervisor source commit is invalid")
+    version_pattern = r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?"
+    for key in ("python_version", "node_version"):
+        if not isinstance(config[key], str) or re.fullmatch(version_pattern, config[key]) is None:
+            raise ValueError("formal supervisor version is invalid: " + key)
+    _validate_https_endpoint(config["uv_index"], "uv_index")
+    _validate_https_endpoint(config["npm_registry"], "npm_registry")
+    if (
+        not isinstance(config["caller_uid"], int)
+        or isinstance(config["caller_uid"], bool)
+        or config["caller_uid"] < 0
+        or config["caller_uid"] >= 2 ** 32 - 1
+    ):
+        raise ValueError("formal supervisor caller uid is invalid")
+    gids = config["caller_gids"]
+    if not isinstance(gids, list) or not gids:
+        raise ValueError("formal supervisor caller gids are invalid")
+    for value in gids:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value >= 2 ** 32 - 1
+        ):
+            raise ValueError("formal supervisor caller gid is invalid")
+    if len(set(gids)) != len(gids):
+        raise ValueError("formal supervisor caller gids contain duplicates")
+    roots = config["forbidden_roots"]
+    if not isinstance(roots, list) or not roots:
+        raise ValueError("formal supervisor forbidden roots are invalid")
+    for value in roots:
+        if (
+            not isinstance(value, str)
+            or not value.startswith("/")
+            or value == "/"
+            or os.path.normpath(value) != value
+            or any(character in value for character in "\r\n\x00")
+        ):
+            raise ValueError("formal supervisor forbidden root is invalid")
+    if len(set(roots)) != len(roots):
+        raise ValueError("formal supervisor forbidden roots contain duplicates")
+    return config
+
+
+def require_identity_unused(adapter, uid, gid):
+    live_uids, live_gids = adapter.live_process_ids()
+    if (
+        adapter.passwd_registered(uid)
+        or adapter.group_registered(gid)
+        or uid in live_uids
+        or gid in live_gids
+    ):
+        raise RuntimeError("temporary identity is registered or still live")
+
+
+class SystemWorkspaceAdapter:
+    def lstat(self, path):
+        return os.lstat(path)
+
+    def has_extended_acl(self, path):
+        try:
+            names = os.listxattr(path, follow_symlinks=False)
+        except AttributeError:
+            return False
+        return any("posix_acl" in name or "acl" == name.lower() for name in names)
+
+    def open_directory(self, path):
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+
+    def fstat(self, descriptor):
+        return os.fstat(descriptor)
+
+    def mkdtemp_at(self, parent_fd, prefix, mode):
+        for unused in range(128):
+            name = prefix + secrets.token_hex(16)
+            try:
+                os.mkdir(name, mode, dir_fd=parent_fd)
+            except FileExistsError:
+                continue
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            return name, descriptor
+        raise RuntimeError("cannot allocate random formal-test workspace")
+
+    def close(self, descriptor):
+        os.close(descriptor)
+
+
+def validate_workspace_parent_chain(adapter):
+    parent_fd = None
+    for path in ("/", "/var", "/var/tmp"):
+        info = adapter.lstat(path)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0:
+            raise RuntimeError("unsafe workspace ancestor: " + path)
+        mode = stat.S_IMODE(info.st_mode)
+        if path in ("/", "/var") and mode & 0o022:
+            raise RuntimeError("writable workspace ancestor: " + path)
+        if path == "/var/tmp" and mode & 0o022 and not mode & stat.S_ISVTX:
+            raise RuntimeError("workspace parent is writable without sticky bit")
+        if adapter.has_extended_acl(path):
+            raise RuntimeError("workspace ancestor has extended ACL: " + path)
+    try:
+        parent_fd = adapter.open_directory("/var/tmp")
+        info = adapter.fstat(parent_fd)
+        path_info = adapter.lstat("/var/tmp")
+        if (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino):
+            raise RuntimeError("workspace parent changed while opening")
+        return parent_fd, (info.st_dev, info.st_ino)
+    except BaseException:
+        if parent_fd is not None:
+            adapter.close(parent_fd)
+        raise
+
+
+def create_workspace_session(adapter, parent_fd, parent_identity):
+    current = adapter.fstat(parent_fd)
+    if (current.st_dev, current.st_ino) != tuple(parent_identity):
+        raise RuntimeError("workspace parent identity changed")
+    descriptor = None
+    try:
+        basename, descriptor = adapter.mkdtemp_at(parent_fd, "taiji-formal-tests.", 0o700)
+        info = adapter.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_dev != parent_identity[0]
+        ):
+            raise RuntimeError("new workspace identity is unsafe")
+        return basename, descriptor, (info.st_dev, info.st_ino)
+    except BaseException:
+        if descriptor is not None:
+            adapter.close(descriptor)
+        raise
+
+
+def _read_token_at(workspace_fd):
+    descriptor = os.open(
+        ".supervisor-token",
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=workspace_fd,
+    )
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 256:
+            raise RuntimeError("unsafe workspace cleanup token")
+        payload = os.read(descriptor, 257)
+    finally:
+        os.close(descriptor)
+    return payload.decode("ascii", errors="strict").rstrip("\n")
+
+
+def _remove_tree_at(directory_fd, expected_device):
+    entries = list(os.scandir(directory_fd))
+    for entry in entries:
+        info = entry.stat(follow_symlinks=False)
+        if info.st_dev != expected_device:
+            raise RuntimeError("cleanup crossed a filesystem boundary")
+        if stat.S_ISDIR(info.st_mode):
+            child = os.open(
+                entry.name,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                held = os.fstat(child)
+                if (held.st_dev, held.st_ino) != (info.st_dev, info.st_ino):
+                    raise RuntimeError("cleanup directory identity changed")
+                _remove_tree_at(child, expected_device)
+            finally:
+                os.close(child)
+            os.rmdir(entry.name, dir_fd=directory_fd)
+        elif stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            os.unlink(entry.name, dir_fd=directory_fd)
+        else:
+            raise RuntimeError("cleanup encountered non-regular node")
+
+
+def cleanup_workspace(
+    parent_dirfd,
+    workspace_dirfd,
+    basename,
+    token,
+    parent_devino,
+    workspace_devino,
+    expected_uid=0,
+):
+    if not re.fullmatch(r"taiji-formal-tests\.[A-Za-z0-9._-]+", basename or ""):
+        raise RuntimeError("invalid cleanup basename")
+    parent_info = os.fstat(parent_dirfd)
+    workspace_info = os.fstat(workspace_dirfd)
+    if (parent_info.st_dev, parent_info.st_ino) != tuple(parent_devino):
+        raise RuntimeError("cleanup parent identity mismatch")
+    if (workspace_info.st_dev, workspace_info.st_ino) != tuple(workspace_devino):
+        raise RuntimeError("cleanup workspace identity mismatch")
+    if workspace_info.st_uid != expected_uid or not stat.S_ISDIR(workspace_info.st_mode):
+        raise RuntimeError("cleanup workspace owner mismatch")
+    path_info = os.stat(basename, dir_fd=parent_dirfd, follow_symlinks=False)
+    if (path_info.st_dev, path_info.st_ino) != tuple(workspace_devino):
+        raise RuntimeError("cleanup pathname no longer names held workspace")
+    if _read_token_at(workspace_dirfd) != token:
+        raise RuntimeError("cleanup token mismatch")
+    _remove_tree_at(workspace_dirfd, workspace_info.st_dev)
+    path_info = os.stat(basename, dir_fd=parent_dirfd, follow_symlinks=False)
+    if (path_info.st_dev, path_info.st_ino) != tuple(workspace_devino):
+        raise RuntimeError("cleanup pathname changed before rmdir")
+    os.rmdir(basename, dir_fd=parent_dirfd)
+
+
+def formal_suite_commands(closure, home, tmp, result_fd=3):
+    validate_formal_target_registry(FORMAL_TARGET_REGISTRY)
+    if not isinstance(result_fd, int) or isinstance(result_fd, bool) or result_fd < 3:
+        raise ValueError("formal suite result descriptor is unsafe")
+    source = os.path.join(closure, "source")
+    agent = os.path.join(source, "hermes-local-lab", "sources", "hermes-agent")
+    webui = os.path.join(source, "hermes-local-lab", "sources", "hermes-webui")
+    python = os.path.join(closure, "venv", "bin", "python")
+    node = os.path.join(closure, "node", "bin", "node")
+    site_packages = os.path.join(closure, "venv", "lib", "python3.11", "site-packages")
+    shim = os.path.join(closure, "support", "libtaiji-formal-passwd.so")
+    path = os.path.join(closure, "node", "bin") + ":/usr/bin:/bin"
+    runner = os.path.join(agent, "scripts", "run_tests_parallel.py")
+    unittest_adapter = formal_unittest_adapter_python_source()
+    node_adapter = formal_node_test_adapter_javascript_source()
+    eslint_adapter = formal_eslint_adapter_javascript_source()
+
+    def suite_targets(suite):
+        return tuple(
+            target for target_suite, _runner, target in FORMAL_TARGET_REGISTRY
+            if target_suite == suite
+        )
+
+    def source_target(target):
+        return os.path.join(source, *target.split("/"))
+
+    def relative_targets(suite, prefix):
+        result = []
+        for target in suite_targets(suite):
+            if not target.startswith(prefix):
+                raise RuntimeError("formal target escaped its suite root")
+            result.append(target[len(prefix):])
+        return result
+
+    def environment(extra=None):
+        result = {
+            "HOME": home,
+            "TMPDIR": tmp,
+            "PATH": path,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "TZ": "UTC",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONHASHSEED": "0",
+            "LD_PRELOAD": shim,
+        }
+        result.update(extra or {})
+        return result
+
+    return (
+        (
+            "root-runtime",
+            source,
+            [
+                python,
+                "-I",
+                "-B",
+                "-c",
+                unittest_adapter,
+                str(result_fd),
+                "0",
+                source,
+                source_target(suite_targets("root-runtime")[0]),
+            ],
+            environment({"TAIJI_AGENT_PYTHON": python, "TAIJI_TEST_NODE": node}),
+        ),
+        (
+            "desktop-evidence-node",
+            source,
+            [
+                node,
+                "-e",
+                node_adapter,
+                str(result_fd),
+                "1",
+                source_target(suite_targets("desktop-evidence-node")[0]),
+            ],
+            environment(),
+        ),
+        (
+            "kylin-install-simulation",
+            source,
+            [
+                python,
+                "-I",
+                "-B",
+                "-c",
+                unittest_adapter,
+                str(result_fd),
+                "2",
+                source,
+                source_target(suite_targets("kylin-install-simulation")[0]),
+            ],
+            environment(),
+        ),
+        (
+            "agent",
+            agent,
+            [
+                python,
+                "-I",
+                "-B",
+                runner,
+                "--no-duration-cache",
+                "--require-nonempty-explicit-files",
+                "--formal-results-fd",
+                str(result_fd),
+                "--formal-first-ordinal",
+                "3",
+                "--formal-test-root",
+                agent,
+                *relative_targets(
+                    "agent", "hermes-local-lab/sources/hermes-agent/"
+                ),
+            ],
+            environment(
+                {
+                    "TAIJI_FORMAL_PYTHON_EXECUTABLE": python,
+                    "TAIJI_FORMAL_SITE_PACKAGES": site_packages,
+                }
+            ),
+        ),
+        (
+            "webui-runtime-lint",
+            webui,
+            [
+                node,
+                "-e",
+                eslint_adapter,
+                str(result_fd),
+                "8",
+                webui,
+                os.path.join(webui, "eslint.runtime-guard.config.mjs"),
+                relative_targets(
+                    "webui-runtime-lint",
+                    "hermes-local-lab/sources/hermes-webui/",
+                )[0],
+            ],
+            environment(),
+        ),
+        (
+            "webui-python",
+            webui,
+            [
+                python,
+                "-I",
+                "-B",
+                runner,
+                "--no-duration-cache",
+                "--require-nonempty-explicit-files",
+                "--formal-results-fd",
+                str(result_fd),
+                "--formal-first-ordinal",
+                "9",
+                "--formal-test-root",
+                webui,
+                *relative_targets(
+                    "webui-python", "hermes-local-lab/sources/hermes-webui/"
+                ),
+            ],
+            environment(
+                {
+                    "HERMES_WEBUI_AGENT_DIR": agent,
+                    "HERMES_WEBUI_PYTHON": python,
+                }
+            ),
+        ),
+    )
+
+
+def _wait_status(status):
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return 255
+
+
+class SystemChildAdapter:
+    def set_nonblocking(self, descriptor):
+        os.set_blocking(descriptor, False)
+
+    def read(self, descriptor, size):
+        return os.read(descriptor, size)
+
+    def wait_nohang(self, pid):
+        try:
+            waited, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            raise RuntimeError("formal child was reaped unexpectedly")
+        if waited == 0:
+            return None
+        if waited != pid:
+            raise RuntimeError("waitpid returned the wrong child")
+        return _wait_status(status)
+
+    def kill_process_group(self, pid):
+        try:
+            os.killpg(pid, 9)
+        except ProcessLookupError:
+            pass
+
+    def reap(self, pid):
+        while True:
+            try:
+                waited, status = os.waitpid(pid, 0)
+                break
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                return 255
+        if waited != pid:
+            raise RuntimeError("waitpid returned the wrong child")
+        return _wait_status(status)
+
+    def poll(self, descriptor, milliseconds):
+        poller = select.poll()
+        poller.register(descriptor, select.POLLIN | select.POLLHUP | select.POLLERR)
+        poller.poll(milliseconds)
+
+    def poll_many(self, descriptors, milliseconds):
+        descriptors = tuple(descriptors)
+        if not descriptors:
+            time.sleep(milliseconds / 1000.0)
+            return
+        poller = select.poll()
+        for descriptor in descriptors:
+            poller.register(
+                descriptor,
+                select.POLLIN | select.POLLHUP | select.POLLERR,
+            )
+        poller.poll(milliseconds)
+
+    def close(self, descriptor):
+        os.close(descriptor)
+
+    def monotonic(self):
+        return time.monotonic()
+
+
+class SystemProcessGroupAdapter:
+    def setpgid(self, pid, group):
+        os.setpgid(pid, group)
+
+    def getpgid(self, pid):
+        return os.getpgid(pid)
+
+    def getpid(self):
+        return os.getpid()
+
+
+def establish_process_group(adapter, pid, child_side=False):
+    target_pid = 0 if child_side else pid
+    target_group = 0 if child_side else pid
+    try:
+        adapter.setpgid(target_pid, target_group)
+    except OSError as error:
+        if not child_side and error.errno == errno.ESRCH:
+            return
+        if child_side or error.errno != errno.EACCES:
+            raise
+    expected = adapter.getpid() if child_side else pid
+    if adapter.getpgid(target_pid) != expected:
+        raise RuntimeError("formal child process group was not established")
+
+
+def _abort_child_after_group_failure(pid, read_fd):
+    try:
+        os.close(read_fd)
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+
+def collect_child_process(adapter, pid, read_fd, timeout, maximum):
+    if timeout <= 0 or maximum <= 0:
+        raise ValueError("invalid child collection limits")
+    output = bytearray()
+    reaped = False
+    start = adapter.monotonic()
+    adapter.set_nonblocking(read_fd)
+    try:
+        while True:
+            try:
+                chunk = adapter.read(read_fd, 65536)
+            except BlockingIOError:
+                chunk = None
+            if chunk:
+                output.extend(chunk)
+                if len(output) > maximum:
+                    raise RuntimeError("formal child output exceeded its fixed bound")
+            status = adapter.wait_nohang(pid)
+            if status is not None:
+                reaped = True
+                adapter.kill_process_group(pid)
+                while True:
+                    try:
+                        tail = adapter.read(read_fd, 65536)
+                    except BlockingIOError:
+                        break
+                    if not tail:
+                        break
+                    output.extend(tail)
+                    if len(output) > maximum:
+                        raise RuntimeError("formal child output exceeded its fixed bound")
+                return status, bytes(output)
+            if adapter.monotonic() - start >= timeout:
+                raise TimeoutError("formal child exceeded its fixed deadline")
+            adapter.poll(read_fd, 50)
+    except BaseException:
+        if not reaped:
+            adapter.kill_process_group(pid)
+            adapter.reap(pid)
+            reaped = True
+        raise
+    finally:
+        adapter.close(read_fd)
+
+
+def collect_child_streams(adapter, pid, descriptors, timeout, limits):
+    names = ("stdout", "stderr", "result")
+    if (
+        timeout <= 0
+        or not isinstance(descriptors, dict)
+        or tuple(descriptors) != names
+        or not isinstance(limits, dict)
+        or tuple(limits) != names
+        or len(set(descriptors.values())) != len(names)
+        or any(
+            not isinstance(descriptors[name], int)
+            or isinstance(descriptors[name], bool)
+            or descriptors[name] < 0
+            for name in names
+        )
+        or any(
+            not isinstance(limits[name], int)
+            or isinstance(limits[name], bool)
+            or limits[name] <= 0
+            for name in names
+        )
+    ):
+        raise ValueError("invalid formal child stream contract")
+    buffers = {name: bytearray() for name in names}
+    open_names = set(names)
+    reaped = False
+    status = None
+    try:
+        start = adapter.monotonic()
+        for descriptor in descriptors.values():
+            adapter.set_nonblocking(descriptor)
+        while True:
+            for name in names:
+                if name not in open_names:
+                    continue
+                try:
+                    chunk = adapter.read(descriptors[name], 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    open_names.remove(name)
+                    continue
+                buffers[name].extend(chunk)
+                if len(buffers[name]) > limits[name]:
+                    raise RuntimeError(
+                        "formal child %s stream exceeded its fixed bound" % name
+                    )
+            if status is None:
+                status = adapter.wait_nohang(pid)
+                if status is not None:
+                    reaped = True
+                    adapter.kill_process_group(pid)
+            if status is not None and not open_names:
+                return status, {
+                    name: bytes(buffers[name]) for name in names
+                }
+            if adapter.monotonic() - start >= timeout:
+                raise TimeoutError("formal child exceeded its fixed deadline")
+            adapter.poll_many(
+                tuple(descriptors[name] for name in names if name in open_names),
+                50,
+            )
+    except BaseException:
+        if not reaped:
+            adapter.kill_process_group(pid)
+            adapter.reap(pid)
+            reaped = True
+        raise
+    finally:
+        for descriptor in descriptors.values():
+            adapter.close(descriptor)
+
+
+def run_current_identity_command(argv, cwd, environment):
+    parent_pid = os.getpid()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            arm_parent_death_signal(SystemParentDeathAdapter(), parent_pid)
+            os.close(read_fd)
+            establish_process_group(SystemProcessGroupAdapter(), 0, child_side=True)
+            os.dup2(write_fd, 1)
+            os.dup2(write_fd, 2)
+            if write_fd > 2:
+                os.close(write_fd)
+            os.chdir(cwd)
+            os.execve(argv[0], argv, environment)
+        except BaseException as error:
+            _os_write_all(2, ("formal child launch failed: " + repr(error) + "\n").encode("utf-8", "replace"))
+        os._exit(127)
+    os.close(write_fd)
+    try:
+        establish_process_group(SystemProcessGroupAdapter(), pid, child_side=False)
+    except BaseException:
+        _abort_child_after_group_failure(pid, read_fd)
+        raise
+    return collect_child_process(
+        SystemChildAdapter(), pid, read_fd, timeout=3600.0, maximum=1024 * 1024
+    )
+
+
+def run_dropped_command(argv, cwd, environment, uid, gid, result_fd):
+    if (
+        not isinstance(result_fd, int)
+        or isinstance(result_fd, bool)
+        or result_fd < 3
+    ):
+        raise ValueError("formal result descriptor is unsafe")
+    parent_pid = os.getpid()
+    stdout_read_fd, stdout_write_fd = os.pipe()
+    stderr_read_fd, stderr_write_fd = os.pipe()
+    result_read_fd, result_write_fd = os.pipe()
+    read_descriptors = (stdout_read_fd, stderr_read_fd, result_read_fd)
+    write_descriptors = (stdout_write_fd, stderr_write_fd, result_write_fd)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            arm_parent_death_signal(SystemParentDeathAdapter(), parent_pid)
+            for descriptor in read_descriptors:
+                os.close(descriptor)
+            establish_process_group(SystemProcessGroupAdapter(), 0, child_side=True)
+            os.dup2(stdout_write_fd, 1)
+            os.dup2(stderr_write_fd, 2)
+            os.dup2(result_write_fd, result_fd)
+            for descriptor in write_descriptors:
+                if descriptor > 2 and descriptor != result_fd:
+                    os.close(descriptor)
+            drop_privileges(SystemPrivilegeAdapter(), uid, gid)
+            arm_parent_death_signal(SystemParentDeathAdapter(), parent_pid)
+            os.chdir(cwd)
+            os.execve(argv[0], argv, environment)
+        except BaseException as error:
+            _os_write_all(2, ("formal test child launch failed: " + repr(error) + "\n").encode("utf-8", "replace"))
+        os._exit(127)
+    for descriptor in write_descriptors:
+        os.close(descriptor)
+    try:
+        establish_process_group(SystemProcessGroupAdapter(), pid, child_side=False)
+    except BaseException:
+        for descriptor in read_descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        raise
+    return collect_child_streams(
+        SystemChildAdapter(),
+        pid,
+        {
+            "stdout": stdout_read_fd,
+            "stderr": stderr_read_fd,
+            "result": result_read_fd,
+        },
+        timeout=3600.0,
+        limits={
+            "stdout": 1024 * 1024,
+            "stderr": 1024 * 1024,
+            "result": 64 * 1024,
+        },
+    )
+
+
+def _promote_archive_root(extracted, destination):
+    names = sorted(os.listdir(extracted))
+    if len(names) == 1:
+        candidate = os.path.join(extracted, names[0])
+        if os.path.isdir(candidate) and not os.path.islink(candidate):
+            os.rename(candidate, destination)
+            os.rmdir(extracted)
+            return
+    os.rename(extracted, destination)
+
+
+def _find_regular(root, candidates, basename=None):
+    for relative in candidates:
+        path = os.path.join(root, *relative.split("/"))
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+            return path
+    if basename is not None:
+        matches = []
+        for current, directories, files in os.walk(root, followlinks=False):
+            directories.sort()
+            files.sort()
+            if basename in files:
+                path = os.path.join(current, basename)
+                info = os.lstat(path)
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    matches.append(path)
+        if len(matches) == 1:
+            return matches[0]
+    raise RuntimeError("required closure executable not found: " + str(candidates))
+
+
+def _run_prep_command(argv, cwd, environment, label):
+    status, output = run_current_identity_command(argv, cwd, environment)
+    if output:
+        _os_write_all(1, sanitize_child_output(output))
+    if status != 0:
+        raise RuntimeError("dependency preparation failed: %s (exit=%d)" % (label, status))
+
+
+def _rewrite_pyvenv_config(venv, python_root, python_executable):
+    config_path = os.path.join(venv, "pyvenv.cfg")
+    version = "3.11.15"
+    payload = (
+        "home = " + os.path.join(python_root, "bin") + "\n"
+        "include-system-site-packages = false\n"
+        "version = " + version + "\n"
+        "executable = " + python_executable + "\n"
+        "command = " + python_executable + " -I -B -m venv --copies " + venv + "\n"
+    )
+    descriptor = os.open(
+        config_path,
+        os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        _os_write_all(descriptor, payload.encode("utf-8"))
+    finally:
+        os.close(descriptor)
+
+
+def _audit_elf_dynamic_paths(root, environment):
+    readelf = "/usr/bin/readelf"
+    if not os.path.isfile(readelf):
+        raise RuntimeError("readelf is required for closure relocation audit")
+    for current, directories, files in os.walk(root, followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in files:
+            path = os.path.join(current, name)
+            try:
+                with open(path, "rb") as handle:
+                    magic = handle.read(4)
+            except OSError:
+                raise
+            if magic != b"\x7fELF":
+                continue
+            status, output = run_current_identity_command(
+                [readelf, "-d", "--", path], root, environment
+            )
+            if status != 0:
+                raise RuntimeError("readelf failed for closure ELF")
+            for line in output.splitlines():
+                if b"(RPATH)" not in line and b"(RUNPATH)" not in line:
+                    continue
+                match = re.search(br"\[([^]]*)\]", line)
+                if match is None:
+                    raise RuntimeError("unparseable RPATH or RUNPATH")
+                for entry in match.group(1).split(b":"):
+                    if entry.startswith(b"/") and not entry.startswith(root.encode("utf-8") + b"/"):
+                        raise RuntimeError("external RPATH or RUNPATH")
+
+
+def locked_dependency_commands(
+    uv,
+    python,
+    node,
+    npm_cli,
+    agent,
+    webui,
+    venv,
+    home,
+    tmp,
+    shim,
+    config,
+):
+    common = {
+        "HOME": home,
+        "TMPDIR": tmp,
+        "PATH": os.path.dirname(node) + ":/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "LD_PRELOAD": shim,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
+    uv_environment = dict(common)
+    uv_environment.update(
+        {
+            "UV_CACHE_DIR": os.path.join(tmp, "uv-cache"),
+            "UV_LINK_MODE": "copy",
+            "UV_NO_CONFIG": "1",
+            "UV_PROJECT_ENVIRONMENT": venv,
+            "UV_PYTHON_DOWNLOADS": "never",
+            "UV_PYTHON": python,
+            "UV_INDEX_URL": config["uv_index"],
+        }
+    )
+    npm_environment = dict(common)
+    npm_environment.update(
+        {
+            "npm_config_cache": os.path.join(tmp, "npm-cache"),
+            "npm_config_registry": config["npm_registry"],
+            "npm_config_userconfig": "/dev/null",
+            "npm_config_globalconfig": "/dev/null",
+            "npm_config_audit": "false",
+            "npm_config_fund": "false",
+            "npm_config_update_notifier": "false",
+        }
+    )
+    return {
+        "uv": (
+            [uv, "--no-config", "sync", "--extra", "all", "--extra", "dev", "--locked"],
+            agent,
+            uv_environment,
+        ),
+        "npm": (
+            [
+                node,
+                npm_cli,
+                "ci", "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                "--userconfig=/dev/null",
+            ],
+            webui,
+            npm_environment,
+        ),
+    }
+
+
+def prepare_closure(frame_descriptors, session, closure, home, tmp, uid, gid, config):
+    staging = os.path.join(session, "staging")
+    for name in SEALED_ARCHIVE_NAMES:
+        extracted = os.path.join(staging, name + ".extract")
+        descriptor = os.dup(frame_descriptors[name])
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
+                descriptor = -1
+                safe_extract_archive(handle, extracted, name, limits=ARCHIVE_LIMITS[name])
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        _promote_archive_root(extracted, os.path.join(closure, name))
+
+    source = os.path.join(closure, "source")
+    python_root = os.path.join(closure, "python")
+    node_root = os.path.join(closure, "node")
+    uv_root = os.path.join(closure, "uv")
+    support = os.path.join(closure, "support")
+    os.mkdir(support, 0o700)
+    shim_source = os.path.join(support, "taiji-formal-passwd.c")
+    shim_library = os.path.join(support, "libtaiji-formal-passwd.so")
+    with open(shim_source, "x", encoding="utf-8") as handle:
+        handle.write(synthetic_nss_source(uid, gid, home))
+    compiler_environment = {
+        "HOME": home,
+        "TMPDIR": tmp,
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+    _run_prep_command(
+        [
+            "/usr/bin/cc",
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-Wl,-z,relro,-z,now",
+            "-o",
+            shim_library,
+            shim_source,
+        ],
+        support,
+        compiler_environment,
+        "synthetic NSS shim",
+    )
+    environment = dict(compiler_environment)
+    environment.update(
+        {
+            "LD_PRELOAD": shim_library,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    python = _find_regular(
+        python_root,
+        ("bin/python3.11", "bin/python3", "bin/python"),
+        basename="python3.11",
+    )
+    node = _find_regular(node_root, ("bin/node",), basename="node")
+    uv = _find_regular(uv_root, ("uv", "bin/uv"), basename="uv")
+    venv = os.path.join(closure, "venv")
+    _run_prep_command(
+        [python, "-I", "-B", "-m", "venv", "--copies", venv],
+        closure,
+        environment,
+        "isolated virtual environment",
+    )
+    _rewrite_pyvenv_config(venv, python_root, python)
+    agent = os.path.join(source, "hermes-local-lab", "sources", "hermes-agent")
+    webui = os.path.join(source, "hermes-local-lab", "sources", "hermes-webui")
+    npm_cli = _find_regular(
+        node_root,
+        ("lib/node_modules/npm/bin/npm-cli.js",),
+        basename="npm-cli.js",
+    )
+    dependency_commands = locked_dependency_commands(
+        uv,
+        python,
+        node,
+        npm_cli,
+        agent,
+        webui,
+        venv,
+        home,
+        tmp,
+        shim_library,
+        config,
+    )
+    for command_name, label in (
+        ("uv", "uv locked development dependencies"),
+        ("npm", "npm locked development dependencies"),
+    ):
+        argv, cwd, command_environment = dependency_commands[command_name]
+        _run_prep_command(argv, cwd, command_environment, label)
+    _audit_elf_dynamic_paths(closure, environment)
+    validate_relocation_paths(closure, tuple(config.get("forbidden_roots", ())))
+    inventory_tree(closure)
+
+
+def run_preparation_child(frame_descriptors, session, closure, home, tmp, uid, gid, config):
+    parent_pid = os.getpid()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            arm_parent_death_signal(SystemParentDeathAdapter(), parent_pid)
+            os.close(read_fd)
+            establish_process_group(SystemProcessGroupAdapter(), 0, child_side=True)
+            os.dup2(write_fd, 1)
+            os.dup2(write_fd, 2)
+            if write_fd > 2:
+                os.close(write_fd)
+            drop_privileges(SystemPrivilegeAdapter(), uid, gid)
+            arm_parent_death_signal(SystemParentDeathAdapter(), parent_pid)
+            prepare_closure(frame_descriptors, session, closure, home, tmp, uid, gid, config)
+            os._exit(0)
+        except BaseException as error:
+            _os_write_all(2, ("formal closure preparation failed: " + repr(error) + "\n").encode("utf-8", "replace"))
+        os._exit(127)
+    os.close(write_fd)
+    try:
+        establish_process_group(SystemProcessGroupAdapter(), pid, child_side=False)
+    except BaseException:
+        _abort_child_after_group_failure(pid, read_fd)
+        raise
+    return collect_child_process(
+        SystemChildAdapter(), pid, read_fd, timeout=3600.0, maximum=1024 * 1024
+    )
+
+
+def _make_root_token(workspace_fd, token):
+    descriptor = os.open(
+        ".supervisor-token",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=workspace_fd,
+    )
+    try:
+        _os_write_all(descriptor, (token + "\n").encode("ascii"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _make_owned_directory(path, uid, gid, mode):
+    os.mkdir(path, mode)
+    os.chown(path, uid, gid)
+    os.chmod(path, mode)
+
+
+def audit_session_writable_intent(session, home, tmp, uid, trusted_uid=None):
+    session = os.path.abspath(session)
+    allowed_roots = (os.path.abspath(home), os.path.abspath(tmp))
+    if any(not path.startswith(session + os.sep) for path in allowed_roots):
+        raise RuntimeError("writable test directory escaped formal session")
+    session_info = os.lstat(session)
+    trusted_uid = session_info.st_uid if trusted_uid is None else trusted_uid
+    if (
+        not stat.S_ISDIR(session_info.st_mode)
+        or session_info.st_uid != trusted_uid
+        or stat.S_IMODE(session_info.st_mode) & 0o022
+    ):
+        raise RuntimeError("formal session root is writable by the test identity")
+    expected_top_level = {
+        ".supervisor-token",
+        "closure",
+        os.path.basename(allowed_roots[0]),
+        os.path.basename(allowed_roots[1]),
+    }
+    with os.scandir(session) as entries:
+        actual_top_level = {entry.name for entry in entries}
+    if actual_top_level != expected_top_level:
+        raise RuntimeError("formal session has an unexpected top-level node")
+    closure = os.path.join(session, "closure")
+    closure_info = os.lstat(closure)
+    if (
+        not stat.S_ISDIR(closure_info.st_mode)
+        or closure_info.st_uid != trusted_uid
+        or stat.S_IMODE(closure_info.st_mode) & 0o022
+    ):
+        raise RuntimeError("frozen closure root is writable by the test identity")
+    token_info = os.lstat(os.path.join(session, ".supervisor-token"))
+    if (
+        not stat.S_ISREG(token_info.st_mode)
+        or token_info.st_nlink != 1
+        or token_info.st_uid != trusted_uid
+        or stat.S_IMODE(token_info.st_mode) & 0o022
+        or token_info.st_size > 256
+    ):
+        raise RuntimeError("formal session token identity is unsafe")
+    observed = set()
+    for root in allowed_roots:
+        info = os.lstat(root)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != uid
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise RuntimeError("writable test directory identity is unsafe")
+    for allowed in allowed_roots:
+        for current, directories, files in os.walk(allowed, topdown=True, followlinks=False):
+            directories.sort()
+            files.sort()
+            for name in ["."] + directories + files:
+                path = current if name == "." else os.path.join(current, name)
+                info = os.lstat(path)
+                if stat.S_ISLNK(info.st_mode):
+                    raise RuntimeError("writable test directory contains a symlink before suite start")
+                mode = stat.S_IMODE(info.st_mode)
+                if info.st_uid != uid or mode & 0o022:
+                    raise RuntimeError("writable test directory contains an unsafe node")
+                observed.add(allowed)
+    if observed != set(allowed_roots):
+        raise RuntimeError("formal HOME/TMP writable intent is incomplete")
+    return observed
+
+
+def _read_json_file(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024 * 1024:
+            raise RuntimeError("unsafe JSON metadata file")
+        payload = b""
+        while len(payload) <= info.st_size:
+            chunk = os.read(descriptor, min(65536, info.st_size + 1 - len(payload)))
+            if not chunk:
+                break
+            payload += chunk
+    finally:
+        os.close(descriptor)
+    return json.loads(payload.decode("utf-8"))
+
+
+def _emit_payload(payload):
+    if not payload:
+        return
+    sanitized = sanitize_child_output(payload)
+    sys.stdout.buffer.write(sanitized)
+    if sanitized and not sanitized.endswith(b"\n"):
+        sys.stdout.buffer.write(b"\n")
+    sys.stdout.buffer.flush()
+
+
+def handle_preparation_result(status, output, emit):
+    if status == 0:
+        return
+    if output:
+        emit(output)
+    raise RuntimeError("formal closure preparation failed (exit=%d)" % status)
+
+
+def _closure_header(
+    closure,
+    config,
+    supervisor_source_sha256,
+    closure_sha256,
+    closure_file_count,
+    closure_total_bytes,
+):
+    python = os.path.join(closure, "venv", "bin", "python")
+    node = os.path.join(closure, "node", "bin", "node")
+    npm_cli = os.path.join(closure, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js")
+    eslint_cli = os.path.join(
+        closure,
+        "source",
+        "hermes-local-lab",
+        "sources",
+        "hermes-webui",
+        "node_modules",
+        "eslint",
+        "bin",
+        "eslint.js",
+    )
+    npm_package = os.path.join(closure, "node", "lib", "node_modules", "npm", "package.json")
+    npm_version = str(_read_json_file(npm_package).get("version", ""))
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", npm_version) is None:
+        raise RuntimeError("invalid npm version in frozen closure")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", supervisor_source_sha256 or "") is None
+        or re.fullmatch(r"[0-9a-f]{64}", closure_sha256 or "") is None
+        or not isinstance(closure_file_count, int)
+        or isinstance(closure_file_count, bool)
+        or closure_file_count <= 0
+        or not isinstance(closure_total_bytes, int)
+        or isinstance(closure_total_bytes, bool)
+        or closure_total_bytes <= 0
+    ):
+        raise RuntimeError("invalid formal closure log identity")
+    return (
+        "schema=taiji-formal-build-tests/v2",
+        "source_commit=" + config["source_commit"],
+        "supervisor_source_sha256=" + supervisor_source_sha256,
+        "python_version=" + config["python_version"],
+        "python_executable_sha256=" + _sha256_file(python),
+        "node_version=" + config["node_version"],
+        "node_executable_sha256=" + _sha256_file(node),
+        "npm_version=" + npm_version,
+        "npm_cli_sha256=" + _sha256_file(npm_cli),
+        "eslint_cli_sha256=" + _sha256_file(eslint_cli),
+        "closure_sha256=" + closure_sha256,
+        "closure_file_count=" + str(closure_file_count),
+        "closure_total_bytes=" + str(closure_total_bytes),
+        "target_count=20",
+        "target_contract_sha256=" + FORMAL_TARGET_CONTRACT_SHA256,
+    )
+
+
+def supervise_formal_build(stream, specs, supervisor_descriptor, config):
+    if os.geteuid() != 0 or os.getegid() != 0 or sys.platform != "linux":
+        raise RuntimeError("formal supervisor requires Linux root")
+    if not os.path.isdir("/proc/self/fd"):
+        raise RuntimeError("formal supervisor requires procfs")
+    config = validate_supervisor_config(config)
+    frame_adapter = SystemFrameAdapter()
+    frames = read_and_reseal_frames(
+        frame_adapter,
+        stream,
+        specs,
+        existing={"supervisor": supervisor_descriptor},
+    )
+    identity_adapter = SystemIdentityAdapter(
+        int(config["caller_uid"]),
+        tuple(int(value) for value in config["caller_gids"]),
+    )
+    uid, gid = choose_temporary_identity(identity_adapter, range(60000, 65000))
+    require_identity_unused(identity_adapter, uid, gid)
+    workspace_adapter = SystemWorkspaceAdapter()
+    parent_fd = None
+    workspace_fd = None
+    basename = None
+    parent_identity = None
+    workspace_identity = None
+    token = secrets.token_hex(32)
+    primary_error = None
+    try:
+        parent_fd, parent_identity = validate_workspace_parent_chain(workspace_adapter)
+        basename, workspace_fd, workspace_identity = create_workspace_session(
+            workspace_adapter, parent_fd, parent_identity
+        )
+        session = os.path.join("/var/tmp", basename)
+        held_path = "/proc/self/fd/" + str(workspace_fd)
+        held_info = os.stat(held_path)
+        if (held_info.st_dev, held_info.st_ino) != workspace_identity:
+            raise RuntimeError("held workspace descriptor identity mismatch")
+        _make_root_token(workspace_fd, token)
+        os.fchown(workspace_fd, 0, gid)
+        os.fchmod(workspace_fd, 0o710)
+        closure = os.path.join(session, "closure")
+        staging = os.path.join(session, "staging")
+        home = os.path.join(session, "home")
+        tmp = os.path.join(session, "tmp")
+        _make_owned_directory(closure, uid, gid, 0o700)
+        _make_owned_directory(staging, uid, gid, 0o700)
+        _make_owned_directory(home, uid, gid, 0o700)
+        _make_owned_directory(tmp, uid, gid, 0o700)
+        status, output = run_preparation_child(
+            frames, session, closure, home, tmp, uid, gid, config
+        )
+        require_identity_unused(identity_adapter, uid, gid)
+        handle_preparation_result(status, output, _emit_payload)
+        _remove_tree_path(staging)
+        before_freeze = inventory_tree(closure)
+        if not before_freeze:
+            raise RuntimeError("formal closure inventory is empty")
+        freeze_closure(closure, 0, 0, chown=True)
+        frozen_inventory = inventory_tree(closure)
+        if frozen_inventory != inventory_tree(closure):
+            raise RuntimeError("formal closure changed after freeze")
+        audit_session_writable_intent(session, home, tmp, uid, trusted_uid=0)
+        closure_sha, closure_count, closure_bytes = inventory_summary(frozen_inventory)
+        for line in _closure_header(
+            closure,
+            config,
+            specs[0][2],
+            closure_sha,
+            closure_count,
+            closure_bytes,
+        ):
+            print(line, flush=True)
+        commands = formal_suite_commands(closure, home, tmp, FORMAL_TARGET_RESULT_FD)
+        if tuple(item[0] for item in commands) != FORMAL_SUITE_NAMES:
+            raise RuntimeError("formal suite order changed")
+        for suite, cwd, argv, environment in commands:
+            if not os.path.realpath(cwd).startswith(os.path.realpath(closure) + os.sep):
+                raise RuntimeError("formal suite cwd escaped closure")
+            if not os.path.realpath(argv[0]).startswith(os.path.realpath(closure) + os.sep):
+                raise RuntimeError("formal suite executable escaped closure")
+            print("suite_begin=" + suite, flush=True)
+            status, streams = run_dropped_command(
+                argv, cwd, environment, uid, gid, FORMAL_TARGET_RESULT_FD
+            )
+            for channel in ("stdout", "stderr"):
+                if streams[channel]:
+                    print(
+                        encode_child_output_record(suite, channel, streams[channel]),
+                        flush=True,
+                    )
+            require_identity_unused(identity_adapter, uid, gid)
+            if inventory_tree(closure) != frozen_inventory:
+                print("suite_status=%s:fail:125" % suite, flush=True)
+                raise RuntimeError("formal closure mutated during suite: " + suite)
+            if status != 0:
+                print("suite_status=%s:fail:%d" % (suite, status), flush=True)
+                raise RuntimeError("formal suite failed: " + suite)
+            try:
+                target_records = parse_target_result_payload(
+                    streams["result"], formal_suite_target_ordinals(suite)
+                )
+            except BaseException:
+                print("suite_status=%s:fail:125" % suite, flush=True)
+                raise
+            for line in formal_suite_result_lines(suite, target_records):
+                print(line, flush=True)
+            print("suite_status=" + suite + ":pass", flush=True)
+        require_identity_unused(identity_adapter, uid, gid)
+        if inventory_tree(closure) != frozen_inventory:
+            raise RuntimeError("formal closure changed after final suite")
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        for descriptor in frames.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if workspace_fd is not None:
+            cleanup_error = None
+            try:
+                require_identity_unused(identity_adapter, uid, gid)
+                cleanup_workspace(
+                    parent_fd,
+                    workspace_fd,
+                    basename,
+                    token,
+                    parent_identity,
+                    workspace_identity,
+                    expected_uid=0,
+                )
+            except BaseException as error:
+                cleanup_error = error
+            try:
+                os.close(workspace_fd)
+            except OSError:
+                pass
+            if cleanup_error is not None and primary_error is None:
+                raise cleanup_error
+        if parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+    print("overall_status=pass", flush=True)
+    return 0
+
+
+def main(stream, specs, supervisor_descriptor, config):
+    return supervise_formal_build(stream, specs, supervisor_descriptor, config)
+PY
+}
+
+formal_build_supervisor_bootstrap_python_source() {
+  /usr/bin/cat <<'PY'
+import ctypes
+import fcntl
+import hashlib
+import json
+import os
+import re
+import select
+import signal
+import stat
+import sys
+import time
+
+names = ("supervisor", "source", "uv", "python", "node")
+TRANSCRIPT_MAX_BYTES = 32 * 1024 * 1024
+TRANSCRIPT_DEADLINE_SECONDS = 8 * 60 * 60
+if len(sys.argv) != 12:
+    raise SystemExit("formal supervisor bootstrap arguments are not canonical")
+config = json.loads(sys.argv[1])
+specs = []
+for index, name in enumerate(names):
+    size = int(sys.argv[2 + index * 2])
+    digest = sys.argv[3 + index * 2]
+    if size <= 0 or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise SystemExit("invalid formal supervisor frame specification")
+    specs.append((name, size, digest))
+supervisor_size = specs[0][1]
+if supervisor_size > 4 * 1024 * 1024:
+    raise SystemExit("formal supervisor source exceeds fixed bound")
+chunks = []
+remaining = supervisor_size
+while remaining:
+    chunk = sys.stdin.buffer.read(min(1024 * 1024, remaining))
+    if not chunk:
+        raise SystemExit("formal supervisor source frame was truncated")
+    chunks.append(chunk)
+    remaining -= len(chunk)
+source_bytes = b"".join(chunks)
+if hashlib.sha256(source_bytes).hexdigest() != specs[0][2]:
+    raise SystemExit("formal supervisor source digest mismatch")
+required = (
+    fcntl.F_SEAL_WRITE
+    | fcntl.F_SEAL_GROW
+    | fcntl.F_SEAL_SHRINK
+    | fcntl.F_SEAL_SEAL
+)
+descriptor = os.memfd_create(
+    "taiji-formal-root-supervisor",
+    os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+)
+try:
+    offset = 0
+    while offset < len(source_bytes):
+        written = os.write(descriptor, source_bytes[offset:])
+        if written <= 0:
+            raise SystemExit("formal supervisor memfd write was truncated")
+        offset += written
+    os.fchmod(descriptor, 0o400)
+    fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, required)
+    info = os.fstat(descriptor)
+    seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 0
+        or info.st_uid != 0
+        or info.st_size != supervisor_size
+        or seals & required != required
+    ):
+        raise SystemExit("formal supervisor root memfd identity is unsafe")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    verified = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        verified.update(chunk)
+    if verified.hexdigest() != specs[0][2]:
+        raise SystemExit("formal supervisor root memfd changed")
+    namespace = {"__name__": "taiji_formal_root_supervisor"}
+    source_text = source_bytes.decode("utf-8", errors="strict")
+    exec(compile(source_text, "sealed-formal-root-supervisor.py", "exec"), namespace)
+    transcript_read, transcript_write = os.pipe()
+    bootstrap_parent_pid = os.getpid()
+    transcript_pid = os.fork()
+    if transcript_pid == 0:
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
+            if os.getppid() != bootstrap_parent_pid:
+                raise RuntimeError("formal root supervisor bootstrap parent changed")
+            os.close(transcript_read)
+            os.setpgid(0, 0)
+            os.dup2(transcript_write, 1)
+            os.dup2(transcript_write, 2)
+            if transcript_write > 2:
+                os.close(transcript_write)
+            result = namespace["main"](sys.stdin.buffer, specs, descriptor, config)
+            os._exit(result)
+        except BaseException as error:
+            os.write(2, ("formal root supervisor failed: " + repr(error) + "\n").encode("utf-8", "replace"))
+        os._exit(127)
+    os.close(transcript_write)
+    try:
+        os.setpgid(transcript_pid, transcript_pid)
+    except OSError as error:
+        if error.errno not in (13, 3):
+            raise
+    try:
+        group = os.getpgid(transcript_pid)
+    except ProcessLookupError:
+        group = transcript_pid
+    if group != transcript_pid:
+        os.kill(transcript_pid, 9)
+        os.waitpid(transcript_pid, 0)
+        raise SystemExit("formal root supervisor process group is unsafe")
+    os.set_blocking(transcript_read, False)
+    poller = select.poll()
+    poller.register(transcript_read, select.POLLIN | select.POLLHUP | select.POLLERR)
+    transcript_hash = hashlib.sha256()
+    transcript_size = 0
+    transcript_status = None
+    transcript_eof = False
+    deadline = time.monotonic() + TRANSCRIPT_DEADLINE_SECONDS
+    try:
+        while transcript_status is None or not transcript_eof:
+            while True:
+                try:
+                    chunk = os.read(transcript_read, 65536)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    transcript_eof = True
+                    break
+                transcript_size += len(chunk)
+                if transcript_size > TRANSCRIPT_MAX_BYTES:
+                    raise RuntimeError("formal root transcript exceeded its fixed bound")
+                transcript_hash.update(chunk)
+                offset = 0
+                while offset < len(chunk):
+                    written = os.write(1, chunk[offset:])
+                    if written <= 0:
+                        raise RuntimeError("formal root transcript write was truncated")
+                    offset += written
+            if transcript_status is None:
+                waited, status = os.waitpid(transcript_pid, os.WNOHANG)
+                if waited == transcript_pid:
+                    transcript_status = status
+                    try:
+                        os.killpg(transcript_pid, 9)
+                    except ProcessLookupError:
+                        pass
+                elif waited != 0:
+                    raise RuntimeError("formal root waitpid returned the wrong child")
+            if transcript_status is not None and transcript_eof:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("formal root supervisor exceeded its total deadline")
+            poller.poll(100)
+    except BaseException:
+        try:
+            os.killpg(transcript_pid, 9)
+        except ProcessLookupError:
+            pass
+        if transcript_status is None:
+            os.waitpid(transcript_pid, 0)
+        raise
+    finally:
+        os.close(transcript_read)
+    waited = transcript_pid
+    status = transcript_status
+    if waited != transcript_pid or not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        raise SystemExit("formal root supervisor process failed")
+    trailer = "root_transcript_sha256=" + transcript_hash.hexdigest() + "\n"
+    os.write(1, trailer.encode("ascii"))
+    descriptor = -1
+    raise SystemExit(0)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+PY
+}
+
+formal_build_supervisor_log_relay_python_source() {
+  /usr/bin/cat <<'PY'
+import hashlib
+import os
+import re
+import sys
+
+if len(sys.argv) != 3:
+    raise SystemExit("usage: relay WRITE_FD READ_FD")
+write_fd = int(sys.argv[1])
+read_fd = int(sys.argv[2])
+payload = bytearray()
+maximum = 32 * 1024 * 1024
+while True:
+    chunk = sys.stdin.buffer.read(65536)
+    if not chunk:
+        break
+    payload.extend(chunk)
+    if len(payload) > maximum:
+        raise SystemExit("formal root transcript exceeded 32 MiB")
+marker = b"root_transcript_sha256="
+newline = payload.rfind(b"\n")
+if newline != len(payload) - 1:
+    raise SystemExit("formal root transcript is not LF terminated")
+previous = payload.rfind(b"\n", 0, newline)
+trailer = bytes(payload[previous + 1:newline])
+if not trailer.startswith(marker):
+    raise SystemExit("formal root transcript trailer is missing")
+expected = trailer[len(marker):].decode("ascii", errors="strict")
+body = bytes(payload[:previous + 1])
+if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+    raise SystemExit("formal root transcript digest is invalid")
+actual = hashlib.sha256(body).hexdigest()
+if actual != expected:
+    raise SystemExit("formal root transcript digest mismatch")
+offset = 0
+while offset < len(body):
+    written = os.write(write_fd, body[offset:])
+    if written <= 0:
+        raise SystemExit("formal log relay write was truncated")
+    offset += written
+os.fsync(write_fd)
+write_info = os.fstat(write_fd)
+read_info = os.fstat(read_fd)
+if (write_info.st_dev, write_info.st_ino, write_info.st_size) != (
+    read_info.st_dev, read_info.st_ino, read_info.st_size
+):
+    raise SystemExit("formal held log identity differs between relay descriptors")
+os.lseek(read_fd, 0, os.SEEK_SET)
+held = hashlib.sha256()
+remaining = read_info.st_size
+while remaining:
+    chunk = os.read(read_fd, min(65536, remaining))
+    if not chunk:
+        raise SystemExit("formal held log was truncated")
+    held.update(chunk)
+    remaining -= len(chunk)
+if os.read(read_fd, 1):
+    raise SystemExit("formal held log grew during attestation")
+if held.hexdigest() != expected:
+    raise SystemExit("formal held log digest differs from root transcript")
+sys.stdout.write("ATTESTED\t" + expected + "\n")
+PY
+}
+
+seal_formal_build_supervisor() {
+  local snapshot_python control_fifo status_fifo ready snapshot_descriptor
+  local reported_size reported_seals holder_path holder_status
+  cleanup_sealed_snapshot_transport || return 1
+  close_sealed_snapshot_slot supervisor || return 1
+  snapshot_python="$(sealed_snapshot_python_source)" || return 1
+  SEALED_SNAPSHOT_TRANSPORT_DIR="$(
+    mktemp -d "$BUILD_TMP_DIR/taiji-sealed-supervisor.XXXXXX"
+  )" || return 1
+  [ -d "$SEALED_SNAPSHOT_TRANSPORT_DIR" ] \
+    && [ ! -L "$SEALED_SNAPSHOT_TRANSPORT_DIR" ] \
+    && [ "$(stat -c '%u:%a' "$SEALED_SNAPSHOT_TRANSPORT_DIR")" = "$(id -u):700" ] \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  control_fifo="$SEALED_SNAPSHOT_TRANSPORT_DIR/control"
+  status_fifo="$SEALED_SNAPSHOT_TRANSPORT_DIR/status"
+  mkfifo -m 0600 -- "$control_fifo" "$status_fifo" \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  exec 7<> "$control_fifo" \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  SEALED_SNAPSHOT_CONTROL_OPEN=1
+  exec 14< <(formal_build_root_supervisor_python_source) \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  /usr/bin/env -i \
+    HOME="$BUILD_ROOT" TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    /usr/bin/python3 -I -B -c "$snapshot_python" create-payload \
+    /proc/self/fd/14 0400 <&7 > "$status_fifo" &
+  SEALED_SNAPSHOT_HOLDER_PID="$!"
+  exec 8< "$status_fifo" \
+    || { exec 14<&-; cleanup_sealed_snapshot_transport || true; return 1; }
+  SEALED_SNAPSHOT_STATUS_OPEN=1
+  if ! IFS=$'\t' read -r ready snapshot_descriptor FORMAL_BUILD_SUPERVISOR_SHA256 reported_size reported_seals <&8; then
+    exec 14<&-
+    cleanup_sealed_snapshot_transport || true
+    return 1
+  fi
+  exec 8<&-
+  exec 14<&-
+  SEALED_SNAPSHOT_STATUS_OPEN=0
+  [ "$ready" = READY ] \
+    && printf '%s\n' "$snapshot_descriptor" | grep -Eq '^[0-9]+$' \
+    && printf '%s\n' "$FORMAL_BUILD_SUPERVISOR_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    && printf '%s\n' "$reported_size" | grep -Eq '^[1-9][0-9]*$' \
+    && printf '%s\n' "$reported_seals" | grep -Eq '^[0-9]+$' \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  holder_path="/proc/$SEALED_SNAPSHOT_HOLDER_PID/fd/$snapshot_descriptor"
+  exec 6< "$holder_path" \
+    || { cleanup_sealed_snapshot_transport || true; return 1; }
+  FORMAL_BUILD_SUPERVISOR_FD_PATH="/proc/$$/fd/6"
+  verify_sealed_snapshot \
+    "$FORMAL_BUILD_SUPERVISOR_FD_PATH" "$FORMAL_BUILD_SUPERVISOR_SHA256" \
+    || { close_sealed_snapshot_slot supervisor || true; cleanup_sealed_snapshot_transport || true; return 1; }
+  printf 'A' >&7 \
+    || { close_sealed_snapshot_slot supervisor || true; cleanup_sealed_snapshot_transport || true; return 1; }
+  exec 7>&-
+  SEALED_SNAPSHOT_CONTROL_OPEN=0
+  holder_status=0
+  wait "$SEALED_SNAPSHOT_HOLDER_PID" || holder_status="$?"
+  SEALED_SNAPSHOT_HOLDER_PID=""
+  cleanup_sealed_snapshot_transport || holder_status=1
+  [ "$holder_status" = 0 ] \
+    || { close_sealed_snapshot_slot supervisor || true; return 1; }
+  verify_sealed_snapshot \
+    "$FORMAL_BUILD_SUPERVISOR_FD_PATH" "$FORMAL_BUILD_SUPERVISOR_SHA256"
+}
+
+formal_build_test_log_fd_path() {
+  local descriptor="$1"
+  printf '/proc/%s/fd/%s\n' "$$" "$descriptor"
+}
+
+held_file_identity_and_sha256() {
+  local held_path="$1" canonical_path="${2:--}"
+  /usr/bin/python3 -I -B - "$held_path" "$canonical_path" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+held_path, canonical_path = sys.argv[1:]
+
+def identity(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_uid,
+        value.st_gid,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+descriptor = os.open(held_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+try:
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise SystemExit("held file is not a single-link regular file")
+    if canonical_path != "-" and identity(os.lstat(canonical_path)) != identity(before):
+        raise SystemExit("canonical path is not bound to held file")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = before.st_size
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise SystemExit("held file was truncated while hashing")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise SystemExit("held file grew while hashing")
+    after = os.fstat(descriptor)
+    if identity(after) != identity(before):
+        raise SystemExit("held file changed while hashing")
+    if canonical_path != "-" and identity(os.lstat(canonical_path)) != identity(after):
+        raise SystemExit("canonical path changed while hashing")
+    print(":".join(str(part) for part in identity(after)) + "\t" + digest.hexdigest())
+finally:
+    os.close(descriptor)
+PY
+}
+
+fsync_held_file() {
+  /usr/bin/python3 -I -B - "$1" <<'PY'
+import os
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+fsync_directory() {
+  /usr/bin/python3 -I -B - "$1" <<'PY'
+import os
+import sys
+
+descriptor = os.open(
+    sys.argv[1],
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+formal_build_test_log_identity_matches() {
+  local read_result write_result read_identity read_sha write_identity write_sha
+  [ -n "${FORMAL_BUILD_TEST_LOG_FD:-}" ] \
+    && [ -n "${FORMAL_BUILD_TEST_LOG_READ_FD:-}" ] \
+    && [ -n "${FORMAL_BUILD_TEST_LOG_IDENTITY:-}" ] \
+    && [ -f "$FORMAL_BUILD_TEST_LOG" ] \
+    && [ ! -L "$FORMAL_BUILD_TEST_LOG" ] \
+    || return 1
+  read_result="$(held_file_identity_and_sha256 \
+    "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_READ_FD")" \
+    "$FORMAL_BUILD_TEST_LOG")" \
+    || return 1
+  write_result="$(held_file_identity_and_sha256 \
+    "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_FD")" -)" \
+    || return 1
+  IFS=$'\t' read -r read_identity read_sha <<< "$read_result"
+  IFS=$'\t' read -r write_identity write_sha <<< "$write_result"
+  [ "$read_identity" = "$write_identity" ] \
+    && [ "$read_sha" = "$write_sha" ] \
+    || return 1
+  if [ -n "${FORMAL_BUILD_TESTS_LOG_SHA256:-}" ]; then
+    [ "$read_identity" = "$FORMAL_BUILD_TEST_LOG_IDENTITY" ] \
+      && [ "$read_sha" = "$FORMAL_BUILD_TESTS_LOG_SHA256" ]
+  else
+    FORMAL_BUILD_TEST_LOG_IDENTITY="$read_identity"
+  fi
+}
+
+poison_formal_build_test_log() {
+  local reason="$1"
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] \
+    || return 0
+  if [ ! -e "$FORMAL_BUILD_TEST_LOG_POISON" ] && [ ! -L "$FORMAL_BUILD_TEST_LOG_POISON" ]; then
+    (umask 077; set -o noclobber; {
+      printf 'formal_build_test_log_poisoned=1\n'
+      printf 'reason=%s\n' "$reason"
+    } > "$FORMAL_BUILD_TEST_LOG_POISON") 2>/dev/null || true
+  fi
+}
+
+require_formal_build_test_log_identity() {
+  local context="$1"
+  if ! formal_build_test_log_identity_matches; then
+    poison_formal_build_test_log "$context"
+    fail "正式构建测试日志身份漂移：$context；已保留外来文件和失败现场"
+  fi
+}
+
+open_formal_build_test_log() {
+  local previous_umask had_noclobber write_identity path_identity
+  if [ -e "$FORMAL_BUILD_TEST_LOG" ] || [ -L "$FORMAL_BUILD_TEST_LOG" ]; then
+    poison_formal_build_test_log "canonical log path was occupied before O_EXCL publication"
+    fail "正式构建测试日志已存在，拒绝覆盖；已保留外来文件并写入 poison"
+  fi
+  [ -d /proc/$$/fd ] \
+    || fail "制包机缺少受信 /proc 文件描述符视图，无法固定正式测试日志"
+  previous_umask="$(umask)"
+  had_noclobber=0
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {FORMAL_BUILD_TEST_LOG_FD}> "$FORMAL_BUILD_TEST_LOG"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    poison_formal_build_test_log "canonical log path was occupied during O_EXCL publication"
+    fail "无法以 no-clobber 方式创建正式构建测试日志；已保留失败现场"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  write_identity="$(stat -Lc '%d:%i:%f:%h:%u' \
+    "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_FD")")" \
+    || fail "无法读取正式构建测试日志 held FD 身份"
+  path_identity="$(stat -c '%d:%i:%f:%h:%u' "$FORMAL_BUILD_TEST_LOG")" \
+    || fail "无法读取正式构建测试日志 canonical 身份"
+  [ "$write_identity" = "$path_identity" ] \
+    && [ "$(stat -c '%s:%h:%u:%a' "$FORMAL_BUILD_TEST_LOG")" = "0:1:$(id -u):600" ] \
+    || fail "正式构建测试日志创建后身份不安全"
+  FORMAL_BUILD_TEST_LOG_IDENTITY="$write_identity"
+  exec {FORMAL_BUILD_TEST_LOG_READ_FD}< "$FORMAL_BUILD_TEST_LOG" \
+    || fail "无法固定正式构建测试日志只读 FD"
+  require_formal_build_test_log_identity "open"
+}
+
+close_formal_build_test_log_fds() {
+  if [ -n "${FORMAL_BUILD_TEST_LOG_READ_FD:-}" ]; then
+    exec {FORMAL_BUILD_TEST_LOG_READ_FD}<&- || true
+    FORMAL_BUILD_TEST_LOG_READ_FD=""
+  fi
+  if [ -n "${FORMAL_BUILD_TEST_LOG_FD:-}" ]; then
+    exec {FORMAL_BUILD_TEST_LOG_FD}>&- || true
+    FORMAL_BUILD_TEST_LOG_FD=""
+  fi
+}
+
+run_formal_test_step() {
+  local suite="$1" working_dir="$2" status
+  shift 2
+  [ -d "$working_dir" ] && [ ! -L "$working_dir" ] \
+    || fail "正式构建测试工作目录不安全：$working_dir"
+  validate_formal_test_runtime_identity \
+    || fail "正式测试运行时在 suite $suite 执行前漂移"
+  require_formal_build_test_log_identity "before suite $suite"
+  printf 'suite_begin=%s\n' "$suite" >&"$FORMAL_BUILD_TEST_LOG_FD"
+  if (cd "$working_dir" && "$@") >&"$FORMAL_BUILD_TEST_LOG_FD" 2>&1; then
+    validate_formal_test_runtime_identity \
+      || fail "正式测试运行时在 suite $suite 执行后漂移"
+    printf 'suite_status=%s:pass\n' "$suite" >&"$FORMAL_BUILD_TEST_LOG_FD"
+    require_formal_build_test_log_identity "after suite $suite"
+    return 0
+  else
+    status="$?"
+    validate_formal_test_runtime_identity \
+      || fail "正式测试运行时在失败 suite $suite 执行后漂移"
+    printf 'suite_status=%s:fail:%s\n' "$suite" "$status" >&"$FORMAL_BUILD_TEST_LOG_FD"
+    require_formal_build_test_log_identity "after failed suite $suite"
+    tail -n 120 "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_READ_FD")" >&2 || true
+    fail "正式构建测试失败：$suite (exit=$status)"
+  fi
+}
+
+formal_package_manifest_fd_path() {
+  local descriptor="$1"
+  printf '/proc/%s/fd/%s\n' "$$" "$descriptor"
+}
+
+source_package_manifest_identity_matches() {
+  local result identity digest
+  [ -n "${SOURCE_PACKAGE_MANIFEST_FD:-}" ] \
+    && [ -n "${SOURCE_PACKAGE_MANIFEST_PATH:-}" ] \
+    && [ -n "${SOURCE_PACKAGE_MANIFEST_IDENTITY:-}" ] \
+    && [ -n "${SOURCE_PACKAGE_MANIFEST_SHA256:-}" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 \
+    "$(formal_package_manifest_fd_path "$SOURCE_PACKAGE_MANIFEST_FD")" \
+    "$SOURCE_PACKAGE_MANIFEST_PATH")" \
+    || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$SOURCE_PACKAGE_MANIFEST_IDENTITY" ] \
+    && [ "$digest" = "$SOURCE_PACKAGE_MANIFEST_SHA256" ]
+}
+
+formal_package_manifest_identity_matches() {
+  local result identity digest
+  [ -n "${FORMAL_PACKAGE_MANIFEST_FD:-}" ] \
+    && [ -n "${FORMAL_PACKAGE_MANIFEST_READ_FD:-}" ] \
+    && [ -n "${FORMAL_PACKAGE_MANIFEST_IDENTITY:-}" ] \
+    && [ -f "$MANIFEST_FILE" ] \
+    && [ ! -L "$MANIFEST_FILE" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 \
+    "$(formal_package_manifest_fd_path "$FORMAL_PACKAGE_MANIFEST_READ_FD")" \
+    "$MANIFEST_FILE")" \
+    || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$FORMAL_PACKAGE_MANIFEST_IDENTITY" ] \
+    || return 1
+  if [ -n "${FORMAL_PACKAGE_MANIFEST_SHA256:-}" ]; then
+    [ "$digest" = "$FORMAL_PACKAGE_MANIFEST_SHA256" ]
+  fi
+}
+
+poison_formal_package_manifest() {
+  local reason="$1"
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] || return 0
+  if [ ! -e "$FORMAL_PACKAGE_MANIFEST_POISON" ] \
+      && [ ! -L "$FORMAL_PACKAGE_MANIFEST_POISON" ]; then
+    (umask 077; set -o noclobber; {
+      printf 'formal_package_manifest_poisoned=1\n'
+      printf 'reason=%s\n' "$reason"
+    } > "$FORMAL_PACKAGE_MANIFEST_POISON") 2>/dev/null || true
+  fi
+}
+
+require_formal_package_manifest_identity() {
+  local context="$1"
+  if ! formal_package_manifest_identity_matches; then
+    poison_formal_package_manifest "$context"
+    fail "正式 package manifest 身份漂移：$context；已保留外来文件和失败现场"
+  fi
+}
+
+close_formal_package_manifest_fds() {
+  if [ -n "${FORMAL_PACKAGE_MANIFEST_READ_FD:-}" ]; then
+    exec {FORMAL_PACKAGE_MANIFEST_READ_FD}<&- || true
+    FORMAL_PACKAGE_MANIFEST_READ_FD=""
+  fi
+  if [ -n "${FORMAL_PACKAGE_MANIFEST_FD:-}" ]; then
+    exec {FORMAL_PACKAGE_MANIFEST_FD}>&- || true
+    FORMAL_PACKAGE_MANIFEST_FD=""
+  fi
+  if [ -n "${SOURCE_PACKAGE_MANIFEST_FD:-}" ]; then
+    exec {SOURCE_PACKAGE_MANIFEST_FD}<&- || true
+    SOURCE_PACKAGE_MANIFEST_FD=""
+  fi
+}
+
+bind_formal_build_test_evidence_to_manifest() {
+  local previous_umask had_noclobber source_fd_path manifest_fd_path
+  local path_identity write_identity final_stability current_uid manifest_result manifest_sha
+  current_uid="$(id -u)"
+  [ "$FORMAL_BUILD_TESTS_STATUS" = pass ] \
+    || fail "正式构建测试未通过，禁止绑定 manifest"
+  [ "$FORMAL_BUILD_TESTS_LOG_BASENAME" = formal-build-tests.log ] \
+    || fail "正式构建测试日志 basename 不是 canonical 值"
+  printf '%s\n' "$FORMAL_BUILD_TESTS_LOG_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "正式构建测试日志 SHA256 无效"
+  source_package_manifest_identity_matches \
+    || fail "build-deb manifest held FD 身份已漂移"
+  source_fd_path="$(formal_package_manifest_fd_path "$SOURCE_PACKAGE_MANIFEST_FD")"
+  ! grep -q '"formal_build_tests_' "$source_fd_path" \
+    || fail "build-deb manifest 已含非本阶段生成的正式测试字段"
+  if [ -e "$MANIFEST_FILE" ] || [ -L "$MANIFEST_FILE" ]; then
+    poison_formal_package_manifest "canonical manifest path was occupied before O_EXCL publication"
+    fail "正式 package manifest 发布路径已被占用；已保留外来文件并写入 poison"
+  fi
+  [ ! -e "$FORMAL_PACKAGE_MANIFEST_POISON" ] \
+    && [ ! -L "$FORMAL_PACKAGE_MANIFEST_POISON" ] \
+    || fail "正式 package manifest poison 路径已被占用"
+  previous_umask="$(umask)"
+  had_noclobber=0
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {FORMAL_PACKAGE_MANIFEST_FD}> "$MANIFEST_FILE"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    poison_formal_package_manifest "canonical manifest path was occupied during O_EXCL publication"
+    fail "无法以 no-clobber 方式创建正式 package manifest；已保留失败现场"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  manifest_fd_path="$(formal_package_manifest_fd_path "$FORMAL_PACKAGE_MANIFEST_FD")"
+  if ! /usr/bin/awk \
+    -v status="$FORMAL_BUILD_TESTS_STATUS" \
+    -v basename="$FORMAL_BUILD_TESTS_LOG_BASENAME" \
+    -v digest="$FORMAL_BUILD_TESTS_LOG_SHA256" '
+      BEGIN { inserted = 0 }
+      /^  "built_at_utc": / {
+        print "  \"formal_build_tests_status\": \"" status "\","
+        print "  \"formal_build_tests_log_basename\": \"" basename "\","
+        print "  \"formal_build_tests_log_sha256\": \"" digest "\","
+        inserted += 1
+      }
+      { print }
+      END { if (inserted != 1) exit 42 }
+    ' "$source_fd_path" >&"$FORMAL_PACKAGE_MANIFEST_FD"; then
+    poison_formal_package_manifest "failed while writing held manifest FD"
+    fail "无法把正式构建测试证据写入正式 package manifest held FD"
+  fi
+  chmod 0644 "$manifest_fd_path"
+  write_identity="$(stat -Lc '%d:%i:%f:%h:%s:%u' "$manifest_fd_path")"
+  path_identity="$(stat -c '%d:%i:%f:%h:%s:%u' "$MANIFEST_FILE")"
+  [ "$write_identity" = "$path_identity" ] \
+    && [ "$(stat -c '%h:%u:%a' "$MANIFEST_FILE")" = "1:$current_uid:644" ] \
+    || { poison_formal_package_manifest "unsafe identity after held-FD write"; \
+      fail "正式 package manifest 创建后身份不安全"; }
+  exec {FORMAL_PACKAGE_MANIFEST_READ_FD}< "$manifest_fd_path" \
+    || fail "无法固定正式 package manifest 只读 FD"
+  manifest_result="$(held_file_identity_and_sha256 \
+    "$(formal_package_manifest_fd_path "$FORMAL_PACKAGE_MANIFEST_READ_FD")" \
+    "$MANIFEST_FILE")" \
+    || fail "正式 package manifest 创建后无法固定完整身份与摘要"
+  IFS=$'\t' read -r FORMAL_PACKAGE_MANIFEST_IDENTITY manifest_sha \
+    <<< "$manifest_result"
+  require_formal_package_manifest_identity "after single publication"
+  final_stability="$FORMAL_PACKAGE_MANIFEST_IDENTITY"
+  /usr/bin/env -i \
+    HOME="$BUILD_ROOT" TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/python3 -I -B - \
+      "$(formal_package_manifest_fd_path "$FORMAL_PACKAGE_MANIFEST_READ_FD")" \
+      "$FORMAL_BUILD_TESTS_LOG_SHA256" <<'PY' \
+    || fail "正式构建测试字段未形成严格 package manifest v3 合同"
+import json
+import re
+import sys
+from pathlib import Path
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit("duplicate manifest field: " + key)
+        result[key] = value
+    return result
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=strict_object)
+expected_fields = {
+    "schema", "package", "version", "architecture", "source_commit",
+    "source_archive_basename", "source_archive_sha256",
+    "source_inventory_basename", "source_inventory_sha256", "deb_basename",
+    "deb_sha256", "acceptance_binding_sha256",
+    "acceptance_tools_manifest_sha256", "acceptance_entrypoint_sha256",
+    "installed_release_manifest_sha256", "maintainer", "compatibility_policy_id",
+    "compatibility_policy_sha256", "upgrade_data_contract_id",
+    "upgrade_data_contract_sha256", "elf_abi_audit_basename",
+    "elf_abi_audit_sha256", "python_dependency_lock_status",
+    "python_lock_basename", "python_lock_sha256", "python_version",
+    "python_archive_sha256", "python_executable_sha256", "uv_version",
+    "uv_archive_sha256", "uv_executable_sha256", "node_version",
+    "node_archive_sha256", "node_executable_sha256", "electron_version",
+    "electron_archive_sha256", "electron_executable_sha256",
+    "desktop_entry_sha256", "icon_set_sha256", "built_at_utc",
+    "formal_build_tests_status", "formal_build_tests_log_basename",
+    "formal_build_tests_log_sha256",
+}
+if type(manifest) is not dict or set(manifest) != expected_fields:
+    raise SystemExit("manifest fields are not the exact formal v3 contract")
+if manifest.get("schema") != "taiji-package-manifest/v3":
+    raise SystemExit("manifest schema is not v3")
+if manifest.get("formal_build_tests_status") != "pass":
+    raise SystemExit("formal build tests did not pass")
+if manifest.get("formal_build_tests_log_basename") != "formal-build-tests.log":
+    raise SystemExit("formal build test log basename is not canonical")
+if manifest.get("formal_build_tests_log_sha256") != sys.argv[2] or re.fullmatch(
+    r"[0-9a-f]{64}", sys.argv[2]
+) is None:
+    raise SystemExit("formal build test log SHA256 mismatch")
+PY
+  manifest_result="$(held_file_identity_and_sha256 \
+    "$(formal_package_manifest_fd_path "$FORMAL_PACKAGE_MANIFEST_READ_FD")" \
+    "$MANIFEST_FILE")" \
+    || { poison_formal_package_manifest "changed during strict held-FD readback"; \
+      fail "package manifest 在严格 held-FD 读回校验期间发生变化"; }
+  IFS=$'\t' read -r path_identity write_identity <<< "$manifest_result"
+  [ "$path_identity" = "$final_stability" ] \
+    && [ "$write_identity" = "$manifest_sha" ] \
+    || { poison_formal_package_manifest "changed during strict held-FD readback"; \
+      fail "package manifest 在严格 held-FD 读回校验期间发生变化"; }
+  FORMAL_PACKAGE_MANIFEST_SHA256="$manifest_sha"
+  require_formal_package_manifest_identity "after strict held-FD readback"
+  FORMAL_PACKAGE_MANIFEST_COMPLETE=1
+  exec {SOURCE_PACKAGE_MANIFEST_FD}<&-
+  SOURCE_PACKAGE_MANIFEST_FD=""
+}
+
+run_formal_build_tests() {
+  require_candidate_deb_fixed
+  local bootstrap_python relay_python supervisor_config caller_uid caller_gids relay_result attestation_tag
+  local supervisor_size source_size uv_size python_size node_size supervisor_status
+  [ "$(uname -s)" = Linux ] \
+    && [ -x /usr/bin/sudo ] \
+    && [ -x /usr/bin/python3 ] \
+    && [ -d /proc/self/fd ] \
+    || fail "正式构建测试需要 Linux、procfs、/usr/bin/sudo 和 /usr/bin/python3"
+  [ -n "$SOURCE_ARCHIVE_SNAPSHOT_PATH" ] \
+    && [ -n "$UV_ARCHIVE_PATH" ] \
+    && [ -n "$PYTHON_ARCHIVE_PATH" ] \
+    && [ -n "$NODE_ARCHIVE_PATH" ] \
+    || fail "正式构建测试的四个 sealed archive FD 未完整保留"
+  verify_sealed_snapshot "$SOURCE_ARCHIVE_SNAPSHOT_PATH" "$SOURCE_ARCHIVE_SHA256" \
+    || fail "正式构建测试 source archive sealed snapshot 已漂移"
+  verify_sealed_snapshot "$UV_ARCHIVE_PATH" "$UV_ARCHIVE_SHA256" \
+    || fail "正式构建测试 uv archive sealed snapshot 已漂移"
+  verify_sealed_snapshot "$PYTHON_ARCHIVE_PATH" "$PYTHON_ARCHIVE_SHA256" \
+    || fail "正式构建测试 Python archive sealed snapshot 已漂移"
+  verify_sealed_snapshot "$NODE_ARCHIVE_PATH" "$NODE_ARCHIVE_SHA256" \
+    || fail "正式构建测试 Node archive sealed snapshot 已漂移"
+  declare -F formal_build_root_supervisor_python_source >/dev/null \
+    || fail "正式构建 root supervisor 源函数不存在"
+  seal_formal_build_supervisor \
+    || fail "无法把正式构建 root supervisor 固定为 sealed memfd"
+  verify_sealed_snapshot \
+    "$FORMAL_BUILD_SUPERVISOR_FD_PATH" "$FORMAL_BUILD_SUPERVISOR_SHA256" \
+    || fail "正式构建 root supervisor sealed snapshot 已漂移"
+  bootstrap_python="$(formal_build_supervisor_bootstrap_python_source)" \
+    || fail "无法生成固定 root supervisor bootstrap"
+  relay_python="$(formal_build_supervisor_log_relay_python_source)" \
+    || fail "无法生成固定 root supervisor 日志 relay"
+  caller_uid="$(id -u)"
+  caller_gids="$(id -G)"
+  supervisor_config="$(
+    /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+      /usr/bin/python3 -I -B -c '
+import json
+import sys
+print(json.dumps({
+    "source_commit": sys.argv[1],
+    "python_version": sys.argv[2],
+    "node_version": sys.argv[3],
+    "uv_index": sys.argv[4],
+    "npm_registry": sys.argv[5],
+    "caller_uid": int(sys.argv[6]),
+    "caller_gids": [int(value) for value in sys.argv[7].split()],
+    "forbidden_roots": sys.argv[8:],
+}, sort_keys=True, separators=(",", ":")))
+' \
+      "$MARKER_SOURCE_COMMIT" "$PYTHON_VERSION_PINNED" "$NODE_VERSION" \
+      "$UV_INDEX_URL" "https://registry.npmmirror.com" \
+      "$caller_uid" "$caller_gids" \
+      "$BUILD_ROOT" "$SRC_DIR" "$TOOL_ROOT" \
+  )" || fail "无法生成正式 root supervisor 固定配置"
+  supervisor_size="$(stat -Lc '%s' "$FORMAL_BUILD_SUPERVISOR_FD_PATH")"
+  source_size="$(stat -Lc '%s' "$SOURCE_ARCHIVE_SNAPSHOT_PATH")"
+  uv_size="$(stat -Lc '%s' "$UV_ARCHIVE_PATH")"
+  python_size="$(stat -Lc '%s' "$PYTHON_ARCHIVE_PATH")"
+  node_size="$(stat -Lc '%s' "$NODE_ARCHIVE_PATH")"
+  open_formal_build_test_log
+  if relay_result="$(
+    {
+      /usr/bin/cat \
+        "$FORMAL_BUILD_SUPERVISOR_FD_PATH" \
+        "$SOURCE_ARCHIVE_SNAPSHOT_PATH" \
+        "$UV_ARCHIVE_PATH" \
+        "$PYTHON_ARCHIVE_PATH" \
+        "$NODE_ARCHIVE_PATH"
+    } 2>&"$FORMAL_BUILD_TEST_LOG_FD" | \
+      (
+        exec {FORMAL_BUILD_TEST_LOG_FD}>&-
+        exec {FORMAL_BUILD_TEST_LOG_READ_FD}<&-
+        exec 6<&-
+        exec 10<&-
+        exec 11<&-
+        exec 12<&-
+        exec 13<&-
+        exec /usr/bin/sudo -n -- /usr/bin/python3 -I -B -c "$bootstrap_python" \
+          "$supervisor_config" \
+          "$supervisor_size" "$FORMAL_BUILD_SUPERVISOR_SHA256" \
+          "$source_size" "$SOURCE_ARCHIVE_SHA256" \
+          "$uv_size" "$UV_ARCHIVE_SHA256" \
+          "$python_size" "$PYTHON_ARCHIVE_SHA256" \
+          "$node_size" "$NODE_ARCHIVE_SHA256"
+      ) 2>&1 | \
+      (
+        exec 6<&-
+        exec 10<&-
+        exec 11<&-
+        exec 12<&-
+        exec 13<&-
+        exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+          /usr/bin/python3 -I -B -c "$relay_python" \
+          "$FORMAL_BUILD_TEST_LOG_FD" "$FORMAL_BUILD_TEST_LOG_READ_FD"
+      )
+  )"; then
+    supervisor_status=0
+  else
+    supervisor_status="$?"
+  fi
+  close_retained_formal_archive_snapshots
+  [ "$supervisor_status" = 0 ] \
+    || { tail -n 120 "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_READ_FD")" >&2 || true; \
+      fail "受限 root supervisor 正式构建测试失败 (exit=$supervisor_status)"; }
+  IFS=$'\t' read -r attestation_tag FORMAL_BUILD_TESTS_LOG_SHA256 <<< "$relay_result"
+  [ "$attestation_tag" = ATTESTED ] \
+    && printf '%s\n' "$FORMAL_BUILD_TESTS_LOG_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "正式 root supervisor transcript 未通过独立 relay 证明"
+  require_formal_build_test_log_identity "after root supervisor"
+  FORMAL_BUILD_TESTS_STATUS=pass
+  local log_stability_before log_stability_after
+  log_stability_before="$(stat -Lc '%d:%i:%s:%f:%h:%u:%Y:%Z' \
+    "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_READ_FD")")"
+  [ "$(sha256sum \
+    "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_READ_FD")" | awk '{print $1}')" \
+    = "$FORMAL_BUILD_TESTS_LOG_SHA256" ] \
+    || fail "held 正式构建测试日志与 root transcript 摘要不一致"
+  log_stability_after="$(stat -Lc '%d:%i:%s:%f:%h:%u:%Y:%Z' \
+    "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_READ_FD")")"
+  [ "$log_stability_after" = "$log_stability_before" ] \
+    || fail "正式构建测试日志在 held FD 摘要期间发生变化"
+  require_formal_build_test_log_identity "after held-FD hash"
+  printf '%s\n' "$FORMAL_BUILD_TESTS_LOG_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "无法固定正式构建测试日志 SHA256"
+  bind_formal_build_test_evidence_to_manifest
+  require_formal_package_manifest_identity "after formal test binding"
+  require_formal_build_test_log_identity "after manifest binding"
+  verify_build_source_integrity
+  require_candidate_deb_fixed
+  close_formal_test_runtime_fds
+  ok "正式构建测试全部通过并绑定日志：$FORMAL_BUILD_TESTS_LOG_SHA256"
+}
+
+pending_build_marker_identity_matches() {
+  local result identity digest
+  [ -n "${PENDING_BUILD_MARKER_FD:-}" ] \
+    && [ -n "${PENDING_BUILD_MARKER_IDENTITY:-}" ] \
+    && [ -n "${PENDING_BUILD_MARKER_SHA256:-}" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 "/proc/$$/fd/$PENDING_BUILD_MARKER_FD" \
+    "$PENDING_BUILD_MARKER")" \
+    || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$PENDING_BUILD_MARKER_IDENTITY" ] \
+    && [ "$digest" = "$PENDING_BUILD_MARKER_SHA256" ]
+}
+
+poison_pending_build_marker() {
+  local reason="$1"
+  [ -n "${PENDING_BUILD_MARKER_POISON:-}" ] || return 0
+  if [ ! -e "$PENDING_BUILD_MARKER_POISON" ] \
+      && [ ! -L "$PENDING_BUILD_MARKER_POISON" ]; then
+    (umask 077; set -o noclobber; {
+      printf 'pending_build_marker_poisoned=1\n'
+      printf 'reason=%s\n' "$reason"
+    } > "$PENDING_BUILD_MARKER_POISON") 2>/dev/null || true
+  fi
+}
+
+close_pending_build_marker_fd() {
+  if [ -n "${PENDING_BUILD_MARKER_FD:-}" ]; then
+    exec {PENDING_BUILD_MARKER_FD}<&- || true
+    PENDING_BUILD_MARKER_FD=""
+  fi
+}
+
+require_pending_build_marker_identity() {
+  local context="$1"
+  if ! pending_build_marker_identity_matches; then
+    poison_pending_build_marker "$context"
+    fail "待发布构建成功标记 held-FD 身份或摘要漂移：$context"
+  fi
+}
+
+write_pending_build_marker() {
+  local previous_umask had_noclobber pending_write_fd pending_result
+  require_candidate_deb_fixed
+  require_formal_package_manifest_identity "before pending build marker"
+  require_formal_build_test_log_identity "before pending build marker"
+  [ "$FORMAL_BUILD_TESTS_STATUS" = pass ] \
+    && [ "$FORMAL_BUILD_TESTS_LOG_BASENAME" = formal-build-tests.log ] \
+    && printf '%s\n' "$FORMAL_BUILD_TESTS_LOG_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "正式构建测试证据未闭合，禁止写入成功标记"
   case "$PENDING_BUILD_MARKER" in
     "$BUILD_ROOT/.build-success.pending") ;;
     *) fail "构建成功待发布标记未绑定受控构建根" ;;
   esac
-  [ ! -e "$PENDING_BUILD_MARKER" ] && [ ! -L "$PENDING_BUILD_MARKER" ] \
-    || fail "构建成功待发布标记已存在，拒绝覆盖"
-  (umask 077; {
+  PENDING_BUILD_MARKER_POISON="$BUILD_ROOT/.build-success.pending.poisoned"
+  [ ! -e "$PENDING_BUILD_MARKER_POISON" ] && [ ! -L "$PENDING_BUILD_MARKER_POISON" ] \
+    || fail "待发布标记私有 poison 路径已被占用"
+  if [ -e "$PENDING_BUILD_MARKER" ] || [ -L "$PENDING_BUILD_MARKER" ]; then
+    poison_pending_build_marker "private pending marker path was occupied before O_EXCL publication"
+    fail "构建成功待发布标记已存在，拒绝覆盖或跟随符号链接"
+  fi
+  previous_umask="$(umask)"
+  had_noclobber=0
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {pending_write_fd}> "$PENDING_BUILD_MARKER"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    poison_pending_build_marker "pending marker no-clobber open failed"
+    fail "构建成功待发布标记路径被占用，未跟随符号链接或覆盖外来文件"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  {
     printf 'version=%s\n' "$VERSION"
     printf 'source_archive=%s\n' "$MARKER_SOURCE_NAME"
     printf 'source_sha256=%s\n' "$MARKER_SOURCE_SHA256"
@@ -1791,6 +6840,9 @@ write_pending_build_marker() {
     printf 'acceptance_entrypoint_sha256=%s\n' "$ACCEPTANCE_ENTRYPOINT_SHA256"
     printf 'installed_release_manifest_sha256=%s\n' "$INSTALLED_RELEASE_MANIFEST_SHA256"
     printf 'icon_set_sha256=%s\n' "$ICON_SET_SHA256"
+    printf 'formal_build_tests_status=%s\n' "$FORMAL_BUILD_TESTS_STATUS"
+    printf 'formal_build_tests_log_basename=%s\n' "$FORMAL_BUILD_TESTS_LOG_BASENAME"
+    printf 'formal_build_tests_log_sha256=%s\n' "$FORMAL_BUILD_TESTS_LOG_SHA256"
     printf 'python_dependency_lock_status=%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
     printf 'python_lock_basename=%s\n' "$PYTHON_LOCK_BASENAME"
     printf 'python_lock_sha256=%s\n' "$PYTHON_LOCK_SHA256"
@@ -1807,20 +6859,71 @@ write_pending_build_marker() {
     printf 'electron_archive_sha256=%s\n' "$ELECTRON_ARCHIVE_SHA256"
     printf 'electron_executable_sha256=%s\n' "$ELECTRON_EXECUTABLE_SHA256"
     printf 'maintainer=%s\n' "$POLICY_MAINTAINER"
-  } > "$PENDING_BUILD_MARKER")
-  chmod 0600 "$PENDING_BUILD_MARKER"
-  [ -f "$PENDING_BUILD_MARKER" ] && [ ! -L "$PENDING_BUILD_MARKER" ] \
-    && [ "$(stat -c '%h' "$PENDING_BUILD_MARKER")" = 1 ] \
-    || fail "构建成功待发布标记不是安全单链接普通文件"
-  PENDING_BUILD_MARKER_SHA256="$(sha256sum "$PENDING_BUILD_MARKER" | awk '{print $1}')"
+  } >&"$pending_write_fd"
+  chmod 0600 "/proc/$$/fd/$pending_write_fd"
+  fsync_held_file "/proc/$$/fd/$pending_write_fd" \
+    || { poison_pending_build_marker "pending marker fsync failed"; fail "待发布标记持久化失败"; }
+  exec {PENDING_BUILD_MARKER_FD}< "/proc/$$/fd/$pending_write_fd" \
+    || fail "无法固定待发布标记 held read FD"
+  exec {pending_write_fd}>&-
+  pending_result="$(held_file_identity_and_sha256 "/proc/$$/fd/$PENDING_BUILD_MARKER_FD" \
+    "$PENDING_BUILD_MARKER")" \
+    || { poison_pending_build_marker "pending marker identity drifted"; fail "待发布标记身份不稳定"; }
+  IFS=$'\t' read -r PENDING_BUILD_MARKER_IDENTITY PENDING_BUILD_MARKER_SHA256 \
+    <<< "$pending_result"
   case "$PENDING_BUILD_MARKER_SHA256" in
     ""|*[!0-9a-f]*) fail "无法固定构建成功待发布标记 SHA256" ;;
     *) [ "${#PENDING_BUILD_MARKER_SHA256}" -eq 64 ] \
       || fail "构建成功待发布标记 SHA256 长度不合法" ;;
   esac
+  require_pending_build_marker_identity "after private marker creation"
+}
+
+poison_published_build_marker() {
+  local reason="$1"
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] || return 0
+  if [ ! -e "$PUBLISHED_BUILD_MARKER_POISON" ] \
+      && [ ! -L "$PUBLISHED_BUILD_MARKER_POISON" ]; then
+    (umask 077; set -o noclobber; {
+      printf 'published_build_marker_poisoned=1\n'
+      printf 'reason=%s\n' "$reason"
+    } > "$PUBLISHED_BUILD_MARKER_POISON") 2>/dev/null || true
+  fi
+}
+
+published_build_marker_identity_matches() {
+  local path_identity stability_before stability_after actual_sha256
+  [ -n "${PUBLISHED_BUILD_MARKER_IDENTITY:-}" ] \
+    && [ -n "${PUBLISHED_BUILD_MARKER_SHA256:-}" ] \
+    && [ -f "$BUILD_MARKER" ] \
+    && [ ! -L "$BUILD_MARKER" ] \
+    || return 1
+  path_identity="$(stat -c '%d:%i:%f:%h:%s:%u' "$BUILD_MARKER")" \
+    || return 1
+  [ "$path_identity" = "$PUBLISHED_BUILD_MARKER_IDENTITY" ] \
+    || return 1
+  stability_before="$(stat -c '%d:%i:%f:%h:%s:%u:%Y:%Z' "$BUILD_MARKER")" \
+    || return 1
+  actual_sha256="$(sha256sum "$BUILD_MARKER" | awk '{print $1}')" \
+    || return 1
+  stability_after="$(stat -c '%d:%i:%f:%h:%s:%u:%Y:%Z' "$BUILD_MARKER")" \
+    || return 1
+  [ "$stability_after" = "$stability_before" ] \
+    && [ "$actual_sha256" = "$PUBLISHED_BUILD_MARKER_SHA256" ]
+}
+
+require_published_build_marker_identity() {
+  local context="$1"
+  if ! published_build_marker_identity_matches; then
+    poison_published_build_marker "$context"
+    fail "构建成功标记身份漂移：$context；已保留外来文件和失败现场"
+  fi
 }
 
 publish_build_success_marker() {
+  local published_identity
+  require_candidate_deb_fixed
+  require_pending_build_marker_identity "before final marker publication"
   case "$PENDING_BUILD_MARKER" in
     "$OUTPUT_DIR/.build-success.pending.$$" ) ;;
     *) fail "最终构建成功待发布标记未绑定本轮输出目录" ;;
@@ -1834,15 +6937,19 @@ publish_build_success_marker() {
   esac
   [ ! -e "$BUILD_MARKER" ] && [ ! -L "$BUILD_MARKER" ] \
     || fail "构建成功标记发布位置已被占用"
-  python3 - "$PENDING_BUILD_MARKER" "$BUILD_MARKER" "$PENDING_BUILD_MARKER_SHA256" <<'PY' \
-    || fail "构建成功标记无法以不覆盖方式原子发布"
+  [ ! -e "$PUBLISHED_BUILD_MARKER_POISON" ] \
+    && [ ! -L "$PUBLISHED_BUILD_MARKER_POISON" ] \
+    || fail "构建成功标记 poison 路径已被占用"
+  if ! published_identity="$(/usr/bin/python3 -I -B - \
+    "$PENDING_BUILD_MARKER" "$BUILD_MARKER" "$PENDING_BUILD_MARKER_SHA256" \
+    "$PUBLISHED_BUILD_MARKER_POISON" <<'PY'
 import hashlib
 import os
 import re
 import stat
 import sys
 
-source, destination, expected_sha256 = sys.argv[1:]
+source, destination, expected_sha256, poison_path = sys.argv[1:]
 if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
     raise SystemExit("pending marker expected hash is invalid")
 flags = os.O_RDONLY
@@ -1851,7 +6958,65 @@ if hasattr(os, "O_CLOEXEC"):
 if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
 
+def identity(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_uid,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+def require_bound(path, descriptor, expected_nlink):
+    held = os.fstat(descriptor)
+    current = os.lstat(path)
+    if identity(current) != identity(held):
+        raise RuntimeError("published marker canonical path changed")
+    if not stat.S_ISREG(held.st_mode) or held.st_nlink != expected_nlink:
+        raise RuntimeError("published marker identity is unsafe")
+    if held.st_uid != os.getuid():
+        raise RuntimeError("published marker owner changed")
+    return held
+
+def digest_from_descriptor(descriptor, expected_size):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = expected_size
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError("marker was truncated")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise RuntimeError("marker grew")
+    return digest.hexdigest()
+
+def write_poison(reason):
+    poison_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    poison_flags |= getattr(os, "O_CLOEXEC", 0)
+    poison_flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(poison_path, poison_flags, 0o600)
+    try:
+        payload = (
+            "published_build_marker_poisoned=1\n"
+            "reason=" + str(reason).replace("\n", " ").replace("\r", " ") + "\n"
+        ).encode("utf-8")
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("cannot write build marker poison")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
 descriptor = os.open(source, flags)
+published_descriptor = None
 published_created = False
 try:
     opened = os.fstat(descriptor)
@@ -1859,51 +7024,28 @@ try:
         raise SystemExit("pending marker is not a safe single-link regular file")
     if opened.st_uid != os.getuid():
         raise SystemExit("pending marker is not owned by current user")
-    digest = hashlib.sha256()
-    remaining = opened.st_size
-    while remaining:
-        chunk = os.read(descriptor, min(1024 * 1024, remaining))
-        if not chunk:
-            raise SystemExit("pending marker was truncated")
-        digest.update(chunk)
-        remaining -= len(chunk)
-    if os.read(descriptor, 1):
-        raise SystemExit("pending marker grew")
-    if digest.hexdigest() != expected_sha256:
+    if digest_from_descriptor(descriptor, opened.st_size) != expected_sha256:
         raise SystemExit("pending marker content differs from the final-gate identity")
-    current = os.lstat(source)
-    opened_identity = (
-        opened.st_dev,
-        opened.st_ino,
-        opened.st_mode,
-        opened.st_nlink,
-        opened.st_size,
-        opened.st_mtime_ns,
-        opened.st_ctime_ns,
-    )
-    current_identity = (
-        current.st_dev,
-        current.st_ino,
-        current.st_mode,
-        current.st_nlink,
-        current.st_size,
-        current.st_mtime_ns,
-        current.st_ctime_ns,
-    )
-    if current_identity != opened_identity:
+    if identity(os.lstat(source)) != identity(opened):
         raise SystemExit("pending marker path changed after validation")
     os.link(source, destination, follow_symlinks=False)
     published_created = True
-    published = os.lstat(destination)
-    if (published.st_dev, published.st_ino) != (opened.st_dev, opened.st_ino):
+    published_descriptor = os.open(destination, flags)
+    published = require_bound(destination, published_descriptor, 2)
+    source_after_link = require_bound(source, descriptor, 2)
+    if (published.st_dev, published.st_ino) != (
+        source_after_link.st_dev,
+        source_after_link.st_ino,
+    ):
         raise SystemExit("published marker identity changed")
-    if not stat.S_ISREG(published.st_mode) or published.st_nlink != 2:
-        raise SystemExit("published marker link count is invalid")
+    require_bound(destination, published_descriptor, 2)
+    require_bound(source, descriptor, 2)
     os.unlink(source)
-    final = os.fstat(descriptor)
-    if final.st_nlink != 1:
+    final = require_bound(destination, published_descriptor, 1)
+    if identity(final) != identity(os.fstat(descriptor)):
         raise SystemExit("published marker did not settle to one link")
     os.fsync(descriptor)
+    require_bound(destination, published_descriptor, 1)
     directory_fd = os.open(
         os.path.dirname(destination),
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
@@ -1912,23 +7054,50 @@ try:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
-except BaseException:
-    if published_created:
-        try:
-            os.unlink(destination)
-        except FileNotFoundError:
-            pass
+    final = require_bound(destination, published_descriptor, 1)
+    if digest_from_descriptor(published_descriptor, final.st_size) != expected_sha256:
+        raise RuntimeError("published marker content differs from held identity")
+    final = require_bound(destination, published_descriptor, 1)
+    print(
+        "%d:%d:%x:%d:%d:%d"
+        % (
+            final.st_dev,
+            final.st_ino,
+            final.st_mode,
+            final.st_nlink,
+            final.st_size,
+            final.st_uid,
+        )
+    )
+except BaseException as error:
+    try:
+        write_poison(error)
+    except BaseException as poison_error:
+        print("cannot write build marker poison: " + str(poison_error), file=sys.stderr)
     raise
 finally:
+    if published_descriptor is not None:
+        os.close(published_descriptor)
     os.close(descriptor)
 PY
+  )"; then
+    fail "构建成功标记无法以不覆盖方式原子发布"
+  fi
+  PUBLISHED_BUILD_MARKER_IDENTITY="$published_identity"
+  PUBLISHED_BUILD_MARKER_SHA256="$PENDING_BUILD_MARKER_SHA256"
+  require_published_build_marker_identity "publish helper return"
+  require_candidate_deb_fixed
+  close_pending_build_marker_fd
   PENDING_BUILD_MARKER=""
+  PENDING_BUILD_MARKER_IDENTITY=""
   PENDING_BUILD_MARKER_SHA256=""
   printf '[OK] 所有最终门禁通过，已原子发布构建成功标记\n' || true
 }
 
 stage_pending_build_marker_for_publication() {
-  local staged_marker="$OUTPUT_DIR/.build-success.pending.$$"
+  local staged_marker="$OUTPUT_DIR/.build-success.pending.$$" pending_result staged_sha
+  require_candidate_deb_fixed
+  require_pending_build_marker_identity "before public staging"
   case "$PENDING_BUILD_MARKER" in
     "$BUILD_ROOT/.build-success.pending") ;;
     *) fail "构建成功待发布标记不在受控构建根" ;;
@@ -1938,7 +7107,9 @@ stage_pending_build_marker_for_publication() {
     || fail "构建成功待发布标记不安全"
   [ "$(sha256sum "$PENDING_BUILD_MARKER" | awk '{print $1}')" = "$PENDING_BUILD_MARKER_SHA256" ] \
     || fail "构建成功待发布标记在最终预检后发生变化"
-  python3 - "$PENDING_BUILD_MARKER" "$staged_marker" "$PENDING_BUILD_MARKER_SHA256" <<'PY' \
+  /usr/bin/python3 -I -B - \
+    "$PENDING_BUILD_MARKER" "$staged_marker" "$PENDING_BUILD_MARKER_SHA256" \
+    "$PUBLISHED_BUILD_MARKER_POISON" <<'PY' \
     || fail "构建成功待发布标记无法以不覆盖方式转移到输出目录"
 import hashlib
 import os
@@ -1946,7 +7117,7 @@ import re
 import stat
 import sys
 
-source, destination, expected_sha256 = sys.argv[1:]
+source, destination, expected_sha256, poison_path = sys.argv[1:]
 if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
     raise SystemExit("pending marker expected hash is invalid")
 read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1959,7 +7130,27 @@ write_flags = (
 )
 source_descriptor = os.open(source, read_flags)
 destination_descriptor = -1
-destination_identity = None
+
+def write_poison(reason):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(poison_path, flags, 0o600)
+    try:
+        payload = (
+            "published_build_marker_poisoned=1\n"
+            "reason=" + str(reason).replace("\n", " ").replace("\r", " ") + "\n"
+        ).encode("utf-8")
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("cannot write pending marker poison")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
 try:
     opened = os.fstat(source_descriptor)
     if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
@@ -1968,7 +7159,6 @@ try:
         raise SystemExit("pending marker is not owned by current user")
     destination_descriptor = os.open(destination, write_flags, 0o600)
     os.fchmod(destination_descriptor, 0o600)
-    destination_identity = os.fstat(destination_descriptor)
     digest = hashlib.sha256()
     remaining = opened.st_size
     while remaining:
@@ -2029,40 +7219,133 @@ try:
         != (destination_after.st_dev, destination_after.st_ino)
     ):
         raise SystemExit("staged pending marker identity is invalid")
-    os.unlink(source)
-    for directory in {os.path.dirname(source), os.path.dirname(destination)}:
-        descriptor = os.open(
-            directory,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-except BaseException:
-    if destination_descriptor >= 0 and destination_identity is not None:
-        try:
-            current = os.lstat(destination)
-            if (current.st_dev, current.st_ino) == (
-                destination_identity.st_dev,
-                destination_identity.st_ino,
-            ):
-                os.unlink(destination)
-        except FileNotFoundError:
-            pass
+    descriptor = os.open(
+        os.path.dirname(destination),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    destination_after = os.fstat(destination_descriptor)
+    destination_current = os.lstat(destination)
+    if (
+        destination_current.st_dev,
+        destination_current.st_ino,
+        destination_current.st_mode,
+        destination_current.st_nlink,
+        destination_current.st_size,
+        destination_current.st_uid,
+        destination_current.st_mtime_ns,
+        destination_current.st_ctime_ns,
+    ) != (
+        destination_after.st_dev,
+        destination_after.st_ino,
+        destination_after.st_mode,
+        destination_after.st_nlink,
+        destination_after.st_size,
+        destination_after.st_uid,
+        destination_after.st_mtime_ns,
+        destination_after.st_ctime_ns,
+    ):
+        raise RuntimeError("staged pending marker canonical path changed")
+except BaseException as error:
+    try:
+        write_poison(error)
+    except BaseException as poison_error:
+        print("cannot write pending marker poison: " + str(poison_error), file=sys.stderr)
     raise
 finally:
     if destination_descriptor >= 0:
         os.close(destination_descriptor)
     os.close(source_descriptor)
 PY
+  staged_sha="$PENDING_BUILD_MARKER_SHA256"
+  close_pending_build_marker_fd
   PENDING_BUILD_MARKER="$staged_marker"
-  [ "$(sha256sum "$PENDING_BUILD_MARKER" | awk '{print $1}')" = "$PENDING_BUILD_MARKER_SHA256" ] \
+  PENDING_BUILD_MARKER_POISON="$PUBLISHED_BUILD_MARKER_POISON"
+  exec {PENDING_BUILD_MARKER_FD}< "$PENDING_BUILD_MARKER" \
+    || { poison_pending_build_marker "cannot hold public pending marker"; \
+      fail "无法固定输出目录待发布标记 held FD"; }
+  pending_result="$(held_file_identity_and_sha256 "/proc/$$/fd/$PENDING_BUILD_MARKER_FD" \
+    "$PENDING_BUILD_MARKER")" \
+    || { poison_pending_build_marker "public pending marker identity drifted"; \
+      fail "输出目录待发布标记身份不稳定"; }
+  IFS=$'\t' read -r PENDING_BUILD_MARKER_IDENTITY PENDING_BUILD_MARKER_SHA256 \
+    <<< "$pending_result"
+  [ "$PENDING_BUILD_MARKER_SHA256" = "$staged_sha" ] \
     || fail "构建成功待发布标记在转移到输出目录时发生变化"
+  require_pending_build_marker_identity "after public staging"
+  require_candidate_deb_fixed
+}
+
+poison_candidate_artifacts() {
+  local reason="$1"
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] || return 0
+  if [ ! -e "$CANDIDATE_ARTIFACT_POISON" ] \
+      && [ ! -L "$CANDIDATE_ARTIFACT_POISON" ]; then
+    (umask 077; set -o noclobber; {
+      printf 'candidate_artifacts_poisoned=1\n'
+      printf 'reason=%s\n' "$reason"
+    } > "$CANDIDATE_ARTIFACT_POISON") 2>/dev/null || true
+  fi
+}
+
+candidate_deb_identity_matches() {
+  local deb_result sidecar_result report_result deb_identity deb_sha sidecar_identity sidecar_sha
+  local report_identity report_sha
+  [ "${CANDIDATE_DEB_FIXED:-0}" = 1 ] \
+    && [ -n "${CANDIDATE_DEB_FD:-}" ] \
+    && [ -n "${CANDIDATE_DEB_SIDECAR_FD:-}" ] \
+    && [ -n "${CANDIDATE_DEB_IDENTITY:-}" ] \
+    && [ -n "${CANDIDATE_DEB_SHA256:-}" ] \
+    && [ -n "${CANDIDATE_DEB_SIDECAR_IDENTITY:-}" ] \
+    && [ -n "${CANDIDATE_DEB_SIDECAR_EXPECTED_SHA256:-}" ] \
+    || return 1
+  deb_result="$(held_file_identity_and_sha256 "/proc/$$/fd/$CANDIDATE_DEB_FD" \
+    "$CANDIDATE_DEB_PATH")" \
+    || return 1
+  sidecar_result="$(held_file_identity_and_sha256 \
+    "/proc/$$/fd/$CANDIDATE_DEB_SIDECAR_FD" "$CANDIDATE_DEB_SIDECAR_PATH")" \
+    || return 1
+  IFS=$'\t' read -r deb_identity deb_sha <<< "$deb_result"
+  IFS=$'\t' read -r sidecar_identity sidecar_sha <<< "$sidecar_result"
+  [ "$deb_identity" = "$CANDIDATE_DEB_IDENTITY" ] \
+    && [ "$deb_sha" = "$CANDIDATE_DEB_SHA256" ] \
+    && [ "$sidecar_identity" = "$CANDIDATE_DEB_SIDECAR_IDENTITY" ] \
+    && [ "$sidecar_sha" = "$CANDIDATE_DEB_SIDECAR_SHA256" ] \
+    && [ "$sidecar_sha" = "$CANDIDATE_DEB_SIDECAR_EXPECTED_SHA256" ] \
+    || return 1
+  if [ -n "${BUILD_REPORT_FD:-}" ]; then
+    report_result="$(held_file_identity_and_sha256 "/proc/$$/fd/$BUILD_REPORT_FD" \
+      "$BUILD_REPORT")" \
+      || return 1
+    IFS=$'\t' read -r report_identity report_sha <<< "$report_result"
+    [ "$report_identity" = "$BUILD_REPORT_IDENTITY" ] \
+      && [ "$report_sha" = "$BUILD_REPORT_SHA256" ]
+  fi
+}
+
+close_candidate_artifact_fds() {
+  if [ -n "${BUILD_REPORT_FD:-}" ]; then
+    exec {BUILD_REPORT_FD}<&- || true
+    BUILD_REPORT_FD=""
+  fi
+  if [ -n "${CANDIDATE_DEB_SIDECAR_FD:-}" ]; then
+    exec {CANDIDATE_DEB_SIDECAR_FD}<&- || true
+    CANDIDATE_DEB_SIDECAR_FD=""
+  fi
+  if [ -n "${CANDIDATE_DEB_FD:-}" ]; then
+    exec {CANDIDATE_DEB_FD}<&- || true
+    CANDIDATE_DEB_FD=""
+  fi
 }
 
 require_candidate_deb_fixed() {
-  [ "$CANDIDATE_DEB_FIXED" = 1 ] || fail "候选 DEB 尚未固定，禁止进入发布后处理阶段"
+  if ! candidate_deb_identity_matches; then
+    poison_candidate_artifacts "candidate DEB or sidecar identity/content drifted"
+    fail "候选 DEB/sidecar held-FD 身份或 exact 内容漂移"
+  fi
 }
 
 build_glibc() {
@@ -2070,12 +7353,29 @@ build_glibc() {
 }
 
 write_build_report() {
-  local source_name deb_name source_line deb_line
+  local source_name deb_name source_line deb_line previous_umask had_noclobber
+  local report_write_fd report_result
   require_candidate_deb_fixed
   source_name="$(basename "$SRC_ARCHIVE")"
   deb_name="taiji-agent_$VERSION"_amd64.deb
   source_line="$(cd "$SCRIPT_DIR" && sha256sum "$source_name")"
   deb_line="$(cd "$OUTPUT_DIR" && sha256sum "$deb_name")"
+  [ ! -e "$BUILD_REPORT" ] && [ ! -L "$BUILD_REPORT" ] \
+    || { poison_candidate_artifacts "build report path was occupied"; \
+      fail "构建报告路径已被占用，未覆盖外来文件"; }
+  previous_umask="$(umask)"
+  had_noclobber=0
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {report_write_fd}> "$BUILD_REPORT"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    poison_candidate_artifacts "build report no-clobber open failed"
+    fail "构建报告无法以 no-clobber 方式创建"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
   {
     printf '太极 Agent 单一 DEB 构建报告\n'
     printf '生成时间：%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
@@ -2091,6 +7391,7 @@ write_build_report() {
     printf '安装态验收入口 SHA256：%s\n' "$ACCEPTANCE_ENTRYPOINT_SHA256"
     printf '安装态 release manifest SHA256：%s\n' "$INSTALLED_RELEASE_MANIFEST_SHA256"
     printf '图标集合 SHA256：%s\n' "$ICON_SET_SHA256"
+    printf '正式构建测试：%s log=%s SHA256=%s\n' "$FORMAL_BUILD_TESTS_STATUS" "$FORMAL_BUILD_TESTS_LOG_BASENAME" "$FORMAL_BUILD_TESTS_LOG_SHA256"
     printf 'Python 依赖锁状态：%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
     printf 'Python lock：%s %s\n' "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256"
     printf 'Python：%s %s\n' "$PYTHON_VERSION" "$PYTHON_EXECUTABLE_SHA256"
@@ -2100,7 +7401,20 @@ write_build_report() {
     printf 'Maintainer（源码 policy 固定）：%s\n' "$POLICY_MAINTAINER"
     printf '客户交付边界：发布预检通过后只交付一个逐字节固定的 amd64 DEB，不附带第二个安装包或 apt 仓库。\n'
     printf '候选 DEB 固定后不再下载运行时依赖。\n'
-  } > "$BUILD_REPORT"
+  } >&"$report_write_fd"
+  chmod 0644 "/proc/$$/fd/$report_write_fd"
+  fsync_held_file "/proc/$$/fd/$report_write_fd" \
+    || { poison_candidate_artifacts "build report fsync failed"; fail "构建报告持久化失败"; }
+  exec {BUILD_REPORT_FD}< "/proc/$$/fd/$report_write_fd" \
+    || fail "无法固定构建报告 held read FD"
+  exec {report_write_fd}>&-
+  report_result="$(held_file_identity_and_sha256 "/proc/$$/fd/$BUILD_REPORT_FD" "$BUILD_REPORT")" \
+    || { poison_candidate_artifacts "build report identity drifted"; fail "构建报告身份不稳定"; }
+  IFS=$'\t' read -r BUILD_REPORT_IDENTITY BUILD_REPORT_SHA256 <<< "$report_result"
+  fsync_directory "$OUTPUT_DIR" \
+    || { poison_candidate_artifacts "build report output directory fsync failed"; \
+      fail "构建报告输出目录持久化失败"; }
+  require_candidate_deb_fixed
   ok "构建报告已生成：$BUILD_REPORT"
 }
 
@@ -2205,7 +7519,8 @@ stage_target_acceptance_tools() {
   [ -f "$validator" ] && [ ! -L "$validator" ] || fail "源码缺少发布证据校验器：$validator"
   [ -f "$challenge_helper" ] && [ ! -L "$challenge_helper" ] || fail "源码缺少 challenge envelope helper：$challenge_helper"
   [ -f "$public_key" ] && [ ! -L "$public_key" ] || fail "源码缺少发布证据验签公钥：$public_key"
-  node --check "$driver" >/dev/null || fail "桌面 App 验收驱动 JavaScript 语法检查失败"
+  run_build_node --check "$driver" >/dev/null \
+    || fail "桌面 App 验收驱动 JavaScript 语法检查失败"
   python3 - "$assembler" "$install_observer" "$validator" "$certification_set_assembler" "$challenge_helper" <<'PY' || fail "目标证据 Python 工具语法检查失败"
 import sys
 from pathlib import Path
@@ -2301,14 +7616,22 @@ PY
 }
 
 cleanup_delivery_build_cache() {
+  local agent_venv
   require_candidate_deb_fixed
   info "清理构建根中的制包工具缓存"
   [ -n "$BUILD_ROOT" ] && [ "$TOOL_ROOT" = "$BUILD_ROOT/.build-tools" ] \
     || fail "制包工具根未绑定到受控构建根：$TOOL_ROOT"
+  close_build_node_runtime_fds
   require_owned_build_root
   restore_owned_build_root_directory_writes
   rm -rf -- "$TOOL_ROOT" || fail "无法清理制包工具缓存：$TOOL_ROOT"
   [ ! -e "$TOOL_ROOT" ] || fail "制包缓存仍然存在：$TOOL_ROOT"
+  agent_venv="$(source_agent_dir)/venv"
+  [ -d "$agent_venv" ] && [ ! -L "$agent_venv" ] \
+    || fail "Agent 构建 venv 不是可安全清理的真实目录：$agent_venv"
+  rm -rf -- "$agent_venv" || fail "无法清理 Agent 构建 venv：$agent_venv"
+  [ ! -e "$agent_venv" ] && [ ! -L "$agent_venv" ] \
+    || fail "Agent 构建 venv 清理后仍然存在：$agent_venv"
   ok "构建根制包工具缓存已清理"
 }
 
@@ -2390,10 +7713,13 @@ main() {
   ensure_python
   set_stage "准备 Node/Electron 构建工具"
   ensure_node
+  seal_build_node_runtime
   set_stage "构建运行时和 DEB"
   build_runtime_and_deb
   set_stage "收集并绑定候选产物"
   collect_artifacts
+  set_stage "使用固定工具链执行正式构建测试"
+  run_formal_build_tests
   write_pending_build_marker
   set_stage "生成 manifest 和报告"
   write_build_report
@@ -2406,12 +7732,17 @@ main() {
   set_stage "最终发布预检"
   require_candidate_deb_fixed
   verify_build_source_integrity
+  require_formal_package_manifest_identity "before final release preflight"
+  require_formal_build_test_log_identity "before final release preflight"
   TAIJI_EXTRACTED_SOURCE_ROOT="$SRC_DIR" \
     TAIJI_BUILD_MARKER_PATH="$PENDING_BUILD_MARKER" \
     TAIJI_EXPECT_PUBLISHED_BUILD_MARKER=0 \
     TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 \
     TAIJI_RELEASE_SKIP_GIT_CHECK=1 \
-    run_release_preflight "$SRC_DIR"
+  run_release_preflight "$SRC_DIR"
+  require_candidate_deb_fixed
+  require_formal_package_manifest_identity "after final release preflight"
+  require_formal_build_test_log_identity "after final release preflight"
   stage_pending_build_marker_for_publication
   set_stage "清理临时构建工作区"
   cleanup_temporary_build_root
@@ -2420,7 +7751,17 @@ main() {
   printf '%s\n' "$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
   printf '请将该 DEB 和当前验收工具用于干净目标机验收；此状态尚不代表真实麒麟/统信目标机已验收。\n'
   printf '\n日志：%s\n' "$LOG_FILE"
+  require_formal_build_test_log_identity "before published build marker"
+  require_formal_package_manifest_identity "before published build marker"
+  require_candidate_deb_fixed
   publish_build_success_marker
+  require_published_build_marker_identity "main after publish"
+  require_formal_package_manifest_identity "main after publish"
+  require_formal_build_test_log_identity "after published build marker"
+  require_candidate_deb_fixed
+  close_candidate_artifact_fds
+  close_formal_package_manifest_fds
+  close_formal_build_test_log_fds
 }
 
 main "$@"

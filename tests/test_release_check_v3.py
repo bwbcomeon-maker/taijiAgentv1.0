@@ -64,12 +64,15 @@ class ReleaseCheckV3Tests(unittest.TestCase):
         self.assertNotIn('--packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz"', self.check)
 
     def test_formal_release_check_revalidates_github_ci_live(self):
+        runner = (ROOT / "scripts/run-taiji-release-python-tests.py").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("revalidate-taiji-github-ci-evidence.py", self.check)
         self.assertIn("github-ci-live-revalidation", self.check)
-        self.assertIn("tests.test_github_ci_live_revalidation", self.check)
+        self.assertIn("tests.test_github_ci_live_revalidation", runner)
         self.assertIn('"$DELIVERY_DIR/github-ci-evidence.json"', self.check)
         self.assertIn('"$commit"', self.check)
-        self.assertIn('python3 "$EVIDENCE_VALIDATOR" release', self.check)
+        self.assertIn('/usr/bin/python3 -I -B "$EVIDENCE_VALIDATOR" release', self.check)
         self.assertNotIn("TAIJI_CI_SKIP", self.check)
         self.assertLess(
             self.check.index("github-ci-live-revalidation"),

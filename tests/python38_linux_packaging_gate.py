@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import os
 import py_compile
 import runpy
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -29,6 +32,12 @@ INSTALL_OBSERVER = (
 )
 GOLDEN_ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
 CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
+RELEASE_TEST_RUNNER = ROOT / "scripts/run-taiji-release-python-tests.py"
+FORMAL_BUILDER = ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
+AGENT_PARALLEL_RUNNER = (
+    ROOT / "hermes-local-lab/sources/hermes-agent/scripts/run_tests_parallel.py"
+)
+SINGLE_DEB_PUBLISHER = ROOT / "packaging/linux/deb/publish-single-deb.sh"
 RELEASE_EVIDENCE_SIGNER = ROOT / "scripts/sign-taiji-release-evidence.sh"
 PUBLICATION_TRUST_HELPER_BEGIN = (
     "# TAIJI_PYTHON38_PUBLICATION_TRUST_HELPER_BEGIN"
@@ -64,7 +73,114 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "scripts/validate-taiji-release-evidence.py",
     GOLDEN_ORCHESTRATOR,
     CHALLENGE_ENVELOPE_HELPER,
+    RELEASE_TEST_RUNNER,
+    AGENT_PARALLEL_RUNNER,
 )
+PYTHON38_RUNTIME_SOURCES = (
+    AGENT_PARALLEL_RUNNER,
+    ROOT / "tests/test_linux_desktop_packaging_static.py",
+)
+FORMAL_BUILDER_EMBEDDED_PYTHON = (
+    "formal_build_root_supervisor_python_source",
+    "formal_build_supervisor_bootstrap_python_source",
+    "formal_build_supervisor_log_relay_python_source",
+)
+
+
+def extract_single_deb_publisher_python() -> str:
+    source = SINGLE_DEB_PUBLISHER.read_text(encoding="utf-8")
+    marker = "/usr/bin/python3 -I -B - \"$@\" <<'PY'\n"
+    assert source.count(marker) == 1
+    embedded = source.split(marker, 1)[1].rsplit("\nPY", 1)[0]
+    assert embedded.startswith("from __future__ import annotations\n")
+    return embedded
+
+
+def extract_sealed_snapshot_python() -> str:
+    source = FORMAL_BUILDER.read_text(encoding="utf-8")
+    marker = "sealed_snapshot_python_source() {\n  /usr/bin/cat <<'PY'\n"
+    assert source.count(marker) == 1
+    embedded = source.split(marker, 1)[1].split("\nPY\n}", 1)[0]
+    assert embedded.startswith("from __future__ import annotations\n")
+    return embedded
+
+
+def extract_formal_builder_embedded_python(function_name: str) -> str:
+    assert function_name in FORMAL_BUILDER_EMBEDDED_PYTHON
+    source = FORMAL_BUILDER.read_text(encoding="utf-8")
+    marker = function_name + "() {\n  /usr/bin/cat <<'PY'\n"
+    assert source.count(marker) == 1
+    return source.split(marker, 1)[1].split("\nPY\n}", 1)[0]
+
+
+def exercise_sealed_snapshot_python(temp_root: Path) -> None:
+    source = extract_sealed_snapshot_python()
+    compile(source, "{}:sealed-snapshot".format(FORMAL_BUILDER), "exec")
+    payload = b"canonical sealed snapshot payload\n"
+    candidate = temp_root / "sealed-snapshot-input.bin"
+    candidate.write_bytes(payload)
+    expected = hashlib.sha256(payload).hexdigest()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            source,
+            "create",
+            str(candidate),
+            expected,
+            "0400",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    ready = process.stdout.readline().decode("utf-8").rstrip("\n")
+    fields = ready.split("\t")
+    if len(fields) != 5 or fields[0] != "READY":
+        process.stdin.close()
+        process.wait(timeout=10)
+        raise AssertionError(
+            "sealed snapshot holder did not become ready: {} {}".format(
+                ready, process.stderr.read().decode("utf-8", errors="replace")
+            )
+        )
+    holder_descriptor = int(fields[1])
+    assert fields[2] == expected
+    adopted = os.open(
+        "/proc/{}/fd/{}".format(process.pid, holder_descriptor),
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        process.stdin.write(b"A")
+        process.stdin.flush()
+        process.stdin.close()
+        assert process.wait(timeout=10) == 0, process.stderr.read().decode(
+            "utf-8", errors="replace"
+        )
+        with candidate.open("r+b") as handle:
+            handle.write(b"X" * len(payload))
+            handle.flush()
+            os.fsync(handle.fileno())
+            handle.seek(0)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.lseek(adopted, 0, os.SEEK_SET)
+        assert os.read(adopted, len(payload) + 1) == payload
+        required = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        assert fcntl.fcntl(adopted, fcntl.F_GET_SEALS) & required == required
+    finally:
+        os.close(adopted)
 
 
 def extract_publication_delivery_trust_helper() -> str:
@@ -115,6 +231,116 @@ def exercise_publication_delivery_trust_helper(temp_root: Path) -> None:
         unsafe_root.chmod(0o700)
 
 
+def exercise_agent_parallel_runner(agent_runner) -> None:
+    fake_test = AGENT_PARALLEL_RUNNER.parents[1] / "tests/test_python38_fake.py"
+    observed = {"duration_saves": 0, "pytest_args": None}
+    agent_runner["_discover_files"] = lambda roots: [fake_test]
+    agent_runner["_count_tests"] = lambda files, repo_root, pytest_args: {
+        fake_test: 1
+    }
+
+    def fake_run_one_file(file, pytest_args, repo_root, file_timeout):
+        observed["pytest_args"] = list(pytest_args)
+        return file, 0, "1 passed in 0.01s\n", {"passed": 1}, 0.01
+
+    def forbidden_duration_save(file_times, repo_root):
+        observed["duration_saves"] += 1
+
+    agent_runner["_run_one_file"] = fake_run_one_file
+    agent_runner["_save_durations"] = forbidden_duration_save
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            str(AGENT_PARALLEL_RUNNER),
+            "--no-duration-cache",
+            "tests/test_python38_fake.py",
+            "--",
+            "-p",
+            "no:cacheprovider",
+        ]
+        result = agent_runner["main"]()
+    finally:
+        sys.argv = original_argv
+    assert result == 0
+    assert observed["duration_saves"] == 0
+    assert observed["pytest_args"] == ["-p", "no:cacheprovider"]
+
+
+def exercise_formal_agent_parallel_runner(agent_runner, temp_root: Path) -> None:
+    formal_root = temp_root / "formal-agent-runner"
+    tests_root = formal_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "one.py").write_text("def test_one(): pass\n", encoding="utf-8")
+    (tests_root / "two.py").write_text("def test_two(): pass\n", encoding="utf-8")
+    selectors = ("tests/one.py", "tests/two.py::test_two")
+    nodeids = ("tests/one.py::test_one", "tests/two.py::test_two")
+
+    class Item:
+        def __init__(self, nodeid):
+            self.nodeid = nodeid
+
+    class Report:
+        def __init__(self, nodeid):
+            self.nodeid = nodeid
+            self.when = "call"
+            self.skipped = False
+            self.passed = True
+            self.failed = False
+
+    class FakePytest:
+        @staticmethod
+        def main(arguments, plugins):
+            assert arguments == [
+                *selectors,
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "-p",
+                "pytest_asyncio.plugin",
+                "-p",
+                "pytest_timeout",
+            ]
+            assert len(plugins) == 1
+            counter = plugins[0]
+            for nodeid in nodeids:
+                counter.pytest_itemcollected(Item(nodeid))
+                counter.pytest_runtest_logstart(nodeid, None)
+                counter.pytest_runtest_logreport(Report(nodeid))
+            return 0
+
+    run_formal = agent_runner["_run_formal_pytest_session"]
+    records = run_formal(formal_root, selectors, 11, FakePytest)
+    assert records == (
+        {
+            "ordinal": 11,
+            "collected": 1,
+            "deselected": 0,
+            "executed": 1,
+            "passed": 1,
+            "failed": 0,
+            "errors": 0,
+            "skipped": 0,
+        },
+        {
+            "ordinal": 12,
+            "collected": 1,
+            "deselected": 0,
+            "executed": 1,
+            "passed": 1,
+            "failed": 0,
+            "errors": 0,
+            "skipped": 0,
+        },
+    )
+
+
+def assert_runtime_sources_avoid_python39_apis() -> None:
+    for path in PYTHON38_RUNTIME_SOURCES:
+        source = path.read_text(encoding="utf-8")
+        for forbidden in (".is_relative_to(", ".removeprefix(", ".removesuffix("):
+            assert forbidden not in source, "{} uses {}".format(path, forbidden)
+
+
 def main() -> int:
     assert sys.version_info[:2] == (3, 8), (
         "this compatibility gate must run on Python 3.8, got {}.{}".format(
@@ -124,6 +350,18 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="taiji-python38-gate-") as temp_dir:
         temp_root = Path(temp_dir)
         exercise_publication_delivery_trust_helper(temp_root)
+        compile(
+            extract_single_deb_publisher_python(),
+            "{}:embedded-python".format(SINGLE_DEB_PUBLISHER),
+            "exec",
+        )
+        for function_name in FORMAL_BUILDER_EMBEDDED_PYTHON:
+            compile(
+                extract_formal_builder_embedded_python(function_name),
+                "{}:{}".format(FORMAL_BUILDER, function_name),
+                "exec",
+            )
+        exercise_sealed_snapshot_python(temp_root)
         for index, entrypoint in enumerate(PYTHON38_ENTRYPOINTS):
             py_compile.compile(
                 str(entrypoint),
@@ -135,6 +373,10 @@ def main() -> int:
             entrypoint: runpy.run_path(str(entrypoint))
             for entrypoint in PYTHON38_ENTRYPOINTS
         }
+        assert_runtime_sources_avoid_python39_apis()
+        agent_runner = loaded_entrypoints[AGENT_PARALLEL_RUNNER]
+        exercise_agent_parallel_runner(agent_runner)
+        exercise_formal_agent_parallel_runner(agent_runner, temp_root)
 
         python_stager = loaded_entrypoints[PYTHON_STAGER]
         is_tcl_tk = python_stager["_is_tcl_tk_library_name"]

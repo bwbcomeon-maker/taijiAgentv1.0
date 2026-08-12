@@ -1,6 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Build the single policy-bound offline Taiji Agent amd64 DEB.
 set -euo pipefail
+PATH=/usr/bin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+unset OPENSSL_CONF OPENSSL_MODULES
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -33,6 +39,7 @@ ACCEPTANCE_RUNNER_SOURCE="$REPO_ROOT/packaging/linux/acceptance_runner.py"
 ACCEPTANCE_ENTRYPOINT_SOURCE="$REPO_ROOT/packaging/linux/bin/taiji-agent-acceptance"
 ACCEPTANCE_LAUNCHER_SOURCE="$REPO_ROOT/taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh"
 PACKAGED_NODE_ROOT="${TAIJI_PACKAGED_NODE_ROOT:-}"
+PACKAGED_NODE_EXECUTABLE="${TAIJI_PACKAGED_NODE_EXECUTABLE:-}"
 PRIVATE_LIBRARY_SYSROOT="${TAIJI_PRIVATE_LIBRARY_SYSROOT:-/usr/lib/x86_64-linux-gnu}"
 SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
 ELECTRON_ARCHIVE="${TAIJI_ELECTRON_ARCHIVE:-}"
@@ -47,7 +54,7 @@ PINNED_PYTHON_ARCHIVE_SHA256="2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6f
 PINNED_PYTHON_EXECUTABLE_SHA256="5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
 PINNED_ELECTRON_EXECUTABLE_SHA256="c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 PINNED_LOCK_CONTRACT_HELPER_SHA256="fca76118874d3846f1bddf304de0159160beff8467bef0870c3636858dedb9e6"
-PINNED_SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+PINNED_SOURCE_INTEGRITY_HELPER_SHA256="eaebadbe2f86d76d09f19ed210ad407e5926a242c46f53fb89e26253db8d8d7a"
 SOURCE_ARCHIVE_PATH="${TAIJI_SOURCE_ARCHIVE_PATH:-}"
 SOURCE_INVENTORY_PATH="${TAIJI_SOURCE_INVENTORY_PATH:-}"
 SOURCE_INVENTORY_SHA256="${TAIJI_SOURCE_INVENTORY_SHA256:-}"
@@ -57,6 +64,8 @@ PYTHON_LOCK_SHA256="${TAIJI_PYTHON_LOCK_SHA256:-}"
 PYTHON_ARCHIVE_PATH="${TAIJI_PYTHON_ARCHIVE_PATH:-}"
 PYTHON_ARCHIVE_SHA256="${TAIJI_PYTHON_ARCHIVE_SHA256:-}"
 EXPECTED_PYTHON_VERSION="${TAIJI_PYTHON_VERSION:-}"
+EXPECTED_PYTHON_EXECUTABLE="${TAIJI_PYTHON_EXECUTABLE:-}"
+EXPECTED_AGENT_PYTHON_SYMLINK_TARGET="${TAIJI_AGENT_PYTHON_SYMLINK_TARGET:-}"
 EXPECTED_PYTHON_EXECUTABLE_SHA256="${TAIJI_PYTHON_EXECUTABLE_SHA256:-}"
 UV_EXECUTABLE="${TAIJI_UV_EXECUTABLE:-}"
 UV_ARCHIVE_PATH="${TAIJI_UV_ARCHIVE_PATH:-}"
@@ -64,6 +73,10 @@ UV_VERSION="${TAIJI_UV_VERSION:-}"
 UV_ARCHIVE_SHA256="${TAIJI_UV_ARCHIVE_SHA256:-}"
 UV_EXECUTABLE_SHA256="${TAIJI_UV_EXECUTABLE_SHA256:-}"
 NODE_ARCHIVE_PATH="${TAIJI_NODE_ARCHIVE_PATH:-}"
+UV_ARCHIVE_SNAPSHOT_FD=""
+PYTHON_ARCHIVE_SNAPSHOT_FD=""
+NODE_ARCHIVE_SNAPSHOT_FD=""
+PACKAGED_NODE_EXECUTABLE_FD=""
 PYTHON_VERSION=""
 PYTHON_EXECUTABLE_SHA256=""
 NODE_VERSION=""
@@ -120,8 +133,88 @@ fail() { echo "$*" >&2; exit 1; }
 warn() { echo "Warning: $*" >&2; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
 
+adopt_sealed_build_inputs() {
+  [ -n "$UV_ARCHIVE_PATH" ] \
+    && [ -n "$PYTHON_ARCHIVE_PATH" ] \
+    && [ -n "$NODE_ARCHIVE_PATH" ] \
+    && [ -n "$PACKAGED_NODE_EXECUTABLE" ] \
+    || fail "sealed tool archives and Node executable are required"
+  exec {UV_ARCHIVE_SNAPSHOT_FD}< "$UV_ARCHIVE_PATH" \
+    || fail "cannot adopt the sealed uv archive"
+  exec {PYTHON_ARCHIVE_SNAPSHOT_FD}< "$PYTHON_ARCHIVE_PATH" \
+    || fail "cannot adopt the sealed Python archive"
+  exec {NODE_ARCHIVE_SNAPSHOT_FD}< "$NODE_ARCHIVE_PATH" \
+    || fail "cannot adopt the sealed Node archive"
+  exec {PACKAGED_NODE_EXECUTABLE_FD}< "$PACKAGED_NODE_EXECUTABLE" \
+    || fail "cannot adopt the sealed Node executable"
+  UV_ARCHIVE_PATH="/proc/$$/fd/$UV_ARCHIVE_SNAPSHOT_FD"
+  PYTHON_ARCHIVE_PATH="/proc/$$/fd/$PYTHON_ARCHIVE_SNAPSHOT_FD"
+  NODE_ARCHIVE_PATH="/proc/$$/fd/$NODE_ARCHIVE_SNAPSHOT_FD"
+  PACKAGED_NODE_EXECUTABLE="/proc/$$/fd/$PACKAGED_NODE_EXECUTABLE_FD"
+  /usr/bin/python3 -I -B - \
+    "$UV_ARCHIVE_PATH" "$PINNED_UV_ARCHIVE_SHA256" 0400 \
+    "$PYTHON_ARCHIVE_PATH" "$PINNED_PYTHON_ARCHIVE_SHA256" 0400 \
+    "$NODE_ARCHIVE_PATH" "$PACKAGED_NODE_ARCHIVE_SHA256" 0400 \
+    "$PACKAGED_NODE_EXECUTABLE" "$PINNED_NODE_EXECUTABLE_SHA256" 0500 <<'PY'
+import fcntl
+import hashlib
+import os
+import stat
+import sys
+
+required_names = (
+    "F_GET_SEALS",
+    "F_SEAL_WRITE",
+    "F_SEAL_GROW",
+    "F_SEAL_SHRINK",
+    "F_SEAL_SEAL",
+)
+missing = [name for name in required_names if not hasattr(fcntl, name)]
+if missing:
+    raise SystemExit("Linux memfd seal verification unavailable: " + ",".join(missing))
+required = (
+    fcntl.F_SEAL_WRITE
+    | fcntl.F_SEAL_GROW
+    | fcntl.F_SEAL_SHRINK
+    | fcntl.F_SEAL_SEAL
+)
+arguments = sys.argv[1:]
+if len(arguments) != 12:
+    raise SystemExit("sealed input verification argument mismatch")
+for offset in range(0, len(arguments), 3):
+    path, expected, expected_mode_text = arguments[offset : offset + 3]
+    if expected_mode_text not in ("0400", "0500"):
+        raise SystemExit("sealed input mode contract is invalid")
+    expected_mode = int(expected_mode_text, 8)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
+            raise SystemExit("sealed input is not a non-empty regular file")
+        if stat.S_IMODE(metadata.st_mode) != expected_mode:
+            raise SystemExit("sealed input mode mismatch")
+        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+        if seals & required != required:
+            raise SystemExit("sealed input is missing a required seal")
+        digest = hashlib.sha256()
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise SystemExit("sealed input is truncated")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise SystemExit("sealed input grew while hashing")
+        if digest.hexdigest() != expected:
+            raise SystemExit("sealed input SHA256 mismatch")
+    finally:
+        os.close(descriptor)
+PY
+}
+
 validate_source_archive_integrity() {
-  local helper_sha inventory_sha
+  local helper_sha inventory_sha agent_python actual_target python_real expected_python_real
   [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
     || fail "source archive integrity helper is missing"
   helper_sha="$(sha256sum "$SOURCE_INTEGRITY_HELPER" | awk '{print $1}')"
@@ -134,6 +227,23 @@ validate_source_archive_integrity() {
   inventory_sha="$(sha256sum "$SOURCE_INVENTORY_PATH" | awk '{print $1}')"
   [ "$inventory_sha" = "$SOURCE_INVENTORY_SHA256" ] \
     || fail "source inventory SHA256 mismatch"
+  agent_python="$SOURCE_AGENT_DIR/venv/bin/python"
+  [ -L "$agent_python" ] || fail "Agent Python must be a symlink"
+  actual_target="$(readlink "$agent_python")" \
+    || fail "Agent Python symlink target cannot be read"
+  [ "$actual_target" = "$EXPECTED_AGENT_PYTHON_SYMLINK_TARGET" ] \
+    || fail "Agent Python raw symlink target does not match TAIJI_AGENT_PYTHON_SYMLINK_TARGET"
+  case "$actual_target" in
+    /*) ;;
+    *) fail "TAIJI_AGENT_PYTHON_SYMLINK_TARGET must be absolute" ;;
+  esac
+  case "$actual_target" in
+    *$'\n'*|*$'\r'*) fail "TAIJI_AGENT_PYTHON_SYMLINK_TARGET contains a newline" ;;
+  esac
+  python_real="$(readlink -f "$agent_python")"
+  expected_python_real="$(readlink -f "$EXPECTED_PYTHON_EXECUTABLE")"
+  [ -n "$python_real" ] && [ "$python_real" = "$expected_python_real" ] \
+    || fail "Agent Python and TAIJI_PYTHON_EXECUTABLE resolve to different files"
   python3 "$SOURCE_INTEGRITY_HELPER" verify \
     --archive "$SOURCE_ARCHIVE_PATH" \
     --inventory "$SOURCE_INVENTORY_PATH" \
@@ -143,6 +253,7 @@ validate_source_archive_integrity() {
     --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
     --allow-extra-prefix "runtime/package-build" \
     --allow-extra-prefix "packages/麒麟操作系统安装包" \
+    --allow-extra-symlink "hermes-local-lab/sources/hermes-agent/venv/bin/python" "$EXPECTED_AGENT_PYTHON_SYMLINK_TARGET" \
     || fail "source tree differs from the immutable archive inventory"
 }
 
@@ -183,7 +294,7 @@ validate_build_host_glibc() {
 }
 
 validate_strict_toolchain_contract() {
-  local actual lock_path python_real node_bin node_archive_marker actual_electron_archive_sha
+  local actual lock_path python_real expected_python_real node_bin node_archive_marker actual_electron_archive_sha
   [ "$PYTHON_DEPENDENCY_LOCK_STATUS" = "strict-locked" ] \
     || fail "TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS must be strict-locked"
   [ "$PYTHON_LOCK_BASENAME" = "uv.lock" ] \
@@ -198,32 +309,28 @@ validate_strict_toolchain_contract() {
   [ "$UV_VERSION" = "$PINNED_UV_VERSION" ] || fail "TAIJI_UV_VERSION is not the pinned uv version"
   [ "$UV_ARCHIVE_SHA256" = "$PINNED_UV_ARCHIVE_SHA256" ] || fail "TAIJI_UV_ARCHIVE_SHA256 is not pinned"
   [ "$UV_EXECUTABLE_SHA256" = "$PINNED_UV_EXECUTABLE_SHA256" ] || fail "TAIJI_UV_EXECUTABLE_SHA256 is not pinned"
-  [ -f "$UV_ARCHIVE_PATH" ] && [ ! -L "$UV_ARCHIVE_PATH" ] \
-    && [ "$(stat -c '%h' "$UV_ARCHIVE_PATH")" = 1 ] \
-    || fail "TAIJI_UV_ARCHIVE_PATH must be a regular single-link file"
   actual="$(sha256sum "$UV_ARCHIVE_PATH" | awk '{print $1}')"
   [ "$actual" = "$PINNED_UV_ARCHIVE_SHA256" ] || fail "uv archive SHA256 mismatch"
   [ -f "$UV_EXECUTABLE" ] && [ ! -L "$UV_EXECUTABLE" ] \
     && [ "$(stat -c '%h' "$UV_EXECUTABLE")" = 1 ] \
     || fail "TAIJI_UV_EXECUTABLE must be a regular single-link file"
+  actual="$(sha256sum "$UV_EXECUTABLE" | awk '{print $1}')"
+  [ "$actual" = "$UV_EXECUTABLE_SHA256" ] || fail "uv executable SHA256 mismatch"
   [ "$("$UV_EXECUTABLE" --version)" = "uv $PINNED_UV_VERSION" ] || fail "uv executable version mismatch"
   file "$UV_EXECUTABLE" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
     || fail "uv executable is not Linux x86_64 ELF"
-  actual="$(sha256sum "$UV_EXECUTABLE" | awk '{print $1}')"
-  [ "$actual" = "$UV_EXECUTABLE_SHA256" ] || fail "uv executable SHA256 mismatch"
 
   python_real="$(readlink -f "$SOURCE_AGENT_DIR/venv/bin/python")"
   [ -f "$python_real" ] || fail "resolved Agent Python executable is missing"
-  PYTHON_VERSION="$("$SOURCE_AGENT_DIR/venv/bin/python" -c 'import platform; print(platform.python_version())')"
+  [ -n "$EXPECTED_PYTHON_EXECUTABLE" ] \
+    || fail "TAIJI_PYTHON_EXECUTABLE is required"
+  expected_python_real="$(readlink -f "$EXPECTED_PYTHON_EXECUTABLE")"
+  [ "$python_real" = "$expected_python_real" ] \
+    || fail "Agent Python symlink does not resolve to TAIJI_PYTHON_EXECUTABLE"
   [ "$EXPECTED_PYTHON_VERSION" = "$PINNED_PYTHON_VERSION" ] \
     || fail "TAIJI_PYTHON_VERSION is not pinned"
-  [ "$PYTHON_VERSION" = "$PINNED_PYTHON_VERSION" ] \
-    || fail "Agent Python version is not the pinned official archive version"
   [ "$PYTHON_ARCHIVE_SHA256" = "$PINNED_PYTHON_ARCHIVE_SHA256" ] \
     || fail "TAIJI_PYTHON_ARCHIVE_SHA256 is not pinned"
-  [ -f "$PYTHON_ARCHIVE_PATH" ] && [ ! -L "$PYTHON_ARCHIVE_PATH" ] \
-    && [ "$(stat -c '%h' "$PYTHON_ARCHIVE_PATH")" = 1 ] \
-    || fail "TAIJI_PYTHON_ARCHIVE_PATH must be a regular single-link file"
   actual="$(sha256sum "$PYTHON_ARCHIVE_PATH" | awk '{print $1}')"
   [ "$actual" = "$PINNED_PYTHON_ARCHIVE_SHA256" ] \
     || fail "Python archive SHA256 mismatch"
@@ -232,25 +339,28 @@ validate_strict_toolchain_contract() {
     || fail "TAIJI_PYTHON_EXECUTABLE_SHA256 is not pinned"
   [ "$PYTHON_EXECUTABLE_SHA256" = "$PINNED_PYTHON_EXECUTABLE_SHA256" ] \
     || fail "Python executable SHA256 is not the pinned official archive identity"
+  PYTHON_VERSION="$("$SOURCE_AGENT_DIR/venv/bin/python" -c 'import platform; print(platform.python_version())')"
+  [ "$PYTHON_VERSION" = "$PINNED_PYTHON_VERSION" ] \
+    || fail "Agent Python version is not the pinned official archive version"
 
   node_bin="$PACKAGED_NODE_ROOT/bin/node"
   node_archive_marker="$PACKAGED_NODE_ROOT/.taiji-node-archive-sha256"
   [ -f "$node_bin" ] && [ ! -L "$node_bin" ] \
     && [ -f "$node_archive_marker" ] && [ ! -L "$node_archive_marker" ] \
     || fail "verified Node identity files are missing or unsafe"
-  NODE_VERSION="$("$node_bin" --version)"
-  NODE_VERSION="${NODE_VERSION#v}"
-  [ "$NODE_VERSION" = "$PACKAGED_NODE_VERSION" ] || fail "Node version mismatch"
   NODE_ARCHIVE_SHA256="$(tr -d '\r\n' < "$node_archive_marker")"
   [ "$NODE_ARCHIVE_SHA256" = "$PACKAGED_NODE_ARCHIVE_SHA256" ] || fail "Node archive SHA256 mismatch"
-  [ -f "$NODE_ARCHIVE_PATH" ] && [ ! -L "$NODE_ARCHIVE_PATH" ] \
-    && [ "$(stat -c '%h' "$NODE_ARCHIVE_PATH")" = 1 ] \
-    || fail "TAIJI_NODE_ARCHIVE_PATH must be a regular single-link file"
   actual="$(sha256sum "$NODE_ARCHIVE_PATH" | awk '{print $1}')"
   [ "$actual" = "$PACKAGED_NODE_ARCHIVE_SHA256" ] || fail "Node archive file SHA256 mismatch"
-  NODE_EXECUTABLE_SHA256="$(sha256sum "$node_bin" | awk '{print $1}')"
+  NODE_EXECUTABLE_SHA256="$(sha256sum "$PACKAGED_NODE_EXECUTABLE" | awk '{print $1}')"
   [ "$NODE_EXECUTABLE_SHA256" = "$PINNED_NODE_EXECUTABLE_SHA256" ] \
     || fail "Node executable SHA256 is not the pinned official archive identity"
+  actual="$(sha256sum "$node_bin" | awk '{print $1}')"
+  [ "$actual" = "$NODE_EXECUTABLE_SHA256" ] \
+    || fail "Node runtime tree differs from the sealed Node executable"
+  NODE_VERSION="$("$PACKAGED_NODE_EXECUTABLE" --version)"
+  NODE_VERSION="${NODE_VERSION#v}"
+  [ "$NODE_VERSION" = "$PACKAGED_NODE_VERSION" ] || fail "Node version mismatch"
 
   ELECTRON_VERSION="$TAIJI_ELECTRON_VERSION"
   ELECTRON_ARCHIVE_SHA256="$TAIJI_ELECTRON_ARCHIVE_SHA256"
@@ -1012,7 +1122,7 @@ PY
 
 if [ "$(uname -s)" != "Linux" ]; then fail "Refusing to build final DEB on non-Linux host"; fi
 case "$(uname -m)" in x86_64|amd64) ;; *) fail "Refusing to build on non-x86_64 host: $(uname -m)" ;; esac
-for cmd in dpkg dpkg-deb rsync npm node sha256sum file ldd strings perl python3 openssl stat mktemp cmp readelf readlink date; do require_cmd "$cmd"; done
+for cmd in dpkg dpkg-deb rsync sha256sum file ldd strings perl python3 openssl stat mktemp cmp readelf readlink date; do require_cmd "$cmd"; done
 validate_source_archive_integrity
 load_policy_contract
 resolve_source_commit
@@ -1023,6 +1133,7 @@ for component in "$RUNTIME_STAGER" "$PYTHON_RUNTIME_STAGER" "$ELECTRON_RUNTIME_S
 [ -f "$ICON_VALIDATOR" ] || fail "Missing icon validator: $ICON_VALIDATOR"
 SOURCE_AGENT_PYTHON="$SOURCE_AGENT_DIR/venv/bin/python"
 [ -x "$SOURCE_AGENT_PYTHON" ] || fail "Missing Linux Agent venv: $SOURCE_AGENT_PYTHON"
+adopt_sealed_build_inputs
 validate_strict_toolchain_contract
 validate_locked_python_environment
 (cd "$SOURCE_AGENT_DIR" && "$SOURCE_AGENT_PYTHON" -m taiji_runtime.main --help >/dev/null 2>&1) || fail "Linux Agent venv module entrypoint failed"
@@ -1053,7 +1164,8 @@ write_launch_manifest
 stage_installed_acceptance_toolchain
 python3 "$RUNTIME_STAGER" --repo-root "$REPO_ROOT" --install-root "$INSTALL_ROOT" --node-root "$PACKAGED_NODE_ROOT" --public-key-fingerprint "$ISSUER_PUBLIC_KEY_FINGERPRINT"
 chmod 0755 "$INSTALL_ROOT/resources/license"
-[ "$("$INSTALL_ROOT/runtime/node/bin/node" --version)" = "v$PACKAGED_NODE_VERSION" ] || fail "Staged Node runtime version mismatch"
+[ "$(sha256sum "$INSTALL_ROOT/runtime/node/bin/node" | awk '{print $1}')" = "$PINNED_NODE_EXECUTABLE_SHA256" ] \
+  || fail "Staged Node runtime identity mismatch"
 python3 "$PRIVATE_LIB_STAGER" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$PRIVATE_STAGE_REPORT" >/dev/null
 rsync -a "$LAB_DIR/config"/ "$INSTALL_ROOT/config"/
 install -m 0755 "$LAB_DIR/scripts/runtime-env.sh" "$INSTALL_ROOT/scripts/runtime-env.sh"
@@ -1070,7 +1182,11 @@ rewrite_product_text_tokens "$INSTALL_ROOT/scripts"
 [ -f "$SOURCE_WEB_DIR/LICENSE" ] && install -m 0644 "$SOURCE_WEB_DIR/LICENSE" "$INSTALL_ROOT/licenses/web-runtime.LICENSE" || true
 mkdir -p "$DESKTOP_RUNTIME/src" "$DESKTOP_RUNTIME/node_modules"
 install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"
-node "$DESKTOP_JS_STAGER" --source "$APP_DIR/src" --destination "$DESKTOP_RUNTIME/src" --entry main.js --entry preload.js
+"$PACKAGED_NODE_EXECUTABLE" "$DESKTOP_JS_STAGER" \
+  --source "$APP_DIR/src" \
+  --destination "$DESKTOP_RUNTIME/src" \
+  --entry main.js \
+  --entry preload.js
 python3 "$ELECTRON_RUNTIME_STAGER" \
   --source "$APP_DIR/node_modules/electron" \
   --destination "$DESKTOP_RUNTIME/node_modules/electron" \

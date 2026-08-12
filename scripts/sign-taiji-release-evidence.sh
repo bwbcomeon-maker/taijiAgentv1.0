@@ -1,5 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+umask 077
+PATH=/usr/bin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+unset OPENSSL_CONF OPENSSL_MODULES
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TRUSTED_GIT="$ROOT_DIR/scripts/taiji-trusted-git"
@@ -18,15 +26,15 @@ EVIDENCE="$1"
 PRIVATE_KEY="$2"
 SIGNATURE="${EVIDENCE}.sig"
 
-command -v openssl >/dev/null 2>&1 || fail "缺少 openssl"
-command -v python3 >/dev/null 2>&1 || fail "缺少 python3"
+[ -x /usr/bin/openssl ] || fail "缺少 /usr/bin/openssl"
+[ -x /usr/bin/python3 ] || fail "缺少 /usr/bin/python3"
 [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "仓库缺少可信 Git 边界"
 [ -f "$LIVE_CI_REVALIDATOR" ] && [ ! -L "$LIVE_CI_REVALIDATOR" ] || fail "仓库缺少固定 GitHub CI 实时复验器"
 [ -f "$CHALLENGE_HELPER" ] && [ ! -L "$CHALLENGE_HELPER" ] || fail "仓库缺少 canonical challenge-envelope helper"
 [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] || fail "证据必须是普通 JSON 文件且不能是符号链接"
 [ -f "$PRIVATE_KEY" ] && [ ! -L "$PRIVATE_KEY" ] || fail "发布私钥必须是普通文件且不能是符号链接"
 [ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || fail "仓库缺少固定验签公钥"
-python3 - "$PRIVATE_KEY" <<'PY' \
+/usr/bin/python3 -I -B - "$PRIVATE_KEY" <<'PY' \
   || fail "发布私钥必须由当前用户独占，权限只能是 0400/0600、不能是硬链接，且不能经过非 root 所有的祖先符号链接"
 import os
 import stat
@@ -70,7 +78,7 @@ cleanup_signer() {
 }
 trap cleanup_signer EXIT
 
-python3 - "$EVIDENCE" "$SNAPSHOT_EVIDENCE" <<'PY' \
+/usr/bin/python3 -I -B - "$EVIDENCE" "$SNAPSHOT_EVIDENCE" <<'PY' \
   || fail "证据无法复制到签名私有快照"
 import os
 import stat
@@ -131,7 +139,7 @@ if identity(opened) != identity(after):
     raise SystemExit("evidence changed while snapshotting")
 PY
 
-metadata="$(python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" "$SNAPSHOT_ENVELOPE" <<'PY'
+metadata="$(/usr/bin/python3 -I -B - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" "$SNAPSHOT_ENVELOPE" <<'PY'
 import importlib.util
 import json
 import os
@@ -240,13 +248,13 @@ case "$MODE" in
 esac
 [ ! -e "$SIGNATURE" ] && [ ! -L "$SIGNATURE" ] || fail "签名输出已存在，拒绝覆盖：$SIGNATURE"
 
-if ! public_fingerprint="$(openssl pkey -pubin -in "$PUBLIC_KEY" -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"; then
+if ! public_fingerprint="$(/usr/bin/openssl pkey -pubin -in "$PUBLIC_KEY" -outform DER 2>/dev/null | /usr/bin/openssl dgst -sha256 -r | awk '{print $1}')"; then
   fail "无法读取固定验签公钥"
 fi
 [ "$public_fingerprint" = "$EXPECTED_FINGERPRINT" ] || fail "固定验签公钥 fingerprint 不匹配"
 
 if [ "$MODE" = "publication" ]; then
-  python3 - "$EVIDENCE" "$SNAPSHOT_ROOT" <<'PY' \
+  /usr/bin/python3 -I -B - "$EVIDENCE" "$SNAPSHOT_ROOT" <<'PY' \
     || fail "publication physical bundle 无法创建不可替换的完整私有快照"
 import os
 import stat
@@ -430,7 +438,7 @@ validate_publication_delivery_root(
 )
 PY
 
-  python3 - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery" "$SNAPSHOT_EVIDENCE" <<'PY' \
+  /usr/bin/python3 -I -B - "$ROOT_DIR" "$SNAPSHOT_ROOT/delivery" "$SNAPSHOT_EVIDENCE" <<'PY' \
     || fail "publication physical bundle 未通过完整实物和签名前合同校验，拒绝读取私钥"
 import argparse
 import hashlib
@@ -527,20 +535,20 @@ validator.validate_certification_set_v1(
 )
 PY
 
-  python3 "$LIVE_CI_REVALIDATOR" \
+  /usr/bin/python3 -I -B "$LIVE_CI_REVALIDATOR" \
     --evidence "$SNAPSHOT_ROOT/delivery/github-ci-evidence.json" \
     --source-commit "$SOURCE_COMMIT" \
     || fail "github-ci-live-revalidation 未通过，拒绝在签名前读取私钥"
 fi
 
-if ! private_fingerprint="$(openssl pkey -in "$PRIVATE_KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"; then
+if ! private_fingerprint="$(/usr/bin/openssl pkey -in "$PRIVATE_KEY" -pubout -outform DER 2>/dev/null | /usr/bin/openssl dgst -sha256 -r | awk '{print $1}')"; then
   fail "无法读取发布私钥"
 fi
 [ -n "$private_fingerprint" ] || fail "无法读取发布私钥"
 [ "$private_fingerprint" = "$public_fingerprint" ] || fail "发布私钥与产品固定验签公钥不匹配"
 
 if [ "$MODE" = "certification" ]; then
-  python3 - "$EVIDENCE" "$SNAPSHOT_ROOT" <<'PY' \
+  /usr/bin/python3 -I -B - "$EVIDENCE" "$SNAPSHOT_ROOT" <<'PY' \
     || fail "certification-set 物理证据树无法创建不可替换快照"
 import json
 import os
@@ -715,7 +723,7 @@ if read_previous_deb_basename(
     raise SystemExit("certification offline previous DEB changed during snapshot")
 PY
 
-  python3 - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" <<'PY' \
+  /usr/bin/python3 -I -B - "$ROOT_DIR" "$SNAPSHOT_EVIDENCE" <<'PY' \
     || fail "certification-set physical bundle 未通过完整实物校验，拒绝签名"
 import argparse
 import importlib.util
@@ -760,7 +768,7 @@ if [ "$MODE" = "certification" ] || [ "$MODE" = "publication" ]; then
   # Reserve once for this public-key identity before the cryptographic write.
   # The nonce filename intentionally omits purpose, so cross-purpose replay in
   # this controlled signing account fails closed.  This is not a global ledger.
-  python3 "$CHALLENGE_HELPER" reserve --envelope "$SNAPSHOT_ENVELOPE" \
+  /usr/bin/python3 -I -B "$CHALLENGE_HELPER" reserve --envelope "$SNAPSHOT_ENVELOPE" \
     --evidence "$SNAPSHOT_EVIDENCE" \
     --public-key-fingerprint "$public_fingerprint" \
     --purpose "$MODE" \
@@ -771,11 +779,11 @@ if [ "$MODE" = "certification" ] || [ "$MODE" = "publication" ]; then
     || fail "本次 challenge 已使用、已过期或固定 signer state 不安全；请签发新 envelope 后重新验收"
 
   tmp_signature="$(mktemp "${SIGNATURE}.tmp.XXXXXX")"
-  openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "$tmp_signature" "$SNAPSHOT_EVIDENCE" || fail "证据签名失败"
-  openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$tmp_signature" "$SNAPSHOT_EVIDENCE" >/dev/null \
+  /usr/bin/openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "$tmp_signature" "$SNAPSHOT_EVIDENCE" || fail "证据签名失败"
+  /usr/bin/openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$tmp_signature" "$SNAPSHOT_EVIDENCE" >/dev/null \
     || fail "证据签名回读验证失败"
   chmod 0644 "$tmp_signature"
-  python3 - "$tmp_signature" "$SIGNATURE" <<'PY' \
+  /usr/bin/python3 -I -B - "$tmp_signature" "$SIGNATURE" <<'PY' \
     || fail "签名输出已被替换，拒绝覆盖"
 import os
 import sys
@@ -787,7 +795,7 @@ except FileExistsError:
 os.unlink(source)
 PY
   tmp_signature=""
-  if ! openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$SIGNATURE" "$EVIDENCE" >/dev/null; then
+  if ! /usr/bin/openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$SIGNATURE" "$EVIDENCE" >/dev/null; then
     rm -f -- "$SIGNATURE"
     fail "原证据在签名期间发生变化，已删除不再匹配的签名"
   fi

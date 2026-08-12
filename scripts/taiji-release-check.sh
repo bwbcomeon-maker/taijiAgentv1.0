@@ -1,5 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+umask 077
+PATH=/usr/bin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+unset OPENSSL_CONF OPENSSL_MODULES
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONNOUSERSITE=1
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ROOT_DIR="${TAIJI_RELEASE_REPO_ROOT:-$SCRIPT_ROOT}"
@@ -7,10 +16,9 @@ TRUSTED_GIT="$SCRIPT_ROOT/scripts/taiji-trusted-git"
 SOURCE_GATE="$SCRIPT_ROOT/scripts/check-clean-worktree.sh"
 EVIDENCE_VALIDATOR="$SCRIPT_ROOT/scripts/validate-taiji-release-evidence.py"
 LIVE_CI_REVALIDATOR="$SCRIPT_ROOT/scripts/revalidate-taiji-github-ci-evidence.py"
+RELEASE_TEST_RUNNER="$SCRIPT_ROOT/scripts/run-taiji-release-python-tests.py"
 EVIDENCE_ATTESTATION_PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
-AGENT_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-agent"
-WEBUI_DIR="$ROOT_DIR/hermes-local-lab/sources/hermes-webui"
 DELIVERY_DIR="${TAIJI_DELIVERY_DIR:-$ROOT_DIR/taijiagent 打包交付}"
 CERTIFICATION_SET="${TAIJI_CERTIFICATION_SET:-$DELIVERY_DIR/certification/certification-set.json}"
 CERTIFICATION_SET_SIGNATURE="${TAIJI_CERTIFICATION_SET_SIGNATURE:-${CERTIFICATION_SET}.sig}"
@@ -29,6 +37,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 CERTIFICATION_MATRIX="$DELIVERY_DIR/验收工具/certification-matrix.json"
+FORMAL_BUILD_TEST_LOG="$DELIVERY_DIR/生成的安装包/formal-build-tests.log"
 
 failures=0
 
@@ -60,58 +69,148 @@ check_canonical_source() {
 }
 
 run_root_tests() {
+  local isolated_root isolated_identity test_status=0 cleanup_status=0
+  isolated_root="$(/usr/bin/mktemp -d /tmp/taiji-release-python.XXXXXX)" \
+    || { printf '[FAIL] cannot create isolated release-test root\n' >&2; return 1; }
+  isolated_root="$(cd "$isolated_root" && pwd -P)" \
+    || { printf '[FAIL] cannot resolve isolated release-test root\n' >&2; return 1; }
+  case "$isolated_root" in
+    /private/tmp/taiji-release-python.*|/tmp/taiji-release-python.*) ;;
+    *) printf '[FAIL] isolated release-test root escaped /tmp: %s\n' "$isolated_root" >&2; return 1 ;;
+  esac
+  /bin/chmod 0700 "$isolated_root"
+  /bin/mkdir -m 0700 "$isolated_root/home" "$isolated_root/tmp"
+  isolated_identity="$(/usr/bin/python3 -I -B - "$isolated_root" <<'PY'
+import os
+import stat
+import sys
+
+metadata = os.lstat(sys.argv[1])
+if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+    raise SystemExit("isolated release-test root is not a real directory")
+print("{}:{}:{}:{}".format(
+    metadata.st_dev,
+    metadata.st_ino,
+    metadata.st_uid,
+    stat.S_IMODE(metadata.st_mode),
+))
+PY
+)" || return 1
   cd "$ROOT_DIR" || return 1
-  python3 -m unittest \
-    tests.test_linux_desktop_packaging_static \
-    tests.test_kylin_install_script_simulation \
-    tests.test_taiji_license_issuer_gui \
-    tests.test_target_desktop_acceptance_producer \
-    tests.test_github_ci_live_revalidation \
-    tests.test_release_evidence_signer_guards \
-    tests.test_certification_set_v1 \
-    tests.test_release_evidence_assembler_v3 \
-    tests.test_release_check_v3
+  /usr/bin/env -i \
+    HOME="$isolated_root/home" \
+    TMPDIR="$isolated_root/tmp" \
+    PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    /usr/bin/python3 -I -B "$RELEASE_TEST_RUNNER" \
+    || test_status=$?
+  /usr/bin/python3 -I -B - "$isolated_root" "$isolated_identity" <<'PY' \
+    || cleanup_status=$?
+import os
+import stat
+import sys
+
+root, expected = sys.argv[1:]
+metadata = os.lstat(root)
+actual = "{}:{}:{}:{}".format(
+    metadata.st_dev,
+    metadata.st_ino,
+    metadata.st_uid,
+    stat.S_IMODE(metadata.st_mode),
+)
+if actual != expected or not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+    raise SystemExit("isolated release-test root identity changed; preserving it")
+for name in ("home", "tmp"):
+    os.rmdir(os.path.join(root, name))
+os.rmdir(root)
+PY
+  if [ "$cleanup_status" -ne 0 ]; then
+    printf '[FAIL] isolated release-test root was not empty/stable; preserved: %s\n' "$isolated_root" >&2
+    return 1
+  fi
+  return "$test_status"
 }
 
-run_desktop_evidence_tool_tests() {
-  cd "$ROOT_DIR" || return 1
-  node --test tools/taiji-desktop-acceptance/run-installed-electron-acceptance.test.js || return 1
-  python3 -B tools/taiji-desktop-acceptance/test_assemble_target_evidence.py
-}
+verify_formal_build_test_evidence() {
+  local marker="$DELIVERY_DIR/生成的安装包/.build-success"
+  local manifest="$DELIVERY_DIR/生成的安装包/taiji-package-manifest.json"
+  /usr/bin/python3 -I -B - "$marker" "$manifest" "$FORMAL_BUILD_TEST_LOG" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
 
-run_agent_tests() {
-  cd "$AGENT_DIR" || return 1
-  scripts/run_tests.sh \
-    tests/tools/test_taiji_security_mode.py \
-    tests/test_taiji_license.py \
-    tests/gateway/test_api_server_license.py \
-    tests/gateway/test_session_api.py \
-    tests/tools/test_image_generation_readiness.py
-}
+marker_path, manifest_path, log_path = (Path(value) for value in sys.argv[1:])
 
-run_webui_tests() {
-  cd "$WEBUI_DIR" || return 1
-  npm run lint:runtime || return 1
-  ../hermes-agent/venv/bin/python -m pytest \
-    tests/test_brand_privacy.py \
-    tests/test_model_config_api.py \
-    tests/test_model_config_frontend.py \
-    tests/test_approval_queue.py \
-    tests/test_approval_sse.py \
-    tests/test_pr1350_sse_notify_correctness.py \
-    tests/test_expert_team_frontend.py \
-    tests/test_ui_visibility_config.py \
-    tests/test_issue1800_file_html_interactions.py \
-    tests/test_writeflow_frontend.py::test_taiji_shell_breakpoint_keeps_electron_1024_in_desktop_shell \
-    tests/test_issue1116_composer_placeholder.py \
-    -q
+def read_regular(path, label, limit):
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_size <= 0
+        or metadata.st_size > limit
+    ):
+        raise SystemExit(label + " is not a bounded single-link regular file")
+    payload = path.read_bytes()
+    if len(payload) != metadata.st_size:
+        raise SystemExit(label + " changed while reading")
+    return payload
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SystemExit("duplicate JSON field: " + key)
+        result[key] = value
+    return result
+
+marker = {}
+for line in read_regular(marker_path, "build marker", 1024 * 1024).decode("utf-8").splitlines():
+    if not line or "=" not in line:
+        raise SystemExit("invalid build marker line")
+    key, value = line.split("=", 1)
+    if key in marker:
+        raise SystemExit("duplicate build marker field: " + key)
+    marker[key] = value
+manifest = json.loads(
+    read_regular(manifest_path, "package manifest", 1024 * 1024).decode("utf-8"),
+    object_pairs_hook=strict_object,
+)
+expected = {
+    "formal_build_tests_status": "pass",
+    "formal_build_tests_log_basename": "formal-build-tests.log",
+}
+for field, value in expected.items():
+    if marker.get(field) != value or manifest.get(field) != value:
+        raise SystemExit(field + " mismatch")
+digest = marker.get("formal_build_tests_log_sha256")
+if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+    raise SystemExit("formal build test log SHA256 is invalid")
+if manifest.get("formal_build_tests_log_sha256") != digest:
+    raise SystemExit("formal build test log SHA256 binding mismatch")
+log_payload = read_regular(log_path, "formal build test log", 32 * 1024 * 1024)
+if log_path.name != "formal-build-tests.log" or hashlib.sha256(log_payload).hexdigest() != digest:
+    raise SystemExit("formal build test log content mismatch")
+PY
+  /usr/bin/python3 -I -B "$EVIDENCE_VALIDATOR" \
+    formal-build-test-log \
+    --manifest "$manifest" \
+    --build-marker "$marker" \
+    --log "$FORMAL_BUILD_TEST_LOG"
 }
 
 run_delivery_preflight() {
   TAIJI_RELEASE_SKIP_GIT_CHECK=0 \
   TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 \
   TAIJI_REPO_ROOT="$ROOT_DIR" \
-    bash "$DELIVERY_DIR/01_制包机_发布预检.sh"
+    /bin/bash -p "$DELIVERY_DIR/01_制包机_发布预检.sh"
 }
 
 check_source_archive() {
@@ -140,6 +239,7 @@ check_delivery_artifacts() {
     return 1
   }
   [ -f "$DELIVERY_DIR/生成的安装包/taiji-package-manifest.json" ] || { fail "缺少 生成的安装包/taiji-package-manifest.json"; return 1; }
+  [ -f "$FORMAL_BUILD_TEST_LOG" ] && [ ! -L "$FORMAL_BUILD_TEST_LOG" ] || { fail "缺少正式构建测试日志"; return 1; }
   [ -f "$DELIVERY_DIR/生成的安装包/构建报告.txt" ] || { fail "缺少 生成的安装包/构建报告.txt"; return 1; }
 }
 
@@ -150,7 +250,7 @@ check_certification_and_publication() {
   [ -f "$RELEASE_EVIDENCE" ] && [ ! -L "$RELEASE_EVIDENCE" ] || { fail "缺少 release-evidence.json"; return 1; }
   [ -f "$RELEASE_SIGNATURE" ] && [ ! -L "$RELEASE_SIGNATURE" ] || { fail "缺少 release-evidence.json.sig"; return 1; }
   [ -f "$CERTIFICATION_MATRIX" ] && [ ! -L "$CERTIFICATION_MATRIX" ] || { fail "缺少认证矩阵"; return 1; }
-  command -v openssl >/dev/null 2>&1 || { fail "缺少 openssl"; return 1; }
+  [ -x /usr/bin/openssl ] || { fail "缺少 /usr/bin/openssl"; return 1; }
   [ -f "$LIVE_CI_REVALIDATOR" ] && [ ! -L "$LIVE_CI_REVALIDATOR" ] \
     || { fail "缺少固定 GitHub CI 实时复验器"; return 1; }
   commit="$($TRUSTED_GIT -C "$ROOT_DIR" rev-parse HEAD)" || return 1
@@ -158,15 +258,15 @@ check_certification_and_publication() {
   manifest="$DELIVERY_DIR/生成的安装包/taiji-package-manifest.json"
   checksum="${deb}.sha256"
   source_archive="$DELIVERY_DIR/taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
-  python3 "$LIVE_CI_REVALIDATOR" \
+  /usr/bin/python3 -I -B "$LIVE_CI_REVALIDATOR" \
     --evidence "$DELIVERY_DIR/github-ci-evidence.json" \
     --source-commit "$commit" \
     || { fail "github-ci-live-revalidation 未通过"; return 1; }
-  openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$CERTIFICATION_SET_SIGNATURE" "$CERTIFICATION_SET" >/dev/null \
+  /usr/bin/openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$CERTIFICATION_SET_SIGNATURE" "$CERTIFICATION_SET" >/dev/null \
     || { fail "certification-set.json.sig 验签失败"; return 1; }
-  openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$RELEASE_SIGNATURE" "$RELEASE_EVIDENCE" >/dev/null \
+  /usr/bin/openssl dgst -sha256 -verify "$EVIDENCE_ATTESTATION_PUBLIC_KEY" -signature "$RELEASE_SIGNATURE" "$RELEASE_EVIDENCE" >/dev/null \
     || { fail "release-evidence.json.sig 验签失败"; return 1; }
-  python3 - "$CERTIFICATION_SET" "$CERTIFICATION_SET_SIGNATURE" "$RELEASE_EVIDENCE" "$deb" "$manifest" <<'PY' || { fail "认证集、v3 回执、DEB 和 policy 摘要不一致"; return 1; }
+  /usr/bin/python3 -I -B - "$CERTIFICATION_SET" "$CERTIFICATION_SET_SIGNATURE" "$RELEASE_EVIDENCE" "$deb" "$manifest" <<'PY' || { fail "认证集、v3 回执、DEB 和 policy 摘要不一致"; return 1; }
 import hashlib, json, sys
 from pathlib import Path
 
@@ -193,7 +293,7 @@ if release.get("deb_sha256") != deb_sha or cert.get("deb_sha256") != deb_sha:
 if release.get("customer_folder_contract") != "exactly-one-deb" or release.get("customer_filename") != deb_path.name:
     raise SystemExit("customer folder contract mismatch")
 PY
-  python3 "$EVIDENCE_VALIDATOR" certification \
+  /usr/bin/python3 -I -B "$EVIDENCE_VALIDATOR" certification \
     --evidence "$CERTIFICATION_SET" \
     --source-commit "$commit" \
     --deb "$deb" \
@@ -203,7 +303,7 @@ PY
     --source-archive "$source_archive" \
     --delivery-dir "$DELIVERY_DIR" \
     --matrix "$CERTIFICATION_MATRIX" || return 1
-  python3 "$EVIDENCE_VALIDATOR" release \
+  /usr/bin/python3 -I -B "$EVIDENCE_VALIDATOR" release \
     --evidence "$RELEASE_EVIDENCE" \
     --source-commit "$commit" \
     --deb "$deb" \
@@ -227,9 +327,7 @@ main() {
   ok "check_canonical_source"
 
   run_step "run_root_tests" run_root_tests
-  run_step "run_desktop_evidence_tool_tests" run_desktop_evidence_tool_tests
-  run_step "run_agent_tests" run_agent_tests
-  run_step "run_webui_tests" run_webui_tests
+  run_step "verify_formal_build_test_evidence" verify_formal_build_test_evidence
   run_step "run_delivery_preflight" run_delivery_preflight
   run_step "check_delivery_artifacts" check_delivery_artifacts
   run_step "check_certification_and_publication" check_certification_and_publication

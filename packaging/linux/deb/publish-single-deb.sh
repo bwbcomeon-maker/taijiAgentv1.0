@@ -1,7 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Publish one immutable customer DEB after the signed certification/release gates.
 set -Eeuo pipefail
 umask 077
+PATH=/usr/bin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+unset OPENSSL_CONF OPENSSL_MODULES
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
@@ -26,7 +33,9 @@ USAGE
   exit 2
 }
 
-python3 - "$@" <<'PY'
+/usr/bin/python3 -I -B - "$@" <<'PY'
+from __future__ import annotations
+
 import argparse
 import ctypes
 import hashlib
@@ -47,6 +56,9 @@ PUBLIC_KEY = ROOT / "tools/taiji-release-evidence/signing-public.pem"
 RELEASE_CHECK = ROOT / "scripts/taiji-release-check.sh"
 RELEASE_VALIDATOR = ROOT / "scripts/validate-taiji-release-evidence.py"
 LIVE_CI_REVALIDATOR = ROOT / "scripts/revalidate-taiji-github-ci-evidence.py"
+TRUSTED_PYTHON_ARGV = ["/usr/bin/python3", "-I", "-B"]
+OPENSSL = "/usr/bin/openssl"
+DPKG_DEB = "/usr/bin/dpkg-deb"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -105,6 +117,29 @@ class PublisherError(RuntimeError):
 
 def fail(message: str) -> "NoReturn":
     raise PublisherError(message)
+
+
+def trusted_child_environment(extra=None) -> dict:
+    environment = {
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+    }
+    for name in ("HOME", "TMPDIR"):
+        value = environment[name]
+        if not value.startswith("/") or "\0" in value:
+            environment[name] = "/tmp"
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        if "\0" in token or "\r" in token or "\n" in token:
+            fail("GITHUB_TOKEN contains an invalid character")
+        environment["GITHUB_TOKEN"] = token
+    if extra:
+        environment.update(extra)
+    return environment
 
 
 def lstat_regular(path: Path, label: str) -> os.stat_result:
@@ -329,7 +364,8 @@ def policy_identity(policy_path: Path) -> tuple[str, str, str]:
 
 def verify_signature(payload_path: Path, signature_path: Path, label: str) -> None:
     result = subprocess.run(
-        ["openssl", "dgst", "-sha256", "-verify", str(PUBLIC_KEY), "-signature", str(signature_path), str(payload_path)],
+        [OPENSSL, "dgst", "-sha256", "-verify", str(PUBLIC_KEY), "-signature", str(signature_path), str(payload_path)],
+        env=trusted_child_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -361,13 +397,14 @@ def live_revalidate_ci(evidence_path: Path, source_commit: str) -> None:
         fail("fixed GitHub CI live revalidator is unavailable")
     result = subprocess.run(
         [
-            sys.executable,
+            *TRUSTED_PYTHON_ARGV,
             str(LIVE_CI_REVALIDATOR),
             "--evidence",
             str(evidence_path),
             "--source-commit",
             source_commit,
         ],
+        env=trusted_child_environment(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -457,8 +494,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    for command in ("openssl", "dpkg-deb", "sha256sum"):
-        if shutil.which(command) is None:
+    for command in (OPENSSL, DPKG_DEB):
+        if not os.path.isfile(command) or not os.access(command, os.X_OK):
             fail(f"missing required command: {command}")
     for path, label in (
         (args.delivery_dir, "delivery directory"),
@@ -513,10 +550,11 @@ def main() -> int:
     lstat_directory(receipt_root, "receipt root")
 
     try:
-        package_name = subprocess.check_output(["dpkg-deb", "-f", str(candidate), "Package"], text=True).strip()
-        version = subprocess.check_output(["dpkg-deb", "-f", str(candidate), "Version"], text=True).strip()
-        architecture = subprocess.check_output(["dpkg-deb", "-f", str(candidate), "Architecture"], text=True).strip()
-        maintainer = subprocess.check_output(["dpkg-deb", "-f", str(candidate), "Maintainer"], text=True).strip()
+        child_env = trusted_child_environment()
+        package_name = subprocess.check_output([DPKG_DEB, "-f", str(candidate), "Package"], env=child_env, text=True).strip()
+        version = subprocess.check_output([DPKG_DEB, "-f", str(candidate), "Version"], env=child_env, text=True).strip()
+        architecture = subprocess.check_output([DPKG_DEB, "-f", str(candidate), "Architecture"], env=child_env, text=True).strip()
+        maintainer = subprocess.check_output([DPKG_DEB, "-f", str(candidate), "Maintainer"], env=child_env, text=True).strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         fail(f"cannot read candidate DEB metadata: {exc}")
     if package_name != "taiji-agent" or architecture != "amd64":
@@ -682,16 +720,14 @@ def main() -> int:
         verify_signature(snapshots["certification-set.json"]["path"], snapshots["certification-set.json.sig"]["path"], "certification set")
         verify_signature(snapshots["release-evidence.json"]["path"], snapshots["release-evidence.json.sig"]["path"], "release evidence")
 
-        release_env = os.environ.copy()
-        release_env.update({
+        release_env = trusted_child_environment({
             "TAIJI_RELEASE_REPO_ROOT": str(ROOT),
             "TAIJI_RELEASE_SKIP_GIT_CHECK": "0",
             "TAIJI_RELEASE_REQUIRE_ARTIFACTS": "1",
             "TAIJI_DELIVERY_DIR": str(delivery_dir),
         })
         result = subprocess.run(
-            [
-                "bash",
+            ["/bin/bash", "-p",
                 str(RELEASE_CHECK),
                 "--delivery-dir",
                 str(delivery_dir),

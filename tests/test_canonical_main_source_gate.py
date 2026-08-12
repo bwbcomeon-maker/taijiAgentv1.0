@@ -48,6 +48,7 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
         mode="formal",
         source_root=None,
         dirty_policy=None,
+        expect_head=None,
         env_overrides=None,
     ):
         source_root = source_root or repo
@@ -63,6 +64,8 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
         ]
         if dirty_policy:
             command.extend(["--dirty-policy", dirty_policy])
+        if expect_head:
+            command.extend(["--expect-head", expect_head])
         return run(
             command,
             cwd=repo,
@@ -71,13 +74,70 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
         )
 
     def test_formal_mode_accepts_clean_main_in_primary_worktree(self):
-        result = self.gate(self.repo)
+        expected = run(["git", "rev-parse", "HEAD"], cwd=self.repo).stdout.strip()
+        result = self.gate(self.repo, expect_head=expected)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("mode: formal", result.stdout)
         self.assertIn("branch: main", result.stdout)
         self.assertIn("worktree: primary", result.stdout)
         self.assertIn("canonical main source gate passed", result.stdout)
+
+    def test_formal_mode_rejects_expected_head_mismatch(self):
+        result = self.gate(self.repo, expect_head="a" * 40)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected head", result.stderr.lower())
+
+    def test_gate_uses_fixed_git_when_exported_function_is_hostile(self):
+        expected = run(["git", "rev-parse", "HEAD"], cwd=self.repo).stdout.strip()
+        result = self.gate(
+            self.repo,
+            expect_head=expected,
+            env_overrides={
+                "BASH_FUNC_git%%": "() { printf 'AMBIENT_GIT_FUNCTION_USED\\n' >&2; /usr/bin/git \"$@\"; }",
+                "BASH_ENV": str(self.root / "does-not-exist"),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("AMBIENT_GIT_FUNCTION_USED", result.stderr)
+
+    def test_gate_disables_repo_local_fsmonitor_hooks(self):
+        marker = self.root / "fsmonitor-ran"
+        hook = self.root / "fsmonitor-hook.sh"
+        hook.write_text(
+            "#!/bin/sh\nprintf ran >> \"{}\"\nprintf '\\n'\n".format(marker),
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+        run(["git", "config", "core.fsmonitor", str(hook)], cwd=self.repo)
+
+        result = self.gate(self.repo)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(marker.exists(), "formal source gate executed core.fsmonitor")
+
+    def test_gate_rejects_external_clean_filters_before_status(self):
+        marker = self.root / "clean-filter-ran"
+        hook = self.root / "clean-filter.sh"
+        hook.write_text(
+            "#!/bin/sh\nprintf ran >> \"{}\"\ncat\n".format(marker),
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+        (self.repo / ".git/info/attributes").write_text(
+            "*.txt filter=taiji-source-test\n",
+            encoding="utf-8",
+        )
+        run(["git", "config", "filter.taiji-source-test.clean", str(hook)], cwd=self.repo)
+        run(["git", "config", "filter.taiji-source-test.smudge", "cat"], cwd=self.repo)
+
+        result = self.gate(self.repo)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe executable filter", result.stderr.lower())
+        self.assertFalse(marker.exists(), "formal source gate executed a clean filter")
 
     def test_formal_mode_rejects_non_main_branch(self):
         run(["git", "switch", "-c", "feature/demo"], cwd=self.repo)
@@ -87,6 +147,21 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("formal source must be branch main", result.stderr)
 
+    def test_formal_mode_rejects_a_sibling_gitdir_as_non_primary(self):
+        canonical = self.repo / ".git"
+        alternate = self.repo / ".git-alternate"
+        canonical.rename(alternate)
+        (alternate / "info/exclude").write_text(
+            ".git-alternate/\n",
+            encoding="utf-8",
+        )
+        canonical.write_text("gitdir: .git-alternate\n", encoding="utf-8")
+
+        result = self.gate(self.repo)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("primary worktree", result.stderr.lower())
+
     def test_formal_mode_rejects_dirty_main(self):
         (self.repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
 
@@ -94,6 +169,23 @@ class CanonicalMainSourceGateTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("formal source worktree is dirty", result.stderr)
+
+    def test_formal_mode_does_not_accept_a_replacement_commit_tree(self):
+        original = run(["git", "rev-parse", "HEAD"], cwd=self.repo).stdout.strip()
+        run(["git", "switch", "-c", "alternate-source"], cwd=self.repo)
+        tracked = self.repo / "tracked.txt"
+        tracked.write_text("replacement tree\n", encoding="utf-8")
+        run(["git", "add", "tracked.txt"], cwd=self.repo)
+        run(["git", "commit", "-m", "replacement tree"], cwd=self.repo)
+        alternate = run(["git", "rev-parse", "HEAD"], cwd=self.repo).stdout.strip()
+        run(["git", "switch", "main"], cwd=self.repo)
+        run(["git", "replace", original, alternate], cwd=self.repo)
+        run(["git", "reset", "--hard", original], cwd=self.repo)
+
+        result = self.gate(self.repo, expect_head=original)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dirty", result.stderr.lower())
 
     def test_runtime_policy_allows_only_root_agent_instructions_to_be_dirty(self):
         (self.repo / "AGENTS.md").write_text("initial instructions\n", encoding="utf-8")

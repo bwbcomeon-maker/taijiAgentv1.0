@@ -1614,7 +1614,7 @@ class CertificationSetV1Tests(unittest.TestCase):
         path.unlink()
         path.write_text("{}\n", encoding="utf-8")
         hardlink = self.records / "kylin-min-ukui" / "hardlink.json"
-        hardlink.hardlink_to(path)
+        os.link(path, hardlink)
         result = self.command()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("exactly", result.stderr.lower())

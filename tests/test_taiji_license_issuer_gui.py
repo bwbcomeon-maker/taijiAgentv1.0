@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -20,6 +22,8 @@ AGENT_PYTHON = Path(
     )
 )
 AGENT_DIR = ROOT / "hermes-local-lab" / "sources" / "hermes-agent"
+NODE = os.environ.get("TAIJI_TEST_NODE", "node")
+OPENSSL = "/usr/bin/openssl"
 TEST_MACHINE_CODE = "sha256:" + "c" * 64
 OTHER_MACHINE_CODE = "sha256:" + "d" * 64
 TEST_DEVICE_ID = "sha256:" + "1" * 64
@@ -28,7 +32,7 @@ OTHER_DEVICE_ID = "sha256:" + "2" * 64
 
 def _node(script: str, *, env: dict | None = None) -> dict:
     proc = subprocess.run(
-        ["node", "-e", script],
+        [NODE, "-e", script],
         cwd=ROOT,
         env={**os.environ, **(env or {})},
         text=True,
@@ -395,7 +399,7 @@ class TaijiLicenseIssuerGuiTest(unittest.TestCase):
         product_source = (AGENT_DIR / "taiji_license.py").read_text(encoding="utf-8")
         issuer_key = ROOT / "tools" / "taiji-license-issuer" / "private" / "signing-public.pem"
         completed = subprocess.run(
-            ["openssl", "pkey", "-pubin", "-in", str(issuer_key), "-outform", "DER"],
+            [OPENSSL, "pkey", "-pubin", "-in", str(issuer_key), "-outform", "DER"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import builtins
 import contextvars
 import hashlib
@@ -67,19 +69,22 @@ PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa
 PINNED_NODE_VERSION = "22.23.1"
 PINNED_NODE_ARCHIVE_SHA256 = "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PINNED_NPM_VERSION = "10.9.8"
+PINNED_NPM_CLI_SHA256 = "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7"
 PINNED_PYTHON_VERSION = "3.11.15"
 PINNED_PYTHON_ARCHIVE_SHA256 = "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
 PINNED_PYTHON_EXECUTABLE_SHA256 = "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
 PINNED_ELECTRON_VERSION = "39.8.10"
 PINNED_ELECTRON_ARCHIVE_SHA256 = "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1"
 PINNED_ELECTRON_EXECUTABLE_SHA256 = "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
-PINNED_SOURCE_INTEGRITY_HELPER_SHA256 = "dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+PINNED_SOURCE_INTEGRITY_HELPER_SHA256 = "eaebadbe2f86d76d09f19ed210ad407e5926a242c46f53fb89e26253db8d8d7a"
 PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
 PINNED_RELEASE_PUBLIC_KEY_PATH = (
     Path(__file__).resolve().parents[1]
     / "tools/taiji-release-evidence/signing-public.pem"
 )
 TRUSTED_OPENSSL = Path("/usr/bin/openssl")
+TRUSTED_SYSTEM_PYTHON = Path("/usr/bin/python3")
 TOOLCHAIN_MANIFEST_FIELDS = {
     "python_dependency_lock_status",
     "python_lock_basename",
@@ -102,6 +107,94 @@ ACCEPTANCE_MANIFEST_FIELDS = {
     "acceptance_tools_manifest_sha256",
     "acceptance_entrypoint_sha256",
     "installed_release_manifest_sha256",
+}
+FORMAL_BUILD_TEST_LOG_BASENAME = "formal-build-tests.log"
+FORMAL_BUILD_TEST_LOG_SCHEMA = "taiji-formal-build-tests/v2"
+FORMAL_BUILD_TEST_TARGET_COUNT = 20
+FORMAL_BUILD_TEST_TARGET_CONTRACT_BYTES = 1864
+FORMAL_BUILD_TEST_TARGET_CONTRACT_SHA256 = (
+    "5fdcd9335ac9c722b224c06b03d817bd505cff4abc514b09f8d9ba604c11953b"
+)
+FORMAL_BUILD_TEST_FIELDS = {
+    "formal_build_tests_status",
+    "formal_build_tests_log_basename",
+    "formal_build_tests_log_sha256",
+}
+FORMAL_BUILD_TEST_SUITES = (
+    "root-runtime",
+    "desktop-evidence-node",
+    "kylin-install-simulation",
+    "agent",
+    "webui-runtime-lint",
+    "webui-python",
+)
+FORMAL_BUILD_TEST_SUITE_TARGET_COUNTS = (1, 1, 1, 5, 1, 11)
+FORMAL_BUILD_TEST_SUITE_RUNNERS = (
+    "unittest",
+    "node-test",
+    "unittest",
+    "pytest",
+    "eslint",
+    "pytest",
+)
+FORMAL_BUILD_TEST_COUNT_FIELD_COUNT = 7
+DELIVERY_INVENTORY_EXCLUDED_TOP_LEVEL = frozenset(
+    {
+        "certification",
+        "offline-install-rehearsal",
+        "target-verification",
+        "构建日志",
+        "诊断报告",
+        "旧版备份",
+    }
+)
+DELIVERY_INVENTORY_EXCLUDED_ROOT_FILES = frozenset(
+    {"release-evidence.json", "release-evidence.json.sig"}
+)
+PACKAGE_MANIFEST_V3_EXACT_FIELDS = {
+    "schema",
+    "package",
+    "version",
+    "architecture",
+    "source_commit",
+    "source_archive_basename",
+    "source_archive_sha256",
+    "source_inventory_basename",
+    "source_inventory_sha256",
+    "deb_basename",
+    "deb_sha256",
+    "acceptance_binding_sha256",
+    "acceptance_tools_manifest_sha256",
+    "acceptance_entrypoint_sha256",
+    "installed_release_manifest_sha256",
+    "maintainer",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
+    "upgrade_data_contract_id",
+    "upgrade_data_contract_sha256",
+    "elf_abi_audit_basename",
+    "elf_abi_audit_sha256",
+    "python_dependency_lock_status",
+    "python_lock_basename",
+    "python_lock_sha256",
+    "python_version",
+    "python_archive_sha256",
+    "python_executable_sha256",
+    "uv_version",
+    "uv_archive_sha256",
+    "uv_executable_sha256",
+    "node_version",
+    "node_archive_sha256",
+    "node_executable_sha256",
+    "electron_version",
+    "electron_archive_sha256",
+    "electron_executable_sha256",
+    "desktop_entry_sha256",
+    "icon_set_sha256",
+    "built_at_utc",
+    "formal_build_tests_status",
+    "formal_build_tests_log_basename",
+    "formal_build_tests_log_sha256",
 }
 ELECTRON_PATH = "/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
 DRIVER_RESULT_BASENAME = "desktop-driver-result.json"
@@ -614,6 +707,48 @@ class BuildBinding:
     delivery_inventory_sha256: builtins.str = ""
 
 
+class DeliveryInventorySnapshot:
+    """One internally consistent, path-bound view of an offline delivery."""
+
+    __slots__ = (
+        "digest",
+        "paths",
+        "file_hashes",
+        "file_identities",
+        "directory_identities",
+        "directory_entries",
+        "control_payloads",
+        "manifest",
+        "marker",
+        "formal_build_test_digest",
+    )
+
+    def __init__(
+        self,
+        *,
+        digest: str,
+        paths: set[str],
+        file_hashes: dict[str, str],
+        file_identities: dict[str, tuple[int, ...]],
+        directory_identities: dict[str, tuple[int, ...]],
+        directory_entries: dict[str, tuple[str, ...]],
+        control_payloads: dict[str, bytes],
+        manifest: dict[str, Any],
+        marker: dict[str, str],
+        formal_build_test_digest: str,
+    ) -> None:
+        self.digest = digest
+        self.paths = frozenset(paths)
+        self.file_hashes = dict(file_hashes)
+        self.file_identities = dict(file_identities)
+        self.directory_identities = dict(directory_identities)
+        self.directory_entries = dict(directory_entries)
+        self.control_payloads = dict(control_payloads)
+        self.manifest = dict(manifest)
+        self.marker = dict(marker)
+        self.formal_build_test_digest = formal_build_test_digest
+
+
 def canonical_policy_identity() -> tuple[str, str]:
     """Return the checked-in policy identity, with a delivery-copy fallback.
 
@@ -826,9 +961,162 @@ def resolve_trusted_openssl() -> str:
     return str(resolved)
 
 
+def resolve_trusted_system_python() -> str:
+    """Resolve the root-managed system Python used by offline helper subprocesses."""
+
+    try:
+        alias = TRUSTED_SYSTEM_PYTHON.lstat()
+        resolved = TRUSTED_SYSTEM_PYTHON.resolve(strict=True)
+        resolved_stat = resolved.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise EvidenceError(f"缺少固定可信系统 Python: {exc}") from exc
+    if (
+        alias.st_uid != 0
+        or alias.st_mode & 0o022
+        or not (stat.S_ISREG(alias.st_mode) or stat.S_ISLNK(alias.st_mode))
+        or resolved.parent != Path("/usr/bin")
+        or resolved.is_symlink()
+        or not stat.S_ISREG(resolved_stat.st_mode)
+        or resolved_stat.st_uid != 0
+        or resolved_stat.st_mode & 0o022
+        or not resolved_stat.st_mode & 0o111
+    ):
+        raise EvidenceError("固定系统 Python 不是 /usr/bin 下 root 管理的可执行实体")
+    return str(TRUSTED_SYSTEM_PYTHON)
+
+
+def open_snapshot_regular(
+    path: Path,
+    label: str,
+    expected_sha256: str,
+    expected_identity: tuple[int, ...],
+) -> tuple[int, os.stat_result]:
+    """Open and hash one file while keeping its verified descriptor alive."""
+
+    descriptor, opened = open_regular(path, label)
+    try:
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise EvidenceError(f"{label} 在 held-FD 摘要期间被截断")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise EvidenceError(f"{label} 在 held-FD 摘要期间增长")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            regular_file_identity(opened) != expected_identity
+            or regular_file_identity(current) != expected_identity
+            or regular_file_identity(opened) != regular_file_identity(after)
+            or digest.hexdigest() != expected_sha256
+        ):
+            raise EvidenceError(f"{label} 与交付清单初始快照不一致")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor, opened
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def inherited_descriptor_path(descriptor: int) -> str:
+    if Path("/proc/self/fd").is_dir():
+        return f"/proc/self/fd/{descriptor}"
+    return f"/dev/fd/{descriptor}"
+
+
+def run_source_integrity_helper_snapshot(
+    delivery_dir: Path,
+    source_relative: str,
+    inventory_relative: str,
+    file_hashes: dict[str, str],
+    file_identities: dict[str, tuple[int, ...]],
+) -> None:
+    """Run the reviewed helper against the same held files hashed by inventory."""
+
+    members = (
+        ("source-archive-integrity.py", "源码归档完整性工具"),
+        (source_relative, "当前源码包"),
+        (inventory_relative, "当前源码成员清单"),
+    )
+    descriptors: list[int] = []
+    try:
+        for relative, label in members:
+            descriptor, _ = open_snapshot_regular(
+                delivery_dir / relative,
+                label,
+                file_hashes[relative],
+                file_identities[relative],
+            )
+            descriptors.append(descriptor)
+        helper_path = inherited_descriptor_path(descriptors[0])
+        python = resolve_trusted_system_python()
+        with tempfile.TemporaryDirectory(prefix="taiji-validator-helper-", dir="/tmp") as home:
+            os.chmod(home, 0o700)
+            helper_result = subprocess.run(
+                [
+                    python,
+                    "-I",
+                    "-B",
+                    helper_path,
+                    "verify",
+                    "--archive-fd",
+                    str(descriptors[1]),
+                    "--archive-basename",
+                    Path(source_relative).name,
+                    "--inventory-fd",
+                    str(descriptors[2]),
+                ],
+                cwd=home,
+                env={
+                    "HOME": home,
+                    "TMPDIR": home,
+                    "PATH": "/usr/bin:/bin",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONNOUSERSITE": "1",
+                },
+                pass_fds=tuple(descriptors),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        if helper_result.returncode != 0:
+            detail = (helper_result.stderr or helper_result.stdout).strip()
+            raise EvidenceError(
+                "源码包与 archive-derived 成员清单不一致"
+                + (f": {detail}" if detail else "")
+            )
+        for descriptor, (relative, label) in zip(descriptors, members):
+            opened = os.fstat(descriptor)
+            current = (delivery_dir / relative).lstat()
+            if (
+                regular_file_identity(opened) != file_identities[relative]
+                or regular_file_identity(current) != file_identities[relative]
+            ):
+                raise EvidenceError(f"{label} 在隔离 helper 执行期间发生变化")
+    finally:
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -> tuple[bytes, os.stat_result]:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"{label} 不可读取: {path}: {exc}") from exc
     descriptor, file_stat = open_regular(path, label)
     try:
+        if regular_file_identity(before) != regular_file_identity(file_stat):
+            raise EvidenceError(f"{label} 在打开前发生变化: {path}")
         if file_stat.st_size > limit:
             raise EvidenceError(f"{label} 超过大小上限 {limit}: {path}")
         chunks: list[bytes] = []
@@ -842,12 +1130,28 @@ def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -
         payload = b"".join(chunks)
         if len(payload) != file_stat.st_size:
             raise EvidenceError(f"{label} 读取期间发生变化: {path}")
+        if os.read(descriptor, 1):
+            raise EvidenceError(f"{label} 读取期间增长: {path}")
+        after = os.fstat(descriptor)
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise EvidenceError(f"{label} 读回期间丢失: {path}: {exc}") from exc
+        if (
+            regular_file_identity(file_stat) != regular_file_identity(after)
+            or regular_file_identity(file_stat) != regular_file_identity(current)
+        ):
+            raise EvidenceError(f"{label} 读取期间身份发生变化: {path}")
         return payload, file_stat
     finally:
         os.close(descriptor)
 
 
 def sha256_regular_file(path: Path, label: str) -> tuple[str, os.stat_result]:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"{label} 不可读取: {path}: {exc}") from exc
     descriptor, file_stat = open_regular(path, label)
     digest = hashlib.sha256()
     total = 0
@@ -858,11 +1162,22 @@ def sha256_regular_file(path: Path, label: str) -> tuple[str, os.stat_result]:
                 break
             total += len(chunk)
             digest.update(chunk)
+        if total != file_stat.st_size:
+            raise EvidenceError(f"{label} 摘要计算期间发生变化: {path}")
+        after = os.fstat(descriptor)
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise EvidenceError(f"{label} 摘要期间丢失: {path}: {exc}") from exc
+        if (
+            regular_file_identity(before) != regular_file_identity(file_stat)
+            or regular_file_identity(file_stat) != regular_file_identity(after)
+            or regular_file_identity(file_stat) != regular_file_identity(current)
+        ):
+            raise EvidenceError(f"{label} 摘要计算期间身份发生变化: {path}")
+        return digest.hexdigest(), file_stat
     finally:
         os.close(descriptor)
-    if total != file_stat.st_size:
-        raise EvidenceError(f"{label} 摘要计算期间发生变化: {path}")
-    return digest.hexdigest(), file_stat
 
 
 def sha256_bounded_stable_regular_file(
@@ -912,8 +1227,23 @@ def sha256_bounded_stable_regular_file(
         os.close(descriptor)
 
 
-def sha256_regular_tar_member(path: Path, member_name: str, label: str) -> str:
-    descriptor, before = open_regular(path, label)
+def sha256_regular_tar_member(
+    path: Path,
+    member_name: str,
+    label: str,
+    *,
+    expected_sha256: str = "",
+    expected_identity: tuple[int, ...] = (),
+) -> str:
+    if expected_sha256 and expected_identity:
+        descriptor, before = open_snapshot_regular(
+            path,
+            label,
+            expected_sha256,
+            expected_identity,
+        )
+    else:
+        descriptor, before = open_regular(path, label)
     digest = hashlib.sha256()
     total = 0
     try:
@@ -956,22 +1286,110 @@ def sha256_regular_tar_member(path: Path, member_name: str, label: str) -> str:
             after.st_mtime_ns,
             after.st_ctime_ns,
         )
-        if identity_before != identity_after:
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise EvidenceError(f"{label} 在成员摘要计算期间丢失: {exc}") from exc
+        if (
+            identity_before != identity_after
+            or (
+                expected_identity
+                and regular_file_identity(after) != expected_identity
+            )
+            or regular_file_identity(after) != regular_file_identity(current)
+        ):
             raise EvidenceError(f"{label} 在成员摘要计算期间发生变化")
         return digest.hexdigest()
     finally:
         os.close(descriptor)
 
 
-def delivery_inventory_sha256(delivery_dir: Path) -> str:
-    excluded_top_level = {
-        "certification",
-        "offline-install-rehearsal",
-        "target-verification",
-        "构建日志",
-        "诊断报告",
-        "旧版备份",
-    }
+def canonical_delivery_inventory_digest(
+    directory_identities: dict[str, tuple[int, ...]],
+    file_hashes: dict[str, str],
+) -> str:
+    canonical = hashlib.sha256()
+    records = [("D", relative, "") for relative in directory_identities]
+    records.extend(("F", relative, digest) for relative, digest in file_hashes.items())
+    for kind, relative, digest in sorted(records):
+        canonical.update(kind.encode("ascii"))
+        canonical.update(b"\0")
+        canonical.update(relative.encode("utf-8"))
+        canonical.update(b"\0")
+        if kind == "F":
+            canonical.update(digest.encode("ascii"))
+            canonical.update(b"\0")
+    return canonical.hexdigest()
+
+
+def _revalidate_delivery_snapshot(
+    delivery_dir: Path,
+    snapshot: DeliveryInventorySnapshot,
+) -> None:
+    """Reject every path, identity, entry-set, or content drift from a snapshot."""
+
+    require_trusted_ancestor_chain(delivery_dir, "交付目录")
+    for relative, expected_identity in snapshot.directory_identities.items():
+        directory = delivery_dir if relative == "." else delivery_dir / relative
+        try:
+            current = directory.lstat()
+        except OSError as exc:
+            raise EvidenceError(f"交付目录快照目录丢失: {relative}: {exc}") from exc
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or directory.is_symlink()
+            or regular_file_identity(current) != expected_identity
+        ):
+            raise EvidenceError(f"交付目录快照目录身份发生变化: {relative}")
+        try:
+            with os.scandir(directory) as entries:
+                current_entries = [entry.name for entry in entries]
+        except OSError as exc:
+            raise EvidenceError(f"交付目录快照无法复核目录项: {relative}: {exc}") from exc
+        if relative == ".":
+            current_entries = [
+                name
+                for name in current_entries
+                if name not in DELIVERY_INVENTORY_EXCLUDED_TOP_LEVEL
+                and name not in DELIVERY_INVENTORY_EXCLUDED_ROOT_FILES
+            ]
+        if tuple(sorted(current_entries)) != snapshot.directory_entries[relative]:
+            raise EvidenceError(f"交付目录快照的精确目录项发生变化: {relative}")
+
+    for relative, expected_identity in snapshot.file_identities.items():
+        digest, current = sha256_regular_file(
+            delivery_dir / relative,
+            f"交付目录快照文件 {relative}",
+        )
+        if (
+            regular_file_identity(current) != expected_identity
+            or digest != snapshot.file_hashes[relative]
+        ):
+            raise EvidenceError(f"交付目录快照文件身份或内容发生变化: {relative}")
+
+    if set(snapshot.file_identities) != set(snapshot.paths):
+        raise EvidenceError("交付目录快照文件集合内部不一致")
+    try:
+        final_root = delivery_dir.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"交付目录快照 root 最终复核失败: {exc}") from exc
+    if (
+        not stat.S_ISDIR(final_root.st_mode)
+        or delivery_dir.is_symlink()
+        or regular_file_identity(final_root) != snapshot.directory_identities["."]
+    ):
+        raise EvidenceError("交付目录快照 root 在闭包期间发生变化")
+    if (
+        canonical_delivery_inventory_digest(
+            snapshot.directory_identities,
+            snapshot.file_hashes,
+        )
+        != snapshot.digest
+    ):
+        raise EvidenceError("交付目录快照 canonical 摘要内部不一致")
+
+
+def _delivery_inventory_snapshot(delivery_dir: Path) -> DeliveryInventorySnapshot:
     required_relative = {
         "00_制包机_生成离线交付包.sh",
         "01_制包机_发布预检.sh",
@@ -984,6 +1402,7 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         "操作说明.md",
         "版本信息.txt",
         "生成的安装包/.build-success",
+        "生成的安装包/formal-build-tests.log",
         "生成的安装包/taiji-package-manifest.json",
         "生成的安装包/构建报告.txt",
         "验收工具/run-installed-electron-acceptance.js",
@@ -997,9 +1416,10 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
     }
     require_trusted_ancestor_chain(delivery_dir, "交付目录")
     try:
-        root_mode = delivery_dir.lstat().st_mode
+        root_stat = delivery_dir.lstat()
     except OSError as exc:
         raise EvidenceError(f"交付目录不可读取: {delivery_dir}: {exc}") from exc
+    root_mode = root_stat.st_mode
     if not stat.S_ISDIR(root_mode) or delivery_dir.is_symlink():
         raise EvidenceError("交付目录必须是真实目录，不能是符号链接")
     root_permissions = stat.S_IMODE(root_mode)
@@ -1008,6 +1428,11 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
 
     file_inventory: list[tuple[str, int, str]] = []
     directory_inventory: list[tuple[str, int]] = [(".", root_permissions)]
+    file_identities: dict[str, tuple[int, ...]] = {}
+    directory_identities: dict[str, tuple[int, ...]] = {
+        ".": regular_file_identity(root_stat)
+    }
+    directory_entries: dict[str, tuple[str, ...]] = {}
 
     def walk_error(exc: OSError) -> None:
         raise EvidenceError(f"交付目录遍历失败: {exc}") from exc
@@ -1019,25 +1444,34 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         onerror=walk_error,
     ):
         current_path = Path(current)
+        current_relative = (
+            "." if current_path == delivery_dir else current_path.relative_to(delivery_dir).as_posix()
+        )
         if current_path == delivery_dir:
-            directories[:] = [name for name in directories if name not in excluded_top_level]
+            directories[:] = [
+                name
+                for name in directories
+                if name not in DELIVERY_INVENTORY_EXCLUDED_TOP_LEVEL
+            ]
+            filenames[:] = [
+                name
+                for name in filenames
+                if name not in DELIVERY_INVENTORY_EXCLUDED_ROOT_FILES
+            ]
+        directory_entries[current_relative] = tuple(sorted(directories + filenames))
         for directory in directories:
             directory_path = current_path / directory
-            mode = directory_path.lstat().st_mode
+            directory_stat = directory_path.lstat()
+            mode = directory_stat.st_mode
             if not stat.S_ISDIR(mode) or directory_path.is_symlink():
                 raise EvidenceError(f"交付目录含不安全目录节点: {directory_path}")
             permissions = stat.S_IMODE(mode)
             if permissions & 0o022:
                 raise EvidenceError(f"交付目录节点不能允许 group/other 写入: {directory_path}")
-            directory_inventory.append(
-                (directory_path.relative_to(delivery_dir).as_posix(), permissions)
-            )
+            relative_directory = directory_path.relative_to(delivery_dir).as_posix()
+            directory_inventory.append((relative_directory, permissions))
+            directory_identities[relative_directory] = regular_file_identity(directory_stat)
         for filename in filenames:
-            if current_path == delivery_dir and filename in {
-                "release-evidence.json",
-                "release-evidence.json.sig",
-            }:
-                continue
             file_path = current_path / filename
             relative = file_path.relative_to(delivery_dir).as_posix()
             digest, file_stat = sha256_regular_file(file_path, f"交付文件 {relative}")
@@ -1045,28 +1479,62 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             if permissions & 0o022:
                 raise EvidenceError(f"交付文件不能允许 group/other 写入: {file_path}")
             file_inventory.append((relative, permissions, digest))
+            file_identities[relative] = regular_file_identity(file_stat)
     file_inventory.sort()
     directory_inventory.sort()
     paths = {relative for relative, _mode, _digest in file_inventory}
     file_hashes = {relative: digest for relative, _mode, digest in file_inventory}
+    control_payloads: dict[str, bytes] = {}
+
+    def read_inventory_payload(relative: str, label: str, *, limit: int = MAX_JSON_BYTES) -> bytes:
+        payload, opened = read_regular_bytes(delivery_dir / relative, label, limit=limit)
+        if (
+            relative not in file_identities
+            or regular_file_identity(opened) != file_identities[relative]
+            or hashlib.sha256(payload).hexdigest() != file_hashes.get(relative)
+        ):
+            raise EvidenceError(f"{label} 与交付清单初始快照不一致")
+        control_payloads[relative] = payload
+        return payload
     missing = sorted(required_relative - paths)
     if missing:
         raise EvidenceError(f"交付清单缺少必需文件: {', '.join(missing)}")
     manifest_path = delivery_dir / "生成的安装包/taiji-package-manifest.json"
-    manifest_bytes, _manifest_stat = read_regular_bytes(
-        manifest_path,
+    manifest_bytes = read_inventory_payload(
+        "生成的安装包/taiji-package-manifest.json",
         "交付清单 package manifest",
     )
-    try:
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (UnicodeError, ValueError) as exc:
-        raise EvidenceError("交付清单 package manifest 不是合法 JSON") from exc
-    if not isinstance(manifest, dict) or isinstance(manifest, list):
-        raise EvidenceError("交付清单 package manifest 必须是对象")
+    manifest = parse_json_bytes(manifest_bytes, "交付清单 package manifest")
 
+    marker: dict[str, str] = {}
+    formal_build_test_digest = ""
     if manifest.get("schema") == "taiji-package-manifest/v3":
+        reject_target_baseline_fields(manifest, "发布 manifest")
+        expected_policy_id, expected_policy_sha256 = canonical_policy_identity()
+        if (
+            manifest.get("compatibility_policy_id") != expected_policy_id
+            or manifest.get("compatibility_policy_sha256") != expected_policy_sha256
+        ):
+            raise EvidenceError(
+                "发布 manifest compatibility policy 与当前 canonical policy 不一致"
+            )
         toolchain = validate_manifest_toolchain_identity(manifest)
         acceptance = validate_manifest_acceptance_identity(manifest)
+        marker_payload = read_inventory_payload(
+            "生成的安装包/.build-success",
+            "构建成功标记",
+        )
+        marker = parse_marker_bytes(marker_payload)
+        formal_log_payload = read_inventory_payload(
+            "生成的安装包/formal-build-tests.log",
+            "正式构建测试日志",
+            limit=MAX_EVIDENCE_BYTES,
+        )
+        formal_build_test_digest = validate_formal_build_test_payloads(
+            manifest,
+            marker,
+            formal_log_payload,
+        )
         source_commit = manifest.get("source_commit")
         if not isinstance(source_commit, str) or not FULL_COMMIT_RE.fullmatch(source_commit):
             raise EvidenceError("v3 交付清单 manifest source_commit 不合法")
@@ -1102,11 +1570,13 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             delivery_dir / expected_source_name,
             "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock",
             "当前源码包",
+            expected_sha256=file_hashes[expected_source_name],
+            expected_identity=file_identities[expected_source_name],
         )
         if source_lock_hash != toolchain["python_lock_sha256"]:
             raise EvidenceError("当前源码包 uv.lock SHA256 与正式工具链身份不一致")
-        source_sums_payload, _ = read_regular_bytes(
-            delivery_dir / "SHA256SUMS.txt",
+        source_sums_payload = read_inventory_payload(
+            "SHA256SUMS.txt",
             "根 SHA256SUMS",
         )
         try:
@@ -1127,30 +1597,13 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         helper_path = delivery_dir / "source-archive-integrity.py"
         if file_hashes["source-archive-integrity.py"] != PINNED_SOURCE_INTEGRITY_HELPER_SHA256:
             raise EvidenceError("交付目录源码归档完整性工具不是固定审查版本")
-        helper_result = subprocess.run(
-            [
-                sys.executable,
-                str(helper_path),
-                "verify",
-                "--archive",
-                str(delivery_dir / expected_source_name),
-                "--inventory",
-                str(delivery_dir / expected_inventory_name),
-            ],
-            cwd=str(delivery_dir),
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+        run_source_integrity_helper_snapshot(
+            delivery_dir,
+            expected_source_name,
+            expected_inventory_name,
+            file_hashes,
+            file_identities,
         )
-        if helper_result.returncode != 0:
-            detail = (helper_result.stderr or helper_result.stdout).strip()
-            raise EvidenceError(
-                "源码包与 archive-derived 成员清单不一致"
-                + (f": {detail}" if detail else "")
-            )
         for key, expected in {
             "source_archive_basename": expected_source_name,
             "source_archive_sha256": source_hash,
@@ -1185,7 +1638,10 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
         version = manifest.get("version")
         if not isinstance(version, str) or deb_name != f"taiji-agent_{version}_amd64.deb":
             raise EvidenceError("v3 交付清单 manifest version 与 DEB basename 不一致")
-        marker = parse_marker(delivery_dir / "生成的安装包/.build-success")
+        read_inventory_payload(
+            f"生成的安装包/{deb_name}.sha256",
+            "DEB SHA256 sidecar",
+        )
         marker_expected = {
             "version": version,
             "source_archive": expected_source_name,
@@ -1202,6 +1658,9 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
             "elf_abi_audit_sha256": manifest.get("elf_abi_audit_sha256"),
             "icon_set_sha256": manifest.get("icon_set_sha256"),
             "maintainer": manifest.get("maintainer"),
+            "formal_build_tests_status": "pass",
+            "formal_build_tests_log_basename": FORMAL_BUILD_TEST_LOG_BASENAME,
+            "formal_build_tests_log_sha256": formal_build_test_digest,
             **toolchain,
             **acceptance,
         }
@@ -1238,21 +1697,26 @@ def delivery_inventory_sha256(delivery_dir: Path) -> str:
     ]
     if len(source_archives) != 1:
         raise EvidenceError("交付清单必须且只能包含一个当前源码包")
-    canonical = hashlib.sha256()
-    records = [
-        ("D", relative, "") for relative, _mode in directory_inventory
-    ] + [
-        ("F", relative, digest) for relative, _mode, digest in file_inventory
-    ]
-    for kind, relative, digest in sorted(records):
-        canonical.update(kind.encode("ascii"))
-        canonical.update(b"\0")
-        canonical.update(relative.encode("utf-8"))
-        canonical.update(b"\0")
-        if kind == "F":
-            canonical.update(digest.encode("ascii"))
-            canonical.update(b"\0")
-    return canonical.hexdigest()
+    snapshot = DeliveryInventorySnapshot(
+        digest=canonical_delivery_inventory_digest(directory_identities, file_hashes),
+        paths=paths,
+        file_hashes=file_hashes,
+        file_identities=file_identities,
+        directory_identities=directory_identities,
+        directory_entries=directory_entries,
+        control_payloads=control_payloads,
+        manifest=manifest,
+        marker=marker,
+        formal_build_test_digest=formal_build_test_digest,
+    )
+    _revalidate_delivery_snapshot(delivery_dir, snapshot)
+    return snapshot
+
+
+def delivery_inventory_sha256(delivery_dir: Path) -> str:
+    """Return the canonical digest of one fully closed delivery snapshot."""
+
+    return _delivery_inventory_snapshot(delivery_dir).digest
 
 
 def parse_json_bytes(payload: bytes, label: str) -> dict[str, Any]:
@@ -1644,8 +2108,7 @@ def verify_with_pinned_release_public_key(
             raise EvidenceError(f"{label} detached signature 未通过固定发布公钥验证")
 
 
-def parse_marker(path: Path) -> dict[str, str]:
-    payload, _ = read_regular_bytes(path, "构建成功标记")
+def parse_marker_bytes(payload: bytes) -> dict[str, str]:
     result: dict[str, str] = {}
     try:
         lines = payload.decode("utf-8").splitlines()
@@ -1661,30 +2124,366 @@ def parse_marker(path: Path) -> dict[str, str]:
     return result
 
 
+def parse_marker(path: Path) -> dict[str, str]:
+    payload, _ = read_regular_bytes(path, "构建成功标记")
+    return parse_marker_bytes(payload)
+
+
+def validate_formal_build_test_payloads(
+    manifest: dict[str, Any],
+    marker: dict[str, str],
+    payload: bytes,
+) -> str:
+    """Validate one already-captured manifest/marker/log snapshot."""
+
+    require_exact_keys(
+        manifest,
+        PACKAGE_MANIFEST_V3_EXACT_FIELDS,
+        "当前 v3 package manifest",
+    )
+    for field, expected in {
+        "schema": PACKAGE_MANIFEST_SCHEMA_V3,
+        "package": "taiji-agent",
+        "architecture": "amd64",
+    }.items():
+        require_exact(manifest, field, expected)
+    expected_binding = {
+        "formal_build_tests_status": "pass",
+        "formal_build_tests_log_basename": FORMAL_BUILD_TEST_LOG_BASENAME,
+    }
+    for field, expected in expected_binding.items():
+        if manifest.get(field) != expected or marker.get(field) != expected:
+            raise EvidenceError(f"正式构建测试字段 {field} 未精确绑定 PASS 日志")
+    digest = validate_sha256(
+        manifest.get("formal_build_tests_log_sha256"),
+        "formal_build_tests_log_sha256",
+    )
+    if marker.get("formal_build_tests_log_sha256") != digest:
+        raise EvidenceError("正式构建测试日志 SHA256 在 manifest/marker 间不一致")
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise EvidenceError("正式构建测试日志内容与绑定 SHA256 不一致")
+    if not payload.endswith(b"\n") or b"\r" in payload or b"\0" in payload:
+        raise EvidenceError("正式构建测试日志必须是 LF 结尾且不含 CR/NUL 的 canonical 文本")
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeError as exc:
+        raise EvidenceError("正式构建测试日志不是 UTF-8") from exc
+    if not lines or lines[0] != "schema=" + FORMAL_BUILD_TEST_LOG_SCHEMA:
+        if lines and lines[0] == "schema=taiji-formal-build-tests/v1":
+            raise EvidenceError("正式构建测试日志 v1 是已拒绝的 downgrade")
+        raise EvidenceError("正式构建测试日志 schema 不是 exact v2 合同")
+
+    source_commit = manifest.get("source_commit")
+    if not isinstance(source_commit, str) or not FULL_COMMIT_RE.fullmatch(source_commit):
+        raise EvidenceError("正式构建测试日志缺少完整 source commit 身份")
+    for field, expected in {
+        "python_version": PINNED_PYTHON_VERSION,
+        "python_executable_sha256": PINNED_PYTHON_EXECUTABLE_SHA256,
+        "node_version": PINNED_NODE_VERSION,
+        "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
+    }.items():
+        if manifest.get(field) != expected:
+            raise EvidenceError(f"正式构建测试日志的 {field} 未绑定固定工具链")
+    expected_fixed_header = [
+        "schema=" + FORMAL_BUILD_TEST_LOG_SCHEMA,
+        "source_commit=" + source_commit,
+    ]
+    if lines[:2] != expected_fixed_header:
+        raise EvidenceError("正式构建测试日志 v2 source header 身份不一致")
+    index = 2
+
+    def require_header_pattern(pattern: str, label: str) -> None:
+        nonlocal index
+        if index >= len(lines) or re.fullmatch(pattern, lines[index]) is None:
+            raise EvidenceError(f"正式构建测试日志 v2 {label} 不合法")
+        index += 1
+
+    require_header_pattern(
+        r"supervisor_source_sha256=[0-9a-f]{64}",
+        "supervisor source 身份",
+    )
+    expected_toolchain_header = [
+        "python_version=" + PINNED_PYTHON_VERSION,
+        "python_executable_sha256=" + PINNED_PYTHON_EXECUTABLE_SHA256,
+        "node_version=" + PINNED_NODE_VERSION,
+        "node_executable_sha256=" + PINNED_NODE_EXECUTABLE_SHA256,
+        "npm_version=" + PINNED_NPM_VERSION,
+        "npm_cli_sha256=" + PINNED_NPM_CLI_SHA256,
+    ]
+    if lines[index : index + len(expected_toolchain_header)] != expected_toolchain_header:
+        raise EvidenceError("正式构建测试日志 v2 固定工具链 header 不一致")
+    index += len(expected_toolchain_header)
+    require_header_pattern(r"eslint_cli_sha256=[0-9a-f]{64}", "eslint CLI 身份")
+    require_header_pattern(r"closure_sha256=[0-9a-f]{64}", "closure 身份")
+    require_header_pattern(r"closure_file_count=[1-9][0-9]*", "closure 文件数")
+    require_header_pattern(r"closure_total_bytes=[1-9][0-9]*", "closure 字节数")
+    exact_target_header = [
+        "target_count=" + str(FORMAL_BUILD_TEST_TARGET_COUNT),
+        "target_contract_sha256=" + FORMAL_BUILD_TEST_TARGET_CONTRACT_SHA256,
+    ]
+    if lines[index : index + len(exact_target_header)] != exact_target_header:
+        raise EvidenceError("正式构建测试日志 v2 target contract header 不一致")
+    index += len(exact_target_header)
+
+    def parse_count(value: str, label: str) -> int:
+        if re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is None:
+            raise EvidenceError(f"正式构建测试 {label} 不是 canonical 非负整数")
+        return int(value)
+
+    serialized_targets = bytearray()
+    next_ordinal = 0
+    for suite, suite_target_count, expected_runner in zip(
+        FORMAL_BUILD_TEST_SUITES,
+        FORMAL_BUILD_TEST_SUITE_TARGET_COUNTS,
+        FORMAL_BUILD_TEST_SUITE_RUNNERS,
+    ):
+        if index >= len(lines) or lines[index] != "suite_begin=" + suite:
+            raise EvidenceError(f"正式构建测试日志缺少有序 suite begin: {suite}")
+        index += 1
+
+        seen_channels: set[str] = set()
+        last_channel_index = -1
+        while index < len(lines) and lines[index].startswith("child_output="):
+            parts = lines[index].split("\t")
+            if len(parts) != 3 or parts[0] != "child_output=" + suite:
+                raise EvidenceError(f"正式构建测试 {suite} 子输出记录身份不合法")
+            channel = parts[1]
+            if channel not in ("stdout", "stderr"):
+                raise EvidenceError(f"正式构建测试 {suite} 子输出通道不合法")
+            channel_index = ("stdout", "stderr").index(channel)
+            if channel in seen_channels or channel_index <= last_channel_index:
+                raise EvidenceError(f"正式构建测试 {suite} 子输出通道重复或乱序")
+            encoded = parts[2]
+            if not encoded:
+                raise EvidenceError(f"正式构建测试 {suite} 含空子输出记录")
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError, UnicodeError) as exc:
+                raise EvidenceError(f"正式构建测试 {suite} 子输出不是 canonical base64") from exc
+            if (
+                not decoded
+                or len(decoded) > 1024 * 1024
+                or base64.b64encode(decoded).decode("ascii") != encoded
+            ):
+                raise EvidenceError(f"正式构建测试 {suite} 子输出越界或不 canonical")
+            seen_channels.add(channel)
+            last_channel_index = channel_index
+            index += 1
+
+        suite_totals = [0] * FORMAL_BUILD_TEST_COUNT_FIELD_COUNT
+        for _suite_offset in range(suite_target_count):
+            if index >= len(lines):
+                raise EvidenceError(f"正式构建测试 {suite} 缺少 target result")
+            parts = lines[index].split("\t")
+            if len(parts) != 4 + FORMAL_BUILD_TEST_COUNT_FIELD_COUNT:
+                raise EvidenceError(f"正式构建测试 {suite} target result 字段数不精确")
+            if parts[0] != "target_result=" + str(next_ordinal):
+                raise EvidenceError(f"正式构建测试 target ordinal 缺失、重复或乱序")
+            target_suite, runner, target = parts[1:4]
+            if target_suite != suite or runner != expected_runner:
+                raise EvidenceError(f"正式构建测试 target suite/runner 身份不一致")
+            path_part = target.split("::", 1)[0]
+            path_components = path_part.split("/")
+            if (
+                not target
+                or target.startswith("/")
+                or "\\" in target
+                or any(component in ("", ".", "..") for component in path_components)
+                or any(ord(character) < 32 or ord(character) == 127 for character in target)
+            ):
+                raise EvidenceError("正式构建测试 target 不是完整 canonical repo-relative 标识")
+            counts = [
+                parse_count(value, "target count") for value in parts[4:]
+            ]
+            collected, deselected, executed, passed, failed, errors, skipped = counts
+            if (
+                collected <= 0
+                or deselected != 0
+                or executed != collected
+                or passed != collected
+                or failed != 0
+                or errors != 0
+                or skipped != 0
+            ):
+                raise EvidenceError("正式构建测试 target 未完整执行并全部通过")
+            serialized_targets.extend(
+                (target_suite + "\t" + runner + "\t" + target + "\n").encode("utf-8")
+            )
+            suite_totals = [
+                total + value for total, value in zip(suite_totals, counts)
+            ]
+            next_ordinal += 1
+            index += 1
+
+        if index >= len(lines):
+            raise EvidenceError(f"正式构建测试 {suite} 缺少 suite counts")
+        summary = lines[index].split("\t")
+        if len(summary) != 2 + FORMAL_BUILD_TEST_COUNT_FIELD_COUNT:
+            raise EvidenceError(f"正式构建测试 {suite} suite counts 字段数不精确")
+        if summary[0] != "suite_counts=" + suite:
+            raise EvidenceError(f"正式构建测试 {suite} suite counts 身份不一致")
+        observed_target_count = parse_count(summary[1], "suite target count")
+        observed_totals = [
+            parse_count(value, "suite aggregate count") for value in summary[2:]
+        ]
+        if observed_target_count != suite_target_count or observed_totals != suite_totals:
+            raise EvidenceError(f"正式构建测试 {suite} suite counts 与 targets 不一致")
+        index += 1
+        if index >= len(lines) or lines[index] != "suite_status=" + suite + ":pass":
+            raise EvidenceError(f"正式构建测试 suite 未唯一通过: {suite}")
+        index += 1
+
+    if next_ordinal != FORMAL_BUILD_TEST_TARGET_COUNT:
+        raise EvidenceError("正式构建测试 target 总数不是 exact 20")
+    if (
+        len(serialized_targets) != FORMAL_BUILD_TEST_TARGET_CONTRACT_BYTES
+        or hashlib.sha256(serialized_targets).hexdigest()
+        != FORMAL_BUILD_TEST_TARGET_CONTRACT_SHA256
+    ):
+        raise EvidenceError("正式构建测试 observed target registry 身份不一致")
+    if index != len(lines) - 1 or lines[index] != "overall_status=pass":
+        raise EvidenceError("正式构建测试日志没有唯一末行 overall PASS 闭包")
+    return digest
+
+
+def validate_formal_build_test_log_binding(
+    manifest_path: Path,
+    marker_path: Path,
+    log_path: Path,
+    pending_marker_parent: Path = None,
+) -> str:
+    """Validate the canonical builder-test log, its semantics, and both bindings."""
+
+    canonical_parent = Path(os.path.abspath(manifest_path.parent))
+    marker_parent = Path(os.path.abspath(marker_path.parent))
+    if (
+        manifest_path.name != "taiji-package-manifest.json"
+        or log_path.name != FORMAL_BUILD_TEST_LOG_BASENAME
+        or Path(os.path.abspath(log_path.parent)) != canonical_parent
+    ):
+        raise EvidenceError("正式构建测试证据必须来自同一 canonical 产物目录")
+    if marker_path.name == ".build-success":
+        if marker_parent != canonical_parent or pending_marker_parent is not None:
+            raise EvidenceError("已发布正式构建测试 marker 路径不 canonical")
+    elif marker_path.name == ".build-success.pending":
+        if (
+            pending_marker_parent is None
+            or not pending_marker_parent.is_absolute()
+            or marker_parent != Path(os.path.abspath(pending_marker_parent))
+        ):
+            raise EvidenceError("待发布正式构建测试 marker 未绑定受控构建根")
+    else:
+        raise EvidenceError("正式构建测试 marker basename 不 canonical")
+
+    manifest_payload, manifest_opened = read_regular_bytes(
+        manifest_path,
+        "package manifest",
+    )
+    manifest = parse_json_bytes(manifest_payload, "package manifest")
+    marker_payload, marker_opened = read_regular_bytes(
+        marker_path,
+        "构建成功标记",
+    )
+    marker = parse_marker_bytes(marker_payload)
+    payload, opened = read_regular_bytes(
+        log_path,
+        "正式构建测试日志",
+        limit=MAX_EVIDENCE_BYTES,
+    )
+    try:
+        current = log_path.lstat()
+    except OSError as exc:
+        raise EvidenceError(f"正式构建测试日志读回失败: {exc}") from exc
+    if regular_file_identity(opened) != regular_file_identity(current):
+        raise EvidenceError("正式构建测试日志在读取期间发生变化")
+    digest = validate_formal_build_test_payloads(manifest, marker, payload)
+    for path, label, initial_identity, initial_payload in (
+        (manifest_path, "package manifest", manifest_opened, manifest_payload),
+        (marker_path, "构建成功标记", marker_opened, marker_payload),
+        (log_path, "正式构建测试日志", opened, payload),
+    ):
+        current_digest, current_identity = sha256_regular_file(path, label)
+        if (
+            regular_file_identity(current_identity)
+            != regular_file_identity(initial_identity)
+            or current_digest != hashlib.sha256(initial_payload).hexdigest()
+        ):
+            raise EvidenceError(f"{label} 在正式构建测试快照闭包前发生变化")
+    return digest
+
+
+def _validate_checksum_sidecar_payload(
+    checksum_payload: bytes,
+    deb_hash: str,
+    deb_basename: str,
+) -> None:
+    try:
+        checksum_text = checksum_payload.decode("ascii")
+    except UnicodeError as exc:
+        raise EvidenceError("DEB SHA256 sidecar 必须是 ASCII") from exc
+    match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?", checksum_text)
+    if not match or match.group(1) != deb_hash or match.group(2) != deb_basename:
+        raise EvidenceError("DEB SHA256 sidecar 未准确绑定当前 DEB basename 和内容")
+
+
 def _validate_checksum_sidecar(args: argparse.Namespace, deb_hash: str) -> None:
     checksum_path = getattr(args, "checksum", None)
     if checksum_path is None:
         return
     checksum_path = Path(checksum_path)
     checksum_payload, _ = read_regular_bytes(checksum_path, "DEB SHA256 sidecar")
-    try:
-        checksum_text = checksum_payload.decode("ascii")
-    except UnicodeError as exc:
-        raise EvidenceError("DEB SHA256 sidecar 必须是 ASCII") from exc
-    match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?", checksum_text)
-    if not match or match.group(1) != deb_hash or match.group(2) != Path(args.deb).name:
-        raise EvidenceError("DEB SHA256 sidecar 未准确绑定当前 DEB basename 和内容")
+    _validate_checksum_sidecar_payload(checksum_payload, deb_hash, Path(args.deb).name)
 
 
 def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
     source_commit = getattr(args, "source_commit", "")
     if not FULL_COMMIT_RE.fullmatch(source_commit):
         raise EvidenceError(f"当前源码 commit 格式不合法: {source_commit!r}")
+    required_delivery_inputs = {
+        "checksum": getattr(args, "checksum", None),
+        "build_marker": getattr(args, "build_marker", None),
+        "source_archive": getattr(args, "source_archive", None),
+        "delivery_dir": getattr(args, "delivery_dir", None),
+    }
+    missing_delivery_inputs = sorted(
+        name for name, value in required_delivery_inputs.items() if value is None
+    )
+    if missing_delivery_inputs:
+        raise EvidenceError(
+            "v3 BuildBinding 缺少完整交付身份输入: " + ", ".join(missing_delivery_inputs)
+        )
     deb_path = Path(args.deb)
-    deb_hash, _ = sha256_regular_file(deb_path, "当前 DEB")
-    _validate_checksum_sidecar(args, deb_hash)
+    delivery_dir = Path(required_delivery_inputs["delivery_dir"])
+    expected_source_archive = (
+        delivery_dir / f"taiji-agentv1.0-kylin-build-src-{source_commit}.tar.gz"
+    )
+    expected_source_inventory = delivery_dir / (
+        f"taiji-agentv1.0-kylin-build-src-{source_commit}.inventory.json"
+    )
+    expected_paths = {
+        "deb": delivery_dir / "生成的安装包" / deb_path.name,
+        "checksum": delivery_dir / "生成的安装包" / f"{deb_path.name}.sha256",
+        "manifest": delivery_dir / "生成的安装包" / "taiji-package-manifest.json",
+        "build_marker": delivery_dir / "生成的安装包" / ".build-success",
+        "formal_build_test_log": delivery_dir / "生成的安装包" / FORMAL_BUILD_TEST_LOG_BASENAME,
+        "source_archive": expected_source_archive,
+        "source_inventory": expected_source_inventory,
+    }
+    actual_paths = {
+        "deb": deb_path,
+        "checksum": Path(required_delivery_inputs["checksum"]),
+        "manifest": Path(args.manifest),
+        "build_marker": Path(required_delivery_inputs["build_marker"]),
+        "formal_build_test_log": delivery_dir / "生成的安装包" / FORMAL_BUILD_TEST_LOG_BASENAME,
+        "source_archive": Path(required_delivery_inputs["source_archive"]),
+        "source_inventory": expected_source_inventory,
+    }
+    for name, expected_path in expected_paths.items():
+        if Path(os.path.abspath(actual_paths[name])) != Path(os.path.abspath(expected_path)):
+            raise EvidenceError(f"v3 BuildBinding {name} 必须来自同一交付目录的 canonical 路径")
 
-    manifest = load_json(Path(args.manifest), "发布 manifest")
+    snapshot = _delivery_inventory_snapshot(delivery_dir)
+    manifest = snapshot.manifest
     reject_target_baseline_fields(manifest, "发布 manifest")
     if manifest.get("schema") != PACKAGE_MANIFEST_SCHEMA_V3:
         if manifest.get("schema_version") == 2:
@@ -1692,6 +2491,15 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
                 "当前发布入口只接受 taiji-package-manifest/v3；历史 v2 必须显式 --legacy-v2-read-only"
             )
         raise EvidenceError("销售发布门禁强制 manifest schema=taiji-package-manifest/v3")
+
+    deb_relative = f"生成的安装包/{deb_path.name}"
+    checksum_relative = f"生成的安装包/{deb_path.name}.sha256"
+    try:
+        deb_hash = snapshot.file_hashes[deb_relative]
+        checksum_payload = snapshot.control_payloads[checksum_relative]
+    except KeyError as exc:
+        raise EvidenceError("v3 BuildBinding 快照缺少唯一 DEB 或 sidecar") from exc
+    _validate_checksum_sidecar_payload(checksum_payload, deb_hash, deb_path.name)
 
     required = {
         "schema": PACKAGE_MANIFEST_SCHEMA_V3,
@@ -1734,55 +2542,14 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
     )
     toolchain = validate_manifest_toolchain_identity(manifest)
     validate_manifest_acceptance_identity(manifest)
-    # The ABI report is part of the v3 manifest binding.  It is deliberately
-    # checked even though it is not a BuildBinding field: the report hash must
-    # be a well-formed immutable release input before later certification work.
     if "elf_abi_audit_sha256" in manifest:
         validate_sha256(manifest["elf_abi_audit_sha256"], "elf_abi_audit_sha256")
-    required_delivery_inputs = {
-        "checksum": getattr(args, "checksum", None),
-        "build_marker": getattr(args, "build_marker", None),
-        "source_archive": getattr(args, "source_archive", None),
-        "delivery_dir": getattr(args, "delivery_dir", None),
-    }
-    missing_delivery_inputs = sorted(
-        name for name, value in required_delivery_inputs.items() if value is None
-    )
-    if missing_delivery_inputs:
-        raise EvidenceError(
-            "v3 BuildBinding 缺少完整交付身份输入: " + ", ".join(missing_delivery_inputs)
-        )
-    delivery_dir = Path(required_delivery_inputs["delivery_dir"])
-    expected_source_archive = (
-        delivery_dir / f"taiji-agentv1.0-kylin-build-src-{source_commit}.tar.gz"
-    )
-    expected_source_inventory = delivery_dir / (
-        f"taiji-agentv1.0-kylin-build-src-{source_commit}.inventory.json"
-    )
-    expected_paths = {
-        "deb": delivery_dir / "生成的安装包" / deb_path.name,
-        "checksum": delivery_dir / "生成的安装包" / f"{deb_path.name}.sha256",
-        "manifest": delivery_dir / "生成的安装包" / "taiji-package-manifest.json",
-        "build_marker": delivery_dir / "生成的安装包" / ".build-success",
-        "source_archive": expected_source_archive,
-        "source_inventory": expected_source_inventory,
-    }
-    actual_paths = {
-        "deb": deb_path,
-        "checksum": Path(required_delivery_inputs["checksum"]),
-        "manifest": Path(args.manifest),
-        "build_marker": Path(required_delivery_inputs["build_marker"]),
-        "source_archive": Path(required_delivery_inputs["source_archive"]),
-        "source_inventory": expected_source_inventory,
-    }
-    for name, expected_path in expected_paths.items():
-        if Path(os.path.abspath(actual_paths[name])) != Path(os.path.abspath(expected_path)):
-            raise EvidenceError(f"v3 BuildBinding {name} 必须来自同一交付目录的 canonical 路径")
-    inventory_hash = delivery_inventory_sha256(delivery_dir)
-    source_hash, _ = sha256_regular_file(expected_source_archive, "当前源码包")
-    source_inventory_hash, _ = sha256_regular_file(
-        expected_source_inventory, "当前源码成员清单"
-    )
+
+    try:
+        source_hash = snapshot.file_hashes[expected_source_archive.name]
+        source_inventory_hash = snapshot.file_hashes[expected_source_inventory.name]
+    except KeyError as exc:
+        raise EvidenceError("v3 BuildBinding 快照缺少当前源码包或成员清单") from exc
     for key, expected in {
         "source_archive_basename": expected_source_archive.name,
         "source_archive_sha256": source_hash,
@@ -1790,7 +2557,7 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         "source_inventory_sha256": source_inventory_hash,
     }.items():
         require_exact(manifest, key, expected)
-    marker = parse_marker(expected_paths["build_marker"])
+    marker = snapshot.marker
     for key, expected in {
         "source_archive": expected_source_archive.name,
         "source_sha256": source_hash,
@@ -1799,14 +2566,9 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
     }.items():
         if marker.get(key) != expected:
             raise EvidenceError(f"构建成功标记 {key} 与 source inventory 不一致")
-    source_checksums_hash, _ = sha256_regular_file(
-        delivery_dir / "SHA256SUMS.txt",
-        "根 SHA256SUMS",
-    )
-    build_marker_hash, _ = sha256_regular_file(
-        expected_paths["build_marker"],
-        "构建成功标记",
-    )
+    source_checksums_hash = snapshot.file_hashes["SHA256SUMS.txt"]
+    build_marker_hash = snapshot.file_hashes["生成的安装包/.build-success"]
+    _revalidate_delivery_snapshot(delivery_dir, snapshot)
     return BuildBinding(
         source_commit=source_commit,
         version=version,
@@ -1824,7 +2586,7 @@ def _validate_v3_build_binding(args: argparse.Namespace) -> BuildBinding:
         source_inventory_sha256=source_inventory_hash,
         source_checksums_sha256=source_checksums_hash,
         build_marker_sha256=build_marker_hash,
-        delivery_inventory_sha256=inventory_hash,
+        delivery_inventory_sha256=snapshot.digest,
     )
 
 
@@ -1994,18 +2756,14 @@ def validate_build_binding(
     that explicitly request historical v2 read-only inspection.
     """
 
-    manifest = load_json(Path(args.manifest), "发布 manifest")
-    if manifest.get("schema") == PACKAGE_MANIFEST_SCHEMA_V3:
-        if legacy_v2_read_only:
-            raise EvidenceError("--legacy-v2-read-only 只能检查 manifest schema_version=2")
+    if not legacy_v2_read_only:
         return _validate_v3_build_binding(args)
+    manifest = load_json(Path(args.manifest), "历史 v2 发布 manifest")
+    if manifest.get("schema") == PACKAGE_MANIFEST_SCHEMA_V3:
+        raise EvidenceError("--legacy-v2-read-only 只能检查 manifest schema_version=2")
     if manifest.get("schema_version") == 2:
-        if not legacy_v2_read_only:
-            raise EvidenceError(
-                "当前发布入口拒绝 schema_version=2 v2 证据；历史 v2 只能显式使用 --legacy-v2-read-only"
-            )
         return _validate_v2_read_only_binding(args)
-    raise EvidenceError("发布 manifest 不是受支持的 v3 合同或显式 v2 历史合同")
+    raise EvidenceError("发布 manifest 不是显式 v2 历史合同")
 
 
 def validate_artifact_binding(
@@ -4396,7 +5154,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_formal_build_test_log_cli(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="validate-taiji-release-evidence.py formal-build-test-log")
+    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--build-marker", required=True, type=Path)
+    parser.add_argument("--log", required=True, type=Path)
+    parser.add_argument("--pending-marker-parent", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        digest = validate_formal_build_test_log_binding(
+            args.manifest,
+            args.build_marker,
+            args.log,
+            args.pending_marker_parent,
+        )
+    except (EvidenceError, OSError, KeyError, TypeError, ValueError) as exc:
+        print(f"formal-build-test-log-invalid: {exc}", file=sys.stderr)
+        return 1
+    print(f"formal-build-test-log-valid\t{digest}\t{args.log}")
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "formal-build-test-log":
+        return validate_formal_build_test_log_cli(sys.argv[2:])
     args = parse_args()
     try:
         require_safe_parent(args.evidence, "证据 JSON")

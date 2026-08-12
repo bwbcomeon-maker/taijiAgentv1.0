@@ -278,7 +278,10 @@ class SingleDebDocumentationContractTest(unittest.TestCase):
         )
         self.assertIn("scripts/taiji-linux-golden-orchestrator.py", canonical)
         for command in ("init", "plan", "checkpoint", "retry"):
-            self.assertRegex(canonical, rf'python3\s+"\$ORCHESTRATOR"\s+{command}\b')
+            self.assertRegex(
+                canonical,
+                rf'/usr/bin/python3\s+-I\s+-B\s+"\$ORCHESTRATOR"\s+{command}\b',
+            )
         for phrase in (
             "commands[].argv",
             "保存日志和证据",

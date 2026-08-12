@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -59,6 +60,10 @@ class SingleDebPublisherGateTest(unittest.TestCase):
         self.receipts = self.root / "receipts"
         self.fake_bin = self.root / "bin"
         self.gate_log = self.root / "gate.log"
+        self.live_ci_fail_marker = self.root / "live-ci-fail"
+        self.gate_fail_marker = self.root / "release-check-fail"
+        self.mutate_input_marker = self.root / "mutate-input"
+        self.mutate_cert_marker = self.root / "mutate-cert"
         self.fake_bin.mkdir()
         self.package_dir.mkdir(parents=True)
         self.delivery.mkdir(exist_ok=True)
@@ -74,20 +79,25 @@ class SingleDebPublisherGateTest(unittest.TestCase):
         public_dir = self.repo / "tools/taiji-release-evidence"
         public_dir.mkdir(parents=True)
         shutil.copy2(PUBLIC_KEY, public_dir / "signing-public.pem")
+        helper = self._load_policy_helper()
+        policy = helper.load_and_validate(POLICY)
+        self.maintainer = policy["package"]["maintainer"]
+        self.deb = self.package_dir / "taiji-agent_1.0.0_amd64.deb"
+        self.deb.write_bytes(b"immutable-unified-deb-v1\n")
         write_executable(
             self.repo / "scripts/taiji-release-check.sh",
-            """
+            f"""
             #!/usr/bin/env bash
             set -eu
-            printf 'release-check\\n' >> "$TEST_GATE_LOG"
-            if [ "${TEST_GATE_FAIL:-0}" = 1 ]; then
+            printf 'release-check\\n' >> {shlex.quote(str(self.gate_log))}
+            if [ -f {shlex.quote(str(self.gate_fail_marker))} ]; then
               exit 23
             fi
-            if [ "${TEST_MUTATE_INPUT:-0}" = 1 ]; then
-              printf 'mutated-after-snapshot\\n' >> "$TEST_CANDIDATE_DEB"
+            if [ -f {shlex.quote(str(self.mutate_input_marker))} ]; then
+              printf 'mutated-after-snapshot\\n' >> {shlex.quote(str(self.deb))}
             fi
-            if [ "${TEST_MUTATE_CERT_ATTACHMENT:-0}" = 1 ]; then
-              printf 'mutated-certification-attachment\\n' >> "$TEST_CERT_ATTACHMENT"
+            if [ -f {shlex.quote(str(self.mutate_cert_marker))} ]; then
+              printf 'mutated-certification-attachment\\n' >> {shlex.quote(str(self.delivery / 'records/fixture-evidence.json'))}
             fi
             exit 0
             """,
@@ -98,9 +108,8 @@ class SingleDebPublisherGateTest(unittest.TestCase):
         )
         write_executable(
             self.repo / "scripts/revalidate-taiji-github-ci-evidence.py",
-            """
+            f"""
             #!/usr/bin/env python3
-            import os
             import sys
             from pathlib import Path
 
@@ -108,18 +117,18 @@ class SingleDebPublisherGateTest(unittest.TestCase):
                 raise SystemExit(2)
             if Path(sys.argv[2]).name != "github-ci-evidence.json":
                 raise SystemExit(2)
-            if Path(sys.argv[2]).parent == Path(os.environ["TEST_DELIVERY_DIR"]):
+            if Path(sys.argv[2]).parent == Path({str(self.delivery)!r}):
                 raise SystemExit("publisher did not use its private CI snapshot")
-            if sys.argv[3:] != ["--source-commit", os.environ["TEST_SOURCE_COMMIT"]]:
+            if sys.argv[3:] != ["--source-commit", {"b" * 40!r}]:
                 raise SystemExit(2)
-            with open(os.environ["TEST_GATE_LOG"], "a", encoding="utf-8") as stream:
+            with open({str(self.gate_log)!r}, "a", encoding="utf-8") as stream:
                 stream.write("live-revalidate\\n")
-            raise SystemExit(1 if os.environ.get("TEST_LIVE_CI_FAIL") == "1" else 0)
+            raise SystemExit(1 if Path({str(self.live_ci_fail_marker)!r}).exists() else 0)
             """,
         )
         write_executable(
             self.fake_bin / "dpkg-deb",
-            """
+            f"""
             #!/usr/bin/env bash
             set -eu
             [ "$1" = -f ]
@@ -127,7 +136,7 @@ class SingleDebPublisherGateTest(unittest.TestCase):
               Package) printf 'taiji-agent\\n' ;;
               Version) printf '1.0.0\\n' ;;
               Architecture) printf 'amd64\\n' ;;
-              Maintainer) printf '%s\\n' "$TEST_MAINTAINER" ;;
+              Maintainer) printf '%s\\n' {shlex.quote(self.maintainer)} ;;
               *) exit 2 ;;
             esac
             """,
@@ -139,14 +148,20 @@ class SingleDebPublisherGateTest(unittest.TestCase):
             exit 0
             """,
         )
+        publisher_source = publisher.read_text(encoding="utf-8")
+        publisher_source = publisher_source.replace(
+            'OPENSSL = "/usr/bin/openssl"',
+            "OPENSSL = {!r}".format(str(self.fake_bin / "openssl")),
+        ).replace(
+            'DPKG_DEB = "/usr/bin/dpkg-deb"',
+            "DPKG_DEB = {!r}".format(str(self.fake_bin / "dpkg-deb")),
+        )
+        publisher.write_text(publisher_source, encoding="utf-8")
 
-        self.deb = self.package_dir / "taiji-agent_1.0.0_amd64.deb"
-        self.deb.write_bytes(b"immutable-unified-deb-v1\n")
         self.deb_sha = hashlib.sha256(self.deb.read_bytes()).hexdigest()
         helper = self._load_policy_helper()
         policy = helper.load_and_validate(POLICY)
         policy_sha = helper.canonical_sha256(policy)
-        self.maintainer = policy["package"]["maintainer"]
         self.policy_sha = policy_sha
         self.certification_challenge = {
             "schema": "taiji-signing-challenge/v1",
@@ -254,20 +269,22 @@ class SingleDebPublisherGateTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def run_publisher(self, *, extra_env=None, output=None, receipts=None):
+        marker_by_flag = {
+            "TEST_LIVE_CI_FAIL": self.live_ci_fail_marker,
+            "TEST_GATE_FAIL": self.gate_fail_marker,
+            "TEST_MUTATE_INPUT": self.mutate_input_marker,
+            "TEST_MUTATE_CERT_ATTACHMENT": self.mutate_cert_marker,
+        }
+        for flag, marker in marker_by_flag.items():
+            if extra_env and extra_env.get(flag) == "1":
+                marker.write_text("1\n", encoding="utf-8")
         env = {
             **os.environ,
             "PATH": f"{self.fake_bin}{os.pathsep}{os.environ['PATH']}",
-            "TEST_GATE_LOG": str(self.gate_log),
-            "TEST_CANDIDATE_DEB": str(self.deb),
-            "TEST_CERT_ATTACHMENT": str(self.certification_attachment),
-            "TEST_MAINTAINER": self.maintainer,
-            "TEST_DELIVERY_DIR": str(self.delivery),
-            "TEST_SOURCE_COMMIT": "b" * 40,
         }
-        if extra_env:
-            env.update(extra_env)
         command = [
-            "bash",
+            "/bin/bash",
+            "-p",
             str(self.repo / "packaging/linux/deb/publish-single-deb.sh"),
             "--delivery-dir",
             str(self.delivery),

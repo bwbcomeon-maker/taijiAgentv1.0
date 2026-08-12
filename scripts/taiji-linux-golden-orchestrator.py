@@ -17,6 +17,7 @@ import pwd
 import re
 import shlex
 import stat
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -24,9 +25,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
-CONFIG_SCHEMA = "taiji-linux-golden-orchestrator-config/v3"
-STATE_SCHEMA = "taiji-linux-golden-orchestrator-state/v3"
-PLAN_SCHEMA = "taiji-linux-golden-orchestrator-plan/v3"
+CONFIG_SCHEMA = "taiji-linux-golden-orchestrator-config/v5"
+STATE_SCHEMA = "taiji-linux-golden-orchestrator-state/v5"
+PLAN_SCHEMA = "taiji-linux-golden-orchestrator-plan/v5"
+SOURCE_IDENTITY_SCHEMA = "taiji-formal-source-identity/v1"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REMOTE_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -58,9 +60,64 @@ EXPLICIT_APPROVAL_STAGES = {
 }
 MAX_CONTROL_FILE_BYTES = 2 * 1024 * 1024
 MAX_EVIDENCE_FILE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_SOURCE_ENTRY_BYTES = 2 * 1024 * 1024
 CHALLENGE_TTL_SECONDS = 7 * 24 * 60 * 60
 PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = (
     "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+)
+TRUSTED_PYTHON_ARGV = ("/usr/bin/python3", "-I", "-B")
+SAFE_EXECUTION_PATH = "/usr/bin:/bin"
+SSH_ENV_PASSTHROUGH = ("SSH_AUTH_SOCK",)
+GITHUB_ENV_PASSTHROUGH = ("GITHUB_TOKEN",)
+TARGET_SESSION_ENV_PASSTHROUGH = (
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DESKTOP_SESSION",
+    "DISPLAY",
+    "LANG",
+    "LANGUAGE",
+    "LC_ADDRESS",
+    "LC_ALL",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NAME",
+    "LC_NUMERIC",
+    "LC_PAPER",
+    "LC_TELEPHONE",
+    "LC_TIME",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_DESKTOP",
+    "XDG_SESSION_ID",
+    "XDG_SESSION_TYPE",
+)
+SOURCE_TRUST_PATHS = (
+    "scripts/taiji-linux-golden-orchestrator.py",
+    "scripts/check-clean-worktree.sh",
+    "scripts/taiji-trusted-git",
+    "packaging/linux/builder-input-package.py",
+    "taijiagent 打包交付/01_制包机_发布预检.sh",
+    "scripts/taiji-challenge-envelope.py",
+    "scripts/produce-taiji-offline-rehearsal.py",
+    "scripts/produce-taiji-negative-boundary-evidence.py",
+    "scripts/validate-taiji-release-evidence.py",
+    "packaging/linux/compatibility_policy.py",
+    "packaging/linux/compatibility-policy.json",
+    "packaging/linux/certification-matrix.json",
+    "scripts/assemble-taiji-certification-set.py",
+    "scripts/sign-taiji-release-evidence.sh",
+    "scripts/produce-taiji-github-ci-evidence.py",
+    "scripts/revalidate-taiji-github-ci-evidence.py",
+    "scripts/assemble-taiji-release-evidence.py",
+    "scripts/taiji-release-check.sh",
+    "scripts/run-taiji-release-python-tests.py",
+    "packaging/linux/deb/publish-single-deb.sh",
+    "tools/taiji-release-evidence/signing-public.pem",
 )
 
 
@@ -93,6 +150,680 @@ def _identity(value: os.stat_result) -> Tuple[int, ...]:
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+def _git_environment() -> Dict[str, str]:
+    return {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "HOME": "/tmp",
+        "TMPDIR": "/tmp",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_ATTR_NOSYSTEM": "1",
+    }
+
+
+def _trusted_internal_directory(path: Path, label: str) -> Tuple[int, ...]:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise OrchestratorError("{} is unavailable".format(label)) from exc
+    if (
+        resolved != path
+        or path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise OrchestratorError(
+            "{} must be a trusted current-user directory".format(label)
+        )
+    return _identity(metadata)
+
+
+def _trusted_internal_regular(path: Path, label: str) -> Tuple[int, ...]:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise OrchestratorError("{} is unavailable".format(label)) from exc
+    if (
+        resolved != path
+        or path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+        or metadata.st_size <= 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise OrchestratorError(
+            "{} must be trusted current-user metadata".format(label)
+        )
+    return _identity(metadata)
+
+
+def _capture_source_boundary_identities(repo_root: Path) -> Dict[str, Tuple[int, ...]]:
+    directories = {repo_root}  # type: set[Path]
+    for relative in SOURCE_TRUST_PATHS:
+        current = (repo_root / relative).parent
+        while current != repo_root:
+            directories.add(current)
+            current = current.parent
+    git_root = repo_root / ".git"
+    directories.update(
+        {
+            git_root,
+            git_root / "info",
+            git_root / "refs",
+            git_root / "refs/heads",
+            git_root / "objects",
+        }
+    )
+    for optional in (git_root / "objects/info", git_root / "objects/pack"):
+        if optional.exists() or optional.is_symlink():
+            directories.add(optional)
+
+    result = {}  # type: Dict[str, Tuple[int, ...]]
+    for path in sorted(directories, key=lambda item: str(item)):
+        relative = "." if path == repo_root else str(path.relative_to(repo_root))
+        result[relative + "/"] = _trusted_internal_directory(
+            path,
+            "formal source directory {}".format(relative),
+        )
+
+    files = [git_root / "HEAD", git_root / "index", git_root / "config"]
+    for optional_file in (
+        git_root / "config.worktree",
+        git_root / "info/attributes",
+        git_root / "info/exclude",
+    ):
+        if optional_file.exists() or optional_file.is_symlink():
+            files.append(optional_file)
+    loose_main = git_root / "refs/heads/main"
+    packed_refs = git_root / "packed-refs"
+    if loose_main.exists() or loose_main.is_symlink():
+        files.append(loose_main)
+    elif packed_refs.exists() or packed_refs.is_symlink():
+        files.append(packed_refs)
+    else:
+        raise OrchestratorError("formal source main ref metadata is unavailable")
+    if packed_refs.exists() or packed_refs.is_symlink():
+        files.append(packed_refs)
+    for path in sorted(set(files), key=lambda item: str(item)):
+        relative = str(path.relative_to(repo_root))
+        result[relative] = _trusted_internal_regular(
+            path,
+            "formal source Git metadata {}".format(relative),
+        )
+    return result
+
+
+def _reject_unsafe_local_git_config(repo_root: Path) -> None:
+    payload = _run_git(
+        repo_root,
+        ("config", "--local", "--null", "--name-only", "--list", "--no-includes"),
+        "Git local config names",
+    )
+    unsafe_exact = {
+        "core.attributesfile",
+        "core.excludesfile",
+        "core.fsmonitor",
+        "core.hookspath",
+        "core.worktree",
+        "diff.external",
+    }
+    unsafe_prefixes = ("filter.", "include.", "includeif.")
+    for raw_name in payload.split(b"\0"):
+        if not raw_name:
+            continue
+        try:
+            name = raw_name.decode("utf-8", "strict").lower()
+        except UnicodeError as exc:
+            raise OrchestratorError("Git local config contains a non-UTF-8 key") from exc
+        components = name.split(".")
+        unsafe_driver = (
+            len(components) >= 3
+            and (
+                (components[0] == "diff" and components[-1] in {"command", "textconv"})
+                or (components[0] == "merge" and components[-1] == "driver")
+            )
+        )
+        if (
+            name in unsafe_exact
+            or name.startswith(unsafe_prefixes)
+            or unsafe_driver
+        ):
+            raise OrchestratorError(
+                "formal source Git config contains an unsafe executable filter or include"
+            )
+
+
+def _require_trusted_python_runtime() -> None:
+    if not sys.flags.isolated or not sys.dont_write_bytecode:
+        raise OrchestratorError(
+            "formal orchestrator requires /usr/bin/python3 -I -B"
+        )
+    requested = Path(TRUSTED_PYTHON_ARGV[0])
+    try:
+        actual = Path(sys.executable).resolve(strict=True)
+        expected = requested.resolve(strict=True)
+        requested_metadata = requested.lstat()
+        expected_metadata = expected.lstat()
+        actual_metadata = actual.lstat()
+    except OSError as exc:
+        raise OrchestratorError("trusted /usr/bin/python3 is unavailable") from exc
+    for parent in (Path("/usr"), Path("/usr/bin")):
+        try:
+            parent_metadata = parent.lstat()
+        except OSError as exc:
+            raise OrchestratorError("trusted Python parent is unavailable") from exc
+        if (
+            parent.is_symlink()
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != 0
+            or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+        ):
+            raise OrchestratorError("trusted Python parent is not root-controlled")
+    if requested.is_symlink():
+        if requested_metadata.st_uid != 0:
+            raise OrchestratorError("trusted Python symlink is not root-controlled")
+    elif not stat.S_ISREG(requested_metadata.st_mode):
+        raise OrchestratorError("trusted Python entrypoint is not a regular file")
+    allowed_root = Path("/usr")
+    if actual != expected:
+        macos_root = Path("/Library/Developer/CommandLineTools")
+        try:
+            actual.relative_to(macos_root)
+        except ValueError:
+            raise OrchestratorError(
+                "formal orchestrator is not using trusted /usr/bin/python3"
+            )
+        allowed_root = macos_root
+    current = actual.parent
+    while True:
+        try:
+            current_metadata = current.lstat()
+        except OSError as exc:
+            raise OrchestratorError("trusted Python path is unavailable") from exc
+        if (
+            current.is_symlink()
+            or not stat.S_ISDIR(current_metadata.st_mode)
+            or current_metadata.st_uid != 0
+            or stat.S_IMODE(current_metadata.st_mode) & 0o022
+        ):
+            raise OrchestratorError("trusted Python path is not root-controlled")
+        if current == allowed_root:
+            break
+        if current == current.parent:
+            raise OrchestratorError("trusted Python path escaped its system root")
+        current = current.parent
+    if (
+        not stat.S_ISREG(expected_metadata.st_mode)
+        or expected_metadata.st_uid != 0
+        or stat.S_IMODE(expected_metadata.st_mode) & 0o022
+        or not os.access(str(expected), os.X_OK)
+        or not stat.S_ISREG(actual_metadata.st_mode)
+        or actual_metadata.st_uid != 0
+        or stat.S_IMODE(actual_metadata.st_mode) & 0o022
+        or not os.access(str(actual), os.X_OK)
+    ):
+        raise OrchestratorError("formal orchestrator is not using trusted /usr/bin/python3")
+
+
+def _run_git(
+    repo_root: Path,
+    arguments: Sequence[str],
+    label: str,
+    input_payload: Optional[bytes] = None,
+) -> bytes:
+    git = Path("/usr/bin/git")
+    if not git.is_file() or not os.access(str(git), os.X_OK):
+        raise OrchestratorError("/usr/bin/git is unavailable for formal source verification")
+    try:
+        result = subprocess.run(
+            [str(git), "-C", str(repo_root), *arguments],
+            cwd=str(repo_root),
+            env=_git_environment(),
+            input=input_payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OrchestratorError("{} could not execute trusted Git".format(label)) from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise OrchestratorError("{} failed: {}".format(label, detail or "git exited nonzero"))
+    return result.stdout
+
+
+def _git_text(repo_root: Path, arguments: Sequence[str], label: str) -> str:
+    try:
+        return _run_git(repo_root, arguments, label).decode("utf-8", "strict").strip()
+    except UnicodeError as exc:
+        raise OrchestratorError("{} returned non-UTF-8 data".format(label)) from exc
+
+
+def _absolute_git_path(repo_root: Path, raw: str, label: str) -> Path:
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise OrchestratorError("{} cannot be resolved".format(label)) from exc
+    return resolved
+
+
+def _formal_repo_facts(repo_root: Path, source_commit: str) -> Dict[str, str]:
+    top = _absolute_git_path(
+        repo_root,
+        _git_text(repo_root, ("rev-parse", "--show-toplevel"), "Git top-level"),
+        "Git top-level",
+    )
+    if top != repo_root:
+        raise OrchestratorError("formal source repo_root is not the Git top-level")
+    common = _absolute_git_path(
+        repo_root,
+        _git_text(repo_root, ("rev-parse", "--git-common-dir"), "Git common directory"),
+        "Git common directory",
+    )
+    try:
+        common_metadata = common.lstat()
+    except OSError as exc:
+        raise OrchestratorError("formal source Git common directory is unavailable") from exc
+    canonical_common = repo_root / ".git"
+    try:
+        canonical_metadata = canonical_common.lstat()
+    except OSError as exc:
+        raise OrchestratorError("formal source canonical Git directory is unavailable") from exc
+    if (
+        common != canonical_common
+        or canonical_common.is_symlink()
+        or not stat.S_ISDIR(common_metadata.st_mode)
+        or not stat.S_ISDIR(canonical_metadata.st_mode)
+        or _identity(common_metadata) != _identity(canonical_metadata)
+        or common_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(common_metadata.st_mode) & 0o022
+    ):
+        raise OrchestratorError(
+            "formal source must use its canonical primary-worktree Git directory"
+        )
+    branch = _git_text(
+        repo_root,
+        ("rev-parse", "--abbrev-ref", "HEAD"),
+        "Git branch",
+    )
+    if branch != "main":
+        raise OrchestratorError("formal source must use branch main")
+    head = _git_text(repo_root, ("rev-parse", "HEAD"), "Git HEAD")
+    main = _git_text(
+        repo_root,
+        ("rev-parse", "refs/heads/main"),
+        "Git main ref",
+    )
+    if head != source_commit or main != source_commit:
+        raise OrchestratorError(
+            "formal source HEAD and main must equal the configured source commit"
+        )
+    status = _run_git(
+        repo_root,
+        ("-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+        "Git clean status",
+    )
+    if status:
+        raise OrchestratorError("formal source worktree is dirty")
+    index_flags = _run_git(
+        repo_root,
+        (
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "-v",
+            "-z",
+        ),
+        "Git index flags",
+    )
+    for record in index_flags.split(b"\0"):
+        if not record:
+            continue
+        tag = record[:1]
+        if tag == b"S" or (tag and tag.lower() == tag and tag.upper() != tag):
+            raise OrchestratorError(
+                "formal source has assume-unchanged or skip-worktree index flags"
+            )
+    return {
+        "repo_root": str(repo_root),
+        "git_common_dir": str(common),
+        "branch": branch,
+        "worktree": "primary",
+        "source_commit": source_commit,
+    }
+
+
+def _git_tree_records(repo_root: Path, source_commit: str) -> Dict[str, Dict[str, str]]:
+    payload = _run_git(
+        repo_root,
+        ("ls-tree", "-z", source_commit, "--", *SOURCE_TRUST_PATHS),
+        "Git source trust tree",
+    )
+    records = {}  # type: Dict[str, Dict[str, str]]
+    for item in payload.split(b"\0"):
+        if not item:
+            continue
+        try:
+            metadata, raw_path = item.split(b"\t", 1)
+            mode, object_type, object_id = metadata.decode("ascii").split(" ")
+            relative = raw_path.decode("utf-8", "strict")
+        except (UnicodeError, ValueError) as exc:
+            raise OrchestratorError("Git source trust tree is malformed") from exc
+        if (
+            relative in records
+            or relative not in SOURCE_TRUST_PATHS
+            or object_type != "blob"
+            or mode not in {"100644", "100755"}
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", object_id)
+        ):
+            raise OrchestratorError("Git source trust tree contains an invalid entry")
+        records[relative] = {
+            "git_mode": mode,
+            "git_object": object_id,
+        }
+    if set(records) != set(SOURCE_TRUST_PATHS):
+        raise OrchestratorError("Git source trust tree is incomplete")
+    return records
+
+
+def _read_git_blobs(repo_root: Path, object_ids: Sequence[str]) -> Dict[str, bytes]:
+    unique = sorted(set(object_ids))
+    requested = "".join("{}\n".format(value) for value in unique).encode("ascii")
+    payload = _run_git(
+        repo_root,
+        ("cat-file", "--batch"),
+        "Git source trust blobs",
+        requested,
+    )
+    offset = 0
+    blobs = {}  # type: Dict[str, bytes]
+    for expected in unique:
+        end = payload.find(b"\n", offset)
+        if end < 0:
+            raise OrchestratorError("Git source trust blob response is truncated")
+        try:
+            object_id, object_type, size_text = payload[offset:end].decode("ascii").split(" ")
+            size = int(size_text)
+        except (UnicodeError, ValueError) as exc:
+            raise OrchestratorError("Git source trust blob header is invalid") from exc
+        start = end + 1
+        finish = start + size
+        if (
+            object_id != expected
+            or object_type != "blob"
+            or size <= 0
+            or size > MAX_SOURCE_ENTRY_BYTES
+            or finish >= len(payload)
+            or payload[finish : finish + 1] != b"\n"
+        ):
+            raise OrchestratorError("Git source trust blob is invalid")
+        blobs[object_id] = payload[start:finish]
+        offset = finish + 1
+    if offset != len(payload):
+        raise OrchestratorError("Git source trust blob response has trailing data")
+    return blobs
+
+
+def _read_source_entry(path: Path, git_mode: str, expected: bytes, label: str) -> bytes:
+    try:
+        before = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise OrchestratorError("{} is unavailable".format(label)) from exc
+    expected_mode = 0o755 if git_mode == "100755" else 0o644
+    if (
+        resolved != path
+        or path.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != expected_mode
+        or before.st_size != len(expected)
+        or before.st_size <= 0
+        or before.st_size > MAX_SOURCE_ENTRY_BYTES
+    ):
+        raise OrchestratorError("{} mode or identity differs from its Git object".format(label))
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+    except OSError as exc:
+        raise OrchestratorError("{} cannot be opened safely".format(label)) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if _identity(opened) != _identity(before):
+            raise OrchestratorError("{} changed before read".format(label))
+        remaining = opened.st_size
+        chunks = []  # type: List[bytes]
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise OrchestratorError("{} was truncated while reading".format(label))
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise OrchestratorError("{} grew while reading".format(label))
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if _identity(after) != _identity(opened) or _identity(current) != _identity(opened):
+            raise OrchestratorError("{} changed while reading".format(label))
+        actual = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if actual != expected:
+        raise OrchestratorError("{} bytes differ from its Git object".format(label))
+    return actual
+
+
+def _capture_source_entries(
+    repo_root: Path,
+    source_commit: str,
+) -> Dict[str, Dict[str, Any]]:
+    tree = _git_tree_records(repo_root, source_commit)
+    blobs = _read_git_blobs(
+        repo_root,
+        [record["git_object"] for record in tree.values()],
+    )
+    entries = {}  # type: Dict[str, Dict[str, Any]]
+    for relative in SOURCE_TRUST_PATHS:
+        tree_record = tree[relative]
+        blob = blobs[tree_record["git_object"]]
+        actual = _read_source_entry(
+            repo_root / relative,
+            tree_record["git_mode"],
+            blob,
+            "formal source {}".format(relative),
+        )
+        entries[relative] = {
+            "git_mode": tree_record["git_mode"],
+            "git_object": tree_record["git_object"],
+            "size": len(actual),
+            "sha256": hashlib.sha256(actual).hexdigest(),
+        }
+    return entries
+
+
+def _executing_repo_root() -> Path:
+    declared = Path(__file__)
+    if not declared.is_absolute():
+        declared = declared.absolute()
+    try:
+        resolved = declared.resolve(strict=True)
+        metadata = declared.lstat()
+    except OSError as exc:
+        raise OrchestratorError("orchestrator source path cannot be resolved") from exc
+    if (
+        resolved != declared
+        or declared.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) not in {0o644, 0o755}
+    ):
+        raise OrchestratorError("orchestrator must execute from its tracked regular source path")
+    repo_root = declared.parent.parent
+    expected = repo_root / SOURCE_TRUST_PATHS[0]
+    if declared != expected:
+        raise OrchestratorError(
+            "orchestrator entrypoint is not its canonical tracked source path"
+        )
+    return repo_root
+
+
+def _run_formal_source_gate(repo_root: Path, source_commit: str) -> None:
+    gate = repo_root / "scripts/check-clean-worktree.sh"
+    try:
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-p",
+                str(gate),
+                "--mode",
+                "formal",
+                "--dirty-policy",
+                "strict",
+                "--repo-root",
+                str(repo_root),
+                "--source-root",
+                str(repo_root),
+                "--expect-head",
+                source_commit,
+            ],
+            cwd=str(repo_root),
+            env=_git_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OrchestratorError("formal source gate could not execute") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise OrchestratorError("formal source gate failed: {}".format(detail))
+
+
+def _validate_source_identity_shape(identity: Dict[str, Any]) -> None:
+    _require_exact_keys(
+        identity,
+        {
+            "schema",
+            "repo_root",
+            "git_common_dir",
+            "branch",
+            "worktree",
+            "source_commit",
+            "entries",
+        },
+        "source identity",
+    )
+    if identity["schema"] != SOURCE_IDENTITY_SCHEMA:
+        raise OrchestratorError("source identity schema is not supported")
+    entries = _require_mapping(identity["entries"], "source identity entries")
+    if set(entries) != set(SOURCE_TRUST_PATHS):
+        raise OrchestratorError("source identity trust entries are incomplete")
+    for relative, record_value in entries.items():
+        record = _require_mapping(record_value, "source identity {}".format(relative))
+        _require_exact_keys(
+            record,
+            {"git_mode", "git_object", "size", "sha256"},
+            "source identity {}".format(relative),
+        )
+        if record["git_mode"] not in {"100644", "100755"}:
+            raise OrchestratorError("source identity Git mode is invalid")
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(record["git_object"])):
+            raise OrchestratorError("source identity Git object is invalid")
+        if type(record["size"]) is not int or record["size"] <= 0:
+            raise OrchestratorError("source identity size is invalid")
+        if not SHA256_RE.fullmatch(str(record["sha256"])):
+            raise OrchestratorError("source identity SHA256 is invalid")
+
+
+def _capture_formal_source_identity(config: Dict[str, Any]) -> Dict[str, Any]:
+    source_commit = config.get("source_commit")
+    if type(source_commit) is not str or not COMMIT_RE.fullmatch(source_commit):
+        raise OrchestratorError("formal source commit is invalid")
+    repo_value = config.get("repo_root")
+    if type(repo_value) is not str:
+        raise OrchestratorError("formal source repo_root is invalid")
+    try:
+        repo_root = Path(repo_value).resolve(strict=True)
+    except OSError as exc:
+        raise OrchestratorError("formal source repo_root cannot be resolved") from exc
+    executing_root = _executing_repo_root()
+    if repo_root != executing_root:
+        raise OrchestratorError("config repo_root does not match the executing orchestrator source")
+    try:
+        root_metadata = repo_root.lstat()
+    except OSError as exc:
+        raise OrchestratorError("formal source repo_root is unavailable") from exc
+    if (
+        repo_root.is_symlink()
+        or not stat.S_ISDIR(root_metadata.st_mode)
+        or root_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(root_metadata.st_mode) & 0o022
+    ):
+        raise OrchestratorError("formal source repo_root is not trusted")
+    boundaries_before = _capture_source_boundary_identities(repo_root)
+    _reject_unsafe_local_git_config(repo_root)
+    facts_before = _formal_repo_facts(repo_root, source_commit)
+    entries_before = _capture_source_entries(repo_root, source_commit)
+    _run_formal_source_gate(repo_root, source_commit)
+    facts_after = _formal_repo_facts(repo_root, source_commit)
+    entries_after = _capture_source_entries(repo_root, source_commit)
+    _reject_unsafe_local_git_config(repo_root)
+    boundaries_after = _capture_source_boundary_identities(repo_root)
+    if (
+        facts_after != facts_before
+        or entries_after != entries_before
+        or boundaries_after != boundaries_before
+    ):
+        raise OrchestratorError("formal source identity drifted during verification")
+    identity = {
+        "schema": SOURCE_IDENTITY_SCHEMA,
+        **facts_after,
+        "entries": entries_after,
+    }
+    _validate_source_identity_shape(identity)
+    return identity
+
+
+def _revalidate_formal_source_identity(
+    config: Dict[str, Any],
+    expected: Dict[str, Any],
+) -> Dict[str, Any]:
+    _validate_source_identity_shape(expected)
+    actual = _capture_formal_source_identity(config)
+    if actual != expected:
+        raise OrchestratorError("formal source identity drifted from checkpoint state")
+    return actual
+
+
+def _canonical_config_sha256(config: Dict[str, Any]) -> str:
+    rendered = json.dumps(
+        config,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(rendered).hexdigest()
 
 
 def _read_regular(path: Path, label: str, max_bytes: int) -> bytes:
@@ -275,7 +1006,12 @@ def _load_challenge_helper(repo: Path) -> Any:
     if spec is None or spec.loader is None:
         raise OrchestratorError("canonical challenge-envelope helper cannot be loaded")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
@@ -454,7 +1190,7 @@ def _validate_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         input_config[key] = _absolute_path(input_config[key], "input.{}".format(key))
 
     remote = _require_mapping(payload["remote"], "remote")
-    _require_exact_keys(remote, {"host", "root"}, "remote")
+    _require_exact_keys(remote, {"host", "root", "account_home"}, "remote")
     if type(remote["host"]) is not str or not REMOTE_HOST_RE.fullmatch(remote["host"]):
         raise OrchestratorError("remote.host must be a configured SSH alias")
     if (
@@ -463,15 +1199,36 @@ def _validate_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         or ".." in Path(remote["root"]).parts
     ):
         raise OrchestratorError("remote.root must be a safe absolute ASCII path")
+    if (
+        type(remote["account_home"]) is not str
+        or not REMOTE_ROOT_RE.fullmatch(remote["account_home"])
+        or ".." in Path(remote["account_home"]).parts
+        or remote["account_home"] == "/"
+    ):
+        raise OrchestratorError("remote.account_home must be a safe absolute ASCII account home")
 
     workspace = _require_mapping(payload["workspace"], "workspace")
-    _require_exact_keys(workspace, {"review_root", "logs_dir"}, "workspace")
+    _require_exact_keys(
+        workspace,
+        {"review_root", "logs_dir", "execution_home", "execution_tmp"},
+        "workspace",
+    )
     workspace["review_root"] = _absolute_path(workspace["review_root"], "workspace.review_root")
     workspace["logs_dir"] = _absolute_path(workspace["logs_dir"], "workspace.logs_dir")
+    workspace["execution_home"] = _absolute_path(
+        workspace["execution_home"], "workspace.execution_home"
+    )
+    workspace["execution_tmp"] = _absolute_path(
+        workspace["execution_tmp"], "workspace.execution_tmp"
+    )
     if Path(workspace["review_root"]).name != "taiji-agentv1.0":
         raise OrchestratorError("workspace.review_root basename must be taiji-agentv1.0")
     _existing_directory(Path(workspace["review_root"]).parent, "workspace.review_root parent")
     _existing_directory(Path(workspace["logs_dir"]), "workspace.logs_dir")
+    _existing_directory(Path(workspace["execution_home"]), "workspace.execution_home")
+    _existing_directory(Path(workspace["execution_tmp"]), "workspace.execution_tmp")
+    if workspace["execution_home"] == workspace["execution_tmp"]:
+        raise OrchestratorError("workspace.execution_home and execution_tmp must be distinct")
 
     offline = _require_mapping(payload["offline"], "offline")
     _require_exact_keys(
@@ -604,9 +1361,10 @@ def _write_state(path: Path, payload: Dict[str, Any], create: bool) -> None:
 
 
 def initialize(config_path: Path, state_path: Path) -> Dict[str, Any]:
-    config, config_bytes = _load_json(config_path, "orchestrator config")
+    config, _config_bytes = _load_json(config_path, "orchestrator config")
     config = _validate_config(config)
     source_commit = config["source_commit"]
+    source_identity = _capture_formal_source_identity(config)
     input_config = config["input"]
     manifest, _ = _load_json(Path(input_config["manifest"]), "builder input manifest")
     if manifest.get("source_commit") != source_commit:
@@ -628,11 +1386,13 @@ def initialize(config_path: Path, state_path: Path) -> Dict[str, Any]:
         )
         for key in ("archive", "manifest", "checksum")
     }
+    _revalidate_formal_source_identity(config, source_identity)
     now = _now()
     state = {
         "schema": STATE_SCHEMA,
         "source_commit": source_commit,
-        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "source_identity": source_identity,
+        "config_sha256": _canonical_config_sha256(config),
         "config": config,
         "input_identity": input_identity,
         "candidate_deb": None,
@@ -656,6 +1416,27 @@ def _load_state(path: Path) -> Dict[str, Any]:
     state, _ = _load_json(path, "orchestrator state")
     if state.get("schema") != STATE_SCHEMA:
         raise OrchestratorError("orchestrator state schema is not supported")
+    _require_exact_keys(
+        state,
+        {
+            "schema",
+            "source_commit",
+            "source_identity",
+            "config_sha256",
+            "config",
+            "input_identity",
+            "candidate_deb",
+            "challenge_envelopes",
+            "remote_attempt_id",
+            "current_stage",
+            "stages",
+            "created_at_utc",
+            "updated_at_utc",
+            "revision",
+            "scope",
+        },
+        "orchestrator state",
+    )
     if state.get("source_commit") is None or not COMMIT_RE.fullmatch(str(state["source_commit"])):
         raise OrchestratorError("orchestrator state source commit is invalid")
     stages = state.get("stages")
@@ -684,6 +1465,13 @@ def _load_state(path: Path) -> Dict[str, Any]:
     _validate_config(config)
     if config["source_commit"] != state["source_commit"]:
         raise OrchestratorError("state config source commit drifted")
+    if state.get("config_sha256") != _canonical_config_sha256(config):
+        raise OrchestratorError("state config identity drifted")
+    source_identity = _require_mapping(
+        state.get("source_identity"),
+        "state.source_identity",
+    )
+    _revalidate_formal_source_identity(config, source_identity)
     if not re.fullmatch(r"[0-9a-f]{16}", str(state.get("remote_attempt_id", ""))):
         raise OrchestratorError("state remote attempt id is invalid")
     input_identity = _require_mapping(state.get("input_identity"), "input_identity")
@@ -779,20 +1567,81 @@ def _command(
     cwd: str,
     log_path: str,
     boundary: str,
-    env: Optional[Dict[str, str]] = None,
+    env: Dict[str, str],
+    env_passthrough: Sequence[str] = (),
+    env_sensitive: Sequence[str] = (),
     required_inputs: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
+    if not argv or any(type(argument) is not str or "\0" in argument for argument in argv):
+        raise OrchestratorError("planned executable argv is invalid")
+    if type(env) is not dict or any(
+        type(key) is not str
+        or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
+        or type(value) is not str
+        or "\0" in value
+        for key, value in env.items()
+    ):
+        raise OrchestratorError("planned replacement environment is invalid")
+    passthrough = sorted(env_passthrough)
+    sensitive = sorted(env_sensitive)
+    if (
+        len(set(passthrough)) != len(passthrough)
+        or len(set(sensitive)) != len(sensitive)
+        or any(not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) for key in passthrough)
+        or not set(sensitive).issubset(passthrough)
+        or set(env).intersection(passthrough)
+    ):
+        raise OrchestratorError("planned environment passthrough contract is invalid")
     result = {
         "label": label,
         "argv": list(argv),
         "cwd": cwd,
-        "env": dict(sorted((env or {}).items())),
+        "env_mode": "replace",
+        "env": dict(sorted(env.items())),
+        "env_passthrough": passthrough,
+        "env_sensitive": sensitive,
         "log_path": log_path,
         "boundary": boundary,
     }
     if required_inputs is not None:
         result["required_inputs"] = list(required_inputs)
     return result
+
+
+def _local_execution_environment(
+    config: Dict[str, Any],
+    extra: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    environment = {
+        "HOME": config["workspace"]["execution_home"],
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": SAFE_EXECUTION_PATH,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TMPDIR": config["workspace"]["execution_tmp"],
+    }
+    if extra:
+        environment.update(extra)
+    return environment
+
+
+def _target_execution_environment() -> Dict[str, str]:
+    return {
+        "PATH": SAFE_EXECUTION_PATH,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TMPDIR": "/tmp",
+    }
+
+
+def _remote_clean_shell(account_home: str, script: str) -> str:
+    return (
+        "/usr/bin/env -i HOME={} TMPDIR=/tmp PATH={} LANG=C LC_ALL=C "
+        "/bin/bash -p -c {}"
+    ).format(
+        shlex.quote(account_home),
+        shlex.quote(SAFE_EXECUTION_PATH),
+        shlex.quote(script),
+    )
 
 
 def _stage_log(config: Dict[str, Any], ordinal: int, stage: str) -> str:
@@ -822,16 +1671,19 @@ def _remote_script(state: Dict[str, Any]) -> str:
         "umask 077",
         "unset TAIJI_ALLOW_UV_LOCK_REFRESH",
         "cd {}".format(shlex.quote(remote_dir)),
-        "sha256sum -c {}".format(shlex.quote(checksum)),
-        "tar --no-same-owner --no-same-permissions -xzf {}".format(shlex.quote(archive)),
+        "/usr/bin/sha256sum -c {}".format(shlex.quote(checksum)),
+        "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {}".format(
+            shlex.quote(archive)
+        ),
         "cd {}".format(shlex.quote(remote_dir + "/" + delivery)),
-        "TAIJI_UV_LOCK_MODE=strict bash ./00_制包机_生成离线交付包.sh 2>&1 | tee {}".format(shlex.quote(remote_log)),
+        "TAIJI_UV_LOCK_MODE=strict /bin/bash -p ./00_制包机_生成离线交付包.sh "
+        "2>&1 | /usr/bin/tee {}".format(shlex.quote(remote_log)),
         "cd {}".format(shlex.quote(remote_dir)),
-        "install -d -m 0700 -- review",
-        "tar --no-same-owner --no-same-permissions -xzf {} -C review".format(
+        "/usr/bin/install -d -m 0700 -- review",
+        "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {} -C review".format(
             shlex.quote(remote_dir + "/" + delivery + "/" + source_archive)
         ),
-        "cp -a -- {}/. {}/".format(
+        "/bin/cp -a -- {}/. {}/".format(
             shlex.quote(remote_dir + "/" + delivery),
             shlex.quote(remote_dir + "/review/taiji-agentv1.0/" + delivery),
         ),
@@ -847,7 +1699,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
     build_output = delivery / "生成的安装包"
     policy = repo / "packaging/linux/compatibility-policy.json"
     logs = config["workspace"]["logs_dir"]
-    common_env = {"LANG": "C", "LC_ALL": "C", "PYTHONDONTWRITEBYTECODE": "1"}
+    common_env = _local_execution_environment(config)
+    target_env = _target_execution_environment()
 
     if stage == "input_verify":
         input_config = config["input"]
@@ -855,7 +1708,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "verify same-commit builder input trio",
                 [
-                    "python3",
+                    *TRUSTED_PYTHON_ARGV,
                     str(repo / "packaging/linux/builder-input-package.py"),
                     "verify",
                     "--archive",
@@ -886,24 +1739,32 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "create commit-specific remote build directory",
                 [
-                    "ssh",
+                    "/usr/bin/ssh",
                     "-o",
                     "BatchMode=yes",
                     "-o",
                     "ConnectTimeout=5",
                     remote["host"],
-                    "install -d -m 0700 -- {} && mkdir -m 0700 -- {}".format(
-                        shlex.quote(remote_parent), shlex.quote(remote_dir)
+                    _remote_clean_shell(
+                        remote["account_home"],
+                        "set -Eeuo pipefail; umask 077; "
+                        "/usr/bin/install -d -m 0700 -- {}; "
+                        "/bin/mkdir -m 0700 -- {}".format(
+                            shlex.quote(remote_parent), shlex.quote(remote_dir)
+                        ),
                     ),
                 ],
                 str(repo),
                 _stage_log(config, 2, stage),
                 "remote-external-approval",
+                common_env,
+                SSH_ENV_PASSTHROUGH,
+                SSH_ENV_PASSTHROUGH,
             ),
             _command(
                 "transfer exact input trio",
                 [
-                    "scp",
+                    "/usr/bin/scp",
                     config["input"]["archive"],
                     config["input"]["manifest"],
                     config["input"]["checksum"],
@@ -912,26 +1773,34 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 str(repo),
                 _stage_log(config, 2, stage),
                 "remote-external-approval",
+                common_env,
+                SSH_ENV_PASSTHROUGH,
+                SSH_ENV_PASSTHROUGH,
             ),
             _command(
                 "run frozen 00 builder and prepare immutable review tree",
                 [
-                    "ssh",
+                    "/usr/bin/ssh",
                     "-o",
                     "BatchMode=yes",
                     "-o",
                     "ConnectTimeout=5",
                     remote["host"],
-                    "bash -lc {}".format(shlex.quote(_remote_script(state))),
+                    _remote_clean_shell(
+                        remote["account_home"], _remote_script(state)
+                    ),
                 ],
                 str(repo),
                 _stage_log(config, 2, stage),
                 "remote-external-approval",
+                common_env,
+                SSH_ENV_PASSTHROUGH,
+                SSH_ENV_PASSTHROUGH,
             ),
             _command(
                 "retrieve complete review tree",
                 [
-                    "scp",
+                    "/usr/bin/scp",
                     "-r",
                     "{}:{}/review/taiji-agentv1.0".format(remote["host"], remote_dir),
                     review_parent + "/",
@@ -939,17 +1808,23 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 str(repo),
                 _stage_log(config, 2, stage),
                 "remote-external-approval",
+                common_env,
+                SSH_ENV_PASSTHROUGH,
+                SSH_ENV_PASSTHROUGH,
             ),
             _command(
                 "retrieve remote build log",
                 [
-                    "scp",
+                    "/usr/bin/scp",
                     "{}:{}".format(remote["host"], remote_log),
                     str(Path(logs) / "02-remote-build.log"),
                 ],
                 str(repo),
                 _stage_log(config, 2, stage),
                 "remote-external-approval",
+                common_env,
+                SSH_ENV_PASSTHROUGH,
+                SSH_ENV_PASSTHROUGH,
             ),
         ]
 
@@ -970,7 +1845,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "prove review preflight script matches frozen local source",
                 [
-                    "cmp",
+                    "/usr/bin/cmp",
                     "--",
                     str(repo / "taijiagent 打包交付/01_制包机_发布预检.sh"),
                     str(delivery / "01_制包机_发布预检.sh"),
@@ -978,10 +1853,11 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 str(review),
                 _stage_log(config, 3, stage),
                 "local-read-only",
+                common_env,
             ),
             _command(
                 "run physical candidate preflight",
-                ["bash", str(delivery / "01_制包机_发布预检.sh")],
+                ["/bin/bash", "-p", str(delivery / "01_制包机_发布预检.sh")],
                 str(review),
                 _stage_log(config, 3, stage),
                 "local-read-only",
@@ -1003,7 +1879,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 _command(
                     "issue certification challenge envelope",
                     [
-                        "python3",
+                        *TRUSTED_PYTHON_ARGV,
                         str(helper),
                         "issue",
                         "--purpose",
@@ -1027,7 +1903,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "verify certification challenge envelope",
                 [
-                    "python3",
+                    *TRUSTED_PYTHON_ARGV,
                     str(helper),
                     "verify",
                     "--envelope",
@@ -1059,7 +1935,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "run no-network candidate and controlled N-1 lifecycle",
                 [
-                    "python3",
+                    *TRUSTED_PYTHON_ARGV,
                     str(repo / "scripts/produce-taiji-offline-rehearsal.py"),
                     "--deb",
                     deb,
@@ -1108,8 +1984,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "start controlled pre-install observer on target",
                 [
-                    "/usr/bin/python3",
-                    "-B",
+                    *TRUSTED_PYTHON_ARGV,
                     str(observer),
                     "observe",
                     "--customer-dir",
@@ -1128,12 +2003,17 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 target["delivery_dir"],
                 _stage_log(config, 6, stage),
                 "target-manual-external-approval",
+                target_env,
+                TARGET_SESSION_ENV_PASSTHROUGH,
             ),
             {
                 "label": "operator performs witnessed offline double-click installation",
                 "argv": [],
                 "cwd": target["customer_dir"],
+                "env_mode": "human-session",
                 "env": {},
+                "env_passthrough": [],
+                "env_sensitive": [],
                 "log_path": _stage_log(config, 6, stage),
                 "boundary": "target-human-gate",
                 "manual_action": "断开非必要外网，在文件管理器双击唯一 DEB，保存完整图形安装器成功 PNG；编排器不会自动越过。",
@@ -1141,8 +2021,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "record operator method attestation",
                 [
-                    "/usr/bin/python3",
-                    "-B",
+                    *TRUSTED_PYTHON_ARGV,
                     str(observer),
                     "attest",
                     "--observation",
@@ -1161,6 +2040,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 target["delivery_dir"],
                 _stage_log(config, 6, stage),
                 "target-human-gate",
+                target_env,
+                TARGET_SESSION_ENV_PASSTHROUGH,
             ),
             _command(
                 "run DEB-installed root-owned acceptance entrypoint",
@@ -1190,6 +2071,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 target["delivery_dir"],
                 _stage_log(config, 6, stage),
                 "target-manual-external-approval",
+                target_env,
+                TARGET_SESSION_ENV_PASSTHROUGH,
             ),
         ]
 
@@ -1199,7 +2082,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "assemble immutable certification set",
                 [
-                    "python3",
+                    *TRUSTED_PYTHON_ARGV,
                     str(repo / "scripts/assemble-taiji-certification-set.py"),
                     "--matrix",
                     str(repo / "packaging/linux/certification-matrix.json"),
@@ -1224,7 +2107,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "sign certification set with offline key",
                 [
-                    "bash",
+                    "/bin/bash",
+                    "-p",
                     str(repo / "scripts/sign-taiji-release-evidence.sh"),
                     str(certification_set),
                     release["private_key"],
@@ -1232,6 +2116,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 str(repo),
                 _stage_log(config, 7, stage),
                 "offline-signing-human-approval",
+                common_env,
             ),
         ]
 
@@ -1240,7 +2125,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "collect trusted GitHub CI v2 evidence trio",
                 [
-                    "python3",
+                    *TRUSTED_PYTHON_ARGV,
                     str(repo / "scripts/produce-taiji-github-ci-evidence.py"),
                     "--source-commit",
                     state["source_commit"],
@@ -1253,6 +2138,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 _stage_log(config, 8, stage),
                 "network-and-ci-human-approval",
                 common_env,
+                GITHUB_ENV_PASSTHROUGH,
+                GITHUB_ENV_PASSTHROUGH,
             )
         ]
 
@@ -1266,7 +2153,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 _command(
                     "issue publication challenge envelope",
                     [
-                        "python3",
+                        *TRUSTED_PYTHON_ARGV,
                         str(helper),
                         "issue",
                         "--purpose",
@@ -1290,7 +2177,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "verify publication challenge envelope",
                 [
-                    "python3",
+                    *TRUSTED_PYTHON_ARGV,
                     str(helper),
                     "verify",
                     "--envelope",
@@ -1313,7 +2200,7 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "assemble v3 publication evidence",
                 [
-                    "python3",
+                    *TRUSTED_PYTHON_ARGV,
                     str(repo / "scripts/assemble-taiji-release-evidence.py"),
                     "--manifest",
                     str(manifest),
@@ -1347,7 +2234,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "sign publication evidence with offline key",
                 [
-                    "bash",
+                    "/bin/bash",
+                    "-p",
                     str(repo / "scripts/sign-taiji-release-evidence.sh"),
                     str(release_evidence),
                     release["private_key"],
@@ -1355,6 +2243,9 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 str(repo),
                 _stage_log(config, 9, stage),
                 "offline-signing-human-approval",
+                common_env,
+                GITHUB_ENV_PASSTHROUGH,
+                GITHUB_ENV_PASSTHROUGH,
             ),
         ])
         return commands
@@ -1365,7 +2256,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "run formal release check including live CI revalidation",
                 [
-                    "bash",
+                    "/bin/bash",
+                    "-p",
                     str(repo / "scripts/taiji-release-check.sh"),
                     "--delivery-dir",
                     str(delivery),
@@ -1381,9 +2273,11 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 str(repo),
                 _stage_log(config, 10, stage),
                 "network-and-release-human-approval",
-                {
-                    "TAIJI_RELEASE_REPO_ROOT": str(repo),
-                },
+                _local_execution_environment(
+                    config, {"TAIJI_RELEASE_REPO_ROOT": str(repo)}
+                ),
+                GITHUB_ENV_PASSTHROUGH,
+                GITHUB_ENV_PASSTHROUGH,
             )
         ]
 
@@ -1393,7 +2287,8 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
             _command(
                 "atomically publish exactly one customer DEB",
                 [
-                    "bash",
+                    "/bin/bash",
+                    "-p",
                     str(repo / "packaging/linux/deb/publish-single-deb.sh"),
                     "--delivery-dir",
                     str(delivery),
@@ -1417,6 +2312,9 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 str(repo),
                 _stage_log(config, 11, stage),
                 "publication-human-approval",
+                common_env,
+                GITHUB_ENV_PASSTHROUGH,
+                GITHUB_ENV_PASSTHROUGH,
             )
         ]
     raise OrchestratorError("unknown stage: {}".format(stage))
@@ -1426,6 +2324,7 @@ def build_plan(state: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     stage = state.get("current_stage")
     identity = {
         "source_commit": state["source_commit"],
+        "source_identity": state["source_identity"],
         "input": state["input_identity"],
         "candidate_deb": state.get("candidate_deb"),
     }
@@ -1627,6 +2526,10 @@ def checkpoint(
         state["current_stage"] = _next_stage(stage)
     state["revision"] = int(state.get("revision", 0)) + 1
     state["updated_at_utc"] = recorded_at
+    _revalidate_formal_source_identity(
+        state["config"],
+        state["source_identity"],
+    )
     _write_state(state_path, state, create=False)
     return state
 
@@ -1653,6 +2556,10 @@ def retry(
         state["remote_attempt_id"] = uuid.uuid4().hex[:16]
     state["revision"] = int(state.get("revision", 0)) + 1
     state["updated_at_utc"] = _now()
+    _revalidate_formal_source_identity(
+        state["config"],
+        state["source_identity"],
+    )
     _write_state(state_path, state, create=False)
     return state
 
@@ -1661,6 +2568,7 @@ def _summary(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "schema": state["schema"],
         "source_commit": state["source_commit"],
+        "source_identity": state["source_identity"],
         "candidate_deb": state.get("candidate_deb"),
         "challenge_envelopes": state.get("challenge_envelopes"),
         "remote_attempt_id": state["remote_attempt_id"],
@@ -1700,6 +2608,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    try:
+        _require_trusted_python_runtime()
+    except OrchestratorError as exc:
+        print("taiji-linux-golden-orchestrator-failed\t{}".format(exc), file=sys.stderr)
+        return 1
     args = parse_args(argv)
     try:
         if args.command == "init":
@@ -1709,6 +2622,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             state = _load_state(args.state)
             _validate_expectations(state, args.expect_source_commit, args.expect_deb_sha256)
             output, exit_code = build_plan(state)
+            _revalidate_formal_source_identity(
+                state["config"],
+                state["source_identity"],
+            )
         elif args.command == "checkpoint":
             output = _summary(
                 checkpoint(

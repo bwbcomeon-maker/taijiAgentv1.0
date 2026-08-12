@@ -1,5 +1,31 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+
+PATH="/usr/bin:/bin"
+LANG=C
+LC_ALL=C
+export PATH LANG LC_ALL
+unset BASH_ENV ENV CDPATH
+unset -f git 2>/dev/null || true
+while IFS= read -r -d '' _taiji_git_env_entry; do
+  _taiji_git_env_name="${_taiji_git_env_entry%%=*}"
+  case "$_taiji_git_env_name" in
+    GIT_*) unset "$_taiji_git_env_name" ;;
+  esac
+done < <(/usr/bin/env -0)
+unset _taiji_git_env_entry _taiji_git_env_name
+
+GIT_CONFIG_NOSYSTEM=1
+GIT_CONFIG_SYSTEM=/dev/null
+GIT_CONFIG_GLOBAL=/dev/null
+GIT_OPTIONAL_LOCKS=0
+GIT_TERMINAL_PROMPT=0
+GIT_NO_REPLACE_OBJECTS=1
+GIT_ATTR_NOSYSTEM=1
+export GIT_CONFIG_NOSYSTEM GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL
+export GIT_OPTIONAL_LOCKS GIT_TERMINAL_PROMPT GIT_NO_REPLACE_OBJECTS GIT_ATTR_NOSYSTEM
+
+GIT=/usr/bin/git
 
 # Repository-selection variables can make `git -C <declared root>` inspect a
 # different checkout.  Provenance checks must derive state from the explicit
@@ -11,6 +37,7 @@ mode="formal"
 dirty_policy="strict"
 repo_root_input=""
 source_root_input=""
+expected_head=""
 
 usage() {
   cat <<'EOF'
@@ -19,6 +46,7 @@ Usage:
                           [--dirty-policy strict|runtime]
                           [--repo-root PATH]
                           [--source-root PATH]
+                          [--expect-head FULL_COMMIT]
 
 formal (default):
   Require a clean local main checked out in the repository's primary worktree.
@@ -68,6 +96,11 @@ while [ "$#" -gt 0 ]; do
       source_root_input="$2"
       shift 2
       ;;
+    --expect-head)
+      [ "$#" -ge 2 ] || fail "--expect-head requires a value"
+      expected_head="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -87,15 +120,22 @@ case "$dirty_policy" in
   *) fail "unsupported dirty policy: $dirty_policy" ;;
 esac
 
-command -v git >/dev/null 2>&1 || fail "git is required"
+if [ -n "$expected_head" ]; then
+  [ "${#expected_head}" -eq 40 ] || fail "expected head must be a full lowercase commit"
+  case "$expected_head" in
+    *[!0-9a-f]*) fail "expected head must be a full lowercase commit" ;;
+  esac
+fi
+
+[ -x "$GIT" ] || fail "/usr/bin/git is required"
 
 if [ -z "$repo_root_input" ]; then
-  repo_root_input="$(git rev-parse --show-toplevel 2>/dev/null)" \
+  repo_root_input="$("$GIT" rev-parse --show-toplevel 2>/dev/null)" \
     || fail "not inside a Git worktree"
 fi
 repo_root="$(physical_dir "$repo_root_input")"
 
-git_top_raw="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null)" \
+git_top_raw="$("$GIT" -C "$repo_root" rev-parse --show-toplevel 2>/dev/null)" \
   || fail "repo root is not inside a Git worktree: $repo_root"
 git_top="$(physical_dir "$git_top_raw")"
 [ "$repo_root" = "$git_top" ] \
@@ -108,7 +148,7 @@ source_root="$(physical_dir "$source_root_input")"
 [ "$source_root" = "$git_top" ] \
   || fail "source root does not match git top-level: source=$source_root git=$git_top"
 
-common_dir_raw="$(git -C "$git_top" rev-parse --git-common-dir 2>/dev/null)" \
+common_dir_raw="$("$GIT" -C "$git_top" rev-parse --git-common-dir 2>/dev/null)" \
   || fail "cannot resolve git common dir"
 case "$common_dir_raw" in
   /*) common_dir_candidate="$common_dir_raw" ;;
@@ -116,17 +156,36 @@ case "$common_dir_raw" in
 esac
 common_dir="$(physical_dir "$common_dir_candidate")"
 canonical_root="$(physical_dir "$common_dir/..")"
+canonical_common_dir="$git_top/.git"
 
-if [ "$git_top" = "$canonical_root" ]; then
+if [ -d "$canonical_common_dir" ] && [ ! -L "$canonical_common_dir" ] \
+  && [ "$(physical_dir "$canonical_common_dir")" = "$common_dir" ]; then
   worktree_kind="primary"
 else
   worktree_kind="linked"
 fi
 
-branch="$(git -C "$git_top" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-head_commit="$(git -C "$git_top" rev-parse HEAD 2>/dev/null)" \
+unsafe_git_config=""
+while IFS= read -r -d '' git_config_name; do
+  case "$git_config_name" in
+    filter.*|include.*|includeif.*|includeIf.*|core.attributesfile|core.excludesfile|core.hookspath|core.worktree|diff.external|diff.*.command|diff.*.textconv|merge.*.driver)
+      unsafe_git_config="${unsafe_git_config}${unsafe_git_config:+$'\n'}$git_config_name"
+      ;;
+  esac
+done < <("$GIT" -C "$git_top" config --local --null --name-only --list --no-includes)
+[ -z "$unsafe_git_config" ] || {
+  printf '%s\n' "$unsafe_git_config" >&2
+  fail "formal source Git config contains an unsafe executable filter or include"
+}
+unset unsafe_git_config git_config_name
+
+branch="$("$GIT" -C "$git_top" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+head_commit="$("$GIT" -C "$git_top" rev-parse HEAD 2>/dev/null)" \
   || fail "cannot resolve HEAD"
-status="$(git -C "$git_top" status --porcelain=v1 --untracked-files=all)"
+if [ -n "$expected_head" ] && [ "$head_commit" != "$expected_head" ]; then
+  fail "formal source expected head does not match actual HEAD: expected=$expected_head actual=$head_commit"
+fi
+status="$("$GIT" -C "$git_top" -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)"
 if [ -n "$status" ]; then
   dirty="1"
 else
@@ -173,7 +232,7 @@ while IFS= read -r -d '' status_entry; do
       fi
       ;;
   esac
-done < <(git -C "$git_top" -c core.quotePath=false status --porcelain=v1 -z --untracked-files=all)
+done < <("$GIT" -C "$git_top" -c core.fsmonitor=false -c core.quotePath=false status --porcelain=v1 -z --untracked-files=all)
 if [ -n "$runtime_status" ]; then runtime_dirty="1"; else runtime_dirty="0"; fi
 if [ -n "$non_runtime_status" ]; then non_runtime_dirty="1"; else non_runtime_dirty="0"; fi
 
@@ -200,10 +259,25 @@ fi
 [ "$branch" = "main" ] \
   || fail "formal source must be branch main: current=${branch:-detached}"
 
-main_commit="$(git -C "$git_top" rev-parse refs/heads/main 2>/dev/null)" \
+main_commit="$("$GIT" -C "$git_top" rev-parse refs/heads/main 2>/dev/null)" \
   || fail "local refs/heads/main does not exist"
 [ "$head_commit" = "$main_commit" ] \
   || fail "formal source HEAD does not match local main: head=$head_commit main=$main_commit"
+
+index_flag_status=""
+while IFS= read -r -d '' index_entry; do
+  index_tag="${index_entry:0:1}"
+  index_path="${index_entry:2}"
+  case "$index_tag" in
+    S|[a-z])
+      index_flag_status="${index_flag_status}${index_flag_status:+$'\n'}$index_tag $index_path"
+      ;;
+  esac
+done < <("$GIT" -C "$git_top" -c core.fsmonitor=false -c core.quotePath=false ls-files -v -z)
+[ -z "$index_flag_status" ] || {
+  printf '%s\n' "$index_flag_status" >&2
+  fail "formal source has assume-unchanged or skip-worktree index flags"
+}
 
 if [ "$dirty_policy" = "runtime" ] && [ "$non_runtime_dirty" != "0" ]; then
   printf '[WARN] non-runtime source changes ignored for local runtime:\n%s\n' "$non_runtime_status" >&2

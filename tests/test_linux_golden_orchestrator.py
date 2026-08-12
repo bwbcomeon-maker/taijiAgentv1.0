@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -17,7 +20,33 @@ ROOT = Path(__file__).resolve().parents[1]
 ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
 CHALLENGE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
 PYTHON38_GATE = ROOT / "tests/python38_linux_packaging_gate.py"
-SOURCE_COMMIT = "a" * 40
+TARGET_SESSION_PASSTHROUGH = [
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DESKTOP_SESSION",
+    "DISPLAY",
+    "LANG",
+    "LANGUAGE",
+    "LC_ADDRESS",
+    "LC_ALL",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NAME",
+    "LC_NUMERIC",
+    "LC_PAPER",
+    "LC_TELEPHONE",
+    "LC_TIME",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_DESKTOP",
+    "XDG_SESSION_ID",
+    "XDG_SESSION_TYPE",
+]
 
 
 def sha256(path: Path) -> str:
@@ -28,15 +57,68 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="taiji-golden-orchestrator-")
         self.root = Path(self.temporary.name).resolve()
-        self.input_archive = self.root / f"taijiagent-制包机输入-{SOURCE_COMMIT}.tar.gz"
-        self.input_manifest = self.root / f"taijiagent-制包机输入-{SOURCE_COMMIT}.manifest.json"
+        source_module = self.load_orchestrator(ORCHESTRATOR)
+        self.repo = self.root / "repo"
+        self.repo.mkdir(mode=0o700)
+        for relative in source_module.SOURCE_TRUST_PATHS:
+            source = ROOT / relative
+            target = self.repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        subprocess.run(
+            ["/usr/bin/git", "init", "-b", "main"],
+            cwd=self.repo,
+            env=self.git_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        subprocess.run(
+            ["/usr/bin/git", "config", "user.name", "Taiji Golden Test"],
+            cwd=self.repo,
+            env=self.git_environment(),
+            check=True,
+        )
+        subprocess.run(
+            ["/usr/bin/git", "config", "user.email", "taiji-golden@example.invalid"],
+            cwd=self.repo,
+            env=self.git_environment(),
+            check=True,
+        )
+        subprocess.run(
+            ["/usr/bin/git", "add", "."],
+            cwd=self.repo,
+            env=self.git_environment(),
+            check=True,
+        )
+        subprocess.run(
+            ["/usr/bin/git", "commit", "-m", "golden orchestrator fixture"],
+            cwd=self.repo,
+            env=self.git_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        self.source_commit = subprocess.run(
+            ["/usr/bin/git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            env=self.git_environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout.strip()
+        self.orchestrator = self.repo / "scripts/taiji-linux-golden-orchestrator.py"
+        self.challenge_helper = self.repo / "scripts/taiji-challenge-envelope.py"
+        self.input_archive = self.root / f"taijiagent-制包机输入-{self.source_commit}.tar.gz"
+        self.input_manifest = self.root / f"taijiagent-制包机输入-{self.source_commit}.manifest.json"
         self.input_checksum = self.root / f"{self.input_archive.name}.sha256"
         self.input_archive.write_bytes(b"frozen-builder-input")
         self.input_manifest.write_text(
             json.dumps(
                 {
                     "schema": "taiji-builder-input-package/v1",
-                    "source_commit": SOURCE_COMMIT,
+                    "source_commit": self.source_commit,
                     "archive_basename": self.input_archive.name,
                 },
                 sort_keys=True,
@@ -51,6 +133,10 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         )
         self.logs_dir = self.root / "logs"
         self.logs_dir.mkdir(mode=0o700)
+        self.execution_home = self.root / "execution-home"
+        self.execution_home.mkdir(mode=0o700)
+        self.execution_tmp = self.root / "execution-tmp"
+        self.execution_tmp.mkdir(mode=0o700)
         self.review_parent = self.root / "review"
         self.review_parent.mkdir(mode=0o700)
         self.review_root = self.review_parent / "taiji-agentv1.0"
@@ -59,9 +145,9 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.certification_envelope = self.root / "certification-challenge-envelope.json"
         self.publication_envelope = self.root / "publication-challenge-envelope.json"
         config = {
-            "schema": "taiji-linux-golden-orchestrator-config/v3",
-            "source_commit": SOURCE_COMMIT,
-            "repo_root": str(ROOT),
+            "schema": "taiji-linux-golden-orchestrator-config/v5",
+            "source_commit": self.source_commit,
+            "repo_root": str(self.repo),
             "input": {
                 "archive": str(self.input_archive),
                 "manifest": str(self.input_manifest),
@@ -70,10 +156,13 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "remote": {
                 "host": "kylin",
                 "root": "/home/kylin/taiji-builds",
+                "account_home": "/home/kylin",
             },
             "workspace": {
                 "review_root": str(self.review_root),
                 "logs_dir": str(self.logs_dir),
+                "execution_home": str(self.execution_home),
+                "execution_tmp": str(self.execution_tmp),
             },
             "offline": {
                 "image": "taiji-offline-rehearsal:local",
@@ -114,10 +203,35 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    @staticmethod
+    def git_environment() -> dict:
+        return {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "HOME": "/tmp",
+            "TMPDIR": "/tmp",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+        }
+
+    @staticmethod
+    def runtime_environment() -> dict:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        return environment
+
     def command(self, *arguments: str, check: bool = False) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
-            ["python3", str(ORCHESTRATOR), *arguments],
-            cwd=ROOT,
+            ["/usr/bin/python3", "-I", "-B", str(self.orchestrator), *arguments],
+            cwd=self.repo,
+            env=self.runtime_environment(),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -137,15 +251,20 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         )
         return json.loads(result.stdout)
 
-    @staticmethod
-    def load_orchestrator():
+    def load_orchestrator(self, path=None):
+        path = getattr(self, "orchestrator", ORCHESTRATOR) if path is None else path
         spec = importlib.util.spec_from_file_location(
-            "taiji_linux_golden_orchestrator_test", ORCHESTRATOR
+            "taiji_linux_golden_orchestrator_test", path
         )
         if spec is None or spec.loader is None:
             raise RuntimeError("cannot load golden orchestrator")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
         return module
 
     def plan(self, *, expected_deb: str | None = None, dry_run: bool = False):
@@ -154,7 +273,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "--state",
             str(self.state),
             "--expect-source-commit",
-            SOURCE_COMMIT,
+            self.source_commit,
         ]
         if expected_deb is not None:
             arguments.extend(["--expect-deb-sha256", expected_deb])
@@ -181,7 +300,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "--state",
             str(self.state),
             "--expect-source-commit",
-            SOURCE_COMMIT,
+            self.source_commit,
             "--stage",
             stage,
             "--result",
@@ -232,13 +351,15 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         }[purpose]
         result = subprocess.run(
             [
-                "python3",
-                str(CHALLENGE_HELPER),
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                str(self.challenge_helper),
                 "issue",
                 "--purpose",
                 purpose,
                 "--source-commit",
-                SOURCE_COMMIT,
+                self.source_commit,
                 "--deb",
                 str(deb),
                 "--output",
@@ -248,7 +369,8 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
                 "--nonce",
                 nonce,
             ],
-            cwd=ROOT,
+            cwd=self.repo,
+            env=self.runtime_environment(),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -341,8 +463,9 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
 
     def test_init_and_plan_bind_input_trio_and_emit_local_verify_only(self):
         state = self.init()
-        self.assertEqual(state["schema"], "taiji-linux-golden-orchestrator-state/v3")
-        self.assertEqual(state["source_commit"], SOURCE_COMMIT)
+        self.assertEqual(state["schema"], "taiji-linux-golden-orchestrator-state/v5")
+        self.assertEqual(state["source_identity"]["source_commit"], self.source_commit)
+        self.assertEqual(state["source_commit"], self.source_commit)
         self.assertEqual(state["current_stage"], "input_verify")
         self.assertIn("checkpoint-plan-only", state["scope"])
         self.assertIn("authoritative", state["scope"])
@@ -352,26 +475,124 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         result = self.plan()
         self.assertEqual(result.returncode, 0, result.stderr)
         plan = json.loads(result.stdout)
-        self.assertEqual(plan["schema"], "taiji-linux-golden-orchestrator-plan/v3")
+        self.assertEqual(plan["schema"], "taiji-linux-golden-orchestrator-plan/v5")
         self.assertEqual(plan["status"], "READY")
         self.assertEqual(plan["stage"], "input_verify")
         self.assertIn("does not execute", plan["scope_note"])
         self.assertIn("cannot replace", plan["scope_note"])
         self.assertEqual(len(plan["commands"]), 1)
         self.assertEqual(
-            Path(plan["commands"][0]["argv"][1]).name,
+            plan["commands"][0]["argv"][:3],
+            ["/usr/bin/python3", "-I", "-B"],
+        )
+        self.assertEqual(
+            Path(plan["commands"][0]["argv"][3]).name,
             "builder-input-package.py",
         )
         self.assertIn("verify", plan["commands"][0]["argv"])
+        self.assertEqual(plan["commands"][0]["env_mode"], "replace")
+        self.assertEqual(
+            plan["commands"][0]["env"],
+            {
+                "HOME": str(self.execution_home),
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "TMPDIR": str(self.execution_tmp),
+            },
+        )
+        self.assertEqual(plan["commands"][0]["env_passthrough"], [])
+        self.assertEqual(plan["commands"][0]["env_sensitive"], [])
         self.assertFalse(self.review_root.exists())
 
         dry_run = self.plan(dry_run=True)
         self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
         self.assertEqual(json.loads(dry_run.stdout), plan)
 
-    def test_legacy_v1_v2_config_and_state_are_rejected_instead_of_reinterpreted(self):
+    def test_formal_cli_requires_isolated_system_python_and_ignores_pythonpath(self):
+        untrusted = subprocess.run(
+            ["python3", str(self.orchestrator), "--help"],
+            cwd=self.repo,
+            env=self.runtime_environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(untrusted.returncode, 0)
+        self.assertRegex(untrusted.stderr.lower(), "isolated|/usr/bin/python3|-i|-b")
+
+        hostile = self.root / "hostile-pythonpath"
+        hostile.mkdir()
+        marker = self.root / "sitecustomize-ran"
+        (hostile / "sitecustomize.py").write_text(
+            "from pathlib import Path\nPath({!r}).write_text('ran')\n".format(str(marker)),
+            encoding="utf-8",
+        )
+        environment = self.runtime_environment()
+        environment["PYTHONPATH"] = str(hostile)
+        trusted = subprocess.run(
+            ["/usr/bin/python3", "-I", "-B", str(self.orchestrator), "--help"],
+            cwd=self.repo,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(trusted.returncode, 0, trusted.stderr)
+        self.assertFalse(marker.exists())
+
+        source = self.orchestrator.read_text(encoding="utf-8")
+        self.assertNotIn('"python3",', source)
+        self.assertNotIn('"/usr/bin/python3",\n                    "-B"', source)
+        self.assertGreaterEqual(source.count("*TRUSTED_PYTHON_ARGV"), 11)
+        runbook = (
+            ROOT / "docs/runbooks/taiji-kylin-uos-offline-delivery.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn('/usr/bin/python3 -I -B "$ORCHESTRATOR" init', runbook)
+        self.assertNotIn('python3 "$ORCHESTRATOR"', runbook.replace(
+            '/usr/bin/python3 -I -B "$ORCHESTRATOR"',
+            "",
+        ))
+
+    def test_resume_revalidates_the_stored_source_identity_and_index_flags(self):
+        self.init()
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        relative = next(iter(state["source_identity"]["entries"]))
+        state["source_identity"]["entries"][relative]["sha256"] = "0" * 64
+        self.state.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.state.chmod(0o600)
+
+        tampered = self.plan()
+        self.assertNotEqual(tampered.returncode, 0)
+        self.assertIn("source identity", tampered.stderr.lower())
+
+        self.state.unlink()
+        self.init()
+        target = self.repo / relative
+        subprocess.run(
+            ["/usr/bin/git", "update-index", "--assume-unchanged", relative],
+            cwd=self.repo,
+            env=self.git_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        target.write_bytes(target.read_bytes() + b"\n# hidden formal source drift\n")
+
+        hidden_drift = self.plan()
+        self.assertNotEqual(hidden_drift.returncode, 0)
+        self.assertRegex(
+            hidden_drift.stderr.lower(),
+            "assume-unchanged|skip-worktree|index flag",
+        )
+
+    def test_legacy_v1_v2_v3_v4_config_and_state_are_rejected_instead_of_reinterpreted(self):
         config = json.loads(self.config.read_text(encoding="utf-8"))
-        for legacy in ("v1", "v2"):
+        for legacy in ("v1", "v2", "v3", "v4"):
             with self.subTest(config_schema=legacy):
                 config["schema"] = "taiji-linux-golden-orchestrator-config/{}".format(legacy)
                 self.config.write_text(
@@ -388,14 +609,14 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
                 self.assertNotEqual(rejected_config.returncode, 0)
                 self.assertIn("schema", rejected_config.stderr.lower())
 
-        config["schema"] = "taiji-linux-golden-orchestrator-config/v3"
+        config["schema"] = "taiji-linux-golden-orchestrator-config/v5"
         self.config.write_text(
             json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
         self.init()
         original_state = json.loads(self.state.read_text(encoding="utf-8"))
-        for legacy in ("v1", "v2"):
+        for legacy in ("v1", "v2", "v3", "v4"):
             with self.subTest(state_schema=legacy):
                 state = json.loads(json.dumps(original_state))
                 state["schema"] = "taiji-linux-golden-orchestrator-state/{}".format(legacy)
@@ -582,7 +803,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertEqual(payload["stage"], "challenge_preparation")
         command_arguments = [command["argv"] for command in payload["commands"]]
         self.assertEqual(len(command_arguments), 2)
-        self.assertTrue(all(Path(argv[1]).name == CHALLENGE_HELPER.name for argv in command_arguments))
+        self.assertTrue(all(Path(argv[3]).name == CHALLENGE_HELPER.name for argv in command_arguments))
         self.assertIn("issue", command_arguments[0])
         self.assertIn("verify", command_arguments[1])
         self.assertIn("--require-active", command_arguments[1])
@@ -650,7 +871,10 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             str(self.certification_envelope),
         )
         self.assertNotIn("--challenge", assembler)
-        self.assertEqual(certification["commands"][1]["env"], {})
+        self.assertEqual(
+            certification["commands"][1]["env"]["PATH"], "/usr/bin:/bin"
+        )
+        self.assertEqual(certification["commands"][1]["env_passthrough"], [])
 
     def test_ci_v2_stage_is_between_certification_and_publication_and_binds_exact_trio(self):
         deb, digest = self.advance_to_ci_evidence()
@@ -666,10 +890,12 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertEqual(
             ci_command["argv"],
             [
-                "python3",
-                str(ROOT / "scripts/produce-taiji-github-ci-evidence.py"),
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                str(self.repo / "scripts/produce-taiji-github-ci-evidence.py"),
                 "--source-commit",
-                SOURCE_COMMIT,
+                self.source_commit,
                 "--run-id",
                 "123456789",
                 "--delivery-dir",
@@ -800,8 +1026,9 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertEqual(
             certification_plan["commands"][1]["argv"],
             [
-                "bash",
-                str(ROOT / "scripts/sign-taiji-release-evidence.sh"),
+                "/bin/bash",
+                "-p",
+                str(self.repo / "scripts/sign-taiji-release-evidence.sh"),
                 str(delivery / "certification/certification-set.json"),
                 str(self.root / "offline-release-private-key.pem"),
             ],
@@ -879,14 +1106,16 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         self.assertEqual(
             signer["argv"],
             [
-                "bash",
-                str(ROOT / "scripts/sign-taiji-release-evidence.sh"),
+                "/bin/bash",
+                "-p",
+                str(self.repo / "scripts/sign-taiji-release-evidence.sh"),
                 str(delivery / "release-evidence.json"),
                 str(self.root / "offline-release-private-key.pem"),
             ],
         )
         self.assertNotIn("--delivery-dir", signer["argv"])
-        self.assertEqual(signer["env"], {})
+        self.assertEqual(signer["env_passthrough"], ["GITHUB_TOKEN"])
+        self.assertEqual(signer["env_sensitive"], ["GITHUB_TOKEN"])
 
         self.issue_publication_envelope(_deb)
         resumed_plan = self.plan(expected_deb=digest)
@@ -958,7 +1187,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "--state",
             str(self.state),
             "--expect-source-commit",
-            SOURCE_COMMIT,
+            self.source_commit,
             "--expect-deb-sha256",
             digest,
             "--stage",
@@ -1002,7 +1231,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             with self.assertRaisesRegex(module.OrchestratorError, "reserved|used"):
                 module.retry(
                     self.state,
-                    SOURCE_COMMIT,
+                    self.source_commit,
                     digest,
                     "offline_rehearsal",
                 )
@@ -1027,7 +1256,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "--state",
             str(self.state),
             "--expect-source-commit",
-            SOURCE_COMMIT,
+            self.source_commit,
             "--expect-deb-sha256",
             digest,
             "--stage",
@@ -1074,7 +1303,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             with self.assertRaisesRegex(module.OrchestratorError, "reserved|used"):
                 module.retry(
                     self.state,
-                    SOURCE_COMMIT,
+                    self.source_commit,
                     digest,
                     "publication_sign",
                 )
@@ -1171,8 +1400,16 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         )
         remote_host_index = build_command["argv"].index("kylin")
         self.assertEqual(len(build_command["argv"][remote_host_index + 1 :]), 1)
-        self.assertTrue(build_command["argv"][-1].startswith("bash -lc "))
+        self.assertNotIn("bash -lc", build_command["argv"][-1])
+        self.assertIn("/usr/bin/env -i", build_command["argv"][-1])
+        self.assertIn("/bin/bash -p -c", build_command["argv"][-1])
+        self.assertIn("/bin/bash -p ./00_制包机_生成离线交付包.sh", build_command["argv"][-1])
         self.assertIn("unset TAIJI_ALLOW_UV_LOCK_REFRESH", build_command["argv"][-1])
+        for command in remote_plan["commands"]:
+            self.assertIn(command["argv"][0], {"/usr/bin/ssh", "/usr/bin/scp"})
+            self.assertEqual(command["env_mode"], "replace")
+            self.assertEqual(command["env_passthrough"], ["SSH_AUTH_SOCK"])
+            self.assertEqual(command["env_sensitive"], ["SSH_AUTH_SOCK"])
 
         deb, _ = self.bind_candidate()
         unapproved = self.checkpoint("remote_build", deb=deb)
@@ -1203,7 +1440,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "--state",
             str(self.state),
             "--expect-source-commit",
-            SOURCE_COMMIT,
+            self.source_commit,
             "--stage",
             "remote_build",
         )
@@ -1229,7 +1466,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "--state",
             str(self.state),
             "--expect-source-commit",
-            SOURCE_COMMIT,
+            self.source_commit,
             "--stage",
             "remote_build",
         )
@@ -1413,7 +1650,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "--state",
             str(self.state),
             "--expect-source-commit",
-            SOURCE_COMMIT,
+            self.source_commit,
             "--stage",
             "input_verify",
             "--result",
@@ -1478,6 +1715,61 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
                 for item in payload["commands"]
             )
             self.assertIn(trusted_entrypoint, command_text)
+            for command in payload["commands"]:
+                self.assertEqual(
+                    set(command),
+                    {
+                        "argv",
+                        "boundary",
+                        "cwd",
+                        "env",
+                        "env_mode",
+                        "env_passthrough",
+                        "env_sensitive",
+                        "label",
+                        "log_path",
+                        *({"manual_action"} if "manual_action" in command else set()),
+                        *({"required_inputs"} if "required_inputs" in command else set()),
+                    },
+                )
+                self.assertEqual(command["env_sensitive"], sorted(command["env_sensitive"]))
+                self.assertTrue(
+                    set(command["env_sensitive"]).issubset(command["env_passthrough"])
+                )
+                if "manual_action" in command:
+                    self.assertEqual(command["env_mode"], "human-session")
+                    self.assertEqual(command["env"], {})
+                    self.assertEqual(command["env_passthrough"], [])
+                    continue
+                self.assertEqual(command["env_mode"], "replace")
+                self.assertEqual(command["env"]["PATH"], "/usr/bin:/bin")
+                forbidden = {
+                    "BASH_ENV",
+                    "ENV",
+                    "PYTHONHOME",
+                    "PYTHONPATH",
+                    "LD_PRELOAD",
+                    "LD_LIBRARY_PATH",
+                }
+                self.assertTrue(forbidden.isdisjoint(command["env"]))
+                self.assertTrue(forbidden.isdisjoint(command["env_passthrough"]))
+                if command["boundary"].startswith("target-"):
+                    self.assertNotIn("HOME", command["env"])
+                    self.assertEqual(command["env_passthrough"], TARGET_SESSION_PASSTHROUGH)
+                    self.assertEqual(command["env_sensitive"], [])
+                else:
+                    self.assertEqual(command["env"]["HOME"], str(self.execution_home))
+                    self.assertEqual(command["env"]["TMPDIR"], str(self.execution_tmp))
+            token_labels = {
+                "collect trusted GitHub CI v2 evidence trio",
+                "sign publication evidence with offline key",
+                "run formal release check including live CI revalidation",
+                "atomically publish exactly one customer DEB",
+            }
+            for command in payload["commands"]:
+                if command["label"] in token_labels:
+                    self.assertEqual(command["env_passthrough"], ["GITHUB_TOKEN"])
+                    self.assertEqual(command["env_sensitive"], ["GITHUB_TOKEN"])
             if stage == "target_acceptance":
                 self.assertIn("验收工具/certification-matrix.json", command_text)
                 self.assertIn("operator-001", command_text)

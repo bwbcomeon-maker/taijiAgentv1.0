@@ -1,6 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -Eeuo pipefail
 umask 022
+PATH=/usr/bin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONBREAKPOINT PYTHONUSERBASE
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+unset OPENSSL_CONF OPENSSL_MODULES
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -8,7 +15,7 @@ SOURCE_GATE="$REPO_ROOT/scripts/check-clean-worktree.sh"
 TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 SOURCE_INTEGRITY_HELPER="$REPO_ROOT/packaging/linux/source-archive-integrity.py"
-SOURCE_INTEGRITY_HELPER_SHA256="dc96ec71409a092eae6c689c5a643bd840b5cad810544b92e6931aa85bd9c2de"
+SOURCE_INTEGRITY_HELPER_SHA256="eaebadbe2f86d76d09f19ed210ad407e5926a242c46f53fb89e26253db8d8d7a"
 BUILDER_INPUT_HELPER="$REPO_ROOT/packaging/linux/builder-input-package.py"
 BUILDER_INPUT_HELPER_SHA256="8c4b378bc762eb7dc10d4cb260cf5499c54f8a348f202d49fb9af754349af1dd"
 
@@ -38,7 +45,7 @@ record_triplet_member() {
 preflight_repo() {
   require_cmd git
   require_cmd gzip
-  require_cmd python3
+  [ -x /usr/bin/python3 ] || fail "缺少受信 Python 解释器：/usr/bin/python3"
   [ -x "$SOURCE_GATE" ] || fail "缺少正式源码门禁：$SOURCE_GATE"
   [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
   [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
@@ -67,7 +74,7 @@ write_source_archive() {
   info "生成源码包：$archive"
   "$TRUSTED_GIT" -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$archive_path"
   digest="$(sha256_file "$archive_path")"
-  python3 "$SOURCE_INTEGRITY_HELPER" create \
+  /usr/bin/python3 -I -B "$SOURCE_INTEGRITY_HELPER" create \
     --archive "$archive_path" \
     --inventory "$SCRIPT_DIR/$inventory" \
     --source-commit "$commit" \
@@ -91,7 +98,7 @@ write_builder_input_package() {
     "$REPO_ROOT"/taijiagent-制包机输入-*.tar.gz.sha256 \
     "$REPO_ROOT"/taijiagent-制包机输入-*.manifest.json
   info "生成制包机输入包：$(basename "$output")"
-  python3 "$BUILDER_INPUT_HELPER" create \
+  /usr/bin/python3 -I -B "$BUILDER_INPUT_HELPER" create \
     --source-dir "$SCRIPT_DIR" \
     --source-integrity-helper "$SOURCE_INTEGRITY_HELPER" \
     --output "$output" \
@@ -99,7 +106,7 @@ write_builder_input_package() {
     --checksum "$checksum" \
     --source-commit "$commit" \
     || fail "制包机输入包固定清单生成失败"
-  python3 "$BUILDER_INPUT_HELPER" verify \
+  /usr/bin/python3 -I -B "$BUILDER_INPUT_HELPER" verify \
     --archive "$output" \
     --manifest "$manifest" \
     --checksum "$checksum" \
@@ -111,14 +118,15 @@ write_builder_input_package() {
 }
 
 main() {
+  [ "$#" -eq 0 ] || fail "99_本机_准备制包输入包.sh 不接受命令行参数"
   preflight_repo
   write_source_archive
-  TAIJI_RELEASE_REQUIRE_ARTIFACTS=0 bash "$SCRIPT_DIR/01_制包机_发布预检.sh"
+  TAIJI_RELEASE_REQUIRE_ARTIFACTS=0 /bin/bash -p "$SCRIPT_DIR/01_制包机_发布预检.sh"
   write_builder_input_package
   printf '\n[OK] 本机发布输入准备完成。请把同一 commit 的 tar.gz、manifest.json 和 tar.gz.sha256 一起复制到 Linux amd64 制包机。\n'
   printf '传输后先在三件套所在目录执行：sha256sum -c taijiagent-制包机输入-*.tar.gz.sha256\n'
   printf '校验通过再解压输入包并执行：\n'
-  printf 'bash ./00_制包机_生成离线交付包.sh\n'
+  printf '/bin/bash -p ./00_制包机_生成离线交付包.sh\n'
 }
 
 main "$@"
