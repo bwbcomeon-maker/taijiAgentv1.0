@@ -14,7 +14,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import BinaryIO, Iterator, Tuple
+from typing import BinaryIO, Iterator, Optional, Tuple
 
 
 EXPECTED_ELECTRON_VERSION = "39.8.10"
@@ -200,6 +200,47 @@ def verified_archive_snapshot(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+@contextmanager
+def verified_archive_fd_snapshot(
+    descriptor: int,
+    *,
+    basename: str,
+    expected_sha256: str,
+    directory: Path,
+) -> Iterator[Tuple[BinaryIO, str]]:
+    """Adopt an already-fixed archive descriptor without reopening a path."""
+    if not isinstance(descriptor, int) or descriptor < 3 or not basename:
+        raise ElectronRuntimeStageError("Electron archive FD contract is invalid")
+    source_descriptor = -1
+    try:
+        source_descriptor = os.dup(descriptor)
+        with os.fdopen(source_descriptor, "rb", closefd=True) as source, tempfile.TemporaryFile(
+            mode="w+b", prefix=".taiji-electron-archive-", dir=str(directory)
+        ) as snapshot:
+            source_descriptor = -1
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size <= 0:
+                raise ElectronRuntimeStageError("Electron archive FD is not a regular single-link file")
+            digest = hashlib.sha256()
+            source.seek(0)
+            copied = 0
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                copied += len(chunk)
+                if copied > MAX_ELECTRON_ARCHIVE_BYTES:
+                    raise ElectronRuntimeStageError("Electron archive size is excessive")
+                digest.update(chunk)
+                snapshot.write(chunk)
+            actual = digest.hexdigest()
+            if actual != expected_sha256:
+                raise ElectronRuntimeStageError("Electron archive SHA256 does not match policy")
+            snapshot.flush()
+            snapshot.seek(0)
+            yield snapshot, actual
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
 
 
 def _runtime_file_inventory(dist: Path) -> dict[str, Path]:
@@ -414,7 +455,9 @@ def stage_electron_runtime(
     source: Path,
     destination: Path,
     *,
-    archive: Path,
+    archive: Optional[Path],
+    archive_fd: Optional[int] = None,
+    archive_basename: Optional[str] = None,
     expected_version: str,
     expected_archive_sha256: str,
     expected_executable_sha256: str,
@@ -426,18 +469,32 @@ def stage_electron_runtime(
         expected_version=expected_version,
         require_linux_x86_64=require_linux_x86_64,
     )
-    archive = archive.expanduser().absolute()
+    if (archive is None) == (archive_fd is None):
+        raise ElectronRuntimeStageError("exactly one Electron archive source is required")
+    if archive_fd is None:
+        archive = archive.expanduser().absolute()
     destination = destination.expanduser().absolute()
     shutil.rmtree(destination, ignore_errors=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with verified_archive_snapshot(
-        archive,
-        expected_sha256=expected_archive_sha256,
-        directory=destination.parent,
-    ) as (archive_snapshot, archive_sha256):
+    snapshot_context = (
+        verified_archive_fd_snapshot(
+            archive_fd,
+            basename=archive_basename or "",
+            expected_sha256=expected_archive_sha256,
+            directory=destination.parent,
+        )
+        if archive_fd is not None
+        else verified_archive_snapshot(
+            archive,
+            expected_sha256=expected_archive_sha256,
+            directory=destination.parent,
+        )
+    )
+    with snapshot_context as (archive_snapshot, archive_sha256):
+        archive_name = archive_basename if archive_fd is not None else archive.name
         archive_sha256 = validate_archive_matches_dist(
             source,
-            archive.name,
+            archive_name,
             archive_snapshot,
             expected_version=expected_version,
             expected_archive_sha256=expected_archive_sha256,
@@ -486,7 +543,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage the audited Taiji Electron runtime")
     parser.add_argument("--source", required=True)
     parser.add_argument("--destination", required=True)
-    parser.add_argument("--archive", required=True)
+    archive_group = parser.add_mutually_exclusive_group(required=True)
+    archive_group.add_argument("--archive")
+    archive_group.add_argument("--archive-fd", type=int)
+    parser.add_argument("--archive-basename")
     parser.add_argument("--policy", required=True)
     parser.add_argument("--require-linux-x86-64", action="store_true")
     args = parser.parse_args()
@@ -499,7 +559,9 @@ def main() -> int:
         result = stage_electron_runtime(
             Path(args.source),
             Path(args.destination),
-            archive=Path(args.archive),
+            archive=Path(args.archive) if args.archive else None,
+            archive_fd=args.archive_fd,
+            archive_basename=args.archive_basename,
             expected_version=expected_version,
             expected_archive_sha256=expected_archive_sha256,
             expected_executable_sha256=expected_executable_sha256,

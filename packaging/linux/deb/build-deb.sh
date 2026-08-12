@@ -43,6 +43,8 @@ PACKAGED_NODE_EXECUTABLE="${TAIJI_PACKAGED_NODE_EXECUTABLE:-}"
 PRIVATE_LIBRARY_SYSROOT="${TAIJI_PRIVATE_LIBRARY_SYSROOT:-/usr/lib/x86_64-linux-gnu}"
 SOURCE_COMMIT="${TAIJI_SOURCE_COMMIT:-}"
 ELECTRON_ARCHIVE="${TAIJI_ELECTRON_ARCHIVE:-}"
+ELECTRON_ARCHIVE_FD="${TAIJI_ELECTRON_ARCHIVE_FD:-}"
+ELECTRON_ARCHIVE_BASENAME="${TAIJI_ELECTRON_ARCHIVE_BASENAME:-}"
 PACKAGED_NODE_VERSION="22.23.1"
 PACKAGED_NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 PINNED_NODE_EXECUTABLE_SHA256="93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
@@ -57,6 +59,10 @@ PINNED_LOCK_CONTRACT_HELPER_SHA256="fca76118874d3846f1bddf304de0159160beff8467be
 PINNED_SOURCE_INTEGRITY_HELPER_SHA256="eaebadbe2f86d76d09f19ed210ad407e5926a242c46f53fb89e26253db8d8d7a"
 SOURCE_ARCHIVE_PATH="${TAIJI_SOURCE_ARCHIVE_PATH:-}"
 SOURCE_INVENTORY_PATH="${TAIJI_SOURCE_INVENTORY_PATH:-}"
+SOURCE_ARCHIVE_FD="${TAIJI_SOURCE_ARCHIVE_FD:-}"
+SOURCE_ARCHIVE_BASENAME="${TAIJI_SOURCE_ARCHIVE_BASENAME:-}"
+SOURCE_INVENTORY_FD="${TAIJI_SOURCE_INVENTORY_FD:-}"
+SOURCE_INVENTORY_BASENAME="${TAIJI_SOURCE_INVENTORY_BASENAME:-}"
 SOURCE_INVENTORY_SHA256="${TAIJI_SOURCE_INVENTORY_SHA256:-}"
 PYTHON_DEPENDENCY_LOCK_STATUS="${TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS:-}"
 PYTHON_LOCK_BASENAME="${TAIJI_PYTHON_LOCK_BASENAME:-}"
@@ -214,17 +220,33 @@ PY
 }
 
 validate_source_archive_integrity() {
-  local helper_sha inventory_sha agent_python actual_target python_real expected_python_real
+  local helper_sha inventory_sha agent_python actual_target python_real expected_python_real archive_ref inventory_ref
+  SOURCE_ARCHIVE_FD="${SOURCE_ARCHIVE_FD:-}"
+  SOURCE_INVENTORY_FD="${SOURCE_INVENTORY_FD:-}"
+  SOURCE_ARCHIVE_BASENAME="${SOURCE_ARCHIVE_BASENAME:-}"
+  SOURCE_INVENTORY_BASENAME="${SOURCE_INVENTORY_BASENAME:-}"
   [ -f "$SOURCE_INTEGRITY_HELPER" ] && [ ! -L "$SOURCE_INTEGRITY_HELPER" ] \
     || fail "source archive integrity helper is missing"
   helper_sha="$(sha256sum "$SOURCE_INTEGRITY_HELPER" | awk '{print $1}')"
   [ "$helper_sha" = "$PINNED_SOURCE_INTEGRITY_HELPER_SHA256" ] \
     || fail "source archive integrity helper is not the reviewed implementation"
-  [ -f "$SOURCE_ARCHIVE_PATH" ] && [ ! -L "$SOURCE_ARCHIVE_PATH" ] \
-    || fail "TAIJI_SOURCE_ARCHIVE_PATH is required"
-  [ -f "$SOURCE_INVENTORY_PATH" ] && [ ! -L "$SOURCE_INVENTORY_PATH" ] \
-    || fail "TAIJI_SOURCE_INVENTORY_PATH is required"
-  inventory_sha="$(sha256sum "$SOURCE_INVENTORY_PATH" | awk '{print $1}')"
+  if [ -n "$SOURCE_ARCHIVE_FD" ] || [ -n "$SOURCE_INVENTORY_FD" ]; then
+    [ -n "$SOURCE_ARCHIVE_FD" ] && [ -n "$SOURCE_INVENTORY_FD" ] \
+      && [ -n "$SOURCE_ARCHIVE_BASENAME" ] && [ -n "$SOURCE_INVENTORY_BASENAME" ] \
+      || fail "formal source archive/inventory FD and basename must be provided together"
+    [ -z "$SOURCE_ARCHIVE_PATH" ] && [ -z "$SOURCE_INVENTORY_PATH" ] \
+      || fail "source path and FD modes are mutually exclusive"
+    archive_ref="/proc/self/fd/$SOURCE_ARCHIVE_FD"
+    inventory_ref="/proc/self/fd/$SOURCE_INVENTORY_FD"
+  else
+    [ -f "$SOURCE_ARCHIVE_PATH" ] && [ ! -L "$SOURCE_ARCHIVE_PATH" ] \
+      || fail "TAIJI_SOURCE_ARCHIVE_PATH is required"
+    [ -f "$SOURCE_INVENTORY_PATH" ] && [ ! -L "$SOURCE_INVENTORY_PATH" ] \
+      || fail "TAIJI_SOURCE_INVENTORY_PATH is required"
+    archive_ref="$SOURCE_ARCHIVE_PATH"
+    inventory_ref="$SOURCE_INVENTORY_PATH"
+  fi
+  inventory_sha="$(sha256sum "$inventory_ref" | awk '{print $1}')"
   [ "$inventory_sha" = "$SOURCE_INVENTORY_SHA256" ] \
     || fail "source inventory SHA256 mismatch"
   agent_python="$SOURCE_AGENT_DIR/venv/bin/python"
@@ -244,17 +266,32 @@ validate_source_archive_integrity() {
   expected_python_real="$(readlink -f "$EXPECTED_PYTHON_EXECUTABLE")"
   [ -n "$python_real" ] && [ "$python_real" = "$expected_python_real" ] \
     || fail "Agent Python and TAIJI_PYTHON_EXECUTABLE resolve to different files"
-  python3 "$SOURCE_INTEGRITY_HELPER" verify \
-    --archive "$SOURCE_ARCHIVE_PATH" \
-    --inventory "$SOURCE_INVENTORY_PATH" \
-    --root "$REPO_ROOT" \
-    --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
-    --allow-extra-prefix "apps/taiji-desktop/node_modules" \
-    --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
-    --allow-extra-prefix "runtime/package-build" \
-    --allow-extra-prefix "packages/麒麟操作系统安装包" \
-    --allow-extra-symlink "hermes-local-lab/sources/hermes-agent/venv/bin/python" "$EXPECTED_AGENT_PYTHON_SYMLINK_TARGET" \
-    || fail "source tree differs from the immutable archive inventory"
+  if [ -n "$SOURCE_ARCHIVE_FD" ]; then
+    python3 "$SOURCE_INTEGRITY_HELPER" verify \
+      --archive-fd "$SOURCE_ARCHIVE_FD" \
+      --archive-basename "$SOURCE_ARCHIVE_BASENAME" \
+      --inventory-fd "$SOURCE_INVENTORY_FD" \
+      --root "$REPO_ROOT" \
+      --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
+      --allow-extra-prefix "apps/taiji-desktop/node_modules" \
+      --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
+      --allow-extra-prefix "runtime/package-build" \
+      --allow-extra-prefix "packages/麒麟操作系统安装包" \
+      --allow-extra-symlink "hermes-local-lab/sources/hermes-agent/venv/bin/python" "$EXPECTED_AGENT_PYTHON_SYMLINK_TARGET" \
+      || fail "source tree differs from the immutable archive inventory"
+  else
+    python3 "$SOURCE_INTEGRITY_HELPER" verify \
+      --archive "$archive_ref" \
+      --inventory "$inventory_ref" \
+      --root "$REPO_ROOT" \
+      --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
+      --allow-extra-prefix "apps/taiji-desktop/node_modules" \
+      --allow-extra-prefix "hermes-local-lab/sources/docx-engine-v2/node_modules" \
+      --allow-extra-prefix "runtime/package-build" \
+      --allow-extra-prefix "packages/麒麟操作系统安装包" \
+      --allow-extra-symlink "hermes-local-lab/sources/hermes-agent/venv/bin/python" "$EXPECTED_AGENT_PYTHON_SYMLINK_TARGET" \
+      || fail "source tree differs from the immutable archive inventory"
+  fi
 }
 
 load_policy_contract() {
@@ -928,7 +965,12 @@ write_package_manifest() {
   local deb_sha256 electron_sha256 desktop_sha256 abi_sha256 upgrade_contract_sha256 icon_set_sha256 built_at_utc out_deb_name source_archive_sha256
   out_deb_name="$(basename "$OUT_DEB")"
   deb_sha256="$(sha256sum "$OUT_DEB" | awk '{print $1}')"
-  source_archive_sha256="$(sha256sum "$SOURCE_ARCHIVE_PATH" | awk '{print $1}')"
+  local source_archive_ref source_inventory_ref
+  source_archive_ref="${SOURCE_ARCHIVE_FD:+/proc/self/fd/$SOURCE_ARCHIVE_FD}"
+  source_inventory_ref="${SOURCE_INVENTORY_FD:+/proc/self/fd/$SOURCE_INVENTORY_FD}"
+  [ -n "$source_archive_ref" ] || source_archive_ref="$SOURCE_ARCHIVE_PATH"
+  [ -n "$source_inventory_ref" ] || source_inventory_ref="$SOURCE_INVENTORY_PATH"
+  source_archive_sha256="$(sha256sum "$source_archive_ref" | awk '{print $1}')"
   electron_sha256="$(sha256sum "$DESKTOP_RUNTIME/node_modules/electron/dist/electron" | awk '{print $1}')"
   [ "$electron_sha256" = "$PINNED_ELECTRON_EXECUTABLE_SHA256" ] \
     || fail "Packaged Electron executable SHA256 is not canonical"
@@ -946,9 +988,9 @@ write_package_manifest() {
   "version": "$VERSION",
   "architecture": "$TAIJI_PACKAGE_ARCHITECTURE",
   "source_commit": "$SOURCE_COMMIT",
-  "source_archive_basename": "$(basename "$SOURCE_ARCHIVE_PATH")",
+  "source_archive_basename": "${SOURCE_ARCHIVE_BASENAME:-$(basename "$SOURCE_ARCHIVE_PATH")}",
   "source_archive_sha256": "$source_archive_sha256",
-  "source_inventory_basename": "$(basename "$SOURCE_INVENTORY_PATH")",
+  "source_inventory_basename": "${SOURCE_INVENTORY_BASENAME:-$(basename "$SOURCE_INVENTORY_PATH")}",
   "source_inventory_sha256": "$SOURCE_INVENTORY_SHA256",
   "deb_basename": "$(basename "$OUT_DEB")",
   "deb_sha256": "$deb_sha256",
@@ -1187,10 +1229,16 @@ install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"
   --destination "$DESKTOP_RUNTIME/src" \
   --entry main.js \
   --entry preload.js
+electron_archive_args=(--archive "$ELECTRON_ARCHIVE")
+if [ -n "$ELECTRON_ARCHIVE_FD" ]; then
+  [ -z "$ELECTRON_ARCHIVE" ] && [ -n "$ELECTRON_ARCHIVE_BASENAME" ] \
+    || fail "Electron archive path and FD modes are mutually exclusive"
+  electron_archive_args=(--archive-fd "$ELECTRON_ARCHIVE_FD" --archive-basename "$ELECTRON_ARCHIVE_BASENAME")
+fi
 python3 "$ELECTRON_RUNTIME_STAGER" \
   --source "$APP_DIR/node_modules/electron" \
   --destination "$DESKTOP_RUNTIME/node_modules/electron" \
-  --archive "$ELECTRON_ARCHIVE" \
+  "${electron_archive_args[@]}" \
   --policy "$POLICY_FILE" \
   --require-linux-x86-64
 validate_staged_toolchain_executables

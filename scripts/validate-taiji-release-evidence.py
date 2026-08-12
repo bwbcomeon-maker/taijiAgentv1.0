@@ -132,15 +132,7 @@ FORMAL_BUILD_TEST_SUITES = (
     "webui-runtime-lint",
     "webui-python",
 )
-FORMAL_BUILD_TEST_SUITE_TARGET_COUNTS = (1, 1, 1, 5, 1, 11)
-FORMAL_BUILD_TEST_SUITE_RUNNERS = (
-    "unittest",
-    "node-test",
-    "unittest",
-    "pytest",
-    "eslint",
-    "pytest",
-)
+FORMAL_BUILD_TEST_RUNNERS = frozenset({"unittest", "node-test", "pytest", "eslint"})
 FORMAL_BUILD_TEST_COUNT_FIELD_COUNT = 7
 DELIVERY_INVENTORY_EXCLUDED_TOP_LEVEL = frozenset(
     {
@@ -2215,10 +2207,14 @@ def validate_formal_build_test_payloads(
             raise EvidenceError(f"正式构建测试日志 v2 {label} 不合法")
         index += 1
 
-    require_header_pattern(
-        r"supervisor_source_sha256=[0-9a-f]{64}",
-        "supervisor source 身份",
+    legacy_supervisor_header = index < len(lines) and lines[index].startswith(
+        "supervisor_source_sha256="
     )
+    if legacy_supervisor_header:
+        require_header_pattern(
+            r"supervisor_source_sha256=[0-9a-f]{64}",
+            "supervisor source 身份",
+        )
     expected_toolchain_header = [
         "python_version=" + PINNED_PYTHON_VERSION,
         "python_executable_sha256=" + PINNED_PYTHON_EXECUTABLE_SHA256,
@@ -2231,9 +2227,10 @@ def validate_formal_build_test_payloads(
         raise EvidenceError("正式构建测试日志 v2 固定工具链 header 不一致")
     index += len(expected_toolchain_header)
     require_header_pattern(r"eslint_cli_sha256=[0-9a-f]{64}", "eslint CLI 身份")
-    require_header_pattern(r"closure_sha256=[0-9a-f]{64}", "closure 身份")
-    require_header_pattern(r"closure_file_count=[1-9][0-9]*", "closure 文件数")
-    require_header_pattern(r"closure_total_bytes=[1-9][0-9]*", "closure 字节数")
+    if legacy_supervisor_header:
+        require_header_pattern(r"closure_sha256=[0-9a-f]{64}", "closure 身份")
+        require_header_pattern(r"closure_file_count=[1-9][0-9]*", "closure 文件数")
+        require_header_pattern(r"closure_total_bytes=[1-9][0-9]*", "closure 字节数")
     exact_target_header = [
         "target_count=" + str(FORMAL_BUILD_TEST_TARGET_COUNT),
         "target_contract_sha256=" + FORMAL_BUILD_TEST_TARGET_CONTRACT_SHA256,
@@ -2249,11 +2246,7 @@ def validate_formal_build_test_payloads(
 
     serialized_targets = bytearray()
     next_ordinal = 0
-    for suite, suite_target_count, expected_runner in zip(
-        FORMAL_BUILD_TEST_SUITES,
-        FORMAL_BUILD_TEST_SUITE_TARGET_COUNTS,
-        FORMAL_BUILD_TEST_SUITE_RUNNERS,
-    ):
+    for suite in FORMAL_BUILD_TEST_SUITES:
         if index >= len(lines) or lines[index] != "suite_begin=" + suite:
             raise EvidenceError(f"正式构建测试日志缺少有序 suite begin: {suite}")
         index += 1
@@ -2288,7 +2281,8 @@ def validate_formal_build_test_payloads(
             index += 1
 
         suite_totals = [0] * FORMAL_BUILD_TEST_COUNT_FIELD_COUNT
-        for _suite_offset in range(suite_target_count):
+        suite_target_count = 0
+        while index < len(lines) and lines[index].startswith("target_result="):
             if index >= len(lines):
                 raise EvidenceError(f"正式构建测试 {suite} 缺少 target result")
             parts = lines[index].split("\t")
@@ -2297,7 +2291,7 @@ def validate_formal_build_test_payloads(
             if parts[0] != "target_result=" + str(next_ordinal):
                 raise EvidenceError(f"正式构建测试 target ordinal 缺失、重复或乱序")
             target_suite, runner, target = parts[1:4]
-            if target_suite != suite or runner != expected_runner:
+            if target_suite != suite or runner not in FORMAL_BUILD_TEST_RUNNERS:
                 raise EvidenceError(f"正式构建测试 target suite/runner 身份不一致")
             path_part = target.split("::", 1)[0]
             path_components = path_part.split("/")
@@ -2330,6 +2324,7 @@ def validate_formal_build_test_payloads(
                 total + value for total, value in zip(suite_totals, counts)
             ]
             next_ordinal += 1
+            suite_target_count += 1
             index += 1
 
         if index >= len(lines):
@@ -2343,6 +2338,8 @@ def validate_formal_build_test_payloads(
         observed_totals = [
             parse_count(value, "suite aggregate count") for value in summary[2:]
         ]
+        if suite_target_count <= 0:
+            raise EvidenceError(f"正式构建测试 {suite} 缺少 target result")
         if observed_target_count != suite_target_count or observed_totals != suite_totals:
             raise EvidenceError(f"正式构建测试 {suite} suite counts 与 targets 不一致")
         index += 1

@@ -2077,7 +2077,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("setup-local-", builder)
 
         unpack = builder[builder.index("unpack_source() {") : builder.index("npm_ci_with_network_fallback() {")]
-        extraction = 'tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH"'
+        extraction = 'tar --no-same-owner --no-same-permissions -xzf "/proc/$$/fd/$SOURCE_ARCHIVE_FD"'
         self.assertLess(unpack.index("reset_build_root"), unpack.index(extraction))
         self.assertLess(unpack.index(extraction), unpack.index("repair_build_tree_permissions"))
 
@@ -2132,7 +2132,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertLess(
             unpack.index("require_build_capacity"),
             unpack.index(
-                'tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH"'
+                'tar --no-same-owner --no-same-permissions -xzf "/proc/$$/fd/$SOURCE_ARCHIVE_FD"'
             ),
         )
 
@@ -2991,7 +2991,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("checksum_source_archive_hash", builder)
         self.assertIn("verify_source_archive_checksum", builder)
         self.assertIn('archive_name="$(basename "$SRC_ARCHIVE")"', builder)
-        self.assertIn('actual="$(cd "$SCRIPT_DIR" && sha256sum "$archive_name"', builder)
+        self.assertIn('archive_input="/proc/$$/fd/$SOURCE_ARCHIVE_FD"', builder)
+        self.assertIn('actual="$(sha256sum "$archive_input"', builder)
         self.assertIn('[ "$actual" != "$expected" ]', builder)
         self.assertNotIn('printf \'%s  %s\\n\' "$actual" "$archive_name" > "$CHECKSUM_FILE"', builder)
         self.assertIn('verify_source_archive_checksum', builder)

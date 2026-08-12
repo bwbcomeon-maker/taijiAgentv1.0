@@ -123,7 +123,7 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertNotIn('-xzf "$PYTHON_ARCHIVE_PATH"', builder)
         self.assertNotIn('-xJf "$tmp_dir/$tarball"', builder)
         self.assertIn(
-            'open_fixed_tool_archive "$SRC_ARCHIVE" "$SOURCE_ARCHIVE_SHA256"',
+            'adopt_sealed_snapshot "$SRC_ARCHIVE" "$source_archive_hash" archive',
             builder,
         )
         self.assertNotIn('tar -xzf "$SRC_ARCHIVE"', builder)

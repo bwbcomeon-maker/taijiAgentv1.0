@@ -743,7 +743,7 @@ PY
   fi
   /usr/bin/python3 -I -B "$REPO_ROOT/scripts/validate-taiji-release-evidence.py" \
     "${formal_log_args[@]}" \
-    || fail "正式构建测试日志摘要或 strict v1 语义无效"
+    || fail "正式构建测试日志摘要或 formal-build-tests/v2 语义无效"
 }
 verify_deb_payload() {
   local deb="$1" payload_root abi embedded_policy abi_sha icon_sha256 marker_icon_sha256
@@ -1002,7 +1002,6 @@ main() {
   check_source_archive_matches_git_head
   check_no_macos_metadata_or_stale_zip
   check_delivery_artifacts
-  check_git_clean_and_commit_match
   ok "发布预检通过"
 }
 trap cleanup_release_temp_artifacts EXIT

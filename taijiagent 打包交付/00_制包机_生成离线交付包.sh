@@ -23,6 +23,10 @@ FROZEN_CONTROL_TEMP_PARENT=""
 SOURCE_INVENTORY=""
 SOURCE_INVENTORY_SHA256=""
 SOURCE_ARCHIVE_SHA256=""
+SOURCE_ARCHIVE_FD=""
+SOURCE_INVENTORY_FD=""
+SOURCE_ARCHIVE_BASENAME=""
+SOURCE_INVENTORY_BASENAME=""
 BUILD_ROOT="${TAIJI_BUILD_ROOT:-}"
 BUILD_ROOT_OWNER_MARKER=".taiji-build-root-owner"
 BUILD_ROOT_OWNER_TOKEN="taiji-agent-build-root-v1:$(id -u 2>/dev/null || printf user)"
@@ -114,6 +118,8 @@ POLICY_MAINTAINER=""
 ELECTRON_VERSION=""
 ELECTRON_ARCHIVE_SHA256=""
 ELECTRON_ARCHIVE=""
+ELECTRON_ARCHIVE_FD=""
+ELECTRON_ARCHIVE_BASENAME=""
 ELECTRON_EXECUTABLE_SHA256=""
 ELECTRON_PINNED_EXECUTABLE_SHA256="c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
 ELF_ABI_AUDIT_SHA256=""
@@ -582,11 +588,16 @@ checksum_source_archive_hash() {
 }
 
 verify_source_archive_checksum() {
-  local archive_name expected actual
+  local archive_name expected actual archive_input
   archive_name="$(basename "$SRC_ARCHIVE")"
   expected="$(checksum_source_archive_hash "$archive_name")"
   [ -n "$expected" ] || fail "校验文件中未找到源码包条目：$archive_name"
-  actual="$(cd "$SCRIPT_DIR" && sha256sum "$archive_name" | awk '{print $1}')"
+  if [ -n "$SOURCE_ARCHIVE_FD" ]; then
+    archive_input="/proc/$$/fd/$SOURCE_ARCHIVE_FD"
+  else
+    archive_input="$SRC_ARCHIVE"
+  fi
+  actual="$(sha256sum "$archive_input" | awk '{print $1}')"
   if [ "$actual" != "$expected" ]; then
     fail "源码包 SHA256 不匹配：$archive_name"
   fi
@@ -606,20 +617,34 @@ resolve_source_integrity_helper() {
 }
 
 resolve_and_verify_source_inventory() {
-  local expected inventory_name inventory_hash source_commit
+  local expected inventory_name inventory_hash source_commit source_archive_hash
   resolve_source_integrity_helper
   inventory_name="$(basename "$SRC_ARCHIVE" .tar.gz).inventory.json"
   SOURCE_INVENTORY="$SCRIPT_DIR/$inventory_name"
   [ -f "$SOURCE_INVENTORY" ] && [ ! -L "$SOURCE_INVENTORY" ] \
     || fail "源码包缺少 archive-derived 不可变成员清单：$inventory_name"
+  source_archive_hash="$(checksum_source_archive_hash "$(basename "$SRC_ARCHIVE")")"
+  [ -n "$source_archive_hash" ] || fail "SHA256SUMS.txt 缺少源码包条目"
   expected="$(checksum_source_archive_hash "$inventory_name")"
   [ -n "$expected" ] || fail "SHA256SUMS.txt 缺少源码成员清单条目：$inventory_name"
-  inventory_hash="$(sha256sum "$SOURCE_INVENTORY" | awk '{print $1}')"
-  [ "$inventory_hash" = "$expected" ] || fail "源码成员清单 SHA256 不匹配"
+  printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "SHA256SUMS.txt 中源码成员清单摘要格式非法"
+  inventory_hash="$expected"
   source_commit="$(basename "$SRC_ARCHIVE" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
+  SOURCE_ARCHIVE_BASENAME="$(basename "$SRC_ARCHIVE")"
+  SOURCE_INVENTORY_BASENAME="$(basename "$SOURCE_INVENTORY")"
+  adopt_sealed_snapshot "$SRC_ARCHIVE" "$source_archive_hash" archive \
+    || fail "无法在首次源码完整性检查前固定源码归档 sealed 快照"
+  exec 13< "$FIXED_TOOL_ARCHIVE_FD_PATH" \
+    || fail "无法接管源码归档 sealed 快照 FD"
+  SOURCE_ARCHIVE_FD=13
+  close_fixed_tool_archive
+  adopt_sealed_snapshot "$SOURCE_INVENTORY" "$inventory_hash" inventory \
+    || fail "无法在首次源码完整性检查前固定源码清单 sealed 快照"
   python3 "$SOURCE_INTEGRITY_HELPER" verify \
-    --archive "$SRC_ARCHIVE" \
-    --inventory "$SOURCE_INVENTORY" \
+    --archive-fd "$SOURCE_ARCHIVE_FD" \
+    --archive-basename "$SOURCE_ARCHIVE_BASENAME" \
+    --inventory-fd "$SOURCE_INVENTORY_FD" \
     || fail "源码归档与不可变成员清单不一致"
   SOURCE_INVENTORY_SHA256="$inventory_hash"
 }
@@ -1045,8 +1070,8 @@ prepare_source_release() {
   resolve_source_archive
   [ -f "$SRC_ARCHIVE" ] || fail "未找到源码包：$SRC_ARCHIVE"
   [ -f "$CHECKSUM_FILE" ] || fail "正式制包缺少 SHA256SUMS.txt"
-  verify_source_archive_checksum
   resolve_and_verify_source_inventory
+  verify_source_archive_checksum
   ok "源码包与 archive-derived 成员清单校验通过"
   run_release_preflight
 }
@@ -1471,6 +1496,8 @@ close_sealed_snapshot_slot() {
     archive) exec 9<&- 2>/dev/null || true ; FIXED_TOOL_ARCHIVE_FD_PATH="" ;;
     node) exec 4<&- 2>/dev/null || true ; BUILD_NODE_HELD_PATH="" ;;
     npm) exec 5<&- 2>/dev/null || true ; BUILD_NPM_CLI_HELD_PATH="" ;;
+    inventory) exec 14<&- 2>/dev/null || true ; SOURCE_INVENTORY_FD="" ;;
+    electron) exec 15<&- 2>/dev/null || true ; ELECTRON_ARCHIVE_FD="" ;;
     supervisor) exec 6<&- 2>/dev/null || true ; FORMAL_BUILD_SUPERVISOR_FD_PATH="" ; FORMAL_BUILD_SUPERVISOR_SHA256="" ;;
     *) return 1 ;;
   esac
@@ -1510,7 +1537,7 @@ adopt_sealed_snapshot() {
   SEALED_SNAPSHOT_CONTROL_OPEN=1
   case "$slot" in
     node) snapshot_mode=0500 ;;
-    archive|npm) snapshot_mode=0400 ;;
+    archive|npm|inventory|electron) snapshot_mode=0400 ;;
   esac
   /usr/bin/env -i \
     HOME="$BUILD_ROOT" TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin \
@@ -1547,6 +1574,14 @@ adopt_sealed_snapshot() {
       exec 5< "$holder_path" || { cleanup_sealed_snapshot_transport || true; return 1; }
       adopted_path="/proc/$$/fd/5"
       ;;
+    inventory)
+      exec 14< "$holder_path" || { cleanup_sealed_snapshot_transport || true; return 1; }
+      adopted_path="/proc/$$/fd/14"
+      ;;
+    electron)
+      exec 15< "$holder_path" || { cleanup_sealed_snapshot_transport || true; return 1; }
+      adopted_path="/proc/$$/fd/15"
+      ;;
   esac
   if ! verify_sealed_snapshot "$adopted_path" "$expected_sha256"; then
     close_sealed_snapshot_slot "$slot" || true
@@ -1572,6 +1607,8 @@ adopt_sealed_snapshot() {
     archive) FIXED_TOOL_ARCHIVE_FD_PATH="$adopted_path" ;;
     node) BUILD_NODE_HELD_PATH="$adopted_path" ;;
     npm) BUILD_NPM_CLI_HELD_PATH="$adopted_path" ;;
+    inventory) SOURCE_INVENTORY_FD=14 ;;
+    electron) ELECTRON_ARCHIVE_FD=15 ;;
   esac
 }
 
@@ -1633,6 +1670,11 @@ retain_source_archive_snapshot() {
 close_retained_formal_archive_snapshots() {
   close_retained_tool_archive_snapshots
   exec 13<&- 2>/dev/null || true
+  exec 14<&- 2>/dev/null || true
+  exec 15<&- 2>/dev/null || true
+  SOURCE_ARCHIVE_FD=""
+  SOURCE_INVENTORY_FD=""
+  ELECTRON_ARCHIVE_FD=""
   exec 6<&- 2>/dev/null || true
   SOURCE_ARCHIVE_SNAPSHOT_PATH=""
   FORMAL_BUILD_SUPERVISOR_FD_PATH=""
@@ -2163,17 +2205,18 @@ unpack_source() {
   reset_build_root
   require_build_capacity "$BUILD_ROOT"
   [ -n "$SOURCE_ARCHIVE_SHA256" ] || fail "源码包固定 SHA256 未加载"
-  open_fixed_tool_archive "$SRC_ARCHIVE" "$SOURCE_ARCHIVE_SHA256" \
-    || fail "源码包在校验与解压之间发生变化"
-  tar --no-same-owner --no-same-permissions -xzf "$FIXED_TOOL_ARCHIVE_FD_PATH" -C "$BUILD_ROOT"
-  require_open_fixed_tool_archive_unchanged "$SOURCE_ARCHIVE_SHA256"
-  retain_source_archive_snapshot \
-    || fail "无法保留源码 sealed memfd 归档快照"
+  [ -n "$SOURCE_ARCHIVE_FD" ] || fail "源码 sealed 快照 FD 尚未固定"
+  verify_sealed_snapshot "/proc/$$/fd/$SOURCE_ARCHIVE_FD" "$SOURCE_ARCHIVE_SHA256" \
+    || fail "源码 sealed 快照在解压前已漂移"
+  tar --no-same-owner --no-same-permissions -xzf "/proc/$$/fd/$SOURCE_ARCHIVE_FD" -C "$BUILD_ROOT"
+  verify_sealed_snapshot "/proc/$$/fd/$SOURCE_ARCHIVE_FD" "$SOURCE_ARCHIVE_SHA256" \
+    || fail "源码 sealed 快照在解压后已漂移"
   [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
   repair_build_tree_permissions
   python3 "$SOURCE_INTEGRITY_HELPER" verify \
-    --archive "$SRC_ARCHIVE" \
-    --inventory "$SOURCE_INVENTORY" \
+    --archive-fd "$SOURCE_ARCHIVE_FD" \
+    --archive-basename "$SOURCE_ARCHIVE_BASENAME" \
+    --inventory-fd "$SOURCE_INVENTORY_FD" \
     --root "$SRC_DIR" \
     || fail "源码解压后已偏离原始归档成员清单"
   VERSION="$(read_product_version)"
@@ -2199,8 +2242,9 @@ verify_build_source_integrity() {
     )
   fi
   python3 "$SOURCE_INTEGRITY_HELPER" verify \
-    --archive "$SRC_ARCHIVE" \
-    --inventory "$SOURCE_INVENTORY" \
+    --archive-fd "$SOURCE_ARCHIVE_FD" \
+    --archive-basename "$SOURCE_ARCHIVE_BASENAME" \
+    --inventory-fd "$SOURCE_INVENTORY_FD" \
     --root "$SRC_DIR" \
     --allow-extra-prefix "hermes-local-lab/sources/hermes-agent/venv" \
     --allow-extra-prefix "hermes-local-lab/sources/hermes-webui/node_modules" \
@@ -2255,6 +2299,9 @@ locate_verified_electron_archive() {
   done < <(find "$electron_config_cache" -type f -name "$expected_name" -print0)
   [ "$matching" -gt 0 ] \
     || fail "npm 安装后未找到 canonical policy 绑定的 Electron ${ELECTRON_VERSION} Linux x64 归档"
+  ELECTRON_ARCHIVE_BASENAME="$(basename "$ELECTRON_ARCHIVE")"
+  adopt_sealed_snapshot "$ELECTRON_ARCHIVE" "$ELECTRON_ARCHIVE_SHA256" electron \
+    || fail "无法在 Electron 首次 staging 前固定归档 sealed 快照"
   ok "Electron 下载归档 SHA256 已绑定：$ELECTRON_ARCHIVE_SHA256"
 }
 
@@ -2442,12 +2489,18 @@ build_runtime_and_deb() {
     || fail "无法从源码包名称解析发布 commit：$(basename "$SRC_ARCHIVE")"
   TAIJI_AGENT_VERSION="$VERSION" \
   TAIJI_SOURCE_COMMIT="$source_commit" \
-  TAIJI_SOURCE_ARCHIVE_PATH="$SRC_ARCHIVE" \
-  TAIJI_SOURCE_INVENTORY_PATH="$SOURCE_INVENTORY" \
+  TAIJI_SOURCE_ARCHIVE_PATH="${SOURCE_ARCHIVE_FD:+}" \
+  TAIJI_SOURCE_INVENTORY_PATH="${SOURCE_INVENTORY_FD:+}" \
+  TAIJI_SOURCE_ARCHIVE_FD="$SOURCE_ARCHIVE_FD" \
+  TAIJI_SOURCE_ARCHIVE_BASENAME="$SOURCE_ARCHIVE_BASENAME" \
+  TAIJI_SOURCE_INVENTORY_FD="$SOURCE_INVENTORY_FD" \
+  TAIJI_SOURCE_INVENTORY_BASENAME="$SOURCE_INVENTORY_BASENAME" \
   TAIJI_SOURCE_INVENTORY_SHA256="$SOURCE_INVENTORY_SHA256" \
   TAIJI_PACKAGED_NODE_ROOT="$packaged_node_root" \
   TAIJI_PACKAGED_NODE_EXECUTABLE="$BUILD_NODE_HELD_PATH" \
-  TAIJI_ELECTRON_ARCHIVE="$ELECTRON_ARCHIVE" \
+  TAIJI_ELECTRON_ARCHIVE="${ELECTRON_ARCHIVE_FD:+}" \
+  TAIJI_ELECTRON_ARCHIVE_FD="$ELECTRON_ARCHIVE_FD" \
+  TAIJI_ELECTRON_ARCHIVE_BASENAME="$ELECTRON_ARCHIVE_BASENAME" \
   TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS="$PYTHON_DEPENDENCY_LOCK_STATUS" \
   TAIJI_PYTHON_LOCK_BASENAME="$PYTHON_LOCK_BASENAME" \
   TAIJI_PYTHON_LOCK_SHA256="$PYTHON_LOCK_SHA256" \
@@ -2581,7 +2634,7 @@ collect_artifacts() {
   CANDIDATE_DEB_FIXED=1
   require_candidate_deb_fixed
   source_name="$(basename "$SRC_ARCHIVE")"
-  source_sha="$(cd "$SCRIPT_DIR" && sha256sum "$source_name" | awk '{print $1}')"
+  source_sha="$(sha256sum "/proc/$$/fd/$SOURCE_ARCHIVE_FD" | awk '{print $1}')"
   source_commit="$(printf '%s\n' "$source_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
   abi_sha="$(python3 - "/proc/$$/fd/$SOURCE_PACKAGE_MANIFEST_FD" "$deb_name" "$deb_sha" "$source_commit" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" \
     "$PYTHON_DEPENDENCY_LOCK_STATUS" "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256" "$PYTHON_VERSION" "$PYTHON_EXECUTABLE_SHA256" \
@@ -6691,6 +6744,41 @@ PY
   SOURCE_PACKAGE_MANIFEST_FD=""
 }
 
+run_formal_build_tests_direct() {
+  require_candidate_deb_fixed
+  [ -x /usr/bin/python3 ] || fail "正式构建测试需要受信任的 /usr/bin/python3"
+  [ -n "${FORMAL_PYTHON_FD:-}" ] && [ -n "${FORMAL_NODE_FD:-}" ] \
+    && [ -n "${FORMAL_NPM_CLI_FD:-}" ] && [ -n "${FORMAL_ESLINT_FD:-}" ] \
+    || fail "正式构建测试工具 held FD 未完整准备"
+  [ -d "$SRC_DIR" ] && [ ! -L "$SRC_DIR" ] || fail "正式构建测试源码根不安全"
+  local direct_work="$BUILD_ROOT/formal-build-tests-direct" status
+  mkdir -p -- "$direct_work/home" "$direct_work/tmp"
+  open_formal_build_test_log
+  if /usr/bin/python3 -I -B "$SCRIPT_DIR/../scripts/run-taiji-formal-build-tests.py" \
+      --source-root "$SRC_DIR" \
+      --source-commit "$MARKER_SOURCE_COMMIT" \
+      --work-root "$direct_work" \
+      --python-fd "$FORMAL_PYTHON_FD" \
+      --node-fd "$FORMAL_NODE_FD" \
+      --npm-cli-fd "$FORMAL_NPM_CLI_FD" \
+      --eslint-fd "$FORMAL_ESLINT_FD" \
+      --log-fd "$FORMAL_BUILD_TEST_LOG_FD" \
+      2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" = 0 ] || fail "direct formal-build-tests/v2 失败 (exit=$status)"
+  FORMAL_BUILD_TESTS_STATUS=pass
+  FORMAL_BUILD_TESTS_LOG_SHA256="$(sha256sum "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_FD")" | awk '{print $1}')"
+  require_formal_build_test_log_identity "after direct formal-build-tests/v2"
+  bind_formal_build_test_evidence_to_manifest
+  require_formal_package_manifest_identity "after direct formal test binding"
+  require_formal_build_test_log_identity "after direct manifest binding"
+  close_formal_test_runtime_fds
+  ok "direct formal-build-tests/v2 全部通过并绑定日志：$FORMAL_BUILD_TESTS_LOG_SHA256"
+}
+
 run_formal_build_tests() {
   require_candidate_deb_fixed
   local bootstrap_python relay_python supervisor_config caller_uid caller_gids relay_result attestation_tag
@@ -7438,7 +7526,7 @@ write_build_report() {
   require_candidate_deb_fixed
   source_name="$(basename "$SRC_ARCHIVE")"
   deb_name="taiji-agent_$VERSION"_amd64.deb
-  source_line="$(cd "$SCRIPT_DIR" && sha256sum "$source_name")"
+  source_line="$(sha256sum "/proc/$$/fd/$SOURCE_ARCHIVE_FD")"
   deb_line="$(cd "$OUTPUT_DIR" && sha256sum "$deb_name")"
   [ ! -e "$BUILD_REPORT" ] && [ ! -L "$BUILD_REPORT" ] \
     || { poison_candidate_artifacts "build report path was occupied"; \
@@ -7799,7 +7887,7 @@ main() {
   set_stage "收集并绑定候选产物"
   collect_artifacts
   set_stage "使用固定工具链执行正式构建测试"
-  run_formal_build_tests
+  run_formal_build_tests_direct
   write_pending_build_marker
   set_stage "生成 manifest 和报告"
   write_build_report
