@@ -850,6 +850,20 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             "/home/kylin/raw-installer-success.png",
         )
         self.assertEqual(
+            attestation_argv[attestation_argv.index("--matrix") + 1],
+            "/home/kylin/taiji-acceptance-data/验收工具/certification-matrix.json",
+        )
+        self.assertEqual(
+            attestation_argv[attestation_argv.index("--category-id") + 1],
+            "kylin-v10-sp1-x86_64",
+        )
+        self.assertEqual(
+            attestation_argv[
+                attestation_argv.index("--environment-observation") + 1
+            ],
+            "/home/kylin/taiji-install/environment-observation.json",
+        )
+        self.assertEqual(
             runner_argv[runner_argv.index("--installer-screenshot") + 1],
             "/home/kylin/taiji-install/single-deb-graphical-installer.png",
         )

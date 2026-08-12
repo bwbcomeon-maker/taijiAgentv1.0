@@ -7,10 +7,12 @@ import importlib.util
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import textwrap
 import unittest
+import zlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,6 +23,24 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/assemble-taiji-certification-set.py"
 VALIDATOR = ROOT / "scripts/validate-taiji-release-evidence.py"
 MATRIX = ROOT / "packaging/linux/certification-matrix.json"
+TARGET_ASSEMBLER = ROOT / "tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+
+
+def large_png_fixture(minimum_size: int) -> bytes:
+    from tests.test_release_evidence_schema_v3 import png_fixture
+
+    base = png_fixture()
+    payload_size = max(1, minimum_size - len(base) - 12)
+    payload = b"taiji-large-evidence\0" + b"x" * max(
+        0, payload_size - len(b"taiji-large-evidence\0")
+    )
+    chunk = (
+        struct.pack(">I", len(payload))
+        + b"tEXt"
+        + payload
+        + struct.pack(">I", zlib.crc32(b"tEXt" + payload) & 0xFFFFFFFF)
+    )
+    return base[:-12] + chunk + base[-12:]
 
 
 def load_script():
@@ -764,6 +784,156 @@ class CertificationSetV1Tests(unittest.TestCase):
             json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
         )
 
+    def _replace_positive_with_canonical_target_output(self, category_id, graphical_png):
+        spec = importlib.util.spec_from_file_location(
+            "taiji_certification_target_chain",
+            TARGET_ASSEMBLER,
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        target_assembler = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(target_assembler)
+
+        source_dir = self.records / category_id
+        inputs = self.root / "canonical-target-inputs"
+        inputs.mkdir(mode=0o700)
+        electron = inputs / "electron"
+        desktop_entry = inputs / "taiji-agent.desktop"
+        electron.write_bytes(b"canonical-electron-fixture")
+        desktop_entry.write_text(
+            "[Desktop Entry]\nName=太极 Agent\nExec=/opt/taiji-agent/bin/taiji-desktop\n",
+            encoding="utf-8",
+        )
+        electron_sha = hashlib.sha256(electron.read_bytes()).hexdigest()
+        desktop_sha = hashlib.sha256(desktop_entry.read_bytes()).hexdigest()
+        manifest = inputs / "taiji-package-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-package-manifest/v3",
+                    "package": "taiji-agent",
+                    "version": self.version,
+                    "architecture": "amd64",
+                    "source_commit": self.source_commit,
+                    "deb_basename": self.deb.name,
+                    "deb_sha256": self.deb_sha,
+                    "electron_executable_sha256": electron_sha,
+                    "desktop_entry_sha256": desktop_sha,
+                    "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                    "compatibility_policy_sha256": self.policy_sha,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+        environment_path = inputs / "environment-observation.json"
+        observation_path = inputs / "single-deb-install-observation.json"
+        attestation_path = inputs / "single-deb-install-method-attestation.json"
+        driver_path = inputs / "desktop-driver-result.json"
+        graphical_path = inputs / "single-deb-graphical-installer.png"
+        screenshot_path = inputs / "desktop-app.png"
+        diagnostic_path = inputs / "taiji-support-bundle.json"
+        environment = json.loads(
+            (source_dir / environment_path.name).read_text(encoding="utf-8")
+        )
+        observation = json.loads(
+            (source_dir / observation_path.name).read_text(encoding="utf-8")
+        )
+        attestation = json.loads(
+            (source_dir / attestation_path.name).read_text(encoding="utf-8")
+        )
+        driver = json.loads(
+            (source_dir / driver_path.name).read_text(encoding="utf-8")
+        )
+        test_identity = "certification-target-chain"
+        with patch.dict(
+            os.environ,
+            {target_assembler.NON_LINUX_TEST_IDENTITY_ENV: test_identity},
+            clear=False,
+        ):
+            commitment, machine_fingerprint, boot_fingerprint = (
+                target_assembler.current_target_identity_binding(self.challenge)
+            )
+            target_uid, home_fingerprint, state_paths_fingerprint = (
+                target_assembler.current_user_context_fingerprints(self.challenge)
+            )
+            environment["machine_identity_commitment_sha256"] = commitment
+            environment_path.write_text(
+                json.dumps(environment, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            observation.update(
+                {
+                    "machine_identity_commitment_sha256": commitment,
+                    "machine_fingerprint_sha256": machine_fingerprint,
+                    "boot_fingerprint_sha256": boot_fingerprint,
+                    "target_uid": target_uid,
+                    "canonical_home_fingerprint_sha256": home_fingerprint,
+                    "user_state_paths_fingerprint_sha256": state_paths_fingerprint,
+                    "manifest_sha256": manifest_sha,
+                }
+            )
+            observation_path.write_text(
+                json.dumps(observation, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            graphical_path.write_bytes(graphical_png)
+            graphical_sha = hashlib.sha256(graphical_png).hexdigest()
+            attestation.update(
+                {
+                    "observation_sha256": hashlib.sha256(
+                        observation_path.read_bytes()
+                    ).hexdigest(),
+                    "machine_fingerprint_sha256": machine_fingerprint,
+                    "boot_fingerprint_sha256": boot_fingerprint,
+                    "graphical_installer_evidence_sha256": graphical_sha,
+                }
+            )
+            attestation_path.write_text(
+                json.dumps(attestation, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            driver["electron_executable_sha256"] = electron_sha
+            driver["desktop_entry_sha256"] = desktop_sha
+            driver_path.write_text(
+                json.dumps(driver, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            screenshot_path.write_bytes((source_dir / screenshot_path.name).read_bytes())
+            diagnostic_path.write_bytes((source_dir / diagnostic_path.name).read_bytes())
+            target_output = self.root / "canonical-target-output"
+            target_assembler.assemble(
+                SimpleNamespace(
+                    driver_result=driver_path,
+                    screenshot=screenshot_path,
+                    diagnostic=diagnostic_path,
+                    manifest=manifest,
+                    deb=self.deb,
+                    electron_executable=electron,
+                    desktop_entry=desktop_entry,
+                    install_observation=observation_path,
+                    install_method_attestation=attestation_path,
+                    graphical_installer_evidence=graphical_path,
+                    release_artifacts_sha256="9" * 64,
+                    installed_package_version=self.version,
+                    challenge=self.challenge,
+                    os_id=environment["os_id"],
+                    os_version=environment["os_version"],
+                    desktop_environment=environment["desktop_environment"],
+                    output_dir=target_output,
+                    matrix=MATRIX,
+                    category_id=category_id,
+                    environment_observation=environment_path,
+                )
+            )
+
+        archived_fixture = self.root / (category_id + "-pre-target-fixture")
+        source_dir.rename(archived_fixture)
+        target_output.rename(source_dir)
+
     def command(self, *extra):
         runner = self.root / "assemble-with-test-release-trust-root.py"
         runner.write_text(
@@ -833,6 +1003,313 @@ class CertificationSetV1Tests(unittest.TestCase):
         self.assertTrue(all(item["compatibility"] == "CERTIFIED" for item in payload["environments"]))
         self.assertEqual(len(payload["negative_boundaries"]), 6)
         self.assertNotEqual(self.deb.read_bytes(), b"")
+
+    def test_large_valid_png_flows_through_certification_and_final_recursive_validation(self):
+        large_png = large_png_fixture(2 * 1024 * 1024)
+        self.assertGreater(len(large_png), 1024 * 1024)
+        self.assertLessEqual(len(large_png), 32 * 1024 * 1024)
+        self._replace_positive_with_canonical_target_output(
+            "kylin-min-ukui",
+            large_png,
+        )
+        target_png = (
+            self.records
+            / "kylin-min-ukui"
+            / "single-deb-graphical-installer.png"
+        )
+        self.assertEqual(target_png.stat().st_size, len(large_png))
+        self.assertEqual(
+            hashlib.sha256(target_png.read_bytes()).hexdigest(),
+            hashlib.sha256(large_png).hexdigest(),
+        )
+
+        module = load_script()
+        validator = self._load_test_validator("taiji_large_png_assembler_validator")
+        real_safe_regular = module._safe_regular
+
+        def json_only_safe_regular(path, label, **kwargs):
+            if Path(path).name in {
+                "single-deb-graphical-installer.png",
+                "desktop-app.png",
+            }:
+                raise AssertionError("PNG must never be materialized by _safe_regular")
+            return real_safe_regular(path, label, **kwargs)
+
+        args = SimpleNamespace(
+            matrix=MATRIX,
+            records_dir=self.records,
+            offline_evidence=self.offline_dir,
+            deb=self.deb,
+            policy=self.policy,
+            output=self.output,
+            challenge_envelope=self.challenge_envelope,
+        )
+        with patch.object(module, "_safe_regular", side_effect=json_only_safe_regular), patch.object(
+            module, "_load_release_validator", return_value=validator
+        ):
+            module.assemble(args)
+
+        validator = self._load_test_validator("taiji_large_png_final_validator")
+        certification_path = self.output / "certification-set.json"
+        data = json.loads(certification_path.read_text(encoding="utf-8"))
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="0" * 64,
+            desktop_entry_sha256="0" * 64,
+        )
+        real_read_regular_bytes = validator.read_regular_bytes
+
+        def json_only_read_regular_bytes(path, label, **kwargs):
+            if Path(path).name in {
+                "single-deb-graphical-installer.png",
+                "desktop-app.png",
+            }:
+                raise AssertionError("PNG must never be materialized by read_regular_bytes")
+            return real_read_regular_bytes(path, label, **kwargs)
+
+        with patch.object(
+            validator,
+            "canonical_policy_identity",
+            return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+        ), patch.object(
+            validator, "read_regular_bytes", side_effect=json_only_read_regular_bytes
+        ):
+            validator.validate_certification_set_v1(
+                data,
+                certification_path,
+                SimpleNamespace(challenge=self.challenge, matrix=MATRIX),
+                binding,
+            )
+
+    def test_certification_assembler_rejects_byte_identical_category_directory_swap(self):
+        module = load_script()
+        validator = self._load_test_validator("taiji_category_swap_assembler_validator")
+        category_id = "kylin-min-ukui"
+        category = self.records / category_id
+        replacement = self.root / (category_id + "-replacement")
+        parked = self.root / (category_id + "-parked")
+        shutil.copytree(category, replacement)
+        swapped = False
+        real_strict_json = module._strict_json
+
+        def swap_after_record_parse(payload, label):
+            nonlocal swapped
+            value = real_strict_json(payload, label)
+            if not swapped and label == "category record " + category_id:
+                category.rename(parked)
+                replacement.rename(category)
+                swapped = True
+            return value
+
+        args = SimpleNamespace(
+            matrix=MATRIX,
+            records_dir=self.records,
+            offline_evidence=self.offline_dir,
+            deb=self.deb,
+            policy=self.policy,
+            output=self.output,
+            challenge_envelope=self.challenge_envelope,
+        )
+        with patch.object(module, "_strict_json", side_effect=swap_after_record_parse), patch.object(
+            module, "_load_release_validator", return_value=validator
+        ), self.assertRaisesRegex(module.CertificationSetError, "changed|identity|directory"):
+            module.assemble(args)
+
+    def test_certification_assembler_rejects_byte_identical_png_path_swap(self):
+        module = load_script()
+        validator = self._load_test_validator("taiji_png_path_swap_assembler_validator")
+        category_id = "kylin-min-ukui"
+        source = self.records / category_id / "single-deb-graphical-installer.png"
+        replacement = self.root / "replacement-graphical-installer.png"
+        parked = self.root / "parked-graphical-installer.png"
+        replacement.write_bytes(source.read_bytes())
+        source_inode = source.stat().st_ino
+        swapped = False
+        real_validate_png = validator.validate_png_descriptor
+
+        def swap_after_stream(*args, **kwargs):
+            nonlocal swapped
+            metadata = real_validate_png(*args, **kwargs)
+            if not swapped and args[1].st_ino == source_inode:
+                source.rename(parked)
+                replacement.rename(source)
+                swapped = True
+            return metadata
+
+        args = SimpleNamespace(
+            matrix=MATRIX,
+            records_dir=self.records,
+            offline_evidence=self.offline_dir,
+            deb=self.deb,
+            policy=self.policy,
+            output=self.output,
+            challenge_envelope=self.challenge_envelope,
+        )
+        with patch.object(
+            validator, "validate_png_descriptor", side_effect=swap_after_stream
+        ), patch.object(
+            module, "_load_release_validator", return_value=validator
+        ), self.assertRaisesRegex(module.CertificationSetError, "changed|identity"):
+            module.assemble(args)
+
+    def test_final_validator_rejects_byte_identical_category_directory_swap(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validator = self._load_test_validator("taiji_category_swap_final_validator")
+        certification_path = self.output / "certification-set.json"
+        data = json.loads(certification_path.read_text(encoding="utf-8"))
+        category_id = data["environments"][0]["category_id"]
+        category = self.output / "records" / category_id
+        replacement = self.output / "records" / (category_id + "-replacement")
+        parked = self.root / (category_id + "-final-parked")
+        shutil.copytree(category, replacement)
+        swapped = False
+        real_parse = validator.parse_json_bytes
+
+        def swap_after_record_parse(payload, label):
+            nonlocal swapped
+            value = real_parse(payload, label)
+            if not swapped and label == "认证集环境记录":
+                category.rename(parked)
+                replacement.rename(category)
+                swapped = True
+            return value
+
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="0" * 64,
+            desktop_entry_sha256="0" * 64,
+        )
+        with patch.object(
+            validator, "parse_json_bytes", side_effect=swap_after_record_parse
+        ), patch.object(
+            validator,
+            "canonical_policy_identity",
+            return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+        ), self.assertRaisesRegex(validator.EvidenceError, "changed|identity|目录"):
+            validator.validate_certification_set_v1(
+                data,
+                certification_path,
+                SimpleNamespace(challenge=self.challenge, matrix=MATRIX),
+                binding,
+            )
+
+    def test_canonical_target_assembler_rejects_png_above_32_mib(self):
+        oversized_png = large_png_fixture(32 * 1024 * 1024 + 1)
+        self.assertGreater(len(oversized_png), 32 * 1024 * 1024)
+
+        with self.assertRaisesRegex(ValueError, "exceeds.*33554432-byte limit"):
+            self._replace_positive_with_canonical_target_output(
+                "kylin-min-ukui",
+                oversized_png,
+            )
+
+        self.assertFalse((self.root / "canonical-target-output").exists())
+
+    def test_final_recursive_validator_rejects_json_attachment_above_one_mib(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        category_id = "kylin-min-ukui"
+        directory = self.output / "records" / category_id
+        diagnostic_path = directory / "taiji-support-bundle.json"
+        diagnostic_path.write_bytes(
+            diagnostic_path.read_bytes()
+            + b" " * (1024 * 1024 + 1 - diagnostic_path.stat().st_size)
+        )
+        diagnostic_sha = hashlib.sha256(diagnostic_path.read_bytes()).hexdigest()
+        target_path = directory / "target-verification.json"
+        target = json.loads(target_path.read_text(encoding="utf-8"))
+        target["diagnostic_sha256"] = diagnostic_sha
+        target_path.write_text(json.dumps(target, sort_keys=True) + "\n", encoding="utf-8")
+        target_sha = hashlib.sha256(target_path.read_bytes()).hexdigest()
+        record_path = directory / "environment-evidence.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        for item in record["attachments"]:
+            if item["basename"] == diagnostic_path.name:
+                item["sha256"] = diagnostic_sha
+            elif item["basename"] == target_path.name:
+                item["sha256"] = target_sha
+        record_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+        certification_path = self.output / "certification-set.json"
+        data = json.loads(certification_path.read_text(encoding="utf-8"))
+        summary = next(item for item in data["environments"] if item["category_id"] == category_id)
+        summary["record_sha256"] = hashlib.sha256(record_path.read_bytes()).hexdigest()
+        validator = self._load_test_validator("taiji_oversized_json_final_validator")
+        binding = validator.BuildBinding(
+            source_commit=self.source_commit,
+            version=self.version,
+            architecture="amd64",
+            deb_basename=self.deb.name,
+            deb_sha256=self.deb_sha,
+            compatibility_policy_id="taiji-linux-amd64-deb-v1",
+            compatibility_policy_sha256=self.policy_sha,
+            electron_executable_sha256="c" * 64,
+            desktop_entry_sha256="d" * 64,
+        )
+        with patch.object(
+            validator,
+            "canonical_policy_identity",
+            return_value=("taiji-linux-amd64-deb-v1", self.policy_sha),
+        ), self.assertRaisesRegex(validator.EvidenceError, "size|大小|上限|attachment"):
+            validator.validate_certification_set_v1(
+                data,
+                certification_path,
+                SimpleNamespace(challenge=self.challenge, matrix=MATRIX),
+                binding,
+            )
+
+    def test_certification_attachment_limits_are_fixed_by_exact_basename(self):
+        module = load_script()
+        category = self.root / "attachment-limits"
+        category.mkdir(mode=0o700)
+        oversized_png = category / "desktop-app.png"
+        with oversized_png.open("wb") as handle:
+            handle.seek(32 * 1024 * 1024)
+            handle.write(b"x")
+        renamed_png = category / "renamed.png"
+        with renamed_png.open("wb") as handle:
+            handle.seek(2 * 1024 * 1024 - 1)
+            handle.write(b"x")
+        oversized_json = category / "taiji-support-bundle.json"
+        with oversized_json.open("wb") as handle:
+            handle.seek(2 * 1024 * 1024 - 1)
+            handle.write(b"x")
+
+        self.assertEqual(
+            module._certification_attachment_limit("desktop-app.png"),
+            32 * 1024 * 1024,
+        )
+        self.assertEqual(
+            module._certification_attachment_limit("renamed.png"),
+            1024 * 1024,
+        )
+        with self.assertRaisesRegex(module.CertificationSetError, "invalid size"):
+            module._validate_attachment(
+                category,
+                {"basename": oversized_png.name, "sha256": "0" * 64},
+            )
+        with self.assertRaisesRegex(module.CertificationSetError, "invalid size"):
+            module._validate_attachment(
+                category,
+                {"basename": renamed_png.name, "sha256": "0" * 64},
+            )
+        with self.assertRaisesRegex(module.CertificationSetError, "invalid size"):
+            module._validate_attachment(
+                category,
+                {"basename": oversized_json.name, "sha256": "0" * 64},
+            )
 
     def test_archives_and_binds_the_complete_offline_rehearsal_directory(self):
         result = self.command()

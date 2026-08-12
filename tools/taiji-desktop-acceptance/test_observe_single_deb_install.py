@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Dynamic contract tests for the single-DEB install observation workflow."""
 
+import gc
 import hashlib
 import importlib.util
 import json
 import os
 import struct
 import tempfile
+import tracemalloc
 import unittest
 import zlib
 from datetime import datetime, timezone
@@ -36,6 +38,24 @@ def png_fixture(width=800, height=600):
         + chunk(b"IDAT", zlib.compress(row * height))
         + chunk(b"IEND", b"")
     )
+
+
+def padded_png_fixture(exact_size):
+    base = png_fixture()
+    payload_size = exact_size - len(base) - 12
+    if payload_size < 0:
+        raise ValueError("requested PNG size is too small")
+    payload = b"x" * payload_size
+    chunk = (
+        struct.pack(">I", len(payload))
+        + b"tEXt"
+        + payload
+        + struct.pack(">I", zlib.crc32(b"tEXt" + payload) & 0xFFFFFFFF)
+    )
+    result = base[:-12] + chunk + base[-12:]
+    if len(result) != exact_size:
+        raise AssertionError("PNG fixture size mismatch")
+    return result
 
 
 def load_observer():
@@ -1270,15 +1290,585 @@ class SingleDebInstallObserverTests(unittest.TestCase):
                 user_state_paths=self.user_paths,
             )
 
+    def test_method_attestation_rejects_different_valid_png_path_swap(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation = self.observe(runtime)
+        observation_path = self.root / "single-deb-install-observation.json"
+        observation_path.write_text(json.dumps(observation, sort_keys=True), encoding="utf-8")
+        screenshot = self.root / "graphical-installer.png"
+        screenshot.write_bytes(png_fixture())
+        replacement = self.root / "different-valid-installer.png"
+        replacement.write_bytes(png_fixture(801, 600))
+        parked = self.root / "parked-installer.png"
+        real_validate = self.observer._validate_png_evidence
+
+        def swap_after_validation(path, *args, **kwargs):
+            result = real_validate(path, *args, **kwargs)
+            screenshot.rename(parked)
+            replacement.rename(screenshot)
+            return result
+
+        with mock.patch.object(
+            self.observer,
+            "_validate_png_evidence",
+            side_effect=swap_after_validation,
+        ), self.assertRaisesRegex(self.observer.ObservationError, "changed|identity"):
+            self.observer.create_method_attestation(
+                observation_path=observation_path,
+                graphical_evidence_path=screenshot,
+                challenge=self.challenge,
+                operator_id="target-operator-01",
+                runtime=runtime,
+                user_state_paths=self.user_paths,
+            )
+
+    def test_snapshot_foreign_swap_is_retained_and_marks_output_poisoned(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation = self.observe(runtime)
+        output_dir = self.root / "snapshot-swap-output"
+        output_dir.mkdir(mode=0o700)
+        output_dir = output_dir.resolve()
+        observation_path = output_dir / self.observer.OBSERVATION_BASENAME
+        observation_path.write_text(
+            json.dumps(observation, sort_keys=True), encoding="utf-8"
+        )
+        source = self.root / "graphical-installer.png"
+        source.write_bytes(png_fixture())
+        snapshot = output_dir / self.observer.GRAPHICAL_EVIDENCE_BASENAME
+        parked = self.root / "parked-published-snapshot.png"
+        foreign = self.root / "foreign-snapshot-inode"
+        foreign_payload = b"foreign-do-not-delete"
+        foreign.write_bytes(foreign_payload)
+        real_validate = self.observer._validate_png_evidence
+
+        def swap_after_publication(path, *args, **kwargs):
+            result = real_validate(path, *args, **kwargs)
+            snapshot.rename(parked)
+            foreign.rename(snapshot)
+            return result
+
+        with mock.patch.object(
+            self.observer,
+            "_validate_png_evidence",
+            side_effect=swap_after_publication,
+        ), self.assertRaisesRegex(
+            self.observer.ObservationError, "changed|identity|poison"
+        ):
+            self.observer.create_method_attestation(
+                observation_path=observation_path,
+                graphical_evidence_path=source,
+                challenge=self.challenge,
+                operator_id="target-operator-01",
+                runtime=runtime,
+                user_state_paths=self.user_paths,
+                graphical_evidence_snapshot_path=snapshot,
+            )
+
+        self.assertEqual(snapshot.read_bytes(), foreign_payload)
+        self.assertTrue(
+            (output_dir / ".single-deb-graphical-installer.poisoned").is_file()
+        )
+
+    def test_snapshot_internal_cleanup_never_unlinks_foreign_inode(self):
+        source = self.root / "snapshot-cleanup-source.png"
+        source.write_bytes(png_fixture())
+        output_dir = self.root / "snapshot-cleanup-output"
+        output_dir.mkdir(mode=0o700)
+        output_dir = output_dir.resolve()
+        snapshot = output_dir / self.observer.GRAPHICAL_EVIDENCE_BASENAME
+        parked = self.root / "parked-cleanup-snapshot.png"
+        foreign = self.root / "foreign-cleanup-inode"
+        foreign_payload = b"foreign-cleanup-do-not-delete"
+        foreign.write_bytes(foreign_payload)
+        real_lstat = Path.lstat
+        swapped = False
+
+        def swap_before_identity_check(candidate, *args, **kwargs):
+            nonlocal swapped
+            if candidate == snapshot and not swapped and snapshot.is_file():
+                snapshot.rename(parked)
+                foreign.rename(snapshot)
+                swapped = True
+            return real_lstat(candidate, *args, **kwargs)
+
+        with mock.patch.object(
+            Path,
+            "lstat",
+            autospec=True,
+            side_effect=swap_before_identity_check,
+        ), self.assertRaisesRegex(
+            self.observer.ObservationError, "identity|changed|poison"
+        ):
+            self.observer._validate_png_evidence(
+                source,
+                snapshot_path=snapshot,
+            )
+
+        self.assertTrue(swapped)
+        self.assertEqual(snapshot.read_bytes(), foreign_payload)
+        self.assertTrue(
+            (output_dir / ".single-deb-graphical-installer.poisoned").is_file()
+        )
+
+    def test_snapshot_publication_never_overwrites_concurrent_foreign_file(self):
+        source = self.root / "snapshot-no-overwrite-source.png"
+        source.write_bytes(png_fixture())
+        output_dir = self.root / "snapshot-no-overwrite-output"
+        output_dir.mkdir(mode=0o700)
+        output_dir = output_dir.resolve()
+        snapshot = output_dir / self.observer.GRAPHICAL_EVIDENCE_BASENAME
+        foreign_payload = b"concurrent-foreign-do-not-overwrite"
+        real_open = self.observer.os.open
+        injected = False
+        result = None
+        captured = None
+
+        def inject_before_snapshot_creation(path, flags, *args, **kwargs):
+            nonlocal injected
+            path_text = os.fspath(path)
+            dir_fd = kwargs.get("dir_fd")
+            if (
+                not injected
+                and dir_fd is not None
+                and (
+                    path_text == self.observer.GRAPHICAL_EVIDENCE_BASENAME
+                    or path_text.startswith(
+                        "." + self.observer.GRAPHICAL_EVIDENCE_BASENAME + "."
+                    )
+                )
+            ):
+                injected = True
+                foreign_fd = real_open(
+                    self.observer.GRAPHICAL_EVIDENCE_BASENAME,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dir_fd,
+                )
+                try:
+                    os.write(foreign_fd, foreign_payload)
+                finally:
+                    os.close(foreign_fd)
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch.object(
+                self.observer.os,
+                "open",
+                side_effect=inject_before_snapshot_creation,
+            ):
+                try:
+                    result = self.observer._validate_png_evidence(
+                        source,
+                        snapshot_path=snapshot,
+                    )
+                except self.observer.ObservationError as exc:
+                    captured = exc
+        finally:
+            if result is not None:
+                result.close()
+
+        self.assertTrue(injected)
+        self.assertEqual(snapshot.read_bytes(), foreign_payload)
+        self.assertIsNotNone(captured)
+        self.assertRegex(str(captured), "exist|overwrite|poison")
+        self.assertTrue(
+            (output_dir / ".single-deb-graphical-installer.poisoned").is_file()
+        )
+
+    def test_cli_attestation_failure_retains_foreign_snapshot_and_marks_poisoned(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation = self.observe(runtime)
+        output_dir = self.root / "downstream-attestation-failure"
+        output_dir.mkdir(mode=0o700)
+        output_dir = output_dir.resolve()
+        observation_path = output_dir / self.observer.OBSERVATION_BASENAME
+        observation_path.write_text(
+            json.dumps(observation, sort_keys=True), encoding="utf-8"
+        )
+        source = self.root / "downstream-installer.png"
+        source.write_bytes(png_fixture())
+        snapshot = output_dir / self.observer.GRAPHICAL_EVIDENCE_BASENAME
+        parked = self.root / "parked-downstream-snapshot.png"
+        foreign = self.root / "foreign-downstream-inode"
+        foreign_payload = b"foreign-downstream-do-not-delete"
+        foreign.write_bytes(foreign_payload)
+        real_atomic_json = self.observer._atomic_json
+
+        def fail_after_snapshot(path, payload):
+            if Path(path).name == self.observer.ATTESTATION_BASENAME:
+                snapshot.rename(parked)
+                foreign.rename(snapshot)
+                raise self.observer.ObservationError(
+                    "forced downstream attestation failure"
+                )
+            return real_atomic_json(path, payload)
+
+        with mock.patch.object(
+            self.observer, "SystemRuntime", return_value=runtime
+        ), mock.patch.object(
+            self.observer,
+            "default_user_state_paths",
+            return_value=self.user_paths,
+        ), mock.patch.object(
+            self.observer,
+            "_atomic_json",
+            side_effect=fail_after_snapshot,
+        ), self.assertRaisesRegex(
+            self.observer.ObservationError, "attestation|poison"
+        ):
+            self.observer.main(
+                [
+                    "attest",
+                    "--observation",
+                    str(observation_path),
+                    "--graphical-evidence",
+                    str(source),
+                    "--challenge",
+                    self.challenge,
+                    "--operator-id",
+                    "target-operator-01",
+                    "--confirmation",
+                    "I-observed-desktop-double-click-and-system-installer",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+        self.assertEqual(snapshot.read_bytes(), foreign_payload)
+        self.assertTrue(
+            (output_dir / ".single-deb-graphical-installer.poisoned").is_file()
+        )
+
+    def test_method_attestation_streams_exact_32_mib_and_rejects_one_byte_more(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation = self.observe(runtime)
+        observation_path = self.root / "single-deb-install-observation.json"
+        observation_path.write_text(json.dumps(observation, sort_keys=True), encoding="utf-8")
+        screenshot = self.root / "graphical-installer.png"
+        exact = padded_png_fixture(32 * 1024 * 1024)
+        screenshot.write_bytes(exact)
+        expected_digest = hashlib.sha256(exact).hexdigest()
+        del exact
+        gc.collect()
+        tracemalloc.start()
+        try:
+            attestation = self.observer.create_method_attestation(
+                observation_path=observation_path,
+                graphical_evidence_path=screenshot,
+                challenge=self.challenge,
+                operator_id="target-operator-01",
+                runtime=runtime,
+                user_state_paths=self.user_paths,
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(
+            attestation["graphical_installer_evidence_sha256"],
+            expected_digest,
+        )
+        self.assertLess(peak, 8 * 1024 * 1024)
+
+        screenshot.write_bytes(padded_png_fixture(32 * 1024 * 1024 + 1))
+        with self.assertRaisesRegex(self.observer.ObservationError, "bounded|32|size"):
+            self.observer.create_method_attestation(
+                observation_path=observation_path,
+                graphical_evidence_path=screenshot,
+                challenge=self.challenge,
+                operator_id="target-operator-01",
+                runtime=runtime,
+                user_state_paths=self.user_paths,
+            )
+
+    def test_canonical_cli_attest_accepts_v2_and_binds_environment_matrix_category(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        output_dir = self.root.resolve() / "canonical-attestation"
+        output_dir.mkdir(mode=0o700)
+        observation_path = output_dir / self.observer.OBSERVATION_BASENAME
+        environment_path = output_dir / self.observer.ENVIRONMENT_RECORD_BASENAME
+        observation_path.write_text(
+            json.dumps(observation, sort_keys=True), encoding="utf-8"
+        )
+        environment_path.write_text(
+            json.dumps(environment, sort_keys=True), encoding="utf-8"
+        )
+        screenshot = self.root / "raw-installer-success.png"
+        screenshot.write_bytes(png_fixture())
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+
+        with mock.patch.object(
+            self.observer, "SystemRuntime", return_value=runtime
+        ), mock.patch.object(
+            self.observer,
+            "collect_platform_identity",
+            return_value=platform_identity,
+        ), mock.patch.object(
+            self.observer,
+            "default_user_state_paths",
+            return_value=self.user_paths,
+        ):
+            result = self.observer.main(
+                [
+                    "attest",
+                    "--observation",
+                    str(observation_path),
+                    "--graphical-evidence",
+                    str(screenshot),
+                    "--challenge",
+                    self.challenge,
+                    "--operator-id",
+                    "target-operator-01",
+                    "--confirmation",
+                    "I-observed-desktop-double-click-and-system-installer",
+                    "--output-dir",
+                    str(output_dir),
+                    "--matrix",
+                    str(MATRIX),
+                    "--category-id",
+                    environment["category_id"],
+                    "--environment-observation",
+                    str(environment_path),
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        attestation_path = output_dir / self.observer.ATTESTATION_BASENAME
+        self.assertTrue(attestation_path.is_file())
+        self.observer.verify_method_attestation(
+            attestation_path=attestation_path,
+            observation_path=observation_path,
+            graphical_evidence_path=output_dir / self.observer.GRAPHICAL_EVIDENCE_BASENAME,
+            challenge=self.challenge,
+            runtime=runtime,
+            user_state_paths=self.user_paths,
+            canonical=True,
+        )
+
+    def test_canonical_attest_fails_closed_on_schema_challenge_or_environment_binding(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        observation_path = self.root / self.observer.OBSERVATION_BASENAME
+        environment_path = self.root / self.observer.ENVIRONMENT_RECORD_BASENAME
+        screenshot = self.root / "graphical-installer.png"
+        screenshot.write_bytes(png_fixture())
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+        cases = {
+            "schema": ({**observation, "schema": "taiji.single-deb-install-observation/v9"}, environment),
+            "challenge": ({**observation, "challenge_nonce": "0" * 64}, environment),
+            "environment": (observation, {**environment, "category_id": "uos-min-dde"}),
+            "environment-deb-name": (
+                observation,
+                {
+                    **environment,
+                    "version": "1.0.0+renamed",
+                    "deb_basename": "taiji-agent_1.0.0+renamed_amd64.deb",
+                },
+            ),
+        }
+        for label, (candidate_observation, candidate_environment) in cases.items():
+            with self.subTest(label=label):
+                observation_path.write_text(
+                    json.dumps(candidate_observation, sort_keys=True), encoding="utf-8"
+                )
+                environment_path.write_text(
+                    json.dumps(candidate_environment, sort_keys=True), encoding="utf-8"
+                )
+                with mock.patch.object(
+                    self.observer,
+                    "collect_platform_identity",
+                    return_value=platform_identity,
+                ), self.assertRaises(self.observer.ObservationError):
+                    self.observer.create_method_attestation(
+                        observation_path=observation_path,
+                        graphical_evidence_path=screenshot,
+                        challenge=self.challenge,
+                        operator_id="target-operator-01",
+                        runtime=runtime,
+                        user_state_paths=self.user_paths,
+                        matrix_path=MATRIX,
+                        category_id=environment["category_id"],
+                        environment_observation_path=environment_path,
+                    )
+
+    def test_canonical_attest_fails_closed_on_operator_png_and_legacy_input(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        observation_path = self.root / self.observer.OBSERVATION_BASENAME
+        environment_path = self.root / self.observer.ENVIRONMENT_RECORD_BASENAME
+        observation_path.write_text(
+            json.dumps(observation, sort_keys=True), encoding="utf-8"
+        )
+        environment_path.write_text(
+            json.dumps(environment, sort_keys=True), encoding="utf-8"
+        )
+        valid_png = self.root / "valid-installer.png"
+        invalid_png = self.root / "invalid-installer.png"
+        valid_png.write_bytes(png_fixture())
+        invalid_png.write_bytes(b"not-a-png")
+        canonical_arguments = {
+            "observation_path": observation_path,
+            "challenge": self.challenge,
+            "runtime": runtime,
+            "user_state_paths": self.user_paths,
+            "matrix_path": MATRIX,
+            "category_id": environment["category_id"],
+            "environment_observation_path": environment_path,
+        }
+        with self.assertRaisesRegex(self.observer.ObservationError, "operator_id"):
+            self.observer.create_method_attestation(
+                graphical_evidence_path=valid_png,
+                operator_id="!",
+                **canonical_arguments,
+            )
+
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+        with mock.patch.object(
+            self.observer,
+            "collect_platform_identity",
+            return_value=platform_identity,
+        ), self.assertRaisesRegex(self.observer.ObservationError, "PNG|png"):
+            self.observer.create_method_attestation(
+                graphical_evidence_path=invalid_png,
+                operator_id="target-operator-01",
+                **canonical_arguments,
+            )
+
+        legacy_runtime = FakeRuntime([None, "install ok installed"])
+        legacy_observation = self.observe(legacy_runtime)
+        observation_path.write_text(
+            json.dumps(legacy_observation, sort_keys=True), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(
+            self.observer.ObservationError,
+            "legacy.*canonical",
+        ):
+            self.observer.create_method_attestation(
+                graphical_evidence_path=valid_png,
+                operator_id="target-operator-01",
+                **{**canonical_arguments, "runtime": legacy_runtime},
+            )
+
+    def test_canonical_attest_rejects_strict_json_duplicates_and_identity_swaps(self):
+        runtime = FakeRuntime([None, "install ok installed"])
+        observation, environment = self.observe_canonical(runtime=runtime)
+        platform_identity = {
+            "os_id": environment["os_id"],
+            "os_version": environment["os_version"],
+            "desktop_environment": environment["desktop_environment"],
+            "security_facts": environment["security_facts"],
+        }
+
+        duplicate_dir = self.root / "duplicate-json"
+        duplicate_dir.mkdir(mode=0o700)
+        duplicate_observation = duplicate_dir / self.observer.OBSERVATION_BASENAME
+        canonical_text = json.dumps(observation, sort_keys=True)
+        duplicate_observation.write_text(
+            canonical_text[:-1] + ',"schema":"%s"}' % observation["schema"],
+            encoding="utf-8",
+        )
+        duplicate_environment = duplicate_dir / self.observer.ENVIRONMENT_RECORD_BASENAME
+        duplicate_environment.write_text(json.dumps(environment, sort_keys=True), encoding="utf-8")
+        duplicate_matrix = duplicate_dir / "certification-matrix.json"
+        duplicate_matrix.write_bytes(MATRIX.read_bytes())
+        duplicate_png = duplicate_dir / "installer.png"
+        duplicate_png.write_bytes(png_fixture())
+        with mock.patch.object(
+            self.observer, "collect_platform_identity", return_value=platform_identity
+        ), self.assertRaisesRegex(self.observer.ObservationError, "duplicate|JSON"):
+            self.observer.create_method_attestation(
+                observation_path=duplicate_observation,
+                graphical_evidence_path=duplicate_png,
+                challenge=self.challenge,
+                operator_id="target-operator-01",
+                runtime=runtime,
+                user_state_paths=self.user_paths,
+                matrix_path=duplicate_matrix,
+                category_id=environment["category_id"],
+                environment_observation_path=duplicate_environment,
+            )
+
+        for label in ("observation", "environment", "matrix"):
+            with self.subTest(label=label):
+                case_dir = self.root / ("swap-" + label)
+                case_dir.mkdir(mode=0o700)
+                observation_path = case_dir / self.observer.OBSERVATION_BASENAME
+                environment_path = case_dir / self.observer.ENVIRONMENT_RECORD_BASENAME
+                matrix_path = case_dir / "certification-matrix.json"
+                observation_path.write_text(json.dumps(observation, sort_keys=True), encoding="utf-8")
+                environment_path.write_text(json.dumps(environment, sort_keys=True), encoding="utf-8")
+                matrix_path.write_bytes(MATRIX.read_bytes())
+                screenshot = case_dir / "installer.png"
+                screenshot.write_bytes(png_fixture())
+                target = {
+                    "observation": observation_path,
+                    "environment": environment_path,
+                    "matrix": matrix_path,
+                }[label]
+                replacement = case_dir / (label + "-replacement")
+                replacement.write_bytes(target.read_bytes())
+                parked = case_dir / (label + "-parked")
+                source_inode = target.stat().st_ino
+                swapped = False
+                real_read = self.observer.os.read
+
+                def swap_after_first_read(descriptor, size):
+                    nonlocal swapped
+                    chunk = real_read(descriptor, size)
+                    if not swapped and self.observer.os.fstat(descriptor).st_ino == source_inode:
+                        target.rename(parked)
+                        replacement.rename(target)
+                        swapped = True
+                    return chunk
+
+                with mock.patch.object(
+                    self.observer.os, "read", side_effect=swap_after_first_read
+                ), mock.patch.object(
+                    self.observer,
+                    "collect_platform_identity",
+                    return_value=platform_identity,
+                ), self.assertRaisesRegex(self.observer.ObservationError, "changed|identity"):
+                    self.observer.create_method_attestation(
+                        observation_path=observation_path,
+                        graphical_evidence_path=screenshot,
+                        challenge=self.challenge,
+                        operator_id="target-operator-01",
+                        runtime=runtime,
+                        user_state_paths=self.user_paths,
+                        matrix_path=matrix_path,
+                        category_id=environment["category_id"],
+                        environment_observation_path=environment_path,
+                    )
+
     def test_method_attestation_rejects_fake_truncated_or_small_png(self):
         runtime = FakeRuntime([None, "install ok installed"])
         observation = self.observe(runtime)
         observation_path = self.root / "single-deb-install-observation.json"
         observation_path.write_text(json.dumps(observation, sort_keys=True), encoding="utf-8")
         screenshot = self.root / "graphical-installer.png"
+        valid = png_fixture()
+        corrupt_crc = bytearray(valid)
+        corrupt_crc[-8] ^= 1
         invalid_payloads = {
             "signature only": b"\x89PNG\r\n\x1a\n" + b"not-png-data",
-            "truncated": png_fixture()[:-10],
+            "bad CRC": bytes(corrupt_crc),
+            "truncated": valid[:-10],
+            "trailing": valid + b"trailing-bytes",
             "too small": png_fixture(320, 240),
         }
         for label, payload in invalid_payloads.items():
