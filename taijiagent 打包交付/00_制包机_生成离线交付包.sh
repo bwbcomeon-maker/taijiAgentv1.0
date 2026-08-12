@@ -2634,7 +2634,11 @@ collect_artifacts() {
   CANDIDATE_DEB_FIXED=1
   require_candidate_deb_fixed
   source_name="$(basename "$SRC_ARCHIVE")"
-  source_sha="$(sha256sum "/proc/$$/fd/$SOURCE_ARCHIVE_FD" | awk '{print $1}')"
+  if [ -n "${SOURCE_ARCHIVE_FD:-}" ]; then
+    source_sha="$(sha256sum "/proc/$$/fd/$SOURCE_ARCHIVE_FD" | awk '{print $1}')"
+  else
+    source_sha="$(sha256sum "$SRC_ARCHIVE" | awk '{print $1}')"
+  fi
   source_commit="$(printf '%s\n' "$source_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
   abi_sha="$(python3 - "/proc/$$/fd/$SOURCE_PACKAGE_MANIFEST_FD" "$deb_name" "$deb_sha" "$source_commit" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" \
     "$PYTHON_DEPENDENCY_LOCK_STATUS" "$PYTHON_LOCK_BASENAME" "$PYTHON_LOCK_SHA256" "$PYTHON_VERSION" "$PYTHON_EXECUTABLE_SHA256" \
@@ -7526,7 +7530,11 @@ write_build_report() {
   require_candidate_deb_fixed
   source_name="$(basename "$SRC_ARCHIVE")"
   deb_name="taiji-agent_$VERSION"_amd64.deb
-  source_line="$(sha256sum "/proc/$$/fd/$SOURCE_ARCHIVE_FD")"
+  if [ -n "${SOURCE_ARCHIVE_FD:-}" ]; then
+    source_line="$(sha256sum "/proc/$$/fd/$SOURCE_ARCHIVE_FD")"
+  else
+    source_line="$(sha256sum "$SRC_ARCHIVE")"
+  fi
   deb_line="$(cd "$OUTPUT_DIR" && sha256sum "$deb_name")"
   [ ! -e "$BUILD_REPORT" ] && [ ! -L "$BUILD_REPORT" ] \
     || { poison_candidate_artifacts "build report path was occupied"; \
