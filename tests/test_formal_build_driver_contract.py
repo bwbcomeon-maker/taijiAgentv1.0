@@ -113,12 +113,14 @@ class FormalBuildDriverContractTests(unittest.TestCase):
             root.mkdir()
             (work / "home").mkdir(parents=True)
             (work / "tmp").mkdir()
+            (root / "driver_helper.py").write_text("VALUE = 2\n", encoding="utf-8")
             target = root / "sample_formal_target.py"
             target.write_text(
                 "import unittest\n"
+                "from driver_helper import VALUE\n"
                 "class Sample(unittest.TestCase):\n"
                 "    def test_one(self):\n"
-                "        self.assertEqual(2, 1 + 1)\n",
+                "        self.assertEqual(VALUE, 1 + 1)\n",
                 encoding="utf-8",
             )
             descriptors = {

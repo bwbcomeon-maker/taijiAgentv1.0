@@ -215,12 +215,15 @@ def _run_target(runner: str, target: str, root: Path, fd_map: Dict[str, int], or
     if runner == "unittest":
         code = """import importlib.util
 import json
+import os
 import sys
 import unittest
 
 spec = importlib.util.spec_from_file_location("taiji_formal_target", sys.argv[1])
 if spec is None or spec.loader is None:
     raise SystemExit("cannot load unittest target file")
+sys.path.insert(0, os.getcwd())
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 suite = unittest.defaultTestLoader.loadTestsFromModule(module)
