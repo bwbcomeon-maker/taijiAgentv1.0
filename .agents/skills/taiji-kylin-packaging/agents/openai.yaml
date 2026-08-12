@@ -1,0 +1,4 @@
+interface:
+  display_name: "太极国产 Linux 制包"
+  short_description: "国产 x86 麒麟统信 DEB 制包、诊断、验收与证据门禁"
+  default_prompt: "Use $taiji-kylin-packaging to diagnose or plan the next authorized Taiji Linux packaging step."

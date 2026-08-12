@@ -1,0 +1,11 @@
+{
+  "build_host_entry": "taijiagent 打包交付/00_制包机_生成离线交付包.sh",
+  "builder_input_entry": "taijiagent 打包交付/99_本机_准备制包输入包.sh",
+  "canonical_runbook": "docs/runbooks/taiji-kylin-uos-offline-delivery.md",
+  "orchestrator": {
+    "path": "scripts/taiji-linux-golden-orchestrator.py",
+    "plan_schema": "taiji-linux-golden-orchestrator-plan/v5"
+  },
+  "repository_id": "taiji-agentv1.0",
+  "schema": "taiji-packaging-interface/v1"
+}
