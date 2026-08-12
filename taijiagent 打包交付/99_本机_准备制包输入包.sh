@@ -175,7 +175,7 @@ record_triplet_member() {
 
 preflight_repo() {
   require_cmd gzip
-  require_cmd python3
+  require_cmd /usr/bin/python3
   require_cmd cmp
   [ -x /usr/bin/git ] || fail "缺少受信任系统 Git：/usr/bin/git"
   [ -x /usr/bin/python3 ] || fail "缺少受信任系统 Python：/usr/bin/python3"
@@ -216,7 +216,7 @@ verify_worktree_file_matches_f() {
   [ -n "$entry" ] || return 1
   git_mode="${entry%% *}"
   case "$git_mode" in 100644|100755) ;; *) return 1 ;; esac
-  python3 - "$path" "$git_mode" <<'PY'
+  /usr/bin/python3 -I -B - "$path" "$git_mode" <<'PY'
 import os
 import stat
 import sys
@@ -322,6 +322,7 @@ write_source_archive() {
 }
 
 run_frozen_release_preflight() {
+  # The published operator entrypoint is always invoked as: /bin/bash -p "$SCRIPT_DIR/01_制包机_发布预检.sh".
   TAIJI_RELEASE_SOURCE_ROOT="$REPO_ROOT" \
     TAIJI_REPO_ROOT="$REPO_ROOT" \
     TAIJI_SOURCE_GATE="$FROZEN_SOURCE_GATE" \
@@ -329,7 +330,7 @@ run_frozen_release_preflight() {
     TAIJI_SOURCE_INTEGRITY_HELPER="$FROZEN_SOURCE_INTEGRITY_HELPER" \
     TAIJI_FROZEN_SOURCE_COMMIT="$FROZEN_SOURCE_COMMIT" \
     TAIJI_RELEASE_REQUIRE_ARTIFACTS=0 \
-    bash "$FROZEN_DELIVERY_DIR/01_制包机_发布预检.sh"
+    /bin/bash -p "$FROZEN_DELIVERY_DIR/01_制包机_发布预检.sh"
 }
 
 write_builder_input_package() {

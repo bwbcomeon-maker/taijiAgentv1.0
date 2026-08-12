@@ -494,7 +494,7 @@ check_frozen_git_control_member() {
   entry="$(env -i PATH=/usr/bin:/bin LC_ALL=C LANG=C GIT_NO_REPLACE_OBJECTS=1 /usr/bin/git -c core.quotePath=false -C "$REPO_ROOT" ls-tree "$FROZEN_SOURCE_COMMIT" -- "$relative")"
   [ -n "$entry" ] || fail "冻结 commit 缺少发布控制成员：$relative"
   git_mode="${entry%% *}"
-  python3 - "$path" "$git_mode" <<'PY' || fail "发布控制成员文件类型或模式偏离冻结 commit：$relative"
+  /usr/bin/python3 -I -B - "$path" "$git_mode" <<'PY' || fail "发布控制成员文件类型或模式偏离冻结 commit：$relative"
 import os
 import stat
 import sys
