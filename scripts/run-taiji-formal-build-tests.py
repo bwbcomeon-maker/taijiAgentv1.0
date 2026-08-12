@@ -213,7 +213,33 @@ def _run_target(runner: str, target: str, root: Path, fd_map: Dict[str, int], or
     env = {"PATH": "/usr/bin:/bin", "HOME": str(work / "home"), "TMPDIR": str(work / "tmp"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1", "PYTHONHASHSEED": "0", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
     os.makedirs(env["HOME"], exist_ok=True); os.makedirs(env["TMPDIR"], exist_ok=True)
     if runner == "unittest":
-        code = "import json,sys,unittest; s=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); r=unittest.TextTestRunner(stream=sys.stderr, verbosity=0).run(s); c=s.countTestCases(); print(json.dumps({'ordinal':int(sys.argv[2]),'collected':c,'deselected':0,'executed':r.testsRun,'passed':r.testsRun-len(r.failures)-len(r.errors),'failed':len(r.failures),'errors':len(r.errors),'skipped':len(getattr(r,'skipped',()))},separators=(',',':')),file=open('/proc/self/fd/'+sys.argv[3],'w'))"
+        code = """import importlib.util
+import json
+import sys
+import unittest
+
+spec = importlib.util.spec_from_file_location("taiji_formal_target", sys.argv[1])
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load unittest target file")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+result = unittest.TextTestRunner(stream=sys.stderr, verbosity=0).run(suite)
+collected = suite.countTestCases()
+record = {
+    "ordinal": int(sys.argv[2]),
+    "collected": collected,
+    "deselected": 0,
+    "executed": result.testsRun,
+    "passed": result.testsRun - len(result.failures) - len(result.errors),
+    "failed": len(result.failures),
+    "errors": len(result.errors),
+    "skipped": len(getattr(result, "skipped", ())),
+}
+with open("/proc/self/fd/" + sys.argv[3], "w", encoding="utf-8") as output:
+    json.dump(record, output, separators=(",", ":"))
+    output.write("\\n")
+"""
         argv = [python, "-I", "-B", "-c", code, target_path, str(ordinal), str(result_write)]
     elif runner == "node-test":
         code = "const fs=require('node:fs');const {run}=require('node:test');(async()=>{let s;for await(const e of run({files:[process.argv[1]],concurrency:false}))if(e.type==='test:summary')s=e.data;if(!s)throw Error('missing summary');let c=s.counts,r={ordinal:+process.argv[2],collected:c.tests,deselected:0,executed:c.tests,passed:c.passed,failed:c.failed,errors:c.cancelled,skipped:c.skipped+c.todo};fs.writeFileSync('/proc/self/fd/'+process.argv[3],JSON.stringify(r)+'\\n');if(!s.success)process.exitCode=1})().catch(e=>{console.error(e);process.exitCode=1})"

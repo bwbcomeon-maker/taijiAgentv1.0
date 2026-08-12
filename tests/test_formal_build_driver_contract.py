@@ -104,6 +104,49 @@ class FormalBuildDriverContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 driver.validate_target_record(bad, 0)
 
+    @unittest.skipUnless(Path("/proc/self/fd").is_dir(), "formal driver executes on Linux procfs")
+    def test_unittest_adapter_executes_a_file_target_not_a_module_name(self):
+        driver = load_driver()
+        with tempfile.TemporaryDirectory(prefix="taiji-formal-driver-") as temp_dir:
+            root = Path(temp_dir) / "source"
+            work = Path(temp_dir) / "work"
+            root.mkdir()
+            (work / "home").mkdir(parents=True)
+            (work / "tmp").mkdir()
+            target = root / "sample_formal_target.py"
+            target.write_text(
+                "import unittest\n"
+                "class Sample(unittest.TestCase):\n"
+                "    def test_one(self):\n"
+                "        self.assertEqual(2, 1 + 1)\n",
+                encoding="utf-8",
+            )
+            descriptors = {
+                name: os.open(os.sys.executable, os.O_RDONLY)
+                for name in ("python", "node", "npm", "eslint")
+            }
+            try:
+                record, _stdout, _stderr = driver._run_target(
+                    "unittest",
+                    "sample_formal_target.py",
+                    root,
+                    descriptors,
+                    0,
+                    work,
+                )
+            finally:
+                for descriptor in descriptors.values():
+                    os.close(descriptor)
+            self.assertEqual(record["collected"], 1)
+            self.assertEqual(record["executed"], 1)
+            self.assertEqual(record["passed"], 1)
+
+    def test_unittest_adapter_source_loads_explicit_file_targets(self):
+        driver = load_driver()
+        source = __import__("inspect").getsource(driver._run_target)
+        self.assertIn("spec_from_file_location", source)
+        self.assertIn("loadTestsFromModule", source)
+
     def test_log_state_machine_rejects_duplicate_or_early_overall(self):
         driver = load_driver()
         with self.assertRaises(ValueError):
@@ -116,7 +159,8 @@ class FormalBuildDriverContractTests(unittest.TestCase):
         self.assertIn("run_formal_build_tests_direct", builder)
         main = builder[builder.rfind("main() {"):]
         self.assertIn("run_formal_build_tests_direct", main)
-        self.assertNotIn("/usr/bin/sudo", builder[builder.index("run_formal_build_tests_direct") : builder.index("run_formal_build_tests() {")])
+        self.assertNotIn("run_formal_build_tests()", main)
+        self.assertNotIn("/usr/bin/sudo -n -- /usr/bin/python3 -I -B -c", main)
 
     def test_formal_consumers_expose_fd_and_basename_contract(self):
         build_deb = (ROOT / "packaging/linux/deb/build-deb.sh").read_text(encoding="utf-8")

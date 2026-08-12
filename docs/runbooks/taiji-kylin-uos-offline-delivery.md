@@ -8,6 +8,8 @@
 
 本文不是某个 commit 的发布证明。最终发布身份必须由当前交付目录中的 `taiji-package-manifest.json`、`.build-success`、各级 SHA256、断网演练证据、认证集、v3 发布回执和签名共同确定。
 
+需求到实现、测试和证据范围的逐项索引见：[Taiji 国产 x86_64 黄金制包流程追踪矩阵](taiji-kylin-packaging-traceability.md)。矩阵中的“已实时验证”只表示本地证据，不表示真实 Kylin/UOS 目标机认证。
+
 ## 2. 支持矩阵
 
 当前 DEB 主线的目标范围：
