@@ -3,13 +3,13 @@
     {
       "expected_output": "Treat the dirty or wrong worktree as a blocker, report its identity, and perform no packaging or cleanup.",
       "expectations": [
-        "Uses doctor --repo on the operator-supplied path instead of scanning",
+        "Uses doctor --repo on the operator-supplied path instead of scanning and, for clean main, routes to builder_input_entry 99 rather than build_host_entry 00",
         "Reports dirty or wrong worktree as blocked",
         "Does not reset, discard, package, SSH, or publish"
       ],
       "files": [],
       "id": 1,
-      "prompt": "我给你的仓库可能是 dirty worktree，也可能不是正式 main。先判断能不能继续制包，别擅自清理。"
+      "prompt": "我给你的仓库可能是 dirty worktree，也可能不是正式 main。先判断能不能继续制包，别擅自清理；如果确实是 clean main，告诉我应该先跑 99 准备输入，还是直接跑 00 制包。"
     },
     {
       "expected_output": "Recognize a frozen no-Git builder input with --input-dir and preserve the formal verifier boundary.",

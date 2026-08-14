@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -101,6 +102,7 @@ def git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
 
 
 def make_repo_fixture(parent: Path) -> Tuple[Path, Path]:
+    parent = parent.resolve(strict=True)
     root = parent / "taiji-agentv1.0"
     root.mkdir()
     git(root, "init", "-q")
@@ -134,6 +136,7 @@ def make_repo_fixture(parent: Path) -> Tuple[Path, Path]:
 
 
 def make_input_fixture(root: Path, *, duplicate_manifest_key: bool = False) -> Path:
+    root = root.parent.resolve(strict=True) / root.name
     root.mkdir()
     archive_name = f"taijiagent-制包机输入-{COMMIT}.tar.gz"
     manifest_name = f"taijiagent-制包机输入-{COMMIT}.manifest.json"
@@ -206,6 +209,26 @@ class SkillSourceContractTests(unittest.TestCase):
             "python3 -I -B scripts/doctor.py --repo <operator-supplied-path>",
             "恰好一个同一 commit 的 `tar.gz`、`manifest.json` 与 `tar.gz.sha256` 三件套",
             "`/usr/bin/taiji-agent-acceptance`",
+            "当“继续”夹带一个或多个外部或特权阶段",
+            "只提供只读诊断或计划",
+            "`待授权阶段`",
+            "`精确身份`",
+            "`影响范围`",
+            "`回滚与停止条件`",
+            "只对操作员明确提供的路径运行 `doctor.py --repo PATH`，不得扫描其它目录",
+            "`.skill` 是 Codex 的便利安装包",
+            "其它 Agent 产品只有经过实际测试后才能标记为已验证",
+        ):
+            self.assertIn(required, content)
+
+    def test_skill_distinguishes_builder_input_from_build_host_entry(self) -> None:
+        content = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        for required in (
+            "`builder_input_entry`",
+            "`taijiagent 打包交付/99_本机_准备制包输入包.sh`",
+            "`build_host_entry`",
+            "`taijiagent 打包交付/00_制包机_生成离线交付包.sh`",
+            "Doctor 的 repo 模式只能把 99 报告为下一步",
         ):
             self.assertIn(required, content)
 
@@ -220,7 +243,8 @@ class SkillSourceContractTests(unittest.TestCase):
                 set(entry),
                 {"id", "prompt", "expected_output", "files", "expectations"},
             )
-            self.assertTrue(entry["expectations"])
+            self.assertEqual(len(entry["expectations"]), 3)
+        self.assertEqual(sum(len(entry["expectations"]) for entry in payload["evals"]), 24)
         rendered = json.dumps(payload, ensure_ascii=False)
         for topic in ("dirty", "frozen", "继续", "一个 DEB", "/usr/bin/taiji-agent-acceptance", "历史 v2", "私有"):
             self.assertIn(topic, rendered)
@@ -249,7 +273,42 @@ class DoctorContractTests(unittest.TestCase):
             self.assertEqual(report["compatibility_status"], "pass")
             self.assertEqual(report["blockers"], [])
             self.assertIn("prepare-builder-input", report["approval_required"])
+            self.assertEqual(
+                report["next_action"],
+                {
+                    "action": "prepare-builder-input",
+                    "cwd": str(repo),
+                    "argv": [
+                        "/bin/bash",
+                        "-p",
+                        "taijiagent 打包交付/99_本机_准备制包输入包.sh",
+                    ],
+                },
+            )
+            self.assertNotIn("00_制包机", json.dumps(report["next_action"], ensure_ascii=False))
             self.assertFalse(sentinel.exists(), "doctor executed an operator-supplied repository script")
+
+    def test_repo_mode_disables_repository_fsmonitor_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary).resolve(strict=True) / "parent with space"
+            temporary_root.mkdir()
+            repo, _sentinel = make_repo_fixture(temporary_root)
+            fsmonitor_sentinel = temporary_root / "fsmonitor-executed"
+            fsmonitor_hook = temporary_root / "fsmonitor-hook.sh"
+            fsmonitor_hook.write_text(
+                "#!/bin/sh\nprintf invoked > "
+                + shlex.quote(str(fsmonitor_sentinel))
+                + "\nprintf 'token\\n'\n",
+                encoding="utf-8",
+            )
+            fsmonitor_hook.chmod(0o700)
+            git(repo, "config", "core.fsmonitor", str(fsmonitor_hook))
+
+            result = run_python(DOCTOR, "--repo", str(repo))
+            report = parse_report(result)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(report["compatibility_status"], "pass")
+            self.assertFalse(fsmonitor_sentinel.exists(), "doctor executed repository core.fsmonitor")
 
     def test_dirty_repo_is_blocked_without_running_repo_code(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -271,6 +330,34 @@ class DoctorContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertEqual(report["compatibility_status"], "blocked")
             self.assertIn("REPO_NOT_MAIN", {item["code"] for item in report["blockers"]})
+
+    def test_clean_detached_repo_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo, _sentinel = make_repo_fixture(Path(temporary))
+            git(repo, "checkout", "-q", "--detach")
+            result = run_python(DOCTOR, "--repo", str(repo))
+            report = parse_report(result)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(report["compatibility_status"], "blocked")
+            self.assertIn("REPO_NOT_MAIN", {item["code"] for item in report["blockers"]})
+
+    def test_repo_authority_must_be_tracked_by_head_not_only_the_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo, _sentinel = make_repo_fixture(Path(temporary))
+            relative = EXPECTED_INTERFACE["build_host_entry"]
+            git(repo, "rm", "-q", "--", relative)
+            git(repo, "commit", "-q", "-m", "remove authority from HEAD")
+            entry = repo / relative
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            entry.write_text("#!/bin/bash\nexit 99\n", encoding="utf-8")
+            git(repo, "add", "--", relative)
+
+            result = run_python(DOCTOR, "--repo", str(repo))
+            report = parse_report(result)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(report["compatibility_status"], "unsupported")
+            self.assertIn("REPO_UNSUPPORTED", {item["code"] for item in report["blockers"]})
+            self.assertIn("not tracked in HEAD", report["blockers"][0]["message"])
 
     def test_input_dir_recognizes_exact_no_git_trio_without_claiming_formal_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -299,6 +386,22 @@ class DoctorContractTests(unittest.TestCase):
             self.assertEqual(extra_result.returncode, 2)
             self.assertIn("INPUT_SET_INVALID", {item["code"] for item in extra_report["blockers"]})
 
+    def test_input_dir_rejects_noncanonical_sidecar_entries(self) -> None:
+        mutations = {
+            "third-line": lambda text: text + ("0" * 64) + "  stale.deb\n",
+            "path-entry": lambda text: text.replace("  taijiagent-", "  ../taijiagent-", 1),
+            "duplicate-basename": lambda text: "\n".join([text.splitlines()[0], text.splitlines()[0]]) + "\n",
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                input_dir = make_input_fixture(Path(temporary) / "input")
+                checksum = next(input_dir.glob("*.sha256"))
+                checksum.write_text(mutate(checksum.read_text(encoding="utf-8")), encoding="utf-8")
+                result = run_python(DOCTOR, "--input-dir", str(input_dir))
+                report = parse_report(result)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("INPUT_CHECKSUM_INVALID", {item["code"] for item in report["blockers"]})
+
     def test_selftest_is_isolated_and_passes(self) -> None:
         result = run_python(DOCTOR, "--selftest")
         report = parse_report(result)
@@ -314,6 +417,77 @@ class DoctorContractTests(unittest.TestCase):
         self.assertEqual(report["mode"], "unknown")
         self.assertEqual(report["compatibility_status"], "unsupported")
         self.assertIn("INVALID_ARGUMENTS", {item["code"] for item in report["blockers"]})
+
+    def test_invalid_operator_path_is_a_public_unsupported_result(self) -> None:
+        result = run_python(DOCTOR, "--repo", ".")
+        report = parse_report(result)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(report["mode"], "repo")
+        self.assertEqual(report["compatibility_status"], "unsupported")
+        self.assertIn("REPO_UNSUPPORTED", {item["code"] for item in report["blockers"]})
+
+    def test_repo_rejects_noncanonical_and_symlink_parent_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary).resolve(strict=True)
+            real_parent = temporary_root / "real"
+            real_parent.mkdir()
+            repo, _sentinel = make_repo_fixture(real_parent)
+            detour = real_parent / "detour"
+            detour.mkdir()
+            parent_link = temporary_root / "parent-link"
+            parent_link.symlink_to(real_parent, target_is_directory=True)
+            candidates = {
+                "dot-dot": detour / ".." / repo.name,
+                "symlink-parent": parent_link / repo.name,
+            }
+            for name, candidate in candidates.items():
+                with self.subTest(name=name):
+                    result = run_python(DOCTOR, "--repo", str(candidate))
+                    report = parse_report(result)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(report["mode"], "repo")
+                    self.assertEqual(report["compatibility_status"], "unsupported")
+                    self.assertIn("REPO_UNSUPPORTED", {item["code"] for item in report["blockers"]})
+                    self.assertEqual(
+                        result.stdout,
+                        json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                    )
+
+    def test_input_dir_rejects_noncanonical_and_symlink_parent_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary).resolve(strict=True)
+            real_parent = temporary_root / "real"
+            real_parent.mkdir()
+            input_dir = make_input_fixture(real_parent / "input")
+            detour = real_parent / "detour"
+            detour.mkdir()
+            parent_link = temporary_root / "parent-link"
+            parent_link.symlink_to(real_parent, target_is_directory=True)
+            candidates = {
+                "dot-dot": detour / ".." / input_dir.name,
+                "symlink-parent": parent_link / input_dir.name,
+            }
+            for name, candidate in candidates.items():
+                with self.subTest(name=name):
+                    result = run_python(DOCTOR, "--input-dir", str(candidate))
+                    report = parse_report(result)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(report["mode"], "input-dir")
+                    self.assertEqual(report["compatibility_status"], "blocked")
+                    self.assertIn("INPUT_SET_INVALID", {item["code"] for item in report["blockers"]})
+                    self.assertEqual(
+                        result.stdout,
+                        json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                    )
+
+    def test_stdout_is_one_canonical_json_document_and_stderr_is_empty(self) -> None:
+        result = run_python(DOCTOR, "--selftest")
+        report = parse_report(result)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            result.stdout,
+            json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        )
 
     def test_every_report_has_exact_public_fields(self) -> None:
         result = run_python(DOCTOR, "--selftest")

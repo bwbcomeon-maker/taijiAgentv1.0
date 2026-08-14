@@ -35,8 +35,11 @@ GIT_ENVIRONMENT_KEYS = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CONFIG",
     "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
     "GIT_CEILING_DIRECTORIES",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_NAMESPACE",
+    "GIT_SHALLOW_FILE",
 )
 EXPECTED_INTERFACE = {
     "schema": INTERFACE_SCHEMA,
@@ -126,11 +129,13 @@ def _directory(path: Path, label: str) -> Path:
         raise DoctorError("{} must be an absolute path".format(label))
     try:
         metadata = path.lstat()
-        path.resolve(strict=True)
+        resolved = path.resolve(strict=True)
     except OSError as exc:
         raise DoctorError("{} is missing".format(label)) from exc
     if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
         raise DoctorError("{} must be a real canonical directory".format(label))
+    if resolved != path:
+        raise DoctorError("{} must use its canonical absolute path".format(label))
     return path
 
 
@@ -176,7 +181,16 @@ def _git_environment(root: Path) -> Dict[str, str]:
 def _git(root: Path, *arguments: str) -> str:
     try:
         result = subprocess.run(
-            ["/usr/bin/git", "-c", "core.quotePath=false", "-C", str(root), *arguments],
+            [
+                "/usr/bin/git",
+                "-c",
+                "core.quotePath=false",
+                "-c",
+                "core.fsmonitor=false",
+                "-C",
+                str(root),
+                *arguments,
+            ],
             env=_git_environment(root),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -213,9 +227,9 @@ def _report(
 
 
 def inspect_repo(root: Path) -> Tuple[Dict[str, Any], int]:
-    root = _directory(root, "repository")
-    interface_path = root / "packaging/linux/taiji-packaging-interface.json"
     try:
+        root = _directory(root, "repository")
+        interface_path = root / "packaging/linux/taiji-packaging-interface.json"
         interface = _load_json(interface_path, "packaging interface")
         if interface != EXPECTED_INTERFACE:
             raise DoctorError("packaging interface does not match the supported v1 contract")
@@ -230,7 +244,7 @@ def inspect_repo(root: Path) -> Tuple[Dict[str, Any], int]:
             interface["builder_input_entry"],
             interface["canonical_runbook"],
         ):
-            tracked = _git(root, "ls-files", "--error-unmatch", "--", relative).strip()
+            tracked = _git(root, "ls-tree", "--name-only", "HEAD", "--", relative).strip()
             if tracked != relative:
                 raise DoctorError("interface authority is not tracked in HEAD: " + relative)
         top = Path(_git(root, "rev-parse", "--show-toplevel").strip())
@@ -240,7 +254,15 @@ def inspect_repo(root: Path) -> Tuple[Dict[str, Any], int]:
         if COMMIT_RE.fullmatch(head) is None:
             raise DoctorError("repository HEAD is not a full commit")
         branch = _git(root, "branch", "--show-current").strip()
-        dirty = bool(_git(root, "status", "--porcelain=v1", "--untracked-files=all"))
+        dirty = bool(
+            _git(
+                root,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=all",
+            )
+        )
     except DoctorError as exc:
         return (
             _report(
@@ -335,8 +357,8 @@ def _input_names(root: Path) -> Tuple[Path, Path, Path, str]:
 
 
 def inspect_input(root: Path) -> Tuple[Dict[str, Any], int]:
-    root = _directory(root, "input directory")
     try:
+        root = _directory(root, "input directory")
         archive, manifest_path, checksum, commit = _input_names(root)
     except DoctorError as exc:
         return (

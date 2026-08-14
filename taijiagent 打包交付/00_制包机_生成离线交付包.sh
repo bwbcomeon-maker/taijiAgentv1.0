@@ -4550,6 +4550,7 @@ main() {
   set_stage "收集并绑定候选产物"
   collect_artifacts
   set_stage "使用固定工具链执行正式构建测试"
+  prepare_formal_build_test_dependencies
   run_formal_build_tests_direct
   write_pending_build_marker
   set_stage "生成 manifest 和报告"

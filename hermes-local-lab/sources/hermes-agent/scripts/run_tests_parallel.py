@@ -46,7 +46,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # Default test discovery roots.
@@ -234,6 +234,64 @@ def _validate_formal_selectors(root: Path, selectors: Tuple[str, ...]) -> Tuple[
     return tuple(canonical)
 
 
+def _formal_pytest_config(root: Path) -> Optional[Path]:
+    for name in ("pytest.ini", "pyproject.toml"):
+        candidate = root / name
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate.resolve()
+    raise RuntimeError("formal pytest config is missing or unsafe")
+
+
+def _absolute_formal_selector(root: Path, selector: str) -> str:
+    file_part, separator, node_part = selector.partition("::")
+    absolute = str((root / file_part).resolve())
+    return absolute + (separator + node_part if separator else "")
+
+
+def _formal_working_directory_plugin(
+    pytest_module,
+    root: Path,
+    initial_cwd: Path,
+    expected_config: Optional[Path],
+):
+    class FormalWorkingDirectoryPlugin:
+        configured = False
+
+        def pytest_configure(self, config) -> None:
+            observed_root = Path(str(config.rootpath)).resolve()
+            if observed_root != root:
+                raise RuntimeError("formal pytest rootdir changed")
+            observed_config = getattr(config, "inipath", None)
+            if expected_config is None:
+                if observed_config is not None:
+                    raise RuntimeError("formal pytest config was not expected")
+            elif (
+                observed_config is None
+                or Path(str(observed_config)).resolve() != expected_config
+            ):
+                raise RuntimeError("formal pytest config changed")
+            if Path.cwd().resolve() != initial_cwd:
+                raise RuntimeError("formal pytest initial cwd changed")
+            os.chdir(root)
+            self.configured = True
+
+        def pytest_unconfigure(self, config) -> None:
+            del config
+            if self.configured:
+                os.chdir(initial_cwd)
+                self.configured = False
+
+    hookimpl = getattr(pytest_module, "hookimpl", None)
+    if hookimpl is not None:
+        FormalWorkingDirectoryPlugin.pytest_configure = hookimpl(trylast=True)(
+            FormalWorkingDirectoryPlugin.pytest_configure
+        )
+        FormalWorkingDirectoryPlugin.pytest_unconfigure = hookimpl(trylast=True)(
+            FormalWorkingDirectoryPlugin.pytest_unconfigure
+        )
+    return FormalWorkingDirectoryPlugin()
+
+
 def _run_formal_pytest_session(
     root: Path,
     selectors: Tuple[str, ...],
@@ -243,8 +301,19 @@ def _run_formal_pytest_session(
     root = root.resolve()
     selectors = _validate_formal_selectors(root, selectors)
     counter = _FormalPytestCounter(selectors, first_ordinal)
+    initial_cwd = Path.cwd().resolve()
+    config_path = _formal_pytest_config(root)
+    cwd_plugin = _formal_working_directory_plugin(
+        pytest_module,
+        root,
+        initial_cwd,
+        config_path,
+    )
     arguments = [
-        *selectors,
+        *(_absolute_formal_selector(root, selector) for selector in selectors),
+        "--rootdir=" + str(root),
+        "--confcutdir=" + str(root),
+        *(["-c", str(config_path)] if config_path is not None else []),
         "-q",
         "-p",
         "no:cacheprovider",
@@ -253,12 +322,10 @@ def _run_formal_pytest_session(
         "-p",
         "pytest_timeout",
     ]
-    previous = Path.cwd()
     try:
-        os.chdir(root)
-        exit_code = pytest_module.main(arguments, plugins=[counter])
+        exit_code = pytest_module.main(arguments, plugins=[counter, cwd_plugin])
     finally:
-        os.chdir(previous)
+        os.chdir(initial_cwd)
     if int(exit_code) != 0:
         raise RuntimeError("formal pytest session exited nonzero: {}".format(exit_code))
     return counter.validated_records()

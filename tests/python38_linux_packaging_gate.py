@@ -257,6 +257,7 @@ def exercise_formal_agent_parallel_runner(agent_runner, temp_root: Path) -> None
     formal_root = temp_root / "formal-agent-runner"
     tests_root = formal_root / "tests"
     tests_root.mkdir(parents=True)
+    (formal_root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     (tests_root / "one.py").write_text("def test_one(): pass\n", encoding="utf-8")
     (tests_root / "two.py").write_text("def test_two(): pass\n", encoding="utf-8")
     selectors = ("tests/one.py", "tests/two.py::test_two")
@@ -278,7 +279,12 @@ def exercise_formal_agent_parallel_runner(agent_runner, temp_root: Path) -> None
         @staticmethod
         def main(arguments, plugins):
             assert arguments == [
-                *selectors,
+                str((formal_root / "tests/one.py").resolve()),
+                str((formal_root / "tests/two.py").resolve()) + "::test_two",
+                "--rootdir=" + str(formal_root.resolve()),
+                "--confcutdir=" + str(formal_root.resolve()),
+                "-c",
+                str((formal_root / "pytest.ini").resolve()),
                 "-q",
                 "-p",
                 "no:cacheprovider",
@@ -287,7 +293,7 @@ def exercise_formal_agent_parallel_runner(agent_runner, temp_root: Path) -> None
                 "-p",
                 "pytest_timeout",
             ]
-            assert len(plugins) == 1
+            assert len(plugins) == 2
             counter = plugins[0]
             for nodeid in nodeids:
                 counter.pytest_itemcollected(Item(nodeid))

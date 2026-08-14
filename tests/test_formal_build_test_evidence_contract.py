@@ -340,6 +340,7 @@ class FormalBuildTestEvidenceContractTests(unittest.TestCase):
             tests.mkdir()
             (tests / "test_one.py").write_text("def test_case(): pass\n")
             (tests / "test_two.py").write_text("def test_exact(): pass\n")
+            (root / "pytest.ini").write_text("[pytest]\n")
             records = runner._run_formal_pytest_session(
                 root,
                 ("tests/test_one.py", "tests/test_two.py::test_exact"),
@@ -355,7 +356,20 @@ class FormalBuildTestEvidenceContractTests(unittest.TestCase):
                 )
 
         self.assertEqual(tuple(record["ordinal"] for record in records), (3, 4))
-        self.assertEqual(len(observed["plugins"]), 1)
+        self.assertEqual(len(observed["plugins"]), 2)
+        self.assertEqual(
+            observed["argv"][:4],
+            (
+                str((root / "tests/test_one.py").resolve()),
+                str((root / "tests/test_two.py").resolve()) + "::test_exact",
+                "--rootdir=" + str(root.resolve()),
+                "--confcutdir=" + str(root.resolve()),
+            ),
+        )
+        self.assertEqual(
+            observed["argv"][4:6],
+            ("-c", str((root / "pytest.ini").resolve())),
+        )
         self.assertIn("-p", observed["argv"])
         self.assertIn("pytest_asyncio.plugin", observed["argv"])
         self.assertIn("pytest_timeout", observed["argv"])
@@ -1032,6 +1046,24 @@ validate_source_archive_integrity
             "manifest_identity",
         ):
             self.assertIn(required, builder)
+
+    def test_builder_prepares_formal_dependencies_after_artifacts_before_driver(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        main = builder[builder.rindex("\nmain() {") + 1 :]
+
+        self.assertEqual(main.count("prepare_formal_build_test_dependencies"), 1)
+        self.assertLess(
+            main.index("collect_artifacts"),
+            main.index("prepare_formal_build_test_dependencies"),
+        )
+        self.assertLess(
+            main.index("prepare_formal_build_test_dependencies"),
+            main.index("run_formal_build_tests_direct"),
+        )
+        self.assertLess(
+            main.index("run_formal_build_tests_direct"),
+            main.index("write_pending_build_marker"),
+        )
 
     def test_formal_runtime_rejects_node_current_retarget_and_seals_every_argv(self):
         builder = BUILDER.read_text(encoding="utf-8")
