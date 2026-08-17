@@ -242,7 +242,10 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
         self.assertIn('electron_config_cache="$BUILD_ROOT/electron-cache"', builder)
         self.assertIn('electron-v${ELECTRON_VERSION}-linux-x64.zip', builder)
         self.assertIn('ELECTRON_ARCHIVE_SHA256', builder)
-        self.assertIn('TAIJI_ELECTRON_ARCHIVE="$ELECTRON_ARCHIVE"', builder)
+        self.assertIn('adopt_sealed_snapshot "$ELECTRON_ARCHIVE" "$ELECTRON_ARCHIVE_SHA256" electron', builder)
+        self.assertIn('TAIJI_ELECTRON_ARCHIVE="${ELECTRON_ARCHIVE_FD:+}"', builder)
+        self.assertIn('TAIJI_ELECTRON_ARCHIVE_FD="$ELECTRON_ARCHIVE_FD"', builder)
+        self.assertIn('TAIJI_ELECTRON_ARCHIVE_BASENAME="$ELECTRON_ARCHIVE_BASENAME"', builder)
 
 
 if __name__ == "__main__":
