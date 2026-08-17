@@ -1009,6 +1009,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         with tempfile.TemporaryDirectory() as tmp:
+            release_temp_root = Path(tmp) / "release-temp"
+            release_temp_root.mkdir()
+            release_env = {**os.environ, "TMPDIR": str(release_temp_root)}
             repo_root = Path(tmp) / "repo"
             delivery = repo_root / "taijiagent 打包交付"
             delivery.mkdir(parents=True)
@@ -1085,6 +1088,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 cwd=delivery,
                 text=True,
                 capture_output=True,
+                env=release_env,
                 check=False,
             )
 
@@ -1113,6 +1117,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 cwd=delivery,
                 text=True,
                 capture_output=True,
+                env=release_env,
                 check=False,
             )
             self.assertNotEqual(rejected.returncode, 0)
