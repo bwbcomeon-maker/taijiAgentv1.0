@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import importlib.util
 import inspect
@@ -15,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from tests.test_release_evidence_schema_v3 import formal_build_test_identity, formal_build_test_log
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,6 +188,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
         policy = policy_helper.load_and_validate(POLICY)
         self.policy_id = policy["policy_id"]
         self.policy_sha256 = policy_helper.canonical_sha256(policy)
+        formal_build_log = package_dir / "formal-build-tests.log"
+        formal_build_log.write_bytes(formal_build_test_log(self.source_commit))
+        formal_build_identity = formal_build_test_identity(formal_build_log)
         manifest = package_dir / "taiji-package-manifest.json"
         manifest.write_text(
             json.dumps(
@@ -203,12 +210,17 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     "compatibility_policy_sha256": self.policy_sha256,
                     "elf_abi_audit_basename": "elf-abi-audit.json",
                     "elf_abi_audit_sha256": "a" * 64,
+                    "upgrade_data_contract_id": "taiji-linux-upgrade-data-v1",
+                    "upgrade_data_contract_sha256": sha256(
+                        ROOT / "packaging/linux/upgrade-data-contract.json"
+                    ),
                     "icon_set_sha256": "1" * 64,
                     "desktop_entry_sha256": "d" * 64,
                     "acceptance_binding_sha256": "2" * 64,
                     "acceptance_tools_manifest_sha256": "3" * 64,
                     "acceptance_entrypoint_sha256": "4" * 64,
                     "installed_release_manifest_sha256": "5" * 64,
+                    **formal_build_identity,
                     "maintainer": "Taiji Agent Product Team <noreply@localhost>",
                     "built_at_utc": generated_at,
                     **TOOLCHAIN,
@@ -240,6 +252,9 @@ class OfflineRehearsalProducerTest(unittest.TestCase):
                     f"acceptance_tools_manifest_sha256={'3' * 64}",
                     f"acceptance_entrypoint_sha256={'4' * 64}",
                     f"installed_release_manifest_sha256={'5' * 64}",
+                    f"formal_build_tests_status={formal_build_identity['formal_build_tests_status']}",
+                    f"formal_build_tests_log_basename={formal_build_identity['formal_build_tests_log_basename']}",
+                    f"formal_build_tests_log_sha256={formal_build_identity['formal_build_tests_log_sha256']}",
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                     *(f"{key}={value}" for key, value in TOOLCHAIN.items()),
                 )
