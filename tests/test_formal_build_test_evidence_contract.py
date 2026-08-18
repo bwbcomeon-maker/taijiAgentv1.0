@@ -959,7 +959,8 @@ validate_source_archive_integrity
         self.assertIn("AGENT_PARALLEL_RUNNER", gate)
         self.assertIn("FORMAL_BUILD_DRIVER", gate)
         self.assertIn("scripts/run-taiji-formal-build-tests.py", gate)
-        self.assertIn('agent_runner["main"]()', gate)
+        self.assertIn('agent_runner["main"].__globals__', gate)
+        self.assertIn('runtime["main"]()', gate)
         for source_path in (AGENT_PARALLEL_RUNNER, LINUX_PACKAGING_TESTS):
             source = source_path.read_text(encoding="utf-8")
             for forbidden in (".is_relative_to(", ".removeprefix(", ".removesuffix("):
