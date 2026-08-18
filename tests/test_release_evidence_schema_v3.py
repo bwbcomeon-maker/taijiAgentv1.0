@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import stat
 import unittest
 import zlib
 from datetime import datetime, timedelta, timezone
@@ -152,6 +153,35 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    @staticmethod
+    def trusted_python_fixture(alias_mode: int):
+        trusted = mock.MagicMock()
+        trusted.__str__.return_value = "/usr/bin/python3"
+        trusted.lstat.return_value = mock.Mock(st_uid=0, st_mode=alias_mode)
+        resolved = mock.MagicMock()
+        resolved.parent = Path("/usr/bin")
+        resolved.is_symlink.return_value = False
+        resolved.lstat.return_value = mock.Mock(
+            st_uid=0,
+            st_mode=stat.S_IFREG | 0o755,
+        )
+        trusted.resolve.return_value = resolved
+        return trusted
+
+    def test_trusted_system_python_accepts_root_owned_symlink_to_trusted_target(self):
+        trusted = self.trusted_python_fixture(stat.S_IFLNK | 0o777)
+        with mock.patch.object(self.validator, "TRUSTED_SYSTEM_PYTHON", trusted):
+            self.assertEqual(
+                self.validator.resolve_trusted_system_python(),
+                "/usr/bin/python3",
+            )
+
+    def test_trusted_system_python_rejects_writable_regular_alias(self):
+        trusted = self.trusted_python_fixture(stat.S_IFREG | 0o775)
+        with mock.patch.object(self.validator, "TRUSTED_SYSTEM_PYTHON", trusted):
+            with self.assertRaisesRegex(self.validator.EvidenceError, "固定系统 Python"):
+                self.validator.resolve_trusted_system_python()
 
     @staticmethod
     def sha256(path: Path) -> str:

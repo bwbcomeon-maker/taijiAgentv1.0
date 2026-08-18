@@ -979,8 +979,11 @@ def resolve_trusted_system_python() -> str:
         raise EvidenceError(f"缺少固定可信系统 Python: {exc}") from exc
     if (
         alias.st_uid != 0
-        or alias.st_mode & 0o022
         or not (stat.S_ISREG(alias.st_mode) or stat.S_ISLNK(alias.st_mode))
+        or (
+            stat.S_ISREG(alias.st_mode)
+            and alias.st_mode & 0o022
+        )
         or resolved.parent != Path("/usr/bin")
         or resolved.is_symlink()
         or not stat.S_ISREG(resolved_stat.st_mode)

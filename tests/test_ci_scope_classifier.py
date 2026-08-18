@@ -134,7 +134,7 @@ class CiScopeClassifierTest(unittest.TestCase):
         self.assertIn("linux_packaging:", workflow)
         self.assertIn("test_linux_compatibility_policy", workflow)
         self.assertIn('selected and result != "success"', workflow)
-        self.assertGreaterEqual(workflow.count("UV_PROJECT_ENVIRONMENT: venv"), 3)
+        self.assertGreaterEqual(workflow.count("UV_PROJECT_ENVIRONMENT"), 2)
         action_refs = re.findall(r"uses: [^@\s]+@([0-9a-f]+)", workflow)
         self.assertTrue(action_refs)
         self.assertTrue(all(len(ref) == 40 for ref in action_refs))
@@ -145,9 +145,17 @@ class CiScopeClassifierTest(unittest.TestCase):
         )
         root_job = workflow[workflow.index("  root:") : workflow.index("  desktop:")]
         self.assertIn("UV_PYTHON_PREFERENCE: only-managed", root_job)
+        self.assertIn(
+            "UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv",
+            root_job,
+        )
         self.assertIn("uv python install 3.11", root_job)
         self.assertIn(
-            "hermes-local-lab/sources/hermes-agent/venv/bin/python -m unittest",
+            '"$UV_PROJECT_ENVIRONMENT/bin/python" -m unittest',
+            root_job,
+        )
+        self.assertNotIn(
+            "hermes-local-lab/sources/hermes-agent/venv/bin/python",
             root_job,
         )
 

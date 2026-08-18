@@ -170,10 +170,12 @@ class TargetEvidenceV2ContractTest(unittest.TestCase):
         )
 
     def test_canonical_observation_is_bound_to_current_machine_commitment(self):
-        with patch.dict(
-            os.environ,
-            {ASSEMBLER.NON_LINUX_TEST_IDENTITY_ENV: TEST_IDENTITY},
-            clear=False,
+        machine_identity = f"non-linux-contract-test-machine:{TEST_IDENTITY}"
+        boot_identity = f"non-linux-contract-test-boot:{TEST_IDENTITY}"
+        with patch.object(
+            ASSEMBLER,
+            "_current_target_identities",
+            return_value=(machine_identity, boot_identity),
         ):
             commitment, machine_fingerprint, boot_fingerprint = (
                 ASSEMBLER.current_target_identity_binding(CHALLENGE)
@@ -182,11 +184,7 @@ class TargetEvidenceV2ContractTest(unittest.TestCase):
                 ASSEMBLER.current_user_context_fingerprints(CHALLENGE)
             )
             expected_commitment = hashlib.sha256(
-                (
-                    "taiji-machine-identity-v1\0"
-                    "non-linux-contract-test-machine:"
-                    + TEST_IDENTITY
-                ).encode("utf-8")
+                ("taiji-machine-identity-v1\0" + machine_identity).encode("utf-8")
             ).hexdigest()
             self.assertEqual(commitment, expected_commitment)
             self.assertEqual(

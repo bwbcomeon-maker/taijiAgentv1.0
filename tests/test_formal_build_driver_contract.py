@@ -57,6 +57,25 @@ def load_evidence_validator():
     return module
 
 
+def live_process_group_members(process_group, proc_root=Path("/proc")):
+    if not proc_root.is_dir():
+        return None
+    live = []
+    for stat_path in proc_root.glob("[0-9]*/stat"):
+        try:
+            payload = stat_path.read_text(encoding="ascii")
+            closing = payload.rfind(")")
+            fields = payload[closing + 2:].split()
+            state = fields[0]
+            member_group = int(fields[2])
+            pid = int(stat_path.parent.name)
+        except (OSError, ValueError, IndexError):
+            continue
+        if member_group == process_group and state not in {"Z", "X"}:
+            live.append((pid, state))
+    return live
+
+
 class FormalBuildDriverContractTests(unittest.TestCase):
     def test_driver_exposes_exact_registry_and_contract(self):
         driver = load_driver()
@@ -911,8 +930,39 @@ class FormalBuildDriverContractTests(unittest.TestCase):
         self.assertEqual(stdout, b"leader-done\n")
         self.assertEqual(stderr, b"")
         self.assertEqual(payload, b'{"status":"pass"}')
-        with self.assertRaises((ProcessLookupError, PermissionError)):
-            os.killpg(proc.pid, 0)
+        deadline = time.monotonic() + 1.0
+        while True:
+            live_members = live_process_group_members(proc.pid)
+            if live_members is None:
+                with self.assertRaises((ProcessLookupError, PermissionError)):
+                    os.killpg(proc.pid, 0)
+                break
+            if not live_members:
+                break
+            if time.monotonic() >= deadline:
+                self.fail(f"process group still has live members: {live_members}")
+            time.sleep(0.01)
+
+    def test_live_process_group_members_filters_zombies(self):
+        with tempfile.TemporaryDirectory(prefix="proc-live-members-") as td:
+            proc = Path(td)
+            (proc / "333").mkdir(parents=True)
+            (proc / "111").mkdir(parents=True)
+            (proc / "222").mkdir(parents=True)
+            (proc / "333/stat").write_text(
+                "333 (python run) Z 0 4242 4242\n", encoding="ascii"
+            )
+            (proc / "111/stat").write_text(
+                "111 (python run) S 0 4242 4242\n", encoding="ascii"
+            )
+            (proc / "222/stat").write_text(
+                "222 (bash -c) R 0 9999 9999\n", encoding="ascii"
+            )
+
+            self.assertEqual(
+                live_process_group_members(4242, proc_root=proc),
+                [(111, "S")],
+            )
 
     def test_formal_pytest_starts_in_scratch_then_switches_to_suite_root(self):
         runner = load_agent_runner()
