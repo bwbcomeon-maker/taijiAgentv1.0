@@ -25,7 +25,7 @@
       "expected_compatibility": "BLOCKED",
       "id": "rpm-only-blocked",
       "kind": "negative",
-      "stable_error_code": "TAIJI-LINUX-E002-PACKAGE-MANAGER"
+      "stable_error_code": "TAIJI-LINUX-E003-DPKG"
     },
     {
       "block_before_business_data_mutation": true,
@@ -33,7 +33,7 @@
       "expected_compatibility": "BLOCKED",
       "id": "glibc-below-min-blocked",
       "kind": "negative",
-      "stable_error_code": "TAIJI-LINUX-E003-GLIBC"
+      "stable_error_code": "TAIJI-LINUX-E004-GLIBC"
     },
     {
       "block_before_business_data_mutation": true,
@@ -41,7 +41,7 @@
       "expected_compatibility": "BLOCKED",
       "id": "missing-core-capability-blocked",
       "kind": "negative",
-      "stable_error_code": "TAIJI-LINUX-E004-CAPABILITY"
+      "stable_error_code": "TAIJI-LINUX-E014-RUNTIME"
     },
     {
       "block_before_business_data_mutation": true,
@@ -49,7 +49,7 @@
       "expected_compatibility": "BLOCKED",
       "id": "no-admin-blocked",
       "kind": "negative",
-      "stable_error_code": "TAIJI-LINUX-E005-ADMIN"
+      "stable_error_code": "TAIJI-LINUX-E010-PRIVILEGE"
     },
     {
       "block_before_business_data_mutation": true,
@@ -68,14 +68,22 @@
       "kind": "positive",
       "label": "Kylin minimum UKUI",
       "os_ids": ["kylin"],
+      "platform_profile": {
+        "desktop_environments": ["UKUI"],
+        "os_id": "kylin",
+        "release_id_pattern": "2403",
+        "security_profile": "supported-default",
+        "version_id": "v10"
+      },
       "required_business_checks": [
         "visible_first_configuration_completion",
         "desktop_launch",
         "real_model_conversation",
         "attachment_flow",
-        "diagnostic_export"
+        "diagnostic_export",
+        "model_configuration_state_consistent"
       ],
-      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+      "required_lifecycle_checks": ["install", "window_close_exit", "three_restart_cycles", "second_instance_focus", "no_new_electron_core"]
     },
     {
       "desktop_environments": ["UKUI"],
@@ -84,14 +92,22 @@
       "kind": "positive",
       "label": "Kylin current standard UKUI",
       "os_ids": ["kylin"],
+      "platform_profile": {
+        "desktop_environments": ["UKUI"],
+        "os_id": "kylin",
+        "release_id_pattern": "2503",
+        "security_profile": "supported-default",
+        "version_id": "v10"
+      },
       "required_business_checks": [
         "visible_first_configuration_completion",
         "desktop_launch",
         "real_model_conversation",
         "attachment_flow",
-        "diagnostic_export"
+        "diagnostic_export",
+        "model_configuration_state_consistent"
       ],
-      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+      "required_lifecycle_checks": ["install", "window_close_exit", "three_restart_cycles", "second_instance_focus", "no_new_electron_core"]
     },
     {
       "desktop_environments": ["UKUI"],
@@ -100,14 +116,22 @@
       "kind": "positive",
       "label": "Kylin hardened UKUI",
       "os_ids": ["kylin"],
+      "platform_profile": {
+        "desktop_environments": ["UKUI"],
+        "os_id": "kylin",
+        "release_id_pattern": "2503",
+        "security_profile": "kysec-enabled-exec-control-off",
+        "version_id": "v10"
+      },
       "required_business_checks": [
         "visible_first_configuration_completion",
         "desktop_launch",
         "real_model_conversation",
         "attachment_flow",
-        "diagnostic_export"
+        "diagnostic_export",
+        "model_configuration_state_consistent"
       ],
-      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+      "required_lifecycle_checks": ["install", "window_close_exit", "three_restart_cycles", "second_instance_focus", "no_new_electron_core"]
     },
     {
       "desktop_environments": ["DDE"],
@@ -116,14 +140,22 @@
       "kind": "positive",
       "label": "UOS minimum DDE",
       "os_ids": ["uos"],
+      "platform_profile": {
+        "desktop_environments": ["DDE"],
+        "os_id": "uos",
+        "release_id_pattern": "1070(?:u2)?",
+        "security_profile": "supported-default",
+        "version_id": "20"
+      },
       "required_business_checks": [
         "visible_first_configuration_completion",
         "desktop_launch",
         "real_model_conversation",
         "attachment_flow",
-        "diagnostic_export"
+        "diagnostic_export",
+        "model_configuration_state_consistent"
       ],
-      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+      "required_lifecycle_checks": ["install", "window_close_exit", "three_restart_cycles", "second_instance_focus", "no_new_electron_core"]
     },
     {
       "desktop_environments": ["DDE"],
@@ -132,14 +164,22 @@
       "kind": "positive",
       "label": "UOS current or hardened DDE",
       "os_ids": ["uos"],
+      "platform_profile": {
+        "desktop_environments": ["DDE"],
+        "os_id": "uos",
+        "release_id_pattern": "25[0-9A-Za-z._-]*",
+        "security_profile": "supported-default",
+        "version_id": "25"
+      },
       "required_business_checks": [
         "visible_first_configuration_completion",
         "desktop_launch",
         "real_model_conversation",
         "attachment_flow",
-        "diagnostic_export"
+        "diagnostic_export",
+        "model_configuration_state_consistent"
       ],
-      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+      "required_lifecycle_checks": ["install", "window_close_exit", "three_restart_cycles", "second_instance_focus", "no_new_electron_core"]
     },
     {
       "desktop_environments": ["UKUI", "GNOME"],
@@ -148,15 +188,23 @@
       "kind": "positive",
       "label": "openKylin current graphical desktop",
       "os_ids": ["openkylin"],
+      "platform_profile": {
+        "desktop_environments": ["UKUI", "GNOME"],
+        "os_id": "openkylin",
+        "release_id_pattern": "2\\.0-SP2",
+        "security_profile": "supported-default",
+        "version_id": "2.0"
+      },
       "required_business_checks": [
         "visible_first_configuration_completion",
         "desktop_launch",
         "real_model_conversation",
         "attachment_flow",
-        "diagnostic_export"
+        "diagnostic_export",
+        "model_configuration_state_consistent"
       ],
-      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+      "required_lifecycle_checks": ["install", "window_close_exit", "three_restart_cycles", "second_instance_focus", "no_new_electron_core"]
     }
   ],
-  "schema": "taiji-linux-certification-matrix/v1"
+  "schema": "taiji-linux-certification-matrix/v2"
 }

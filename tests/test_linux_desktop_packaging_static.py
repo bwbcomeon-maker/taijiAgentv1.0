@@ -9,6 +9,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import zlib
@@ -16,10 +17,60 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FORMAL_BUILD_SOURCE_PATHS = (
+    "taijiagent 打包交付/00_制包机_生成离线交付包.sh",
+    "hermes-local-lab/scripts/setup-local.sh",
+    "hermes-local-lab/sources/hermes-agent/pyproject.toml",
+    "hermes-local-lab/sources/hermes-webui/requirements.txt",
+    "hermes-local-lab/sources/hermes-agent/uv.lock",
+    "packaging/linux/verify-python-lock-contract.py",
+    "packaging/linux/source-archive-integrity.py",
+    "packaging/linux/deb/build-deb.sh",
+)
+SOURCE_INTEGRITY_HELPER = ROOT / "packaging/linux/source-archive-integrity.py"
 
 
 def read_text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def copy_formal_build_sources(destination: Path) -> None:
+    for relative in FORMAL_BUILD_SOURCE_PATHS:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+
+
+def write_formal_build_source_archive(path: Path) -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        for relative in FORMAL_BUILD_SOURCE_PATHS:
+            archive.add(ROOT / relative, arcname=f"taiji-agentv1.0/{relative}")
+
+
+def write_source_inventory(delivery: Path, archive: Path, commit: str) -> Path:
+    helper = delivery / SOURCE_INTEGRITY_HELPER.name
+    shutil.copy2(SOURCE_INTEGRITY_HELPER, helper)
+    inventory = delivery / f"{archive.name[:-len('.tar.gz')]}.inventory.json"
+    inventory.unlink(missing_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(helper),
+            "create",
+            "--archive",
+            str(archive),
+            "--inventory",
+            str(inventory),
+            "--source-commit",
+            commit,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    return inventory
 
 
 def build_function_source(name: str, next_name: str) -> str:
@@ -143,7 +194,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         evidence_validator = read_text("scripts/validate-taiji-release-evidence.py")
 
         self.assertIn(
-            'node "$DESKTOP_JS_STAGER"',
+            '"$PACKAGED_NODE_EXECUTABLE" "$DESKTOP_JS_STAGER"',
             build,
         )
         self.assertIn('--entry main.js', build)
@@ -175,7 +226,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('dpkg-deb --root-owner-group', build)
         self.assertIn("^[0-9a-f]{40}$", offline_builder)
         for source in (offline_builder, input_builder, release_preflight):
-            self.assertIn("rev-parse HEAD", source)
+            self.assertIn("FROZEN_SOURCE_COMMIT", source)
+            self.assertIn("rev-parse --verify", source)
             self.assertNotIn("rev-parse --short=8 HEAD", source)
         for source in (release_check, release_signer, rehearsal_producer):
             self.assertNotIn("rev-parse --short=8 HEAD", source)
@@ -289,8 +341,6 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         )
 
     def test_native_verify_closed_health_ports_do_not_abort_under_inherited_errexit(self):
-        if importlib.util.find_spec("yaml") is None:
-            self.skipTest("PyYAML is not installed in this test environment")
         env = os.environ.copy()
         env.update(
             {
@@ -298,6 +348,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 "AGENT_API_PORT": "9",
                 "WEBUI_PORT": "10",
                 "TAIJI_VERIFY_DESKTOP_SMOKE": "0",
+                "TAIJI_AGENT_SYNC_PACKAGED_CONFIG": "0",
             }
         )
 
@@ -807,9 +858,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         docs = read_text("docs/taiji-sale-readiness.md")
 
         self.assertIn("run_root_tests", release_check)
-        self.assertIn("run_agent_tests", release_check)
-        self.assertIn("run_webui_tests", release_check)
-        self.assertIn("tests/test_issue1800_file_html_interactions.py", release_check)
+        self.assertNotIn("run_agent_tests", release_check)
+        self.assertNotIn("run_webui_tests", release_check)
+        self.assertIn("verify_formal_build_test_evidence", release_check)
+        self.assertIn("formal-build-test-log", release_check)
         self.assertIn("check_delivery_artifacts", release_check)
         self.assertIn("run_delivery_preflight", release_check)
         self.assertIn("TAIJI_RELEASE_REQUIRE_ARTIFACTS=1", release_check)
@@ -820,50 +872,35 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
     def test_root_release_check_runs_all_release_evidence_tool_tests(self):
         release_check = read_text("scripts/taiji-release-check.sh")
+        release_runner = read_text("scripts/run-taiji-release-python-tests.py")
 
-        self.assertIn("tests.test_target_desktop_acceptance_producer", release_check)
-        self.assertIn("tests.test_certification_set_v1", release_check)
-        self.assertIn("tests.test_release_evidence_assembler_v3", release_check)
-        self.assertIn("tests.test_release_evidence_signer_guards", release_check)
-        self.assertIn("run_desktop_evidence_tool_tests()", release_check)
-        self.assertIn(
-            "node --test tools/taiji-desktop-acceptance/run-installed-electron-acceptance.test.js",
-            release_check,
-        )
-        self.assertIn(
-            "python3 -B tools/taiji-desktop-acceptance/test_assemble_target_evidence.py",
-            release_check,
-        )
+        self.assertIn("tests.test_target_desktop_acceptance_producer", release_runner)
+        self.assertIn("tests.test_certification_set_v1", release_runner)
+        self.assertIn("tests.test_release_evidence_assembler_v3", release_runner)
+        self.assertIn("tests.test_release_evidence_signer_guards", release_runner)
+        self.assertIn("test_assemble_target_evidence.py", release_runner)
+        self.assertIn("tests.test_formal_build_test_evidence_contract", release_runner)
+        self.assertIn('/usr/bin/python3 -I -B "$RELEASE_TEST_RUNNER"', release_check)
+        self.assertNotIn("run_desktop_evidence_tool_tests()", release_check)
+        self.assertNotIn("node --test", release_check)
         main = release_check[release_check.index("main() {") :]
         self.assertIn(
-            'run_step "run_desktop_evidence_tool_tests" run_desktop_evidence_tool_tests',
+            'run_step "verify_formal_build_test_evidence" verify_formal_build_test_evidence',
             main,
         )
 
-    def test_release_check_cannot_mask_an_earlier_webui_failure(self):
+    def test_release_check_cannot_mask_a_formal_build_evidence_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            webui = tmp_path / "webui"
-            agent_python = tmp_path / "hermes-agent" / "venv" / "bin" / "python"
-            fake_bin = tmp_path / "bin"
-            webui.mkdir()
-            agent_python.parent.mkdir(parents=True)
-            fake_bin.mkdir()
-            agent_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-            agent_python.chmod(0o755)
-            npm = fake_bin / "npm"
-            npm.write_text("#!/usr/bin/env bash\nexit 23\n", encoding="utf-8")
-            npm.chmod(0o755)
-            harness = tmp_path / "masked-webui-failure.sh"
+            harness = tmp_path / "masked-formal-build-evidence-failure.sh"
             harness.write_text(
                 "\n".join(
                     [
                         "#!/usr/bin/env bash",
                         "set -euo pipefail",
-                        f'export PATH="{fake_bin}:$PATH"',
                         f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
-                        f'WEBUI_DIR="{webui}"',
-                        'run_step "webui" run_webui_tests',
+                        "broken_formal_evidence() { return 23; }",
+                        'run_step "formal-build-evidence" broken_formal_evidence',
                         '[ "$failures" -eq 1 ]',
                     ]
                 )
@@ -886,8 +923,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         docs = read_text("docs/taiji-sale-readiness.md")
 
         self.assertIn("check_certification_and_publication", release_check)
-        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", release_check)
-        self.assertIn("TAIJI_PUBLICATION_CHALLENGE", release_check)
+        self.assertNotIn("TAIJI_CERTIFICATION_CHALLENGE", release_check)
+        self.assertNotIn("TAIJI_PUBLICATION_CHALLENGE", release_check)
         self.assertIn("python3", release_check)
         main = release_check[release_check.index("main() {") :]
         self.assertNotIn("check_offline_install_rehearsal", main)
@@ -913,9 +950,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                         f'source "{ROOT / "scripts/taiji-release-check.sh"}"',
                         "check_canonical_source() { :; }",
                         "run_root_tests() { :; }",
-                        "run_desktop_evidence_tool_tests() { :; }",
-                        "run_agent_tests() { :; }",
-                        "run_webui_tests() { :; }",
+                        "verify_formal_build_test_evidence() { :; }",
                         "run_delivery_preflight() { :; }",
                         "check_delivery_artifacts() { :; }",
                         "main",
@@ -939,6 +974,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
     def test_release_evidence_signer_uses_fixed_offline_trust_anchor(self):
         signer = read_text("scripts/sign-taiji-release-evidence.sh")
+        challenge_helper = read_text("scripts/taiji-challenge-envelope.py")
         release_check = read_text("scripts/taiji-release-check.sh")
 
         self.assertIn("tools/taiji-release-evidence/signing-public.pem", signer)
@@ -948,29 +984,34 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn('SIGNATURE="${EVIDENCE}.sig"', signer)
         self.assertIn('--attestation-signature "$RELEASE_SIGNATURE"', release_check)
         self.assertIn("EVIDENCE_ATTESTATION_EXPECTED_FINGERPRINT", release_check)
-        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", signer)
-        self.assertIn("TAIJI_PUBLICATION_CHALLENGE", signer)
+        self.assertNotIn("TAIJI_CERTIFICATION_CHALLENGE", signer)
+        self.assertNotIn("TAIJI_PUBLICATION_CHALLENGE", signer)
+        self.assertIn("taiji-challenge-envelope.py", signer)
+        self.assertIn('reserve --envelope "$SNAPSHOT_ENVELOPE"', signer)
         self.assertIn("TAIJI_RELEASE_SKIP_GIT_CHECK=0", release_check)
         self.assertIn("st_nlink", signer)
         self.assertIn("stat.S_IMODE", signer)
         self.assertIn("O_EXCL", signer)
-        self.assertIn("used-challenges", signer)
+        self.assertIn("used-nonces", challenge_helper)
         self.assertNotIn("TAIJI_OFFLINE_REHEARSAL_CHALLENGE", signer)
         self.assertNotIn("TAIJI_TARGET_ACCEPTANCE_CHALLENGE", signer)
-        self.assertIn('"$CHALLENGE" = "$EXPECTED_CHALLENGE"', signer)
+        self.assertIn('challenge != envelope["nonce"]', signer)
         self.assertIn("st_size > 1024 * 1024", signer)
         self.assertIn("O_NOFOLLOW", signer)
-        self.assertIn("os.fsync(state_fd)", signer)
+        self.assertIn("os.fsync(descriptor)", challenge_helper)
         self.assertIn('os.link(source, destination)', signer)
         self.assertIn('os.unlink(source)', signer)
         self.assertIn('exit 0', signer)
 
     def test_release_preflight_accepts_same_git_archive_from_a_different_gzip_encoder(self):
-        if not all(shutil.which(command) for command in ("git", "gzip", "sha256sum")):
-            self.skipTest("git, gzip, and sha256sum are required by release preflight")
+        if not all(shutil.which(command) for command in ("git", "gzip")):
+            self.fail("git and gzip are required by the fixed release test environment")
 
         source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         with tempfile.TemporaryDirectory() as tmp:
+            release_temp_root = Path(tmp) / "release-temp"
+            release_temp_root.mkdir()
+            release_env = {**os.environ, "TMPDIR": str(release_temp_root)}
             repo_root = Path(tmp) / "repo"
             delivery = repo_root / "taijiagent 打包交付"
             delivery.mkdir(parents=True)
@@ -980,8 +1021,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             gate_dir.mkdir()
             shutil.copy2(ROOT / "scripts/check-clean-worktree.sh", gate_dir)
             shutil.copy2(ROOT / "scripts/taiji-trusted-git", gate_dir)
+            copy_formal_build_sources(repo_root)
             (repo_root / ".gitignore").write_text(
                 "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.tar.gz\n"
+                "/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-*.inventory.json\n"
+                "/taijiagent 打包交付/source-archive-integrity.py\n"
                 "/taijiagent 打包交付/SHA256SUMS.txt\n",
                 encoding="utf-8",
             )
@@ -1010,6 +1054,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                     "git",
                     "-C",
                     str(repo_root),
+                    "-c",
+                    "tar.umask=0022",
                     "archive",
                     "--format=tar",
                     "--prefix=taiji-agentv1.0/",
@@ -1030,8 +1076,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
             archive.write_bytes(alternate_gzip)
             digest = hashlib.sha256(alternate_gzip).hexdigest()
+            inventory = write_source_inventory(delivery, archive, commit)
             (delivery / "SHA256SUMS.txt").write_text(
-                f"{digest}  {archive.name}\n",
+                f"{digest}  {archive.name}\n"
+                f"{hashlib.sha256(inventory.read_bytes()).hexdigest()}  {inventory.name}\n",
                 encoding="utf-8",
             )
 
@@ -1040,6 +1088,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 cwd=delivery,
                 text=True,
                 capture_output=True,
+                env=release_env,
                 check=False,
             )
 
@@ -1048,7 +1097,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 0,
                 msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
             )
-            self.assertIn("源码包归档与当前 Git HEAD 一致", result.stdout)
+            self.assertIn("源码包归档与冻结 source commit 一致", result.stdout)
 
             tampered_payload = gzip.compress(
                 tar_payload + b"not part of git archive\n",
@@ -1057,8 +1106,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             )
             archive.write_bytes(tampered_payload)
             tampered_digest = hashlib.sha256(tampered_payload).hexdigest()
+            inventory = write_source_inventory(delivery, archive, commit)
             (delivery / "SHA256SUMS.txt").write_text(
-                f"{tampered_digest}  {archive.name}\n",
+                f"{tampered_digest}  {archive.name}\n"
+                f"{hashlib.sha256(inventory.read_bytes()).hexdigest()}  {inventory.name}\n",
                 encoding="utf-8",
             )
             rejected = subprocess.run(
@@ -1066,10 +1117,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 cwd=delivery,
                 text=True,
                 capture_output=True,
+                env=release_env,
                 check=False,
             )
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("源码包归档内容与当前 Git HEAD 不一致", rejected.stderr)
+            self.assertIn("源码包归档内容与冻结 source commit 不一致", rejected.stderr)
 
     def test_desktop_allows_isolated_user_data_for_playwright_app_smoke(self):
         main_js = read_text("apps/taiji-desktop/src/main.js")
@@ -1629,7 +1681,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("Categories=Utility;", desktop)
         self.assertNotIn("Categories=Utility;Development;", desktop)
 
-    def test_setup_local_can_recover_from_stale_uv_lockfile_on_kylin_build_host(self):
+    def test_setup_local_keeps_developer_modes_but_production_is_strict_only(self):
         setup = read_text("hermes-local-lab/scripts/setup-local.sh")
 
         self.assertIn("TAIJI_UV_LOCK_MODE", setup)
@@ -1638,9 +1690,11 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("auto", setup)
         self.assertIn("local -a sync_args=(--extra all)", setup)
         self.assertIn("sync_args+=(--extra dev)", setup)
-        self.assertIn('uv sync "${sync_args[@]}" --locked', setup)
-        self.assertIn('uv sync "${sync_args[@]}"', setup)
+        self.assertIn('"$UV_EXECUTABLE" sync "${sync_args[@]}" --locked', setup)
+        self.assertIn('"$UV_EXECUTABLE" sync "${sync_args[@]}"', setup)
         self.assertIn("retrying without --locked", setup)
+        self.assertIn("Production dependency setup requires strict", setup)
+        self.assertNotIn("uv pip install", setup)
 
     def test_offline_builder_uv_index_is_explicit_and_matches_committed_lock(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -1672,13 +1726,13 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             builder.index('export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-'),
         )
 
-    def test_offline_builder_records_whether_uv_used_locked_dependencies(self):
+    def test_offline_builder_records_strict_locked_dependencies_only(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
         self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="unknown"', builder)
-        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="locked"', builder)
-        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"', builder)
-        self.assertIn('grep -Fq "retrying without --locked" "$setup_log"', builder)
+        self.assertIn('PYTHON_DEPENDENCY_LOCK_STATUS="strict-locked"', builder)
+        self.assertNotIn('PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"', builder)
+        self.assertNotIn('PYTHON_DEPENDENCY_LOCK_STATUS="explicit-unlocked"', builder)
         self.assertIn(
             "Python 依赖锁状态：%s\\n' \"$PYTHON_DEPENDENCY_LOCK_STATUS\"",
             builder,
@@ -1700,9 +1754,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("glibc 2.31", doc)
         self.assertIn("离线优先", doc)
         self.assertIn("不内置模型", doc)
-        self.assertIn("Node.js 10 / npm 6", doc)
-        self.assertIn("TAIJI_UV_LOCK_MODE=auto", doc)
+        self.assertIn("Node.js", doc)
+        self.assertIn("22.23.1", doc)
         self.assertIn("TAIJI_UV_LOCK_MODE=strict", doc)
+        self.assertNotIn("TAIJI_UV_LOCK_MODE=auto", doc)
+        self.assertIn("72c5f455…68e23e2", doc)
+        self.assertIn("93956de2…8e068", doc)
 
     def test_current_delivery_docs_describe_v3_single_deb_and_internal_backup_boundary(self):
         operator_doc = read_text("docs/taiji-desktop-uos-packaging.md")
@@ -1840,6 +1897,8 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("99_本机_准备制包输入包.sh", docs)
         self.assertIn("!/taijiagent 打包交付/99_本机_准备制包输入包.sh", gitignore)
         self.assertIn("/taijiagent-制包机输入-*.tar.gz", gitignore)
+        self.assertIn("/taijiagent-制包机输入-*.tar.gz.sha256", gitignore)
+        self.assertIn("/taijiagent-制包机输入-*.manifest.json", gitignore)
         self.assertIn("check-clean-worktree.sh", preflight)
         self.assertIn("--mode formal", preflight)
         self.assertIn('--repo-root "$REPO_ROOT"', preflight)
@@ -1896,6 +1955,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")
         prepare = read_text("taijiagent 打包交付/99_本机_准备制包输入包.sh")
+        input_helper = read_text("packaging/linux/builder-input-package.py")
         docs = read_text("taijiagent 打包交付/操作说明.md")
 
         for script in (builder,):
@@ -1913,16 +1973,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("安装回执", install)
 
         self.assertIn("taijiagent-制包机输入-", prepare)
-        self.assertIn("tarfile.USTAR_FORMAT", prepare)
-        self.assertIn("PaxHeaders", prepare)
-        self.assertIn("._", prepare)
-        self.assertIn('"离线演练证据"', prepare)
+        self.assertIn("BUILDER_INPUT_HELPER_SHA256", prepare)
+        self.assertIn("tarfile.USTAR_FORMAT", input_helper)
+        self.assertIn("STATIC_INPUT_NAMES", input_helper)
+        self.assertNotIn("os.walk", input_helper)
+        self.assertNotIn("离线演练证据", input_helper)
         self.assertIn("失败诊断", docs)
 
     def test_release_preflight_cleans_macos_copy_metadata(self):
-        if not shutil.which("sha256sum"):
-            self.skipTest("sha256sum is required by release preflight")
-
         source_script = ROOT / "taijiagent 打包交付/01_制包机_发布预检.sh"
         with tempfile.TemporaryDirectory() as tmp:
             delivery = Path(tmp) / "taijiagent 打包交付"
@@ -1930,11 +1988,14 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             script = delivery / "01_制包机_发布预检.sh"
             shutil.copy2(source_script, script)
 
-            archive = delivery / "taiji-agentv1.0-kylin-build-src-test.tar.gz"
-            archive.write_bytes(b"fake source archive\n")
+            commit = "a" * 40
+            archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
+            write_formal_build_source_archive(archive)
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            inventory = write_source_inventory(delivery, archive, commit)
             (delivery / "SHA256SUMS.txt").write_text(
-                f"{digest}  {archive.name}\n",
+                f"{digest}  {archive.name}\n"
+                f"{hashlib.sha256(inventory.read_bytes()).hexdigest()}  {inventory.name}\n",
                 encoding="utf-8",
             )
 
@@ -1962,7 +2023,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             self.assertFalse((delivery / ".DS_Store").exists())
             self.assertFalse(apple_dir.exists())
 
-    def test_offline_builder_generates_manifest_and_does_not_refresh_lock_by_default(self):
+    def test_offline_builder_generates_manifest_and_forbids_lock_refresh(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
         self.assertIn("MANIFEST_FILE", builder)
@@ -1973,14 +2034,18 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("elf_abi_audit_sha256", builder)
         self.assertIn("CANDIDATE_DEB_FIXED", builder)
         self.assertIn("TAIJI_ALLOW_UV_LOCK_REFRESH", builder)
-        self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"', builder)
+        self.assertIn('uv_lock_mode="${TAIJI_UV_LOCK_MODE:-strict}"', builder)
         self.assertIn('run_setup_local "$uv_lock_mode"', builder)
-        self.assertIn('TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh', builder)
+        self.assertIn('TAIJI_UV_LOCK_MODE="$uv_lock_mode"', builder)
+        self.assertIn('./scripts/setup-local.sh', builder)
         self.assertIn('TAIJI_DEPENDENCY_PROFILE=production', builder)
-        self.assertIn("Python 依赖 lock 漂移", builder)
-        self.assertNotIn("TAIJI_UV_LOCK_MODE=strict ./scripts/setup-local.sh", builder)
+        self.assertIn("lock 在 strict sync 前后发生变化", builder)
         self.assertNotIn("\n  uv lock\n", builder)
-        self.assertIn('printf \'%s  %s\\n\' "$deb_sha" "$deb_name"', builder)
+        self.assertIn(
+            'printf \'%s  %s\\n\' "$CANDIDATE_DEB_SHA256" "$deb_name"',
+            builder,
+        )
+        self.assertIn('>&"$candidate_sidecar_write_fd"', builder)
         self.assertNotIn("write_release_manifest", builder)
         self.assertNotIn("packages_gz_sha256", builder)
         self.assertNotIn("dpkg-scanpackages", builder)
@@ -2017,8 +2082,9 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("setup-local-", builder)
 
         unpack = builder[builder.index("unpack_source() {") : builder.index("npm_ci_with_network_fallback() {")]
-        self.assertLess(unpack.index("reset_build_root"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
-        self.assertLess(unpack.index('tar -xzf "$SRC_ARCHIVE"'), unpack.index("repair_build_tree_permissions"))
+        extraction = 'tar --no-same-owner --no-same-permissions -xzf "/proc/$$/fd/$SOURCE_ARCHIVE_FD"'
+        self.assertLess(unpack.index("reset_build_root"), unpack.index(extraction))
+        self.assertLess(unpack.index(extraction), unpack.index("repair_build_tree_permissions"))
 
     def test_offline_builder_does_not_hardcode_tmp_as_default_build_root(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -2068,7 +2134,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             )
         ]
         self.assertLess(unpack.index("reset_build_root"), unpack.index("require_build_capacity"))
-        self.assertLess(unpack.index("require_build_capacity"), unpack.index('tar -xzf "$SRC_ARCHIVE"'))
+        self.assertLess(
+            unpack.index("require_build_capacity"),
+            unpack.index(
+                'tar --no-same-owner --no-same-permissions -xzf "/proc/$$/fd/$SOURCE_ARCHIVE_FD"'
+            ),
+        )
 
         helper = re.search(r"(?ms)^require_build_capacity\(\) \{.*?^\}", builder).group(0)
         harness = "\n".join(
@@ -2662,7 +2733,10 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             'install -m 0644 "$APP_DIR/package.json" "$DESKTOP_RUNTIME/package.json"',
             desktop_stage,
         )
-        self.assertIn('node "$DESKTOP_JS_STAGER"', desktop_stage)
+        self.assertIn(
+            '"$PACKAGED_NODE_EXECUTABLE" "$DESKTOP_JS_STAGER"',
+            desktop_stage,
+        )
         self.assertIn('--source "$APP_DIR/src"', desktop_stage)
         self.assertIn('--destination "$DESKTOP_RUNTIME/src"', desktop_stage)
         self.assertIn('--entry main.js', desktop_stage)
@@ -2734,6 +2808,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
                 "info() { :; }\n"
                 "warn() { :; }\n"
                 "fail() { printf '%s\\n' \"$*\" >&2; exit 91; }\n"
+                "run_build_npm() { npm \"$@\"; }\n"
                 f"{audit_function}\n"
                 f'export PATH="{fake_bin}:$PATH"\n'
                 'export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"\n'
@@ -2908,28 +2983,29 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "static/vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs",
             "static/vendor/mermaid/10.9.3/mermaid.min.js",
         ):
-            self.assertTrue((static_root / local_asset.removeprefix("static/")).exists(), local_asset)
+            self.assertTrue(local_asset.startswith("static/"), local_asset)
+            self.assertTrue((static_root / local_asset[len("static/") :]).exists(), local_asset)
         self.assertIn("static/vendor/pdfjs-dist/4.9.155/pdf.min.mjs", ui)
         self.assertIn("static/vendor/pdfjs-dist/4.9.155/pdf.worker.min.mjs", ui)
         self.assertIn("static/vendor/mermaid/10.9.3/mermaid.min.js", ui)
         self.assertIn("本地静态资源", terminal)
 
-    def test_offline_builder_normalizes_source_checksum_paths(self):
+    def test_offline_builder_verifies_source_checksum_without_rewriting_input(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
 
         self.assertIn("checksum_source_archive_hash", builder)
         self.assertIn("verify_source_archive_checksum", builder)
         self.assertIn('archive_name="$(basename "$SRC_ARCHIVE")"', builder)
-        self.assertIn('printf \'%s  %s\\n\' "$actual" "$archive_name" > "$CHECKSUM_FILE"', builder)
+        self.assertIn('archive_input="/proc/$$/fd/$SOURCE_ARCHIVE_FD"', builder)
+        self.assertIn('actual="$(sha256sum "$archive_input"', builder)
+        self.assertIn('[ "$actual" != "$expected" ]', builder)
+        self.assertNotIn('printf \'%s  %s\\n\' "$actual" "$archive_name" > "$CHECKSUM_FILE"', builder)
         self.assertIn('verify_source_archive_checksum', builder)
         self.assertIn("length(hash) != 64", builder)
         self.assertNotIn("[[:xdigit:]]{64}", builder)
         self.assertNotIn("sha256sum -c SHA256SUMS.txt", builder)
 
     def test_offline_builder_checksum_parser_accepts_prefixed_paths(self):
-        if shutil.which("sha256sum") is None:
-            self.skipTest("sha256sum is required for the shell-level checksum parser check")
-
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         builder = builder.replace('\nmain "$@"\n', '\n# main disabled for parser test\n')
         archive_name = "taiji-agentv1.0-kylin-build-src-test123.tar.gz"
@@ -2965,8 +3041,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
 
         self.assertIn("SRC_ARCHIVE=", result.stdout)
         self.assertIn(f"/{archive_name}", result.stdout)
-        self.assertIn(f"{expected}  {archive_name}", result.stdout)
-        self.assertNotIn(f"taijiagent 打包交付/{archive_name}", result.stdout)
+        self.assertIn(f"{expected}  taijiagent 打包交付/{archive_name}", result.stdout)
 
     def test_offline_builder_has_network_mirror_fallbacks_for_build_tools(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
@@ -2985,8 +3060,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("https://github.com/electron/electron/releases/download/", builder)
         self.assertIn("无法下载 Node.js", builder)
         self.assertIn("npm ci 失败", builder)
-        self.assertNotIn("hermes-local-lab", builder.lower())
-        self.assertNotIn("hermes-agent", builder.lower())
+        self.assertNotIn("curl https://astral.sh/uv/install.sh", builder.lower())
 
     def test_delivery_install_script_removes_legacy_runtime_without_backup(self):
         install = read_text("taijiagent 打包交付/02_目标终端_安装并验证.sh")

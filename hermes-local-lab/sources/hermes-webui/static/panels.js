@@ -8243,6 +8243,7 @@ let _platformCredentialSaveSession=null;
 let _platformCredentialDeleteGeneration=0;
 let _platformCredentialDeleteSession=null;
 let _modelConfigLoadGeneration=0;
+let _pendingMainModelConfigReconciliation=null;
 let _customVisionProviderBusy=false;
 let _customVisionProviderGeneration=0;
 let _customVisionProviderReturnFocus=null;
@@ -9666,25 +9667,27 @@ function _renderModelConfigFocusSummary(data){
  const mainModel=String(main.model||'').trim();
  const mainKeyLabel=_modelConfigKeyLabel(main.key_status);
  const mainProviderDisplay=_modelConfigProviderDisplay(mainProvider,data);
- const mainReady=!!(mainProvider&&mainModel&&main.key_status&&main.key_status.configured&&!main.runtime_refresh_pending);
+ const mainConfigured=!!(mainProvider&&mainModel&&main.key_status&&main.key_status.configured);
+ const mainRefreshing=!!(mainConfigured&&main.runtime_refresh_pending);
+ const mainReady=!!(mainConfigured&&!mainRefreshing);
  _setModelConfigText('modelConfigMainModelName',mainModel||'未配置主模型');
  _setModelConfigText('modelConfigProviderSummary',_formatModelConfigProvider(mainProvider,mainProviderDisplay));
  _setModelConfigText('modelConfigModelSummary',mainModel);
  _setModelConfigText('modelConfigKeySummary',mainKeyLabel);
- _setModelConfigStatusBadge('modelConfigMainEffective',mainReady?'已生效':'待配置',mainReady?'ok':'warn');
- _setModelConfigStatusBadge('modelConfigMainStatusBadge',mainReady?'主模型可用':'主模型待配置',mainReady?'ok':'warn');
+ _setModelConfigStatusBadge('modelConfigMainEffective',mainReady?'已生效':(mainRefreshing?'刷新中':'待配置'),mainReady?'ok':'warn');
+ _setModelConfigStatusBadge('modelConfigMainStatusBadge',mainReady?'主模型可用':(mainRefreshing?'主模型刷新中':'主模型待配置'),mainReady?'ok':'warn');
  _renderVisionConfigSummary(data);
 
  const hero=$('modelConfigHero');
  if(hero){
   hero.dataset.state=mainReady?'ok':'warn';
   const icon=hero.querySelector('.model-config-state-icon');
-  if(icon) icon.textContent=mainReady?'✓':'!';
+  if(icon) icon.textContent=mainReady?'✓':(mainRefreshing?'↻':'!');
  }
- _setModelConfigText('modelConfigHeroTitle',mainReady?'主模型已生效，可以开始新会话':'主模型尚未配置完整');
+ _setModelConfigText('modelConfigHeroTitle',mainReady?'主模型已生效，可以开始新会话':(mainRefreshing?'主模型配置已保存，运行时正在刷新':'主模型尚未配置完整'));
  _setModelConfigText('modelConfigHeroMessage',mainReady
   ? ('当前生效模型：'+mainModel+'。页面只突出当前能否使用和需要处理的阻断项。')
-  : '请先完成主模型和 API 密钥配置，再开始新会话。');
+  : (mainRefreshing?'配置已写入本机，运行时状态刷新完成后即可开始新会话。':'请先完成主模型和 API 密钥配置，再开始新会话。'));
 
  const imageGen=(data&&data.image_gen)||{};
  const imageProvider=String(imageGen.provider||'').trim();
@@ -11150,6 +11153,150 @@ function _setModelConfigDraftStatus(message){
  if(status) status.textContent=String(message||'');
 }
 
+function _setMainModelConfigSaveState(state,message){
+ const normalized=String(state||'');
+ const defaults={
+  saving:'正在保存主模型配置…',
+  refreshing:'主模型配置已保存，运行时正在刷新。',
+  reconciling:'保存结果待核对，正在读取本机权威状态…',
+  applied:'主模型配置已生效。',
+  failed:'主模型配置保存失败。',
+ };
+ const text=String(message||defaults[normalized]||'');
+ const status=$('modelConfigDraftStatus');
+ if(status){status.textContent=text;status.dataset.state=normalized;}
+ const transient={
+  saving:{effective:'保存中',badge:'主模型保存中',title:'正在保存主模型配置',heroMessage:'请稍候，页面不会重复提交当前密钥。'},
+  reconciling:{effective:'待核对',badge:'主模型待核对',title:'主模型保存结果待核对',heroMessage:text},
+  failed:{effective:'保存失败',badge:'主模型保存失败',title:'主模型配置保存失败',heroMessage:text},
+ }[normalized];
+ if(!transient) return;
+ const effective=$('modelConfigMainEffective');
+ const badge=$('modelConfigMainStatusBadge');
+ const hero=$('modelConfigHero');
+ const heroTitle=$('modelConfigHeroTitle');
+ const heroMessage=$('modelConfigHeroMessage');
+ const tone=normalized==='failed'?'danger':'warn';
+ if(effective){effective.textContent=transient.effective;effective.dataset.state=tone;}
+ if(badge){badge.textContent=transient.badge;badge.dataset.state=tone;}
+ if(hero){hero.dataset.state='warn';const icon=hero.querySelector('.model-config-state-icon');if(icon) icon.textContent=normalized==='failed'?'!':'…';}
+ if(heroTitle) heroTitle.textContent=transient.title;
+ if(heroMessage) heroMessage.textContent=transient.heroMessage;
+}
+
+function _newMainModelConfigRequestId(){
+ if(typeof crypto==='undefined'||typeof crypto.getRandomValues!=='function') throw new Error('无法生成安全保存标识，请重新启动应用后重试。');
+ const bytes=new Uint8Array(16);
+ crypto.getRandomValues(bytes);
+ return Array.from(bytes,value=>value.toString(16).padStart(2,'0')).join('');
+}
+
+function _mainModelConfigSaveResultIsUncertain(error){
+ const status=Number(error&&error.status);
+ return !!(error&&(error.timeout===true||error.name==='TimeoutError'||(Number.isFinite(status)&&status>=500)||(error.name==='TypeError'&&!error.status)));
+}
+
+function _applyAuthoritativeMainModelConfig(data){
+ if(!data||!data.main) return null;
+ if(!_modelConfigData) _modelConfigData={};
+ if(data.profile) _modelConfigData.profile=data.profile;
+ _modelConfigData.main_request_id=String(data.main_request_id||'');
+ const main=Object.assign({},data.main,{key_status:Object.assign({},data.main.key_status||{})});
+ main.runtime_refresh_pending=!!(data.runtime_state==='refresh_pending'||data.refresh_pending===true||main.runtime_refresh_pending===true);
+ _modelConfigData.main=main;
+ if(Array.isArray(data.providers)) _modelConfigData.providers=data.providers.slice();
+ const providerInput=$('modelConfigProvider');
+ const modelInput=$('modelConfigModel');
+ const baseInput=$('modelConfigBaseUrl');
+ if(providerInput) providerInput.value=main.provider||'';
+ if(modelInput) modelInput.value=main.model||'';
+ if(baseInput) baseInput.value=main.base_url||'';
+ _syncMainModelConfigControls();
+ _renderModelConfigFocusSummary(_modelConfigData);
+ return main;
+}
+
+function _mainModelConfigMatchesExpected(main,expected){
+ const current=main||{};
+ const target=expected||{};
+ const provider=String(current.provider||'').trim().toLowerCase();
+ const targetProvider=String(target.provider||'').trim().toLowerCase();
+ const model=String(current.model||'').trim();
+ const targetModel=String(target.model||'').trim();
+ if(provider!==targetProvider||model!==targetModel||!(current.key_status&&current.key_status.configured)) return false;
+ const base=String(current.base_url||'').trim().replace(/\/+$/,'');
+ const targetBase=String(target.base_url||'').trim().replace(/\/+$/,'');
+ if(base!==targetBase) return false;
+ return true;
+}
+
+function _mainModelConfigReceiptMatches(data,expected){
+ const receipt=String(data&&data.main_request_id||'');
+ const requestId=String(expected&&expected.request_id||'');
+ return !!(requestId&&receipt===requestId);
+}
+
+function _rememberPendingMainModelConfigReconciliation(expected){
+ _pendingMainModelConfigReconciliation={
+  provider:String(expected&&expected.provider||''),
+  model:String(expected&&expected.model||''),
+  base_url:String(expected&&expected.base_url||''),
+  request_id:String(expected&&expected.request_id||''),
+ };
+}
+
+function _clearPendingMainModelConfigReconciliation(expected){
+ const pendingId=String(_pendingMainModelConfigReconciliation&&_pendingMainModelConfigReconciliation.request_id||'');
+ const expectedId=String(expected&&expected.request_id||'');
+ if(pendingId&&pendingId===expectedId) _pendingMainModelConfigReconciliation=null;
+}
+
+async function _reconcileMainModelConfigSave(expected){
+ try{
+  const data=await api('/api/model-config',{timeoutToast:false});
+  const main=_applyAuthoritativeMainModelConfig(data);
+  if(!_mainModelConfigReceiptMatches(data,expected)||!_mainModelConfigMatchesExpected(main,expected)){
+   _clearPendingMainModelConfigReconciliation(expected);
+   const message='本机权威状态未确认本次保存；请求可能未提交或配置已被后续更新，请检查后重试。';
+   _setMainModelConfigSaveState('failed',message);
+   if(typeof showToast==='function') showToast(message,5000,'error');
+   return {state:'failed',data};
+  }
+  _clearPendingMainModelConfigReconciliation(expected);
+  const refreshing=!!(main&&main.runtime_refresh_pending);
+  _setMainModelConfigSaveState(refreshing?'refreshing':'applied',refreshing?'主模型配置已核对，运行时仍在刷新。':'主模型配置已核对并生效。');
+  if(typeof populateModelDropdown==='function') populateModelDropdown();
+  if(!refreshing){
+   toggleModelConfigSection('modelConfigMainEdit',false);
+   if(typeof showToast==='function') showToast('主模型配置已核对并生效。');
+  }
+  return {state:refreshing?'refreshing':'applied',data};
+ }catch(error){
+  const message='保存结果仍待核对，请点击“刷新状态”继续核对。';
+  _setMainModelConfigSaveState('reconciling',message);
+  if(typeof showToast==='function') showToast(message,7000,'warning');
+  return {state:'reconciling',error};
+ }
+}
+
+async function reconcilePendingMainModelConfigSave(){
+ const pending=_pendingMainModelConfigReconciliation;
+ if(!pending) return {handled:false,state:'idle'};
+ const refreshBtn=$('btnReloadAllModelConfig');
+ const saveBtn=$('btnSaveMainModel');
+ const refreshWasDisabled=!!(refreshBtn&&refreshBtn.disabled);
+ const saveWasDisabled=!!(saveBtn&&saveBtn.disabled);
+ if(refreshBtn){refreshBtn.disabled=true;refreshBtn.setAttribute('aria-busy','true');}
+ if(saveBtn) saveBtn.disabled=true;
+ try{
+  const result=await _reconcileMainModelConfigSave(pending);
+  return Object.assign({handled:true},result||{});
+ }finally{
+  if(refreshBtn){refreshBtn.disabled=refreshWasDisabled;refreshBtn.removeAttribute('aria-busy');}
+  if(saveBtn) saveBtn.disabled=saveWasDisabled;
+ }
+}
+
 async function loadModelConfigPanel(force,options){
  const opts=options||{};
  const status=$('modelConfigStatus');
@@ -11235,37 +11382,47 @@ async function saveMainModelConfig(){
  const model=(($('modelConfigModel')||{}).value||'').trim();
  const baseUrl=(($('modelConfigBaseUrl')||{}).value||'').trim();
  const apiKey=(($('modelConfigApiKey')||{}).value||'').trim();
- if(btn) btn.disabled=true;
+ const expected={provider,model,base_url:baseUrl,request_id:''};
+ if(btn){btn.disabled=true;btn.setAttribute('aria-busy','true');}
+ _setMainModelConfigSaveState('saving');
  try{
-  const payload={provider,model,base_url:baseUrl};
+  expected.request_id=_newMainModelConfigRequestId();
+  _rememberPendingMainModelConfigReconciliation(expected);
+  const payload={provider,model,base_url:baseUrl,request_id:expected.request_id};
   if(apiKey) payload.api_key=apiKey;
-  const data=await api('/api/model-config/main',{method:'POST',body:JSON.stringify(payload)});
+  const data=await api('/api/model-config/main',{method:'POST',body:JSON.stringify(payload),timeoutToast:false,retryNetworkErrors:false});
   const refresh=_handleRuntimeRefreshOutcome(data,{savedLabel:'主模型配置',statusId:'modelConfigDraftStatus'});
   _clearModelConfigSecrets('main');
-  if(_modelConfigData&&data&&data.main){
-   _modelConfigData.profile=data.profile||_modelConfigData.profile;
-   _modelConfigData.main=data.main;
-   _modelConfigData.main.runtime_refresh_pending=refresh.pending;
-   if(Array.isArray(data.providers)) _modelConfigData.providers=data.providers;
-   const saved=data.main;
-   const providerInput=$('modelConfigProvider');
-   const modelInput=$('modelConfigModel');
-   const baseInput=$('modelConfigBaseUrl');
-   if(providerInput) providerInput.value=saved.provider||provider;
-   if(modelInput) modelInput.value=saved.model||model;
-   if(baseInput) baseInput.value=saved.base_url||baseUrl;
-   _syncMainModelConfigControls();
-   _renderModelConfigFocusSummary(_modelConfigData);
+  const saved=_applyAuthoritativeMainModelConfig(data);
+  if(!_mainModelConfigReceiptMatches(data,expected)||!_mainModelConfigMatchesExpected(saved,expected)){
+   _setMainModelConfigSaveState('reconciling');
+   await _reconcileMainModelConfigSave(expected);
+   return;
   }
+  _clearPendingMainModelConfigReconciliation(expected);
+  if(saved) saved.runtime_refresh_pending=refresh.pending;
+  if(saved) _renderModelConfigFocusSummary(_modelConfigData);
   if(typeof populateModelDropdown==='function') populateModelDropdown();
-  if(!refresh.pending){
+  if(refresh.pending){
+   _setMainModelConfigSaveState('refreshing','主模型配置已保存，运行时正在刷新。');
+  }else{
+   _setMainModelConfigSaveState('applied','主模型配置已生效。');
    toggleModelConfigSection('modelConfigMainEdit',false);
    if(typeof showToast==='function') showToast('主模型配置已保存');
   }
  }catch(e){
-  if(typeof showToast==='function') showToast('保存主模型失败：'+(e.message||e),5000,'error');
+  if(_mainModelConfigSaveResultIsUncertain(e)){
+   _clearModelConfigSecrets('main');
+   _setMainModelConfigSaveState('reconciling');
+   await _reconcileMainModelConfigSave(expected);
+  }else{
+   _clearPendingMainModelConfigReconciliation(expected);
+   const message='主模型配置保存失败：'+(e.message||e);
+   _setMainModelConfigSaveState('failed',message);
+   if(typeof showToast==='function') showToast(message,5000,'error');
+  }
  }finally{
-  if(btn) btn.disabled=false;
+  if(btn){btn.disabled=false;btn.removeAttribute('aria-busy');}
  }
 }
 

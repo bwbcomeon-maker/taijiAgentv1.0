@@ -442,6 +442,45 @@ def test_onboarding_captures_active_config_path_once(
     assert "OPENROUTER_API_KEY=secret" in (tmp_path / ".env").read_text()
 
 
+def test_onboarding_commits_a_durable_main_model_receipt_in_the_same_pair_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api import model_config, onboarding
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(onboarding, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(onboarding, "reload_config", lambda: None)
+    monkeypatch.setattr(onboarding, "get_onboarding_status", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(model_config, "reload_config", lambda: None)
+    monkeypatch.setattr(model_config, "get_providers", lambda: {"providers": []})
+    monkeypatch.setattr(model_config, "get_auxiliary_models", lambda: {})
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+
+    onboarding.apply_onboarding_setup({
+        "provider": "openrouter",
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key": "secret",
+    })
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    receipt = saved[model_config._MAIN_MODEL_REQUEST_ID_KEY]
+    assert len(receipt) == 32
+    assert all(char in "0123456789abcdef" for char in receipt)
+    public_state = model_config.get_model_config()
+    assert public_state["main_request_id"] == receipt
+    assert public_state["main"]["provider"] == "openrouter"
+    assert public_state["main"]["model"] == "anthropic/claude-sonnet-4.6"
+    assert public_state["main"]["key_env"] == ""
+    assert public_state["main"]["key_status"] == {
+        "configured": True,
+        "source": "env_file",
+        "env_var": "OPENROUTER_API_KEY",
+    }
+
+
 def test_onboarding_pair_failure_leaves_config_and_env_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

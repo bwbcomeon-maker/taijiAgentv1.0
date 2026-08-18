@@ -3,8 +3,10 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-TOOLS_DIR="$SCRIPT_DIR/验收工具"
-OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
+INSTALL_ACCEPTANCE_ROOT="/opt/taiji-agent/libexec/target-acceptance"
+DELIVERY_DIR="${TAIJI_TARGET_DELIVERY_DIR:?请由 /usr/bin/taiji-agent-acceptance 传入受验证的交付工作区}"
+TOOLS_DIR="$INSTALL_ACCEPTANCE_ROOT/验收工具"
+OUTPUT_DIR="$DELIVERY_DIR/生成的安装包"
 MANIFEST="$OUTPUT_DIR/taiji-package-manifest.json"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 DRIVER="$TOOLS_DIR/run-installed-electron-acceptance.js"
@@ -18,7 +20,7 @@ NODE_BIN="/opt/taiji-agent/runtime/node/bin/node"
 PYTHON_BIN="/opt/taiji-agent/runtime/agent/venv/bin/python"
 ELECTRON_BIN="/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
 DESKTOP_ENTRY="/usr/share/applications/taiji-agent.desktop"
-TARGET_DIR="${TAIJI_TARGET_VERIFICATION_DIR:-$SCRIPT_DIR/target-verification}"
+TARGET_DIR="${TAIJI_TARGET_VERIFICATION_DIR:-$DELIVERY_DIR/target-verification}"
 CHALLENGE="${TAIJI_TARGET_ACCEPTANCE_CHALLENGE:-}"
 TIMEOUT_MS="${TAIJI_TARGET_ACCEPTANCE_TIMEOUT_MS:-900000}"
 SINGLE_DEB_CUSTOMER_DIR="${TAIJI_SINGLE_DEB_CUSTOMER_DIR:-}"
@@ -26,7 +28,7 @@ INSTALL_OBSERVATION="${TAIJI_SINGLE_DEB_INSTALL_OBSERVATION:-}"
 INSTALL_METHOD_ATTESTATION="${TAIJI_SINGLE_DEB_METHOD_ATTESTATION:-}"
 GRAPHICAL_INSTALLER_EVIDENCE="${TAIJI_SINGLE_DEB_GRAPHICAL_INSTALLER_EVIDENCE:-}"
 CERTIFICATION_CATEGORY_ID="${TAIJI_CERTIFICATION_CATEGORY_ID:-}"
-ENVIRONMENT_RECORD="${TAIJI_LINUX_ENVIRONMENT_RECORD:-}"
+ENVIRONMENT_OBSERVATION="${TAIJI_LINUX_ENVIRONMENT_OBSERVATION:-}"
 WORK_ROOT=""
 OUTPUT_CREATED=0
 SUCCESS=0
@@ -108,6 +110,14 @@ validate_inputs() {
   require_cmd dpkg-deb
   require_cmd mktemp
   require_cmd env
+  [ "$SCRIPT_DIR" = "$INSTALL_ACCEPTANCE_ROOT" ] \
+    || fail "目标验收脚本必须从安装态受信目录执行：$INSTALL_ACCEPTANCE_ROOT"
+  case "$DELIVERY_DIR" in
+    /*) ;;
+    *) fail "TAIJI_TARGET_DELIVERY_DIR 必须是绝对路径：$DELIVERY_DIR" ;;
+  esac
+  [ -d "$DELIVERY_DIR" ] && [ ! -L "$DELIVERY_DIR" ] \
+    || fail "交付工作区必须是实体目录：$DELIVERY_DIR"
   [ -x /usr/bin/python3 ] || fail "目标系统缺少 /usr/bin/python3，无法验证安装前持续观察记录"
   require_regular_file "$MATRIX" "国产 Linux 认证类别矩阵"
   [ -n "$CERTIFICATION_CATEGORY_ID" ] || fail "请设置 TAIJI_CERTIFICATION_CATEGORY_ID，选择一个认证矩阵类别"
@@ -156,57 +166,48 @@ validate_inputs() {
   require_regular_file "$MANIFEST" "发布 manifest"
   require_regular_file "$BUILD_MARKER" "构建成功标记"
   require_regular_file "$INSTALL_OBSERVATION" "单 DEB 安装持续观察记录"
-  if [ -z "$ENVIRONMENT_RECORD" ]; then
-    ENVIRONMENT_RECORD="$(dirname "$INSTALL_OBSERVATION")/environment-evidence.json"
+  if [ -z "$ENVIRONMENT_OBSERVATION" ]; then
+    ENVIRONMENT_OBSERVATION="$(dirname "$INSTALL_OBSERVATION")/environment-observation.json"
   fi
-  case "$ENVIRONMENT_RECORD" in
+  case "$ENVIRONMENT_OBSERVATION" in
     /*) ;;
-    *) fail "TAIJI_LINUX_ENVIRONMENT_RECORD 必须是绝对路径" ;;
+    *) fail "TAIJI_LINUX_ENVIRONMENT_OBSERVATION 必须是绝对路径" ;;
   esac
-  require_regular_file "$ENVIRONMENT_RECORD" "单环境认证记录"
+  require_regular_file "$ENVIRONMENT_OBSERVATION" "安装阶段环境观察种子"
   require_regular_file "$INSTALL_METHOD_ATTESTATION" "桌面双击安装人工见证"
   require_regular_file "$GRAPHICAL_INSTALLER_EVIDENCE" "系统图形安装器证据截图"
 }
 
 read_os_identity() {
   local values
-  values="$($PYTHON_BIN - /etc/os-release <<'PY'
-import re
+  values="$(/usr/bin/python3 -B - "$INSTALL_OBSERVER" "$MATRIX" "$CERTIFICATION_CATEGORY_ID" <<'PY'
+import importlib.util
+import json
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
-fields = {}
-for raw in path.read_text(encoding="utf-8").splitlines():
-    if not raw or raw.lstrip().startswith("#") or "=" not in raw:
-        continue
-    key, value = raw.split("=", 1)
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        value = value[1:-1]
-    fields[key] = value
-os_id = fields.get("ID", "").strip().lower()
-version = (fields.get("VERSION_ID") or fields.get("VERSION") or "").strip()
-if not re.fullmatch(r"[a-z0-9._-]{2,32}", os_id):
-    raise SystemExit("invalid os id")
-if not version or len(version) > 128 or any(character in version for character in "\r\n\t"):
-    raise SystemExit("invalid os version")
-print(os_id)
-print(version)
+observer_path = Path(sys.argv[1])
+matrix_path = Path(sys.argv[2])
+category_id = sys.argv[3]
+spec = importlib.util.spec_from_file_location("taiji_target_platform_identity", observer_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load target platform identity collector")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+matrix = module._read_certification_matrix(matrix_path)
+identity = module.collect_platform_identity(matrix, category_id)
+print(identity["os_id"])
+print(identity["os_version"])
+print(identity["desktop_environment"])
 PY
-)" || fail "无法安全读取 /etc/os-release"
+  )" || fail "无法从可信系统文件、桌面会话和安全状态收集目标平台身份"
   OS_ID="$(printf '%s\n' "$values" | sed -n '1p')"
   OS_VERSION="$(printf '%s\n' "$values" | sed -n '2p')"
+  DESKTOP_ENVIRONMENT="$(printf '%s\n' "$values" | sed -n '3p')"
   case "$OS_ID" in
     kylin|uos|openkylin) ;;
     *) fail "目标桌面验收只接受 Kylin/UOS/openKylin，当前 ID=$OS_ID" ;;
   esac
-  DESKTOP_ENVIRONMENT="${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-}}"
-  [ -n "$DESKTOP_ENVIRONMENT" ] || fail "无法识别当前桌面环境"
-  case "$DESKTOP_ENVIRONMENT" in
-    *$'\n'*|*$'\r'*|*$'\t'*) fail "桌面环境标识包含非法换行或制表符" ;;
-  esac
-  [ "${#DESKTOP_ENVIRONMENT}" -le 128 ] || fail "桌面环境标识过长"
 }
 
 read_release_identity() {
@@ -259,7 +260,7 @@ PY
   EXPECTED_DESKTOP_SHA256="$(printf '%s\n' "$values" | sed -n '6p')"
   DEB="$OUTPUT_DIR/$DEB_BASENAME"
   CHECKSUM="${DEB}.sha256"
-  SOURCE_ARCHIVE="$SCRIPT_DIR/taiji-agentv1.0-kylin-build-src-$SOURCE_COMMIT.tar.gz"
+  SOURCE_ARCHIVE="$DELIVERY_DIR/taiji-agentv1.0-kylin-build-src-$SOURCE_COMMIT.tar.gz"
   require_regular_file "$DEB" "当前 DEB"
   require_regular_file "$CHECKSUM" "DEB SHA256 sidecar"
   require_regular_file "$SOURCE_ARCHIVE" "当前源码包"
@@ -307,7 +308,7 @@ validate_install_observation() {
     --challenge "$CHALLENGE" \
     --matrix "$MATRIX" \
     --category-id "$CERTIFICATION_CATEGORY_ID" \
-    --environment-record "$ENVIRONMENT_RECORD" \
+    --environment-observation "$ENVIRONMENT_OBSERVATION" \
     || fail "单 DEB 安装观察记录或桌面双击人工见证无效"
 }
 
@@ -325,15 +326,16 @@ if category is None:
     raise SystemExit("unknown certification category")
 if category.get("kind") != "positive":
     raise SystemExit("target desktop acceptance only emits positive environment records")
-if os_id not in category.get("os_ids", []):
+profile = category.get("platform_profile", {})
+if os_id != profile.get("os_id"):
     raise SystemExit("OS does not match category")
-if not any(token.lower() in desktop.lower() for token in category.get("desktop_environments", [])):
+if desktop not in profile.get("desktop_environments", []):
     raise SystemExit("desktop does not match category")
 PY
 }
 
 compute_release_inventory() {
-  RELEASE_ARTIFACTS_SHA256="$($PYTHON_BIN - "$VALIDATOR" "$SCRIPT_DIR" <<'PY'
+  RELEASE_ARTIFACTS_SHA256="$($PYTHON_BIN - "$VALIDATOR" "$DELIVERY_DIR" <<'PY'
 import importlib.util
 import sys
 from pathlib import Path
@@ -432,22 +434,49 @@ run_desktop_acceptance() {
     --desktop-environment "$DESKTOP_ENVIRONMENT" \
     --matrix "$MATRIX" \
     --category-id "$CERTIFICATION_CATEGORY_ID" \
-    --environment-record "$ENVIRONMENT_RECORD" \
+    --environment-observation "$ENVIRONMENT_OBSERVATION" \
     --output-dir "$TARGET_DIR"
   OUTPUT_CREATED=1
 
   info "对未签名目标证据执行完整发布绑定校验"
-  "$PYTHON_BIN" - "$TARGET_DIR/target-verification.json" "$CERTIFICATION_CATEGORY_ID" <<'PY' || fail "canonical target evidence envelope is invalid"
+  require_regular_file "$TARGET_DIR/environment-evidence.json" "最终环境证据记录"
+  "$PYTHON_BIN" - \
+    "$TARGET_DIR/target-verification.json" \
+    "$TARGET_DIR/environment-evidence.json" \
+    "$TARGET_DIR/environment-observation.json" \
+    "$MATRIX" \
+    "$ASSEMBLER" \
+    "$CERTIFICATION_CATEGORY_ID" <<'PY' || fail "canonical target evidence envelope is invalid"
+import hashlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
-data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if data.get("schema") != "taiji-linux-target-verification/v1":
+
+target_path, environment_path, observation_path, matrix_path, assembler_path = map(Path, sys.argv[1:6])
+category_id = sys.argv[6]
+data = json.loads(target_path.read_text(encoding="utf-8"))
+if data.get("schema") != "taiji-linux-target-verification/v2":
     raise SystemExit("wrong canonical target evidence schema")
-if data.get("category_id") != sys.argv[2]:
+if data.get("category_id") != category_id:
     raise SystemExit("canonical category binding mismatch")
 if "CERTIFIED" in json.dumps(data, ensure_ascii=False):
     raise SystemExit("single target evidence must not self-claim CERTIFIED")
+if data.get("environment_observation_basename") != observation_path.name:
+    raise SystemExit("target evidence does not bind the environment observation")
+if data.get("environment_observation_sha256") != hashlib.sha256(observation_path.read_bytes()).hexdigest():
+    raise SystemExit("target evidence environment observation hash mismatch")
+spec = importlib.util.spec_from_file_location("taiji_installed_target_evidence_contract", assembler_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load target evidence contract")
+contract = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(contract)
+matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+environment = json.loads(environment_path.read_text(encoding="utf-8"))
+contract.validate_environment_record(environment, matrix)
+attachments = {item["basename"]: item["sha256"] for item in environment["attachments"]}
+if attachments.get(target_path.name) != hashlib.sha256(target_path.read_bytes()).hexdigest():
+    raise SystemExit("final environment evidence does not bind target verification")
 PY
 }
 

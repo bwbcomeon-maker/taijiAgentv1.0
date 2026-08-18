@@ -18,6 +18,8 @@ from agent.provider_credentials import (
     mutate_config_env_strict,
     mutate_env_unique,
     recover_credential_transaction,
+    replace_config_env_payload_strict,
+    seed_config_payload_strict,
 )
 
 
@@ -117,6 +119,534 @@ def test_env_mutation_repairs_target_duplicates_and_preserves_other_lines(
     assert "# retained\n" in written
     assert "UNRELATED=value\n" in written
     assert os.environ["API_KEY"] == "fresh-secret"
+
+
+def test_env_only_writer_atomically_invalidates_matching_taiji_main_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    env_path = config_path.parent / ".env"
+    config_path.parent.mkdir(parents=True)
+    old_revision = "a" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        "_taiji_main_model_request_id: 0123456789abcdef0123456789abcdef\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {old_revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {old_revision}\n",
+        encoding="utf-8",
+    )
+    env_path.write_text("DEEPSEEK_API_KEY=old-secret\n", encoding="utf-8")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "old-secret")
+
+    applied = mutate_env_unique(
+        {"DEEPSEEK_API_KEY": "new-secret"},
+        config_path=config_path,
+    )
+
+    snapshot = load_credential_snapshot(config_path)
+    assert applied == {"DEEPSEEK_API_KEY": True}
+    assert snapshot.env["DEEPSEEK_API_KEY"] == "new-secret"
+    assert "_taiji_main_model_request_id" not in snapshot.config
+    assert "_taiji_main_model_receipt_env" not in snapshot.config
+    assert "_taiji_main_model_credential_revision" not in snapshot.config
+    revision = snapshot.config["_taiji_credential_revisions"][
+        "DEEPSEEK_API_KEY"
+    ]
+    assert revision != old_revision
+    assert len(revision) == 32
+    assert set(revision) <= set("0123456789abcdef")
+
+
+def test_env_only_same_value_and_unrelated_write_preserve_taiji_main_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    env_path = config_path.parent / ".env"
+    config_path.parent.mkdir(parents=True)
+    request_id = "1123456789abcdef0123456789abcdef"
+    revision = "b" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {revision}\n",
+        encoding="utf-8",
+    )
+    env_path.write_text(
+        "DEEPSEEK_API_KEY=same-secret\nANTHROPIC_API_KEY=old-other\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "same-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "old-other")
+
+    same_applied = mutate_env_unique(
+        {"DEEPSEEK_API_KEY": "same-secret"},
+        config_path=config_path,
+    )
+    unrelated_applied = mutate_env_unique(
+        {"ANTHROPIC_API_KEY": "new-other"},
+        config_path=config_path,
+    )
+
+    snapshot = load_credential_snapshot(config_path)
+    assert same_applied == {"DEEPSEEK_API_KEY": True}
+    assert unrelated_applied == {"ANTHROPIC_API_KEY": True}
+    assert snapshot.config["_taiji_main_model_request_id"] == request_id
+    assert snapshot.config["_taiji_main_model_receipt_env"] == (
+        "DEEPSEEK_API_KEY"
+    )
+    assert snapshot.config["_taiji_main_model_credential_revision"] == revision
+    assert snapshot.config["_taiji_credential_revisions"] == {
+        "DEEPSEEK_API_KEY": revision
+    }
+
+
+def test_env_only_duplicate_repair_preserves_receipt_when_effective_value_unchanged(
+    monkeypatch,
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    env_path = config_path.parent / ".env"
+    config_path.parent.mkdir(parents=True)
+    request_id = "2123456789abcdef0123456789abcdef"
+    revision = "c" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {revision}\n",
+        encoding="utf-8",
+    )
+    env_path.write_text(
+        "DEEPSEEK_API_KEY=obsolete-duplicate\n"
+        "DEEPSEEK_API_KEY=effective-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "effective-secret")
+
+    applied = mutate_env_unique(
+        {"DEEPSEEK_API_KEY": "effective-secret"},
+        config_path=config_path,
+    )
+
+    snapshot = load_credential_snapshot(config_path)
+    assert applied == {"DEEPSEEK_API_KEY": True}
+    assert snapshot.env == {"DEEPSEEK_API_KEY": "effective-secret"}
+    assert snapshot.config["_taiji_main_model_request_id"] == request_id
+    assert snapshot.config["_taiji_main_model_receipt_env"] == (
+        "DEEPSEEK_API_KEY"
+    )
+    assert snapshot.config["_taiji_main_model_credential_revision"] == revision
+    assert snapshot.config["_taiji_credential_revisions"] == {
+        "DEEPSEEK_API_KEY": revision
+    }
+
+
+def test_config_only_main_key_change_invalidates_receipt_but_same_and_unrelated_preserve(
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    request_id = "3123456789abcdef0123456789abcdef"
+    revision = "d" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        "  api_key: inline-secret\n"
+        f"_taiji_main_model_request_id: {request_id}\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {revision}\n",
+        encoding="utf-8",
+    )
+
+    mutate_config_strict(
+        lambda config: config.update({"unrelated": "preserved"}),
+        config_path=config_path,
+    )
+    mutate_config_strict(
+        lambda config: config["model"].update(
+            {"api_key": "inline-secret"}
+        ),
+        config_path=config_path,
+    )
+    preserved = load_credential_snapshot(config_path).config
+    assert preserved["_taiji_main_model_request_id"] == request_id
+
+    mutate_config_strict(
+        lambda config: config["model"].update(
+            {"api_key": "changed-inline-secret"}
+        ),
+        config_path=config_path,
+    )
+
+    changed = load_credential_snapshot(config_path).config
+    assert changed["model"]["api_key"] == "changed-inline-secret"
+    assert "_taiji_main_model_request_id" not in changed
+    assert "_taiji_main_model_receipt_env" not in changed
+    assert "_taiji_main_model_credential_revision" not in changed
+
+
+def test_config_only_writer_cannot_publish_a_forged_taiji_main_receipt(
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    revision = "e" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {revision}\n",
+        encoding="utf-8",
+    )
+
+    def forge(config):
+        config["_taiji_main_model_request_id"] = (
+            "4123456789abcdef0123456789abcdef"
+        )
+        config["_taiji_main_model_receipt_env"] = "DEEPSEEK_API_KEY"
+        config["_taiji_main_model_credential_revision"] = revision
+
+    mutate_config_strict(forge, config_path=config_path)
+
+    changed = load_credential_snapshot(config_path).config
+    assert "_taiji_main_model_request_id" not in changed
+    assert "_taiji_main_model_receipt_env" not in changed
+    assert "_taiji_main_model_credential_revision" not in changed
+
+
+def test_seed_writer_rejects_taiji_main_receipt_metadata(tmp_path):
+    config_path = tmp_path / "profile" / "config.yaml"
+    revision = "e" * 32
+    payload = (
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        "_taiji_main_model_request_id: 4123456789abcdef0123456789abcdef\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {revision}\n"
+    ).encode("utf-8")
+
+    with pytest.raises(ValueError, match="receipt metadata"):
+        seed_config_payload_strict(payload, config_path=config_path)
+
+    assert not config_path.exists()
+
+
+def test_config_only_writer_cannot_complete_bare_request_id_into_receipt(
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    request_id = "5123456789abcdef0123456789abcdef"
+    revision = "f" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n",
+        encoding="utf-8",
+    )
+
+    def forge(config):
+        config["_taiji_main_model_receipt_env"] = "DEEPSEEK_API_KEY"
+        config["_taiji_main_model_credential_revision"] = revision
+        config["_taiji_credential_revisions"] = {
+            "DEEPSEEK_API_KEY": revision,
+        }
+
+    mutate_config_strict(forge, config_path=config_path)
+
+    changed = load_credential_snapshot(config_path).config
+    assert "_taiji_main_model_request_id" not in changed
+    assert "_taiji_main_model_receipt_env" not in changed
+    assert "_taiji_main_model_credential_revision" not in changed
+
+
+def test_pair_writer_cannot_complete_bare_request_id_into_receipt(tmp_path):
+    config_path = tmp_path / "profile" / "config.yaml"
+    env_path = config_path.parent / ".env"
+    config_path.parent.mkdir(parents=True)
+    request_id = "6123456789abcdef0123456789abcdef"
+    revision = "9" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n",
+        encoding="utf-8",
+    )
+    env_path.write_text("DEEPSEEK_API_KEY=same-secret\n", encoding="utf-8")
+
+    def forge(config):
+        config["_taiji_main_model_receipt_env"] = "DEEPSEEK_API_KEY"
+        config["_taiji_main_model_credential_revision"] = revision
+        config["_taiji_credential_revisions"] = {
+            "DEEPSEEK_API_KEY": revision,
+        }
+
+    snapshot = mutate_config_env_strict(
+        forge,
+        {"DEEPSEEK_API_KEY": "same-secret"},
+        config_path=config_path,
+    )
+
+    assert "_taiji_main_model_request_id" not in snapshot.config
+    assert "_taiji_main_model_receipt_env" not in snapshot.config
+    assert "_taiji_main_model_credential_revision" not in snapshot.config
+
+
+def test_config_only_writer_cannot_rebind_existing_receipt_metadata(tmp_path):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    request_id = "7123456789abcdef0123456789abcdef"
+    old_revision = "a" * 32
+    new_revision = "b" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {old_revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {old_revision}\n",
+        encoding="utf-8",
+    )
+
+    def rebind(config):
+        config["_taiji_main_model_receipt_env"] = "OPENAI_API_KEY"
+        config["_taiji_main_model_credential_revision"] = new_revision
+        config["_taiji_credential_revisions"] = {
+            "OPENAI_API_KEY": new_revision,
+        }
+
+    mutate_config_strict(rebind, config_path=config_path)
+
+    changed = load_credential_snapshot(config_path).config
+    assert "_taiji_main_model_request_id" not in changed
+    assert "_taiji_main_model_receipt_env" not in changed
+    assert "_taiji_main_model_credential_revision" not in changed
+
+
+def test_pair_writer_allow_flag_cannot_rebind_existing_request_id(tmp_path):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    request_id = "8123456789abcdef0123456789abcdef"
+    old_revision = "a" * 32
+    new_revision = "b" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {old_revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {old_revision}\n",
+        encoding="utf-8",
+    )
+
+    def rebind(config):
+        config["_taiji_main_model_receipt_env"] = "OPENAI_API_KEY"
+        config["_taiji_main_model_credential_revision"] = new_revision
+        config["_taiji_credential_revisions"] = {
+            "OPENAI_API_KEY": new_revision,
+        }
+
+    snapshot = mutate_config_env_strict(
+        rebind,
+        {},
+        config_path=config_path,
+        allow_taiji_main_model_receipt=True,
+    )
+
+    assert "_taiji_main_model_request_id" not in snapshot.config
+    assert "_taiji_main_model_receipt_env" not in snapshot.config
+    assert "_taiji_main_model_credential_revision" not in snapshot.config
+
+
+def test_pair_writer_allow_flag_requires_complete_new_receipt_binding(
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "model:\n"
+        "  provider: custom-without-key\n"
+        "  default: local-model\n",
+        encoding="utf-8",
+    )
+    revision = "d" * 32
+
+    def incomplete_receipt(config):
+        config["_taiji_main_model_request_id"] = (
+            "9123456789abcdef0123456789abcdef"
+        )
+        config["_taiji_credential_revisions"] = {
+            "DEEPSEEK_API_KEY": revision,
+        }
+
+    snapshot = mutate_config_env_strict(
+        incomplete_receipt,
+        {},
+        config_path=config_path,
+        allow_taiji_main_model_receipt=True,
+    )
+
+    assert "_taiji_main_model_request_id" not in snapshot.config
+    assert "_taiji_main_model_receipt_env" not in snapshot.config
+    assert "_taiji_main_model_credential_revision" not in snapshot.config
+    assert "_taiji_credential_revisions" not in snapshot.config
+
+
+def test_legacy_env_repair_invalidates_matching_taiji_main_receipt(tmp_path):
+    config_path = tmp_path / "profile" / "config.yaml"
+    env_path = config_path.parent / ".env"
+    config_path.parent.mkdir(parents=True)
+    request_id = "5123456789abcdef0123456789abcdef"
+    old_revision = "f" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {old_revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {old_revision}\n",
+        encoding="utf-8",
+    )
+    env_path.write_text("DEEPSEEK_API_KEY=old-secret\n", encoding="utf-8")
+
+    snapshot = replace_config_env_payload_strict(
+        lambda _config: None,
+        b"DEEPSEEK_API_KEY=new-secret\n",
+        config_path=config_path,
+        env_keys=("DEEPSEEK_API_KEY",),
+    )
+
+    assert snapshot.env["DEEPSEEK_API_KEY"] == "new-secret"
+    assert "_taiji_main_model_request_id" not in snapshot.config
+    assert "_taiji_main_model_receipt_env" not in snapshot.config
+    assert "_taiji_main_model_credential_revision" not in snapshot.config
+    assert snapshot.config["_taiji_credential_revisions"][
+        "DEEPSEEK_API_KEY"
+    ] != old_revision
+
+
+def test_legacy_env_repair_cannot_complete_same_request_id_into_receipt(
+    tmp_path,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    request_id = "8123456789abcdef0123456789abcdef"
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n",
+        encoding="utf-8",
+    )
+    config_path.with_name(".env").write_text(
+        "DEEPSEEK_API_KEY=same-secret\n",
+        encoding="utf-8",
+    )
+    revision = "9" * 32
+
+    def forge(config):
+        config["_taiji_main_model_request_id"] = request_id
+        config["_taiji_main_model_receipt_env"] = "DEEPSEEK_API_KEY"
+        config["_taiji_main_model_credential_revision"] = revision
+        config["_taiji_credential_revisions"] = {
+            "DEEPSEEK_API_KEY": revision,
+        }
+
+    snapshot = replace_config_env_payload_strict(
+        forge,
+        b"DEEPSEEK_API_KEY=same-secret\n",
+        config_path=config_path,
+        env_keys=("DEEPSEEK_API_KEY",),
+    )
+
+    assert "_taiji_main_model_request_id" not in snapshot.config
+    assert "_taiji_main_model_receipt_env" not in snapshot.config
+    assert "_taiji_main_model_credential_revision" not in snapshot.config
+
+
+@pytest.mark.parametrize(
+    ("payload", "env_keys"),
+    [
+        (
+            b"DEEPSEEK_API_KEY=same-secret\nOTHER_API_KEY=old-secret\n",
+            ("DEEPSEEK_API_KEY",),
+        ),
+        (
+            b"DEEPSEEK_API_KEY=same-secret\nOTHER_API_KEY=new-secret\n",
+            ("OTHER_API_KEY",),
+        ),
+    ],
+    ids=["same-main-secret", "unrelated-provider-secret"],
+)
+def test_legacy_env_repair_preserves_valid_receipt_for_effective_noop_or_unrelated_change(
+    tmp_path,
+    payload,
+    env_keys,
+):
+    config_path = tmp_path / "profile" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    request_id = "9123456789abcdef0123456789abcdef"
+    revision = "c" * 32
+    config_path.write_text(
+        "model:\n"
+        "  provider: deepseek\n"
+        "  default: deepseek-chat\n"
+        f"_taiji_main_model_request_id: {request_id}\n"
+        "_taiji_main_model_receipt_env: DEEPSEEK_API_KEY\n"
+        f"_taiji_main_model_credential_revision: {revision}\n"
+        "_taiji_credential_revisions:\n"
+        f"  DEEPSEEK_API_KEY: {revision}\n",
+        encoding="utf-8",
+    )
+    config_path.with_name(".env").write_text(
+        "DEEPSEEK_API_KEY=same-secret\nOTHER_API_KEY=old-secret\n",
+        encoding="utf-8",
+    )
+
+    snapshot = replace_config_env_payload_strict(
+        lambda _config: None,
+        payload,
+        config_path=config_path,
+        env_keys=env_keys,
+    )
+
+    assert snapshot.config["_taiji_main_model_request_id"] == request_id
+    assert snapshot.config["_taiji_main_model_receipt_env"] == (
+        "DEEPSEEK_API_KEY"
+    )
+    assert snapshot.config[
+        "_taiji_main_model_credential_revision"
+    ] == revision
 
 
 def test_env_mutation_rejects_untouched_duplicate_without_writing(tmp_path):

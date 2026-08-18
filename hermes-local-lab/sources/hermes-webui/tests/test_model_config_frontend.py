@@ -901,6 +901,168 @@ run().then(result=>process.stdout.write(JSON.stringify(result))).catch(err=>{con
 """
 
 
+_MAIN_MODEL_RECONCILIATION_DRIVER = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[2],'utf8');
+const indexSource=fs.readFileSync(process.argv[4],'utf8');
+function extractFunc(name,input=source){
+ const re=new RegExp('(?:async\\s+)?function\\s+'+name+'\\s*\\(');
+ const start=input.search(re);if(start<0)return '';
+ let i=input.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<input.length){if(input[i]==='{')depth++;else if(input[i]==='}')depth--;i++;}
+ return input.slice(start,i);
+}
+function control(id,value=''){
+ return {id,value,textContent:'',disabled:false,hidden:false,dataset:{},attrs:{},style:{},focused:false,
+  setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},focus(){this.focused=true;},
+  querySelector(){return null;},querySelectorAll(){return [];}};
+}
+const ids=['btnSaveMainModel','btnReloadAllModelConfig','modelConfigDraftStatus','modelConfigProvider','modelConfigModel','modelConfigBaseUrl',
+ 'modelConfigApiKey','visionConfigModel','visionConfigApiKey','imageGenConfigModel','imageGenConfigApiKey',
+ 'platformCredentialLabel','platformCredentialSecret'];
+const elements={};for(const id of ids)elements[id]=control(id);
+elements.modelConfigProvider.value='deepseek';
+elements.modelConfigModel.value='deepseek-chat';
+elements.modelConfigBaseUrl.value='';
+elements.modelConfigApiKey.value='sk-browser-secret-must-clear';
+elements.visionConfigModel.value='vision-draft';
+elements.visionConfigApiKey.value='vision-secret-draft';
+elements.imageGenConfigModel.value='image-draft';
+elements.imageGenConfigApiKey.value='image-secret-draft';
+elements.platformCredentialLabel.value='platform-label-draft';
+elements.platformCredentialSecret.value='platform-secret-draft';
+const secretFields=[elements.modelConfigApiKey,elements.visionConfigApiKey,elements.imageGenConfigApiKey,elements.platformCredentialSecret];
+secretFields.forEach(item=>{item.dataset.secretField='true';});
+const $=id=>elements[id]||null;
+const document={querySelectorAll(selector){return selector.includes('data-secret-field')?secretFields:[];}};
+const oldVision={provider:'alibaba',model:'vision-baseline'};
+const oldImage={provider:'dashscope',model:'image-baseline'};
+const oldCredentials=[{id:'shared-draft-baseline',label:'Shared baseline'}];
+let _modelConfigData={profile:'default',main:{provider:'openai',model:'gpt-4o',base_url:'',key_status:{configured:false}},
+ providers:[{id:'openai'}],vision:oldVision,image_gen:oldImage,provider_credentials:oldCredentials};
+const _imageCapabilityProviderDrafts={vision:{alibaba:{Model:'vision-provider-draft',ApiKey:'vision-provider-secret'}},
+ image:{dashscope:{Model:'image-provider-draft',ApiKey:'image-provider-secret'}}};
+const scenario=process.argv[3]||'timeout_matching';
+const expectedRequestId='00112233445566778899aabbccddeeff';
+const crypto={getRandomValues(bytes){bytes.set(Buffer.from(expectedRequestId,'hex'));return bytes;}};
+const authoritative={profile:'default',main_request_id:scenario==='nonmatching_receipt'?'ffeeddccbbaa99887766554433221100':expectedRequestId,
+ main:{provider:'deepseek',model:'deepseek-chat',base_url:'',key_status:{configured:true,source:'env_file'}},
+ providers:[{id:'deepseek',display_name:'DeepSeek'}],vision:{provider:'server',model:'must-not-replace-vision'},
+ image_gen:{provider:'server',model:'must-not-replace-image'},provider_credentials:[{id:'server-must-not-replace-platform'}]};
+if(scenario==='matching_refresh_pending'){authoritative.runtime_state='refresh_pending';authoritative.refresh_pending=true;}
+if(scenario==='http_200_unconfigured'){authoritative.main.key_status={configured:false,source:'none'};}
+if(scenario==='http_200_unexpected_base_url'){authoritative.main.base_url='https://stale-relay.example/v1';}
+const apiCalls=[];let busyDuringPost=null;let postRequestId='';let postPayloadHasApiKey=false;
+let authoritativeReadCount=0,refreshBusyDuringGet=null;
+const api=async(url,options)=>{
+ apiCalls.push({url,method:options&&options.method||'GET',timeoutToast:options&&options.timeoutToast,retryNetworkErrors:options&&options.retryNetworkErrors});
+ if(url==='/api/model-config/main'){
+  busyDuringPost={disabled:elements.btnSaveMainModel.disabled,ariaBusy:elements.btnSaveMainModel.attrs['aria-busy']||null};
+  const body=JSON.parse(options.body||'{}');postRequestId=String(body.request_id||'');postPayloadHasApiKey=!!body.api_key;
+  if(scenario==='http_4xx'){const error=new Error('request rejected');error.status=400;throw error;}
+  if(scenario==='http_5xx_matching'||scenario==='matching_refresh_pending'){const error=new Error('server failed after commit');error.status=503;throw error;}
+  if(scenario==='http_200_unconfigured'||scenario==='http_200_unexpected_base_url')return Object.assign({commit_state:'committed',runtime_state:'applied'},authoritative);
+  const error=new Error('request timed out');error.name='TimeoutError';error.timeout=true;throw error;
+ }
+ if(url==='/api/model-config'){
+  authoritativeReadCount++;
+  if(authoritativeReadCount===2){
+   refreshBusyDuringGet={disabled:elements.btnReloadAllModelConfig.disabled,ariaBusy:elements.btnReloadAllModelConfig.attrs['aria-busy']||null};
+  }
+  if(scenario==='get_failure'||(scenario.startsWith('get_failure_then_')&&authoritativeReadCount===1)||scenario==='get_failure_then_failure'){
+   throw new TypeError('authoritative read failed');
+  }
+  if(scenario==='get_failure_then_mismatch'){
+   return Object.assign({},authoritative,{main_request_id:'ffeeddccbbaa99887766554433221100'});
+  }
+  return authoritative;
+ }
+ throw new Error('unexpected API call '+url);
+};
+const toasts=[];
+const showToast=(message,duration,tone)=>toasts.push({message,duration,tone});
+let confirmCount=0,fullLoadCount=0,imageLoadCount=0,renderedMain=null,populateCount=0,closedCount=0;
+const showConfirmDialog=async()=>{confirmCount++;return false;};
+const loadModelConfigPanel=async()=>{fullLoadCount++;return authoritative;};
+const _modelConfigHasUnsavedChanges=()=>true;
+const _syncMainModelConfigControls=()=>{};
+const _renderModelConfigFocusSummary=data=>{renderedMain=JSON.parse(JSON.stringify(data.main||{}));};
+const populateModelDropdown=()=>{populateCount++;};
+const toggleModelConfigSection=()=>{closedCount++;};
+const _handleRuntimeRefreshOutcome=data=>({pending:data&&data.runtime_state==='refresh_pending'||data&&data.refresh_pending===true});
+let _pendingMainModelConfigReconciliation=null;
+let imageCapabilityRequestInFlight=false,imageCapabilityLoadInFlight=false,imageCapabilityData={};
+const imageCapabilityText=()=>{};
+const imageCapabilityConfirmReload=async()=>{confirmCount++;return true;};
+const loadImageCapabilityCenter=async()=>{imageLoadCount++;return imageCapabilityData;};
+const window={loadModelConfigPanel};
+const helperNames=['_clearCapabilityProviderDraftSecrets','_clearModelConfigSecrets','_setModelConfigDraftStatus',
+ '_setMainModelConfigSaveState','_newMainModelConfigRequestId','_mainModelConfigSaveResultIsUncertain','_applyAuthoritativeMainModelConfig',
+ '_mainModelConfigMatchesExpected','_mainModelConfigReceiptMatches','_rememberPendingMainModelConfigReconciliation',
+ '_clearPendingMainModelConfigReconciliation','_reconcileMainModelConfigSave',
+ 'reconcilePendingMainModelConfigSave','saveMainModelConfig'];
+const helperSource=helperNames.map(name=>extractFunc(name)).filter(Boolean).join('\n');
+eval(helperSource);
+if(typeof reconcilePendingMainModelConfigSave==='function')window.reconcilePendingMainModelConfigSave=reconcilePendingMainModelConfigSave;
+eval(extractFunc('refreshModelAndImageCapabilities',indexSource));
+async function run(){
+ await saveMainModelConfig();
+ if(scenario.startsWith('get_failure_then_'))await refreshModelAndImageCapabilities();
+ return {
+  apiCalls,
+  expectedRequestId,postRequestId,postPayloadHasApiKey,mainRequestId:_modelConfigData.main_request_id||'',
+  main:_modelConfigData.main,
+  providers:_modelConfigData.providers,
+  preserved:{vision:_modelConfigData.vision===oldVision,image:_modelConfigData.image_gen===oldImage,
+   credentials:_modelConfigData.provider_credentials===oldCredentials,
+   visionModel:elements.visionConfigModel.value,visionSecret:elements.visionConfigApiKey.value,
+   imageModel:elements.imageGenConfigModel.value,imageSecret:elements.imageGenConfigApiKey.value,
+   platformLabel:elements.platformCredentialLabel.value,platformSecret:elements.platformCredentialSecret.value,
+   visionProviderDraft:_imageCapabilityProviderDrafts.vision.alibaba,imageProviderDraft:_imageCapabilityProviderDrafts.image.dashscope},
+  mainSecret:elements.modelConfigApiKey.value,status:{text:elements.modelConfigDraftStatus.textContent,state:elements.modelConfigDraftStatus.dataset.state},
+  button:{disabled:elements.btnSaveMainModel.disabled,ariaBusy:elements.btnSaveMainModel.attrs['aria-busy']||null},
+  toasts,confirmCount,fullLoadCount,imageLoadCount,renderedMain,populateCount,closedCount,busyDuringPost,
+  refreshBusyDuringGet,pendingReconciliation:_pendingMainModelConfigReconciliation
+ };
+}
+run().then(result=>process.stdout.write(JSON.stringify(result))).catch(error=>{console.error(error);process.exit(1);});
+"""
+
+
+_MAIN_MODEL_FOCUS_STATE_DRIVER = r"""
+const fs=require('fs');const source=fs.readFileSync(process.argv[2],'utf8');
+function extractFunc(name){const re=new RegExp('function\\s+'+name+'\\s*\\(');const start=source.search(re);
+ if(start<0)throw new Error(name+' missing');let i=source.indexOf('{',start),depth=1;i++;
+ while(depth>0&&i<source.length){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;i++;}return source.slice(start,i);}
+function control(id){return {id,textContent:'',dataset:{},style:{},querySelector(){return id==='modelConfigHero'?icon:null;}};}
+const ids=['modelConfigMainModelName','modelConfigProviderSummary','modelConfigModelSummary','modelConfigKeySummary','modelConfigDraftStatus',
+ 'modelConfigMainEffective','modelConfigMainStatusBadge','modelConfigHero','modelConfigHeroTitle','modelConfigHeroMessage','modelConfigImagePasteAction'];
+const elements={};for(const id of ids)elements[id]=control(id);const icon={textContent:''};
+const $=id=>elements[id]||null;
+const _modelConfigProviderDisplay=id=>id;
+const _formatModelConfigProvider=(id,label)=>label||id;
+const _renderVisionConfigSummary=()=>{};
+const _renderImageGenConfigSummary=()=>{};
+const _modelConfigImageProviderRow=()=>({});
+eval(['_modelConfigKeyLabel','_setModelConfigText','_setModelConfigStatusBadge','_renderModelConfigFocusSummary','_setMainModelConfigSaveState'].map(extractFunc).join('\n'));
+function snapshot(main){
+ _renderModelConfigFocusSummary({main,image_gen:{}});
+ return {effective:elements.modelConfigMainEffective.textContent,badge:elements.modelConfigMainStatusBadge.textContent,
+  hero:elements.modelConfigHeroTitle.textContent,message:elements.modelConfigHeroMessage.textContent,state:elements.modelConfigHero.dataset.state};
+}
+const stateMessages={};
+for(const state of ['saving','refreshing','reconciling','applied','failed']){
+ _setMainModelConfigSaveState(state);
+ stateMessages[state]={text:elements.modelConfigDraftStatus.textContent,state:elements.modelConfigDraftStatus.dataset.state};
+}
+process.stdout.write(JSON.stringify({
+ pending:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},runtime_refresh_pending:true}),
+ applied:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true}}),
+ unconfigured:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:false}}),stateMessages
+}));
+"""
+
+
 def _run_vision_race(tmp_path: Path, scenario: str) -> dict:
     driver = tmp_path / "vision-race-driver.js"
     driver.write_text(
@@ -910,7 +1072,12 @@ def _run_vision_race(tmp_path: Path, scenario: str) -> dict:
         encoding="utf-8",
     )
     result = subprocess.run(
-        [NODE, str(driver), str(ROOT / "static" / "panels.js"), scenario],
+        [
+            NODE,
+            str(driver),
+            str(ROOT / "static" / "panels.js"),
+            scenario,
+        ],
         capture_output=True,
         text=True,
         timeout=10,
@@ -984,6 +1151,43 @@ def _run_credential_sessions(tmp_path: Path) -> dict:
 def _run_model_config_draft_guard(tmp_path: Path) -> dict:
     driver = tmp_path / "model-config-draft-guard-driver.js"
     driver.write_text("const _collectImageCapabilityEndpointValues=()=>({});\n" + _MODEL_CONFIG_DRAFT_GUARD_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    return json.loads(result.stdout)
+
+
+def _run_main_model_reconciliation(
+    tmp_path: Path,
+    scenario: str = "timeout_matching",
+) -> dict:
+    driver = tmp_path / "main-model-reconciliation-driver.js"
+    driver.write_text(_MAIN_MODEL_RECONCILIATION_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [
+            NODE,
+            str(driver),
+            str(ROOT / "static" / "panels.js"),
+            scenario,
+            str(ROOT / "static" / "index.html"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    return json.loads(result.stdout)
+
+
+def _run_main_model_focus_states(tmp_path: Path) -> dict:
+    driver = tmp_path / "main-model-focus-state-driver.js"
+    driver.write_text(_MAIN_MODEL_FOCUS_STATE_DRIVER, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(driver), str(ROOT / "static" / "panels.js")],
         capture_output=True,
@@ -1085,6 +1289,281 @@ process.stdout.write(JSON.stringify({pending,ready,status,toasts}));
     assert payload["status"]["dataset"]["state"] == "warn"
     assert payload["toasts"][-1]["tone"] == "warning"
     assert all(item["tone"] != "success" for item in payload["toasts"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_refresh_pending_is_not_rendered_as_unconfigured(tmp_path):
+    result = _run_main_model_focus_states(tmp_path)
+
+    assert result["pending"] == {
+        "effective": "刷新中",
+        "badge": "主模型刷新中",
+        "hero": "主模型配置已保存，运行时正在刷新",
+        "message": "配置已写入本机，运行时状态刷新完成后即可开始新会话。",
+        "state": "warn",
+    }
+    assert result["applied"]["effective"] == "已生效"
+    assert result["applied"]["badge"] == "主模型可用"
+    assert result["unconfigured"]["effective"] == "待配置"
+    assert result["unconfigured"]["badge"] == "主模型待配置"
+    assert result["stateMessages"] == {
+        "saving": {"text": "正在保存主模型配置…", "state": "saving"},
+        "refreshing": {
+            "text": "主模型配置已保存，运行时正在刷新。",
+            "state": "refreshing",
+        },
+        "reconciling": {
+            "text": "保存结果待核对，正在读取本机权威状态…",
+            "state": "reconciling",
+        },
+        "applied": {"text": "主模型配置已生效。", "state": "applied"},
+        "failed": {"text": "主模型配置保存失败。", "state": "failed"},
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_timeout_reconciles_authoritative_state_without_clobbering_other_drafts(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path)
+
+    assert result["apiCalls"] == [
+        {
+            "url": "/api/model-config/main",
+            "method": "POST",
+            "timeoutToast": False,
+            "retryNetworkErrors": False,
+        },
+        {
+            "url": "/api/model-config",
+            "method": "GET",
+            "timeoutToast": False,
+        },
+    ]
+    assert result["postRequestId"] == result["expectedRequestId"]
+    assert result["postPayloadHasApiKey"] is True
+    assert result["mainRequestId"] == result["expectedRequestId"]
+    assert result["main"] == {
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "base_url": "",
+        "key_status": {"configured": True, "source": "env_file"},
+        "runtime_refresh_pending": False,
+    }
+    assert result["providers"] == [
+        {"id": "deepseek", "display_name": "DeepSeek"}
+    ]
+    assert result["preserved"] == {
+        "vision": True,
+        "image": True,
+        "credentials": True,
+        "visionModel": "vision-draft",
+        "visionSecret": "vision-secret-draft",
+        "imageModel": "image-draft",
+        "imageSecret": "image-secret-draft",
+        "platformLabel": "platform-label-draft",
+        "platformSecret": "platform-secret-draft",
+        "visionProviderDraft": {
+            "Model": "vision-provider-draft",
+            "ApiKey": "vision-provider-secret",
+        },
+        "imageProviderDraft": {
+            "Model": "image-provider-draft",
+            "ApiKey": "image-provider-secret",
+        },
+    }
+    assert result["mainSecret"] == ""
+    assert result["status"] == {"text": "主模型配置已核对并生效。", "state": "applied"}
+    assert result["button"] == {"disabled": False, "ariaBusy": None}
+    assert result["busyDuringPost"] == {"disabled": True, "ariaBusy": "true"}
+    assert result["confirmCount"] == 0
+    assert result["fullLoadCount"] == 0
+    assert result["renderedMain"]["key_status"]["configured"] is True
+    assert result["populateCount"] == 1
+    assert result["closedCount"] == 1
+    assert all("保存主模型失败" not in toast["message"] for toast in result["toasts"])
+    assert all("待配置" not in toast["message"] for toast in result["toasts"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_http_5xx_reconciles_matching_receipt_without_replaying_post(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path, "http_5xx_matching")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["postRequestId"] == result["expectedRequestId"]
+    assert result["status"]["state"] == "applied"
+    assert result["closedCount"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_same_public_state_with_old_receipt_never_reports_applied(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path, "nonmatching_receipt")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["main"]["key_status"]["configured"] is True
+    assert result["mainRequestId"] != result["postRequestId"]
+    assert result["status"]["state"] == "failed"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_authoritative_get_failure_stays_reconciling(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "get_failure")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["status"]["state"] == "reconciling"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_refresh_continues_pending_receipt_after_first_get_failure_without_repost(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(
+        tmp_path,
+        "get_failure_then_matching",
+    )
+
+    assert [call["method"] for call in result["apiCalls"]] == [
+        "POST",
+        "GET",
+        "GET",
+    ]
+    assert result["postRequestId"] == result["expectedRequestId"]
+    assert result["status"]["state"] == "applied"
+    assert result["pendingReconciliation"] is None
+    assert result["fullLoadCount"] == 0
+    assert result["imageLoadCount"] == 0
+    assert result["confirmCount"] == 0
+    assert result["refreshBusyDuringGet"] == {
+        "disabled": True,
+        "ariaBusy": "true",
+    }
+    assert result["button"] == {"disabled": False, "ariaBusy": None}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_refresh_rejects_pending_receipt_mismatch_without_repost(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(
+        tmp_path,
+        "get_failure_then_mismatch",
+    )
+
+    assert [call["method"] for call in result["apiCalls"]] == [
+        "POST",
+        "GET",
+        "GET",
+    ]
+    assert result["status"]["state"] == "failed"
+    assert result["pendingReconciliation"] is None
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+    assert result["fullLoadCount"] == 0
+    assert result["imageLoadCount"] == 0
+    assert result["confirmCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_refresh_keeps_non_secret_pending_receipt_when_get_still_fails(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(
+        tmp_path,
+        "get_failure_then_failure",
+    )
+
+    assert [call["method"] for call in result["apiCalls"]] == [
+        "POST",
+        "GET",
+        "GET",
+    ]
+    assert result["status"]["state"] == "reconciling"
+    assert result["pendingReconciliation"] == {
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "base_url": "",
+        "request_id": result["expectedRequestId"],
+    }
+    assert "api_key" not in result["pendingReconciliation"]
+    assert result["fullLoadCount"] == 0
+    assert result["imageLoadCount"] == 0
+    assert result["confirmCount"] == 0
+    assert result["refreshBusyDuringGet"] == {
+        "disabled": True,
+        "ariaBusy": "true",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_matching_receipt_with_refresh_pending_stays_refreshing(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path, "matching_refresh_pending")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["mainRequestId"] == result["postRequestId"]
+    assert result["status"]["state"] == "refreshing"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_http_4xx_is_definite_failure_without_authoritative_get(tmp_path):
+    result = _run_main_model_reconciliation(tmp_path, "http_4xx")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST"]
+    assert result["postRequestId"] == result["expectedRequestId"]
+    assert result["status"]["state"] == "failed"
+    assert result["closedCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_http_200_requires_matching_public_projection_before_applied(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(tmp_path, "http_200_unconfigured")
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["mainRequestId"] == result["postRequestId"]
+    assert result["main"]["key_status"]["configured"] is False
+    assert result["status"]["state"] == "failed"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for frontend behavior checks")
+def test_main_model_http_200_rejects_unexpected_base_url_when_target_is_empty(
+    tmp_path,
+):
+    result = _run_main_model_reconciliation(
+        tmp_path,
+        "http_200_unexpected_base_url",
+    )
+
+    assert [call["method"] for call in result["apiCalls"]] == ["POST", "GET"]
+    assert result["mainRequestId"] == result["postRequestId"]
+    assert result["main"]["base_url"] == "https://stale-relay.example/v1"
+    assert result["status"]["state"] == "failed"
+    assert result["closedCount"] == 0
+    assert result["populateCount"] == 0
+
+
+def test_main_model_request_id_uses_secure_128_bit_randomness():
+    start = PANELS_JS.find("function _newMainModelConfigRequestId")
+    assert start >= 0
+    end = PANELS_JS.find("\n}", start)
+    body = PANELS_JS[start:end]
+    assert "new Uint8Array(16)" in body
+    assert "crypto.getRandomValues" in body
+    assert "Math.random" not in body
 
 
 def test_model_config_secret_inputs_start_empty():

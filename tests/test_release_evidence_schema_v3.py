@@ -1,20 +1,82 @@
 import argparse
+import copy
 import hashlib
+import io
 import importlib.util
 import json
+import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import tarfile
+import stat
 import unittest
-from datetime import datetime, timezone
+import zlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
+
+from tests.github_ci_v2_fixture import write_github_ci_v2_bundle
+from tests.test_formal_build_test_evidence_contract import canonical_formal_v2_log
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "scripts/validate-taiji-release-evidence.py"
 POLICY_PATH = ROOT / "packaging/linux/compatibility-policy.json"
 POLICY_HELPER_PATH = ROOT / "packaging/linux/compatibility_policy.py"
+SOURCE_INTEGRITY_HELPER = ROOT / "packaging/linux/source-archive-integrity.py"
+
+
+def toolchain_identity() -> dict[str, str]:
+    return {
+        "python_dependency_lock_status": "strict-locked",
+        "python_lock_basename": "uv.lock",
+        "python_lock_sha256": "dbab12665d98aef021ba64953c61b0ed8a908cfb56a1c01e2fcb4b052b71a2a1",
+        "python_version": "3.11.15",
+        "python_archive_sha256": "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a",
+        "python_executable_sha256": "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba",
+        "uv_version": "0.12.2",
+        "uv_archive_sha256": "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4",
+        "uv_executable_sha256": "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2",
+        "node_version": "22.23.1",
+        "node_archive_sha256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
+        "node_executable_sha256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
+        "electron_version": "39.8.10",
+        "electron_archive_sha256": "92e8b031fa5327c78a972279fd75fc8503fcd1773401809f4557e4de583eabd1",
+        "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
+    }
+
+
+def acceptance_identity() -> dict[str, str]:
+    return {
+        "acceptance_binding_sha256": "2" * 64,
+        "acceptance_tools_manifest_sha256": "3" * 64,
+        "acceptance_entrypoint_sha256": "4" * 64,
+        "installed_release_manifest_sha256": "5" * 64,
+    }
+
+
+def formal_build_test_log(source_commit: str) -> bytes:
+    identity = toolchain_identity()
+    return canonical_formal_v2_log(
+        source_commit,
+        identity["python_version"],
+        identity["python_executable_sha256"],
+        identity["node_version"],
+        identity["node_executable_sha256"],
+        "10.9.8",
+        "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    )
+
+
+def formal_build_test_identity(path: Path) -> dict[str, str]:
+    return {
+        "formal_build_tests_status": "pass",
+        "formal_build_tests_log_basename": "formal-build-tests.log",
+        "formal_build_tests_log_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
 
 
 def load_validator():
@@ -42,6 +104,29 @@ def load_policy_helper():
     return module
 
 
+def png_fixture(width: int = 800, height: int = 600) -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload))
+        )
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    row = b"\x00" + b"".join(
+        bytes((index % 251, (index * 3) % 251, (index * 7) % 251))
+        for index in range(width)
+    )
+    return (
+        signature
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(row * height, level=9))
+        + chunk(b"IEND", b"")
+    )
+
+
 class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
     def setUp(self) -> None:
         self.validator = load_validator()
@@ -57,14 +142,46 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.package_dir.mkdir(parents=True)
         self.deb = self.package_dir / "taiji-agent_1.0.0_amd64.deb"
         self.deb.write_bytes(b"deb-v3")
+        self.formal_build_test_log = self.package_dir / "formal-build-tests.log"
+        self.formal_build_test_log.write_bytes(formal_build_test_log(self.commit))
         self.manifest = self.package_dir / "taiji-package-manifest.json"
         self.write_manifest()
         self.write_delivery_identity_fixture()
+        self.ci_evidence = write_github_ci_v2_bundle(self.root, self.commit)
         self.evidence = self.root / "release-evidence.json"
         self.write_evidence()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    @staticmethod
+    def trusted_python_fixture(alias_mode: int):
+        trusted = mock.MagicMock()
+        trusted.__str__.return_value = "/usr/bin/python3"
+        trusted.lstat.return_value = mock.Mock(st_uid=0, st_mode=alias_mode)
+        resolved = mock.MagicMock()
+        resolved.parent = Path("/usr/bin")
+        resolved.is_symlink.return_value = False
+        resolved.lstat.return_value = mock.Mock(
+            st_uid=0,
+            st_mode=stat.S_IFREG | 0o755,
+        )
+        trusted.resolve.return_value = resolved
+        return trusted
+
+    def test_trusted_system_python_accepts_root_owned_symlink_to_trusted_target(self):
+        trusted = self.trusted_python_fixture(stat.S_IFLNK | 0o777)
+        with mock.patch.object(self.validator, "TRUSTED_SYSTEM_PYTHON", trusted):
+            self.assertEqual(
+                self.validator.resolve_trusted_system_python(),
+                "/usr/bin/python3",
+            )
+
+    def test_trusted_system_python_rejects_writable_regular_alias(self):
+        trusted = self.trusted_python_fixture(stat.S_IFREG | 0o775)
+        with mock.patch.object(self.validator, "TRUSTED_SYSTEM_PYTHON", trusted):
+            with self.assertRaisesRegex(self.validator.EvidenceError, "固定系统 Python"):
+                self.validator.resolve_trusted_system_python()
 
     @staticmethod
     def sha256(path: Path) -> str:
@@ -81,14 +198,28 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "deb_sha256": self.sha256(self.deb),
             "compatibility_policy_id": self.policy_id,
             "compatibility_policy_sha256": self.policy_sha256,
+            "upgrade_data_contract_id": "taiji-upgrade-data-contract-v1",
+            "upgrade_data_contract_sha256": "6" * 64,
             "elf_abi_audit_basename": "elf-abi-audit.json",
             "elf_abi_audit_sha256": "e" * 64,
             "icon_set_sha256": "1" * 64,
-            "electron_executable_sha256": "c" * 64,
+            "electron_executable_sha256": "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d",
             "desktop_entry_sha256": "d" * 64,
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
             "built_at_utc": "2026-08-05T00:00:00Z",
+            **toolchain_identity(),
+            **acceptance_identity(),
+            **formal_build_test_identity(self.formal_build_test_log),
         }
+        if hasattr(self, "source_inventory"):
+            manifest.update(
+                {
+                    "source_archive_basename": self.source_archive.name,
+                    "source_archive_sha256": self.sha256(self.source_archive),
+                    "source_inventory_basename": self.source_inventory.name,
+                    "source_inventory_sha256": self.sha256(self.source_inventory),
+                }
+            )
         manifest.update(updates)
         self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -96,14 +227,30 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.source_archive = (
             self.delivery / f"taiji-agentv1.0-kylin-build-src-{self.commit}.tar.gz"
         )
-        self.source_archive.write_bytes(b"source fixture\n")
+        self.write_source_archive(self.source_archive)
+        self.source_inventory = self.delivery / (
+            f"taiji-agentv1.0-kylin-build-src-{self.commit}.inventory.json"
+        )
+        self.write_source_inventory(self.source_archive, self.source_inventory)
+        shutil.copy2(SOURCE_INTEGRITY_HELPER, self.delivery / SOURCE_INTEGRITY_HELPER.name)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest.update(
+            {
+                "source_archive_basename": self.source_archive.name,
+                "source_archive_sha256": self.sha256(self.source_archive),
+                "source_inventory_basename": self.source_inventory.name,
+                "source_inventory_sha256": self.sha256(self.source_inventory),
+            }
+        )
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
         self.checksum = self.package_dir / f"{self.deb.name}.sha256"
         self.checksum.write_text(
             f"{self.sha256(self.deb)}  {self.deb.name}\n",
             encoding="ascii",
         )
         (self.delivery / "SHA256SUMS.txt").write_text(
-            f"{self.sha256(self.source_archive)}  {self.source_archive.name}\n",
+            f"{self.sha256(self.source_archive)}  {self.source_archive.name}\n"
+            f"{self.sha256(self.source_inventory)}  {self.source_inventory.name}\n",
             encoding="ascii",
         )
         self.build_marker = self.package_dir / ".build-success"
@@ -114,6 +261,8 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"source_archive={self.source_archive.name}",
                     f"source_sha256={self.sha256(self.source_archive)}",
                     f"source_commit={self.commit}",
+                    f"source_inventory={self.source_inventory.name}",
+                    f"source_inventory_sha256={self.sha256(self.source_inventory)}",
                     f"deb={self.deb.name}",
                     f"deb_sha256={self.sha256(self.deb)}",
                     f"checksum={self.checksum.name}",
@@ -123,6 +272,14 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"compatibility_policy_sha256={self.policy_sha256}",
                     f"elf_abi_audit_sha256={'e' * 64}",
                     f"icon_set_sha256={'1' * 64}",
+                    *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
+                    *(f"{key}={value}" for key, value in sorted(acceptance_identity().items())),
+                    *(
+                        f"{key}={value}"
+                        for key, value in sorted(
+                            formal_build_test_identity(self.formal_build_test_log).items()
+                        )
+                    ),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )
@@ -150,16 +307,59 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "certification-matrix.json",
             "assemble-taiji-certification-set.py",
             "validate-taiji-release-evidence.py",
+            "taiji-challenge-envelope.py",
             "signing-public.pem",
         ):
             (tools_dir / filename).write_text(f"fixture {filename}\n", encoding="utf-8")
 
+    @staticmethod
+    def write_source_archive(path: Path, payload: bytes = b"version = 1\n") -> None:
+        member = tarfile.TarInfo(
+            "taiji-agentv1.0/hermes-local-lab/sources/hermes-agent/uv.lock"
+        )
+        member.size = len(payload)
+        member.mode = 0o644
+        with tarfile.open(path, "w:gz") as archive:
+            archive.addfile(member, io.BytesIO(payload))
+
+    def write_source_inventory(self, archive: Path, inventory: Path) -> None:
+        inventory.unlink(missing_ok=True)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SOURCE_INTEGRITY_HELPER),
+                "create",
+                "--archive",
+                str(archive),
+                "--inventory",
+                str(inventory),
+                "--source-commit",
+                self.commit,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def write_evidence(self, **updates) -> None:
+        generated = datetime.now(timezone.utc)
+        challenge_envelope = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "publication",
+            "nonce": "ab" * 32,
+            "issued_at_utc": (generated - timedelta(minutes=5)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "expires_at_utc": (generated + timedelta(minutes=55)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "source_commit": self.commit,
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.sha256(self.deb),
+        }
         evidence = {
             "schema": "taiji-release-evidence/v3",
             "evidence_type": "single-deb-publication",
-            "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "generated_at_utc": generated.isoformat().replace("+00:00", "Z"),
             "challenge_nonce": "ab" * 32,
+            "challenge_envelope": challenge_envelope,
             "source_commit": self.commit,
             "version": "1.0.0",
             "architecture": "amd64",
@@ -171,11 +371,21 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "certification_set_sha256": "f" * 64,
             "certification_set_signature_basename": "certification-set.json.sig",
             "certification_set_signature_sha256": "1" * 64,
+            "ci_evidence_basename": self.ci_evidence.name,
+            "ci_evidence_sha256": self.sha256(self.ci_evidence),
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
             "customer_filename": self.deb.name,
             "customer_folder_contract": "exactly-one-deb",
-            "signing_public_key_fingerprint": "2" * 64,
-            "formal_gates": {"build": "PASS"},
+            "signing_public_key_fingerprint": "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da",
+            "formal_gates": {
+                "candidate_deb_unchanged": "PASS",
+                "canonical_policy": "PASS",
+                "certification_set": "PASS",
+                "certification_signature": "PASS",
+                "github_ci_gate": "PASS",
+                "manifest_binding": "PASS",
+            },
+            **toolchain_identity(),
         }
         evidence.update(updates)
         self.evidence.write_text(json.dumps(evidence), encoding="utf-8")
@@ -190,9 +400,64 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "source_archive": self.source_archive,
             "delivery_dir": self.delivery,
             "challenge": "ab" * 32,
+            "pre_sign": True,
         }
         values.update(updates)
         return argparse.Namespace(**values)
+
+    def test_signed_archive_window_is_not_invalidated_by_wall_clock_age(self):
+        old_generated = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        # A signed archive is evaluated in its signed publication time domain.
+        # Keep the physical CI trio coherent with that historical reference
+        # instead of mixing a current fixture into an old publication record.
+        write_github_ci_v2_bundle(
+            self.root,
+            self.commit,
+            now=old_generated - timedelta(minutes=1),
+        )
+        envelope = {
+            "schema": "taiji-signing-challenge/v1",
+            "purpose": "publication",
+            "nonce": "ab" * 32,
+            "issued_at_utc": (old_generated - timedelta(minutes=5)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "expires_at_utc": (old_generated + timedelta(minutes=5)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "source_commit": self.commit,
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.sha256(self.deb),
+        }
+        self.write_evidence(
+            generated_at_utc=old_generated.isoformat().replace("+00:00", "Z"),
+            challenge_envelope=envelope,
+        )
+        data = json.loads(self.evidence.read_text(encoding="utf-8"))
+        args = self.args(pre_sign=False)
+        binding = self.validator.validate_build_binding(args)
+
+        self.validator.validate_release_evidence_v3(data, self.evidence, args, binding)
+
+    def test_pre_sign_rejects_expired_or_future_publication_envelope(self):
+        now = datetime.now(timezone.utc)
+        for issued, expires, expected in (
+            (now - timedelta(hours=2), now - timedelta(hours=1), "expired"),
+            (now + timedelta(hours=1), now + timedelta(hours=2), "future"),
+        ):
+            with self.subTest(expected=expected):
+                envelope = json.loads(
+                    json.dumps(
+                        json.loads(self.evidence.read_text(encoding="utf-8"))[
+                            "challenge_envelope"
+                        ]
+                    )
+                )
+                envelope["issued_at_utc"] = issued.isoformat(timespec="seconds").replace("+00:00", "Z")
+                envelope["expires_at_utc"] = expires.isoformat(timespec="seconds").replace("+00:00", "Z")
+                self.write_evidence(challenge_envelope=envelope)
+                data = json.loads(self.evidence.read_text(encoding="utf-8"))
+                binding = self.validator.validate_build_binding(self.args())
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.validator.validate_release_evidence_v3(
+                        data, self.evidence, self.args(), binding
+                    )
 
     def run_cli(self, *extra):
         return subprocess.run(
@@ -248,6 +513,674 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("release-evidence-pre-sign-valid", result.stdout)
 
+    def test_v3_build_binding_rejects_delivery_root_swap_after_snapshot(self):
+        replica = self.root / "delivery-replica"
+        displaced = self.root / "delivery-displaced"
+        shutil.copytree(self.delivery, replica)
+        capture = self.validator._delivery_inventory_snapshot
+
+        def capture_then_swap(delivery_dir):
+            snapshot = capture(delivery_dir)
+            self.delivery.rename(displaced)
+            replica.rename(self.delivery)
+            return snapshot
+
+        with mock.patch.object(
+            self.validator,
+            "_delivery_inventory_snapshot",
+            side_effect=capture_then_swap,
+        ):
+            with self.assertRaisesRegex(self.validator.EvidenceError, "快照.*变化"):
+                self.validator.validate_build_binding(self.args())
+
+    def test_v3_build_binding_rejects_same_inode_control_payload_rewrite(self):
+        capture = self.validator._delivery_inventory_snapshot
+        for target in (self.build_marker, self.formal_build_test_log):
+            with self.subTest(target=target.name):
+                original = target.read_bytes()
+                inode = target.stat().st_ino
+
+                def capture_then_rewrite(delivery_dir, *, _target=target, _original=original):
+                    snapshot = capture(delivery_dir)
+                    replacement = bytes([_original[0] ^ 1]) + _original[1:]
+                    _target.write_bytes(replacement)
+                    self.assertEqual(_target.stat().st_ino, inode)
+                    return snapshot
+
+                with mock.patch.object(
+                    self.validator,
+                    "_delivery_inventory_snapshot",
+                    side_effect=capture_then_rewrite,
+                ):
+                    with self.assertRaisesRegex(
+                        self.validator.EvidenceError,
+                        "快照.*(?:身份|内容|变化)",
+                    ):
+                        self.validator.validate_build_binding(self.args())
+                target.write_bytes(original)
+
+    def test_v3_build_binding_rejects_new_member_after_snapshot(self):
+        capture = self.validator._delivery_inventory_snapshot
+
+        def capture_then_add_member(delivery_dir):
+            snapshot = capture(delivery_dir)
+            (self.package_dir / "unexpected-after-snapshot.txt").write_text(
+                "foreign\n",
+                encoding="utf-8",
+            )
+            return snapshot
+
+        with mock.patch.object(
+            self.validator,
+            "_delivery_inventory_snapshot",
+            side_effect=capture_then_add_member,
+        ):
+            with self.assertRaisesRegex(self.validator.EvidenceError, "快照.*(?:目录项|变化)"):
+                self.validator.validate_build_binding(self.args())
+
+    def test_inventory_helper_ignores_hostile_python_environment(self):
+        hostile = self.root / "hostile-python"
+        hostile.mkdir()
+        sentinel = self.root / "sitecustomize-executed"
+        (hostile / "sitecustomize.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        actual_run = subprocess.run
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOME": str(hostile),
+                "PYTHONPATH": str(hostile),
+                "PYTHONHOME": str(hostile / "fake-home"),
+                "BASH_ENV": str(hostile / "bash-env"),
+            },
+            clear=False,
+        ), mock.patch.object(
+            self.validator.subprocess,
+            "run",
+            wraps=actual_run,
+        ) as run:
+            digest = self.validator.delivery_inventory_sha256(self.delivery)
+
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertFalse(sentinel.exists())
+        helper_calls = [
+            call
+            for call in run.call_args_list
+            if call.args
+            and call.args[0][:3] == ["/usr/bin/python3", "-I", "-B"]
+            and "verify" in call.args[0]
+        ]
+        self.assertEqual(len(helper_calls), 1)
+        argv = helper_calls[0].args[0]
+        helper_env = helper_calls[0].kwargs["env"]
+        self.assertEqual(argv[:3], ["/usr/bin/python3", "-I", "-B"])
+        self.assertIn("--archive-fd", argv)
+        self.assertIn("--archive-basename", argv)
+        self.assertIn("--inventory-fd", argv)
+        self.assertNotIn("--archive", argv)
+        self.assertNotIn("--inventory", argv)
+        self.assertEqual(helper_env["PATH"], "/usr/bin:/bin")
+        for forbidden in ("PYTHONPATH", "PYTHONHOME", "BASH_ENV", "LD_PRELOAD"):
+            self.assertNotIn(forbidden, helper_env)
+
+    def _target_driver_v2_fixture(self):
+        checks = {
+            "visible_first_configuration_completion": True,
+            "desktop_launch": True,
+            "real_model_conversation": True,
+            "attachment_flow": True,
+            "window_close_exit": True,
+            "diagnostic_export": True,
+            "three_restart_cycles": True,
+            "second_instance_focus": True,
+            "model_configuration_state_consistent": True,
+            "no_new_electron_core": True,
+        }
+        restart_rounds = []
+        for round_number in range(1, 4):
+            restart_rounds.append(
+                {
+                    "round": round_number,
+                    "ready": True,
+                    "electron_pid": 4100 + round_number,
+                    "agent_pid": 4200 + round_number,
+                    "web_pid": 4300 + round_number,
+                    "secondary_pid": 4400 + round_number,
+                    "cdp_port": 15000 + round_number,
+                    "webui_port": 18000 + round_number,
+                    "second_instance_exit_code": 0,
+                    "electron_exit_code": 0,
+                    "restored_and_focused": True,
+                    "page_close_sent": True,
+                    "process_identities_gone": {
+                        "electron": True,
+                        "agent": True,
+                        "webui": True,
+                        "secondary": True,
+                    },
+                    "ports_closed": {"cdp": True, "webui": True},
+                    "pidfiles_absent": True,
+                    "model_config_observed": True,
+                    "profile_continuity_observed": True,
+                }
+            )
+        driver = {
+            "schema": "taiji.desktop.acceptance-driver.v2",
+            "acceptance_session_id": "b" * 32,
+            "challenge_nonce": "ab" * 32,
+            "electron_pid": restart_rounds[0]["electron_pid"],
+            "electron_executable": self.validator.ELECTRON_PATH,
+            "electron_executable_sha256": "c" * 64,
+            "desktop_entry_sha256": "d" * 64,
+            "app_url": "http://127.0.0.1:18001/?taiji_desktop=1",
+            "webui_origin": "http://127.0.0.1:18001",
+            "desktop_auth_cookie": {
+                "name": "taiji_desktop_token",
+                "present": True,
+                "http_only": True,
+                "same_site": "Strict",
+                "path": "/",
+                "value_format": "lowercase-hex-64",
+            },
+            "model": "deepseek-chat",
+            "attachment_probe_sha256": "e" * 64,
+            "agent_pid": restart_rounds[0]["agent_pid"],
+            "web_pid": restart_rounds[0]["web_pid"],
+            "screenshot_basename": self.validator.SCREENSHOT_BASENAME,
+            "diagnostic_basename": self.validator.DIAGNOSTIC_BASENAME,
+            "restart_rounds": restart_rounds,
+            "persistent_user_data": {
+                "mode": "electron-default-persistent",
+                "restart_rounds": 3,
+                "user_data_override": False,
+                "profile_reset": False,
+                "environment_reused": True,
+                "continuity_observed_rounds": 3,
+                "continuity_token": "f" * 64,
+            },
+            "core_observation": {
+                "status": "verified",
+                "mechanism": "journalctl-json-user-electron",
+                "baseline_entry_count": 0,
+                "baseline_cursor_set_token": "1" * 64,
+                "rounds": [
+                    {
+                        "round": round_number,
+                        "status": "verified",
+                        "added_entry_count": 0,
+                        "cursor_set_token": str(round_number + 1) * 64,
+                    }
+                    for round_number in range(1, 4)
+                ],
+            },
+            "model_config_observation": {
+                "observed_rounds": 3,
+                "consistent": True,
+                "public_projection_token": "5" * 64,
+            },
+            "checks": checks,
+            "js_error_count": 0,
+            "unexpected_http_failures": 0,
+            "electron_exit_code": 0,
+        }
+        data = {
+            "acceptance_session_id": driver["acceptance_session_id"],
+            "challenge_nonce": driver["challenge_nonce"],
+            "electron_executable_sha256": driver["electron_executable_sha256"],
+            "desktop_entry_sha256": driver["desktop_entry_sha256"],
+            "screenshot_basename": driver["screenshot_basename"],
+            "diagnostic_basename": driver["diagnostic_basename"],
+            **checks,
+        }
+        session = {
+            "electron_pid": driver["electron_pid"],
+            "js_error_count": 0,
+            "unexpected_http_failures": 0,
+            "checks": dict(checks),
+        }
+        return data, session, driver
+
+    def test_release_validator_accepts_only_complete_target_driver_v2(self):
+        data, session, driver = self._target_driver_v2_fixture()
+        self.validator.validate_target_driver(data, session, driver)
+
+        legacy = copy.deepcopy(driver)
+        legacy["schema"] = "taiji.desktop.acceptance-driver.v1"
+        with self.assertRaisesRegex(self.validator.EvidenceError, "schema"):
+            self.validator.validate_target_driver(data, session, legacy)
+
+        expected_checks = {
+            "three_restart_cycles",
+            "second_instance_focus",
+            "model_configuration_state_consistent",
+            "no_new_electron_core",
+        }
+        self.assertTrue(expected_checks <= self.validator.TARGET_CHECK_KEYS)
+        self.assertTrue(expected_checks <= self.validator.TARGET_KEYS)
+
+    def test_release_validator_rejects_target_driver_v2_downgrades(self):
+        data, session, driver = self._target_driver_v2_fixture()
+        mutations = []
+
+        changed = copy.deepcopy(driver)
+        changed["restart_rounds"][1]["ports_closed"]["webui"] = False
+        mutations.append(changed)
+        changed = copy.deepcopy(driver)
+        changed["persistent_user_data"]["continuity_observed_rounds"] = 2
+        mutations.append(changed)
+        changed = copy.deepcopy(driver)
+        changed["core_observation"]["status"] = "unverified"
+        mutations.append(changed)
+        changed = copy.deepcopy(driver)
+        changed["model_config_observation"]["consistent"] = False
+        mutations.append(changed)
+        changed = copy.deepcopy(driver)
+        changed["checks"]["second_instance_focus"] = False
+        mutations.append(changed)
+
+        for candidate in mutations:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(self.validator.EvidenceError):
+                    self.validator.validate_target_driver(data, session, candidate)
+
+        changed_session = copy.deepcopy(session)
+        changed_session["checks"]["three_restart_cycles"] = False
+        with self.assertRaises(self.validator.EvidenceError):
+            self.validator.validate_target_driver(data, changed_session, driver)
+
+        changed_data = copy.deepcopy(data)
+        changed_data["no_new_electron_core"] = False
+        with self.assertRaises(self.validator.EvidenceError):
+            self.validator.validate_target_driver(changed_data, session, driver)
+
+    def _positive_certification_bundle_fixture(self):
+        _data, _session, driver = self._target_driver_v2_fixture()
+        challenge = "ab" * 32
+        commitment = "6" * 64
+        fingerprint = hashlib.sha256(
+            (challenge + "\0" + commitment).encode("utf-8")
+        ).hexdigest()
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+        checks = {key: "PASS" for key in self.validator.TARGET_CHECK_KEYS}
+        checks.update({"preflight": "PASS", "install": "PASS"})
+        security_facts = {
+            "administrator_available": True,
+            "business_data_mutation": False,
+            "graphical_desktop": True,
+            "network_observation": "continuous-process-sampling-no-non-loopback-up",
+            "package_manager": "dpkg",
+            "security_profile": "supported-default",
+        }
+        record = {
+            "schema": "taiji-linux-environment-evidence/v2",
+            "category_id": "kylin-min-ukui",
+            "category_kind": "positive",
+            "compatibility": "COMPATIBLE",
+            "source_commit": self.commit,
+            "version": "1.0.0",
+            "architecture": "amd64",
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.sha256(self.deb),
+            "compatibility_policy_id": self.policy_id,
+            "compatibility_policy_sha256": self.policy_sha256,
+            "machine_identity_commitment_sha256": commitment,
+            "os_id": "kylin",
+            "os_version": "v10/2403",
+            "desktop_environment": "UKUI",
+            "security_facts": security_facts,
+            "checks": checks,
+            "attachments": [],
+            "challenge_nonce": challenge,
+            "acceptance_session_id": driver["acceptance_session_id"],
+            "machine_fingerprint_sha256": fingerprint,
+        }
+        environment_observation = {
+            key: record[key]
+            for key in (
+                "category_id",
+                "category_kind",
+                "compatibility",
+                "source_commit",
+                "version",
+                "architecture",
+                "deb_basename",
+                "deb_sha256",
+                "compatibility_policy_id",
+                "compatibility_policy_sha256",
+                "machine_identity_commitment_sha256",
+                "os_id",
+                "os_version",
+                "desktop_environment",
+                "security_facts",
+            )
+        }
+        environment_observation.update(
+            {
+                "schema": "taiji-linux-environment-observation/v1",
+                "checks": {"preflight": "PASS", "install": "PASS"},
+                "attachments": [],
+            }
+        )
+        install_observation = {
+            "schema": "taiji.single-deb-install-observation/v2",
+            "generated_at_utc": timestamp,
+            "started_at_utc": timestamp,
+            "completed_at_utc": timestamp,
+            "challenge_nonce": challenge,
+            "machine_identity_commitment_sha256": commitment,
+            "machine_fingerprint_sha256": fingerprint,
+            "boot_fingerprint_sha256": "8" * 64,
+            "target_uid": 1000,
+            "canonical_home_fingerprint_sha256": "a" * 64,
+            "user_state_paths_fingerprint_sha256": "b" * 64,
+            "source_commit": self.commit,
+            "manifest_sha256": "7" * 64,
+            "deb_observed_basename": self.deb.name,
+            "deb_sha256": self.sha256(self.deb),
+            "candidate_file_count": 1,
+            "additional_install_files_observed": False,
+            "package_status_before": "not-installed",
+            "package_status_after": "install ok installed",
+            "package_status_transitions": ["not-installed", "install ok installed"],
+            "network_observation": "continuous-process-sampling-no-non-loopback-up",
+            "network_sample_interval_ms": 100,
+            "network_sample_count": 3,
+            "user_state_before": "absent",
+            "user_state_after_install_before_first_launch": "absent",
+            "first_launch_eligible": True,
+            "installation_method_machine_observed": False,
+            "observation_process_continuous": True,
+        }
+        payloads = {
+            "environment-observation.json": (
+                json.dumps(environment_observation, sort_keys=True) + "\n"
+            ).encode("utf-8"),
+            "single-deb-install-observation.json": (
+                json.dumps(install_observation, sort_keys=True) + "\n"
+            ).encode("utf-8"),
+            "single-deb-graphical-installer.png": png_fixture(),
+            "desktop-app.png": png_fixture(),
+            "desktop-driver-result.json": (
+                json.dumps(driver, sort_keys=True) + "\n"
+            ).encode("utf-8"),
+            "taiji-support-bundle.json": (
+                json.dumps(
+                    {
+                        "schema": "taiji.product.support-bundle.v1",
+                        "manifest": {
+                            "redacted": True,
+                            "logs_included": False,
+                            "paths_included": False,
+                            "secrets_included": False,
+                        },
+                        "diagnostics": {
+                            "schema": "taiji.product.diagnostics.v1",
+                            "generated_at": timestamp,
+                            "incident_id": "inc-0123456789ab",
+                            "overall": "ready",
+                            "components": [
+                                {"id": "webui", "label": "桌面界面", "status": "ready"},
+                                {"id": "agent", "label": "智能体服务", "status": "ready"},
+                                {"id": "gateway", "label": "本地任务服务", "status": "ready"},
+                                {"id": "license", "label": "授权状态", "status": "ready"},
+                                {"id": "docx", "label": "文档引擎", "status": "ready"},
+                                {"id": "skills", "label": "专家能力", "status": "ready"},
+                                {"id": "node", "label": "运行环境", "status": "ready"},
+                            ],
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8"),
+        }
+        observation_hash = hashlib.sha256(
+            payloads["single-deb-install-observation.json"]
+        ).hexdigest()
+        graphical_hash = hashlib.sha256(
+            payloads["single-deb-graphical-installer.png"]
+        ).hexdigest()
+        attestation = {
+            "schema": "taiji.single-deb-install-method-attestation.v1",
+            "generated_at_utc": timestamp,
+            "observation_basename": "single-deb-install-observation.json",
+            "observation_sha256": observation_hash,
+            "challenge_nonce": challenge,
+            "machine_fingerprint_sha256": fingerprint,
+            "boot_fingerprint_sha256": install_observation["boot_fingerprint_sha256"],
+            "deb_sha256": self.sha256(self.deb),
+            "installation_method_attested": "desktop-double-click",
+            "installation_method_machine_observed": False,
+            "attestation_scope": "human-observed-system-graphical-installer",
+            "operator_id": "operator-001",
+            "confirmation": True,
+            "graphical_installer_evidence_basename": "single-deb-graphical-installer.png",
+            "graphical_installer_evidence_sha256": graphical_hash,
+        }
+        payloads["single-deb-install-method-attestation.json"] = (
+            json.dumps(attestation, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        target = {
+            "schema": "taiji-linux-target-verification/v2",
+            "evidence_type": "target-desktop-environment",
+            "generated_at_utc": timestamp,
+            "acceptance_session_id": record["acceptance_session_id"],
+            "challenge_nonce": challenge,
+            "machine_identity_commitment_sha256": commitment,
+            "machine_fingerprint_sha256": fingerprint,
+            "release_artifacts_sha256": "9" * 64,
+            "category_id": record["category_id"],
+            "category_kind": "positive",
+            "compatibility": "COMPATIBLE",
+            "source_commit": self.commit,
+            "version": "1.0.0",
+            "architecture": "amd64",
+            "deb_basename": self.deb.name,
+            "deb_sha256": self.sha256(self.deb),
+            "compatibility_policy_id": self.policy_id,
+            "compatibility_policy_sha256": self.policy_sha256,
+            "os_id": record["os_id"],
+            "os_version": record["os_version"],
+            "desktop_environment": record["desktop_environment"],
+            "installation_method": "desktop-double-click",
+            "installation_method_evidence": "human-attestation",
+            "installation_method_machine_observed": False,
+            "checks": dict(driver["checks"]),
+        }
+        pointers = {
+            "environment_observation": "environment-observation.json",
+            "install_observation": "single-deb-install-observation.json",
+            "install_method_attestation": "single-deb-install-method-attestation.json",
+            "graphical_installer_evidence": "single-deb-graphical-installer.png",
+            "driver_result": "desktop-driver-result.json",
+            "screenshot": "desktop-app.png",
+            "diagnostic": "taiji-support-bundle.json",
+        }
+        for field, basename in pointers.items():
+            target[field + "_basename"] = basename
+            target[field + "_sha256"] = hashlib.sha256(payloads[basename]).hexdigest()
+        payloads["target-verification.json"] = (
+            json.dumps(target, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        record["attachments"] = [
+            {"basename": basename, "sha256": hashlib.sha256(payload).hexdigest()}
+            for basename, payload in sorted(payloads.items())
+        ]
+        return record, payloads
+
+    def _positive_bundle_inputs(self, payloads):
+        png_basenames = {
+            "single-deb-graphical-installer.png",
+            "desktop-app.png",
+        }
+        json_payloads = {
+            basename: payload
+            for basename, payload in payloads.items()
+            if basename not in png_basenames
+        }
+        png_evidence = {}
+        for basename in png_basenames:
+            payload = payloads[basename]
+            self.validator.validate_png(payload)
+            width, height, _depth, color_type, _compression, _filtering, _interlace = struct.unpack(
+                ">IIBBBBB", payload[16:29]
+            )
+            png_evidence[basename] = self.validator.ValidatedPngEvidence(
+                sha256=hashlib.sha256(payload).hexdigest(),
+                size=len(payload),
+                width=width,
+                height=height,
+                color_type=color_type,
+            )
+        return json_payloads, png_evidence
+
+    def test_positive_certification_bundle_is_recursively_validated_not_hash_only(self):
+        record, payloads = self._positive_certification_bundle_fixture()
+        self.validator.validate_positive_certification_bundle(
+            record,
+            *self._positive_bundle_inputs(payloads),
+            expected_release_artifacts_sha256="9" * 64,
+            expected_manifest_sha256="7" * 64,
+            expected_electron_executable_sha256="c" * 64,
+            expected_desktop_entry_sha256="d" * 64,
+        )
+
+        legacy_record = copy.deepcopy(record)
+        legacy_record["schema"] = "taiji-linux-environment-evidence/v1"
+        with self.assertRaisesRegex(self.validator.EvidenceError, "schema"):
+            self.validator.validate_positive_certification_bundle(
+                legacy_record,
+                *self._positive_bundle_inputs(payloads),
+                expected_release_artifacts_sha256="9" * 64,
+                expected_manifest_sha256="7" * 64,
+                expected_electron_executable_sha256="c" * 64,
+                expected_desktop_entry_sha256="d" * 64,
+            )
+
+    def test_positive_certification_rejects_png_magic_only_and_shallow_support_bundle(self):
+        def rebind(record, payloads):
+            attestation = json.loads(
+                payloads["single-deb-install-method-attestation.json"].decode("utf-8")
+            )
+            attestation["graphical_installer_evidence_sha256"] = hashlib.sha256(
+                payloads["single-deb-graphical-installer.png"]
+            ).hexdigest()
+            payloads["single-deb-install-method-attestation.json"] = (
+                json.dumps(attestation, sort_keys=True) + "\n"
+            ).encode("utf-8")
+            target = json.loads(payloads["target-verification.json"].decode("utf-8"))
+            pointers = {
+                "environment_observation": "environment-observation.json",
+                "install_observation": "single-deb-install-observation.json",
+                "install_method_attestation": "single-deb-install-method-attestation.json",
+                "graphical_installer_evidence": "single-deb-graphical-installer.png",
+                "driver_result": "desktop-driver-result.json",
+                "screenshot": "desktop-app.png",
+                "diagnostic": "taiji-support-bundle.json",
+            }
+            for field, basename in pointers.items():
+                target[field + "_sha256"] = hashlib.sha256(payloads[basename]).hexdigest()
+            payloads["target-verification.json"] = (
+                json.dumps(target, sort_keys=True) + "\n"
+            ).encode("utf-8")
+            record["attachments"] = [
+                {"basename": basename, "sha256": hashlib.sha256(payload).hexdigest()}
+                for basename, payload in sorted(payloads.items())
+            ]
+
+        record, payloads = self._positive_certification_bundle_fixture()
+        forged_pngs = dict(payloads)
+        forged_pngs["single-deb-graphical-installer.png"] = b"\x89PNG\r\n\x1a\nnot-an-image"
+        forged_pngs["desktop-app.png"] = b"\x89PNG\r\n\x1a\nnot-an-image"
+        rebind(record, forged_pngs)
+        with self.assertRaisesRegex(self.validator.EvidenceError, "PNG"):
+            self.validator.validate_positive_certification_bundle(
+                record,
+                *self._positive_bundle_inputs(forged_pngs),
+                expected_release_artifacts_sha256="9" * 64,
+                expected_manifest_sha256="7" * 64,
+                expected_electron_executable_sha256="c" * 64,
+                expected_desktop_entry_sha256="d" * 64,
+            )
+
+        forged_support = dict(payloads)
+        forged_support["taiji-support-bundle.json"] = (
+            json.dumps(
+                {
+                    "schema": "taiji.product.support-bundle.v1",
+                    "manifest": {"redacted": True},
+                    "diagnostics": {"overall": "ready"},
+                }
+            )
+            + "\n"
+        ).encode("utf-8")
+        rebind(record, forged_support)
+        with self.assertRaisesRegex(self.validator.EvidenceError, "manifest|diagnostics"):
+            self.validator.validate_positive_certification_bundle(
+                record,
+                *self._positive_bundle_inputs(forged_support),
+                expected_release_artifacts_sha256="9" * 64,
+                expected_manifest_sha256="7" * 64,
+                expected_electron_executable_sha256="c" * 64,
+                expected_desktop_entry_sha256="d" * 64,
+            )
+
+        forged_record = copy.deepcopy(record)
+        forged_record["machine_identity_commitment_sha256"] = "4" * 64
+        forged_record["machine_fingerprint_sha256"] = hashlib.sha256(
+            (
+                forged_record["challenge_nonce"]
+                + "\0"
+                + forged_record["machine_identity_commitment_sha256"]
+            ).encode("utf-8")
+        ).hexdigest()
+        forged_payloads = {
+            basename: ("evidence:" + basename).encode("utf-8")
+            for basename in payloads
+        }
+        forged_record["attachments"] = [
+            {"basename": basename, "sha256": hashlib.sha256(payload).hexdigest()}
+            for basename, payload in sorted(forged_payloads.items())
+        ]
+        with self.assertRaises(self.validator.EvidenceError):
+            self.validator.validate_positive_certification_bundle(
+                forged_record,
+                *self._positive_bundle_inputs(forged_payloads),
+                expected_release_artifacts_sha256="9" * 64,
+                expected_manifest_sha256="7" * 64,
+                expected_electron_executable_sha256="c" * 64,
+                expected_desktop_entry_sha256="d" * 64,
+            )
+
+    def test_streaming_png_validator_rejects_bad_crc_truncation_and_trailing_data(self):
+        valid = png_fixture()
+        bad_crc = bytearray(valid)
+        bad_crc[-8] ^= 1
+        cases = {
+            "bad CRC": bytes(bad_crc),
+            "truncated": valid[:-5],
+            "trailing": valid + b"trailing-bytes",
+        }
+        for label, payload in cases.items():
+            with self.subTest(label=label):
+                candidate = self.root / (label.replace(" ", "-") + ".png")
+                candidate.write_bytes(payload)
+                descriptor = os.open(candidate, os.O_RDONLY)
+                try:
+                    with self.assertRaises(self.validator.EvidenceError):
+                        self.validator.validate_png_descriptor(
+                            descriptor,
+                            os.fstat(descriptor),
+                            "streaming PNG",
+                        )
+                finally:
+                    os.close(descriptor)
+
     def test_v3_rejects_target_baseline_fields(self):
         self.write_manifest(target_baseline_profile_id="legacy-profile")
         with self.assertRaisesRegex(self.validator.EvidenceError, "target baseline"):
@@ -263,6 +1196,86 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         result = self.run_cli()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("canonical policy", result.stderr)
+
+    def test_v3_rejects_missing_or_nonpass_ci_formal_gate(self):
+        for gates in (
+            {},
+            {
+                "candidate_deb_unchanged": "PASS",
+                "canonical_policy": "PASS",
+                "certification_set": "PASS",
+                "certification_signature": "PASS",
+                "github_ci_gate": "FAIL",
+                "manifest_binding": "PASS",
+            },
+        ):
+            with self.subTest(gates=gates):
+                self.write_evidence(formal_gates=gates)
+                result = self.run_cli()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("formal_gates", result.stderr)
+
+    def test_v3_rejects_ci_file_tamper_or_wrong_head_sha(self):
+        ci = json.loads(self.ci_evidence.read_text(encoding="utf-8"))
+        ci["head_sha"] = "b" * 40
+        self.ci_evidence.write_text(json.dumps(ci) + "\n", encoding="utf-8")
+        self.write_evidence(ci_evidence_sha256=self.sha256(self.ci_evidence))
+
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CI", result.stderr)
+
+    def test_v3_rejects_arbitrary_or_partial_formal_gate_claims(self):
+        binding = self.validator.validate_build_binding(self.args())
+        data = json.loads(self.evidence.read_text(encoding="utf-8"))
+        data["formal_gates"] = {"x": "PASS"}
+
+        with self.assertRaisesRegex(self.validator.EvidenceError, "formal_gates"):
+            self.validator.validate_release_evidence_v3(
+                data,
+                self.evidence,
+                self.args(),
+                binding,
+            )
+
+    def test_old_v3_without_strict_toolchain_is_rejected_not_upgraded(self):
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest.pop("uv_executable_sha256")
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        downgraded = self.manifest.read_bytes()
+
+        with self.assertRaisesRegex(self.validator.EvidenceError, "工具链|toolchain"):
+            self.validator.validate_build_binding(self.args())
+        self.assertNotIn("uv_executable_sha256", json.loads(self.manifest.read_text()))
+        self.assertEqual(self.manifest.read_bytes(), downgraded)
+
+    def test_v3_rejects_missing_installed_acceptance_identity(self):
+        for field in sorted(acceptance_identity()):
+            with self.subTest(field=field):
+                self.write_manifest()
+                manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+                manifest.pop(field)
+                self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    self.validator.EvidenceError,
+                    "安装态验收|acceptance",
+                ):
+                    self.validator.validate_build_binding(self.args())
+
+    def test_v3_rejects_installed_acceptance_marker_drift(self):
+        field = "acceptance_binding_sha256"
+        marker = self.build_marker.read_text(encoding="utf-8")
+        self.build_marker.write_text(
+            marker.replace(
+                f"{field}={acceptance_identity()[field]}",
+                f"{field}={'6' * 64}",
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(self.validator.EvidenceError, "构建成功标记"):
+            self.validator.validate_build_binding(self.args())
 
     def test_v3_build_binding_rejects_old_or_wrong_named_source_archive(self):
         wrong_archive = self.delivery / "taiji-agentv1.0-kylin-build-src-bbbbbbb.tar.gz"
@@ -288,6 +1301,36 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(self.validator.EvidenceError, "source_commit|\u6784\u5efa\u6210\u529f\u6807\u8bb0"):
+            self.validator.validate_build_binding(self.args())
+
+    def test_v3_build_binding_rejects_source_archive_lock_drift(self):
+        old_source_sha = self.sha256(self.source_archive)
+        self.write_source_archive(self.source_archive, b"version = 2\n")
+        self.write_source_inventory(self.source_archive, self.source_inventory)
+        new_source_sha = self.sha256(self.source_archive)
+        new_inventory_sha = self.sha256(self.source_inventory)
+        (self.delivery / "SHA256SUMS.txt").write_text(
+            f"{new_source_sha}  {self.source_archive.name}\n"
+            f"{new_inventory_sha}  {self.source_inventory.name}\n",
+            encoding="ascii",
+        )
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["source_archive_sha256"] = new_source_sha
+        manifest["source_inventory_sha256"] = new_inventory_sha
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        marker = self.build_marker.read_text(encoding="utf-8")
+        self.build_marker.write_text(
+            marker.replace(
+                f"source_sha256={old_source_sha}",
+                f"source_sha256={new_source_sha}",
+            ).replace(
+                next(line for line in marker.splitlines() if line.startswith("source_inventory_sha256=")),
+                f"source_inventory_sha256={new_inventory_sha}",
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(self.validator.EvidenceError, "uv.lock|lock"):
             self.validator.validate_build_binding(self.args())
 
     def test_delivery_copy_fallback_uses_current_canonical_policy_identity(self):
@@ -330,9 +1373,13 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         for filename in root_files:
             (delivery / filename).write_text(f"fixture {filename}\n", encoding="utf-8")
         source_archive = delivery / f"taiji-agentv1.0-kylin-build-src-{self.commit}.tar.gz"
-        source_archive.write_bytes(b"source fixture\n")
+        self.write_source_archive(source_archive)
+        source_inventory = delivery / f"taiji-agentv1.0-kylin-build-src-{self.commit}.inventory.json"
+        self.write_source_inventory(source_archive, source_inventory)
+        shutil.copy2(SOURCE_INTEGRITY_HELPER, delivery / SOURCE_INTEGRITY_HELPER.name)
         (delivery / "SHA256SUMS.txt").write_text(
-            f"{self.sha256(source_archive)}  {source_archive.name}\n",
+            f"{self.sha256(source_archive)}  {source_archive.name}\n"
+            f"{self.sha256(source_inventory)}  {source_inventory.name}\n",
             encoding="ascii",
         )
 
@@ -348,14 +1395,28 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "version": "1.0.0",
             "architecture": "amd64",
             "source_commit": self.commit,
+            "source_archive_basename": source_archive.name,
+            "source_archive_sha256": self.sha256(source_archive),
+            "source_inventory_basename": source_inventory.name,
+            "source_inventory_sha256": self.sha256(source_inventory),
             "deb_basename": deb.name,
             "deb_sha256": self.sha256(deb),
             "compatibility_policy_id": self.policy_id,
             "compatibility_policy_sha256": self.policy_sha256,
+            "upgrade_data_contract_id": "taiji-upgrade-data-contract-v1",
+            "upgrade_data_contract_sha256": "6" * 64,
+            "elf_abi_audit_basename": "elf-abi-audit.json",
             "elf_abi_audit_sha256": "e" * 64,
             "icon_set_sha256": "1" * 64,
+            "desktop_entry_sha256": "d" * 64,
+            "built_at_utc": "2026-08-05T00:00:00Z",
             "maintainer": "Taiji Agent Product Team <noreply@localhost>",
+            **toolchain_identity(),
+            **acceptance_identity(),
         }
+        formal_log = package_dir / "formal-build-tests.log"
+        formal_log.write_bytes(formal_build_test_log(self.commit))
+        manifest.update(formal_build_test_identity(formal_log))
         (package_dir / "taiji-package-manifest.json").write_text(
             json.dumps(manifest),
             encoding="utf-8",
@@ -367,6 +1428,8 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"source_archive={source_archive.name}",
                     f"source_sha256={self.sha256(source_archive)}",
                     f"source_commit={self.commit}",
+                    f"source_inventory={source_inventory.name}",
+                    f"source_inventory_sha256={self.sha256(source_inventory)}",
                     f"deb={deb.name}",
                     f"deb_sha256={self.sha256(deb)}",
                     f"checksum={deb.name}.sha256",
@@ -376,6 +1439,12 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
                     f"compatibility_policy_sha256={self.policy_sha256}",
                     f"elf_abi_audit_sha256={'e' * 64}",
                     f"icon_set_sha256={'1' * 64}",
+                    *(f"{key}={value}" for key, value in sorted(toolchain_identity().items())),
+                    *(f"{key}={value}" for key, value in sorted(acceptance_identity().items())),
+                    *(
+                        f"{key}={value}"
+                        for key, value in sorted(formal_build_test_identity(formal_log).items())
+                    ),
                     "maintainer=Taiji Agent Product Team <noreply@localhost>",
                 )
             )
@@ -391,6 +1460,7 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
             "certification-matrix.json",
             "assemble-taiji-certification-set.py",
             "validate-taiji-release-evidence.py",
+            "taiji-challenge-envelope.py",
             "signing-public.pem",
         ):
             (tools_dir / filename).write_text(f"fixture {filename}\n", encoding="utf-8")
@@ -398,6 +1468,23 @@ class ReleaseEvidenceSchemaV3Test(unittest.TestCase):
         digest = self.validator.delivery_inventory_sha256(delivery)
         self.assertRegex(digest, r"^[0-9a-f]{64}$")
         self.assertFalse((delivery / "离线依赖").exists())
+
+        certification = delivery / "certification"
+        certification.mkdir()
+        (certification / "certification-set.json").write_text("{}\n", encoding="utf-8")
+        (delivery / "release-evidence.json").write_text("{}\n", encoding="utf-8")
+        (delivery / "release-evidence.json.sig").write_bytes(b"signature")
+        self.assertEqual(
+            self.validator.delivery_inventory_sha256(delivery),
+            digest,
+            "post-build certification and signed publication evidence must not drift the build inventory",
+        )
+        (delivery / "release-evidence.json.bak").write_text("{}\n", encoding="utf-8")
+        self.assertNotEqual(
+            self.validator.delivery_inventory_sha256(delivery),
+            digest,
+            "lookalike publication files must remain part of the build inventory",
+        )
 
 
 if __name__ == "__main__":

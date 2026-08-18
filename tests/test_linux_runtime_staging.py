@@ -497,7 +497,13 @@ class LinuxRuntimeStagingTest(unittest.TestCase):
         self.assertIn("TAIJI_PACKAGED_NODE_ROOT", build)
         self.assertIn('NODE_VERSION="22.23.1"', offline)
         self.assertIn(NODE_ARCHIVE_SHA256, offline)
-        self.assertIn('TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current"', offline)
+        self.assertIn('packaged_node_root="$(readlink -f "$NODE_ROOT/current")"', offline)
+        self.assertIn(
+            '[ -d "$packaged_node_root" ] && [ ! -L "$packaged_node_root" ]',
+            offline,
+        )
+        self.assertIn('TAIJI_PACKAGED_NODE_ROOT="$packaged_node_root"', offline)
+        self.assertNotIn('TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current"', offline)
         self.assertNotIn('release_dir="latest-v${NODE_MAJOR}.x"', offline)
 
     def test_public_key_fingerprint_contract_is_exact(self) -> None:

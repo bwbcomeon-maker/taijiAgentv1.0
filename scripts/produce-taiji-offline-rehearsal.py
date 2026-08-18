@@ -25,15 +25,22 @@ ROOT = Path(__file__).resolve().parents[1]
 TRUSTED_GIT = ROOT / "scripts" / "taiji-trusted-git"
 VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
 POLICY_HELPER = ROOT / "packaging" / "linux" / "compatibility_policy.py"
+RELEASE_PUBLIC_KEY = ROOT / "tools" / "taiji-release-evidence" / "signing-public.pem"
+PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT = (
+    "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+)
+TRUSTED_OPENSSL = Path("/usr/bin/openssl")
 IMAGE_ROLE_LABEL = "offline-rehearsal-v1"
 IMAGE_BASELINE_LABEL = "ubuntu-20.04"
 IMAGE_FIXTURE_LABEL = "kylin-os-release-v1"
 REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
 SESSION_BASENAME = "offline-install-rehearsal-session.json"
+LIFECYCLE_BASENAME = "offline-install-rehearsal-lifecycle.json"
 EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 OFFLINE_SESSION_KEYS = {
     "schema",
     "generated_at_utc",
@@ -66,18 +73,114 @@ def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def load_json(path: Path, label: str) -> dict[str, Any]:
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def resolve_trusted_openssl() -> str:
+    """Resolve only the root-managed fixed OpenSSL admission executable."""
+
+    for directory in (Path("/usr"), Path("/usr/bin")):
+        try:
+            metadata = directory.lstat()
+        except OSError as exc:
+            raise ProducerError(f"可信 openssl 目录不可读取：{directory}: {exc}") from exc
+        if (
+            directory.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_mode & 0o022
+        ):
+            raise ProducerError(f"可信 openssl 目录不是 root 管理的只读系统目录：{directory}")
+
     try:
-        file_stat = path.lstat()
+        alias = TRUSTED_OPENSSL.lstat()
+    except OSError as exc:
+        raise ProducerError(f"缺少固定可信 openssl：{TRUSTED_OPENSSL}: {exc}") from exc
+    if alias.st_uid != 0 or alias.st_nlink != 1:
+        raise ProducerError(f"固定 openssl 必须是 root-owned 单链接入口：{TRUSTED_OPENSSL}")
+    if not (stat.S_ISREG(alias.st_mode) or stat.S_ISLNK(alias.st_mode)):
+        raise ProducerError(f"固定 openssl 入口类型不可信：{TRUSTED_OPENSSL}")
+    if stat.S_ISREG(alias.st_mode) and alias.st_mode & 0o022:
+        raise ProducerError(f"固定 openssl 可被组或其他用户写入：{TRUSTED_OPENSSL}")
+    try:
+        resolved = TRUSTED_OPENSSL.resolve(strict=True)
+        resolved_metadata = resolved.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise ProducerError(f"固定 openssl 无法解析到可信实体：{exc}") from exc
+    if resolved.parent != Path("/usr/bin"):
+        raise ProducerError(f"固定 openssl 解析后逃离 /usr/bin：{resolved}")
+    if (
+        resolved.is_symlink()
+        or not stat.S_ISREG(resolved_metadata.st_mode)
+        or resolved_metadata.st_uid != 0
+        or resolved_metadata.st_nlink != 1
+        or not resolved_metadata.st_mode & 0o111
+        or resolved_metadata.st_mode & 0o022
+    ):
+        raise ProducerError(f"固定 openssl 实体不是 root 管理的单链接可执行普通文件：{resolved}")
+    return str(resolved)
+
+
+def read_regular_bytes(path: Path, label: str, *, max_bytes: int = 1024 * 1024) -> bytes:
+    """Read one bounded regular file without switching pathnames mid-read."""
+
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ProducerError(f"{label} 必须是单链接普通文件：{path}")
+        if before.st_size <= 0 or before.st_size > max_bytes:
+            raise ProducerError(f"{label} 大小不合法：{path}")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+    except ProducerError:
+        raise
     except OSError as exc:
         raise ProducerError(f"{label} 不存在或不可读取：{path}: {exc}") from exc
-    if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink() or file_stat.st_nlink != 1:
-        raise ProducerError(f"{label} 必须是单链接普通文件：{path}")
-    if file_stat.st_size <= 0 or file_stat.st_size > 1024 * 1024:
-        raise ProducerError(f"{label} 大小不合法：{path}")
+
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=strict_object)
-    except (OSError, UnicodeError, json.JSONDecodeError, ProducerError) as exc:
+        opened = os.fstat(descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            raise ProducerError(f"{label} 在打开时发生替换：{path}")
+        remaining = before.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ProducerError(f"{label} 读取期间被截断：{path}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ProducerError(f"{label} 读取期间大小发生变化：{path}")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            _file_identity(after) != _file_identity(before)
+            or _file_identity(current) != _file_identity(before)
+        ):
+            raise ProducerError(f"{label} 读取期间发生变化：{path}")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ProducerError(f"{label} 读取失败：{path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
+def load_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        raw = read_regular_bytes(path, label)
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    except (UnicodeError, json.JSONDecodeError, ProducerError) as exc:
         raise ProducerError(f"{label} 无法严格解析：{exc}") from exc
     if type(payload) is not dict:
         raise ProducerError(f"{label} 顶层必须是 JSON object")
@@ -181,12 +284,198 @@ def load_policy_identity(path: Path) -> tuple[str, str]:
 def parse_sha256_sidecar(path: Path, expected_file: Path, expected_hash: str) -> None:
     sidecar = resolve_regular_file(path, "previous DEB SHA256 sidecar")
     try:
-        text = sidecar.read_text(encoding="ascii")
-    except (OSError, UnicodeError) as exc:
+        text = read_regular_bytes(
+            sidecar, "previous DEB SHA256 sidecar", max_bytes=4096
+        ).decode("ascii")
+    except (ProducerError, UnicodeError) as exc:
         raise ProducerError(f"previous DEB SHA256 sidecar 无法读取：{sidecar}") from exc
     match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?", text)
     if not match or match.group(1) != expected_hash or match.group(2) != expected_file.name:
         raise ProducerError("previous DEB SHA256 sidecar 未准确绑定 previous DEB basename 和内容")
+
+
+def verify_previous_detached_signature(previous: Path, signature: Path) -> str:
+    """Verify the supplied N-1 signature against the tracked release trust root."""
+
+    previous = resolve_regular_file(previous, "previous DEB")
+    signature = resolve_regular_file(signature, "previous DEB detached signature")
+    expected_signature_name = f"{previous.name}.sig"
+    if signature.name != expected_signature_name:
+        raise ProducerError(
+            "previous DEB detached signature basename 必须是 "
+            f"{expected_signature_name}"
+        )
+    public_key = resolve_regular_file(RELEASE_PUBLIC_KEY, "tracked release public key")
+    signature_payload = read_regular_bytes(
+        signature,
+        "previous DEB detached signature",
+        max_bytes=64 * 1024,
+    )
+    public_key_payload = read_regular_bytes(
+        public_key,
+        "tracked release public key",
+        max_bytes=64 * 1024,
+    )
+    openssl = resolve_trusted_openssl()
+
+    try:
+        before = previous.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0:
+            raise ProducerError("previous DEB 必须是非空单链接普通文件")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(previous, flags)
+    except ProducerError:
+        raise
+    except OSError as exc:
+        raise ProducerError(f"previous DEB 无法打开以执行 detached signature 验签：{exc}") from exc
+
+    try:
+        opened = os.fstat(descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            raise ProducerError("previous DEB 在验签打开时发生替换")
+        with tempfile.TemporaryDirectory(prefix="taiji-previous-signature-") as temporary:
+            temporary_root = Path(temporary)
+            public_snapshot = temporary_root / "signing-public.pem"
+            signature_snapshot = temporary_root / "previous.deb.sig"
+            public_snapshot.write_bytes(public_key_payload)
+            signature_snapshot.write_bytes(signature_payload)
+            public_snapshot.chmod(0o600)
+            signature_snapshot.chmod(0o600)
+            derived = subprocess.run(
+                [
+                    openssl,
+                    "pkey",
+                    "-pubin",
+                    "-in",
+                    str(public_snapshot),
+                    "-outform",
+                    "DER",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if derived.returncode != 0:
+                raise ProducerError("tracked release public key 不是有效 PEM 公钥")
+            actual_fingerprint = hashlib.sha256(derived.stdout).hexdigest()
+            if actual_fingerprint != PINNED_SIGNING_PUBLIC_KEY_FINGERPRINT:
+                raise ProducerError(
+                    "tracked release public key fingerprint 与产品固定信任锚不一致"
+                )
+            result = subprocess.run(
+                [
+                    openssl,
+                    "dgst",
+                    "-sha256",
+                    "-verify",
+                    str(public_snapshot),
+                    "-signature",
+                    str(signature_snapshot),
+                ],
+                stdin=descriptor,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        after = os.fstat(descriptor)
+        current = previous.lstat()
+        if (
+            _file_identity(after) != _file_identity(before)
+            or _file_identity(current) != _file_identity(before)
+        ):
+            raise ProducerError("previous DEB 在 detached signature 验签期间发生变化")
+        if result.returncode != 0:
+            raise ProducerError("previous DEB detached signature 未通过固定发布公钥验证")
+    except OSError as exc:
+        raise ProducerError(f"previous DEB detached signature 验证失败：{exc}") from exc
+    finally:
+        os.close(descriptor)
+    return hashlib.sha256(signature_payload).hexdigest()
+
+
+def _split_debian_version(version: str) -> tuple[int, str, str]:
+    if type(version) is not str or not version:
+        raise ProducerError("Debian version 不能为空")
+    epoch = 0
+    remainder = version
+    if ":" in remainder:
+        epoch_text, remainder = remainder.split(":", 1)
+        if not epoch_text.isdigit() or not remainder:
+            raise ProducerError(f"Debian version epoch 不合法：{version}")
+        epoch = int(epoch_text, 10)
+    if not re.fullmatch(r"[0-9A-Za-z.+~:-]+", version):
+        raise ProducerError(f"Debian version 包含不合法字符：{version}")
+    if "-" in remainder:
+        upstream, revision = remainder.rsplit("-", 1)
+        if not revision:
+            raise ProducerError(f"Debian version revision 不合法：{version}")
+    else:
+        upstream, revision = remainder, "0"
+    if not upstream or not upstream[0].isdigit():
+        raise ProducerError(f"Debian upstream version 不合法：{version}")
+    return epoch, upstream, revision
+
+
+def _debian_character_order(character: str) -> int:
+    if character == "~":
+        return -1
+    if not character:
+        return 0
+    if character.isalpha():
+        return ord(character)
+    return ord(character) + 256
+
+
+def _compare_debian_part(left: str, right: str) -> int:
+    left_index = 0
+    right_index = 0
+    while left_index < len(left) or right_index < len(right):
+        while (
+            (left_index < len(left) and not left[left_index].isdigit())
+            or (right_index < len(right) and not right[right_index].isdigit())
+        ):
+            left_character = left[left_index] if left_index < len(left) and not left[left_index].isdigit() else ""
+            right_character = right[right_index] if right_index < len(right) and not right[right_index].isdigit() else ""
+            left_order = _debian_character_order(left_character)
+            right_order = _debian_character_order(right_character)
+            if left_order != right_order:
+                return -1 if left_order < right_order else 1
+            if left_character:
+                left_index += 1
+            if right_character:
+                right_index += 1
+        while left_index < len(left) and left[left_index] == "0":
+            left_index += 1
+        while right_index < len(right) and right[right_index] == "0":
+            right_index += 1
+        left_end = left_index
+        right_end = right_index
+        while left_end < len(left) and left[left_end].isdigit():
+            left_end += 1
+        while right_end < len(right) and right[right_end].isdigit():
+            right_end += 1
+        left_digits = left[left_index:left_end]
+        right_digits = right[right_index:right_end]
+        if len(left_digits) != len(right_digits):
+            return -1 if len(left_digits) < len(right_digits) else 1
+        if left_digits != right_digits:
+            return -1 if left_digits < right_digits else 1
+        left_index = left_end
+        right_index = right_end
+    return 0
+
+
+def compare_debian_versions(left: str, right: str) -> int:
+    """Return Debian/dpkg ordering for two complete package versions."""
+
+    left_epoch, left_upstream, left_revision = _split_debian_version(left)
+    right_epoch, right_upstream, right_revision = _split_debian_version(right)
+    if left_epoch != right_epoch:
+        return -1 if left_epoch < right_epoch else 1
+    upstream_order = _compare_debian_part(left_upstream, right_upstream)
+    if upstream_order:
+        return upstream_order
+    return _compare_debian_part(left_revision, right_revision)
 
 
 def resolve_output(path: Path) -> Path:
@@ -345,6 +634,8 @@ def run_lifecycle_container(
             "--env",
             f"TAIJI_EXPECTED_DEB_SHA256={release['deb_sha256']}",
             "--env",
+            f"TAIJI_EXPECTED_CANDIDATE_VERSION={release['version']}",
+            "--env",
             f"TAIJI_REHEARSAL_FIXTURE_ID={IMAGE_FIXTURE_LABEL}",
     ]
     if expanded:
@@ -359,8 +650,17 @@ def run_lifecycle_container(
                 "--env",
                 f"TAIJI_EXPECTED_PREVIOUS_DEB_SHA256={previous['sha256']}",
                 "--env",
+                f"TAIJI_EXPECTED_PREVIOUS_VERSION={previous['version']}",
+                "--env",
                 "TAIJI_PREVIOUS_DEB_RELATIVE=.rehearsal-inputs/previous/"
                 f"{previous['deb'].name}",
+                "--env",
+                f"TAIJI_EXPECTED_PREVIOUS_SIGNATURE_BASENAME={previous['signature'].name}",
+                "--env",
+                f"TAIJI_EXPECTED_PREVIOUS_SIGNATURE_SHA256={previous['signature_sha256']}",
+                "--env",
+                "TAIJI_PREVIOUS_SIGNATURE_RELATIVE=.rehearsal-inputs/previous/"
+                f"{previous['signature'].name}",
                 "--env",
                 f"TAIJI_COMPATIBILITY_POLICY_ID={policy['id']}",
                 "--env",
@@ -369,6 +669,16 @@ def run_lifecycle_container(
                 "TAIJI_TRANSACTION_HELPER_RELATIVE=.rehearsal-inputs/upgrade_transaction.py",
                 "--env",
                 "TAIJI_TRANSACTION_CONTRACT_RELATIVE=.rehearsal-inputs/upgrade-data-contract.json",
+                "--env",
+                "TAIJI_SILENT_DEPLOY_RELATIVE=.rehearsal-inputs/taiji-silent-deploy.sh",
+                "--env",
+                "TAIJI_BUILD_MANIFEST_RELATIVE=生成的安装包/taiji-package-manifest.json",
+                "--env",
+                "TAIJI_POLICY_RELATIVE=.rehearsal-inputs/compatibility-policy.json",
+                "--env",
+                "TAIJI_RELEASE_PUBLIC_KEY_RELATIVE=.rehearsal-inputs/signing-public.pem",
+                "--env",
+                f"TAIJI_EXPECTED_RELEASE_PUBLIC_KEY_SHA256={sha256_file(RELEASE_PUBLIC_KEY)}",
             ]
         )
     create_args.append(image)
@@ -471,11 +781,43 @@ def validate_session(session: dict[str, Any], release: dict[str, Any], challenge
 
 
 def sha256_file(path: Path) -> str:
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0:
+            raise ProducerError(f"待摘要文件必须是非空单链接普通文件：{path}")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+    except ProducerError:
+        raise
+    except OSError as exc:
+        raise ProducerError(f"待摘要文件不存在或不可读取：{path}: {exc}") from exc
+
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+    try:
+        opened = os.fstat(descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            raise ProducerError(f"待摘要文件在打开时发生替换：{path}")
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ProducerError(f"待摘要文件读取期间被截断：{path}")
             digest.update(chunk)
-    return digest.hexdigest()
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ProducerError(f"待摘要文件读取期间大小发生变化：{path}")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            _file_identity(after) != _file_identity(before)
+            or _file_identity(current) != _file_identity(before)
+        ):
+            raise ProducerError(f"待摘要文件读取期间发生变化：{path}")
+        return digest.hexdigest()
+    except OSError as exc:
+        raise ProducerError(f"待摘要文件读取失败：{path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -490,6 +832,80 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def copy_new_evidence_file(source: Path, destination: Path) -> str:
+    source = resolve_regular_file(source, "offline lifecycle identity input")
+    try:
+        before = source.lstat()
+        source_descriptor = os.open(
+            source,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise ProducerError(f"N-1 生命周期身份文件不可安全打开：{source}: {exc}") from exc
+    destination_descriptor = -1
+    succeeded = False
+    try:
+        opened = os.fstat(source_descriptor)
+        if _file_identity(opened) != _file_identity(before):
+            raise ProducerError(f"N-1 生命周期身份文件在打开时发生替换：{source}")
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        copied = 0
+        while remaining:
+            chunk = os.read(source_descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ProducerError(f"N-1 生命周期身份文件在归档时被截断：{source}")
+            digest.update(chunk)
+            copied += len(chunk)
+            remaining -= len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                if written <= 0:
+                    raise ProducerError("无法流式归档 N-1 生命周期身份文件")
+                view = view[written:]
+        if os.read(source_descriptor, 1):
+            raise ProducerError(f"N-1 生命周期身份文件在归档时增长：{source}")
+        os.fsync(destination_descriptor)
+        after = os.fstat(source_descriptor)
+        current = source.lstat()
+        if (
+            _file_identity(after) != _file_identity(opened)
+            or _file_identity(current) != _file_identity(opened)
+        ):
+            raise ProducerError(f"N-1 生命周期身份文件在归档期间发生变化：{source}")
+        archived = os.fstat(destination_descriptor)
+        archived_current = destination.lstat()
+        if (
+            not stat.S_ISREG(archived.st_mode)
+            or archived.st_nlink != 1
+            or archived.st_size != copied
+            or archived.st_mode & 0o077
+            or _file_identity(archived_current) != _file_identity(archived)
+        ):
+            raise ProducerError(f"N-1 生命周期身份归档快照元数据不可信：{destination}")
+        succeeded = True
+        return digest.hexdigest()
+    except ProducerError:
+        raise
+    except OSError as exc:
+        raise ProducerError(f"N-1 生命周期身份文件归档失败：{exc}") from exc
+    finally:
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
+        os.close(source_descriptor)
+        if not succeeded and os.path.lexists(destination):
+            try:
+                destination.unlink()
+            except OSError:
+                pass
 
 
 def validate_current_offline(
@@ -522,7 +938,7 @@ def validate_current_offline(
 
 
 @contextmanager
-def staged_expanded_delivery(delivery: Path, previous: Path, policy_source: Path):
+def staged_expanded_delivery(delivery: Path, previous: dict[str, Any], policy_source: Path):
     """Expose previous-release and transaction inputs without mutating delivery."""
 
     with tempfile.TemporaryDirectory(prefix=".taiji-offline-rehearsal-", dir=delivery.parent) as temporary:
@@ -531,15 +947,22 @@ def staged_expanded_delivery(delivery: Path, previous: Path, policy_source: Path
         input_root = staged / ".rehearsal-inputs"
         previous_dir = input_root / "previous"
         previous_dir.mkdir(mode=0o700, parents=True)
-        previous_target = previous_dir / previous.name
-        shutil.copy2(previous, previous_target)
-        shutil.copy2(Path(f"{previous}.sha256"), Path(f"{previous_target}.sha256"))
+        previous_deb = previous["deb"]
+        previous_target = previous_dir / previous_deb.name
+        shutil.copy2(previous_deb, previous_target)
+        shutil.copy2(previous["checksum"], Path(f"{previous_target}.sha256"))
+        shutil.copy2(previous["signature"], previous_dir / previous["signature"].name)
+        shutil.copy2(previous["manifest"], previous_dir / "previous-release-manifest.json")
         for source in (
+            ROOT / "packaging" / "linux" / "deb" / "taiji-silent-deploy.sh",
+            ROOT / "packaging" / "linux" / "deployment_receipt.py",
             ROOT / "packaging" / "linux" / "upgrade_transaction.py",
             ROOT / "packaging" / "linux" / "upgrade-data-contract.json",
+            ROOT / "packaging" / "linux" / "compatibility_policy.py",
             policy_source,
         ):
             shutil.copy2(source, input_root / source.name)
+        shutil.copy2(RELEASE_PUBLIC_KEY, input_root / "signing-public.pem")
         yield staged
 
 
@@ -554,6 +977,8 @@ def prepare_explicit_inputs(
     validator: ModuleType,
     deb_arg: Path,
     previous_arg: Path,
+    previous_signature_arg: Path,
+    previous_manifest_arg: Path,
     manifest_arg: Path,
     policy_arg: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
@@ -566,14 +991,59 @@ def prepare_explicit_inputs(
         raise ProducerError("candidate DEB 必须是交付目录生成的安装包中的唯一 amd64 DEB")
     if manifest.name != release["manifest"].name:
         raise ProducerError("build manifest basename 必须是 taiji-package-manifest.json")
-    if manifest.read_bytes() != release["manifest"].read_bytes():
+    if read_regular_bytes(manifest, "build manifest") != read_regular_bytes(
+        release["manifest"], "交付目录 build manifest"
+    ):
         raise ProducerError("build manifest 内容必须与交付目录中的 candidate manifest 完全一致")
     release["manifest"] = manifest
     previous = resolve_regular_file(previous_arg, "previous DEB")
     if previous == deb:
         raise ProducerError("previous DEB 不能与 candidate DEB 是同一文件")
     previous_hash = sha256_file(previous)
-    parse_sha256_sidecar(Path(f"{previous}.sha256"), previous, previous_hash)
+    previous_checksum = resolve_regular_file(Path(f"{previous}.sha256"), "previous DEB checksum")
+    parse_sha256_sidecar(previous_checksum, previous, previous_hash)
+    previous_signature = resolve_regular_file(
+        previous_signature_arg,
+        "previous DEB detached signature",
+    )
+    previous_signature_sha256 = verify_previous_detached_signature(
+        previous,
+        previous_signature,
+    )
+    previous_manifest = resolve_regular_file(previous_manifest_arg, "previous build manifest")
+    previous_manifest_payload = load_json(previous_manifest, "previous build manifest")
+    required_previous_manifest = {
+        "schema": "taiji-package-manifest/v3",
+        "package": "taiji-agent",
+        "architecture": "amd64",
+        "deb_basename": previous.name,
+        "deb_sha256": previous_hash,
+    }
+    for key, expected in required_previous_manifest.items():
+        if previous_manifest_payload.get(key) != expected:
+            raise ProducerError(f"previous build manifest {key} 与 previous DEB 不一致")
+    previous_source_commit = previous_manifest_payload.get("source_commit")
+    previous_version = previous_manifest_payload.get("version")
+    previous_policy_id = previous_manifest_payload.get("compatibility_policy_id")
+    previous_policy_sha256 = previous_manifest_payload.get("compatibility_policy_sha256")
+    if type(previous_source_commit) is not str or not re.fullmatch(r"[0-9a-f]{40}", previous_source_commit):
+        raise ProducerError("previous build manifest source_commit 不合法")
+    if type(previous_version) is not str or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}", previous_version):
+        raise ProducerError("previous build manifest version 不合法")
+    if type(previous_policy_id) is not str or not previous_policy_id:
+        raise ProducerError("previous build manifest compatibility_policy_id 不合法")
+    if type(previous_policy_sha256) is not str or not SHA256_RE.fullmatch(previous_policy_sha256):
+        raise ProducerError("previous build manifest compatibility_policy_sha256 不合法")
+    previous_name = re.fullmatch(r"taiji-agent_(.+)_amd64\.deb", previous.name)
+    if previous_name is None:
+        raise ProducerError("previous DEB basename 不符合 taiji-agent_<version>_amd64.deb")
+    if previous_name.group(1) != previous_version:
+        raise ProducerError("previous DEB basename version 与 previous build manifest 不一致")
+    candidate_version = release["version"]
+    if compare_debian_versions(previous_version, candidate_version) >= 0:
+        raise ProducerError(
+            "previous DEB must be strictly older than candidate under Debian version rules"
+        )
     policy_id, policy_sha256 = load_policy_identity(policy_arg)
     manifest_payload = load_json(manifest, "build manifest")
     manifest_policy_id = manifest_payload.get("compatibility_policy_id")
@@ -582,7 +1052,21 @@ def prepare_explicit_inputs(
         raise ProducerError("显式 policy identity 与 candidate build manifest 不一致")
     return (
         release,
-        {"deb": previous, "sha256": previous_hash},
+        {
+            "deb": previous,
+            "sha256": previous_hash,
+            "checksum": previous_checksum,
+            "checksum_sha256": sha256_file(previous_checksum),
+            "signature": previous_signature,
+            "signature_sha256": previous_signature_sha256,
+            "signature_verification": "PASS",
+            "manifest": previous_manifest,
+            "manifest_sha256": sha256_file(previous_manifest),
+            "source_commit": previous_source_commit,
+            "version": previous_version,
+            "compatibility_policy_id": previous_policy_id,
+            "compatibility_policy_sha256": previous_policy_sha256,
+        },
         {"id": policy_id, "sha256": policy_sha256, "path": str(Path(policy_arg).resolve())},
     )
 
@@ -595,6 +1079,8 @@ def produce(
     *,
     deb_arg: Path | None = None,
     previous_deb_arg: Path | None = None,
+    previous_signature_arg: Path | None = None,
+    previous_manifest_arg: Path | None = None,
     build_manifest_arg: Path | None = None,
     policy_arg: Path | None = None,
 ) -> Path:
@@ -608,10 +1094,30 @@ def produce(
 
     explicit = any(
         value is not None
-        for value in (deb_arg, previous_deb_arg, build_manifest_arg, policy_arg)
+        for value in (
+            deb_arg,
+            previous_deb_arg,
+            previous_signature_arg,
+            previous_manifest_arg,
+            build_manifest_arg,
+            policy_arg,
+        )
     )
-    if explicit and any(value is None for value in (deb_arg, previous_deb_arg, build_manifest_arg, policy_arg)):
-        raise ProducerError("显式生命周期入口必须同时提供 --deb、--previous-deb、--build-manifest、--policy")
+    if explicit and any(
+        value is None
+        for value in (
+            deb_arg,
+            previous_deb_arg,
+            previous_signature_arg,
+            previous_manifest_arg,
+            build_manifest_arg,
+            policy_arg,
+        )
+    ):
+        raise ProducerError(
+            "显式生命周期入口必须同时提供 --deb、--previous-deb、--previous-signature、"
+            "--previous-manifest、--build-manifest、--policy"
+        )
     if not explicit and delivery_arg is None:
         raise ProducerError("必须提供 --delivery-dir，或完整的显式 DEB/previous/manifest/policy 输入")
     if explicit and delivery_arg is not None:
@@ -621,8 +1127,8 @@ def produce(
         delivery = resolve_directory(delivery_arg, "交付目录")
     else:
         candidate = resolve_regular_file(Path(deb_arg), "candidate DEB")
-        # The explicit first release is intentionally scoped to the canonical
-        # delivery layout; this keeps source/manifest/inventory binding stable.
+        # The explicit controlled lifecycle is intentionally scoped to the
+        # canonical delivery layout so source/manifest/inventory binding stays stable.
         expected_delivery = candidate.parent.parent
         delivery = resolve_directory(expected_delivery, "candidate DEB 所属交付目录")
     output = resolve_output(output_arg)
@@ -636,6 +1142,8 @@ def produce(
             validator=validator,
             deb_arg=Path(deb_arg),
             previous_arg=Path(previous_deb_arg),
+            previous_signature_arg=Path(previous_signature_arg),
+            previous_manifest_arg=Path(previous_manifest_arg),
             manifest_arg=Path(build_manifest_arg),
             policy_arg=Path(policy_arg),
         )
@@ -646,7 +1154,7 @@ def produce(
     published = False
     try:
         with (
-            staged_expanded_delivery(delivery, previous["deb"], Path(policy["path"]))
+            staged_expanded_delivery(delivery, previous, Path(policy["path"]))
             if expanded and previous
             else unmodified_delivery(delivery)
         ) as container_delivery:
@@ -662,7 +1170,7 @@ def produce(
                 expanded=expanded,
             )
         session_path = output / SESSION_BASENAME
-        lifecycle_path = output / "offline-install-rehearsal-lifecycle.json"
+        lifecycle_path = output / LIFECYCLE_BASENAME
         if not session_path.is_file() and lifecycle_path.is_file():
             lifecycle_session = load_json(lifecycle_path, "扩展离线生命周期会话")
             base_session = {
@@ -684,6 +1192,16 @@ def produce(
                 raise ProducerError("lifecycle evidence compatibility_policy_id 与固定 policy 不一致")
             if lifecycle_session.get("compatibility_policy_sha256") != policy["sha256"]:
                 raise ProducerError("lifecycle evidence compatibility_policy_sha256 与固定 policy 不一致")
+            for key, expected in {
+                "previous_deb_basename": previous["deb"].name,
+                "previous_deb_sha256": previous["sha256"],
+                "previous_version": previous["version"],
+                "previous_signature_basename": previous["signature"].name,
+                "previous_signature_sha256": previous["signature_sha256"],
+                "previous_signature_verification": previous["signature_verification"],
+            }.items():
+                if lifecycle_session.get(key) != expected:
+                    raise ProducerError(f"lifecycle evidence {key} 与固定 previous DEB 不一致")
 
         current_release = discover_release_inputs(delivery, validator)
         if (
@@ -692,6 +1210,50 @@ def produce(
             != release["delivery_inventory_sha256"]
         ):
             raise ProducerError("当前 v3 交付目录在 Docker 演练期间发生变化")
+
+        previous_release_evidence: dict[str, Any] | None = None
+        if expanded:
+            if previous is None:
+                raise ProducerError("扩展生命周期演练缺少已验证的 N-1 身份")
+            archived_deb_hash = copy_new_evidence_file(
+                previous["deb"],
+                output / previous["deb"].name,
+            )
+            archived_checksum_hash = copy_new_evidence_file(
+                previous["checksum"],
+                output / previous["checksum"].name,
+            )
+            archived_signature_hash = copy_new_evidence_file(
+                previous["signature"],
+                output / previous["signature"].name,
+            )
+            previous_manifest_basename = "previous-release-manifest.json"
+            archived_manifest_hash = copy_new_evidence_file(
+                previous["manifest"],
+                output / previous_manifest_basename,
+            )
+            if (
+                archived_deb_hash != previous["sha256"]
+                or archived_checksum_hash != previous["checksum_sha256"]
+                or archived_signature_hash != previous["signature_sha256"]
+                or archived_manifest_hash != previous["manifest_sha256"]
+            ):
+                raise ProducerError("归档后的 N-1 身份与已验证输入不一致")
+            previous_release_evidence = {
+                "source_commit": previous["source_commit"],
+                "version": previous["version"],
+                "deb_basename": previous["deb"].name,
+                "deb_sha256": previous["sha256"],
+                "checksum_basename": previous["checksum"].name,
+                "checksum_sha256": previous["checksum_sha256"],
+                "signature_basename": previous["signature"].name,
+                "signature_sha256": previous["signature_sha256"],
+                "signature_verification": previous["signature_verification"],
+                "manifest_basename": previous_manifest_basename,
+                "manifest_sha256": previous["manifest_sha256"],
+                "compatibility_policy_id": previous["compatibility_policy_id"],
+                "compatibility_policy_sha256": previous["compatibility_policy_sha256"],
+            }
 
         evidence = {
             "schema": "taiji.offline-install-rehearsal.v1",
@@ -725,9 +1287,20 @@ def produce(
                 "data_manifests",
                 "journal",
                 "package_actions",
+                "previous_deb_basename",
+                "previous_deb_sha256",
+                "previous_version",
+                "previous_signature_basename",
+                "previous_signature_sha256",
+                "previous_signature_verification",
             ):
                 if key in lifecycle_session:
                     evidence[key] = lifecycle_session[key]
+            if previous_release_evidence is None:
+                raise ProducerError("扩展生命周期证据缺少 N-1 身份")
+            evidence["previous_release"] = previous_release_evidence
+            evidence["lifecycle_log_basename"] = LIFECYCLE_BASENAME
+            evidence["lifecycle_log_sha256"] = sha256_file(lifecycle_path)
         evidence_path = output / EVIDENCE_BASENAME
         atomic_write_json(evidence_path, evidence)
         validate_current_offline(evidence_path, release, challenge)
@@ -755,16 +1328,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--deb", type=Path, help="本轮固定 candidate amd64 DEB")
     parser.add_argument("--previous-deb", type=Path, help="必须存在且有 .sha256 sidecar 的 N-1 DEB")
+    parser.add_argument("--previous-signature", type=Path, help="由固定发布公钥验证的 N-1 DEB detached signature")
+    parser.add_argument("--previous-manifest", type=Path, help="与 N-1 DEB 身份一致的发布 manifest")
     parser.add_argument("--build-manifest", type=Path, help="绑定 candidate 的 taiji-package-manifest.json")
     parser.add_argument("--policy", type=Path, help="固定 compatibility-policy.json")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--image", required=True)
     parser.add_argument("--challenge", required=True)
     args = parser.parse_args()
-    explicit = (args.deb, args.previous_deb, args.build_manifest, args.policy)
+    explicit = (
+        args.deb,
+        args.previous_deb,
+        args.previous_signature,
+        args.previous_manifest,
+        args.build_manifest,
+        args.policy,
+    )
     if args.delivery_dir is None and any(item is None for item in explicit):
         parser.error(
-            "必须提供 --delivery-dir，或完整提供 --deb --previous-deb --build-manifest --policy"
+            "必须提供 --delivery-dir，或完整提供 --deb --previous-deb --previous-signature "
+            "--previous-manifest --build-manifest --policy"
         )
     if args.delivery_dir is not None and any(item is not None for item in explicit):
         parser.error("--delivery-dir 与显式 DEB 输入不能混用")
@@ -781,6 +1364,8 @@ def main() -> int:
             args.challenge,
             deb_arg=args.deb,
             previous_deb_arg=args.previous_deb,
+            previous_signature_arg=args.previous_signature,
+            previous_manifest_arg=args.previous_manifest,
             build_manifest_arg=args.build_manifest,
             policy_arg=args.policy,
         )

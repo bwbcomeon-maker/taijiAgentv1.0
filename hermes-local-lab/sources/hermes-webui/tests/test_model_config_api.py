@@ -1655,6 +1655,428 @@ def test_main_model_config_writes_deepseek_key_without_echo(monkeypatch, tmp_pat
     os.environ.pop("DEEPSEEK_API_KEY", None)
 
 
+def test_main_model_config_response_marks_committed_applied_without_secret(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    secret = "sk-main-contract-secret-123456"
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+        }
+    )
+
+    assert result["commit_state"] == "committed"
+    assert result["runtime_state"] == "applied"
+    assert secret not in json.dumps(result)
+
+
+def test_main_model_config_response_marks_committed_refresh_pending_without_secret(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    secret = "sk-main-pending-secret-123456"
+    monkeypatch.setattr(
+        model_config,
+        "reload_config",
+        lambda: (_ for _ in ()).throw(OSError("reload failed")),
+    )
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+        }
+    )
+
+    assert result["commit_state"] == "committed"
+    assert result["runtime_state"] == "refresh_pending"
+    assert result["refresh_pending"] is True
+    assert secret not in json.dumps(result)
+
+
+def test_main_model_request_receipt_is_atomically_persisted_and_publicly_redacted(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    request_id = "00112233445566778899aabbccddeeff"
+    secret = "sk-main-receipt-secret-123456"
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+            "request_id": request_id,
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    assert cfg[model_config._MAIN_MODEL_REQUEST_ID_KEY] == request_id
+    assert "request_id" not in cfg["model"]
+    assert result["main_request_id"] == request_id
+    assert model_config.get_model_config()["main_request_id"] == request_id
+    dumped = json.dumps(result)
+    assert secret not in dumped
+    assert hashlib.sha256(secret.encode()).hexdigest() not in dumped
+    assert f"DEEPSEEK_API_KEY={secret}" in (tmp_path / ".env").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_main_model_request_receipt_binds_to_opaque_credential_revision(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    request_id = "0123456789abcdef0123456789abcdef"
+    secret = "sk-main-revision-secret-123456"
+
+    result = model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+            "request_id": request_id,
+        }
+    )
+
+    cfg = _read_config(tmp_path)
+    revision = cfg.get("_taiji_main_model_credential_revision", "")
+    revisions = cfg.get("_taiji_credential_revisions", {})
+    assert cfg.get("_taiji_main_model_receipt_env") == "DEEPSEEK_API_KEY"
+    assert len(revision) == 32
+    assert set(revision) <= set("0123456789abcdef")
+    assert revisions.get("DEEPSEEK_API_KEY") == revision
+    assert result["main_request_id"] == request_id
+    assert model_config.get_model_config()["main_request_id"] == request_id
+    public_material = json.dumps({"config": cfg, "response": result})
+    assert secret not in public_material
+    assert hashlib.sha256(secret.encode()).hexdigest() not in public_material
+
+
+def test_provider_key_update_invalidates_current_main_receipt_and_rotates_revision(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    request_id = "1023456789abcdef0123456789abcdef"
+    first_secret = "sk-main-first-revision-secret-123456"
+    second_secret = "sk-main-second-revision-secret-654321"
+    model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": first_secret,
+            "request_id": request_id,
+        }
+    )
+    before = _read_config(tmp_path)
+    before_revision = before["_taiji_main_model_credential_revision"]
+
+    result = providers.set_provider_key("deepseek", second_secret)
+
+    after = _read_config(tmp_path)
+    assert result["ok"] is True
+    assert model_config._MAIN_MODEL_REQUEST_ID_KEY not in after
+    assert "_taiji_main_model_receipt_env" not in after
+    assert "_taiji_main_model_credential_revision" not in after
+    assert after["_taiji_credential_revisions"]["DEEPSEEK_API_KEY"] != before_revision
+    assert model_config.get_model_config()["main_request_id"] == ""
+    assert second_secret not in json.dumps(after)
+
+
+def test_provider_same_key_preserves_current_main_receipt_revision(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    request_id = "1123456789abcdef0123456789abcdef"
+    secret = "sk-main-same-revision-secret-123456"
+    model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+            "request_id": request_id,
+        }
+    )
+    before = _read_config(tmp_path)
+
+    result = providers.set_provider_key("deepseek", secret)
+
+    after = _read_config(tmp_path)
+    assert result["ok"] is True
+    assert after[model_config._MAIN_MODEL_REQUEST_ID_KEY] == request_id
+    assert after["_taiji_main_model_receipt_env"] == "DEEPSEEK_API_KEY"
+    assert after["_taiji_main_model_credential_revision"] == before[
+        "_taiji_main_model_credential_revision"
+    ]
+    assert model_config.get_model_config()["main_request_id"] == request_id
+
+
+def test_unrelated_provider_key_update_preserves_current_main_receipt_revision(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    request_id = "1223456789abcdef0123456789abcdef"
+    main_secret = "sk-main-unrelated-revision-secret-123456"
+    model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": main_secret,
+            "request_id": request_id,
+        }
+    )
+    before = _read_config(tmp_path)
+
+    result = providers.set_provider_key(
+        "anthropic",
+        "sk-ant-unrelated-secret-123456",
+    )
+
+    after = _read_config(tmp_path)
+    assert result["ok"] is True
+    assert after[model_config._MAIN_MODEL_REQUEST_ID_KEY] == request_id
+    assert after["_taiji_main_model_receipt_env"] == "DEEPSEEK_API_KEY"
+    assert after["_taiji_main_model_credential_revision"] == before[
+        "_taiji_main_model_credential_revision"
+    ]
+    assert model_config.get_model_config()["main_request_id"] == request_id
+
+
+def test_provider_key_removal_invalidates_current_main_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    request_id = "2023456789abcdef0123456789abcdef"
+    secret = "sk-main-remove-revision-secret-123456"
+    model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": secret,
+            "request_id": request_id,
+        }
+    )
+    before_revision = _read_config(tmp_path)[
+        "_taiji_main_model_credential_revision"
+    ]
+
+    result = providers.remove_provider_key("deepseek")
+
+    after = _read_config(tmp_path)
+    assert result["ok"] is True
+    assert model_config._MAIN_MODEL_REQUEST_ID_KEY not in after
+    assert "_taiji_main_model_receipt_env" not in after
+    assert "_taiji_main_model_credential_revision" not in after
+    assert after["_taiji_credential_revisions"]["DEEPSEEK_API_KEY"] != before_revision
+    authoritative = model_config.get_model_config()
+    assert authoritative["main_request_id"] == ""
+    assert authoritative["main"]["key_status"]["configured"] is False
+
+
+def test_provider_key_removal_invalidates_receipt_for_legacy_inline_main_key(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    request_id = "2523456789abcdef0123456789abcdef"
+    revision = "f" * 32
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "deepseek",
+                    "default": "deepseek-chat",
+                    "api_key": "legacy-inline-secret",
+                },
+                model_config._MAIN_MODEL_REQUEST_ID_KEY: request_id,
+                "_taiji_main_model_receipt_env": "DEEPSEEK_API_KEY",
+                "_taiji_main_model_credential_revision": revision,
+                "_taiji_credential_revisions": {
+                    "DEEPSEEK_API_KEY": revision,
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    assert model_config.get_model_config()["main_request_id"] == request_id
+
+    result = providers.remove_provider_key("deepseek")
+
+    after = _read_config(tmp_path)
+    assert result["ok"] is True
+    assert "api_key" not in after["model"]
+    assert model_config._MAIN_MODEL_REQUEST_ID_KEY not in after
+    assert "_taiji_main_model_receipt_env" not in after
+    assert "_taiji_main_model_credential_revision" not in after
+    assert model_config.get_model_config()["main_request_id"] == ""
+
+
+def test_provider_key_update_failure_preserves_receipt_and_secret_pair(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    request_id = "3023456789abcdef0123456789abcdef"
+    first_secret = "sk-main-atomic-first-secret-123456"
+    second_secret = "sk-main-atomic-second-secret-654321"
+    model_config.set_main_model_config(
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": first_secret,
+            "request_id": request_id,
+        }
+    )
+    config_before = (tmp_path / "config.yaml").read_bytes()
+    env_before = (tmp_path / ".env").read_bytes()
+
+    def fail_journal(*_args, **_kwargs):
+        raise OSError("receipt pair journal unavailable")
+
+    monkeypatch.setattr(
+        credential_store,
+        "_write_credential_journal",
+        fail_journal,
+    )
+
+    result = providers.set_provider_key("deepseek", second_secret)
+
+    assert result["ok"] is False
+    assert "receipt pair journal unavailable" in result["error"]
+    assert (tmp_path / "config.yaml").read_bytes() == config_before
+    assert (tmp_path / ".env").read_bytes() == env_before
+    assert first_secret.encode() in env_before
+    assert second_secret.encode() not in env_before
+
+
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "",
+        "00112233445566778899aabbccddeef",
+        "00112233445566778899aabbccddeeff00",
+        "00112233445566778899AABBCCDDEEFF",
+        "g0112233445566778899aabbccddeeff",
+    ],
+)
+def test_main_model_request_receipt_rejects_noncanonical_ids(
+    monkeypatch,
+    tmp_path,
+    request_id,
+):
+    _use_home(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="request_id"):
+        model_config.set_main_model_config(
+            {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "api_key": "sk-invalid-request-secret-123456",
+                "request_id": request_id,
+            }
+        )
+
+    assert not (tmp_path / "config.yaml").exists()
+    assert not (tmp_path / ".env").exists()
+
+
+def test_main_model_current_committed_request_id_cannot_be_reused(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    request_id = "11223344556677889900aabbccddeeff"
+    first_secret = "sk-first-main-secret-123456"
+    second_secret = "sk-second-main-secret-654321"
+    base = {
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "request_id": request_id,
+    }
+
+    model_config.set_main_model_config({**base, "api_key": first_secret})
+    config_before = (tmp_path / "config.yaml").read_bytes()
+    env_before = (tmp_path / ".env").read_bytes()
+
+    with pytest.raises(ValueError, match="request_id"):
+        model_config.set_main_model_config({**base, "api_key": second_secret})
+
+    assert (tmp_path / "config.yaml").read_bytes() == config_before
+    assert (tmp_path / ".env").read_bytes() == env_before
+    assert first_secret.encode() in env_before
+    assert second_secret.encode() not in env_before
+
+
+def test_main_model_missing_request_id_gets_server_generated_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    generated = "223344556677889900aabbccddeeff11"
+    monkeypatch.setattr(model_config.secrets, "token_hex", lambda size: generated)
+
+    result = model_config.set_main_model_config(
+        {"provider": "deepseek", "model": "deepseek-chat"}
+    )
+
+    assert result["main_request_id"] == generated
+    assert _read_config(tmp_path)[model_config._MAIN_MODEL_REQUEST_ID_KEY] == generated
+
+
+def test_main_model_request_receipt_rolls_back_with_failed_env_stage(
+    monkeypatch,
+    tmp_path,
+):
+    _use_home(monkeypatch, tmp_path)
+    original_prepare = credential_store._prepare_pair_target
+
+    def fail_env_stage(*, name, **kwargs):
+        if name == "env":
+            raise OSError("env stage failure")
+        return original_prepare(name=name, **kwargs)
+
+    monkeypatch.setattr(credential_store, "_prepare_pair_target", fail_env_stage)
+
+    with pytest.raises(OSError, match="env stage failure"):
+        model_config.set_main_model_config(
+            {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "api_key": "sk-atomic-receipt-secret-123456",
+                "request_id": "3344556677889900aabbccddeeff1122",
+            }
+        )
+
+    if (tmp_path / "config.yaml").exists():
+        assert model_config._MAIN_MODEL_REQUEST_ID_KEY not in _read_config(tmp_path)
+    if (tmp_path / ".env").exists():
+        assert "sk-atomic-receipt-secret-123456" not in (
+            tmp_path / ".env"
+        ).read_text(encoding="utf-8")
+
+
 def test_custom_main_model_uses_key_env_not_inline_secret(monkeypatch, tmp_path):
     _use_home(monkeypatch, tmp_path)
     monkeypatch.delenv("HERMES_CUSTOM_MODEL_API_KEY", raising=False)
@@ -1723,8 +2145,14 @@ def test_main_model_config_acquires_credential_transaction_before_cfg_lock(
         {
             "provider": "deepseek",
             "model": "deepseek-chat",
+            "request_id": "44556677889900aabbccddeeff112233",
         }
-    ) == {"ok": True}
+    ) == {
+        "ok": True,
+        "commit_state": "committed",
+        "main_request_id": "44556677889900aabbccddeeff112233",
+        "runtime_state": "applied",
+    }
 
 
 def test_oauth_main_provider_rejected_from_webui(monkeypatch, tmp_path):

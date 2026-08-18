@@ -312,6 +312,7 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         self.assertIn("observe-single-deb-install.py", script)
         self.assertIn("certification-matrix.json", script)
         self.assertIn("TAIJI_CERTIFICATION_CATEGORY_ID", script)
+        self.assertIn("environment-observation.json", script)
         self.assertIn("environment-evidence.json", script)
         self.assertIn("validate-taiji-release-evidence.py", script)
         self.assertIn('/opt/taiji-agent/bin/taiji-native-verify', script)
@@ -327,6 +328,8 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         self.assertNotIn("--pre-sign", script)
         self.assertNotIn("TAIJI_LEGACY_TARGET_BASELINE_MODE", script)
         self.assertIn("target-verification.json", script)
+        self.assertIn('"taiji-linux-target-verification/v2"', script)
+        self.assertNotIn('"taiji-linux-target-verification/v1"', script)
         self.assertIn("driver-result.json", script)
         self.assertIn("desktop-app.png", script)
         self.assertIn("taiji-support-bundle.json", script)
@@ -351,6 +354,30 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
         self.assertIn("sha256sum", script)
         self.assertIn("证据输出目录已存在，拒绝覆盖", script)
 
+    def test_target_script_separates_installed_code_from_external_delivery_data(self):
+        script = read_text(DELIVERY / "04_目标终端_桌面App验收并导出证据.sh")
+
+        self.assertIn(
+            'INSTALL_ACCEPTANCE_ROOT="/opt/taiji-agent/libexec/target-acceptance"',
+            script,
+        )
+        self.assertIn('DELIVERY_DIR="${TAIJI_TARGET_DELIVERY_DIR:?', script)
+        self.assertIn('TOOLS_DIR="$INSTALL_ACCEPTANCE_ROOT/验收工具"', script)
+        self.assertIn('OUTPUT_DIR="$DELIVERY_DIR/生成的安装包"', script)
+        self.assertIn(
+            'TARGET_DIR="${TAIJI_TARGET_VERIFICATION_DIR:-$DELIVERY_DIR/target-verification}"',
+            script,
+        )
+        self.assertIn(
+            'SOURCE_ARCHIVE="$DELIVERY_DIR/taiji-agentv1.0-kylin-build-src-$SOURCE_COMMIT.tar.gz"',
+            script,
+        )
+        self.assertIn('"$VALIDATOR" "$DELIVERY_DIR"', script)
+        self.assertNotIn('TOOLS_DIR="$SCRIPT_DIR/验收工具"', script)
+        self.assertNotIn('OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"', script)
+        self.assertNotIn('$SCRIPT_DIR/target-verification', script)
+        self.assertNotIn('$SCRIPT_DIR/taiji-agentv1.0-kylin-build-src-', script)
+
     def test_target_script_rejects_non_v3_manifest_before_platform_and_long_input_checks(self):
         script = read_text(DELIVERY / "04_目标终端_桌面App验收并导出证据.sh")
         main = script[script.index("main() {") :]
@@ -374,10 +401,12 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
             "--graphical-installer-evidence",
             "--matrix",
             "--category-id",
-            "--environment-record",
+            "TAIJI_LINUX_ENVIRONMENT_OBSERVATION",
+            "--environment-observation",
             "/usr/bin/python3 -B",
         ):
             self.assertIn(required, script)
+        self.assertNotIn("--environment-record", script)
         for removed_post_hoc_flag in (
             "TAIJI_TARGET_INSTALL_METHOD",
             "TAIJI_TARGET_INSTALL_NETWORK",
@@ -404,6 +433,7 @@ class TargetDesktopAcceptanceProducerTest(unittest.TestCase):
             "certification-matrix.json",
             "assemble-taiji-certification-set.py",
             "validate-taiji-release-evidence.py",
+            "taiji-challenge-envelope.py",
             "signing-public.pem",
         ):
             self.assertIn(filename, builder)

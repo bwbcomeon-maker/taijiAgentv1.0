@@ -4,6 +4,7 @@ async function api(path,opts={}){
   const url=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
+  const retryNetworkErrors=opts.retryNetworkErrors!==false;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Server errors (4xx/5xx) and client-side timeouts are NOT retried.
   let lastErr;
@@ -17,6 +18,7 @@ async function api(path,opts={}){
       const fetchOpts={...opts};
       delete fetchOpts.timeoutMs;
       delete fetchOpts.timeoutToast;
+      delete fetchOpts.retryNetworkErrors;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -85,7 +87,7 @@ async function api(path,opts={}){
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
       // that were already thrown above. Re-throw 401 redirects immediately.
       if(e.message&&/401/.test(e.message)) throw e;
-      if(attempt<2 && e instanceof TypeError) continue;
+      if(retryNetworkErrors && attempt<2 && e instanceof TypeError) continue;
       throw e;
     }finally{
       if(timeoutId) clearTimeout(timeoutId);

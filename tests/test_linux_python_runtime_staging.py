@@ -21,6 +21,13 @@ if not SOURCE_PYTHON.exists() and ROOT.parent.name == ".worktrees":
     )
 
 
+def source_python_for_staging() -> Path:
+    override = os.environ.get("TAIJI_AGENT_PYTHON")
+    if override:
+        return Path(override)
+    return SOURCE_PYTHON
+
+
 class LinuxPythonRuntimeStagingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="taiji-python-runtime-stage-"))
@@ -28,7 +35,7 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
         self.source_venv = self.temp_dir / "source-venv"
         self.destination = self.temp_dir / "payload/runtime/agent/venv"
 
-        source_python = SOURCE_PYTHON.resolve(strict=True)
+        source_python = source_python_for_staging().resolve(strict=True)
         info = json.loads(
             subprocess.check_output(
                 [
@@ -67,6 +74,11 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
             encoding="utf-8",
         )
         (site_packages / "portable_fixture.py").write_text("VALUE = 'portable-ok'\n", encoding="utf-8")
+
+    def test_staging_uses_taiji_agent_python_override(self) -> None:
+        override = self.temp_dir / "ci-agent-python"
+        with mock.patch.dict(os.environ, {"TAIJI_AGENT_PYTHON": str(override)}):
+            self.assertEqual(override, source_python_for_staging())
 
     def test_absolute_uv_python_symlink_becomes_a_self_contained_relocatable_runtime(self) -> None:
         self.assertTrue((self.source_venv / "bin/python").is_symlink())
@@ -347,6 +359,17 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
             fake_root = self.temp_dir / f"fake-uv-{profile or 'default'}"
             fake_bin = fake_root / "bin"
             fake_bin.mkdir(parents=True)
+            test_venv = ROOT / "hermes-local-lab/sources/hermes-agent/venv"
+            self.assertFalse(test_venv.exists(), "isolated worktree must not have a real venv")
+            (test_venv / "bin").mkdir(parents=True)
+            fake_python = test_venv / "bin/python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [ \"${1:-}\" = -c ]; then printf '%s\\n' \"$3\"; exit 0; fi\n"
+                "exec python3 \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
             uv_log = fake_root / "uv.log"
             fake_uv = fake_bin / "uv"
             fake_uv.write_text(
@@ -364,13 +387,19 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
             }
             if profile is not None:
                 env["TAIJI_DEPENDENCY_PROFILE"] = profile
-            completed = subprocess.run(
-                ["bash", str(setup)],
-                text=True,
-                capture_output=True,
-                check=False,
-                env=env,
-            )
+            if profile == "production":
+                env["TAIJI_PYTHON_EXECUTABLE"] = str(fake_python.resolve())
+                env["TAIJI_UV_EXECUTABLE"] = str(fake_uv.resolve())
+            try:
+                completed = subprocess.run(
+                    ["bash", str(setup)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=env,
+                )
+            finally:
+                shutil.rmtree(test_venv)
             completed.uv_log = uv_log.read_text(encoding="utf-8") if uv_log.exists() else ""  # type: ignore[attr-defined]
             return completed
 

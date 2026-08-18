@@ -31,6 +31,41 @@ VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
 DEB_RE = re.compile(r"^taiji-agent_[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}_amd64\.deb$")
 MAX_JSON_BYTES = 1024 * 1024
 MAX_SIGNATURE_BYTES = 1024 * 1024
+FORMAL_GATES = {
+    "candidate_deb_unchanged": "PASS",
+    "canonical_policy": "PASS",
+    "certification_set": "PASS",
+    "certification_signature": "PASS",
+    "github_ci_gate": "PASS",
+    "manifest_binding": "PASS",
+}
+PINNED_UV_VERSION = "0.12.2"
+PINNED_UV_ARCHIVE_SHA256 = "d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41bf4"
+PINNED_UV_EXECUTABLE_SHA256 = "72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
+PINNED_NODE_VERSION = "22.23.1"
+PINNED_NODE_ARCHIVE_SHA256 = "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
+PINNED_NODE_EXECUTABLE_SHA256 = "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068"
+PINNED_PYTHON_VERSION = "3.11.15"
+PINNED_PYTHON_ARCHIVE_SHA256 = "2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
+PINNED_PYTHON_EXECUTABLE_SHA256 = "5035e46784be79111e00103f91b37bcd3b26f2b8b936f26e2bd4bb8252cd0aba"
+PINNED_ELECTRON_EXECUTABLE_SHA256 = "c63780578ca420c8651b81544e1551cef8b71a31c64712378467ed30dae06f6d"
+TOOLCHAIN_FIELDS = {
+    "python_dependency_lock_status",
+    "python_lock_basename",
+    "python_lock_sha256",
+    "python_version",
+    "python_archive_sha256",
+    "python_executable_sha256",
+    "uv_version",
+    "uv_archive_sha256",
+    "uv_executable_sha256",
+    "node_version",
+    "node_archive_sha256",
+    "node_executable_sha256",
+    "electron_version",
+    "electron_archive_sha256",
+    "electron_executable_sha256",
+}
 
 
 class ReleaseEvidenceError(ValueError):
@@ -131,6 +166,57 @@ def _canonical_policy(path: Path) -> tuple[str, str]:
         raise ReleaseEvidenceError("compatibility policy is not canonical") from exc
 
 
+def _validate_ci_evidence(
+    path: Path,
+    *,
+    source_commit: str,
+    output_parent: Path,
+) -> tuple[dict[str, Any], str]:
+    if path.name != "github-ci-evidence.json" or path.parent.resolve() != output_parent.resolve():
+        raise ReleaseEvidenceError("CI evidence must be github-ci-evidence.json beside the release evidence output")
+    validator = _load_certification_validator()
+    try:
+        result = validator.validate_github_ci_evidence_bundle(path, source_commit)
+    except Exception as exc:
+        raise ReleaseEvidenceError(f"GitHub CI v2 physical trio is invalid: {exc}") from exc
+    digest = result.get("evidence_sha256")
+    if type(digest) is not str or SHA256_RE.fullmatch(digest) is None:
+        raise ReleaseEvidenceError("GitHub CI v2 validator returned an invalid evidence hash")
+    return {}, digest
+
+
+def _manifest_toolchain(manifest: dict[str, Any], policy: dict[str, Any]) -> dict[str, str]:
+    missing = sorted(TOOLCHAIN_FIELDS - manifest.keys())
+    if missing:
+        raise ReleaseEvidenceError(
+            "current v3 manifest is missing formal toolchain identity: " + ", ".join(missing)
+        )
+    electron = policy.get("elf", {}).get("electron_distribution", {})
+    expected = {
+        "python_dependency_lock_status": "strict-locked",
+        "python_lock_basename": "uv.lock",
+        "python_version": PINNED_PYTHON_VERSION,
+        "python_archive_sha256": PINNED_PYTHON_ARCHIVE_SHA256,
+        "python_executable_sha256": PINNED_PYTHON_EXECUTABLE_SHA256,
+        "uv_version": PINNED_UV_VERSION,
+        "uv_archive_sha256": PINNED_UV_ARCHIVE_SHA256,
+        "uv_executable_sha256": PINNED_UV_EXECUTABLE_SHA256,
+        "node_version": PINNED_NODE_VERSION,
+        "node_archive_sha256": PINNED_NODE_ARCHIVE_SHA256,
+        "node_executable_sha256": PINNED_NODE_EXECUTABLE_SHA256,
+        "electron_version": electron.get("version"),
+        "electron_archive_sha256": electron.get("archive_sha256"),
+        "electron_executable_sha256": PINNED_ELECTRON_EXECUTABLE_SHA256,
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise ReleaseEvidenceError(f"manifest {key} is not the pinned formal identity")
+    for key in TOOLCHAIN_FIELDS:
+        if key.endswith("_sha256"):
+            _require_sha(manifest.get(key), f"manifest {key}")
+    return {key: manifest[key] for key in TOOLCHAIN_FIELDS}
+
+
 def _verify_signature(payload_path: Path, signature_path: Path) -> str:
     if not PUBLIC_KEY.is_file() or PUBLIC_KEY.is_symlink():
         raise ReleaseEvidenceError("fixed signing public key is unavailable")
@@ -157,6 +243,26 @@ def _load_certification_validator():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_challenge_helper():
+    candidates = (
+        Path(__file__).resolve().with_name("taiji-challenge-envelope.py"),
+        ROOT / "scripts/taiji-challenge-envelope.py",
+    )
+    for path in dict.fromkeys(candidates):
+        if not path.is_file() or path.is_symlink():
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "taiji_publication_challenge_envelope",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise ReleaseEvidenceError("cannot load challenge-envelope helper")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    raise ReleaseEvidenceError("challenge-envelope helper is missing")
 
 
 def _validate_certification_set(
@@ -201,6 +307,7 @@ def _validate_certification_set(
         compatibility_policy_sha256=policy_sha,
         electron_executable_sha256=manifest["electron_executable_sha256"],
         desktop_entry_sha256=manifest["desktop_entry_sha256"],
+        **{field: manifest[field] for field in TOOLCHAIN_FIELDS if field != "electron_executable_sha256"},
     )
     matrix_path = ROOT / "packaging/linux/certification-matrix.json"
     args = SimpleNamespace(challenge=cert_challenge, matrix=matrix_path)
@@ -244,8 +351,6 @@ def _write_new(path: Path, payload: bytes) -> None:
 
 
 def assemble(args: argparse.Namespace) -> Path:
-    if not CHALLENGE_RE.fullmatch(args.challenge or ""):
-        raise ReleaseEvidenceError("publication challenge must be 64-128 lowercase hexadecimal characters")
     for path, label in (
         (args.manifest, "manifest"),
         (args.deb, "candidate DEB"),
@@ -253,6 +358,7 @@ def assemble(args: argparse.Namespace) -> Path:
         (args.certification_set, "certification set"),
         (args.certification_signature, "certification signature"),
         (args.output, "output"),
+        (args.challenge_envelope, "publication challenge envelope"),
     ):
         if not path.is_absolute():
             raise ReleaseEvidenceError(f"{label} path must be absolute")
@@ -272,8 +378,13 @@ def assemble(args: argparse.Namespace) -> Path:
     deb_hash_before = _sha(args.deb, "candidate DEB")
     if manifest.get("deb_sha256") != deb_hash_before:
         raise ReleaseEvidenceError("candidate DEB hash does not match manifest")
+    challenge_helper = _load_challenge_helper()
+    challenge_envelope = challenge_helper.load_envelope_file(args.challenge_envelope)
+    publication_challenge = challenge_envelope.get("nonce")
     _require_sha(manifest.get("electron_executable_sha256"), "manifest electron hash")
     _require_sha(manifest.get("desktop_entry_sha256"), "manifest desktop entry hash")
+    policy_document, _ = _load_json(args.policy, "compatibility policy")
+    toolchain = _manifest_toolchain(manifest, policy_document)
     policy_id, policy_sha = _canonical_policy(args.policy)
     if manifest.get("compatibility_policy_id") != policy_id or manifest.get("compatibility_policy_sha256") != policy_sha:
         raise ReleaseEvidenceError("manifest policy identity does not match canonical policy")
@@ -286,18 +397,33 @@ def assemble(args: argparse.Namespace) -> Path:
         deb_hash=deb_hash_before,
         policy_id=policy_id,
         policy_sha=policy_sha,
-        publication_challenge=args.challenge,
+        publication_challenge=publication_challenge,
     )
     deb_hash_after = _sha(args.deb, "candidate DEB")
     if deb_hash_after != deb_hash_before:
         raise ReleaseEvidenceError("candidate DEB changed while assembling publication evidence")
     certification_hash = _sha(args.certification_set, "certification set")
+    _ci_data, ci_evidence_hash = _validate_ci_evidence(
+        args.ci_evidence,
+        source_commit=source_commit,
+        output_parent=args.output.parent,
+    )
     generated = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    challenge_helper.verify_envelope(
+        challenge_envelope,
+        purpose="publication",
+        source_commit=source_commit,
+        deb_basename=deb_basename,
+        deb_sha256=deb_hash_before,
+        require_active=True,
+        evidence_times=(generated,),
+    )
     evidence = {
         "schema": SCHEMA,
         "evidence_type": "single-deb-publication",
         "generated_at_utc": generated,
-        "challenge_nonce": args.challenge,
+        "challenge_nonce": publication_challenge,
+        "challenge_envelope": challenge_envelope,
         "source_commit": source_commit,
         "version": version,
         "architecture": "amd64",
@@ -305,21 +431,18 @@ def assemble(args: argparse.Namespace) -> Path:
         "deb_sha256": deb_hash_before,
         "compatibility_policy_id": policy_id,
         "compatibility_policy_sha256": policy_sha,
+        **toolchain,
         "certification_set_basename": args.certification_set.name,
         "certification_set_sha256": certification_hash,
         "certification_set_signature_basename": args.certification_signature.name,
         "certification_set_signature_sha256": certification_signature_hash,
+        "ci_evidence_basename": args.ci_evidence.name,
+        "ci_evidence_sha256": ci_evidence_hash,
         "maintainer": _require_text(manifest.get("maintainer"), "manifest maintainer"),
         "customer_filename": deb_basename,
         "customer_folder_contract": "exactly-one-deb",
         "signing_public_key_fingerprint": PUBLIC_KEY_FINGERPRINT,
-        "formal_gates": {
-            "candidate_deb_unchanged": "PASS",
-            "canonical_policy": "PASS",
-            "certification_set": "PASS",
-            "certification_signature": "PASS",
-            "manifest_binding": "PASS",
-        },
+        "formal_gates": dict(FORMAL_GATES),
     }
     payload = (json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
     _write_new(args.output, payload)
@@ -333,8 +456,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--certification-set", required=True, type=Path)
     parser.add_argument("--certification-signature", required=True, type=Path)
+    parser.add_argument("--ci-evidence", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--challenge", required=True)
+    parser.add_argument("--challenge-envelope", required=True, type=Path)
     return parser.parse_args(argv)
 
 

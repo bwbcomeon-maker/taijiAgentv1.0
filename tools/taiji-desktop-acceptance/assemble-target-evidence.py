@@ -13,8 +13,10 @@ import pwd
 import re
 import shutil
 import stat
+import struct
 import sys
 import tempfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -30,12 +32,14 @@ DIAGNOSTIC_BASENAME = "taiji-support-bundle.json"
 INSTALL_OBSERVATION_BASENAME = "single-deb-install-observation.json"
 INSTALL_METHOD_ATTESTATION_BASENAME = "single-deb-install-method-attestation.json"
 GRAPHICAL_INSTALLER_EVIDENCE_BASENAME = "single-deb-graphical-installer.png"
+ENVIRONMENT_OBSERVATION_BASENAME = "environment-observation.json"
 ENVIRONMENT_EVIDENCE_BASENAME = "environment-evidence.json"
 CANONICAL_OBSERVATION_SCHEMA = "taiji.single-deb-install-observation/v2"
-CANONICAL_TARGET_EVIDENCE_SCHEMA = "taiji-linux-target-verification/v1"
+CANONICAL_TARGET_EVIDENCE_SCHEMA = "taiji-linux-target-verification/v2"
 MAX_JSON_BYTES = 1024 * 1024
 MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+MACHINE_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -45,6 +49,7 @@ VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$")
 OPERATOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 SYSTEM_ID_RE = re.compile(r"^[0-9a-fA-F-]{16,64}$")
 NON_LINUX_TEST_IDENTITY_ENV = "TAIJI_ASSEMBLER_NON_LINUX_TEST_IDENTITY"
+MACHINE_IDENTITY_COMMITMENT_DOMAIN = "taiji-machine-identity-v1"
 EXPECTED_CHECKS = {
     "visible_first_configuration_completion",
     "desktop_launch",
@@ -52,6 +57,10 @@ EXPECTED_CHECKS = {
     "attachment_flow",
     "window_close_exit",
     "diagnostic_export",
+    "three_restart_cycles",
+    "second_instance_focus",
+    "model_configuration_state_consistent",
+    "no_new_electron_core",
 }
 DRIVER_KEYS = {
     "schema",
@@ -70,10 +79,60 @@ DRIVER_KEYS = {
     "web_pid",
     "screenshot_basename",
     "diagnostic_basename",
+    "restart_rounds",
+    "persistent_user_data",
+    "core_observation",
+    "model_config_observation",
     "checks",
     "js_error_count",
     "unexpected_http_failures",
     "electron_exit_code",
+}
+DRIVER_RESTART_ROUND_KEYS = {
+    "round",
+    "ready",
+    "electron_pid",
+    "agent_pid",
+    "web_pid",
+    "secondary_pid",
+    "cdp_port",
+    "webui_port",
+    "second_instance_exit_code",
+    "electron_exit_code",
+    "restored_and_focused",
+    "page_close_sent",
+    "process_identities_gone",
+    "ports_closed",
+    "pidfiles_absent",
+    "model_config_observed",
+    "profile_continuity_observed",
+}
+DRIVER_PERSISTENT_USER_DATA_KEYS = {
+    "mode",
+    "restart_rounds",
+    "user_data_override",
+    "profile_reset",
+    "environment_reused",
+    "continuity_observed_rounds",
+    "continuity_token",
+}
+DRIVER_CORE_OBSERVATION_KEYS = {
+    "status",
+    "mechanism",
+    "baseline_entry_count",
+    "baseline_cursor_set_token",
+    "rounds",
+}
+DRIVER_CORE_ROUND_KEYS = {
+    "round",
+    "status",
+    "added_entry_count",
+    "cursor_set_token",
+}
+DRIVER_MODEL_CONFIG_OBSERVATION_KEYS = {
+    "observed_rounds",
+    "consistent",
+    "public_projection_token",
 }
 DESKTOP_AUTH_COOKIE_KEYS = {
     "name",
@@ -162,6 +221,10 @@ TARGET_KEYS = {
     "attachment_flow",
     "window_close_exit",
     "diagnostic_export",
+    "three_restart_cycles",
+    "second_instance_focus",
+    "model_configuration_state_consistent",
+    "no_new_electron_core",
     "session_log_basename",
     "session_log_sha256",
     "screenshot_basename",
@@ -176,6 +239,48 @@ TARGET_KEYS = {
     "install_method_attestation_sha256",
     "graphical_installer_evidence_basename",
     "graphical_installer_evidence_sha256",
+}
+
+CANONICAL_TARGET_EVIDENCE_KEYS = {
+    "schema",
+    "evidence_type",
+    "generated_at_utc",
+    "acceptance_session_id",
+    "challenge_nonce",
+    "machine_identity_commitment_sha256",
+    "machine_fingerprint_sha256",
+    "release_artifacts_sha256",
+    "category_id",
+    "category_kind",
+    "compatibility",
+    "source_commit",
+    "version",
+    "architecture",
+    "deb_basename",
+    "deb_sha256",
+    "compatibility_policy_id",
+    "compatibility_policy_sha256",
+    "os_id",
+    "os_version",
+    "desktop_environment",
+    "installation_method",
+    "installation_method_evidence",
+    "installation_method_machine_observed",
+    "checks",
+    "environment_observation_basename",
+    "environment_observation_sha256",
+    "install_observation_basename",
+    "install_observation_sha256",
+    "install_method_attestation_basename",
+    "install_method_attestation_sha256",
+    "graphical_installer_evidence_basename",
+    "graphical_installer_evidence_sha256",
+    "driver_result_basename",
+    "driver_result_sha256",
+    "screenshot_basename",
+    "screenshot_sha256",
+    "diagnostic_basename",
+    "diagnostic_sha256",
 }
 
 INSTALL_OBSERVATION_KEYS = {
@@ -202,16 +307,14 @@ class AssemblyError(ValueError):
     """Raised when an input cannot produce trustworthy target evidence."""
 
 
-def current_target_fingerprints(challenge: str) -> tuple[str, str]:
-    """Derive privacy-preserving identities for the current target and boot.
+def _current_target_identities() -> tuple[str, str]:
+    """Read canonical machine and boot identities from the current target.
 
     The production path is deliberately Linux-only and reads the same kernel
     identities as the pre-install observer.  A separately named environment
     variable exists only so the subprocess contract tests can run on the macOS
     development host; it is ignored on Linux.
     """
-    if not CHALLENGE_RE.fullmatch(challenge or ""):
-        raise AssemblyError("challenge must be 64-128 lowercase hexadecimal characters")
     if sys.platform.startswith("linux"):
         machine_path = next(
             (
@@ -229,7 +332,7 @@ def current_target_fingerprints(challenge: str) -> tuple[str, str]:
             boot_id = boot_path.read_text(encoding="ascii").strip()
         except OSError as exc:
             raise AssemblyError("current Linux machine or boot identity is unreadable") from exc
-        if not SYSTEM_ID_RE.fullmatch(machine_id) or not SYSTEM_ID_RE.fullmatch(boot_id):
+        if not MACHINE_ID_RE.fullmatch(machine_id) or not SYSTEM_ID_RE.fullmatch(boot_id):
             raise AssemblyError("current Linux machine or boot identity is invalid")
         machine_identity = machine_id.lower()
         boot_identity = boot_id.lower()
@@ -239,6 +342,39 @@ def current_target_fingerprints(challenge: str) -> tuple[str, str]:
             raise AssemblyError("target evidence assembly is Linux-only outside contract tests")
         machine_identity = f"non-linux-contract-test-machine:{test_identity}"
         boot_identity = f"non-linux-contract-test-boot:{test_identity}"
+
+    return machine_identity, boot_identity
+
+
+def _machine_identity_commitment(machine_identity: str) -> str:
+    return hashlib.sha256(
+        (MACHINE_IDENTITY_COMMITMENT_DOMAIN + "\0" + machine_identity).encode("utf-8")
+    ).hexdigest()
+
+
+def _machine_fingerprint_from_commitment(challenge: str, commitment: str) -> str:
+    if not CHALLENGE_RE.fullmatch(challenge or ""):
+        raise AssemblyError("challenge must be 64-128 lowercase hexadecimal characters")
+    require_sha256(commitment, "machine identity commitment")
+    return hashlib.sha256((challenge + "\0" + commitment).encode("utf-8")).hexdigest()
+
+
+def current_target_identity_binding(challenge: str) -> tuple[str, str, str]:
+    """Return stable commitment plus challenge-bound machine and boot fingerprints."""
+    machine_identity, boot_identity = _current_target_identities()
+    commitment = _machine_identity_commitment(machine_identity)
+    machine_fingerprint = _machine_fingerprint_from_commitment(challenge, commitment)
+    boot_fingerprint = hashlib.sha256(
+        (challenge + "\0" + boot_identity).encode("utf-8")
+    ).hexdigest()
+    return commitment, machine_fingerprint, boot_fingerprint
+
+
+def current_target_fingerprints(challenge: str) -> tuple[str, str]:
+    """Derive legacy challenge-bound machine and boot fingerprints."""
+    if not CHALLENGE_RE.fullmatch(challenge or ""):
+        raise AssemblyError("challenge must be 64-128 lowercase hexadecimal characters")
+    machine_identity, boot_identity = _current_target_identities()
 
     def fingerprint(identity: str) -> str:
         return hashlib.sha256((challenge + "\0" + identity).encode("utf-8")).hexdigest()
@@ -303,8 +439,9 @@ def require_exact_keys(data: dict[str, Any], expected: set[str], label: str) -> 
         raise AssemblyError(f"{label} has an invalid field set ({'; '.join(details)})")
 
 
-CERTIFICATION_MATRIX_SCHEMA = "taiji-linux-certification-matrix/v1"
-ENVIRONMENT_EVIDENCE_SCHEMA = "taiji-linux-environment-evidence/v1"
+CERTIFICATION_MATRIX_SCHEMA = "taiji-linux-certification-matrix/v2"
+ENVIRONMENT_OBSERVATION_SCHEMA = "taiji-linux-environment-observation/v1"
+ENVIRONMENT_EVIDENCE_SCHEMA = "taiji-linux-environment-evidence/v2"
 CERTIFICATION_POLICY_ID = "taiji-linux-amd64-deb-v1"
 CERTIFICATION_POSITIVE_IDS = {
     "kylin-min-ukui",
@@ -328,12 +465,14 @@ CERTIFICATION_BUSINESS_CHECKS = {
     "real_model_conversation",
     "attachment_flow",
     "diagnostic_export",
+    "model_configuration_state_consistent",
 }
 CERTIFICATION_LIFECYCLE_CHECKS = {
     "install",
-    "uninstall",
-    "reinstall",
     "window_close_exit",
+    "three_restart_cycles",
+    "second_instance_focus",
+    "no_new_electron_core",
 }
 CERTIFICATION_MATRIX_KEYS = {
     "schema",
@@ -344,7 +483,77 @@ CERTIFICATION_MATRIX_KEYS = {
     "positive_categories",
     "negative_boundaries",
 }
-ENVIRONMENT_RECORD_KEYS = {
+CERTIFICATION_POSITIVE_CATEGORY_KEYS = {
+    "id",
+    "kind",
+    "label",
+    "expected_compatibility",
+    "os_ids",
+    "desktop_environments",
+    "platform_profile",
+    "required_business_checks",
+    "required_lifecycle_checks",
+}
+CERTIFICATION_NEGATIVE_CATEGORY_KEYS = {
+    "id",
+    "kind",
+    "boundary",
+    "expected_compatibility",
+    "stable_error_code",
+    "block_before_business_data_mutation",
+}
+PLATFORM_PROFILE_KEYS = {
+    "os_id",
+    "version_id",
+    "release_id_pattern",
+    "desktop_environments",
+    "security_profile",
+}
+CANONICAL_PLATFORM_PROFILES = {
+    "kylin-min-ukui": {
+        "os_id": "kylin",
+        "version_id": "v10",
+        "release_id_pattern": "2403",
+        "desktop_environments": ["UKUI"],
+        "security_profile": "supported-default",
+    },
+    "kylin-current-standard": {
+        "os_id": "kylin",
+        "version_id": "v10",
+        "release_id_pattern": "2503",
+        "desktop_environments": ["UKUI"],
+        "security_profile": "supported-default",
+    },
+    "kylin-hardened": {
+        "os_id": "kylin",
+        "version_id": "v10",
+        "release_id_pattern": "2503",
+        "desktop_environments": ["UKUI"],
+        "security_profile": "kysec-enabled-exec-control-off",
+    },
+    "uos-min-dde": {
+        "os_id": "uos",
+        "version_id": "20",
+        "release_id_pattern": r"1070(?:u2)?",
+        "desktop_environments": ["DDE"],
+        "security_profile": "supported-default",
+    },
+    "uos-current-or-hardened": {
+        "os_id": "uos",
+        "version_id": "25",
+        "release_id_pattern": r"25[0-9A-Za-z._-]*",
+        "desktop_environments": ["DDE"],
+        "security_profile": "supported-default",
+    },
+    "openkylin-current": {
+        "os_id": "openkylin",
+        "version_id": "2.0",
+        "release_id_pattern": r"2\.0-SP2",
+        "desktop_environments": ["UKUI", "GNOME"],
+        "security_profile": "supported-default",
+    },
+}
+ENVIRONMENT_OBSERVATION_KEYS = {
     "schema",
     "category_id",
     "category_kind",
@@ -356,12 +565,83 @@ ENVIRONMENT_RECORD_KEYS = {
     "deb_sha256",
     "compatibility_policy_id",
     "compatibility_policy_sha256",
+    "machine_identity_commitment_sha256",
     "os_id",
     "os_version",
     "desktop_environment",
     "security_facts",
     "checks",
     "attachments",
+}
+ENVIRONMENT_RECORD_KEYS = (ENVIRONMENT_OBSERVATION_KEYS - {
+    "machine_identity_commitment_sha256",
+}) | {
+    "challenge_nonce",
+    "acceptance_session_id",
+    "machine_fingerprint_sha256",
+}
+POSITIVE_ENVIRONMENT_RECORD_KEYS = ENVIRONMENT_RECORD_KEYS | {
+    "machine_identity_commitment_sha256",
+}
+POSITIVE_ENVIRONMENT_ATTACHMENT_BASENAMES = {
+    EVIDENCE_BASENAME,
+    ENVIRONMENT_OBSERVATION_BASENAME,
+    INSTALL_OBSERVATION_BASENAME,
+    INSTALL_METHOD_ATTESTATION_BASENAME,
+    GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
+    DRIVER_RESULT_BASENAME,
+    SCREENSHOT_BASENAME,
+    DIAGNOSTIC_BASENAME,
+}
+NEGATIVE_ENVIRONMENT_ATTACHMENT_BASENAMES = {
+    "preflight-result.json",
+    "business-data-inventory.json",
+}
+NEGATIVE_SECURITY_FACT_KEYS = {
+    "business_data_mutation",
+    "business_data_before_sha256",
+    "business_data_after_sha256",
+    "business_data_scope_id",
+    "business_data_inventory_sha256",
+    "boundary",
+    "observed_value",
+    "stable_error_code",
+    "execution_environment",
+    "preflight_result_sha256",
+}
+POSITIVE_SECURITY_FACT_KEYS = {
+    "administrator_available",
+    "business_data_mutation",
+    "graphical_desktop",
+    "network_observation",
+    "package_manager",
+    "security_profile",
+    "kysec_detected",
+    "kysec_enabled",
+    "kysec_exec_control",
+    "os_release_sha256",
+    "os_version_sha256",
+}
+BUSINESS_DATA_SCOPE_ID = "taiji-user-and-install-state-v1"
+PROTECTED_BUSINESS_PATHS = (
+    "home/customer/.config/taiji-agent",
+    "home/customer/.config/taiji-agent-desktop",
+    "home/customer/.local/share/taiji-agent",
+    "home/customer/.local/share/taiji-agent-desktop",
+    "home/customer/.local/state/taiji-agent",
+    "home/customer/.local/state/taiji-agent-desktop",
+    "home/customer/.cache/taiji-agent",
+    "home/customer/.cache/taiji-agent-desktop",
+    "opt/taiji-agent",
+)
+NEGATIVE_PREFLIGHT_KEYS = {
+    "schema",
+    "status",
+    "policy_id",
+    "compatibility_policy_sha256",
+    "error_code",
+    "reason_zh",
+    "failed_capabilities",
 }
 
 
@@ -405,6 +685,11 @@ def validate_certification_matrix(matrix: dict[str, Any]) -> dict[str, Any]:
     for category in categories:
         if type(category) is not dict:
             raise AssemblyError("certification matrix positive category must be an object")
+        require_exact_keys(
+            category,
+            CERTIFICATION_POSITIVE_CATEGORY_KEYS,
+            f"certification matrix positive category {category.get('id')}",
+        )
         if category.get("kind") != "positive":
             raise AssemblyError(f"certification matrix category {category.get('id')} kind is invalid")
         if category.get("expected_compatibility") != "COMPATIBLE":
@@ -425,9 +710,36 @@ def validate_certification_matrix(matrix: dict[str, Any]) -> dict[str, Any]:
             raise AssemblyError(
                 f"certification matrix category {category.get('id')} desktop environments are invalid"
             )
+        profile = category.get("platform_profile")
+        if type(profile) is not dict:
+            raise AssemblyError(
+                f"certification matrix category {category.get('id')} platform profile is invalid"
+            )
+        require_exact_keys(
+            profile,
+            PLATFORM_PROFILE_KEYS,
+            f"certification matrix category {category.get('id')} platform profile",
+        )
+        if profile != CANONICAL_PLATFORM_PROFILES[category["id"]]:
+            raise AssemblyError(
+                f"certification matrix category {category.get('id')} platform profile is not canonical"
+            )
+        if category["os_ids"] != [profile["os_id"]]:
+            raise AssemblyError(
+                f"certification matrix category {category.get('id')} OS IDs do not match its platform profile"
+            )
+        if category["desktop_environments"] != profile["desktop_environments"]:
+            raise AssemblyError(
+                f"certification matrix category {category.get('id')} desktop environments do not match its platform profile"
+            )
     for boundary in boundaries:
         if type(boundary) is not dict:
             raise AssemblyError("certification matrix negative boundary must be an object")
+        require_exact_keys(
+            boundary,
+            CERTIFICATION_NEGATIVE_CATEGORY_KEYS,
+            f"certification matrix negative boundary {boundary.get('id')}",
+        )
         if boundary.get("kind") != "negative":
             raise AssemblyError(f"certification matrix boundary {boundary.get('id')} kind is invalid")
         if boundary.get("expected_compatibility") != "BLOCKED":
@@ -458,65 +770,386 @@ def validate_certification_matrix(matrix: dict[str, Any]) -> dict[str, Any]:
     return matrix
 
 
-def validate_environment_record(
-    record: dict[str, Any], matrix: dict[str, Any]
+def _validate_environment_identity(
+    record: dict[str, Any], matrix: dict[str, Any], *, label: str
 ) -> dict[str, Any]:
-    """Validate one machine-fact record without allowing certification claims."""
     validate_certification_matrix(matrix)
     if type(record) is not dict:
-        raise AssemblyError("environment evidence record must be an object")
+        raise AssemblyError(f"{label} must be an object")
     if "CERTIFIED" in json.dumps(record, ensure_ascii=False, sort_keys=True):
-        raise AssemblyError("environment evidence record must not claim CERTIFIED")
-    require_exact_keys(record, ENVIRONMENT_RECORD_KEYS, "environment evidence record")
-    if record["schema"] != ENVIRONMENT_EVIDENCE_SCHEMA:
-        raise AssemblyError("environment evidence record has the wrong schema")
+        raise AssemblyError(f"{label} must not claim CERTIFIED")
     category_id = record["category_id"]
     if type(category_id) is not str:
-        raise AssemblyError("environment evidence category_id is invalid")
+        raise AssemblyError(f"{label} category_id is invalid")
     all_categories = {
         item["id"]: item
         for item in matrix["positive_categories"] + matrix["negative_boundaries"]
     }
     category = all_categories.get(category_id)
     if category is None:
-        raise AssemblyError("environment evidence category_id is not in the certification matrix")
+        raise AssemblyError(f"{label} category_id is not in the certification matrix")
     expected_kind = category["kind"]
     if record["category_kind"] != expected_kind:
-        raise AssemblyError("environment evidence category_kind does not match the matrix")
+        raise AssemblyError(f"{label} category_kind does not match the matrix")
     if record["compatibility"] != category["expected_compatibility"]:
-        raise AssemblyError("environment evidence compatibility does not match the matrix")
+        raise AssemblyError(f"{label} compatibility does not match the matrix")
     source_commit = record["source_commit"]
     if type(source_commit) is not str or not FULL_COMMIT_RE.fullmatch(source_commit):
-        raise AssemblyError("environment evidence source_commit is invalid")
+        raise AssemblyError(f"{label} source_commit is invalid")
     version = record["version"]
     if type(version) is not str or not VERSION_RE.fullmatch(version):
-        raise AssemblyError("environment evidence version is invalid")
+        raise AssemblyError(f"{label} version is invalid")
     if record["architecture"] != matrix["architecture"]:
-        raise AssemblyError("environment evidence architecture does not match the matrix")
+        raise AssemblyError(f"{label} architecture does not match the matrix")
     expected_deb = f"taiji-agent_{version}_amd64.deb"
     if record["deb_basename"] != expected_deb:
-        raise AssemblyError("environment evidence DEB basename is invalid")
-    require_sha256(record["deb_sha256"], "environment evidence DEB hash")
+        raise AssemblyError(f"{label} DEB basename is invalid")
+    require_sha256(record["deb_sha256"], f"{label} DEB hash")
     if record["compatibility_policy_id"] != matrix["compatibility_policy_id"]:
-        raise AssemblyError("environment evidence compatibility policy does not match the matrix")
+        raise AssemblyError(f"{label} compatibility policy does not match the matrix")
     require_sha256(
         record["compatibility_policy_sha256"],
-        "environment evidence compatibility policy hash",
+        f"{label} compatibility policy hash",
     )
     for key in ("os_id", "os_version", "desktop_environment"):
-        require_visible_text(record[key], f"environment evidence {key}")
+        require_visible_text(record[key], f"{label} {key}")
     if type(record["security_facts"]) is not dict:
-        raise AssemblyError("environment evidence security_facts must be an object")
+        raise AssemblyError(f"{label} security_facts must be an object")
     if type(record["checks"]) is not dict:
-        raise AssemblyError("environment evidence checks must be an object")
+        raise AssemblyError(f"{label} checks must be an object")
     if type(record["attachments"]) is not list:
-        raise AssemblyError("environment evidence attachments must be a list")
-    if expected_kind == "negative":
-        if record["checks"].get("preflight") != "BLOCKED":
+        raise AssemblyError(f"{label} attachments must be a list")
+    if category["kind"] == "positive":
+        profile = category["platform_profile"]
+        facts = record["security_facts"]
+        require_sha256(
+            record.get("machine_identity_commitment_sha256"),
+            f"{label} machine identity commitment",
+        )
+        if set(facts) != POSITIVE_SECURITY_FACT_KEYS:
+            raise AssemblyError(f"{label} positive security facts have an invalid field set")
+        if (
+            facts["administrator_available"] is not True
+            or facts["business_data_mutation"] is not False
+            or facts["graphical_desktop"] is not True
+            or facts["network_observation"]
+            != "continuous-process-sampling-no-non-loopback-up"
+            or facts["package_manager"] != "dpkg"
+            or type(facts["kysec_detected"]) is not bool
+            or type(facts["kysec_enabled"]) is not bool
+            or facts["kysec_exec_control"] not in {"off", "not-present"}
+        ):
+            raise AssemblyError(f"{label} positive security facts are unsafe or inconsistent")
+        if not facts["kysec_detected"] and (
+            facts["kysec_enabled"] or facts["kysec_exec_control"] != "not-present"
+        ):
+            raise AssemblyError(f"{label} positive security facts contain an inconsistent absent Kysec state")
+        if facts["kysec_detected"] and facts["kysec_exec_control"] != "off":
+            raise AssemblyError(f"{label} detected Kysec does not prove exec control off")
+        require_sha256(facts["os_release_sha256"], f"{label} os-release hash")
+        if facts["os_version_sha256"] != "not-present":
+            require_sha256(facts["os_version_sha256"], f"{label} os-version hash")
+        if record["os_id"] != profile["os_id"]:
+            raise AssemblyError(f"{label} OS does not match the category platform profile")
+        version_parts = record["os_version"].split("/", 1)
+        if len(version_parts) != 2 or version_parts[0] != profile["version_id"]:
+            raise AssemblyError(f"{label} OS version does not match the category platform profile")
+        release_id = version_parts[1]
+        try:
+            release_matches = re.fullmatch(profile["release_id_pattern"], release_id) is not None
+        except re.error as exc:
+            raise AssemblyError(f"{label} category release pattern is invalid") from exc
+        if not release_matches:
+            raise AssemblyError(f"{label} OS release does not match the category platform profile")
+        if record["desktop_environment"] not in profile["desktop_environments"]:
+            raise AssemblyError(f"{label} desktop does not match the category platform profile")
+        if facts["security_profile"] != profile["security_profile"]:
+            raise AssemblyError(f"{label} security profile does not match the category platform profile")
+        if profile["security_profile"] == "kysec-enabled-exec-control-off" and any(
+            facts.get(key) != expected
+            for key, expected in {
+                "kysec_detected": True,
+                "kysec_enabled": True,
+                "kysec_exec_control": "off",
+            }.items()
+        ):
+            raise AssemblyError(f"{label} hardened security facts do not prove Kysec enabled with exec control off")
+    return category
+
+
+def _validate_environment_attachments(attachments: list[Any]) -> set[str]:
+    basenames: set[str] = set()
+    for attachment in attachments:
+        if type(attachment) is not dict:
+            raise AssemblyError("environment evidence attachment must be an object")
+        require_exact_keys(attachment, {"basename", "sha256"}, "environment evidence attachment")
+        basename = attachment["basename"]
+        if (
+            type(basename) is not str
+            or not basename
+            or basename in {".", ".."}
+            or Path(basename).name != basename
+            or "/" in basename
+            or "\\" in basename
+        ):
+            raise AssemblyError("environment evidence attachment basename is invalid")
+        if basename in basenames:
+            raise AssemblyError("environment evidence contains duplicate attachment basenames")
+        require_sha256(attachment["sha256"], "environment evidence attachment hash")
+        basenames.add(basename)
+    return basenames
+
+
+def validate_environment_observation(
+    observation: dict[str, Any], matrix: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the install-time seed without treating it as final evidence."""
+    require_exact_keys(observation, ENVIRONMENT_OBSERVATION_KEYS, "environment observation")
+    if observation["schema"] != ENVIRONMENT_OBSERVATION_SCHEMA:
+        raise AssemblyError("environment observation has the wrong schema")
+    category = _validate_environment_identity(observation, matrix, label="environment observation")
+    if category["kind"] != "positive":
+        raise AssemblyError("desktop installation observation requires a positive category")
+    if observation["checks"] != {"preflight": "PASS", "install": "PASS"}:
+        raise AssemblyError("environment observation must contain only successful preflight and install checks")
+    if observation["attachments"] != []:
+        raise AssemblyError("environment observation must not claim final evidence attachments")
+    return observation
+
+
+def validate_environment_record(
+    record: dict[str, Any], matrix: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate one final machine-fact record without allowing certification claims."""
+    if type(record) is dict and "CERTIFIED" in json.dumps(record, ensure_ascii=False, sort_keys=True):
+        raise AssemblyError("environment evidence record must not claim CERTIFIED")
+    expected_keys = (
+        POSITIVE_ENVIRONMENT_RECORD_KEYS
+        if type(record) is dict and record.get("category_kind") == "positive"
+        else ENVIRONMENT_RECORD_KEYS
+    )
+    require_exact_keys(record, expected_keys, "environment evidence record")
+    if record["schema"] != ENVIRONMENT_EVIDENCE_SCHEMA:
+        raise AssemblyError("environment evidence record has the wrong schema")
+    category = _validate_environment_identity(record, matrix, label="environment evidence")
+    if not CHALLENGE_RE.fullmatch(record["challenge_nonce"] or ""):
+        raise AssemblyError("environment evidence challenge_nonce is invalid")
+    if not SESSION_RE.fullmatch(record["acceptance_session_id"] or ""):
+        raise AssemblyError("environment evidence acceptance_session_id is invalid")
+    machine_fingerprint = require_sha256(
+        record["machine_fingerprint_sha256"],
+        "environment evidence machine fingerprint",
+    )
+    if category["kind"] == "positive":
+        commitment = require_sha256(
+            record["machine_identity_commitment_sha256"],
+            "environment evidence machine identity commitment",
+        )
+        expected_fingerprint = _machine_fingerprint_from_commitment(
+            record["challenge_nonce"], commitment
+        )
+        if machine_fingerprint != expected_fingerprint:
+            raise AssemblyError(
+                "environment evidence machine fingerprint does not match its identity commitment"
+            )
+    attachment_basenames = _validate_environment_attachments(record["attachments"])
+    if category["kind"] == "positive":
+        required_checks = {
+            "preflight",
+            *category["required_business_checks"],
+            *category["required_lifecycle_checks"],
+        }
+        if set(record["checks"]) != required_checks or any(
+            record["checks"].get(key) != "PASS" for key in required_checks
+        ):
+            raise AssemblyError("positive environment evidence requires the exact successful target checks")
+        if attachment_basenames != POSITIVE_ENVIRONMENT_ATTACHMENT_BASENAMES:
+            raise AssemblyError("positive environment evidence attachments are incomplete or contain extras")
+    else:
+        if record["checks"] != {"preflight": "BLOCKED"}:
             raise AssemblyError("negative environment evidence must block during preflight")
-        if record["security_facts"].get("business_data_mutation") is not False:
+        facts = record["security_facts"]
+        if set(facts) != NEGATIVE_SECURITY_FACT_KEYS:
+            raise AssemblyError("negative environment evidence has an invalid security fact set")
+        if facts.get("business_data_mutation") is not False:
             raise AssemblyError("negative environment evidence must prove no business data mutation")
+        before_hash = require_sha256(
+            facts.get("business_data_before_sha256"),
+            "negative environment evidence business data before hash",
+        )
+        after_hash = require_sha256(
+            facts.get("business_data_after_sha256"),
+            "negative environment evidence business data after hash",
+        )
+        if before_hash != after_hash:
+            raise AssemblyError("negative environment evidence business data changed during preflight")
+        if facts.get("business_data_scope_id") != BUSINESS_DATA_SCOPE_ID:
+            raise AssemblyError("negative environment evidence business data scope is invalid")
+        require_sha256(
+            facts.get("business_data_inventory_sha256"),
+            "negative environment evidence business data inventory hash",
+        )
+        if facts.get("boundary") != category["boundary"]:
+            raise AssemblyError("negative environment evidence boundary does not match the matrix")
+        if facts.get("stable_error_code") != category["stable_error_code"]:
+            raise AssemblyError("negative environment evidence stable error code does not match the matrix")
+        if facts.get("execution_environment") != "controlled-root-fixture-v1":
+            raise AssemblyError("negative environment evidence execution environment is invalid")
+        require_visible_text(facts.get("observed_value"), "negative environment evidence observed value")
+        preflight_hash = require_sha256(
+            facts.get("preflight_result_sha256"),
+            "negative environment evidence preflight result hash",
+        )
+        if attachment_basenames != NEGATIVE_ENVIRONMENT_ATTACHMENT_BASENAMES:
+            raise AssemblyError("negative environment evidence must contain exactly the raw preflight result")
+        attachment_hash = next(
+            item["sha256"]
+            for item in record["attachments"]
+            if item["basename"] == "preflight-result.json"
+        )
+        if attachment_hash != preflight_hash:
+            raise AssemblyError("negative environment evidence preflight attachment hash is inconsistent")
     return record
+
+
+def validate_negative_preflight_attachment(
+    record: dict[str, Any],
+    matrix: dict[str, Any],
+    payload: bytes,
+) -> dict[str, Any]:
+    """Validate the raw preinst result bound by a negative record."""
+    validate_environment_record(record, matrix)
+    category = next(
+        item
+        for item in matrix["negative_boundaries"]
+        if item["id"] == record["category_id"]
+    )
+    if category["kind"] != "negative":
+        raise AssemblyError("raw negative preflight attachment requires a negative category")
+    preflight = parse_json_bytes(payload, "negative preflight result")
+    require_exact_keys(preflight, NEGATIVE_PREFLIGHT_KEYS, "negative preflight result")
+    if preflight["schema"] != "taiji-install-preflight/v1":
+        raise AssemblyError("negative preflight result schema is invalid")
+    if preflight["status"] != "BLOCKED":
+        raise AssemblyError("negative preflight result must be BLOCKED")
+    if preflight["policy_id"] != record["compatibility_policy_id"]:
+        raise AssemblyError("negative preflight result policy ID does not match the candidate")
+    if preflight["compatibility_policy_sha256"] != record["compatibility_policy_sha256"]:
+        raise AssemblyError("negative preflight result policy hash does not match the candidate")
+    expected_code = category["stable_error_code"]
+    if preflight["error_code"] != expected_code:
+        raise AssemblyError("negative preflight result error code does not match the matrix")
+    if preflight["failed_capabilities"] != [expected_code]:
+        raise AssemblyError("negative preflight result must isolate exactly one matrix boundary")
+    require_visible_text(preflight["reason_zh"], "negative preflight result reason", maximum=256)
+    actual_hash = hashlib.sha256(payload).hexdigest()
+    if record["security_facts"]["preflight_result_sha256"] != actual_hash:
+        raise AssemblyError("negative preflight result hash does not match the environment record")
+    return preflight
+
+
+def validate_negative_business_data_attachment(
+    record: dict[str, Any],
+    matrix: dict[str, Any],
+    payload: bytes,
+) -> dict[str, Any]:
+    """Validate the closed before/after inventory for all protected Taiji paths."""
+    validate_environment_record(record, matrix)
+    inventory = parse_json_bytes(payload, "negative business data inventory")
+    require_exact_keys(
+        inventory,
+        {"schema", "scope_id", "protected_paths", "before", "after", "unchanged"},
+        "negative business data inventory",
+    )
+    if inventory["schema"] != "taiji-business-data-inventory/v1":
+        raise AssemblyError("negative business data inventory schema is invalid")
+    if inventory["scope_id"] != BUSINESS_DATA_SCOPE_ID:
+        raise AssemblyError("negative business data inventory scope is invalid")
+    if inventory["protected_paths"] != list(PROTECTED_BUSINESS_PATHS):
+        raise AssemblyError("negative business data inventory protected path set is invalid")
+    if inventory["unchanged"] is not True:
+        raise AssemblyError("negative business data inventory must prove unchanged state")
+
+    def validate_entries(value: Any, label: str) -> list[dict[str, str]]:
+        if type(value) is not list or len(value) != len(PROTECTED_BUSINESS_PATHS):
+            raise AssemblyError(f"{label} entry set is incomplete")
+        result: list[dict[str, str]] = []
+        for index, expected_path in enumerate(PROTECTED_BUSINESS_PATHS):
+            item = value[index]
+            if type(item) is not dict:
+                raise AssemblyError(f"{label} entry must be an object")
+            require_exact_keys(item, {"path", "sha256"}, f"{label} entry")
+            if item["path"] != expected_path:
+                raise AssemblyError(f"{label} protected path order or value is invalid")
+            require_sha256(item["sha256"], f"{label} protected path hash")
+            result.append(item)
+        return result
+
+    before = validate_entries(inventory["before"], "negative business data before inventory")
+    after = validate_entries(inventory["after"], "negative business data after inventory")
+    if before != after:
+        raise AssemblyError("negative business data inventory changed during preflight")
+    digest = hashlib.sha256(payload).hexdigest()
+    facts = record["security_facts"]
+    if facts["business_data_inventory_sha256"] != digest:
+        raise AssemblyError("negative business data inventory hash does not match the environment record")
+    aggregate = hashlib.sha256(
+        json_bytes({"entries": before})
+    ).hexdigest()
+    if facts["business_data_before_sha256"] != aggregate or facts["business_data_after_sha256"] != aggregate:
+        raise AssemblyError("negative business data aggregate hash does not match the inventory")
+    attachment_hash = next(
+        item["sha256"]
+        for item in record["attachments"]
+        if item["basename"] == "business-data-inventory.json"
+    )
+    if attachment_hash != digest:
+        raise AssemblyError("negative business data attachment hash is inconsistent")
+    return inventory
+
+
+def build_positive_environment_evidence(
+    observation: dict[str, Any],
+    *,
+    matrix: dict[str, Any],
+    driver_checks: dict[str, Any],
+    challenge: str,
+    acceptance_session_id: str,
+    attachment_hashes: dict[str, str],
+) -> dict[str, Any]:
+    validate_certification_matrix(matrix)
+    validate_environment_observation(observation, matrix)
+    if set(driver_checks) != EXPECTED_CHECKS or any(driver_checks.get(key) is not True for key in EXPECTED_CHECKS):
+        raise AssemblyError("desktop driver checks are incomplete or failed")
+    if set(attachment_hashes) != POSITIVE_ENVIRONMENT_ATTACHMENT_BASENAMES:
+        raise AssemblyError("positive environment evidence attachment set is incomplete or contains extras")
+    for basename, digest in attachment_hashes.items():
+        if Path(basename).name != basename:
+            raise AssemblyError("positive environment evidence attachment basename is invalid")
+        require_sha256(digest, "positive environment evidence attachment hash")
+    commitment = require_sha256(
+        observation["machine_identity_commitment_sha256"],
+        "positive environment machine identity commitment",
+    )
+    record = {
+        **observation,
+        "schema": ENVIRONMENT_EVIDENCE_SCHEMA,
+        "challenge_nonce": challenge,
+        "acceptance_session_id": acceptance_session_id,
+        "machine_fingerprint_sha256": _machine_fingerprint_from_commitment(
+            challenge, commitment
+        ),
+        "checks": {
+            "preflight": "PASS",
+            "install": "PASS",
+            **{key: "PASS" for key in sorted(driver_checks)},
+        },
+        "attachments": [
+            {"basename": basename, "sha256": attachment_hashes[basename]}
+            for basename in sorted(attachment_hashes)
+        ],
+    }
+    return validate_environment_record(record, matrix)
 
 
 def validate_environment_records(
@@ -540,6 +1173,16 @@ def validate_environment_records(
                 if key == "compatibility_policy_sha256":
                     raise AssemblyError("environment evidence records must use one compatibility policy hash")
                 raise AssemblyError(f"environment evidence records have mixed {key}")
+    challenges = {record["challenge_nonce"] for record in validated}
+    if len(challenges) != 1:
+        raise AssemblyError("environment evidence records must use one certification challenge")
+    positive = [record for record in validated if record["category_kind"] == "positive"]
+    if len({record["machine_identity_commitment_sha256"] for record in positive}) != len(positive):
+        raise AssemblyError(
+            "positive environment evidence must use distinct machine identity commitments"
+        )
+    if len({record["acceptance_session_id"] for record in positive}) != len(positive):
+        raise AssemblyError("positive environment evidence must use distinct acceptance sessions")
     return validated
 
 
@@ -594,7 +1237,8 @@ def validate_canonical_install_observation(
     """Validate the no-target-baseline install observation emitted by v3 mode."""
     require_exact_keys(observation, {
         "schema", "generated_at_utc", "started_at_utc", "completed_at_utc", "challenge_nonce",
-        "machine_fingerprint_sha256", "boot_fingerprint_sha256", "target_uid",
+        "machine_identity_commitment_sha256", "machine_fingerprint_sha256",
+        "boot_fingerprint_sha256", "target_uid",
         "canonical_home_fingerprint_sha256", "user_state_paths_fingerprint_sha256",
         "source_commit", "manifest_sha256", "deb_observed_basename", "deb_sha256",
         "candidate_file_count", "additional_install_files_observed", "package_status_before",
@@ -624,6 +1268,10 @@ def validate_canonical_install_observation(
     for key, value in expected.items():
         if observation.get(key) != value:
             raise AssemblyError(f"canonical install observation {key} is invalid")
+    machine_identity_commitment = require_sha256(
+        observation.get("machine_identity_commitment_sha256"),
+        "canonical install observation machine_identity_commitment_sha256",
+    )
     machine_fingerprint = require_sha256(
         observation.get("machine_fingerprint_sha256"),
         "canonical install observation machine_fingerprint_sha256",
@@ -632,8 +1280,21 @@ def validate_canonical_install_observation(
         observation.get("boot_fingerprint_sha256"),
         "canonical install observation boot_fingerprint_sha256",
     )
-    current_machine, current_boot = current_target_fingerprints(challenge)
-    if machine_fingerprint != current_machine or boot_fingerprint != current_boot:
+    expected_machine_fingerprint = _machine_fingerprint_from_commitment(
+        challenge, machine_identity_commitment
+    )
+    if machine_fingerprint != expected_machine_fingerprint:
+        raise AssemblyError(
+            "canonical install observation machine fingerprint does not match its identity commitment"
+        )
+    current_commitment, current_machine, current_boot = current_target_identity_binding(
+        challenge
+    )
+    if (
+        machine_identity_commitment != current_commitment
+        or machine_fingerprint != current_machine
+        or boot_fingerprint != current_boot
+    ):
         raise AssemblyError("canonical install observation target identity does not match the current target")
     current_uid, current_home, current_paths = current_user_context_fingerprints(challenge)
     if observation.get("target_uid") != current_uid:
@@ -654,7 +1315,7 @@ def validate_canonical_install_observation(
         raise AssemblyError("canonical install observation sample interval is invalid")
     if type(observation["network_sample_count"]) is not int or observation["network_sample_count"] < 2:
         raise AssemblyError("canonical install observation sample count is invalid")
-    return machine_fingerprint
+    return machine_identity_commitment, machine_fingerprint
 
 
 def object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -735,10 +1396,22 @@ def open_regular(path: Path, label: str) -> tuple[int, os.stat_result]:
         raise
 
 
-def _verify_unchanged(descriptor: int, before: os.stat_result, label: str) -> None:
+def _verify_unchanged(
+    descriptor: int,
+    before: os.stat_result,
+    label: str,
+    path: Path | None = None,
+) -> None:
     after = os.fstat(descriptor)
     if _stable_identity(after) != _stable_identity(before):
         raise AssemblyError(f"{label} changed while it was being read")
+    if path is not None:
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise AssemblyError(f"{label} path identity changed while it was being read") from exc
+        if _stable_identity(current) != _stable_identity(before):
+            raise AssemblyError(f"{label} path identity changed while it was being read")
 
 
 def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -> bytes:
@@ -756,26 +1429,40 @@ def read_regular_bytes(path: Path, label: str, *, limit: int = MAX_JSON_BYTES) -
             total += len(chunk)
         if total != file_stat.st_size:
             raise AssemblyError(f"{label} was truncated while being read")
-        _verify_unchanged(descriptor, file_stat, label)
+        _verify_unchanged(descriptor, file_stat, label, path)
         return b"".join(chunks)
     finally:
         os.close(descriptor)
 
 
-def sha256_regular_file(path: Path, label: str) -> str:
+def sha256_regular_file(
+    path: Path,
+    label: str,
+    *,
+    limit: int | None = None,
+    required_prefix: bytes | None = None,
+) -> str:
     descriptor, file_stat = open_regular(path, label)
     digest = hashlib.sha256()
     total = 0
+    prefix = bytearray()
     try:
+        if limit is not None and file_stat.st_size > limit:
+            raise AssemblyError(f"{label} exceeds the {limit}-byte limit")
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
+            if required_prefix is not None and len(prefix) < len(required_prefix):
+                needed = len(required_prefix) - len(prefix)
+                prefix.extend(chunk[:needed])
             total += len(chunk)
             digest.update(chunk)
         if total != file_stat.st_size:
             raise AssemblyError(f"{label} was truncated while hashing")
-        _verify_unchanged(descriptor, file_stat, label)
+        if required_prefix is not None and bytes(prefix) != required_prefix:
+            raise AssemblyError(f"{label} has an invalid file signature")
+        _verify_unchanged(descriptor, file_stat, label, path)
         return digest.hexdigest()
     finally:
         os.close(descriptor)
@@ -861,7 +1548,7 @@ def validate_desktop_auth_cookie(cookie: Any) -> None:
 
 def validate_driver_result(driver: dict[str, Any], challenge: str) -> None:
     require_exact_keys(driver, DRIVER_KEYS, "driver-result.json")
-    if driver["schema"] != "taiji.desktop.acceptance-driver.v1":
+    if driver["schema"] != "taiji.desktop.acceptance-driver.v2":
         raise AssemblyError("driver-result.json has the wrong schema")
     if type(driver["acceptance_session_id"]) is not str or not SESSION_RE.fullmatch(
         driver["acceptance_session_id"]
@@ -892,6 +1579,139 @@ def validate_driver_result(driver: dict[str, Any], challenge: str) -> None:
     require_exact_keys(checks, EXPECTED_CHECKS, "driver checks")
     if any(type(checks[key]) is not bool or checks[key] is not True for key in EXPECTED_CHECKS):
         raise AssemblyError("all driver checks must be true")
+
+    restart_rounds = driver["restart_rounds"]
+    if type(restart_rounds) is not list or len(restart_rounds) != 3:
+        raise AssemblyError("driver restart_rounds must contain exactly three rounds")
+    for index, round_record in enumerate(restart_rounds, start=1):
+        if type(round_record) is not dict:
+            raise AssemblyError(f"driver restart round {index} must be an object")
+        require_exact_keys(
+            round_record,
+            DRIVER_RESTART_ROUND_KEYS,
+            f"driver restart round {index}",
+        )
+        if type(round_record["round"]) is not int or round_record["round"] != index:
+            raise AssemblyError("driver restart rounds are out of order")
+        for key in ("electron_pid", "agent_pid", "web_pid", "secondary_pid"):
+            require_pid(round_record[key], f"driver restart round {index} {key}")
+        for key in ("cdp_port", "webui_port"):
+            value = round_record[key]
+            if type(value) is not int or value < 1024 or value > 65535:
+                raise AssemblyError(f"driver restart round {index} {key} is invalid")
+        for key in ("second_instance_exit_code", "electron_exit_code"):
+            if type(round_record[key]) is not int or round_record[key] != 0:
+                raise AssemblyError(f"driver restart round {index} {key} must be integer zero")
+        for key in (
+            "ready",
+            "restored_and_focused",
+            "page_close_sent",
+            "pidfiles_absent",
+            "model_config_observed",
+            "profile_continuity_observed",
+        ):
+            if type(round_record[key]) is not bool or round_record[key] is not True:
+                raise AssemblyError(f"driver restart round {index} {key} must be true")
+        process_gone = round_record["process_identities_gone"]
+        if type(process_gone) is not dict:
+            raise AssemblyError(f"driver restart round {index} process identity evidence is invalid")
+        require_exact_keys(
+            process_gone,
+            {"electron", "agent", "webui", "secondary"},
+            f"driver restart round {index} process identity evidence",
+        )
+        if any(type(value) is not bool or value is not True for value in process_gone.values()):
+            raise AssemblyError(f"driver restart round {index} left a process identity behind")
+        ports_closed = round_record["ports_closed"]
+        if type(ports_closed) is not dict:
+            raise AssemblyError(f"driver restart round {index} port evidence is invalid")
+        require_exact_keys(
+            ports_closed,
+            {"cdp", "webui"},
+            f"driver restart round {index} port evidence",
+        )
+        if any(type(value) is not bool or value is not True for value in ports_closed.values()):
+            raise AssemblyError(f"driver restart round {index} left a port open")
+
+    round_one = restart_rounds[0]
+    for driver_key, round_key in (
+        ("electron_pid", "electron_pid"),
+        ("agent_pid", "agent_pid"),
+        ("web_pid", "web_pid"),
+        ("electron_exit_code", "electron_exit_code"),
+    ):
+        if driver[driver_key] != round_one[round_key]:
+            raise AssemblyError(f"driver {driver_key} is not a strict restart round one alias")
+    app_port = urlsplit(driver["app_url"]).port
+    if app_port != round_one["webui_port"]:
+        raise AssemblyError("driver App URL port is not the first restart WebUI port")
+
+    persistent = driver["persistent_user_data"]
+    if type(persistent) is not dict:
+        raise AssemblyError("driver persistent_user_data must be an object")
+    require_exact_keys(
+        persistent,
+        DRIVER_PERSISTENT_USER_DATA_KEYS,
+        "driver persistent_user_data",
+    )
+    expected_persistent = {
+        "mode": "electron-default-persistent",
+        "restart_rounds": 3,
+        "user_data_override": False,
+        "profile_reset": False,
+        "environment_reused": True,
+        "continuity_observed_rounds": 3,
+    }
+    for key, expected in expected_persistent.items():
+        if type(persistent[key]) is not type(expected) or persistent[key] != expected:
+            raise AssemblyError(f"driver persistent_user_data {key} is invalid")
+    require_sha256(persistent["continuity_token"], "driver persistent profile token")
+
+    core = driver["core_observation"]
+    if type(core) is not dict:
+        raise AssemblyError("driver core_observation must be an object")
+    require_exact_keys(core, DRIVER_CORE_OBSERVATION_KEYS, "driver core_observation")
+    if core["status"] != "verified" or core["mechanism"] != "journalctl-json-user-electron":
+        raise AssemblyError("driver core observation was not verified")
+    if type(core["baseline_entry_count"]) is not int or core["baseline_entry_count"] < 0:
+        raise AssemblyError("driver core observation baseline count is invalid")
+    require_sha256(core["baseline_cursor_set_token"], "driver core baseline cursor token")
+    core_rounds = core["rounds"]
+    if type(core_rounds) is not list or len(core_rounds) != 3:
+        raise AssemblyError("driver core observation must cover exactly three rounds")
+    for index, core_round in enumerate(core_rounds, start=1):
+        if type(core_round) is not dict:
+            raise AssemblyError(f"driver core observation round {index} must be an object")
+        require_exact_keys(core_round, DRIVER_CORE_ROUND_KEYS, f"driver core observation round {index}")
+        if (
+            type(core_round["round"]) is not int
+            or core_round["round"] != index
+            or core_round["status"] != "verified"
+            or type(core_round["added_entry_count"]) is not int
+            or core_round["added_entry_count"] != 0
+        ):
+            raise AssemblyError(f"driver core observation round {index} is invalid")
+        require_sha256(core_round["cursor_set_token"], f"driver core observation round {index} cursor token")
+
+    model_observation = driver["model_config_observation"]
+    if type(model_observation) is not dict:
+        raise AssemblyError("driver model_config_observation must be an object")
+    require_exact_keys(
+        model_observation,
+        DRIVER_MODEL_CONFIG_OBSERVATION_KEYS,
+        "driver model_config_observation",
+    )
+    if (
+        type(model_observation["observed_rounds"]) is not int
+        or model_observation["observed_rounds"] != 3
+        or type(model_observation["consistent"]) is not bool
+        or model_observation["consistent"] is not True
+    ):
+        raise AssemblyError("driver model configuration observation is inconsistent")
+    require_sha256(
+        model_observation["public_projection_token"],
+        "driver model configuration projection token",
+    )
     for key in ("js_error_count", "unexpected_http_failures", "electron_exit_code"):
         if type(driver[key]) is not int or driver[key] != 0:
             raise AssemblyError(f"driver {key} must be integer zero")
@@ -1160,9 +1980,121 @@ def copy_regular_file(
             raise AssemblyError(f"{label} was truncated while being copied")
         if required_prefix is not None and bytes(prefix) != required_prefix:
             raise AssemblyError(f"{label} has an invalid file signature")
-        _verify_unchanged(source_descriptor, source_stat, label)
+        _verify_unchanged(source_descriptor, source_stat, label, source)
         os.fsync(destination_descriptor)
         return digest.hexdigest()
+    finally:
+        os.close(source_descriptor)
+        os.close(destination_descriptor)
+
+
+def copy_validated_png(
+    source: Path,
+    destination: Path,
+    label: str,
+    *,
+    limit: int,
+) -> str:
+    """Validate and snapshot one PNG from one stable source descriptor."""
+    source_descriptor, source_stat = open_regular(source, label)
+    if source_stat.st_size > limit:
+        os.close(source_descriptor)
+        raise AssemblyError(f"{label} exceeds the {limit}-byte limit")
+    try:
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+    except Exception:
+        os.close(source_descriptor)
+        raise
+    digest = hashlib.sha256()
+    total = 0
+
+    def read_piece(size: int) -> bytes:
+        nonlocal total
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = os.read(source_descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise AssemblyError(f"{label} PNG was truncated")
+            chunks.append(chunk)
+            digest.update(chunk)
+            total += len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                if written <= 0:
+                    raise AssemblyError(f"failed to snapshot {label}")
+                view = view[written:]
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    try:
+        if read_piece(8) != b"\x89PNG\r\n\x1a\n":
+            raise AssemblyError(f"{label} has an invalid PNG signature")
+        saw_ihdr = False
+        saw_idat = False
+        saw_iend = False
+        chunk_index = 0
+        while total < source_stat.st_size:
+            header = read_piece(8)
+            length = struct.unpack(">I", header[:4])[0]
+            kind = header[4:]
+            if length > source_stat.st_size - total - 4:
+                raise AssemblyError(f"{label} PNG chunk was truncated")
+            crc = zlib.crc32(kind)
+            remaining = length
+            ihdr = bytearray()
+            while remaining:
+                piece = read_piece(min(1024 * 1024, remaining))
+                crc = zlib.crc32(piece, crc)
+                if kind == b"IHDR":
+                    ihdr.extend(piece)
+                remaining -= len(piece)
+            expected_crc = struct.unpack(">I", read_piece(4))[0]
+            if (crc & 0xFFFFFFFF) != expected_crc:
+                raise AssemblyError(f"{label} PNG CRC is invalid")
+            if chunk_index == 0:
+                if kind != b"IHDR" or length != 13:
+                    raise AssemblyError(f"{label} PNG IHDR is invalid")
+                width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
+                    ">IIBBBBB", bytes(ihdr)
+                )
+                if (
+                    width < 800
+                    or height < 600
+                    or width > 7680
+                    or height > 4320
+                    or bit_depth != 8
+                    or color_type not in {2, 6}
+                    or compression != 0
+                    or filtering != 0
+                    or interlace != 0
+                ):
+                    raise AssemblyError(f"{label} PNG IHDR encoding is invalid")
+                saw_ihdr = True
+            elif kind == b"IHDR":
+                raise AssemblyError(f"{label} PNG contains duplicate IHDR")
+            if kind == b"IDAT":
+                saw_idat = True
+            if kind == b"IEND":
+                if length != 0 or total != source_stat.st_size:
+                    raise AssemblyError(f"{label} PNG has invalid IEND or trailing data")
+                saw_iend = True
+                break
+            chunk_index += 1
+        if not saw_ihdr or not saw_idat or not saw_iend or total != source_stat.st_size:
+            raise AssemblyError(f"{label} PNG structure is incomplete")
+        if os.read(source_descriptor, 1):
+            raise AssemblyError(f"{label} PNG grew while it was read")
+        _verify_unchanged(source_descriptor, source_stat, label, source)
+        os.fsync(destination_descriptor)
+        return digest.hexdigest()
+    except OSError as exc:
+        raise AssemblyError(f"cannot snapshot {label}: {exc}") from exc
     finally:
         os.close(source_descriptor)
         os.close(destination_descriptor)
@@ -1257,8 +2189,8 @@ def assemble_canonical(args: argparse.Namespace) -> None:
     release_artifacts_sha256 = require_sha256(
         args.release_artifacts_sha256, "release_artifacts_sha256"
     )
-    if args.environment_record.name != ENVIRONMENT_EVIDENCE_BASENAME:
-        raise AssemblyError("environment record input must use the fixed evidence basename")
+    if args.environment_observation.name != ENVIRONMENT_OBSERVATION_BASENAME:
+        raise AssemblyError("environment observation input must use the fixed observation basename")
     matrix = validate_certification_matrix(load_json(Path(args.matrix), "certification matrix"))
     category_map = {
         item["id"]: item
@@ -1289,7 +2221,7 @@ def assemble_canonical(args: argparse.Namespace) -> None:
     observation_payload = read_regular_bytes(args.install_observation, "canonical install observation")
     observation = parse_json_bytes(observation_payload, "canonical install observation")
     observation_hash = hashlib.sha256(observation_payload).hexdigest()
-    machine_fingerprint = validate_canonical_install_observation(
+    machine_identity_commitment, machine_fingerprint = validate_canonical_install_observation(
         observation,
         challenge=challenge,
         manifest_sha256=sha256_regular_file(args.manifest, "release manifest"),
@@ -1297,9 +2229,9 @@ def assemble_canonical(args: argparse.Namespace) -> None:
         deb_sha256=deb_sha256,
         source_commit=source_commit,
     )
-    environment_payload = read_regular_bytes(args.environment_record, "environment evidence record")
-    environment_record = parse_json_bytes(environment_payload, "environment evidence record")
-    validate_environment_record(environment_record, matrix)
+    environment_payload = read_regular_bytes(args.environment_observation, "environment observation")
+    environment_observation = parse_json_bytes(environment_payload, "environment observation")
+    validate_environment_observation(environment_observation, matrix)
     for key, value in {
         "category_id": args.category_id,
         "source_commit": source_commit,
@@ -1309,87 +2241,81 @@ def assemble_canonical(args: argparse.Namespace) -> None:
         "deb_sha256": deb_sha256,
         "compatibility_policy_id": policy_id,
         "compatibility_policy_sha256": policy_sha,
+        "machine_identity_commitment_sha256": machine_identity_commitment,
         "os_id": args.os_id,
         "os_version": args.os_version,
         "desktop_environment": args.desktop_environment,
     }.items():
-        if environment_record.get(key) != value:
-            raise AssemblyError(f"environment evidence {key} does not match the current release or target")
-    graphical_evidence_payload = read_regular_bytes(
-        args.graphical_installer_evidence,
-        "graphical installer evidence",
-        limit=MAX_SCREENSHOT_BYTES,
-    )
-    if not graphical_evidence_payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise AssemblyError("graphical installer evidence has an invalid PNG signature")
-    graphical_evidence_hash = hashlib.sha256(graphical_evidence_payload).hexdigest()
+        if environment_observation.get(key) != value:
+            raise AssemblyError(f"environment observation {key} does not match the current release or target")
     attestation_payload = read_regular_bytes(
         args.install_method_attestation,
         "single-DEB install method attestation",
     )
     attestation = parse_json_bytes(attestation_payload, "single-DEB install method attestation")
-    validate_install_method_attestation(
-        attestation,
-        observation_sha256=observation_hash,
-        observation=observation,
-        graphical_evidence_sha256=graphical_evidence_hash,
-        challenge=challenge,
-    )
     if args.screenshot.name != driver["screenshot_basename"]:
         raise AssemblyError("screenshot input basename does not match the driver result")
     if args.diagnostic.name != driver["diagnostic_basename"]:
         raise AssemblyError("diagnostic input basename does not match the driver result")
-    screenshot_payload = read_regular_bytes(args.screenshot, "desktop App screenshot", limit=MAX_SCREENSHOT_BYTES)
-    if not screenshot_payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise AssemblyError("desktop App screenshot has an invalid PNG signature")
     diagnostic_payload = read_regular_bytes(args.diagnostic, "App diagnostic export")
     diagnostic_json = parse_json_bytes(diagnostic_payload, "App diagnostic export")
     if set(diagnostic_json) != {"schema", "manifest", "diagnostics"} or diagnostic_json["schema"] != "taiji.product.support-bundle.v1":
         raise AssemblyError("App diagnostic export has an invalid schema")
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    screenshot_hash = hashlib.sha256(screenshot_payload).hexdigest()
     diagnostic_hash = hashlib.sha256(diagnostic_payload).hexdigest()
     graphical_name = GRAPHICAL_INSTALLER_EVIDENCE_BASENAME
 
     def produce(temporary: Path) -> None:
-        copied_screenshot_hash = copy_regular_file(
+        copied_screenshot_hash = copy_validated_png(
             args.screenshot,
             temporary / SCREENSHOT_BASENAME,
             "desktop App screenshot",
             limit=MAX_SCREENSHOT_BYTES,
-            required_prefix=b"\x89PNG\r\n\x1a\n",
         )
-        copied_environment_hash = write_exclusive(
-            temporary / ENVIRONMENT_EVIDENCE_BASENAME,
+        copied_environment_observation_hash = write_exclusive(
+            temporary / ENVIRONMENT_OBSERVATION_BASENAME,
             environment_payload,
         )
         copied_observation_hash = write_exclusive(
-            temporary / OBSERVATION_BASENAME,
+            temporary / INSTALL_OBSERVATION_BASENAME,
             observation_payload,
         )
         copied_attestation_hash = write_exclusive(
             temporary / INSTALL_METHOD_ATTESTATION_BASENAME,
             attestation_payload,
         )
-        copied_graphical_hash = write_exclusive(
+        copied_graphical_hash = copy_validated_png(
+            args.graphical_installer_evidence,
             temporary / graphical_name,
-            graphical_evidence_payload,
+            "graphical installer evidence",
+            limit=MAX_SCREENSHOT_BYTES,
+        )
+        validate_install_method_attestation(
+            attestation,
+            observation_sha256=observation_hash,
+            observation=observation,
+            graphical_evidence_sha256=copied_graphical_hash,
+            challenge=challenge,
         )
         copied_driver_hash = write_exclusive(temporary / DRIVER_RESULT_BASENAME, driver_payload)
         copied_diagnostic_hash = write_exclusive(temporary / DIAGNOSTIC_BASENAME, diagnostic_payload)
-        if copied_screenshot_hash != screenshot_hash or copied_environment_hash != hashlib.sha256(environment_payload).hexdigest():
+        if (
+            copied_environment_observation_hash
+            != hashlib.sha256(environment_payload).hexdigest()
+        ):
             raise AssemblyError("canonical evidence changed while it was copied")
-        evidence = {
+        target_evidence = {
             "schema": CANONICAL_TARGET_EVIDENCE_SCHEMA,
             "evidence_type": "target-desktop-environment",
             "generated_at_utc": generated_at,
             "acceptance_session_id": driver["acceptance_session_id"],
             "challenge_nonce": challenge,
+            "machine_identity_commitment_sha256": machine_identity_commitment,
             "machine_fingerprint_sha256": machine_fingerprint,
             "release_artifacts_sha256": release_artifacts_sha256,
             "category_id": args.category_id,
-            "category_kind": environment_record["category_kind"],
-            "compatibility": environment_record["compatibility"],
+            "category_kind": environment_observation["category_kind"],
+            "compatibility": environment_observation["compatibility"],
             "source_commit": source_commit,
             "version": version,
             "architecture": "amd64",
@@ -1404,9 +2330,9 @@ def assemble_canonical(args: argparse.Namespace) -> None:
             "installation_method_evidence": "human-attestation",
             "installation_method_machine_observed": False,
             "checks": driver["checks"],
-            "environment_evidence_basename": ENVIRONMENT_EVIDENCE_BASENAME,
-            "environment_evidence_sha256": copied_environment_hash,
-            "install_observation_basename": OBSERVATION_BASENAME,
+            "environment_observation_basename": ENVIRONMENT_OBSERVATION_BASENAME,
+            "environment_observation_sha256": copied_environment_observation_hash,
+            "install_observation_basename": INSTALL_OBSERVATION_BASENAME,
             "install_observation_sha256": copied_observation_hash,
             "install_method_attestation_basename": INSTALL_METHOD_ATTESTATION_BASENAME,
             "install_method_attestation_sha256": copied_attestation_hash,
@@ -1419,15 +2345,44 @@ def assemble_canonical(args: argparse.Namespace) -> None:
             "diagnostic_basename": DIAGNOSTIC_BASENAME,
             "diagnostic_sha256": copied_diagnostic_hash,
         }
-        write_exclusive(temporary / EVIDENCE_BASENAME, json_bytes(evidence))
+        require_exact_keys(
+            target_evidence,
+            CANONICAL_TARGET_EVIDENCE_KEYS,
+            "canonical target evidence",
+        )
+        target_evidence_hash = write_exclusive(
+            temporary / EVIDENCE_BASENAME,
+            json_bytes(target_evidence),
+        )
+        final_environment_record = build_positive_environment_evidence(
+            environment_observation,
+            matrix=matrix,
+            driver_checks=driver["checks"],
+            challenge=challenge,
+            acceptance_session_id=driver["acceptance_session_id"],
+            attachment_hashes={
+                EVIDENCE_BASENAME: target_evidence_hash,
+                ENVIRONMENT_OBSERVATION_BASENAME: copied_environment_observation_hash,
+                INSTALL_OBSERVATION_BASENAME: copied_observation_hash,
+                INSTALL_METHOD_ATTESTATION_BASENAME: copied_attestation_hash,
+                graphical_name: copied_graphical_hash,
+                DRIVER_RESULT_BASENAME: copied_driver_hash,
+                SCREENSHOT_BASENAME: copied_screenshot_hash,
+                DIAGNOSTIC_BASENAME: copied_diagnostic_hash,
+            },
+        )
+        write_exclusive(
+            temporary / ENVIRONMENT_EVIDENCE_BASENAME,
+            json_bytes(final_environment_record),
+        )
 
     publish_atomically(args.output_dir, produce)
 
 
 def assemble(args: argparse.Namespace) -> None:
-    if args.matrix or args.category_id or args.environment_record:
-        if not args.matrix or not args.category_id or not args.environment_record:
-            raise AssemblyError("canonical mode requires --matrix, --category-id, and --environment-record")
+    if args.matrix or args.category_id or args.environment_observation:
+        if not args.matrix or not args.category_id or not args.environment_observation:
+            raise AssemblyError("canonical mode requires --matrix, --category-id, and --environment-observation")
         assemble_canonical(args)
         return
     challenge = args.challenge
@@ -1490,14 +2445,6 @@ def assemble(args: argparse.Namespace) -> None:
         target_baseline_profile_id=target_baseline_profile_id,
         target_baseline_sha256=target_baseline_sha256,
     )
-    graphical_evidence_payload = read_regular_bytes(
-        args.graphical_installer_evidence,
-        "graphical installer evidence",
-        limit=MAX_SCREENSHOT_BYTES,
-    )
-    if not graphical_evidence_payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise AssemblyError("graphical installer evidence has an invalid PNG signature")
-    graphical_evidence_hash = hashlib.sha256(graphical_evidence_payload).hexdigest()
     attestation_payload = read_regular_bytes(
         args.install_method_attestation,
         "single-DEB install method attestation",
@@ -1505,13 +2452,6 @@ def assemble(args: argparse.Namespace) -> None:
     attestation = parse_json_bytes(
         attestation_payload,
         "single-DEB install method attestation",
-    )
-    validate_install_method_attestation(
-        attestation,
-        observation_sha256=observation_hash,
-        observation=observation,
-        graphical_evidence_sha256=graphical_evidence_hash,
-        challenge=challenge,
     )
     if args.screenshot.name != driver["screenshot_basename"]:
         raise AssemblyError("screenshot input basename does not match the driver result")
@@ -1533,12 +2473,11 @@ def assemble(args: argparse.Namespace) -> None:
     checks = {key: True for key in sorted(EXPECTED_CHECKS)}
 
     def produce(temporary: Path) -> None:
-        screenshot_hash = copy_regular_file(
+        screenshot_hash = copy_validated_png(
             args.screenshot,
             temporary / SCREENSHOT_BASENAME,
             "desktop App screenshot",
             limit=MAX_SCREENSHOT_BYTES,
-            required_prefix=b"\x89PNG\r\n\x1a\n",
         )
         diagnostic_hash = write_exclusive(
             temporary / DIAGNOSTIC_BASENAME, diagnostic_payload
@@ -1554,14 +2493,21 @@ def assemble(args: argparse.Namespace) -> None:
             temporary / INSTALL_METHOD_ATTESTATION_BASENAME,
             attestation_payload,
         )
-        copied_graphical_evidence_hash = write_exclusive(
+        copied_graphical_evidence_hash = copy_validated_png(
+            args.graphical_installer_evidence,
             temporary / GRAPHICAL_INSTALLER_EVIDENCE_BASENAME,
-            graphical_evidence_payload,
+            "graphical installer evidence",
+            limit=MAX_SCREENSHOT_BYTES,
+        )
+        validate_install_method_attestation(
+            attestation,
+            observation_sha256=observation_hash,
+            observation=observation,
+            graphical_evidence_sha256=copied_graphical_evidence_hash,
+            challenge=challenge,
         )
         if install_observation_hash != observation_hash:
             raise AssemblyError("copied install observation hash changed")
-        if copied_graphical_evidence_hash != graphical_evidence_hash:
-            raise AssemblyError("copied graphical installer evidence hash changed")
         session = {
             "schema": "taiji.desktop.acceptance.v1",
             "application": "taiji-electron-desktop",
@@ -1643,6 +2589,12 @@ def assemble(args: argparse.Namespace) -> None:
             "attachment_flow": True,
             "window_close_exit": True,
             "diagnostic_export": True,
+            "three_restart_cycles": checks["three_restart_cycles"],
+            "second_instance_focus": checks["second_instance_focus"],
+            "model_configuration_state_consistent": checks[
+                "model_configuration_state_consistent"
+            ],
+            "no_new_electron_core": checks["no_new_electron_core"],
             "session_log_basename": SESSION_BASENAME,
             "session_log_sha256": session_hash,
             "screenshot_basename": SCREENSHOT_BASENAME,
@@ -1696,7 +2648,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--desktop-environment", required=True)
     parser.add_argument("--matrix")
     parser.add_argument("--category-id")
-    parser.add_argument("--environment-record", type=Path)
+    parser.add_argument("--environment-observation", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args(raw)
     for name in (

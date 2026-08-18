@@ -6,6 +6,6 @@
 # needs `edge-tts`. It is intentionally NOT a hard dependency — the /api/tts
 # endpoint returns 503 with an install hint when it's absent. Install it only if
 # you want server-side Microsoft neural voices:  pip install edge-tts
-pyyaml>=6.0
-cryptography>=42.0
+pyyaml==6.0.3
+cryptography==46.0.7
 pypdf==6.14.2
