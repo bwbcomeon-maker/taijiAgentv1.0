@@ -140,7 +140,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       UV_PYTHON_PREFERENCE: only-managed
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -153,9 +152,14 @@ jobs:
       - name: Install the uv-managed standalone Python required by packaging tests
         run: uv python install 3.11
       - name: Prepare the canonical Agent venv required by root contracts
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv
         working-directory: hermes-local-lab/sources/hermes-agent
         run: uv sync --locked --python 3.11 --extra dev --extra messaging
-      - run: >-
+      - name: Run Taiji root contracts with uv-managed Python
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv
+        run: >-
           "$UV_PROJECT_ENVIRONMENT/bin/python" -m unittest discover -s tests -p 'test_*.py'
 
   desktop:

@@ -145,8 +145,31 @@ class CiScopeClassifierTest(unittest.TestCase):
         )
         root_job = workflow[workflow.index("  root:") : workflow.index("  desktop:")]
         self.assertIn("UV_PYTHON_PREFERENCE: only-managed", root_job)
-        self.assertIn(
+        prelude, body = root_job.split("    steps:", 1)
+        self.assertNotIn(
             "UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv",
+            prelude,
+            "runner.temp venv must not be declared in root job prelude",
+        )
+        self.assertEqual(
+            2,
+            body.count("UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv"),
+            "runner.temp venv must be declared exactly twice in root job steps",
+        )
+        self.assertIn(
+            "      - name: Prepare the canonical Agent venv required by root contracts\n"
+            "        env:\n"
+            "          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv",
+            root_job,
+        )
+        self.assertIn(
+            "Run Taiji root contracts with uv-managed Python",
+            root_job,
+        )
+        self.assertIn(
+            "      - name: Run Taiji root contracts with uv-managed Python\n"
+            "        env:\n"
+            "          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv",
             root_job,
         )
         self.assertIn("uv python install 3.11", root_job)
