@@ -159,6 +159,7 @@ jobs:
       - name: Run Taiji root contracts with uv-managed Python
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/taiji-root-venv
+          TAIJI_AGENT_PYTHON: ${{ runner.temp }}/taiji-root-venv/bin/python
         run: >-
           "$UV_PROJECT_ENVIRONMENT/bin/python" -m unittest discover -s tests -p 'test_*.py'
 

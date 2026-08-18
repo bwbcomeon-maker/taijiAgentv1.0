@@ -221,8 +221,9 @@ def exercise_publication_delivery_trust_helper(temp_root: Path) -> None:
 def exercise_agent_parallel_runner(agent_runner) -> None:
     fake_test = AGENT_PARALLEL_RUNNER.parents[1] / "tests/test_python38_fake.py"
     observed = {"duration_saves": 0, "pytest_args": None}
-    agent_runner["_discover_files"] = lambda roots: [fake_test]
-    agent_runner["_count_tests"] = lambda files, repo_root, pytest_args: {
+    runtime = agent_runner["main"].__globals__
+    runtime["_discover_files"] = lambda roots: [fake_test]
+    runtime["_count_tests"] = lambda files, repo_root, pytest_args: {
         fake_test: 1
     }
 
@@ -233,8 +234,8 @@ def exercise_agent_parallel_runner(agent_runner) -> None:
     def forbidden_duration_save(file_times, repo_root):
         observed["duration_saves"] += 1
 
-    agent_runner["_run_one_file"] = fake_run_one_file
-    agent_runner["_save_durations"] = forbidden_duration_save
+    runtime["_run_one_file"] = fake_run_one_file
+    runtime["_save_durations"] = forbidden_duration_save
     original_argv = sys.argv[:]
     try:
         sys.argv = [
@@ -245,7 +246,7 @@ def exercise_agent_parallel_runner(agent_runner) -> None:
             "-p",
             "no:cacheprovider",
         ]
-        result = agent_runner["main"]()
+        result = runtime["main"]()
     finally:
         sys.argv = original_argv
     assert result == 0

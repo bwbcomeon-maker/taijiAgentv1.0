@@ -2762,6 +2762,11 @@ def validate_build_binding(
     """
 
     if not legacy_v2_read_only:
+        manifest = load_json(Path(args.manifest), "发布 manifest")
+        if manifest.get("schema_version") == 2:
+            raise EvidenceError(
+                "当前发布入口只接受 taiji-package-manifest/v3；manifest schema_version=2 的历史 v2 必须显式 --legacy-v2-read-only"
+            )
         return _validate_v3_build_binding(args)
     manifest = load_json(Path(args.manifest), "历史 v2 发布 manifest")
     if manifest.get("schema") == PACKAGE_MANIFEST_SCHEMA_V3:

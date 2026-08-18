@@ -177,6 +177,10 @@ class CiScopeClassifierTest(unittest.TestCase):
             '"$UV_PROJECT_ENVIRONMENT/bin/python" -m unittest',
             root_job,
         )
+        self.assertIn(
+            "          TAIJI_AGENT_PYTHON: ${{ runner.temp }}/taiji-root-venv/bin/python",
+            root_job,
+        )
         self.assertNotIn(
             "hermes-local-lab/sources/hermes-agent/venv/bin/python",
             root_job,

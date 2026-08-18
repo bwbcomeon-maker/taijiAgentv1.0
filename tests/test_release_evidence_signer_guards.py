@@ -400,6 +400,11 @@ class ReleaseEvidenceSignerGuardTest(unittest.TestCase):
         ) as temp_dir:
             exercise_helper(Path(temp_dir).resolve())
 
+    def test_python38_gate_exercises_agent_runner_with_actual_runpy_namespace(self) -> None:
+        gate_namespace = runpy.run_path(str(PYTHON38_GATE))
+        agent_runner = runpy.run_path(str(gate_namespace["AGENT_PARALLEL_RUNNER"]))
+        gate_namespace["exercise_agent_parallel_runner"](agent_runner)
+
     def test_publication_evidence_rejects_relative_symlinked_or_dotdot_delivery_root(
         self,
     ) -> None:

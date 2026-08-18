@@ -21,6 +21,13 @@ if not SOURCE_PYTHON.exists() and ROOT.parent.name == ".worktrees":
     )
 
 
+def source_python_for_staging() -> Path:
+    override = os.environ.get("TAIJI_AGENT_PYTHON")
+    if override:
+        return Path(override)
+    return SOURCE_PYTHON
+
+
 class LinuxPythonRuntimeStagingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="taiji-python-runtime-stage-"))
@@ -28,7 +35,7 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
         self.source_venv = self.temp_dir / "source-venv"
         self.destination = self.temp_dir / "payload/runtime/agent/venv"
 
-        source_python = SOURCE_PYTHON.resolve(strict=True)
+        source_python = source_python_for_staging().resolve(strict=True)
         info = json.loads(
             subprocess.check_output(
                 [
@@ -67,6 +74,11 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
             encoding="utf-8",
         )
         (site_packages / "portable_fixture.py").write_text("VALUE = 'portable-ok'\n", encoding="utf-8")
+
+    def test_staging_uses_taiji_agent_python_override(self) -> None:
+        override = self.temp_dir / "ci-agent-python"
+        with mock.patch.dict(os.environ, {"TAIJI_AGENT_PYTHON": str(override)}):
+            self.assertEqual(override, source_python_for_staging())
 
     def test_absolute_uv_python_symlink_becomes_a_self_contained_relocatable_runtime(self) -> None:
         self.assertTrue((self.source_venv / "bin/python").is_symlink())
@@ -377,6 +389,7 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
                 env["TAIJI_DEPENDENCY_PROFILE"] = profile
             if profile == "production":
                 env["TAIJI_PYTHON_EXECUTABLE"] = str(fake_python.resolve())
+                env["TAIJI_UV_EXECUTABLE"] = str(fake_uv.resolve())
             try:
                 completed = subprocess.run(
                     ["bash", str(setup)],
