@@ -7,6 +7,14 @@ const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 const { createExternalWindowOpenHandler, normalizeTrustedExternalOrigins } = require("./external-link-policy");
+const {
+  INSTALLED_PROFILE,
+  allowsDevTools,
+  applyInstalledRuntimePaths,
+  applySecurityProfile,
+  requiresSourceGate,
+  resolveLaunchProfile,
+} = require("./launch-profile");
 
 const APP_NAME = "太极 Agent";
 const DEFAULT_AGENT_PORT = 18642;
@@ -14,53 +22,21 @@ const DEFAULT_WEBUI_PORT = 18787;
 const DESKTOP_CHROME_BACKGROUND = "#eaf7ff";
 const SMOKE_TEST = process.env.TAIJI_DESKTOP_SMOKE_TEST === "1";
 
+let launchProfile = null;
+let launchProfileError = null;
+try {
+  launchProfile = resolveLaunchProfile({
+    env: process.env,
+    appPath: app.getAppPath(),
+  });
+} catch (error) {
+  launchProfileError = error;
+}
+
 let mainWindow = null;
 let runtimeEnv = null;
 let stopped = false;
 const trustedIdentityWindows = new Set();
-
-const SECURITY_ALLOW_FLAGS = [
-  "TAIJI_ALLOW_TERMINAL",
-  "TAIJI_ALLOW_EXECUTE_CODE",
-  "TAIJI_ALLOW_DELEGATE_TASK",
-  "TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS"
-];
-
-function hasExplicitEnv(name) {
-  return Object.prototype.hasOwnProperty.call(process.env, name);
-}
-
-function securityProfileDefaults(profileName) {
-  if (profileName === "full") {
-    return { name: "full", mode: "full", allow: true };
-  }
-  if (profileName === "local_controlled") {
-    return { name: "local_controlled", mode: "restricted", allow: true };
-  }
-  return { name: "strict", mode: "restricted", allow: false };
-}
-
-function resolveSecurityProfile() {
-  const explicit = String(process.env.TAIJI_SECURITY_PROFILE || "").trim();
-  if (["strict", "local_controlled", "full"].includes(explicit)) {
-    return securityProfileDefaults(explicit);
-  }
-  return securityProfileDefaults(app.isPackaged ? "strict" : "local_controlled");
-}
-
-function applySecurityProfile(env) {
-  const profile = resolveSecurityProfile();
-  env.TAIJI_SECURITY_PROFILE = process.env.TAIJI_SECURITY_PROFILE || profile.name;
-  env.TAIJI_SECURITY_MODE = process.env.TAIJI_SECURITY_MODE || profile.mode;
-  if (profile.name === "local_controlled" || profile.name === "full") {
-    for (const flag of SECURITY_ALLOW_FLAGS) {
-      if (!hasExplicitEnv(flag)) {
-        env[flag] = "1";
-      }
-    }
-  }
-  return profile;
-}
 
 function configureDesktopUserDataDir() {
   const override = process.env.TAIJI_DESKTOP_USER_DATA_DIR;
@@ -68,7 +44,7 @@ function configureDesktopUserDataDir() {
     app.setPath("userData", path.resolve(override));
     return;
   }
-  if (app.isPackaged) return;
+  if ((launchProfile && launchProfile.kind === INSTALLED_PROFILE) || app.isPackaged) return;
 
   // Source/debug instances from different worktrees must not compete for
   // Electron's global singleton lock.  Otherwise launching worktree B can
@@ -114,9 +90,8 @@ function desktopBootLog(message) {
 }
 
 function verifyFormalSourceBeforeWindow() {
-  const mode = String(process.env.TAIJI_SOURCE_MODE || "formal").trim();
-  if (mode === "development") return;
-  if (mode !== "formal") throw new Error(`Unsupported source mode: ${mode}`);
+  if (launchProfileError) throw launchProfileError;
+  if (!requiresSourceGate(launchProfile)) return;
 
   const sourceRoot = path.resolve(process.env.TAIJI_SOURCE_ROOT || path.join(app.getAppPath(), "..", ".."));
   const gitEnv = { ...process.env };
@@ -137,15 +112,27 @@ function verifyFormalSourceBeforeWindow() {
   desktopBootLog(`source gate passed root=${JSON.stringify(sourceRoot)}`);
 }
 
-desktopBootLog(
-  `boot argv=${JSON.stringify(process.argv)} defaultApp=${process.defaultApp ? "1" : "0"} ` +
-  `appPath=${app.getAppPath()} lock=${gotSingleInstanceLock ? "1" : "0"} ` +
-  `sourceRoot=${JSON.stringify(process.env.TAIJI_SOURCE_ROOT || "unknown")} ` +
-  `sourceCommit=${JSON.stringify(process.env.TAIJI_SOURCE_COMMIT || "unknown")} ` +
-  `sourceDirty=${JSON.stringify(process.env.TAIJI_SOURCE_DIRTY || "unknown")}`
-);
+if (launchProfile && launchProfile.kind === INSTALLED_PROFILE) {
+  desktopBootLog(
+    `boot argv=${JSON.stringify(process.argv)} defaultApp=${process.defaultApp ? "1" : "0"} ` +
+    `appPath=${app.getAppPath()} lock=${gotSingleInstanceLock ? "1" : "0"} ` +
+    `releaseVersion=${JSON.stringify(launchProfile.release.version)} ` +
+    `releaseCommit=${JSON.stringify(launchProfile.release.commit)}`
+  );
+} else {
+  desktopBootLog(
+    `boot argv=${JSON.stringify(process.argv)} defaultApp=${process.defaultApp ? "1" : "0"} ` +
+    `appPath=${app.getAppPath()} lock=${gotSingleInstanceLock ? "1" : "0"} ` +
+    `sourceRoot=${JSON.stringify(process.env.TAIJI_SOURCE_ROOT || "unknown")} ` +
+    `sourceCommit=${JSON.stringify(process.env.TAIJI_SOURCE_COMMIT || "unknown")} ` +
+    `sourceDirty=${JSON.stringify(process.env.TAIJI_SOURCE_DIRTY || "unknown")}`
+  );
+}
 
 function resolveLabDir() {
+  if (launchProfile && launchProfile.kind === INSTALLED_PROFILE) {
+    return launchProfile.installRoot;
+  }
   if (process.env.TAIJI_AGENT_ROOT) {
     return path.resolve(process.env.TAIJI_AGENT_ROOT);
   }
@@ -399,6 +386,22 @@ async function stopExistingRuntime(labDir, logDir) {
     TAIJI_AGENT_LOG_DIR: logDir
   };
   delete env.ELECTRON_RUN_AS_NODE;
+  if (launchProfile.kind === INSTALLED_PROFILE) {
+    delete env.TAIJI_SOURCE_ROOT;
+    delete env.TAIJI_SOURCE_COMMIT;
+    delete env.TAIJI_SOURCE_DIRTY;
+    delete env.TAIJI_SOURCE_MODE;
+    env.TAIJI_LAUNCH_PROFILE = INSTALLED_PROFILE;
+    env.TAIJI_RELEASE_VERSION = launchProfile.release.version;
+    env.TAIJI_RELEASE_COMMIT = launchProfile.release.commit;
+    applyInstalledRuntimePaths({ launchProfile, runtimeEnv: env });
+    applySecurityProfile({
+      launchProfile,
+      runtimeEnv: env,
+      sourceEnv: process.env,
+      packaged: app.isPackaged,
+    });
+  }
   appendDesktopLog(desktopLog, "stopping stale desktop runtime");
   const result = spawnSync(stopScript, {
     cwd: labDir,
@@ -454,14 +457,30 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   const accountHome = systemAccountHome();
   const desktopAccessToken = crypto.randomBytes(32).toString("hex");
   env.TAIJI_AGENT_ROOT = labDir;
-  env.TAIJI_SOURCE_ROOT = process.env.TAIJI_SOURCE_ROOT || path.resolve(labDir, "..");
-  env.TAIJI_SOURCE_COMMIT = process.env.TAIJI_SOURCE_COMMIT || "unknown";
-  env.TAIJI_SOURCE_DIRTY = process.env.TAIJI_SOURCE_DIRTY || "unknown";
+  if (launchProfile.kind === INSTALLED_PROFILE) {
+    delete env.TAIJI_SOURCE_ROOT;
+    delete env.TAIJI_SOURCE_COMMIT;
+    delete env.TAIJI_SOURCE_DIRTY;
+    delete env.TAIJI_SOURCE_MODE;
+    env.TAIJI_LAUNCH_PROFILE = INSTALLED_PROFILE;
+    env.TAIJI_RELEASE_VERSION = launchProfile.release.version;
+    env.TAIJI_RELEASE_COMMIT = launchProfile.release.commit;
+    applyInstalledRuntimePaths({ launchProfile, runtimeEnv: env });
+  } else {
+    env.TAIJI_SOURCE_ROOT = process.env.TAIJI_SOURCE_ROOT || path.resolve(labDir, "..");
+    env.TAIJI_SOURCE_COMMIT = process.env.TAIJI_SOURCE_COMMIT || "unknown";
+    env.TAIJI_SOURCE_DIRTY = process.env.TAIJI_SOURCE_DIRTY || "unknown";
+  }
   env.TAIJI_AGENT_USE_USER_DIRS = "1";
   env.TAIJI_RUNTIME_HOME = process.env.TAIJI_RUNTIME_HOME || path.join(userDataDir(), "runtime-home");
   env.TAIJI_WORKSPACE = process.env.TAIJI_WORKSPACE || path.join(userDataDir(), "workspace");
   env.TAIJI_AGENT_LOG_DIR = logDir;
-  applySecurityProfile(env);
+  applySecurityProfile({
+    launchProfile,
+    runtimeEnv: env,
+    sourceEnv: process.env,
+    packaged: app.isPackaged,
+  });
   env.AGENT_API_HOST = "127.0.0.1";
   env.AGENT_API_PORT = String(agentPort);
   env.API_SERVER_HOST = "127.0.0.1";
@@ -507,7 +526,9 @@ function stopRuntime() {
 async function startRuntime() {
   desktopBootLog("startRuntime");
   const labDir = resolveLabDir();
-  const declaredSourceRoot = String(process.env.TAIJI_SOURCE_ROOT || "").trim();
+  const declaredSourceRoot = launchProfile.kind === "source"
+    ? String(process.env.TAIJI_SOURCE_ROOT || "").trim()
+    : "";
   if (declaredSourceRoot) {
     const expectedLabDir = fs.realpathSync(path.join(declaredSourceRoot, "her" + "mes-local-lab"));
     const actualLabDir = fs.realpathSync(labDir);
@@ -575,6 +596,10 @@ function installMenu() {
     return;
   }
 
+  const viewItems = [{ role: "reload", label: "重新加载" }];
+  if (allowsDevTools(launchProfile)) {
+    viewItems.push({ role: "toggleDevTools", label: "开发者工具" });
+  }
   const template = [
     {
       label: APP_NAME,
@@ -607,10 +632,7 @@ function installMenu() {
     },
     {
       label: "视图",
-      submenu: [
-        { role: "reload", label: "重新加载" },
-        { role: "toggleDevTools", label: "开发者工具" }
-      ]
+      submenu: viewItems
     }
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -620,6 +642,7 @@ function openTrustedIdentityWindow(url, allowedOrigins) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return Promise.reject(new Error("main window is unavailable"));
   }
+  const authIconPath = resolveIconPath(resolveLabDir());
   const authWindow = new BrowserWindow({
     parent: mainWindow,
     width: 620,
@@ -628,10 +651,12 @@ function openTrustedIdentityWindow(url, allowedOrigins) {
     minHeight: 640,
     show: true,
     title: "企业身份安全登录",
+    icon: authIconPath || undefined,
     autoHideMenuBar: true,
     webPreferences: {
       session: mainWindow.webContents.session,
       contextIsolation: true,
+      devTools: allowsDevTools(launchProfile),
       nodeIntegration: false,
       sandbox: true
     }
@@ -687,6 +712,7 @@ async function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
+      devTools: allowsDevTools(launchProfile),
       nodeIntegration: false,
       sandbox: true
     }
@@ -695,7 +721,7 @@ async function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
-  const trustedOidcOrigins = normalizeTrustedExternalOrigins(process.env.TAIJI_TRUSTED_OIDC_ORIGINS || "", { allowLocalHttp: !app.isPackaged });
+  const trustedOidcOrigins = normalizeTrustedExternalOrigins(process.env.TAIJI_TRUSTED_OIDC_ORIGINS || "", { allowLocalHttp: launchProfile.kind === "source" && launchProfile.mode === "development" });
   mainWindow.webContents.setWindowOpenHandler(createExternalWindowOpenHandler(
     (url) => openTrustedIdentityWindow(url, trustedOidcOrigins),
     (error) => desktopBootLog(`external URL open failed: ${error && error.message ? error.message : String(error)}`),
@@ -732,8 +758,10 @@ if (!gotSingleInstanceLock) {
 
   app.whenReady().then(() => {
     desktopBootLog("app.whenReady");
-    installMenu();
-    installDesktopIpcHandlers();
+    app.setName("taiji-agent");
+    if (process.platform === "linux") {
+      app.setDesktopName("taiji-agent.desktop");
+    }
     try {
       verifyFormalSourceBeforeWindow();
     } catch (error) {
@@ -743,6 +771,8 @@ if (!gotSingleInstanceLock) {
       app.quit();
       return;
     }
+    installMenu();
+    installDesktopIpcHandlers();
     createWindow();
   });
 

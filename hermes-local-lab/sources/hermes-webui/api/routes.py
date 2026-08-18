@@ -11735,6 +11735,7 @@ from api.providers import get_providers, get_provider_quota, get_provider_cost_h
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
+    get_setup_status,
     complete_onboarding,
     probe_provider_endpoint,
 )
@@ -13525,6 +13526,13 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
+
+    if parsed.path in {"/api/setup/status", "/api/setup/preflight"}:
+        return j(
+            handler,
+            get_setup_status(),
+            extra_headers={"Cache-Control": "no-store"},
+        )
 
     if parsed.path.startswith("/extensions/"):
         from api.extensions import serve_extension_static
@@ -18012,14 +18020,18 @@ def handle_post(handler, parsed) -> bool:
             if not is_local:
                 return bad(handler, "Onboarding setup is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
         try:
-            return j(handler, apply_onboarding_setup(body))
+            result = apply_onboarding_setup(body)
+            status = 409 if result.get("error") == "config_exists" else 200
+            return j(handler, result, status=status)
         except ValueError as e:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
 
     if parsed.path == "/api/onboarding/complete":
-        return j(handler, complete_onboarding())
+        result = complete_onboarding()
+        status = 409 if result.get("error") == "setup_not_ready" else 200
+        return j(handler, result, status=status)
 
     if parsed.path == "/api/onboarding/probe":
         # Probe a self-hosted provider endpoint (#1499).  Validates the

@@ -5,30 +5,50 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SRC_ARCHIVE="${TAIJI_SOURCE_ARCHIVE:-}"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
-DEFAULT_BUILD_ROOT="/tmp/taiji-agent-build-$(id -u 2>/dev/null || printf user)"
-BUILD_ROOT="${TAIJI_BUILD_ROOT:-$DEFAULT_BUILD_ROOT}"
+BUILD_ROOT="${TAIJI_BUILD_ROOT:-}"
 BUILD_ROOT_OWNER_MARKER=".taiji-build-root-owner"
 BUILD_ROOT_OWNER_TOKEN="taiji-agent-build-root-v1:$(id -u 2>/dev/null || printf user)"
-SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
+BUILD_MIN_FREE_MIB="12288"
+BUILD_MIN_FREE_INODES="100000"
+BUILD_TMP_DIR=""
+SRC_DIR=""
 OUTPUT_DIR="$SCRIPT_DIR/生成的安装包"
-OFFLINE_REPO="$SCRIPT_DIR/离线依赖"
 STATE_HOME="${XDG_STATE_HOME:-${HOME:-}/.local/state}"
 LOG_DIR="$STATE_HOME/taiji-agent/build-logs"
 DELIVERY_BUILD_LOG_DIR="$SCRIPT_DIR/构建日志"
 VERSION=""
-TOOL_ROOT="$SCRIPT_DIR/.构建工具"
-NODE_ROOT="$TOOL_ROOT/node"
+TOOL_ROOT=""
+NODE_ROOT=""
 NODE_VERSION="22.23.1"
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 NODE_ARCHIVE_SHA256="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
 BUILD_MARKER="$OUTPUT_DIR/.build-success"
 BUILD_REPORT="$OUTPUT_DIR/构建报告.txt"
 MANIFEST_FILE="$OUTPUT_DIR/taiji-package-manifest.json"
+POLICY_FILE=""
+POLICY_HELPER=""
+POLICY_ID=""
+POLICY_SHA256=""
+POLICY_MAINTAINER=""
+ELECTRON_VERSION=""
+ELECTRON_ARCHIVE_SHA256=""
+ELECTRON_ARCHIVE=""
+ELF_ABI_AUDIT_SHA256=""
+PYTHON_DEPENDENCY_LOCK_STATUS="unknown"
+CANDIDATE_DEB_FIXED=0
+OUTPUT_ARCHIVE_DIR=""
+OUTPUT_BACKUP=""
+OUTPUT_REPLACEMENT_PENDING=0
+ACCEPTANCE_STAGING=""
+ACCEPTANCE_TARGET=""
+ACCEPTANCE_ARCHIVE_DIR=""
+ACCEPTANCE_BACKUP=""
 
 LOG_DIR_REAL=""
 LOG_FILE=""
 FAILURE_REPORTED=0
 CURRENT_STAGE="初始化"
+BUILD_ROOT_PROBE_RESULTS=""
 
 ok() { printf '[OK] %s\n' "$*"; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -51,8 +71,10 @@ initialize_build_logging() {
       exit 1
       ;;
   esac
-  mkdir -p "$LOG_DIR" "$OUTPUT_DIR" "$OFFLINE_REPO" \
+  mkdir -p "$LOG_DIR" "$OUTPUT_DIR" \
     || { printf '[FAIL] 无法创建制包日志或交付产物目录\n' >&2; exit 1; }
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] \
+    || { printf '[FAIL] 生成的安装包目录必须是真实目录：%s\n' "$OUTPUT_DIR" >&2; exit 1; }
   [ -d "$LOG_DIR" ] && [ ! -L "$LOG_DIR" ] \
     || { printf '[FAIL] 制包日志目录不是可信实体目录：%s\n' "$LOG_DIR" >&2; exit 1; }
   chmod 0700 "$LOG_DIR" \
@@ -90,17 +112,25 @@ write_environment_snapshot() {
     printf 'arch=%s\n' "$(uname -m 2>/dev/null || true)"
     printf 'dpkg_arch=%s\n' "$(dpkg --print-architecture 2>/dev/null || true)"
     printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
-    for cmd in sudo apt-get apt-cache dpkg dpkg-deb dpkg-scanpackages sha256sum tar gzip git curl python3 node npm uv systemctl lsof; do
+    for cmd in sudo apt-get apt-cache dpkg dpkg-deb sha256sum tar gzip git curl python3 node npm uv cc df findmnt systemctl lsof readelf strings perl cmp ldd getconf desktop-file-validate; do
       printf 'cmd.%s=%s\n' "$cmd" "$(safe_cmd_path "$cmd")"
     done
     printf 'TAIJI_NODE_MIRRORS=%s\n' "${TAIJI_NODE_MIRRORS:+set}"
     printf 'TAIJI_NPM_REGISTRIES=%s\n' "${TAIJI_NPM_REGISTRIES:+set}"
+    printf 'TAIJI_NPM_AUDIT_REGISTRY=%s\n' "${TAIJI_NPM_AUDIT_REGISTRY:+set}"
     printf 'TAIJI_ELECTRON_MIRRORS=%s\n' "${TAIJI_ELECTRON_MIRRORS:+set}"
     printf 'TAIJI_BUILD_ROOT=%s\n' "${TAIJI_BUILD_ROOT:-}"
     printf 'BUILD_ROOT=%s\n' "$BUILD_ROOT"
+    printf 'BUILD_TMP_DIR=%s\n' "$BUILD_TMP_DIR"
+    printf 'TOOL_ROOT=%s\n' "$TOOL_ROOT"
+    printf 'NODE_ROOT=%s\n' "$NODE_ROOT"
+    printf 'TMPDIR=%s\n' "${TMPDIR:-}"
+    printf 'TMP=%s\n' "${TMP:-}"
+    printf 'TEMP=%s\n' "${TEMP:-}"
+    printf '%s\n' '## 构建根探针结果'
+    printf '%s\n' "$BUILD_ROOT_PROBE_RESULTS"
     printf 'UV_INDEX_URL=%s\n' "${UV_INDEX_URL:-}"
     printf '\n## 交付目录\n'
-    find "$SCRIPT_DIR" -maxdepth 2 \( -name 'taiji-agentv1.0-kylin-build-src-*.tar.gz' -o -name 'SHA256SUMS.txt' -o -name '*.zip' -o -name '*.deb' -o -name 'Packages' -o -name 'Packages.gz' -o -name '.build-success' -o -name 'taiji-package-manifest.json' -o -name '构建报告.txt' \) -print 2>/dev/null | sort
     printf '\n## 最新日志\n'
     [ -f "$LOG_FILE" ] && tail -n 160 "$LOG_FILE"
   } >> "$out" 2>&1 || true
@@ -121,17 +151,20 @@ failure_next_steps() {
     *"源码包"*|*"SHA256"*|*"当前 commit"*|*"未提交改动"*|*"已暂存未提交"*)
       printf 'next=在本地重新生成唯一源码包和 SHA256SUMS.txt，并重新拷贝整个交付目录\n'
       ;;
+    *"npm audit"*|*"DOCX Engine 生产依赖"*)
+      printf 'next=查看 npm audit 输出；镜像不支持审计接口时设置 TAIJI_NPM_AUDIT_REGISTRY=https://registry.npmjs.org，实际存在 high/critical 漏洞时必须更新依赖后重新制包\n'
+      ;;
     *"Node.js"*|*"npm ci"*|*"Electron"*)
       printf 'next=检查 DNS/代理/镜像，必要时设置 TAIJI_NODE_MIRRORS、TAIJI_NPM_REGISTRIES、TAIJI_ELECTRON_MIRRORS 后重试\n'
       ;;
     *"pyproject.toml"*|*"Permission denied"*|*"os error 13"*|*"源码权限不可读"*)
-      printf 'next=构建工作区源码权限不可读。新版脚本默认使用 /tmp/taiji-agent-build-<uid> 并在解压后修复权限；如仍失败，检查终端安全管控/ACL，或设置 TAIJI_BUILD_ROOT=/tmp/taiji-agent-build-test 后重试\n'
+      printf 'next=构建工作区源码权限不可读。请查看新版候选目录探针和 findmnt 诊断；不要关闭麒麟安全策略，可显式设置一个经过允许的 owner-only TAIJI_BUILD_ROOT 后重试\n'
       ;;
     *"setup-local.sh"*|*"uv.lock"*|*"--locked"*|*"TAIJI_UV_LOCK_MODE"*)
       printf 'next=Python 依赖 lock 漂移。新版脚本默认 TAIJI_UV_LOCK_MODE=auto 会自动重试非 locked 同步；如仍使用旧包，可先用 TAIJI_ALLOW_UV_LOCK_REFRESH=1 bash ./00_制包机_生成离线交付包.sh 临时继续\n'
       ;;
-    *"离线依赖"*|*"运行依赖"*|*"Packages.gz"*|*"--download-only"*)
-      printf 'next=确认制包机 apt 源可访问目标机同发行版/架构依赖，重新生成离线依赖仓库\n'
+    *"可用空间不足"*|*"inode 不足"*)
+      printf 'next=制包文件系统资源不足。请至少准备 12 GiB 可用空间和 100000 个可用 inode；清理空间后重试，或把 TAIJI_BUILD_ROOT 指向满足条件的 owner-only taiji-agent-build-* 目录\n'
       ;;
     *)
       printf 'next=查看本诊断文件和主日志，按最后一个 [FAIL]/命令错误继续定位\n'
@@ -172,7 +205,115 @@ on_error() {
   exit "$code"
 }
 
+rollback_previous_build_outputs() {
+  local archive_name current_uid
+  [ -n "${OUTPUT_BACKUP:-}" ] || return 0
+  archive_name="${OUTPUT_ARCHIVE_DIR##*/}"
+  if [ "$OUTPUT_DIR" != "$SCRIPT_DIR/生成的安装包" ] \
+      || [ "${OUTPUT_ARCHIVE_DIR%/*}" != "$SCRIPT_DIR/旧版备份" ] \
+      || [ "$OUTPUT_BACKUP" != "$OUTPUT_ARCHIVE_DIR/生成的安装包" ]; then
+    warn "旧制包产物回滚路径不属于本轮安全范围，已停止自动操作"
+    return 1
+  fi
+  case "$archive_name" in
+    制包重试-*-"$$") ;;
+    *) warn "旧制包产物回滚备份不属于本轮进程，已停止自动操作"; return 1 ;;
+  esac
+  if [ -e "$OUTPUT_DIR" ] || [ -L "$OUTPUT_DIR" ]; then
+    if [ ! -e "$OUTPUT_BACKUP" ] && [ ! -L "$OUTPUT_BACKUP" ]; then
+      rmdir -- "$OUTPUT_ARCHIVE_DIR" 2>/dev/null || true
+      OUTPUT_BACKUP=""
+      OUTPUT_ARCHIVE_DIR=""
+      OUTPUT_REPLACEMENT_PENDING=0
+      return 0
+    fi
+    current_uid="$(id -u)"
+    if [ "${OUTPUT_REPLACEMENT_PENDING:-0}" = 1 ] \
+        && [ -d "$OUTPUT_DIR" ] \
+        && [ ! -L "$OUTPUT_DIR" ] \
+        && [ "$(stat -c '%u' "$OUTPUT_DIR")" = "$current_uid" ] \
+        && [ -z "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+      if ! rmdir -- "$OUTPUT_DIR"; then
+        warn "本轮新输出目录虽为空但无法安全移除，未覆盖任何内容：$OUTPUT_DIR"
+        return 1
+      fi
+    else
+      warn "输出目录已存在或不再满足本轮空目录条件，未覆盖任何内容：$OUTPUT_DIR"
+      return 0
+    fi
+  fi
+  [ -d "$OUTPUT_BACKUP" ] && [ ! -L "$OUTPUT_BACKUP" ] || {
+    warn "旧制包产物归档中断，但本轮备份不安全，无法自动回滚：$OUTPUT_BACKUP"
+    return 1
+  }
+  if ! mv -- "$OUTPUT_BACKUP" "$OUTPUT_DIR"; then
+    warn "旧制包产物归档中断后自动回滚失败：$OUTPUT_BACKUP"
+    return 1
+  fi
+  rmdir -- "$OUTPUT_ARCHIVE_DIR" 2>/dev/null || true
+  OUTPUT_BACKUP=""
+  OUTPUT_ARCHIVE_DIR=""
+  OUTPUT_REPLACEMENT_PENDING=0
+  warn "旧制包产物归档中断，已完整恢复上一版输出目录"
+}
+
+rollback_target_acceptance_tools() {
+  local archive_name
+  [ -n "${ACCEPTANCE_BACKUP:-}" ] || return 0
+  archive_name="${ACCEPTANCE_ARCHIVE_DIR##*/}"
+  if [ "${ACCEPTANCE_TARGET:-}" != "$SCRIPT_DIR/验收工具" ] \
+      || [ "${ACCEPTANCE_ARCHIVE_DIR%/*}" != "$SCRIPT_DIR/旧版备份" ] \
+      || [ "$ACCEPTANCE_BACKUP" != "$ACCEPTANCE_ARCHIVE_DIR/验收工具" ]; then
+    warn "验收工具回滚路径不属于本轮安全范围，已停止自动操作"
+    return 1
+  fi
+  case "$archive_name" in
+    验收工具重试-*-"$$") ;;
+    *) warn "验收工具回滚备份不属于本轮进程，已停止自动操作"; return 1 ;;
+  esac
+  if [ -e "$ACCEPTANCE_TARGET" ] || [ -L "$ACCEPTANCE_TARGET" ]; then
+    return 0
+  fi
+  [ -d "$ACCEPTANCE_BACKUP" ] && [ ! -L "$ACCEPTANCE_BACKUP" ] || {
+    warn "验收工具替换中断，但本轮备份不安全，无法自动回滚：$ACCEPTANCE_BACKUP"
+    return 1
+  }
+  if ! mv -- "$ACCEPTANCE_BACKUP" "$ACCEPTANCE_TARGET"; then
+    warn "验收工具替换中断后自动回滚失败：$ACCEPTANCE_BACKUP"
+    return 1
+  fi
+  rmdir -- "$ACCEPTANCE_ARCHIVE_DIR" 2>/dev/null || true
+  ACCEPTANCE_BACKUP=""
+  ACCEPTANCE_ARCHIVE_DIR=""
+  ACCEPTANCE_TARGET=""
+  warn "验收工具替换中断，已自动恢复上一版"
+}
+
+cleanup_transient_delivery() {
+  set +e
+  rollback_previous_build_outputs || true
+  rollback_target_acceptance_tools || true
+  if [ -n "${ACCEPTANCE_STAGING:-}" ] \
+      && [ "$ACCEPTANCE_STAGING" = "$SCRIPT_DIR/.验收工具.tmp-$$" ] \
+      && [ -d "$ACCEPTANCE_STAGING" ] \
+      && [ ! -L "$ACCEPTANCE_STAGING" ]; then
+    rm -rf -- "$ACCEPTANCE_STAGING"
+  fi
+}
+
+on_signal() {
+  local code="$1" signal_name="$2"
+  set +e
+  printf '\n[FAIL] 收到信号 %s，正在恢复本轮交付目录\n' "$signal_name" >&2
+  write_failure_diagnostic "$code" "收到信号：$signal_name"
+  exit "$code"
+}
+
+trap cleanup_transient_delivery EXIT
 trap 'on_error "$?" "$BASH_COMMAND"' ERR
+trap 'on_signal 130 INT' INT
+trap 'on_signal 143 TERM' TERM
+trap 'on_signal 129 HUP' HUP
 
 require_cmd() { have "$1" || fail "缺少命令：$1"; }
 
@@ -240,21 +381,23 @@ verify_source_archive_checksum() {
 }
 
 create_source_archive_from_git() {
-  local repo_root source_gate short archive_name
+  local repo_root source_gate trusted_git commit archive_name
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd -P)"
   source_gate="$repo_root/scripts/check-clean-worktree.sh"
+  trusted_git="$repo_root/scripts/taiji-trusted-git"
   [ -e "$repo_root/.git" ] || fail "未找到源码包，也无法从当前目录生成源码包。请先放入 taiji-agentv1.0-kylin-build-src-<hash>.tar.gz"
   require_cmd git
   [ -x "$source_gate" ] || fail "缺少正式源码门禁：$source_gate"
+  [ -x "$trusted_git" ] && [ ! -L "$trusted_git" ] || fail "缺少可信 Git 边界：$trusted_git"
   "$source_gate" \
     --mode formal \
     --repo-root "$repo_root" \
     --source-root "$repo_root" \
     || fail "发布源码包必须来自干净本地 main"
-  short="$(git -C "$repo_root" rev-parse --short=8 HEAD)"
-  archive_name="taiji-agentv1.0-kylin-build-src-$short.tar.gz"
+  commit="$("$trusted_git" -C "$repo_root" rev-parse HEAD)"
+  archive_name="taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
   info "使用 git archive 生成源码包：$archive_name"
-  git -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
+  "$trusted_git" -C "$repo_root" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$SCRIPT_DIR/$archive_name"
   (cd "$SCRIPT_DIR" && sha256sum "$archive_name" > SHA256SUMS.txt)
   SRC_ARCHIVE="$SCRIPT_DIR/$archive_name"
   ok "源码包已生成并写入 SHA256SUMS.txt"
@@ -325,7 +468,6 @@ run_release_preflight() {
 preflight() {
   info "检查制包机环境"
   cleanup_delivery_metadata
-  validate_build_root_location
   [ "$(uname -s)" = "Linux" ] || fail "最终 DEB 必须在 Linux amd64 制包机生成，当前为：$(uname -s)"
   case "$(uname -m)" in
     x86_64|amd64) ok "CPU 架构符合：$(uname -m)" ;;
@@ -335,45 +477,207 @@ preflight() {
   require_cmd apt-cache
   require_cmd dpkg
   require_cmd sha256sum
+  require_cmd readlink
   require_admin_capability
   arch="$(dpkg --print-architecture 2>/dev/null || true)"
   [ "$arch" = "amd64" ] || fail "dpkg 架构不是 amd64：${arch:-unknown}"
 }
 
-validate_build_root_location() {
-  local resolved_script resolved_build
-  have readlink || fail "缺少 readlink，无法验证临时构建目录边界"
-  validate_safe_build_root_path
-  resolved_script="$(readlink -f -- "$SCRIPT_DIR")" || fail "无法解析交付目录真实路径：$SCRIPT_DIR"
-  resolved_build="$(readlink -m -- "$BUILD_ROOT")" || fail "无法解析临时构建目录：$BUILD_ROOT"
-  case "$resolved_build" in
+build_root_candidates() {
+  local uid cache_root home_cache candidate
+  uid="$(id -u 2>/dev/null || printf user)"
+  if [ -n "${TAIJI_BUILD_ROOT:-}" ]; then
+    printf '%s\n' "$TAIJI_BUILD_ROOT"
+    return 0
+  fi
+
+  cache_root="${XDG_CACHE_HOME:-}"
+  if [ -n "$cache_root" ] && [[ "$cache_root" = /* ]]; then
+    printf '%s/taiji-agent-build-%s\n' "${cache_root%/}" "$uid"
+  fi
+  if [ -n "${HOME:-}" ] && [[ "$HOME" = /* ]]; then
+    home_cache="$HOME/.cache"
+    if [ "${cache_root%/}" != "$home_cache" ]; then
+      printf '%s/taiji-agent-build-%s\n' "$home_cache" "$uid"
+    fi
+  fi
+  printf '/var/tmp/taiji-agent-build-%s\n' "$uid"
+}
+
+candidate_failure() {
+  local candidate="$1" reason="$2"
+  warn "候选构建根不可用：${candidate}（${reason}）"
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$candidate stage=validation reason=$reason"$'\n'
+  return 1
+}
+
+validate_candidate_build_root() {
+  local candidate="$1" resolved_candidate resolved_script basename_candidate
+  case "$candidate" in
+    /*) ;;
+    *) candidate_failure "$candidate" "必须是绝对路径"; return 1 ;;
+  esac
+  resolved_candidate="$(readlink -m -- "$candidate")" || {
+    candidate_failure "$candidate" "无法解析路径"
+    return 1
+  }
+  basename_candidate="${resolved_candidate##*/}"
+  case "$basename_candidate" in
+    taiji-agent-build-?*) ;;
+    *) candidate_failure "$resolved_candidate" "目录名必须使用 taiji-agent-build-*"; return 1 ;;
+  esac
+  case "$resolved_candidate" in
+    "/"|"/tmp"|"/tmp/"*|"/home"|"/var"|"/usr")
+      candidate_failure "$resolved_candidate" "拒绝宽泛或受限目录"
+      return 1
+      ;;
+  esac
+  [ ! -L "$candidate" ] || {
+    candidate_failure "$candidate" "不能是符号链接"
+    return 1
+  }
+  if [ -e "$candidate" ] && [ ! -d "$candidate" ]; then
+    candidate_failure "$candidate" "已存在但不是目录"
+    return 1
+  fi
+  resolved_script="$(readlink -f -- "$SCRIPT_DIR")" || {
+    candidate_failure "$candidate" "无法解析交付目录"
+    return 1
+  }
+  case "$resolved_candidate" in
     "$resolved_script"|"$resolved_script"/*)
-      fail "TAIJI_BUILD_ROOT 不能位于交付目录内：$resolved_build"
+      candidate_failure "$resolved_candidate" "不能位于交付目录内"
+      return 1
       ;;
   esac
 }
 
+validate_build_root_location() {
+  validate_candidate_build_root "$BUILD_ROOT" \
+    || fail "显式 TAIJI_BUILD_ROOT 不符合安全路径要求：$BUILD_ROOT"
+}
+
 validate_safe_build_root_path() {
-  local resolved_build build_basename
-  case "$BUILD_ROOT" in
-    /*) ;;
-    *) fail "TAIJI_BUILD_ROOT 必须是绝对路径：$BUILD_ROOT" ;;
-  esac
-  resolved_build="$(readlink -m -- "$BUILD_ROOT")" || fail "无法解析临时构建目录：$BUILD_ROOT"
-  build_basename="${resolved_build##*/}"
-  case "$build_basename" in
-    taiji-agent-build-?*) ;;
-    *) fail "TAIJI_BUILD_ROOT 必须使用 taiji-agent-build-* 专用目录名：$resolved_build" ;;
-  esac
-  case "$resolved_build" in
-    "/"|"/tmp"|"/home"|"/usr"|"/var")
-      fail "拒绝使用危险构建目录：$resolved_build"
-      ;;
-  esac
-  [ ! -L "$BUILD_ROOT" ] || fail "TAIJI_BUILD_ROOT 不能是符号链接：$BUILD_ROOT"
-  if [ -e "$BUILD_ROOT" ] && [ ! -d "$BUILD_ROOT" ]; then
-    fail "TAIJI_BUILD_ROOT 已存在但不是目录：$BUILD_ROOT"
+  validate_candidate_build_root "$BUILD_ROOT" \
+    || fail "TAIJI_BUILD_ROOT 不符合安全路径要求：$BUILD_ROOT"
+}
+
+record_probe_failure() {
+  local candidate="$1" stage="$2" output="$3" findmnt_output
+  findmnt_output=""
+  if have findmnt; then
+    findmnt_output="$(findmnt -T "$candidate" 2>&1 || true)"
   fi
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$candidate stage=$stage"$'\n'
+  BUILD_ROOT_PROBE_RESULTS+="output=$output"$'\n'
+  BUILD_ROOT_PROBE_RESULTS+="findmnt=$findmnt_output"$'\n'
+  warn "构建根探针失败：candidate=$candidate stage=$stage"
+  [ -z "$output" ] || warn "$output"
+  [ -z "$findmnt_output" ] || warn "findmnt -T ${candidate}：${findmnt_output}"
+}
+
+probe_build_root() {
+  local candidate="$1" probe_dir probe_output marker marker_value marker_meta marker_uid marker_mode marker_links
+  validate_candidate_build_root "$candidate" || return 1
+  if [ -e "$candidate" ]; then
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+    [ "$(stat -c '%u' "$candidate" 2>/dev/null || printf -1)" = "$(id -u)" ] || {
+      candidate_failure "$candidate" "目录不属于当前用户"
+      return 1
+    }
+    chmod 0700 "$candidate" 2>/dev/null || {
+      candidate_failure "$candidate" "无法设置 0700 权限"
+      return 1
+    }
+    marker="$candidate/$BUILD_ROOT_OWNER_MARKER"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      [ -f "$marker" ] && [ ! -L "$marker" ] || {
+        candidate_failure "$candidate" "所有权标记不是普通文件"
+        return 1
+      }
+      marker_meta="$(stat -c '%u %a %h' "$marker" 2>/dev/null || true)"
+      read -r marker_uid marker_mode marker_links <<< "$marker_meta"
+      marker_value="$(tr -d '\r\n' < "$marker" 2>/dev/null || true)"
+      if [ "$marker_uid" != "$(id -u)" ] || [ "$marker_mode" != "600" ] || [ "$marker_links" != "1" ] || [ "$marker_value" != "$BUILD_ROOT_OWNER_TOKEN" ]; then
+        candidate_failure "$candidate" "所有权标记不可信"
+        return 1
+      fi
+    elif [ -n "$(find "$candidate" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+      candidate_failure "$candidate" "已有内容但缺少可信所有权标记"
+      return 1
+    fi
+  else
+    mkdir -p -- "$candidate" 2>/dev/null || {
+      candidate_failure "$candidate" "无法创建目录"
+      return 1
+    }
+    chmod 0700 "$candidate" 2>/dev/null || {
+      candidate_failure "$candidate" "无法设置 0700 权限"
+      return 1
+    }
+  fi
+
+  probe_dir="$candidate/.probe-$$"
+  rm -rf -- "$probe_dir"
+  if ! mkdir -m 0700 -- "$probe_dir" 2>/dev/null; then
+    record_probe_failure "$candidate" "mkdir" "无法创建探针目录"
+    return 1
+  fi
+  if ! probe_output="$({
+    printf '#include <stdlib.h>\nint main(void) { return 0; }\n' > "$probe_dir/probe.c"
+    cc "$probe_dir/probe.c" -o "$probe_dir/probe-exec"
+    "$probe_dir/probe-exec"
+    cc -shared -fPIC "$probe_dir/probe.c" -o "$probe_dir/probe.so"
+    python3 - "$probe_dir/probe.so" <<'PY'
+import ctypes
+import sys
+
+ctypes.CDLL(sys.argv[1])
+PY
+  } 2>&1)"; then
+    record_probe_failure "$candidate" "exec-or-dlopen" "$probe_output"
+    rm -rf -- "$probe_dir"
+    return 1
+  fi
+  rm -rf -- "$probe_dir"
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$candidate stage=success"$'\n'
+  return 0
+}
+
+configure_build_tmp() {
+  [ -n "$BUILD_ROOT" ] || fail "构建根尚未选择，不能配置临时目录"
+  BUILD_TMP_DIR="$BUILD_ROOT/tmp"
+  SRC_DIR="$BUILD_ROOT/taiji-agentv1.0"
+  TOOL_ROOT="$BUILD_ROOT/.build-tools"
+  NODE_ROOT="$TOOL_ROOT/node"
+  mkdir -p -- "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法创建构建临时目录或工具根"
+  chmod 0700 "$BUILD_TMP_DIR" "$TOOL_ROOT" || fail "无法设置构建临时目录或工具根权限"
+  export TMPDIR="$BUILD_TMP_DIR" TMP="$BUILD_TMP_DIR" TEMP="$BUILD_TMP_DIR"
+  ok "构建临时目录已固定：$BUILD_TMP_DIR"
+  ok "构建工具根已固定：$TOOL_ROOT"
+}
+
+select_build_root() {
+  local candidate explicit
+  explicit="${TAIJI_BUILD_ROOT:-}"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if ! validate_candidate_build_root "$candidate"; then
+      [ -n "$explicit" ] && fail "显式 TAIJI_BUILD_ROOT 不符合安全路径要求：$candidate"
+      continue
+    fi
+    if probe_build_root "$candidate"; then
+      BUILD_ROOT="$candidate"
+      create_owned_build_root
+      configure_build_tmp
+      ok "已选择可执行且可加载动态库的构建根：$BUILD_ROOT"
+      return 0
+    fi
+    if [ -n "$explicit" ]; then
+      fail "显式 TAIJI_BUILD_ROOT 探针失败：$candidate"
+    fi
+  done < <(build_root_candidates)
+  fail "没有候选构建根通过可执行文件和动态库加载探针；请查看失败诊断中的 findmnt 结果"
 }
 
 require_owned_build_root() {
@@ -428,17 +732,86 @@ prepare_source_release() {
   run_release_preflight
 }
 
+archive_previous_build_outputs() {
+  local path name current_uid archive_root archive_dir entry_count=0
+  [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] \
+    || fail "生成的安装包目录必须是真实目录：$OUTPUT_DIR"
+  current_uid="$(id -u)"
+
+  while IFS= read -r -d '' path; do
+    entry_count=$((entry_count + 1))
+    name="${path##*/}"
+    case "$name" in
+      .build-success|taiji-package-manifest.json|构建报告.txt) ;;
+      taiji-agent_*_amd64.deb|taiji-agent_*_amd64.deb.sha256)
+        printf '%s\n' "$name" | grep -Eq '^taiji-agent_(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)_amd64\.deb(\.sha256)?$' \
+          || fail "生成的安装包目录含未知文件，未移动任何内容：$path"
+        ;;
+      *) fail "生成的安装包目录含未知条目，未移动任何内容：$path" ;;
+    esac
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      || fail "上次制包产物不是实体普通文件，未移动任何内容：$path"
+    [ "$(stat -c '%h' "$path")" = "1" ] \
+      || fail "上次制包产物存在硬链接，未移动任何内容：$path"
+    [ "$(stat -c '%u' "$path")" = "$current_uid" ] \
+      || fail "上次制包产物不属于当前用户，未移动任何内容：$path"
+  done < <(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print0)
+
+  [ "$entry_count" -gt 0 ] || return 0
+  archive_root="$SCRIPT_DIR/旧版备份"
+  [ ! -L "$archive_root" ] || fail "旧版备份目录不能是符号链接：$archive_root"
+  install -d -m 0755 "$archive_root"
+  archive_dir="$archive_root/制包重试-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  install -d -m 0700 "$archive_dir"
+  OUTPUT_ARCHIVE_DIR="$archive_dir"
+  OUTPUT_BACKUP="$archive_dir/生成的安装包"
+  mv -- "$OUTPUT_DIR" "$OUTPUT_BACKUP"
+  OUTPUT_REPLACEMENT_PENDING=1
+  install -d -m 0755 "$OUTPUT_DIR"
+  OUTPUT_BACKUP=""
+  OUTPUT_ARCHIVE_DIR=""
+  OUTPUT_REPLACEMENT_PENDING=0
+  ok "已把上次中断留下的已知制包产物归档到：$archive_dir"
+}
+
 install_build_dependencies() {
   info "安装制包依赖。这里可能需要输入 sudo 密码。"
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update
   sudo env DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y \
-    curl ca-certificates build-essential python3-dev libffi-dev git rsync \
-    dpkg-dev file desktop-file-utils lsof xz-utils tar gzip openssl \
+    curl ca-certificates build-essential python3 python3-dev libffi-dev git rsync \
+    dpkg-dev binutils perl-base diffutils libc-bin file desktop-file-utils \
+    lsof xz-utils tar gzip openssl \
     libc6 libgtk-3-0 libnss3 libnspr4 libxss1 libasound2 libatk1.0-0 \
     libatk-bridge2.0-0 libatspi2.0-0 libdrm2 libgbm1 libxkbcommon0 libx11-6 \
     libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxrender1 \
     libxshmfence1 libxcb1 libcups2 libdbus-1-3 libglib2.0-0 libpango-1.0-0 \
     libcairo2 libexpat1 libfontconfig1 libsecret-1-0 libxtst6 libuuid1 xdg-utils
+}
+
+verify_build_command_contract() {
+  local command missing=""
+  for command in \
+    curl git tar gzip xz sha256sum openssl python3 cc rsync dpkg dpkg-deb \
+    file desktop-file-validate lsof readelf strings perl cmp ldd getconf \
+    stat mktemp date df find grep sed awk sort head tail wc tr install chmod cp mv; do
+    if ! have "$command"; then
+      missing="$missing $command"
+    fi
+  done
+  [ -z "$missing" ] \
+    || fail "制包依赖安装后仍缺少命令：${missing# }"
+  ok "制包命令依赖闭包已通过"
+}
+
+verify_trusted_system_tools() {
+  local helper trusted_readelf
+  helper="$SRC_DIR/packaging/linux/trusted_system_tools.py"
+  [ -f "$helper" ] && [ ! -L "$helper" ] \
+    || fail "源码缺少可信系统工具解析器：$helper"
+  trusted_readelf="$(python3 "$helper" readelf)" \
+    || fail "系统 readelf 未通过可信路径校验；请确认 binutils 安装完整"
+  [ -n "$trusted_readelf" ] || fail "可信 readelf 解析结果为空"
+  ok "可信 readelf 已就绪：$trusted_readelf"
 }
 
 source_lab_dir() {
@@ -592,6 +965,30 @@ reset_build_root() {
       || fail "专用构建工作区清理后仍存在：$BUILD_ROOT"
   fi
   create_owned_build_root
+  configure_build_tmp
+}
+
+require_build_capacity() {
+  local target="${1:-$BUILD_ROOT}" available_kib available_mib available_inodes
+  if ! available_kib="$(LC_ALL=C df -Pk -- "$target" 2>/dev/null | awk 'NR == 2 {print $4}')"; then
+    fail "无法读取构建文件系统可用空间：$target"
+  fi
+  if ! available_inodes="$(LC_ALL=C df -Pi -- "$target" 2>/dev/null | awk 'NR == 2 {print $(NF-2)}')"; then
+    fail "无法读取构建文件系统可用 inode：$target"
+  fi
+  case "$available_kib" in
+    ''|*[!0-9]*) fail "无法读取构建文件系统可用空间：$target" ;;
+  esac
+  case "$available_inodes" in
+    ''|*[!0-9]*) fail "无法读取构建文件系统可用 inode：$target" ;;
+  esac
+  available_mib=$((available_kib / 1024))
+  BUILD_ROOT_PROBE_RESULTS+="candidate=$target stage=capacity available_mib=$available_mib available_inodes=$available_inodes"$'\n'
+  [ "$available_mib" -ge "$BUILD_MIN_FREE_MIB" ] \
+    || fail "构建文件系统可用空间不足：${available_mib} MiB，至少需要 ${BUILD_MIN_FREE_MIB} MiB（${target}）"
+  [ "$available_inodes" -ge "$BUILD_MIN_FREE_INODES" ] \
+    || fail "构建文件系统可用 inode 不足：${available_inodes}，至少需要 ${BUILD_MIN_FREE_INODES}（${target}）"
+  ok "构建文件系统容量门禁通过：${available_mib} MiB，${available_inodes} inodes"
 }
 
 repair_build_tree_permissions() {
@@ -612,11 +1009,58 @@ unpack_source() {
   info "解压源码到构建工作区"
   info "构建工作区：$BUILD_ROOT"
   reset_build_root
+  require_build_capacity "$BUILD_ROOT"
   tar -xzf "$SRC_ARCHIVE" -C "$BUILD_ROOT"
   [ -d "$SRC_DIR" ] || fail "源码解压后未找到：$SRC_DIR"
   repair_build_tree_permissions
   VERSION="$(read_product_version)"
   ok "源码已解压：$SRC_DIR"
+}
+
+load_source_controlled_policy() {
+  local policy_exports
+  POLICY_FILE="$SRC_DIR/packaging/linux/compatibility-policy.json"
+  POLICY_HELPER="$SRC_DIR/packaging/linux/compatibility_policy.py"
+  [ -f "$POLICY_FILE" ] && [ ! -L "$POLICY_FILE" ] || fail "源码包缺少 canonical compatibility policy：$POLICY_FILE"
+  [ -f "$POLICY_HELPER" ] && [ ! -L "$POLICY_HELPER" ] || fail "源码包缺少 compatibility policy helper：$POLICY_HELPER"
+  POLICY_ID="$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-id)"
+  POLICY_SHA256="$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-sha256)"
+  POLICY_MAINTAINER="$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-maintainer)"
+  policy_exports="$(python3 "$POLICY_HELPER" validate --policy "$POLICY_FILE" --print-shell)" \
+    || fail "无法读取 canonical policy 的 Electron 归档合同"
+  eval "$policy_exports"
+  ELECTRON_VERSION="$TAIJI_ELECTRON_VERSION"
+  ELECTRON_ARCHIVE_SHA256="$TAIJI_ELECTRON_ARCHIVE_SHA256"
+  printf '%s\n' "$POLICY_SHA256" | grep -Eq '^[0-9a-f]{64}$' || fail "canonical policy SHA256 格式非法"
+  printf '%s\n' "$ELECTRON_VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+    || fail "canonical policy Electron 版本格式非法"
+  printf '%s\n' "$ELECTRON_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || fail "canonical policy Electron 归档 SHA256 格式非法"
+  ok "采用源码包内 canonical policy：$POLICY_ID ($POLICY_SHA256)"
+}
+
+locate_verified_electron_archive() {
+  local candidate actual_sha expected_name matching=0
+  expected_name="electron-v${ELECTRON_VERSION}-linux-x64.zip"
+  ELECTRON_ARCHIVE=""
+  while IFS= read -r -d '' candidate; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "Electron 缓存归档不是实体普通文件：$candidate"
+    [ "$(stat -c '%h' "$candidate")" = 1 ] \
+      || fail "Electron 缓存归档不能是硬链接：$candidate"
+    [ "$(stat -c '%u' "$candidate")" = "$(id -u)" ] \
+      || fail "Electron 缓存归档不属于当前制包用户：$candidate"
+    actual_sha="$(sha256sum "$candidate" | awk '{print $1}')"
+    if [ "$actual_sha" = "$ELECTRON_ARCHIVE_SHA256" ]; then
+      matching=$((matching + 1))
+      if [ -z "$ELECTRON_ARCHIVE" ]; then
+        ELECTRON_ARCHIVE="$candidate"
+      fi
+    fi
+  done < <(find "$electron_config_cache" -type f -name "$expected_name" -print0)
+  [ "$matching" -gt 0 ] \
+    || fail "npm 安装后未找到 canonical policy 绑定的 Electron ${ELECTRON_VERSION} Linux x64 归档"
+  ok "Electron 下载归档 SHA256 已绑定：$ELECTRON_ARCHIVE_SHA256"
 }
 
 npm_ci_with_network_fallback() {
@@ -646,12 +1090,58 @@ npm_ci_with_network_fallback() {
   [ "$installed" = "1" ] || fail "npm ci 失败：已尝试多个 npm registry 和 Electron mirror；请检查制包机网络、DNS、代理，或设置 TAIJI_NPM_REGISTRIES / TAIJI_ELECTRON_MIRRORS"
 }
 
+npm_audit_fail_closed() {
+  local audit_registry audit_registry_host
+  audit_registry="${TAIJI_NPM_AUDIT_REGISTRY:-https://registry.npmjs.org}"
+  unset TAIJI_NPM_AUDIT_REGISTRY
+  audit_registry="${audit_registry%/}"
+  if ! audit_registry_host="$(python3 -c '
+import sys
+from urllib.parse import urlsplit
+
+raw = sys.stdin.read()
+if raw.endswith("\n"):
+    raw = raw[:-1]
+try:
+    parsed = urlsplit(raw)
+    port = parsed.port
+except ValueError:
+    raise SystemExit(1)
+
+if (
+    not raw.isascii()
+    or any(character.isspace() for character in raw)
+    or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw)
+    or parsed.scheme != "https"
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.query
+    or parsed.fragment
+):
+    raise SystemExit(1)
+
+host = parsed.hostname
+if ":" in host:
+    host = f"[{host}]"
+if port is not None:
+    host = f"{host}:{port}"
+print(host)
+ ' <<<"$audit_registry"
+)"; then
+    fail "TAIJI_NPM_AUDIT_REGISTRY 必须是单个 ASCII HTTPS URL，且不得包含凭据、空白、控制字符、查询参数或片段"
+  fi
+  info "使用 npm audit registry 主机：$audit_registry_host"
+  npm audit --omit=dev --audit-level=high --registry="$audit_registry" \
+    || fail "DOCX Engine 生产依赖包含 high/critical 漏洞或 npm audit 不可用，拒绝生成正式安装包"
+}
+
 run_setup_local() {
   local uv_lock_mode="$1" setup_log status
   setup_log="$LOG_DIR/setup-local-$(date +%Y%m%d_%H%M%S)_$$.log"
 
   set +e
-  TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
+  TAIJI_DEPENDENCY_PROFILE=production TAIJI_UV_LOCK_MODE="$uv_lock_mode" ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
   status="${PIPESTATUS[0]}"
   set -e
 
@@ -659,14 +1149,39 @@ run_setup_local() {
     if grep -qiE 'pyproject\.toml|Permission denied|os error 13' "$setup_log"; then
       fail "Python venv 生成失败：构建工作区源码权限不可读（pyproject.toml Permission denied）"
     fi
-    fail "Python venv 生成失败：setup-local.sh 返回 $status，详见 $setup_log"
+    fail "Python venv 生成失败：setup-local.sh 返回 ${status}，详见 ${setup_log}"
+  fi
+
+  case "$uv_lock_mode" in
+    strict)
+      PYTHON_DEPENDENCY_LOCK_STATUS="locked"
+      ;;
+    auto)
+      if grep -Fq "retrying without --locked" "$setup_log"; then
+        PYTHON_DEPENDENCY_LOCK_STATUS="fallback-unlocked"
+        warn "Python 依赖使用了 non-locked 后备解析；构建报告将保留该事实。"
+      else
+        PYTHON_DEPENDENCY_LOCK_STATUS="locked"
+      fi
+      ;;
+    unlocked)
+      PYTHON_DEPENDENCY_LOCK_STATUS="explicit-unlocked"
+      ;;
+  esac
+  if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
+    PYTHON_DEPENDENCY_LOCK_STATUS="refreshed-${PYTHON_DEPENDENCY_LOCK_STATUS}"
   fi
 }
 
 build_runtime_and_deb() {
-  local uv_lock_mode
-  export PATH="$NODE_ROOT/current/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
-  export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+  local uv_lock_mode source_commit
+  export PATH="$NODE_ROOT/current/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin:/usr/local/bin"
+  # Keep the packaging host's shell/profile from injecting a higher-priority
+  # Python package source into uv. UV_NO_CONFIG blocks config files, but these
+  # environment variables otherwise still override or augment UV_INDEX_URL.
+  unset UV_INDEX UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_NO_INDEX UV_INDEX_STRATEGY UV_CONFIG_FILE
+  export UV_NO_CONFIG=1
+  export UV_INDEX_URL="${TAIJI_UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   uv_lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"
 
   if [ "${TAIJI_ALLOW_UV_LOCK_REFRESH:-0}" = "1" ]; then
@@ -675,318 +1190,251 @@ build_runtime_and_deb() {
     uv lock
   fi
 
-  info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=$uv_lock_mode）"
+  info "生成 Linux Python venv（TAIJI_UV_LOCK_MODE=${uv_lock_mode}）"
   cd "$(source_lab_dir)"
   run_setup_local "$uv_lock_mode"
 
   info "获取 Linux Electron runtime"
   cd "$SRC_DIR/apps/taiji-desktop"
+  electron_config_cache="$BUILD_ROOT/electron-cache"
+  export electron_config_cache
+  install -d -m 0700 "$electron_config_cache"
   npm --version
   npm_ci_with_network_fallback --omit=dev
+  locate_verified_electron_archive
 
   info "准备 DOCX Engine V2 生产依赖并执行源码测试"
   cd "$(source_lab_dir)/sources/docx-engine-v2"
   npm_ci_with_network_fallback --omit=dev
-  npm audit --omit=dev --audit-level=high \
-    || fail "DOCX Engine 生产依赖包含 high/critical 漏洞或 npm audit 不可用，拒绝生成正式安装包"
+  npm_audit_fail_closed
   node scripts/materialize-portable-resvg-dependencies.js
   npm test
 
   info "构建 DEB 安装包"
   cd "$SRC_DIR"
+  source_commit="$(basename "$SRC_ARCHIVE" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
+  printf '%s\n' "$source_commit" | grep -Eq '^[0-9a-f]{40}$' \
+    || fail "无法从源码包名称解析发布 commit：$(basename "$SRC_ARCHIVE")"
   TAIJI_AGENT_VERSION="$VERSION" \
+  TAIJI_SOURCE_COMMIT="$source_commit" \
   TAIJI_PACKAGED_NODE_ROOT="$NODE_ROOT/current" \
+  TAIJI_ELECTRON_ARCHIVE="$ELECTRON_ARCHIVE" \
     ./packaging/linux/deb/build-deb.sh
 }
 
 collect_artifacts() {
-  info "收集安装包产物"
-  local src_pkg_dir deb checksum deb_name checksum_name deb_sha src_name src_sha
+  info "收集候选 DEB 与 build-deb manifest"
+  local src_pkg_dir deb manifest deb_name source_name source_sha deb_sha source_commit abi_sha icon_sha
   src_pkg_dir="$SRC_DIR/packages/麒麟操作系统安装包"
   deb="$src_pkg_dir/taiji-agent_${VERSION}_amd64.deb"
-  checksum="$deb.sha256"
-  [ -f "$deb" ] || fail "未找到 DEB：$deb"
-  [ -f "$checksum" ] || fail "未找到 DEB 校验文件：$checksum"
-
+  manifest="$src_pkg_dir/taiji-package-manifest.json"
+  [ -f "$deb" ] || fail "未找到候选 DEB：$deb"
+  [ -f "$deb.sha256" ] || fail "未找到候选 DEB SHA256 sidecar：$deb.sha256"
+  [ -f "$manifest" ] || fail "未找到 build-deb manifest：$manifest"
   rm -f "$OUTPUT_DIR"/taiji-agent_*_amd64.deb "$OUTPUT_DIR"/taiji-agent_*_amd64.deb.sha256 "$BUILD_MARKER" "$MANIFEST_FILE" "$BUILD_REPORT"
   cp -f "$deb" "$OUTPUT_DIR/"
+  cp -f "$manifest" "$MANIFEST_FILE"
   deb_name="taiji-agent_${VERSION}_amd64.deb"
-  checksum_name="$deb_name.sha256"
   deb_sha="$(sha256sum "$OUTPUT_DIR/$deb_name" | awk '{print $1}')"
-  printf '%s  %s\n' "$deb_sha" "$deb_name" > "$OUTPUT_DIR/$checksum_name"
-  (cd "$OUTPUT_DIR" && sha256sum -c "$checksum_name")
-  src_name="$(basename "$SRC_ARCHIVE")"
-  src_sha="$(cd "$SCRIPT_DIR" && sha256sum "$src_name" | awk '{print $1}')"
+  printf '%s  %s\n' "$deb_sha" "$deb_name" > "$OUTPUT_DIR/$deb_name.sha256"
+  (cd "$OUTPUT_DIR" && sha256sum -c "$deb_name.sha256")
+  source_name="$(basename "$SRC_ARCHIVE")"
+  source_sha="$(cd "$SCRIPT_DIR" && sha256sum "$source_name" | awk '{print $1}')"
+  source_commit="$(printf '%s\n' "$source_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
+  abi_sha="$(python3 - "$MANIFEST_FILE" "$deb_name" "$deb_sha" "$source_commit" "$POLICY_ID" "$POLICY_SHA256" "$POLICY_MAINTAINER" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = {
+    "schema": "taiji-package-manifest/v3",
+    "deb_basename": sys.argv[2],
+    "deb_sha256": sys.argv[3],
+    "source_commit": sys.argv[4],
+    "compatibility_policy_id": sys.argv[5],
+    "compatibility_policy_sha256": sys.argv[6],
+    "maintainer": sys.argv[7],
+}
+for key, value in expected.items():
+    if manifest.get(key) != value:
+        raise SystemExit("manifest binding mismatch: " + key)
+abi = manifest.get("elf_abi_audit_sha256")
+if not isinstance(abi, str) or not re.fullmatch(r"[0-9a-f]{64}", abi):
+    raise SystemExit("manifest elf_abi_audit_sha256 is invalid")
+print(abi)
+PY
+  )"
+  ELF_ABI_AUDIT_SHA256="$abi_sha"
+  icon_sha="$(python3 - "$MANIFEST_FILE" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = manifest.get("icon_set_sha256")
+if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+    raise SystemExit("manifest icon_set_sha256 is invalid")
+print(value)
+PY
+)"
+  ICON_SET_SHA256="$icon_sha"
   {
     printf 'version=%s\n' "$VERSION"
-    printf 'source_archive=%s\n' "$src_name"
-    printf 'source_sha256=%s\n' "$src_sha"
+    printf 'source_archive=%s\n' "$source_name"
+    printf 'source_sha256=%s\n' "$source_sha"
+    printf 'source_commit=%s\n' "$source_commit"
     printf 'deb=%s\n' "$deb_name"
     printf 'deb_sha256=%s\n' "$deb_sha"
-    printf 'checksum=%s\n' "$checksum_name"
-    printf 'built_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'checksum=%s\n' "$deb_name.sha256"
+    printf 'built_at_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'manifest=%s\n' "$(basename "$MANIFEST_FILE")"
+    printf 'compatibility_policy_id=%s\n' "$POLICY_ID"
+    printf 'compatibility_policy_sha256=%s\n' "$POLICY_SHA256"
+    printf 'elf_abi_audit_sha256=%s\n' "$ELF_ABI_AUDIT_SHA256"
+    printf 'icon_set_sha256=%s\n' "$ICON_SET_SHA256"
+    printf 'maintainer=%s\n' "$POLICY_MAINTAINER"
   } > "$BUILD_MARKER"
-  ok "安装包已生成：$OUTPUT_DIR/$deb_name"
+  CANDIDATE_DEB_FIXED=1
+  ok "候选 DEB、manifest 和 canonical policy/ABI 摘要已绑定"
 }
 
-normalize_dependency_names() {
-  tr ',' '\n' \
-    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]*\([^)]*\)//g; s/[[:space:]]*\[[^]]*\]//g; s/[[:space:]]*<[^>]*>//g; s/[[:space:]]*\|.*$//; s/:[A-Za-z0-9][A-Za-z0-9-]*$//' \
-    | awk '/^[A-Za-z0-9][A-Za-z0-9.+-]*$/ { print }' \
-    | sort -u
-}
-
-package_names_from_depends() {
-  {
-    dpkg-deb -f "$1" Depends
-    dpkg-deb -f "$1" Pre-Depends
-  } 2>/dev/null \
-    | normalize_dependency_names
-}
-
-download_resolved_runtime_dependencies() {
-  local deb="$1" offline_repo="$2" resolver_status="$3" current_user
-  current_user="$(id -un)"
-  mkdir -p "$offline_repo/partial" || fail "无法创建离线依赖下载缓存"
-  : > "$resolver_status" || fail "无法创建空白 apt 安装状态：$resolver_status"
-  [ ! -s "$resolver_status" ] || fail "apt 安装状态必须为空：$resolver_status"
-
-  apt-get -y --download-only --no-install-recommends --no-remove \
-    -o Debug::NoLocking=1 \
-    -o "APT::Sandbox::User=$current_user" \
-    -o "Dir::State::status=$resolver_status" \
-    -o "Dir::Cache::archives=$offline_repo" \
-    install "$deb" \
-    || fail "apt 无法为干净目标系统解析并下载完整运行依赖"
-  rm -rf -- "$offline_repo/partial" || fail "无法清理离线依赖下载缓存"
-}
-
-write_runtime_dependency_inventory() {
-  local offline_repo="$1" main_deb_name="$2" output_file="$3" package_deb package_name
-  : > "$output_file" || fail "无法创建运行依赖清单：$output_file"
-  while IFS= read -r -d '' package_deb; do
-    [ "$(basename "$package_deb")" != "$main_deb_name" ] || continue
-    package_name="$(dpkg-deb -f "$package_deb" Package 2>/dev/null)" \
-      || fail "无法读取离线依赖包名：$package_deb"
-    printf '%s\n' "$package_name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.+-]*$' \
-      || fail "离线依赖包含非法包名：$package_name"
-    printf '%s\n' "$package_name" >> "$output_file"
-  done < <(find "$offline_repo" -maxdepth 1 -type f -name '*.deb' -print0)
-  sort -u -o "$output_file" "$output_file"
-}
-
-validate_runtime_dependency_closure() {
-  local direct_dependencies_file="$1" recursive_dependencies_file="$2" pkg
-  [ -s "$direct_dependencies_file" ] \
-    || fail "主安装包未解析出直接运行依赖，拒绝生成伪离线仓库"
-  [ -s "$recursive_dependencies_file" ] \
-    || fail "递归运行依赖为空，拒绝生成伪离线仓库"
-
-  while IFS= read -r pkg; do
-    [ -n "$pkg" ] || continue
-    grep -Fqx -- "$pkg" "$recursive_dependencies_file" \
-      || fail "递归运行依赖缺少直接依赖：$pkg"
-  done < "$direct_dependencies_file"
-}
-
-build_offline_dependency_repo() {
-  info "生成完全离线 apt 依赖仓库"
-  local deb deb_name packages_sha packages_gz_sha direct_dependencies_file resolver_status
-  deb="$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
-  direct_dependencies_file="$BUILD_ROOT/direct-runtime-dependencies.txt"
-  resolver_status="$BUILD_ROOT/offline-apt-empty-status"
-  [ -f "$deb" ] || fail "未找到待打包 DEB：$deb"
-  rm -rf "$OFFLINE_REPO"
-  mkdir -p "$OFFLINE_REPO"
-  cp -f "$deb" "$OFFLINE_REPO/"
-  package_names_from_depends "$deb" > "$direct_dependencies_file" \
-    || fail "无法解析主安装包的直接运行依赖"
-  deb_name="$(basename "$deb")"
-  download_resolved_runtime_dependencies "$deb" "$OFFLINE_REPO" "$resolver_status"
-  write_runtime_dependency_inventory "$OFFLINE_REPO" "$deb_name" "$OFFLINE_REPO/runtime-dependencies.txt"
-  validate_runtime_dependency_closure "$direct_dependencies_file" "$OFFLINE_REPO/runtime-dependencies.txt"
-
-  (cd "$OFFLINE_REPO" && dpkg-scanpackages . /dev/null > Packages)
-  (cd "$OFFLINE_REPO" && gzip -9c Packages > Packages.gz)
-  (cd "$OFFLINE_REPO" && sha256sum ./*.deb Packages Packages.gz runtime-dependencies.txt > SHA256SUMS.txt)
-  packages_sha="$(sha256sum "$OFFLINE_REPO/Packages" | awk '{print $1}')"
-  packages_gz_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
-  ok "离线依赖仓库已生成：$OFFLINE_REPO/Packages.gz"
-  ok "主安装包已纳入离线仓库：$deb_name"
-  ok "Packages SHA256：$packages_sha"
-  ok "Packages.gz SHA256：$packages_gz_sha"
+require_candidate_deb_fixed() {
+  [ "$CANDIDATE_DEB_FIXED" = 1 ] || fail "候选 DEB 尚未固定，禁止进入发布后处理阶段"
 }
 
 build_glibc() {
   getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version 2>/dev/null | head -1 || printf 'unknown\n'
 }
 
-cleanup_release_manifest_payload() {
-  local root="$1"
-  case "$root" in
-    /tmp/taiji-release-manifest.*) ;;
-    *) fail "拒绝清理非专用 manifest 临时目录：$root" ;;
-  esac
-  if [ -e "$root" ] || [ -L "$root" ]; then
-    [ -d "$root" ] && [ ! -L "$root" ] || fail "manifest 临时路径不是实体目录：$root"
-    find "$root" -type d -exec chmod u+w {} + \
-      || fail "无法恢复 manifest 临时目录的 owner 写权限：$root"
-    rm -rf -- "$root" || fail "无法清理 manifest 临时目录：$root"
-  fi
-  [ ! -e "$root" ] && [ ! -L "$root" ] || fail "manifest 临时目录清理后仍存在：$root"
-}
-
-json_escape() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
-  printf '%s' "$value"
-}
-
-json_string() {
-  printf '"%s"' "$(json_escape "$1")"
-}
-
-write_release_manifest() {
-  info "生成发布 manifest"
-  local src_name deb_name checksum_name source_sha deb_sha packages_sha packages_gz_sha build_os build_glibc build_arch dpkg_arch source_commit
-  local payload_root electron_executable_sha desktop_entry_sha
-  src_name="$(basename "$SRC_ARCHIVE")"
-  deb_name="taiji-agent_${VERSION}_amd64.deb"
-  checksum_name="$deb_name.sha256"
-  source_sha="$(cd "$SCRIPT_DIR" && sha256sum "$src_name" | awk '{print $1}')"
-  deb_sha="$(sha256sum "$OUTPUT_DIR/$deb_name" | awk '{print $1}')"
-  packages_sha="$(sha256sum "$OFFLINE_REPO/Packages" | awk '{print $1}')"
-  packages_gz_sha="$(sha256sum "$OFFLINE_REPO/Packages.gz" | awk '{print $1}')"
-  build_os="$(. /etc/os-release 2>/dev/null && printf '%s %s' "${PRETTY_NAME:-Linux}" "${VERSION_ID:-}" || uname -a)"
-  build_glibc="$(build_glibc)"
-  build_arch="$(uname -m)"
-  dpkg_arch="$(dpkg --print-architecture 2>/dev/null || true)"
-  source_commit="$(printf '%s\n' "$src_name" | sed -E 's/^taiji-agentv1\.0-kylin-build-src-([^.]+)\.tar\.gz$/\1/')"
-  payload_root="$(mktemp -d /tmp/taiji-release-manifest.XXXXXX)"
-  if ! dpkg-deb -x "$OUTPUT_DIR/$deb_name" "$payload_root"; then
-    cleanup_release_manifest_payload "$payload_root"
-    fail "无法解包当前 DEB 以绑定 Electron/desktop entry 摘要"
-  fi
-  if [ ! -f "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" ] \
-    || [ -L "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" ] \
-    || [ ! -f "$payload_root/usr/share/applications/taiji-agent.desktop" ] \
-    || [ -L "$payload_root/usr/share/applications/taiji-agent.desktop" ]; then
-    cleanup_release_manifest_payload "$payload_root"
-    fail "当前 DEB 缺少可绑定的安装态 Electron 或 desktop entry"
-  fi
-  electron_executable_sha="$(sha256sum "$payload_root/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron" | awk '{print $1}')"
-  desktop_entry_sha="$(sha256sum "$payload_root/usr/share/applications/taiji-agent.desktop" | awk '{print $1}')"
-  cleanup_release_manifest_payload "$payload_root"
-
-  {
-    printf '{\n'
-    printf '  "build_arch": %s,\n' "$(json_string "$build_arch")"
-    printf '  "build_glibc": %s,\n' "$(json_string "$build_glibc")"
-    printf '  "build_os": %s,\n' "$(json_string "$build_os")"
-    printf '  "built_at": %s,\n' "$(json_string "$(date -u '+%Y-%m-%dT%H:%M:%S%z')")"
-    printf '  "checksum": %s,\n' "$(json_string "$checksum_name")"
-    printf '  "deb": %s,\n' "$(json_string "$deb_name")"
-    printf '  "deb_sha256": %s,\n' "$(json_string "$deb_sha")"
-    printf '  "desktop_entry_sha256": %s,\n' "$(json_string "$desktop_entry_sha")"
-    printf '  "dpkg_arch": %s,\n' "$(json_string "$dpkg_arch")"
-    printf '  "electron_executable_sha256": %s,\n' "$(json_string "$electron_executable_sha")"
-    printf '  "package": "taiji-agent",\n'
-    printf '  "packages_sha256": %s,\n' "$(json_string "$packages_sha")"
-    printf '  "packages_gz_sha256": %s,\n' "$(json_string "$packages_gz_sha")"
-    printf '  "schema_version": 1,\n'
-    printf '  "source_archive": %s,\n' "$(json_string "$src_name")"
-    printf '  "source_commit": %s,\n' "$(json_string "$source_commit")"
-    printf '  "source_sha256": %s,\n' "$(json_string "$source_sha")"
-    printf '  "support_boundary": {\n'
-    printf '    "supported": [\n'
-    printf '      "x86_64/amd64",\n'
-    printf '      "Debian-like package manager with apt-get and dpkg",\n'
-    printf '      "Graphical desktop session for Electron startup",\n'
-    printf '      "Complete delivery directory with generated DEB and local offline apt repository"\n'
-    printf '    ],\n'
-    printf '    "unsupported": [\n'
-    printf '      "RPM-only terminals without dpkg/apt",\n'
-    printf '      "ARM/aarch64 terminals",\n'
-    printf '      "Headless or strongly sandboxed terminals without desktop session",\n'
-    printf '      "Offline installations missing 离线依赖/Packages or Packages.gz"\n'
-    printf '    ]\n'
-    printf '  },\n'
-    printf '  "target_matrix": [\n'
-    printf '    "Debian-like x86_64/amd64 desktop Linux",\n'
-    printf '    "Kylin V10 SP1 x86_64 desktop baseline",\n'
-    printf '    "UOS/openKylin x86_64 desktop, apt/dpkg variant"\n'
-    printf '  ],\n'
-    printf '  "version": %s\n' "$(json_string "$VERSION")"
-    printf '}\n'
-  } > "$MANIFEST_FILE"
-
-  {
-    printf 'manifest=%s\n' "$(basename "$MANIFEST_FILE")"
-    printf 'packages_sha256=%s\n' "$packages_sha"
-    printf 'packages_gz_sha256=%s\n' "$packages_gz_sha"
-  } >> "$BUILD_MARKER"
-  ok "发布 manifest 已生成：$MANIFEST_FILE"
-}
-
 write_build_report() {
-  local commit system_info source_line deb_line packages_line packages_gz_line
-  commit="$(tar -tzf "$SRC_ARCHIVE" 2>/dev/null | head -1 | sed 's#/.*##' || true)"
-  system_info="$(. /etc/os-release 2>/dev/null && printf '%s %s' "${PRETTY_NAME:-Linux}" "${VERSION_ID:-}" || uname -a)"
-  source_line="$(cd "$SCRIPT_DIR" && sha256sum "$(basename "$SRC_ARCHIVE")")"
-  deb_line="$(cd "$OUTPUT_DIR" && sha256sum "taiji-agent_${VERSION}_amd64.deb")"
-  packages_line="$(cd "$OFFLINE_REPO" && sha256sum Packages)"
-  packages_gz_line="$(cd "$OFFLINE_REPO" && sha256sum Packages.gz)"
+  local source_name deb_name source_line deb_line
+  require_candidate_deb_fixed
+  source_name="$(basename "$SRC_ARCHIVE")"
+  deb_name="taiji-agent_$VERSION"_amd64.deb
+  source_line="$(cd "$SCRIPT_DIR" && sha256sum "$source_name")"
+  deb_line="$(cd "$OUTPUT_DIR" && sha256sum "$deb_name")"
   {
-    printf '太极 Agent 离线交付构建报告\n'
+    printf '太极 Agent 单一 DEB 构建报告\n'
     printf '生成时间：%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
-    printf '源码包前缀：%s\n' "${commit:-unknown}"
-    printf '制包机系统：%s\n' "$system_info"
-    printf '制包机架构：%s / %s\n' "$(uname -m)" "$(dpkg --print-architecture 2>/dev/null || true)"
-    printf 'glibc：%s\n' "$(build_glibc)"
-    printf 'sudo：%s\n' "$(safe_cmd_path sudo)"
-    printf 'apt-get：%s\n' "$(safe_cmd_path apt-get)"
-    printf 'dpkg-deb：%s\n' "$(safe_cmd_path dpkg-deb)"
-    printf 'python3：%s\n' "$(python3 --version 2>/dev/null || true)"
-    printf 'uv：%s\n' "$(uv --version 2>/dev/null || true)"
-    printf 'uv lock 模式：%s\n' "${TAIJI_UV_LOCK_MODE:-auto}"
-    printf 'node：%s\n' "$(node --version 2>/dev/null || true)"
-    printf 'npm：%s\n' "$(npm -v 2>/dev/null || true)"
-    printf 'Node 镜像覆盖：%s\n' "${TAIJI_NODE_MIRRORS:+已设置}"
-    printf 'npm 镜像覆盖：%s\n' "${TAIJI_NPM_REGISTRIES:+已设置}"
-    printf 'Electron 镜像覆盖：%s\n' "${TAIJI_ELECTRON_MIRRORS:+已设置}"
-    printf '依赖源：%s\n' "$(apt_source_summary)"
+    printf '源码包：%s\n' "$source_name"
     printf '源码包 SHA256：%s\n' "$source_line"
+    printf '候选 DEB：%s\n' "$deb_name"
     printf 'DEB SHA256：%s\n' "$deb_line"
-    printf 'Packages SHA256：%s\n' "$packages_line"
-    printf 'Packages.gz SHA256：%s\n' "$packages_gz_line"
-    printf '发布 manifest：%s\n' "$(basename "$MANIFEST_FILE")"
-    printf '支持边界：Debian-like x86_64/amd64 图形桌面，必须同时包含离线依赖/Packages 与 Packages.gz；RPM/.run 另行制包。\n'
-    printf '目标机安装脚本：02_目标终端_安装并验证.sh\n'
-    printf '目标机离线仓库：离线依赖/Packages 与 Packages.gz\n'
+    printf 'compatibility policy id：%s\n' "$POLICY_ID"
+    printf 'compatibility policy SHA256：%s\n' "$POLICY_SHA256"
+    printf 'ELF ABI audit SHA256：%s\n' "$ELF_ABI_AUDIT_SHA256"
+    printf '图标集合 SHA256：%s\n' "$ICON_SET_SHA256"
+    printf 'Python 依赖锁状态：%s\n' "$PYTHON_DEPENDENCY_LOCK_STATUS"
+    printf 'Maintainer（源码 policy 固定）：%s\n' "$POLICY_MAINTAINER"
+    printf '客户交付边界：发布预检通过后只交付一个逐字节固定的 amd64 DEB，不附带第二个安装包或 apt 仓库。\n'
+    printf '候选 DEB 固定后不再下载运行时依赖。\n'
   } > "$BUILD_REPORT"
   ok "构建报告已生成：$BUILD_REPORT"
 }
 
+
+archive_stale_acceptance_staging() {
+  local current_uid path archive_root archive_dir index=0
+  local -a stale_paths=()
+  current_uid="$(id -u)"
+  while IFS= read -r -d '' path; do
+    [ -d "$path" ] && [ ! -L "$path" ] \
+      || fail "验收工具临时残留不是可安全归档的实体目录：$path"
+    python3 - "$path" "$current_uid" <<'PY' \
+      || fail "验收工具临时残留含不安全节点，拒绝自动归档：$path"
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+expected_uid = int(sys.argv[2])
+for current, directories, filenames in os.walk(root, topdown=True, followlinks=False):
+    current_path = Path(current)
+    current_stat = current_path.lstat()
+    if not stat.S_ISDIR(current_stat.st_mode) or current_path.is_symlink() or current_stat.st_uid != expected_uid:
+        raise SystemExit("unsafe staging directory")
+    for name in directories + filenames:
+        candidate = current_path / name
+        metadata = candidate.lstat()
+        if candidate.is_symlink() or metadata.st_uid != expected_uid:
+            raise SystemExit("unsafe staging node")
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise SystemExit("unsafe staging file")
+PY
+    stale_paths+=("$path")
+  done < <(find "$SCRIPT_DIR" -mindepth 1 -maxdepth 1 -name '.验收工具.tmp-*' -print0)
+
+  [ "${#stale_paths[@]}" -gt 0 ] || return 0
+  archive_root="$SCRIPT_DIR/旧版备份"
+  [ ! -L "$archive_root" ] || fail "旧版备份目录不能是符号链接：$archive_root"
+  install -d -m 0755 "$archive_root"
+  for path in "${stale_paths[@]}"; do
+    index=$((index + 1))
+    archive_dir="$archive_root/验收工具临时残留-$(date -u '+%Y%m%dT%H%M%SZ')-$$-$index"
+    mkdir -m 0700 -- "$archive_dir" \
+      || fail "无法创建验收工具临时残留归档：$archive_dir"
+    mv -- "$path" "$archive_dir/${path##*/}" \
+      || fail "无法归档验收工具临时残留：$path"
+    ok "已自动归档上次中断的验收工具临时目录：$archive_dir"
+  done
+}
+
+publish_target_acceptance_tools() {
+  local target="$1" target_staging="$2"
+  local archive_root archive_dir
+  ACCEPTANCE_TARGET="$target"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    archive_root="$SCRIPT_DIR/旧版备份"
+    [ ! -L "$archive_root" ] || fail "旧版备份目录不能是符号链接：$archive_root"
+    install -d -m 0755 "$archive_root"
+    archive_dir="$archive_root/验收工具重试-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+    mkdir -m 0700 -- "$archive_dir" \
+      || fail "无法创建验收工具重试备份：$archive_dir"
+    ACCEPTANCE_ARCHIVE_DIR="$archive_dir"
+    ACCEPTANCE_BACKUP="$archive_dir/验收工具"
+    mv -- "$target" "$ACCEPTANCE_BACKUP"
+  fi
+  mv -- "$target_staging" "$target"
+  ACCEPTANCE_STAGING=""
+  ACCEPTANCE_BACKUP=""
+  ACCEPTANCE_ARCHIVE_DIR=""
+  ACCEPTANCE_TARGET=""
+}
+
 stage_target_acceptance_tools() {
+  require_candidate_deb_fixed
   local target="$SCRIPT_DIR/验收工具"
+  local target_staging="$SCRIPT_DIR/.验收工具.tmp-$$"
+  local management="$target_staging/management"
   local driver="$SRC_DIR/tools/taiji-desktop-acceptance/run-installed-electron-acceptance.js"
   local assembler="$SRC_DIR/tools/taiji-desktop-acceptance/assemble-target-evidence.py"
+  local install_observer="$SRC_DIR/tools/taiji-desktop-acceptance/observe-single-deb-install.py"
+  local certification_matrix="$SRC_DIR/packaging/linux/certification-matrix.json"
+  local certification_set_assembler="$SRC_DIR/scripts/assemble-taiji-certification-set.py"
   local validator="$SRC_DIR/scripts/validate-taiji-release-evidence.py"
   local public_key="$SRC_DIR/tools/taiji-release-evidence/signing-public.pem"
   local public_fingerprint expected_fingerprint
   expected_fingerprint="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+  archive_stale_acceptance_staging
+  ACCEPTANCE_STAGING="$target_staging"
+  [ ! -e "$target_staging" ] && [ ! -L "$target_staging" ] \
+    || fail "验收工具临时目录已存在：$target_staging"
 
   info "收集目标终端真实 Electron 桌面 App 验收工具"
   [ -f "$driver" ] && [ ! -L "$driver" ] || fail "源码缺少桌面 App 验收驱动：$driver"
   [ -f "$assembler" ] && [ ! -L "$assembler" ] || fail "源码缺少目标证据组装器：$assembler"
+  [ -f "$install_observer" ] && [ ! -L "$install_observer" ] || fail "源码缺少单 DEB 安装前观察器：$install_observer"
+  [ -f "$certification_matrix" ] && [ ! -L "$certification_matrix" ] || fail "源码缺少认证类别矩阵：$certification_matrix"
+  [ -f "$certification_set_assembler" ] && [ ! -L "$certification_set_assembler" ] || fail "源码缺少认证集组装器：$certification_set_assembler"
   [ -f "$validator" ] && [ ! -L "$validator" ] || fail "源码缺少发布证据校验器：$validator"
   [ -f "$public_key" ] && [ ! -L "$public_key" ] || fail "源码缺少发布证据验签公钥：$public_key"
   node --check "$driver" >/dev/null || fail "桌面 App 验收驱动 JavaScript 语法检查失败"
-  python3 - "$assembler" "$validator" <<'PY' || fail "目标证据 Python 工具语法检查失败"
+  python3 - "$assembler" "$install_observer" "$validator" "$certification_set_assembler" <<'PY' || fail "目标证据 Python 工具语法检查失败"
 import sys
 from pathlib import Path
 
@@ -997,24 +1445,102 @@ PY
   public_fingerprint="$(openssl pkey -pubin -in "$public_key" -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"
   [ "$public_fingerprint" = "$expected_fingerprint" ] || fail "目标验收验签公钥 fingerprint 不匹配"
 
-  rm -rf -- "$target"
-  install -d -m 0755 "$target"
-  install -m 0644 "$driver" "$target/run-installed-electron-acceptance.js"
-  install -m 0644 "$assembler" "$target/assemble-target-evidence.py"
-  install -m 0644 "$validator" "$target/validate-taiji-release-evidence.py"
-  install -m 0644 "$public_key" "$target/signing-public.pem"
+  install -d -m 0755 "$target_staging"
+  install -m 0644 "$driver" "$target_staging/run-installed-electron-acceptance.js"
+  install -m 0644 "$assembler" "$target_staging/assemble-target-evidence.py"
+  install -m 0644 "$install_observer" "$target_staging/observe-single-deb-install.py"
+  install -m 0644 "$certification_matrix" "$target_staging/certification-matrix.json"
+  install -m 0755 "$certification_set_assembler" "$target_staging/assemble-taiji-certification-set.py"
+  install -m 0644 "$validator" "$target_staging/validate-taiji-release-evidence.py"
+  install -m 0644 "$public_key" "$target_staging/signing-public.pem"
+  # These are management-plane helpers for the copied 02 wrapper.  They are
+  # deliberately outside the customer DEB and are never staged into
+  # 生成的安装包/; a delivery directory can therefore run 02 without a
+  # source checkout while keeping the customer payload a single DEB.
+  install -d -m 0755 "$management"
+  install -m 0755 "$SRC_DIR/packaging/linux/deb/taiji-silent-deploy.sh" "$management/taiji-silent-deploy.sh"
+  install -m 0644 "$SRC_DIR/packaging/linux/deployment_receipt.py" "$management/deployment_receipt.py"
+  install -m 0644 "$SRC_DIR/packaging/linux/upgrade_transaction.py" "$management/upgrade_transaction.py"
+  install -m 0644 "$SRC_DIR/packaging/linux/upgrade-data-contract.json" "$management/upgrade-data-contract.json"
+  install -m 0644 "$SRC_DIR/packaging/linux/compatibility_policy.py" "$management/compatibility_policy.py"
+  install -m 0644 "$SRC_DIR/packaging/linux/compatibility-policy.json" "$management/compatibility-policy.json"
+  install -m 0644 "$SRC_DIR/scripts/validate-taiji-release-evidence.py" "$management/validate-taiji-release-evidence.py"
+
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    [ -d "$target" ] && [ ! -L "$target" ] \
+      || fail "验收工具目录不是可信实体目录，未覆盖：$target"
+    python3 - "$target" "$(id -u)" <<'PY' \
+      || fail "验收工具目录含未知或不安全内容，未覆盖：$target"
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+expected_uid = int(sys.argv[2])
+expected_files = {
+    "run-installed-electron-acceptance.js",
+    "assemble-target-evidence.py",
+    "observe-single-deb-install.py",
+    "certification-matrix.json",
+    "assemble-taiji-certification-set.py",
+    "validate-taiji-release-evidence.py",
+    "signing-public.pem",
+    "management/taiji-silent-deploy.sh",
+    "management/deployment_receipt.py",
+    "management/upgrade_transaction.py",
+    "management/upgrade-data-contract.json",
+    "management/compatibility_policy.py",
+    "management/compatibility-policy.json",
+    "management/validate-taiji-release-evidence.py",
+}
+expected_dirs = {"management"}
+actual_files = set()
+actual_dirs = set()
+for current, directories, filenames in os.walk(root, topdown=True, followlinks=False):
+    current_path = Path(current)
+    for name in directories:
+        path = current_path / name
+        relative = path.relative_to(root).as_posix()
+        metadata = path.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or path.is_symlink() or metadata.st_uid != expected_uid:
+            raise SystemExit("unsafe directory: " + relative)
+        actual_dirs.add(relative)
+    for name in filenames:
+        path = current_path / name
+        relative = path.relative_to(root).as_posix()
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or path.is_symlink()
+            or metadata.st_nlink != 1
+            or metadata.st_uid != expected_uid
+        ):
+            raise SystemExit("unsafe file: " + relative)
+        actual_files.add(relative)
+if actual_dirs != expected_dirs or actual_files != expected_files:
+    raise SystemExit("验收工具目录含未知或缺失条目")
+PY
+  fi
+  publish_target_acceptance_tools "$target" "$target_staging"
   ok "目标终端桌面 App 验收工具已收集：$target"
 }
 
 cleanup_delivery_build_cache() {
-  info "清理交付目录中的制包缓存"
-  rm -rf "$TOOL_ROOT" || fail "无法清理制包缓存：$TOOL_ROOT"
+  require_candidate_deb_fixed
+  info "清理构建根中的制包工具缓存"
+  [ -n "$BUILD_ROOT" ] && [ "$TOOL_ROOT" = "$BUILD_ROOT/.build-tools" ] \
+    || fail "制包工具根未绑定到受控构建根：$TOOL_ROOT"
+  require_owned_build_root
+  restore_owned_build_root_directory_writes
+  rm -rf -- "$TOOL_ROOT" || fail "无法清理制包工具缓存：$TOOL_ROOT"
   [ ! -e "$TOOL_ROOT" ] || fail "制包缓存仍然存在：$TOOL_ROOT"
-  ok "交付目录制包缓存已清理"
+  ok "构建根制包工具缓存已清理"
 }
 
 normalize_delivery_permissions() {
   local unsafe_node
+  require_candidate_deb_fixed
   info "归一化交付目录权限"
   unsafe_node="$(find "$SCRIPT_DIR" -xdev -mindepth 1 \( -type l -o \( -type f -links +1 \) \) -print -quit)"
   [ -z "$unsafe_node" ] || fail "交付目录含符号链接或硬链接，拒绝修改其权限：$unsafe_node"
@@ -1067,23 +1593,30 @@ main() {
   initialize_build_logging
   set_stage "制包机预检"
   preflight
+  set_stage "归档上次中断产物"
+  archive_previous_build_outputs
   set_stage "安装制包依赖"
   install_build_dependencies
+  set_stage "校验制包命令依赖闭包"
+  verify_build_command_contract
+  set_stage "选择安全构建根并配置临时目录"
+  select_build_root
   set_stage "源码包发布预检"
   prepare_source_release
-  set_stage "准备 Python/Node/Electron 构建工具"
-  ensure_uv
-  ensure_node
-  set_stage "解压源码"
+  set_stage "解压源码并加载 canonical policy"
   unpack_source
+  load_source_controlled_policy
+  set_stage "校验可信系统构建工具"
+  verify_trusted_system_tools
+  set_stage "准备 Python 构建工具"
+  ensure_uv
+  set_stage "准备 Node/Electron 构建工具"
+  ensure_node
   set_stage "构建运行时和 DEB"
   build_runtime_and_deb
-  set_stage "收集安装包产物"
+  set_stage "收集并绑定候选产物"
   collect_artifacts
-  set_stage "生成离线依赖仓库"
-  build_offline_dependency_repo
   set_stage "生成 manifest 和报告"
-  write_release_manifest
   write_build_report
   set_stage "收集目标终端桌面 App 验收工具"
   stage_target_acceptance_tools
@@ -1092,11 +1625,13 @@ main() {
   set_stage "归一化交付权限"
   normalize_delivery_permissions
   set_stage "最终发布预检"
+  require_candidate_deb_fixed
   TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 TAIJI_RELEASE_SKIP_GIT_CHECK=1 run_release_preflight "$SRC_DIR"
   set_stage "清理临时构建工作区"
   cleanup_temporary_build_root
-  printf '\n[OK] 离线交付包生成完成。目标机断网后执行：\n'
-  printf 'bash ./02_目标终端_安装并验证.sh\n'
+  printf '\n[OK] 单一 DEB 制包候选生成完成：\n'
+  printf '%s\n' "$OUTPUT_DIR/taiji-agent_${VERSION}_amd64.deb"
+  printf '请将该 DEB 和当前验收工具用于干净目标机验收；此状态尚不代表真实麒麟/统信目标机已验收。\n'
   printf '\n日志：%s\n' "$LOG_FILE"
 }
 

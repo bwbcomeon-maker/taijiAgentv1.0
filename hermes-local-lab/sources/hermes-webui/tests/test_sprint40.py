@@ -5,7 +5,7 @@ Covers:
 - _build_setup_catalog sets current_is_oauth=True for OAuth providers
 - _build_setup_catalog sets current_is_oauth=False for API-key providers
 - _build_setup_catalog sets current_is_oauth=False when no provider configured
-- apply_onboarding_setup with unsupported provider marks onboarding complete directly
+- apply_onboarding_setup with unsupported provider returns without bypassing preflight
 - i18n.js contains all required OAuth onboarding keys in both English and Spanish
 """
 import pathlib
@@ -70,25 +70,26 @@ class TestBuildSetupCatalog(unittest.TestCase):
 
 class TestApplyOnboardingOAuthPath(unittest.TestCase):
 
-    def test_unsupported_provider_skips_to_complete(self):
-        """apply_onboarding_setup with an OAuth provider just marks onboarding done."""
+    def test_unsupported_provider_returns_without_completing(self):
+        """OAuth setup cannot persist completion before readiness preflight."""
         saved = {}
 
         def _save(d):
             saved.update(d)
 
-        mock_status = {"completed": True, "system": {"chat_ready": True}}
+        mock_status = {"completed": False, "system": {"chat_ready": True}}
+        status = unittest.mock.Mock(return_value=mock_status)
 
         with patch.object(mod, "save_settings", side_effect=_save), \
-             patch.object(mod, "get_onboarding_status", return_value=mock_status):
+             patch.object(mod, "get_onboarding_status", status):
             result = mod.apply_onboarding_setup({"provider": "openai-codex", "model": "gpt-5.4"})
 
-        self.assertTrue(saved.get("onboarding_completed"),
-                        "save_settings must set onboarding_completed=True for OAuth provider")
+        self.assertEqual(saved, {})
+        status.assert_called_once_with(allow_config_auto_complete=False)
         self.assertEqual(result, mock_status)
 
     def test_unsupported_provider_does_not_write_config_yaml(self):
-        """OAuth path marks completion without entering the credential transaction."""
+        """OAuth path returns without entering the credential transaction."""
         with tempfile.TemporaryDirectory() as tmp:
             config_path = pathlib.Path(tmp) / "config.yaml"
             with patch.object(mod, "save_settings"), \

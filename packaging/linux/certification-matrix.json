@@ -1,0 +1,162 @@
+{
+  "architecture": "amd64",
+  "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+  "coverage_rules": {
+    "application_only_change": "three-family-core-path",
+    "runtime_policy_or_lifecycle_change": "all-positive-and-negative"
+  },
+  "minimum_application_only_categories": [
+    "kylin-current-standard",
+    "uos-current-or-hardened",
+    "openkylin-current"
+  ],
+  "negative_boundaries": [
+    {
+      "block_before_business_data_mutation": true,
+      "boundary": "architecture",
+      "expected_compatibility": "BLOCKED",
+      "id": "arm-blocked",
+      "kind": "negative",
+      "stable_error_code": "TAIJI-LINUX-E001-ARCH"
+    },
+    {
+      "block_before_business_data_mutation": true,
+      "boundary": "package-manager",
+      "expected_compatibility": "BLOCKED",
+      "id": "rpm-only-blocked",
+      "kind": "negative",
+      "stable_error_code": "TAIJI-LINUX-E002-PACKAGE-MANAGER"
+    },
+    {
+      "block_before_business_data_mutation": true,
+      "boundary": "glibc",
+      "expected_compatibility": "BLOCKED",
+      "id": "glibc-below-min-blocked",
+      "kind": "negative",
+      "stable_error_code": "TAIJI-LINUX-E003-GLIBC"
+    },
+    {
+      "block_before_business_data_mutation": true,
+      "boundary": "core-capability",
+      "expected_compatibility": "BLOCKED",
+      "id": "missing-core-capability-blocked",
+      "kind": "negative",
+      "stable_error_code": "TAIJI-LINUX-E004-CAPABILITY"
+    },
+    {
+      "block_before_business_data_mutation": true,
+      "boundary": "administrator",
+      "expected_compatibility": "BLOCKED",
+      "id": "no-admin-blocked",
+      "kind": "negative",
+      "stable_error_code": "TAIJI-LINUX-E005-ADMIN"
+    },
+    {
+      "block_before_business_data_mutation": true,
+      "boundary": "graphical-desktop",
+      "expected_compatibility": "BLOCKED",
+      "id": "no-graphical-desktop-blocked",
+      "kind": "negative",
+      "stable_error_code": "TAIJI-LINUX-E006-DESKTOP"
+    }
+  ],
+  "positive_categories": [
+    {
+      "desktop_environments": ["UKUI"],
+      "expected_compatibility": "COMPATIBLE",
+      "id": "kylin-min-ukui",
+      "kind": "positive",
+      "label": "Kylin minimum UKUI",
+      "os_ids": ["kylin"],
+      "required_business_checks": [
+        "visible_first_configuration_completion",
+        "desktop_launch",
+        "real_model_conversation",
+        "attachment_flow",
+        "diagnostic_export"
+      ],
+      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+    },
+    {
+      "desktop_environments": ["UKUI"],
+      "expected_compatibility": "COMPATIBLE",
+      "id": "kylin-current-standard",
+      "kind": "positive",
+      "label": "Kylin current standard UKUI",
+      "os_ids": ["kylin"],
+      "required_business_checks": [
+        "visible_first_configuration_completion",
+        "desktop_launch",
+        "real_model_conversation",
+        "attachment_flow",
+        "diagnostic_export"
+      ],
+      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+    },
+    {
+      "desktop_environments": ["UKUI"],
+      "expected_compatibility": "COMPATIBLE",
+      "id": "kylin-hardened",
+      "kind": "positive",
+      "label": "Kylin hardened UKUI",
+      "os_ids": ["kylin"],
+      "required_business_checks": [
+        "visible_first_configuration_completion",
+        "desktop_launch",
+        "real_model_conversation",
+        "attachment_flow",
+        "diagnostic_export"
+      ],
+      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+    },
+    {
+      "desktop_environments": ["DDE"],
+      "expected_compatibility": "COMPATIBLE",
+      "id": "uos-min-dde",
+      "kind": "positive",
+      "label": "UOS minimum DDE",
+      "os_ids": ["uos"],
+      "required_business_checks": [
+        "visible_first_configuration_completion",
+        "desktop_launch",
+        "real_model_conversation",
+        "attachment_flow",
+        "diagnostic_export"
+      ],
+      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+    },
+    {
+      "desktop_environments": ["DDE"],
+      "expected_compatibility": "COMPATIBLE",
+      "id": "uos-current-or-hardened",
+      "kind": "positive",
+      "label": "UOS current or hardened DDE",
+      "os_ids": ["uos"],
+      "required_business_checks": [
+        "visible_first_configuration_completion",
+        "desktop_launch",
+        "real_model_conversation",
+        "attachment_flow",
+        "diagnostic_export"
+      ],
+      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+    },
+    {
+      "desktop_environments": ["UKUI", "GNOME"],
+      "expected_compatibility": "COMPATIBLE",
+      "id": "openkylin-current",
+      "kind": "positive",
+      "label": "openKylin current graphical desktop",
+      "os_ids": ["openkylin"],
+      "required_business_checks": [
+        "visible_first_configuration_completion",
+        "desktop_launch",
+        "real_model_conversation",
+        "attachment_flow",
+        "diagnostic_export"
+      ],
+      "required_lifecycle_checks": ["install", "uninstall", "reinstall", "window_close_exit"]
+    }
+  ],
+  "schema": "taiji-linux-certification-matrix/v1"
+}

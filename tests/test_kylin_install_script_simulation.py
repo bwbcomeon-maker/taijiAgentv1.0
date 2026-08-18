@@ -1,1003 +1,499 @@
-import hashlib
-import gzip
+from __future__ import annotations
+
+import json
 import os
-import re
-import shutil
 import subprocess
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALL_SCRIPT = ROOT / "taijiagent 打包交付" / "02_目标终端_安装并验证.sh"
-
-
-def write_executable(path: Path, body: str) -> None:
-    path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
-    path.chmod(0o755)
+WRAPPER = ROOT / "taijiagent 打包交付/02_目标终端_安装并验证.sh"
+SILENT = ROOT / "packaging/linux/deb/taiji-silent-deploy.sh"
 
 
 class KylinInstallScriptSimulationTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self.tmp.name) / "taijiagent 打包交付"
-        self.tmp_path.mkdir()
-        self.fake_bin = self.tmp_path / "bin"
-        self.fake_bin.mkdir()
-        self.fake_state = self.tmp_path / "state"
-        self.fake_state.mkdir()
-        self.fake_root_tmp = Path(self.tmp.name) / "root-tmp"
-        self.fake_root_tmp.mkdir()
-        self.fake_home = self.tmp_path / "home"
-        self.fake_home.mkdir()
-        self.fake_log = self.tmp_path / "fake.log"
-        self.import_script = self.tmp_path / "install_import.sh"
-        self._write_import_script()
-        self._write_fake_commands()
-        self._write_current_deb()
+    def test_wrapper_is_management_only_and_points_to_silent_deployer(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("taiji-silent-deploy.sh", text)
+        self.assertIn("TAIJI_ADMISSION_MODE", text)
+        self.assertIn("TAIJI_CERTIFICATION_CHALLENGE", text)
+        self.assertNotIn("apt-get update", text)
+        self.assertNotIn("ONLINE_OK", text)
+        self.assertNotIn("离线依赖", text)
 
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
+    def test_wrapper_does_not_copy_management_script_into_output(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertNotIn("cp ", text)
+        # The wrapper now copies the management plane only into a root-owned
+        # /var/tmp staging directory before elevation; it must never copy
+        # management files into the customer output directory.
+        self.assertIn("mktemp -d /var/tmp/taiji-agent-management.XXXXXX", text)
+        self.assertIn("stage_regular_file", text)
+        self.assertIn("O_NOFOLLOW", text)
+        self.assertIn("sudo env -i", text)
+        self.assertIn("PATH=/usr/sbin:/usr/bin:/sbin:/bin", text)
+        self.assertIn('"$stage/build-manifest.json"', text)
+        self.assertIn('"$stage/previous.deb.sig"', text)
+        self.assertNotIn("$OUTPUT_DIR/management", text)
+        self.assertNotIn("离线仓库", text)
 
-    def _write_import_script(self) -> None:
-        source = INSTALL_SCRIPT.read_text(encoding="utf-8")
-        source = source.replace('exec > >(tee -a "$LOG_FILE") 2>&1\n', "")
-        verifier = str(self.fake_bin / "taiji-native-verify")
-        source = source.replace(
-            "[ -x /opt/taiji-agent/bin/taiji-native-verify ]",
-            f'[ -x "{verifier}" ]',
-        )
-        source = source.replace(
-            "\n  /opt/taiji-agent/bin/taiji-native-verify\n",
-            f'\n  "{verifier}"\n',
-        )
-        source = source.replace(
-            "TAIJI_VERIFY_DESKTOP_SMOKE=1 /opt/taiji-agent/bin/taiji-native-verify",
-            f'TAIJI_VERIFY_DESKTOP_SMOKE=1 "{verifier}"',
-        )
-        source = re.sub(r'\nmain "\$@"\s*\Z', "\n", source)
-        self.import_script.write_text(source, encoding="utf-8")
+    def test_root_staging_preserves_deb_basename_bound_by_sha256_sidecar(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("stage_deb_with_sidecar", text)
+        self.assertIn('target="$stage/$(basename -- "$source")"', text)
+        self.assertIn('stage_regular_file "$source.sha256" "$target.sha256" 0600', text)
+        self.assertIn('STAGED_DEB_PATH="$target"', text)
+        self.assertIn('args[index + 1]="$STAGED_DEB_PATH"', text)
+        self.assertNotIn('="$(stage_deb_with_sidecar', text)
+        self.assertNotIn('"$stage/candidate.deb"', text)
+        self.assertNotIn('"$stage/previous.deb"', text)
 
-    def _write_current_deb(self) -> None:
-        output_dir = self.tmp_path / "生成的安装包"
-        output_dir.mkdir(exist_ok=True)
-        repo_dir = self.tmp_path / "离线依赖"
-        repo_dir.mkdir(exist_ok=True)
-        packages = repo_dir / "Packages"
-        packages.write_bytes(b"fake packages\n")
-        packages_gz = repo_dir / "Packages.gz"
-        packages_gz.write_bytes(gzip.compress(packages.read_bytes()))
-        (repo_dir / "dependency_1.0_amd64.deb").write_bytes(b"fake dependency\n")
-        packages_sha = hashlib.sha256(packages.read_bytes()).hexdigest()
-        packages_gz_sha = hashlib.sha256(packages_gz.read_bytes()).hexdigest()
-        deb = output_dir / "taiji-agent_0.1.0_amd64.deb"
-        checksum = output_dir / "taiji-agent_0.1.0_amd64.deb.sha256"
-        manifest = output_dir / "taiji-package-manifest.json"
-        deb.write_bytes(b"fake deb\n")
-        sha = hashlib.sha256(deb.read_bytes()).hexdigest()
-        checksum.write_text(f"{sha}  {deb.name}\n", encoding="utf-8")
-        manifest.write_text(
-            textwrap.dedent(
-                f"""
-                {{
-                  "schema_version": 1,
-                  "version": "0.1.0",
-                  "source_archive": "taiji-agentv1.0-kylin-build-src-test.tar.gz",
-                  "source_sha256": "{'0' * 64}",
-                  "deb": "{deb.name}",
-                  "deb_sha256": "{sha}",
-                  "checksum": "{checksum.name}",
-                  "packages_sha256": "{packages_sha}",
-                  "packages_gz_sha256": "{packages_gz_sha}",
-                  "target_matrix": ["Debian-like x86_64/amd64 desktop Linux"],
-                  "support_boundary": {{
-                    "supported": ["Debian-like x86_64/amd64 desktop Linux"],
-                    "unsupported": ["RPM-only Linux terminals"]
-                  }}
-                }}
-                """
-            ).strip()
-            + "\n",
-            encoding="utf-8",
-        )
-        (output_dir / ".build-success").write_text(
-            "\n".join(
-                [
-                    f"deb={deb.name}",
-                    f"checksum={checksum.name}",
-                    f"deb_sha256={sha}",
-                    f"manifest={manifest.name}",
-                    f"packages_sha256={packages_sha}",
-                    f"packages_gz_sha256={packages_gz_sha}",
-                    "version=0.1.0",
-                ]
+    def test_root_staging_cleanup_covers_hidden_files_without_recursive_delete(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn('find "$stage" -mindepth 1 -maxdepth 1 -type f -delete', text)
+        self.assertNotIn('rm -f -- "$stage"/*', text)
+
+    def test_root_staging_disables_python_bytecode_before_any_helper_runs(self):
+        text = WRAPPER.read_text(encoding="utf-8")
+        staged = text[
+            text.index("<<'ROOT_STAGED_SCRIPT'") : text.index("ROOT_STAGED_SCRIPT\n}")
+        ]
+        assignment = staged.index('PYTHONDONTWRITEBYTECODE="1"')
+        exported = staged.index("export PYTHONDONTWRITEBYTECODE")
+        first_helper = staged.index("stage_regular_file() {")
+        self.assertLess(assignment, exported)
+        self.assertLess(exported, first_helper)
+
+    def test_silent_deployer_declares_noninteractive_local_dpkg_contract(self):
+        text = SILENT.read_text(encoding="utf-8")
+        self.assertIn("DEBIAN_FRONTEND=noninteractive", text)
+        self.assertIn("NEEDRESTART_MODE=a", text)
+        self.assertIn("dpkg --install", text)
+        self.assertIn("/run/lock/taiji-agent-deploy.lock", text)
+        self.assertNotIn("apt-get", text)
+        self.assertNotIn("apt update", text)
+        self.assertNotIn("ONLINE_OK", text)
+
+    def test_silent_deployer_surfaces_dpkg_maintainer_failure_details(self):
+        text = SILENT.read_text(encoding="utf-8")
+        install_body = text[
+            text.index("install_local_deb() {") : text.index("\nmain() {", text.index("install_local_deb() {"))
+        ]
+
+        self.assertIn("DPKG_LOG_PATH", install_body)
+        self.assertIn('tail -n 80 -- "$DPKG_LOG_PATH"', install_body)
+        self.assertIn("DPKG_INSTALL_FAILED", install_body)
+        self.assertNotIn('dpkg --install --force-confold -- "$DEB_PATH" >/dev/null 2>&1', install_body)
+
+    def test_silent_deployer_uses_system_only_native_verify_after_install_and_rollback(self):
+        text = SILENT.read_text(encoding="utf-8")
+        rollback_install_body = text[
+            text.index("rollback_previous_package() {") : text.index(
+                "\nverify_rollback_package() {", text.index("rollback_previous_package() {")
             )
-            + "\n",
-            encoding="utf-8",
-        )
-
-    def _write_fake_commands(self) -> None:
-        write_executable(
-            self.fake_bin / "getent",
-            r'''
-            #!/usr/bin/env bash
-            set -euo pipefail
-            if [ "${1:-}" = "passwd" ]; then
-              if [ "${2:-}" = "_apt" ] && [ "${FAKE_MISSING_APT_USER:-0}" = "1" ]; then
-                exit 2
-              fi
-              printf 'taiji:x:%s:%s::%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$HOME"
-              exit 0
-            fi
-            exit 1
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "cat",
-            r'''
-            #!/usr/bin/env bash
-            set -euo pipefail
-            source="${*: -1}"
-            if [ "${FAKE_TAMPER_DURING_COPY:-0}" = "1" ] && [[ "$source" = */生成的安装包/taiji-agent_*_amd64.deb ]] && [ ! -f "$FAKE_STATE/tampered_during_copy" ]; then
-              printf 'raced readable replacement\n' > "$source"
-              touch "$FAKE_STATE/tampered_during_copy"
-            fi
-            exec /bin/cat "$@"
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "sudo",
-            r'''
-            #!/usr/bin/env bash
-            set -euo pipefail
-            printf 'sudo %s\n' "$*" >> "$FAKE_LOG"
-            if [ "${1:-}" = "env" ]; then
-              shift
-              while [ "$#" -gt 0 ] && [[ "${1:-}" == *=* ]]; do
-                shift
-              done
-            fi
-            cmd="${1:-}"
-            shift || true
-            case "$cmd" in
-              rm)
-                if [ "${FAKE_CLEANUP_FAIL:-0}" = "1" ] && [[ "${*: -1}" = *taiji-agent-install.* ]]; then
-                  exit 1
-                fi
-                /bin/rm "$@"
-                ;;
-              chmod)
-                /bin/chmod "$@"
-                ;;
-              chown)
-                :
-                ;;
-              mkdir)
-                /bin/mkdir "$@"
-                ;;
-              mktemp)
-                if [ "$*" = "-d /var/tmp/taiji-agent-install.XXXXXX" ]; then
-                  staging="$(/usr/bin/mktemp -d "$FAKE_ROOT_TMP/taiji-agent-install.XXXXXX")"
-                  printf '%s\n' "$staging" > "$FAKE_STATE/root_staging_path"
-                  printf '%s\n' "$staging"
-                else
-                  /usr/bin/mktemp "$@"
-                fi
-                ;;
-              install)
-                if [ "${1:-}" = "-o" ] && [ "${2:-}" = "root" ] && [ "${3:-}" = "-g" ] && [ "${4:-}" = "root" ]; then
-                  shift 4
-                fi
-                destination="${@: -1}"
-                /usr/bin/install "$@"
-                if [ "${FAKE_TAMPER_STAGED_PACKAGES:-0}" = "1" ] && [[ "$destination" = */repo/Packages.gz ]]; then
-                  printf 'tampered staged packages gzip\n' > "$destination"
-                fi
-                ;;
-              tee)
-                destination="${@: -1}"
-                /usr/bin/tee "$@"
-                if [ "${FAKE_TAMPER_STAGED_PACKAGES:-0}" = "1" ] && [[ "$destination" = */repo/Packages.gz ]]; then
-                  printf 'tampered staged packages gzip\n' > "$destination"
-                fi
-                ;;
-              systemctl)
-                op="${1:-}"
-                svc="${2:-}"
-                case "$op" in
-                  stop) touch "$FAKE_STATE/stopped_$svc" ;;
-                  start) rm -f "$FAKE_STATE/stopped_$svc" ;;
-                  disable) touch "$FAKE_STATE/disabled_$svc" ;;
-                  reset-failed) : ;;
-                esac
-                ;;
-              kill)
-                touch "$FAKE_STATE/killed_${1#-}"
-                :
-                ;;
-              apt-get)
-                case "${1:-}" in
-                  purge)
-                    if [ "${FAKE_APT_PURGE_FAIL:-0}" = "1" ]; then
-                      exit 1
-                    fi
-                    touch "$FAKE_STATE/purged"
-                    ;;
-                  install) touch "$FAKE_STATE/installed" ;;
-                esac
-                ;;
-              dpkg)
-                if [ "${FAKE_DPKG_PERSIST:-0}" = "1" ]; then
-                  exit 1
-                fi
-                touch "$FAKE_STATE/purged"
-                ;;
-              *)
-                "$cmd" "$@"
-                ;;
-            esac
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "stat",
-            r'''
-            #!/usr/bin/env bash
-            set -euo pipefail
-            if [ "${1:-}" = "-c" ]; then
-              format="${2:-}"
-              shift 2
-              [ "${1:-}" != "--" ] || shift
-              path="${1:?path is required}"
-              read -r links mode < <(python3 -c 'import os, stat, sys; metadata = os.stat(sys.argv[1]); print(metadata.st_nlink, format(stat.S_IMODE(metadata.st_mode), "o"))' "$path")
-              case "$format" in
-                '%h')
-                  printf '%s\n' "$links"
-                  ;;
-                '%u:%g:%a:%h')
-                  printf '0:0:%s:%s\n' "$mode" "$links"
-                  ;;
-                *)
-                  printf 'unsupported fake stat format: %s\n' "$format" >&2
-                  exit 2
-                  ;;
-              esac
-              exit 0
-            fi
-            exec /usr/bin/stat "$@"
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "systemctl",
-            r'''
-            #!/usr/bin/env bash
-            set -euo pipefail
-            svc="${2:-}"
-            case "${1:-}" in
-              is-active)
-                [ ! -f "$FAKE_STATE/stopped_$svc" ]
-                ;;
-              is-enabled)
-                [ ! -f "$FAKE_STATE/disabled_$svc" ]
-                ;;
-              list-unit-files|status)
-                exit 0
-                ;;
-              *)
-                exit 0
-                ;;
-            esac
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "dpkg-query",
-            r'''
-            #!/usr/bin/env bash
-            set -euo pipefail
-            [ ! -f "$FAKE_STATE/purged" ] || exit 1
-            case "$*" in
-              *'${db:Status-Abbrev}'*) printf 'ii ' ;;
-              *'${Version}'*) printf '0.1.0-1kylin9' ;;
-            esac
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "apt-mark",
-            r'''
-            #!/usr/bin/env bash
-            exit 0
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "pgrep",
-            r'''
-            #!/usr/bin/env bash
-            if [ "${FAKE_PGREP_MODE:-none}" = "legacy" ]; then
-              printf '9999\n'
-              exit 0
-            fi
-            exit 1
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "lsof",
-            r'''
-            #!/usr/bin/env bash
-            if [ "${FAKE_LSOF_MODE:-none}" = "non_taiji" ]; then
-              printf '43210\n'
-              exit 0
-            fi
-            exit 1
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "ps",
-            r'''
-            #!/usr/bin/env bash
-            if [ "$*" = "-p 43210 -o args=" ]; then
-              printf '/usr/bin/other-app --port 8787\n'
-              exit 0
-            fi
-            if [ "$*" = "-p 9999 -o args=" ]; then
-              printf '/opt/taiji-agent/src/hermes-webui/server.py\n'
-              exit 0
-            fi
-            exit 1
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "taiji-native-verify",
-            r'''
-            #!/usr/bin/env bash
-            printf 'verify desktop_smoke=%s\n' "${TAIJI_VERIFY_DESKTOP_SMOKE:-0}" >> "$FAKE_LOG"
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "taiji",
-            r'''
-            #!/usr/bin/env bash
-            [ "${1:-}" = "--help" ]
-            ''',
-        )
-        write_executable(
-            self.fake_bin / "taiji-agent",
-            r'''
-            #!/usr/bin/env bash
-            exit 0
-            ''',
-        )
-
-    def run_install_package(
-        self,
-        *,
-        apt_purge_fails: bool = False,
-        dpkg_persists: bool = False,
-        lsof_mode: str = "none",
-        pgrep_mode: str = "none",
-        online_ok: bool = False,
-        tamper_staged_packages: bool = False,
-        tamper_during_copy: bool = False,
-        tamper_repo_after_manifest: bool = False,
-        cleanup_fails: bool = False,
-        missing_apt_user: bool = False,
-        xdg_config_home: Path | None = None,
-    ) -> subprocess.CompletedProcess:
-        harness = self.tmp_path / "run.sh"
-        harness.write_text(
-            textwrap.dedent(
-                f"""
-                #!/usr/bin/env bash
-                set -Eeuo pipefail
-                export PATH="{self.fake_bin}:$PATH"
-                export FAKE_STATE="{self.fake_state}"
-                export FAKE_LOG="{self.fake_log}"
-                export FAKE_ROOT_TMP="{self.fake_root_tmp}"
-                export HOME="{self.fake_home}"
-                export XDG_CONFIG_HOME="{xdg_config_home or ''}"
-                export FAKE_APT_PURGE_FAIL="{1 if apt_purge_fails else 0}"
-                export FAKE_DPKG_PERSIST="{1 if dpkg_persists else 0}"
-                export FAKE_LSOF_MODE="{lsof_mode}"
-                export FAKE_PGREP_MODE="{pgrep_mode}"
-                export FAKE_TAMPER_STAGED_PACKAGES="{1 if tamper_staged_packages else 0}"
-                export FAKE_TAMPER_DURING_COPY="{1 if tamper_during_copy else 0}"
-                export FAKE_TAMPER_REPO_AFTER_MANIFEST="{1 if tamper_repo_after_manifest else 0}"
-                export FAKE_CLEANUP_FAIL="{1 if cleanup_fails else 0}"
-                export FAKE_MISSING_APT_USER="{1 if missing_apt_user else 0}"
-                export ONLINE_OK="{1 if online_ok else 0}"
-                source "{self.import_script}"
-                if [ "$FAKE_TAMPER_REPO_AFTER_MANIFEST" = "1" ]; then
-                  original_validate_build_marker_definition="$(declare -f validate_build_marker)"
-                  eval "${{original_validate_build_marker_definition/validate_build_marker/original_validate_build_marker}}"
-                  validate_build_marker() {{
-                    original_validate_build_marker
-                    printf 'rebound packages index\n' > "$OFFLINE_REPO/Packages"
-                    gzip -9c "$OFFLINE_REPO/Packages" > "$OFFLINE_REPO/Packages.gz"
-                    printf 'rebound dependency\n' > "$OFFLINE_REPO/dependency_1.0_amd64.deb"
-                  }}
-                fi
-                path_exists() {{
-                  case "$1" in
-                    /opt/taiji-agent|\\
-                    /etc/default/taiji-agent|\\
-                    /lib/systemd/system/taiji-agent-webui.service|\\
-                    /lib/systemd/system/taiji-agent-gateway.service|\\
-                    /usr/bin/taiji|\\
-                    /usr/bin/taiji-agent|\\
-                    /usr/share/applications/taiji-agent.desktop)
-                      return 0
-                      ;;
-                  esac
-                  [ -e "$1" ] || [ -L "$1" ]
-                }}
-                launcher_owned_by_taiji() {{
-                  case "$1" in
-                    /usr/bin/taiji|/usr/bin/taiji-agent|/usr/local/bin/taiji)
-                      return 0
-                      ;;
-                    *)
-                      return 1
-                      ;;
-                  esac
-                }}
-                validate_install_inputs
-                install_package
-                if [ -n "${{OFFLINE_APT_REPO_SOURCE:-}}" ]; then
-                  [ -f "$OFFLINE_APT_REPO_SOURCE/Packages" ] && cp "$OFFLINE_APT_REPO_SOURCE/Packages" "$FAKE_STATE/offline_Packages"
-                  [ -f "$OFFLINE_APT_REPO_SOURCE/Packages.gz" ] && touch "$FAKE_STATE/offline_Packages_gz"
-                fi
-                if [ -n "${{OFFLINE_APT_SOURCE_FILE:-}}" ]; then
-                  cp "$OFFLINE_APT_SOURCE_FILE" "$FAKE_STATE/offline_source.list"
-                fi
-                """
-            ).lstrip(),
-            encoding="utf-8",
-        )
-        harness.chmod(0o755)
-        return subprocess.run(
-            ["bash", str(harness)],
-            cwd=self.tmp_path,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def fake_log_text(self) -> str:
-        return self.fake_log.read_text(encoding="utf-8") if self.fake_log.exists() else ""
-
-    def run_main_for_verification(
-        self, *, allow_headless_rehearsal: bool
-    ) -> subprocess.CompletedProcess:
-        harness = self.tmp_path / "run-verification.sh"
-        harness.write_text(
-            textwrap.dedent(
-                f"""
-                #!/usr/bin/env bash
-                set -Eeuo pipefail
-                export PATH="{self.fake_bin}:$PATH"
-                export FAKE_STATE="{self.fake_state}"
-                export FAKE_LOG="{self.fake_log}"
-                export HOME="{self.fake_home}"
-                export DISPLAY=""
-                export WAYLAND_DISPLAY=""
-                export TAIJI_ALLOW_HEADLESS_REHEARSAL="{1 if allow_headless_rehearsal else 0}"
-                source "{self.import_script}"
-                preflight() {{ :; }}
-                validate_install_inputs() {{ :; }}
-                require_admin_capability() {{ :; }}
-                install_package() {{ :; }}
-                main
-                """
-            ).lstrip(),
-            encoding="utf-8",
-        )
-        harness.chmod(0o755)
-        return subprocess.run(
-            ["bash", str(harness)],
-            cwd=self.tmp_path,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def run_main_with_install_sentinel(
-        self, *, allow_headless_rehearsal: bool
-    ) -> subprocess.CompletedProcess:
-        harness = self.tmp_path / "run-main-order.sh"
-        harness.write_text(
-            textwrap.dedent(
-                f"""
-                #!/usr/bin/env bash
-                set -Eeuo pipefail
-                export PATH="{self.fake_bin}:$PATH"
-                export FAKE_STATE="{self.fake_state}"
-                export FAKE_LOG="{self.fake_log}"
-                export HOME="{self.fake_home}"
-                export DISPLAY=""
-                export WAYLAND_DISPLAY=""
-                export TAIJI_ALLOW_HEADLESS_REHEARSAL="{1 if allow_headless_rehearsal else 0}"
-                source "{self.import_script}"
-                uname() {{
-                  case "${{1:-}}" in
-                    -s) printf 'Linux\n' ;;
-                    -m) printf 'x86_64\n' ;;
-                    *) command uname "$@" ;;
-                  esac
-                }}
-                have() {{ return 0; }}
-                validate_install_inputs() {{ printf 'validate\n' >> "$FAKE_STATE/main_order"; }}
-                require_admin_capability() {{ printf 'admin\n' >> "$FAKE_STATE/main_order"; }}
-                install_package() {{ printf 'install\n' >> "$FAKE_STATE/main_order"; touch "$FAKE_STATE/install_called"; }}
-                main
-                """
-            ).lstrip(),
-            encoding="utf-8",
-        )
-        harness.chmod(0o755)
-        return subprocess.run(
-            ["bash", str(harness)],
-            cwd=self.tmp_path,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def run_preflight_as_root(self) -> subprocess.CompletedProcess:
-        harness = self.tmp_path / "run-root-preflight.sh"
-        harness.write_text(
-            textwrap.dedent(
-                f"""
-                #!/usr/bin/env bash
-                set -Eeuo pipefail
-                export PATH="{self.fake_bin}:$PATH"
-                export FAKE_STATE="{self.fake_state}"
-                export FAKE_LOG="{self.fake_log}"
-                export HOME="{self.fake_home}"
-                source "{self.import_script}"
-                uname() {{
-                  case "${{1:-}}" in
-                    -s) printf 'Linux\n' ;;
-                    -m) printf 'x86_64\n' ;;
-                    *) command uname "$@" ;;
-                  esac
-                }}
-                id() {{
-                  if [ "${{1:-}}" = "-u" ]; then
-                    printf '0\n'
-                    return 0
-                  fi
-                  command id "$@"
-                }}
-                preflight
-                """
-            ).lstrip(),
-            encoding="utf-8",
-        )
-        harness.chmod(0o755)
-        return subprocess.run(
-            ["bash", str(harness)],
-            cwd=self.tmp_path,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def test_cross_machine_absolute_deb_checksum_path_is_tolerated(self):
-        deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
-        checksum = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb.sha256"
-        sha = hashlib.sha256(deb.read_bytes()).hexdigest()
-        checksum.write_text(
-            f"{sha}  /home/user2/桌面/taijiagent 打包交付/构建工作区/taiji-agentv1.0/packages/麒麟操作系统安装包/{deb.name}\n",
-            encoding="utf-8",
-        )
-
-        result = self.run_install_package()
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("安装包 SHA256 校验通过", result.stdout + result.stderr)
-
-    def test_entire_script_root_invocation_is_rejected_before_sudo(self):
-        result = self.run_preflight_as_root()
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("不要使用 sudo bash", output)
-        self.assertNotIn("sudo ", self.fake_log_text())
-
-    def test_root_owned_staging_precedes_purge_and_is_cleaned_on_exit(self):
-        result = self.run_install_package()
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        log = self.fake_log_text()
-        staging_path_file = self.fake_state / "root_staging_path"
-        self.assertTrue(staging_path_file.is_file(), log)
-        staging = staging_path_file.read_text(encoding="utf-8").strip()
-        self.assertIn("sudo mktemp -d /var/tmp/taiji-agent-install.XXXXXX", log)
-        self.assertIn(
-            f"sudo tee -- {staging}/repo/dependency_1.0_amd64.deb",
-            log,
-        )
-        self.assertNotIn(
-            f"sudo install -m 0644 {self.tmp_path / '离线依赖' / 'dependency_1.0_amd64.deb'}",
-            log,
-        )
-        self.assertIn(f"sudo chown _apt:root {staging}/apt-lists/partial", log)
-        self.assertIn(f"sudo chmod 0700 {staging}/apt-lists/partial", log)
-        self.assertLess(
-            log.index(f"sudo chmod 0700 {staging}"),
-            log.index(f"sudo tee -- {staging}/package/taiji-agent_0.1.0_amd64.deb"),
-        )
-        self.assertLess(
-            log.index(f"sudo tee -- {staging}/package/taiji-agent_0.1.0_amd64.deb"),
-            log.index(f"sudo chmod 0755 {staging} {staging}/package"),
-        )
-        self.assertLess(
-            log.index("sudo mktemp -d /var/tmp/taiji-agent-install.XXXXXX"),
-            log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"),
-        )
-        self.assertIn(f"Dir::Etc::sourcelist={staging}/taiji-agent-offline.list", log)
-        self.assertIn(f"install -y --reinstall --allow-downgrades --allow-change-held-packages {staging}/package/taiji-agent_0.1.0_amd64.deb", log)
-        self.assertNotIn(f"install -y --reinstall --allow-downgrades --allow-change-held-packages {self.tmp_path / '生成的安装包'}", log)
-        self.assertIn(f"sudo rm -rf -- {staging}", log)
-        self.assertFalse(Path(staging).exists())
-
-    def test_cleanup_failure_reports_residual_root_staging_path(self):
-        result = self.run_install_package(cleanup_fails=True)
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        staging = (self.fake_state / "root_staging_path").read_text(encoding="utf-8").strip()
-        self.assertIn("root staging 清理失败", output)
-        self.assertIn(staging, output)
-        self.assertTrue(Path(staging).exists())
-
-    def test_symlinked_deb_is_rejected_before_root_staging(self):
-        deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
-        real_deb = deb.with_name("same-content.deb")
-        real_deb.write_bytes(deb.read_bytes())
-        deb.unlink()
-        deb.symlink_to(real_deb.name)
-
-        result = self.run_install_package()
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("符号链接", output)
-        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
-
-    def test_hardlinked_deb_is_rejected_before_root_staging(self):
-        deb = self.tmp_path / "生成的安装包" / "taiji-agent_0.1.0_amd64.deb"
-        real_deb = deb.with_name("same-content.deb")
-        real_deb.write_bytes(deb.read_bytes())
-        deb.unlink()
-        os.link(real_deb, deb)
-
-        result = self.run_install_package()
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("硬链接", output)
-        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
-
-    def test_marker_path_traversal_is_rejected_before_root_staging(self):
-        marker = self.tmp_path / "生成的安装包" / ".build-success"
-        marker.write_text(
-            marker.read_text(encoding="utf-8").replace(
-                "deb=taiji-agent_0.1.0_amd64.deb",
-                "deb=../taiji-agent_0.1.0_amd64.deb",
-            ),
-            encoding="utf-8",
-        )
-
-        result = self.run_install_package()
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("DEB 文件名不合法", output)
-        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
-
-    def test_source_swap_during_user_open_is_detected_before_purge(self):
-        result = self.run_install_package(tamper_during_copy=True)
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("root staging 中 taiji-agent_0.1.0_amd64.deb SHA256 重校验失败", output)
-        log = self.fake_log_text()
-        self.assertNotIn("apt-get purge -y taiji-agent", log)
-        self.assertNotIn(" install -y --reinstall", log)
-
-    def test_repo_index_swap_after_manifest_validation_is_rejected(self):
-        result = self.run_install_package(tamper_repo_after_manifest=True)
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertRegex(output, r"Packages(?:\.gz)? 与 manifest 不匹配")
-        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
-        self.assertNotIn("apt-get purge -y taiji-agent", self.fake_log_text())
-
-    def test_unlisted_offline_repo_entry_is_rejected_before_root_staging(self):
-        (self.tmp_path / "离线依赖" / "unexpected.conf").write_text("ignored?\n", encoding="utf-8")
-
-        result = self.run_install_package()
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("包含未允许的文件或目录", output)
-        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
-
-    def test_double_dot_offline_deb_name_is_rejected_before_root_staging(self):
-        (self.tmp_path / "离线依赖" / "dependency.._1.0_amd64.deb").write_bytes(b"fake dependency\n")
-
-        result = self.run_install_package()
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("离线仓库 DEB 文件名不合法", output)
-        self.assertFalse((self.fake_state / "root_staging_path").exists(), output)
-
-    def test_staged_repo_hash_mismatch_stops_before_purge(self):
-        result = self.run_install_package(tamper_staged_packages=True)
-
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("root staging 中 Packages.gz", result.stdout + result.stderr)
-        log = self.fake_log_text()
-        self.assertNotIn("apt-get purge -y taiji-agent", log)
-        self.assertNotIn(" install -y --reinstall", log)
-
-    def test_headless_verification_fails_by_default_without_success_claim(self):
-        result = self.run_main_for_verification(allow_headless_rehearsal=False)
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("图形桌面会话", output)
-        self.assertIn("TAIJI_ALLOW_HEADLESS_REHEARSAL=1", output)
-        self.assertNotIn("[OK] 安装验证命令已执行完毕", output)
-
-    def test_main_rejects_headless_before_install_package(self):
-        result = self.run_main_with_install_sentinel(
-            allow_headless_rehearsal=False
-        )
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("图形桌面会话", output)
-        self.assertFalse((self.fake_state / "install_called").exists(), output)
-        self.assertFalse((self.fake_state / "main_order").exists(), output)
-        self.assertNotIn("[INFO] 阶段：安装太极 Agent", output)
-
-    def test_explicit_headless_rehearsal_reports_partial_non_target_result(self):
-        result = self.run_main_with_install_sentinel(
-            allow_headless_rehearsal=True
-        )
-
-        output = result.stdout + result.stderr
-        self.assertEqual(result.returncode, 0, output)
-        self.assertTrue((self.fake_state / "install_called").is_file(), output)
-        self.assertEqual(
-            (self.fake_state / "main_order").read_text(encoding="utf-8").splitlines(),
-            ["validate", "admin", "install"],
-        )
-        self.assertIn("仅离线安装演练，不是桌面 App/目标机验证", output)
-        self.assertIn("真实模型对话和目标机验证：未验证", output)
-        self.assertIn("taiji 命令可用", output)
-        self.assertNotIn("[OK] 安装验证命令已执行完毕", output)
-
-    def test_tampered_plain_packages_index_stops_before_install(self):
-        (self.tmp_path / "离线依赖" / "Packages").write_bytes(b"tampered packages\n")
-
-        result = self.run_install_package()
-
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Packages 与 manifest 不匹配", result.stdout + result.stderr)
-        self.assertFalse((self.fake_state / "installed").exists())
-
-    def test_tampered_gzip_packages_index_stops_before_install(self):
-        (self.tmp_path / "离线依赖" / "Packages.gz").write_bytes(b"tampered gzip\n")
-
-        result = self.run_install_package()
-
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Packages.gz 与 manifest 不匹配", result.stdout + result.stderr)
-        self.assertFalse((self.fake_state / "installed").exists())
-
-    def test_missing_plain_packages_hash_binding_stops_before_install(self):
-        marker = self.tmp_path / "生成的安装包" / ".build-success"
-        marker.write_text(
-            "\n".join(
-                line
-                for line in marker.read_text(encoding="utf-8").splitlines()
-                if not line.startswith("packages_sha256=")
+        ]
+        rollback_body = text[
+            text.index("verify_rollback_package() {") : text.index(
+                "\nstage_candidate_for_install() {", text.index("verify_rollback_package() {")
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        manifest = self.tmp_path / "生成的安装包" / "taiji-package-manifest.json"
-        manifest.write_text(
-            "\n".join(
-                line
-                for line in manifest.read_text(encoding="utf-8").splitlines()
-                if '"packages_sha256"' not in line
+        ]
+        install_body = text[
+            text.index("install_local_deb() {") : text.index(
+                "\nmain() {", text.index("install_local_deb() {")
             )
-            + "\n",
-            encoding="utf-8",
+        ]
+
+        for body in (rollback_body, install_body):
+            self.assertIn("env -i", body)
+            self.assertIn("PATH=/usr/sbin:/usr/bin:/sbin:/bin", body)
+            self.assertIn("LANG=C.UTF-8", body)
+            self.assertIn('"$verifier" --system-only', body)
+            self.assertNotIn('"$verifier" >/dev/null 2>&1', body)
+            self.assertNotIn("TAIJI_NATIVE_VERIFY_MODE=system-only", body)
+
+        self.assertIn("TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0", rollback_body)
+        self.assertNotIn("TAIJI_AGENT_SYNC_PACKAGED_CONFIG=0", install_body)
+        self.assertIn("ROLLBACK_DPKG_LOG_PATH", rollback_install_body)
+        self.assertIn("ROLLBACK_VERIFY_LOG_PATH", rollback_body)
+        self.assertIn('tail -n 80 -- "$ROLLBACK_DPKG_LOG_PATH"', rollback_install_body)
+        self.assertIn('tail -n 80 -- "$ROLLBACK_VERIFY_LOG_PATH"', rollback_body)
+        self.assertIn('if ! rm -f -- "$ROLLBACK_DPKG_LOG_PATH"', rollback_install_body)
+        self.assertIn('if ! rm -f -- "$ROLLBACK_VERIFY_LOG_PATH"', rollback_body)
+        self.assertIn("NATIVE_VERIFY_LOG_PATH", install_body)
+        self.assertIn('tail -n 80 -- "$NATIVE_VERIFY_LOG_PATH"', install_body)
+        self.assertIn("NATIVE_VERIFY_UNAVAILABLE", install_body)
+
+    def test_silent_deployer_dynamically_tails_and_cleans_private_dpkg_log(self):
+        with tempfile.TemporaryDirectory(prefix="taiji-dpkg-log-") as temporary:
+            root = Path(temporary)
+            library = root / "taiji-silent-deploy-library.sh"
+            source = SILENT.read_text(encoding="utf-8")
+            self.assertTrue(source.rstrip().endswith('main "$@"'))
+            library.write_text(source.rsplit('main "$@"', 1)[0], encoding="utf-8")
+            stage = root / "stage"
+            stage.mkdir(mode=0o700)
+            deb = root / "candidate.deb"
+            deb.write_bytes(b"fake")
+            result_file = root / "harness-result.txt"
+            harness = r'''
+source "$1"
+chmod() {
+  local mode="$1"
+  shift
+  if [ "${1:-}" = "--" ]; then shift; fi
+  command chmod "$mode" "$@"
+}
+dpkg() {
+  local index
+  for index in $(seq 1 90); do
+    printf 'maintainer-line-%03d\n' "$index"
+  done
+  return 42
+}
+read_dpkg_status() { printf 'half-configured\n'; }
+read_dpkg_version() { printf '\n'; }
+manual_recovery() {
+  local mode
+  mode="$(stat -c '%a' "$DPKG_LOG_PATH" 2>/dev/null || stat -f '%Lp' "$DPKG_LOG_PATH")"
+  printf 'mode=%s\nerror_stage=%s\nerror_code=%s\nlog_path=%s\n' \
+    "$mode" "$1" "$2" "$DPKG_LOG_PATH" > "$HARNESS_RESULT"
+  cleanup_staged_deb
+  exit "$3"
+}
+STAGING_DIR="$HARNESS_STAGE"
+DEB_PATH="$HARNESS_DEB"
+OPERATION=fresh_install
+install_local_deb
+'''
+            completed = subprocess.run(
+                ["/bin/bash", "-c", harness, "taiji-dpkg-log-test", str(library)],
+                env={
+                    **os.environ,
+                    "HARNESS_STAGE": str(stage),
+                    "HARNESS_DEB": str(deb),
+                    "HARNESS_RESULT": str(result_file),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 42, completed.stderr)
+            self.assertIn("DPKG_INSTALL_FAILED", completed.stderr)
+            self.assertIn("maintainer-line-090", completed.stderr)
+            self.assertNotIn("maintainer-line-001", completed.stderr)
+            result = result_file.read_text(encoding="utf-8")
+            self.assertIn("mode=600", result)
+            self.assertIn("error_stage=dpkg", result)
+            self.assertIn("error_code=DPKG_INSTALL_FAILED", result)
+            log_path = Path(result.split("log_path=", 1)[1].strip())
+            self.assertFalse(log_path.exists())
+            self.assertFalse(stage.exists())
+
+    def _run_post_install_native_verify_harness(
+        self, verifier_source: str | None
+    ) -> tuple[subprocess.CompletedProcess, str, str, bool]:
+        with tempfile.TemporaryDirectory(prefix="taiji-native-verify-") as temporary:
+            root = Path(temporary)
+            library = root / "taiji-silent-deploy-library.sh"
+            verifier = root / "taiji-native-verify"
+            observed = root / "observed.txt"
+            result_file = root / "result.txt"
+            stage = root / "stage"
+            stage.mkdir(mode=0o700)
+            deb = root / "candidate.deb"
+            deb.write_bytes(b"fake")
+
+            source = SILENT.read_text(encoding="utf-8")
+            source = source.replace(
+                "/opt/taiji-agent/bin/taiji-native-verify", str(verifier)
+            )
+            library.write_text(source.rsplit('main "$@"', 1)[0], encoding="utf-8")
+            if verifier_source is not None:
+                verifier.write_text(
+                    verifier_source.replace("__OBSERVED__", str(observed)),
+                    encoding="utf-8",
+                )
+                verifier.chmod(0o755)
+
+            harness = r'''
+source "$1"
+chmod() {
+  local mode="$1"
+  shift
+  if [ "${1:-}" = "--" ]; then shift; fi
+  command chmod "$mode" "$@"
+}
+dpkg() { printf 'dpkg-ok\n'; return 0; }
+read_dpkg_status() { printf 'installed\n'; }
+read_dpkg_version() { printf '1.0.0\n'; }
+finish() {
+  printf 'finish=%s\nnative=%s\n' "$1" "$NATIVE_VERIFY" > "$HARNESS_RESULT"
+  cleanup_staged_deb
+  exit "$1"
+}
+manual_recovery() {
+  local mode="missing"
+  if [ -n "${NATIVE_VERIFY_LOG_PATH:-}" ] && [ -e "$NATIVE_VERIFY_LOG_PATH" ]; then
+    mode="$(stat -c '%a' "$NATIVE_VERIFY_LOG_PATH" 2>/dev/null || stat -f '%Lp' "$NATIVE_VERIFY_LOG_PATH")"
+  fi
+  printf 'manual=%s\nerror=%s\nnative=%s\nmode=%s\n' \
+    "$1" "$2" "$NATIVE_VERIFY" "$mode" > "$HARNESS_RESULT"
+  cleanup_staged_deb
+  exit "$3"
+}
+STAGING_DIR="$HARNESS_STAGE"
+DEB_PATH="$HARNESS_DEB"
+STAGED_DEB_PATH=""
+STAGED_PREVIOUS_DEB_PATH=""
+STAGED_PREVIOUS_SIGNATURE_PATH=""
+OPERATION=fresh_install
+UPGRADE_TRANSACTION_ID=""
+install_local_deb
+'''
+            completed = subprocess.run(
+                ["/bin/bash", "-c", harness, "taiji-native-test", str(library)],
+                env={
+                    **os.environ,
+                    "HARNESS_STAGE": str(stage),
+                    "HARNESS_DEB": str(deb),
+                    "HARNESS_RESULT": str(result_file),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            result = result_file.read_text(encoding="utf-8") if result_file.exists() else ""
+            observation = observed.read_text(encoding="utf-8") if observed.exists() else ""
+            return completed, result, observation, stage.exists()
+
+    def test_silent_deployer_runs_post_install_verify_in_exact_system_only_env(self):
+        completed, result, observed, stage_exists = self._run_post_install_native_verify_harness(
+            """#!/usr/bin/env bash
+printf 'home=%s\nmode=%s\n' "${HOME:-unset}" "${1:-unset}" > '__OBSERVED__'
+exit 0
+"""
         )
 
-        result = self.run_install_package()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("finish=0", result)
+        self.assertIn("native=PASS", result)
+        self.assertIn("home=unset", observed)
+        self.assertIn("mode=--system-only", observed)
+        self.assertFalse(stage_exists)
 
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("缺少 packages_sha256", result.stdout + result.stderr)
-        self.assertFalse((self.fake_state / "installed").exists())
+    def test_silent_deployer_fails_closed_when_native_verifier_is_unavailable(self):
+        completed, result, _, stage_exists = self._run_post_install_native_verify_harness(None)
 
-    def test_clean_reinstall_removes_legacy_without_backup_before_installing(self):
-        result = self.run_install_package()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("manual=native_verify", result)
+        self.assertIn("error=NATIVE_VERIFY_UNAVAILABLE", result)
+        self.assertIn("native=NOT_RUN", result)
+        self.assertFalse(stage_exists)
 
-        log = self.fake_log_text()
-        self.assertNotIn("sudo tar -C / -czf", log)
-        self.assertLess(log.index("sudo systemctl stop taiji-agent-webui.service"), log.index("sudo apt-mark unhold taiji-agent"))
-        self.assertLess(log.index("sudo apt-mark unhold taiji-agent"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
-        self.assertLess(log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"), log.index("sudo rm -rf -- /opt/taiji-agent"))
-        self.assertLess(log.index("sudo rm -rf -- /opt/taiji-agent"), log.index(" install -y --reinstall --allow-downgrades --allow-change-held-packages"))
-        self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
-        self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertIn(" install -y --reinstall --allow-downgrades --allow-change-held-packages", log)
-
-    def test_dpkg_purge_fallback_allows_install_when_apt_purge_fails(self):
-        result = self.run_install_package(apt_purge_fails=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        log = self.fake_log_text()
-        self.assertIn("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent", log)
-        self.assertIn("sudo dpkg --remove --force-remove-reinstreq taiji-agent", log)
-        self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
-        self.assertIn(" install -y --reinstall", log)
-
-    def test_persistent_dpkg_state_stops_before_file_removal_and_install(self):
-        result = self.run_install_package(apt_purge_fails=True, dpkg_persists=True)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        log = self.fake_log_text()
-        self.assertIn("sudo dpkg --purge --force-all taiji-agent", log)
-        self.assertNotIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertNotIn(" install -y --reinstall", log)
-
-    def test_legacy_opt_process_is_killed_before_package_purge(self):
-        result = self.run_install_package(pgrep_mode="legacy")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        log = self.fake_log_text()
-        self.assertIn("sudo kill 9999", log)
-        self.assertLess(log.index("sudo kill 9999"), log.index("sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get purge -y taiji-agent"))
-        self.assertIn(" install -y --reinstall", log)
-
-    def test_non_taiji_port_conflict_is_reported_without_blocking_install(self):
-        result = self.run_install_package(lsof_mode="non_taiji")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        log = self.fake_log_text()
-        self.assertNotIn("sudo kill 43210", log)
-        self.assertIn("apt-get purge -y taiji-agent", log)
-        self.assertIn("sudo rm -rf -- /opt/taiji-agent", log)
-        self.assertIn(" install -y --reinstall", log)
-
-    def test_missing_offline_repo_blocks_default_install(self):
-        shutil.rmtree(self.tmp_path / "离线依赖")
-
-        result = self.run_install_package()
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        output = result.stdout + result.stderr
-        self.assertIn("缺少离线依赖仓库", output)
-        self.assertNotIn(" install -y --reinstall", self.fake_log_text())
-        diagnostics = sorted((self.tmp_path / "构建日志").glob("失败诊断-*.txt"))
-        self.assertTrue(diagnostics, output)
-        diagnostic = diagnostics[-1].read_text(encoding="utf-8")
-        self.assertIn("缺少离线依赖仓库", diagnostic)
-        self.assertIn("ONLINE_OK=0", diagnostic)
-        self.assertIn(
-            "next=完全离线安装必须同时包含 离线依赖/Packages 与 Packages.gz",
-            diagnostic,
+    def test_silent_deployer_tails_and_cleans_private_native_verify_log(self):
+        completed, result, _, stage_exists = self._run_post_install_native_verify_harness(
+            """#!/usr/bin/env bash
+for index in $(seq 1 90); do printf 'native-line-%03d\n' "$index"; done
+exit 17
+"""
         )
 
-    def test_online_ok_allows_explicit_fallback_without_offline_repo(self):
-        shutil.rmtree(self.tmp_path / "离线依赖")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("native-line-090", completed.stderr)
+        self.assertNotIn("native-line-001", completed.stderr)
+        self.assertIn("error=NATIVE_VERIFY_FAILED", result)
+        self.assertIn("native=FAIL", result)
+        self.assertIn("mode=600", result)
+        self.assertFalse(stage_exists)
 
-        result = self.run_install_package(online_ok=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def _run_recovery_verify_harness(
+        self, *, dpkg_exit: int, verifier_source: str
+    ) -> tuple[subprocess.CompletedProcess, str, str, bool]:
+        with tempfile.TemporaryDirectory(prefix="taiji-recovery-verify-") as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            stage.mkdir(mode=0o700)
+            previous = stage / "previous.deb"
+            previous.write_bytes(b"previous")
+            verifier = root / "taiji-native-verify"
+            observed = root / "observed.txt"
+            result_file = root / "result.txt"
+            library = root / "taiji-silent-deploy-library.sh"
 
-        output = result.stdout + result.stderr
-        self.assertIn("ONLINE_OK=1", output)
-        log = self.fake_log_text()
-        staging_path_file = self.fake_state / "root_staging_path"
-        self.assertTrue(staging_path_file.is_file(), log)
-        staging = staging_path_file.read_text(encoding="utf-8").strip()
-        self.assertIn(f" install -y --reinstall --allow-downgrades --allow-change-held-packages {staging}/package/taiji-agent_0.1.0_amd64.deb", log)
-        self.assertNotIn(f" install -y --reinstall --allow-downgrades --allow-change-held-packages {self.tmp_path / '生成的安装包'}", log)
+            source = SILENT.read_text(encoding="utf-8").replace(
+                "/opt/taiji-agent/bin/taiji-native-verify", str(verifier)
+            )
+            library.write_text(source.rsplit('main "$@"', 1)[0], encoding="utf-8")
+            verifier.write_text(
+                verifier_source.replace("__OBSERVED__", str(observed)),
+                encoding="utf-8",
+            )
+            verifier.chmod(0o755)
 
-    def test_online_fallback_rejects_missing_apt_sandbox_account_before_purge(self):
-        shutil.rmtree(self.tmp_path / "离线依赖")
+            harness = r'''
+source "$1"
+chmod() {
+  local mode="$1"
+  shift
+  if [ "${1:-}" = "--" ]; then shift; fi
+  command chmod "$mode" "$@"
+}
+dpkg() {
+  local index
+  for index in $(seq 1 90); do printf 'recovery-dpkg-line-%03d\n' "$index"; done
+  return "$HARNESS_DPKG_EXIT"
+}
+refresh_dpkg_state_after_recovery() {
+  DPKG_STATUS_AFTER=installed
+  VERSION_AFTER=1.0.0
+}
+OPERATION=upgrade
+STAGING_DIR="$HARNESS_STAGE"
+STAGED_DEB_PATH=""
+STAGED_PREVIOUS_DEB_PATH="$HARNESS_PREVIOUS"
+STAGED_PREVIOUS_SIGNATURE_PATH=""
+PREVIOUS_VERSION=1.0.0
+dpkg_rc=0
+verify_rc=not-run
+if rollback_previous_package; then
+  if verify_rollback_package; then verify_rc=0; else verify_rc=$?; fi
+else
+  dpkg_rc=$?
+fi
+active_log="${ROLLBACK_DPKG_LOG_PATH:-${ROLLBACK_VERIFY_LOG_PATH:-}}"
+mode=missing
+if [ -n "$active_log" ] && [ -e "$active_log" ]; then
+  mode="$(stat -c '%a' "$active_log" 2>/dev/null || stat -f '%Lp' "$active_log")"
+fi
+printf 'dpkg=%s\nverify=%s\nnative=%s\nmode=%s\n' \
+  "$dpkg_rc" "$verify_rc" "$NATIVE_VERIFY" "$mode" > "$HARNESS_RESULT"
+cleanup_staged_deb
+if [ "$dpkg_rc" -ne 0 ]; then exit "$dpkg_rc"; fi
+if [ "$verify_rc" != 0 ]; then exit "$verify_rc"; fi
+exit 0
+'''
+            completed = subprocess.run(
+                ["/bin/bash", "-c", harness, "taiji-recovery-test", str(library)],
+                env={
+                    **os.environ,
+                    "HARNESS_STAGE": str(stage),
+                    "HARNESS_PREVIOUS": str(previous),
+                    "HARNESS_DPKG_EXIT": str(dpkg_exit),
+                    "HARNESS_RESULT": str(result_file),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            result = result_file.read_text(encoding="utf-8")
+            observation = observed.read_text(encoding="utf-8") if observed.exists() else ""
+            return completed, result, observation, stage.exists()
 
-        result = self.run_install_package(online_ok=True, missing_apt_user=True)
-
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("缺少 _apt 系统账号", output)
-        log = self.fake_log_text()
-        self.assertNotIn("apt-get purge -y taiji-agent", log)
-        self.assertNotIn(" install -y --reinstall", log)
-
-    def test_offline_repo_under_spaced_delivery_dir_uses_no_space_apt_source(self):
-        repo = self.tmp_path / "离线依赖"
-
-        result = self.run_install_package()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        source_file = self.fake_state / "offline_source.list"
-        source = source_file.read_text(encoding="utf-8").strip()
-        staging = (self.fake_state / "root_staging_path").read_text(encoding="utf-8").strip()
-        self.assertEqual(source, f"deb [trusted=yes] file:{staging}/repo ./")
-        apt_uri = source.split("file:", 1)[1].split(" ", 1)[0]
-        self.assertNotIn(" ", apt_uri)
-        self.assertNotIn(str(repo), source)
-        self.assertEqual((self.fake_state / "offline_Packages").read_text(encoding="utf-8"), "fake packages\n")
-        self.assertTrue((self.fake_state / "offline_Packages_gz").is_file())
-
-    def test_adjacent_license_is_installed_to_user_config_with_owner_only_mode(self):
-        (self.tmp_path / "license.jwt").write_text("signed-license-token\n", encoding="utf-8")
-
-        result = self.run_install_package()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        target = self.fake_home / ".config" / "taiji-agent" / "licenses" / "active-license.jwt"
-        self.assertEqual(target.read_text(encoding="utf-8"), "signed-license-token\n")
-        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
-        self.assertIn("license.jwt", self.fake_log_text() + result.stdout + result.stderr)
-
-    def test_adjacent_descriptive_license_is_installed_to_user_config(self):
-        source = self.tmp_path / "taiji-license-测试客户-一号终端-aaaaaaaaaaaa-20260612-000000Z-20260712-000000Z.jwt"
-        source.write_text("signed-license-token\n", encoding="utf-8")
-
-        result = self.run_install_package()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-        target = self.fake_home / ".config" / "taiji-agent" / "licenses" / "active-license.jwt"
-        self.assertEqual(target.read_text(encoding="utf-8"), "signed-license-token\n")
-        self.assertIn(source.name, self.fake_log_text() + result.stdout + result.stderr)
-
-    def test_license_install_ignores_xdg_redirect_and_uses_account_home(self):
-        (self.tmp_path / "license.jwt").write_text("signed-license-token\n", encoding="utf-8")
-        redirected = self.tmp_path / "redirected-config"
-
-        result = self.run_install_package(xdg_config_home=redirected)
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        canonical = (
-            self.fake_home
-            / ".config"
-            / "taiji-agent"
-            / "licenses"
-            / "active-license.jwt"
+    def test_recovery_verify_uses_exact_system_only_env_without_rewriting_config(self):
+        completed, result, observed, stage_exists = self._run_recovery_verify_harness(
+            dpkg_exit=0,
+            verifier_source="""#!/usr/bin/env bash
+printf 'home=%s\nmode=%s\nsync=%s\n' \
+  "${HOME:-unset}" "${1:-unset}" "${TAIJI_AGENT_SYNC_PACKAGED_CONFIG:-unset}" \
+  > '__OBSERVED__'
+exit 0
+""",
         )
-        self.assertTrue(canonical.is_file())
-        self.assertFalse((redirected / "taiji-agent/licenses/active-license.jwt").exists())
 
-    def test_multiple_adjacent_descriptive_licenses_require_explicit_source(self):
-        (self.tmp_path / "taiji-license-客户A-一号-aaaaaaaaaaaa-20260612-000000Z-20260712-000000Z.jwt").write_text(
-            "a\n",
-            encoding="utf-8",
-        )
-        (self.tmp_path / "taiji-license-客户B-二号-bbbbbbbbbbbb-20260612-000000Z-20260712-000000Z.jwt").write_text(
-            "b\n",
-            encoding="utf-8",
-        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("verify=0", result)
+        self.assertIn("native=PASS", result)
+        self.assertIn("home=unset", observed)
+        self.assertIn("mode=--system-only", observed)
+        self.assertIn("sync=0", observed)
+        self.assertFalse(stage_exists)
 
-        result = self.run_install_package()
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("检测到多个候选授权文件", result.stdout + result.stderr)
-        diagnostics = sorted((self.tmp_path / "构建日志").glob("失败诊断-*.txt"))
-        self.assertTrue(diagnostics, result.stdout + result.stderr)
-        diagnostic = diagnostics[-1].read_text(encoding="utf-8")
-        self.assertIn("检测到多个候选授权文件", diagnostic)
+    def test_recovery_dpkg_and_verify_failures_surface_private_log_tail(self):
+        dpkg_failed, dpkg_result, _, dpkg_stage_exists = self._run_recovery_verify_harness(
+            dpkg_exit=42,
+            verifier_source="#!/usr/bin/env bash\nexit 0\n",
+        )
+        self.assertEqual(dpkg_failed.returncode, 42)
+        self.assertIn("recovery-dpkg-line-090", dpkg_failed.stderr)
+        self.assertNotIn("recovery-dpkg-line-001", dpkg_failed.stderr)
+        self.assertIn("mode=600", dpkg_result)
+        self.assertFalse(dpkg_stage_exists)
+
+        verify_failed, verify_result, _, verify_stage_exists = self._run_recovery_verify_harness(
+            dpkg_exit=0,
+            verifier_source="""#!/usr/bin/env bash
+for index in $(seq 1 90); do printf 'recovery-verify-line-%03d\n' "$index"; done
+exit 17
+""",
+        )
+        self.assertEqual(verify_failed.returncode, 17)
+        self.assertIn("recovery-verify-line-090", verify_failed.stderr)
+        self.assertNotIn("recovery-verify-line-001", verify_failed.stderr)
+        self.assertIn("native=FAIL", verify_result)
+        self.assertIn("mode=600", verify_result)
+        self.assertFalse(verify_stage_exists)
+
+    def test_dpkg_receives_only_root_owned_staged_copy_after_second_hash(self):
+        text = SILENT.read_text(encoding="utf-8")
+        self.assertIn("stage_candidate_for_install", text)
+        self.assertIn("stage_previous_for_rollback", text)
+        self.assertIn("mktemp -d /var/tmp/taiji-agent-deploy.XXXXXX", text)
+        self.assertIn("install -o 0 -g 0 -m 0600", text)
+        self.assertIn("STAGED_DEB_SHA256_MISMATCH", text)
+        self.assertIn("STAGED_PREVIOUS_DEB_SHA256_MISMATCH", text)
+        self.assertIn('dpkg --install --force-confold -- "$STAGED_PREVIOUS_DEB_PATH"', text)
+        main_body = text[text.index("main()") :]
+        self.assertLess(main_body.index("stage_candidate_for_install"), main_body.index("install_local_deb"))
+        self.assertLess(main_body.index("stage_previous_for_rollback"), main_body.index("prepare_upgrade_transaction"))
+        self.assertRegex(text, r"actual=\"\$\(sha256sum -- \"\$STAGED_DEB_PATH\"")
+
+    def test_wrapper_requires_explicit_challenge_for_certification(self):
+        with tempfile.TemporaryDirectory(prefix="taiji-wrapper-") as temporary:
+            root = Path(temporary)
+            output = root / "生成的安装包"
+            output.mkdir()
+            deb = output / "taiji-agent_1.2.3_amd64.deb"
+            deb.write_bytes(b"fake")
+            import hashlib
+
+            sha = hashlib.sha256(deb.read_bytes()).hexdigest()
+            (deb.with_name(deb.name + ".sha256")).write_text(f"{sha}  {deb.name}\n", encoding="utf-8")
+            policy = ROOT / "packaging/linux/compatibility-policy.json"
+            policy_sha = hashlib.sha256(policy.read_bytes()).hexdigest()
+            (output / "taiji-package-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "taiji-package-manifest/v3",
+                        "package": "taiji-agent",
+                        "version": "1.2.3",
+                        "architecture": "amd64",
+                        "source_commit": "a" * 40,
+                        "deb_basename": deb.name,
+                        "deb_sha256": sha,
+                        "compatibility_policy_id": "taiji-linux-amd64-deb-v1",
+                        "compatibility_policy_sha256": policy_sha,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", str(WRAPPER)],
+                env={
+                    **os.environ,
+                    "TAIJI_OUTPUT_DIR": str(output),
+                    "TAIJI_BUILD_MANIFEST": str(output / "taiji-package-manifest.json"),
+                    "TAIJI_POLICY_PATH": str(policy),
+                    "TAIJI_RECEIPT_PATH": str(root / "receipt.json"),
+                    "PATH": os.environ.get("PATH", ""),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("一次性", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

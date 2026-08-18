@@ -1,17 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 027
 
-chmod +x /opt/taiji-agent/scripts/*.sh \
-  /opt/taiji-agent/scripts/taiji-native-verify \
-  /opt/taiji-agent/scripts/taiji-agent-diagnose \
-  /opt/taiji-agent/scripts/sync-packaged-config.py 2>/dev/null || true
-chmod +x /usr/bin/taiji-agent /usr/bin/taiji 2>/dev/null || true
+# This maintainer script is package-only: it never invokes a package manager and never
+# resolves or writes a user's HOME/XDG tree.  User data transactions are
+# owned by the management-plane upgrade journal.
+INSTALL_ROOT="/opt/taiji-agent"
+SYSTEM_STATE_ROOT="/var/lib/taiji-agent"
+SYSTEM_LOG_ROOT="/var/log/taiji-agent"
+VERIFY_LOG="$SYSTEM_LOG_ROOT/postinst-verify.log"
 
-chrome_sandbox="/opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/chrome-sandbox"
-if [ -f "$chrome_sandbox" ]; then
-  chown root:root "$chrome_sandbox" 2>/dev/null || true
-  chmod 4755 "$chrome_sandbox" 2>/dev/null || true
+require_regular_file() {
+  local path="$1"
+  [ -f "$path" ] && [ ! -L "$path" ] || {
+    printf '[FAIL] required packaged file is missing or unsafe: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+for required_script in \
+  start-agent.sh \
+  start-webui.sh \
+  stop-all.sh \
+  runtime-env.sh \
+  taiji-native-verify \
+  taiji-agent-diagnose \
+  support_bundle.py \
+  sync-packaged-config.py; do
+  require_regular_file "$INSTALL_ROOT/scripts/$required_script"
+  chmod 0755 "$INSTALL_ROOT/scripts/$required_script"
+done
+unset required_script
+
+for launcher in /usr/bin/taiji-agent /usr/bin/taiji /usr/bin/taiji-agent-support; do
+  require_regular_file "$launcher"
+  chmod 0755 "$launcher"
+done
+unset launcher
+
+chrome_sandbox="$INSTALL_ROOT/apps/taiji-desktop/node_modules/electron/dist/chrome-sandbox"
+require_regular_file "$chrome_sandbox"
+chown root:root "$chrome_sandbox"
+chmod 4755 "$chrome_sandbox"
+sandbox_metadata="$(stat -c '%u:%g:%a' -- "$chrome_sandbox")"
+[ "$sandbox_metadata" = "0:0:4755" ] || {
+  printf '[FAIL] chrome-sandbox owner/mode verification failed: %s\n' "$sandbox_metadata" >&2
+  exit 1
+}
+
+install -d -o root -g root -m 0750 \
+  "$SYSTEM_STATE_ROOT" \
+  "$SYSTEM_STATE_ROOT/runtime-home" \
+  "$SYSTEM_STATE_ROOT/workspace" \
+  "$SYSTEM_STATE_ROOT/tmp" \
+  "$SYSTEM_LOG_ROOT"
+
+native_verify="$INSTALL_ROOT/bin/taiji-native-verify"
+require_regular_file "$native_verify"
+chmod 0755 "$native_verify"
+if ! env -i \
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 \
+  "$native_verify" --system-only >"$VERIFY_LOG" 2>&1; then
+  printf '[FAIL] installed payload verification failed; see %s\n' "$VERIFY_LOG" >&2
+  exit 1
 fi
+chmod 0640 "$VERIFY_LOG"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
@@ -19,10 +73,6 @@ fi
 
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
-fi
-
-if [ -x /opt/taiji-agent/bin/taiji-native-verify ]; then
-  TAIJI_AGENT_USE_USER_DIRS=0 /opt/taiji-agent/bin/taiji-native-verify >/var/log/taiji-agent-postinst-verify.log 2>&1 || true
 fi
 
 exit 0

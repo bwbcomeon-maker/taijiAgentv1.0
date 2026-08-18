@@ -357,6 +357,128 @@ def test_production_rejects_untrusted_license_file_shape(
     assert status.code == "license_file_untrusted"
 
 
+def test_production_user_file_accepts_root_group_writable_root_parent(
+    monkeypatch, tmp_path
+):
+    candidate = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("signed-token\n", encoding="utf-8")
+    candidate.chmod(0o600)
+    real_lstat = taiji_license.Path.lstat
+
+    def kylin_root_lstat(path):
+        result = real_lstat(path)
+        if path == taiji_license.Path("/"):
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o775,
+                st_uid=0,
+                st_gid=0,
+                st_nlink=result.st_nlink,
+            )
+        if path in candidate.parents:
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_uid=os.getuid(),
+                st_gid=os.getgid(),
+                st_nlink=result.st_nlink,
+            )
+        return result
+
+    monkeypatch.setattr(taiji_license.Path, "lstat", kylin_root_lstat)
+
+    assert taiji_license._validate_production_user_file(candidate, required=True)
+
+
+def test_production_public_key_accepts_root_group_writable_root_parent(
+    monkeypatch, tmp_path, signing_keys
+):
+    _, public_key = signing_keys
+    key_path = tmp_path / "opt/taiji-agent/resources/license/signing-public.pem"
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text(public_key, encoding="utf-8")
+    key_path.chmod(0o644)
+    real_lstat = taiji_license.Path.lstat
+
+    def root_owned_lstat(path):
+        result = real_lstat(path)
+        if path == key_path:
+            mode = stat.S_IFREG | 0o644
+        elif path == taiji_license.Path("/"):
+            mode = stat.S_IFDIR | 0o775
+        else:
+            mode = stat.S_IFDIR | 0o755
+        return types.SimpleNamespace(
+            st_mode=mode,
+            st_uid=0,
+            st_gid=0,
+            st_nlink=result.st_nlink,
+        )
+
+    monkeypatch.setattr(taiji_license.Path, "lstat", root_owned_lstat)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_PUBLIC_KEY_PATH", key_path)
+    policy = taiji_license.replace(
+        taiji_license.production_license_policy(),
+        public_key_path=key_path,
+        public_key_fingerprint=taiji_license._public_key_fingerprint(public_key),
+    )
+
+    assert taiji_license._load_production_public_key(policy) == public_key.strip()
+
+
+def test_production_version_accepts_root_group_writable_root_parent(
+    monkeypatch, tmp_path
+):
+    version_path = tmp_path / "opt/taiji-agent/VERSION"
+    version_path.parent.mkdir(parents=True)
+    version_path.write_text("1.0.2\n", encoding="utf-8")
+    version_path.chmod(0o644)
+    real_lstat = taiji_license.Path.lstat
+
+    def root_owned_lstat(path):
+        result = real_lstat(path)
+        if path == version_path:
+            mode = stat.S_IFREG | 0o644
+        elif path == taiji_license.Path("/"):
+            mode = stat.S_IFDIR | 0o775
+        else:
+            mode = stat.S_IFDIR | 0o755
+        return types.SimpleNamespace(
+            st_mode=mode,
+            st_uid=0,
+            st_gid=0,
+            st_nlink=result.st_nlink,
+        )
+
+    monkeypatch.setattr(taiji_license.Path, "lstat", root_owned_lstat)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_VERSION_PATH", version_path)
+
+    assert taiji_license._load_production_version() == "1.0.2"
+
+
+@pytest.mark.parametrize(
+    ("uid", "gid", "mode", "user_uid"),
+    [
+        (0, 100, 0o775, None),
+        (0, 0, 0o777, None),
+        (1000, 1000, 0o770, 1000),
+        (1001, 1001, 0o755, 1000),
+    ],
+)
+def test_production_parent_trust_rejects_non_privileged_writers(
+    uid, gid, mode, user_uid
+):
+    parent_stat = types.SimpleNamespace(
+        st_mode=stat.S_IFDIR | mode,
+        st_uid=uid,
+        st_gid=gid,
+    )
+
+    assert not taiji_license._trusted_production_parent(
+        parent_stat,
+        user_uid=user_uid,
+    )
+
+
 def test_production_version_input_overwrites_user_environment(
     monkeypatch, tmp_path, installed_production_profile
 ):

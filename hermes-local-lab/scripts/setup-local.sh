@@ -15,21 +15,35 @@ fi
 
 sync_agent_dependencies() {
   local lock_mode="${TAIJI_UV_LOCK_MODE:-auto}"
+  local dependency_profile="${TAIJI_DEPENDENCY_PROFILE:-development}"
+  local -a sync_args=(--extra all)
+
+  case "$dependency_profile" in
+    development)
+      sync_args+=(--extra dev)
+      ;;
+    production)
+      ;;
+    *)
+      echo "Unsupported TAIJI_DEPENDENCY_PROFILE: $dependency_profile (expected development or production)" >&2
+      exit 1
+      ;;
+  esac
 
   case "$lock_mode" in
     strict)
-      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all --locked
+      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync "${sync_args[@]}" --locked
       ;;
     auto)
-      if UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all --locked; then
+      if UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync "${sync_args[@]}" --locked; then
         return 0
       fi
       echo "Warning: uv.lock sync failed; retrying without --locked in this build workspace." >&2
       echo "Warning: rerun with TAIJI_UV_LOCK_MODE=strict to require a current hash-verified lockfile." >&2
-      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all
+      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync "${sync_args[@]}"
       ;;
     unlocked)
-      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync --extra all
+      UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT="$AGENT_DIR/venv" uv sync "${sync_args[@]}"
       ;;
     *)
       echo "Unsupported TAIJI_UV_LOCK_MODE: $lock_mode (expected strict, auto, or unlocked)" >&2

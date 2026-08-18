@@ -2,10 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+TRUSTED_GIT="$ROOT_DIR/scripts/taiji-trusted-git"
 PUBLIC_KEY="$ROOT_DIR/tools/taiji-release-evidence/signing-public.pem"
 EXPECTED_FINGERPRINT="839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
-DELIVERY_DIR="$ROOT_DIR/taijiagent 打包交付"
-VALIDATOR="$ROOT_DIR/scripts/validate-taiji-release-evidence.py"
 
 fail() {
   printf 'release-evidence-sign-failed\t%s\n' "$*" >&2
@@ -19,6 +18,7 @@ SIGNATURE="${EVIDENCE}.sig"
 
 command -v openssl >/dev/null 2>&1 || fail "缺少 openssl"
 command -v python3 >/dev/null 2>&1 || fail "缺少 python3"
+[ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "仓库缺少可信 Git 边界"
 [ -f "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] || fail "证据必须是普通 JSON 文件且不能是符号链接"
 [ -f "$PRIVATE_KEY" ] && [ ! -L "$PRIVATE_KEY" ] || fail "发布私钥必须是普通文件且不能是符号链接"
 [ -f "$PUBLIC_KEY" ] && [ ! -L "$PUBLIC_KEY" ] || fail "仓库缺少固定验签公钥"
@@ -98,23 +98,23 @@ if len(raw) != evidence_stat.st_size:
 payload = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates)
 if type(payload) is not dict:
     raise SystemExit("top-level evidence must be an object")
-evidence_type = payload.get("evidence_type")
+schema = payload.get("schema")
 mode = {
-    "offline-install-rehearsal": "offline",
-    "target-desktop-verification": "target",
-}.get(evidence_type)
+    "taiji-linux-certification-set/v1": "certification",
+    "taiji-release-evidence/v3": "publication",
+}.get(schema)
 challenge = payload.get("challenge_nonce")
 if mode is None or type(challenge) is not str:
-    raise SystemExit("unsupported evidence_type or missing challenge_nonce")
+    raise SystemExit("当前 signer 只接受 certification-set v1 或 release-evidence v3")
 print(f"{mode}\t{challenge}")
 PY
  )" || fail "证据 JSON 无法严格解析"
 IFS=$'\t' read -r MODE CHALLENGE <<< "$metadata"
-if [ "$MODE" = "offline" ]; then
-  EXPECTED_CHALLENGE="${TAIJI_OFFLINE_REHEARSAL_CHALLENGE:-}"
-else
-  EXPECTED_CHALLENGE="${TAIJI_TARGET_ACCEPTANCE_CHALLENGE:-}"
-fi
+case "$MODE" in
+  certification) EXPECTED_CHALLENGE="${TAIJI_CERTIFICATION_CHALLENGE:-}" ;;
+  publication) EXPECTED_CHALLENGE="${TAIJI_PUBLICATION_CHALLENGE:-}" ;;
+  *) fail "当前 signer 只接受 taiji-linux-certification-set/v1 或 taiji-release-evidence/v3" ;;
+esac
 case "$EXPECTED_CHALLENGE" in
   ""|*[!0-9a-f]*) fail "签名前必须独立提供本次 64-128 位小写十六进制 challenge" ;;
 esac
@@ -122,6 +122,7 @@ esac
   || fail "签名前必须独立提供本次 64-128 位小写十六进制 challenge"
 [ "$CHALLENGE" = "$EXPECTED_CHALLENGE" ] \
   || fail "证据 challenge 与签名前独立提供的本次 challenge 不一致"
+[ ! -e "$SIGNATURE" ] && [ ! -L "$SIGNATURE" ] || fail "签名输出已存在，拒绝覆盖：$SIGNATURE"
 
 if ! public_fingerprint="$(openssl pkey -pubin -in "$PUBLIC_KEY" -outform DER 2>/dev/null | openssl dgst -sha256 -r | awk '{print $1}')"; then
   fail "无法读取固定验签公钥"
@@ -133,116 +134,90 @@ fi
 [ -n "$private_fingerprint" ] || fail "无法读取发布私钥"
 [ "$private_fingerprint" = "$public_fingerprint" ] || fail "发布私钥与产品固定验签公钥不匹配"
 
-TAIJI_RELEASE_SKIP_GIT_CHECK=0 \
-TAIJI_RELEASE_REQUIRE_ARTIFACTS=1 \
-TAIJI_REPO_ROOT="$ROOT_DIR" \
-  bash "$DELIVERY_DIR/01_制包机_发布预检.sh" \
-  || fail "真实发布预检未通过，拒绝签名"
-
-commit="$(git -C "$ROOT_DIR" rev-parse --short=8 HEAD)"
-deb_count="$(find "$DELIVERY_DIR/生成的安装包" -maxdepth 1 -type f -name 'taiji-agent_*.deb' | wc -l | tr -d ' ')"
-[ "$deb_count" = "1" ] || fail "当前 DEB 数量必须为 1"
-deb="$(find "$DELIVERY_DIR/生成的安装包" -maxdepth 1 -type f -name 'taiji-agent_*.deb' | head -n 1)"
-validator_args=(
-  "$MODE"
-  --evidence "$EVIDENCE"
-  --source-commit "$commit"
-  --deb "$deb"
-  --checksum "${deb}.sha256"
-  --manifest "$DELIVERY_DIR/生成的安装包/taiji-package-manifest.json"
-  --build-marker "$DELIVERY_DIR/生成的安装包/.build-success"
-  --source-archive "$DELIVERY_DIR/taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
-  --packages "$DELIVERY_DIR/离线依赖/Packages"
-  --packages-gz "$DELIVERY_DIR/离线依赖/Packages.gz"
-  --delivery-dir "$DELIVERY_DIR"
-  --attestation-public-key "$PUBLIC_KEY"
-  --attestation-public-key-fingerprint "$EXPECTED_FINGERPRINT"
-  --challenge "$EXPECTED_CHALLENGE"
-)
-python3 "$VALIDATOR" "${validator_args[@]}" --pre-sign \
-  || fail "证据内容/交付清单预签校验未通过"
-
-python3 - "$PRIVATE_KEY" "$MODE" "$EXPECTED_CHALLENGE" "$EVIDENCE" <<'PY' \
-  || fail "本次 challenge 已使用或发布私钥目录不安全；请生成新 challenge 后重新验收"
+if [ "$MODE" = "certification" ] || [ "$MODE" = "publication" ]; then
+  # Reserve the challenge before the cryptographic write.  The record is
+  # owner-only and keyed by mode, so a certification challenge cannot be
+  # replayed as a publication challenge (or vice versa).
+  python3 - "$PRIVATE_KEY" "$MODE" "$EXPECTED_CHALLENGE" "$EVIDENCE" <<'PY' \
+    || fail "本次 challenge 已使用或发布私钥目录不安全；请生成新 challenge 后重新验收"
 import hashlib
 import os
-from pathlib import Path
 import stat
 import sys
 from datetime import datetime, timezone
-
+from pathlib import Path
 
 private_key = Path(sys.argv[1])
 mode = sys.argv[2]
 challenge = sys.argv[3]
 evidence = Path(sys.argv[4])
-key_parent = private_key.parent
-directory_flags = (
-    os.O_RDONLY
-    | getattr(os, "O_CLOEXEC", 0)
-    | getattr(os, "O_DIRECTORY", 0)
-    | getattr(os, "O_NOFOLLOW", 0)
-)
-parent_descriptor = os.open(key_parent, directory_flags)
+parent = private_key.parent
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+parent_fd = os.open(parent, flags)
 try:
-    parent_stat = os.fstat(parent_descriptor)
-    if (
-        not stat.S_ISDIR(parent_stat.st_mode)
-        or parent_stat.st_uid != os.getuid()
-        or stat.S_IMODE(parent_stat.st_mode) & 0o077
-    ):
+    parent_stat = os.fstat(parent_fd)
+    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o077:
         raise SystemExit("unsafe private-key directory")
     state_name = ".taiji-release-evidence-used-challenges"
     try:
-        os.mkdir(state_name, mode=0o700, dir_fd=parent_descriptor)
-        os.fsync(parent_descriptor)
+        os.mkdir(state_name, 0o700, dir_fd=parent_fd)
+        os.fsync(parent_fd)
     except FileExistsError:
         pass
-    state_descriptor = os.open(state_name, directory_flags, dir_fd=parent_descriptor)
-    state_stat = os.fstat(state_descriptor)
-    if (
-        not stat.S_ISDIR(state_stat.st_mode)
-        or state_stat.st_uid != os.getuid()
-        or stat.S_IMODE(state_stat.st_mode) != 0o700
-    ):
-        raise SystemExit("unsafe challenge state directory")
-    evidence_hash = hashlib.sha256(evidence.read_bytes()).hexdigest()
-    record = (
-        f"mode={mode}\n"
-        f"challenge={challenge}\n"
-        f"evidence_sha256={evidence_hash}\n"
-        f"reserved_at_utc={datetime.now(timezone.utc).isoformat()}\n"
-    ).encode("ascii")
-    record_name = f"{mode}-{challenge}.used"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    record_descriptor = os.open(record_name, flags, 0o600, dir_fd=state_descriptor)
+    state_fd = os.open(state_name, flags, dir_fd=parent_fd)
     try:
-        written = 0
-        while written < len(record):
-            written += os.write(record_descriptor, record[written:])
-        os.fsync(record_descriptor)
+        state_stat = os.fstat(state_fd)
+        if not stat.S_ISDIR(state_stat.st_mode) or state_stat.st_uid != os.getuid() or stat.S_IMODE(state_stat.st_mode) != 0o700:
+            raise SystemExit("unsafe challenge state directory")
+        record = (
+            f"mode={mode}\nchallenge={challenge}\nevidence_sha256={hashlib.sha256(evidence.read_bytes()).hexdigest()}\n"
+            f"reserved_at_utc={datetime.now(timezone.utc).isoformat()}\n"
+        ).encode("ascii")
+        record_fd = os.open(
+            f"{mode}-{challenge}.used",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=state_fd,
+        )
+        try:
+            view = memoryview(record)
+            while view:
+                written = os.write(record_fd, view)
+                if written <= 0:
+                    raise SystemExit("challenge record write failed")
+                view = view[written:]
+            os.fsync(record_fd)
+        finally:
+            os.close(record_fd)
+        os.fsync(state_fd)
     finally:
-        os.close(record_descriptor)
-    os.fsync(state_descriptor)
+        os.close(state_fd)
 finally:
-    if "state_descriptor" in locals():
-        os.close(state_descriptor)
-    os.close(parent_descriptor)
+    os.close(parent_fd)
 PY
 
-umask 077
-tmp_signature="$(mktemp "${SIGNATURE}.tmp.XXXXXX")"
-cleanup() {
-  rm -f "$tmp_signature"
-}
-trap cleanup EXIT
-openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "$tmp_signature" "$EVIDENCE" \
-  || fail "证据签名失败"
-openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$tmp_signature" "$EVIDENCE" >/dev/null \
-  || fail "证据签名回读验证失败"
-chmod 0644 "$tmp_signature"
-python3 "$VALIDATOR" "${validator_args[@]}" --attestation-signature "$tmp_signature" \
-  || fail "签名后的完整证据门禁未通过"
-mv -f "$tmp_signature" "$SIGNATURE"
-trap - EXIT
-printf 'release-evidence-signed\t%s\n' "$SIGNATURE"
+  umask 077
+  tmp_signature="$(mktemp "${SIGNATURE}.tmp.XXXXXX")"
+  cleanup_current() { rm -f "$tmp_signature"; }
+  trap cleanup_current EXIT
+  openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "$tmp_signature" "$EVIDENCE" || fail "证据签名失败"
+  openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$tmp_signature" "$EVIDENCE" >/dev/null \
+    || fail "证据签名回读验证失败"
+  chmod 0644 "$tmp_signature"
+  python3 - "$tmp_signature" "$SIGNATURE" <<'PY' \
+    || fail "签名输出已被替换，拒绝覆盖"
+import os
+import sys
+source, destination = sys.argv[1:]
+try:
+    os.link(source, destination)
+except FileExistsError:
+    raise SystemExit(1)
+os.unlink(source)
+PY
+  trap - EXIT
+  printf 'release-evidence-signed\t%s\n' "$SIGNATURE"
+  exit 0
+fi
+
+fail "当前 signer 只接受 certification-set v1 或 release-evidence v3"

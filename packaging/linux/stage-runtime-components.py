@@ -20,6 +20,9 @@ PUBLIC_KEY_FINGERPRINT = "2dcff4f2b5e6f7a5e7e3f730e2f4446ad3265964431f614de75502
 ALLOWLIST_SCHEMA = "taiji-product-skills-allowlist/v1"
 MANIFEST_SCHEMA = "taiji-product-skills/v1"
 SKILL_PRODUCTIZATION = "skill-md-visible-branding-v1"
+RESVG_META_PACKAGE = "resvg-js"
+RESVG_LINUX_X64_GNU_PACKAGE = "resvg-js-linux-x64-gnu"
+RESVG_LINUX_X64_GNU_MAIN = "resvgjs.linux-x64-gnu.node"
 PRUNED_NAMES = {
     ".cache",
     ".coverage",
@@ -107,11 +110,70 @@ def ignored_names(_directory: str, names: list[str]) -> set[str]:
     return ignored
 
 
-def copy_filtered(source: Path, destination: Path) -> None:
+def copy_filtered(source: Path, destination: Path, *, ignore=ignored_names) -> None:
     assert_safe_symlinks(source, label=str(source))
     shutil.rmtree(destination, ignore_errors=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, symlinks=True, ignore=ignored_names)
+    shutil.copytree(source, destination, symlinks=True, ignore=ignore)
+
+
+def docx_node_modules_ignored(directory: str, names: list[str]) -> set[str]:
+    ignored = ignored_names(directory, names)
+    if Path(directory).name == "@resvg":
+        ignored.update(
+            name
+            for name in names
+            if name.startswith("resvg-js-") and name != RESVG_LINUX_X64_GNU_PACKAGE
+        )
+    return ignored
+
+
+def validate_staged_docx_resvg(engine_root: Path) -> None:
+    scope = engine_root / "node_modules/@resvg"
+    meta_package = scope / RESVG_META_PACKAGE / "package.json"
+    if meta_package.is_symlink() or not meta_package.is_file():
+        raise StageError("staged DOCX Engine is missing regular @resvg/resvg-js package metadata")
+    meta = json.loads(meta_package.read_text(encoding="utf-8"))
+    if meta.get("name") != "@resvg/resvg-js" or meta.get("version") != "2.6.2":
+        raise StageError("staged DOCX Engine requires exact @resvg/resvg-js@2.6.2")
+
+    platform_packages = {
+        candidate.name for candidate in scope.iterdir() if candidate.name.startswith("resvg-js-")
+    }
+    if platform_packages != {RESVG_LINUX_X64_GNU_PACKAGE}:
+        raise StageError(
+            "staged DOCX Engine resvg native package set must be exactly "
+            f"{RESVG_LINUX_X64_GNU_PACKAGE}: {sorted(platform_packages)}"
+        )
+
+    package_root = scope / RESVG_LINUX_X64_GNU_PACKAGE
+    package_json = package_root / "package.json"
+    native = package_root / RESVG_LINUX_X64_GNU_MAIN
+    if package_json.is_symlink() or not package_json.is_file():
+        raise StageError(f"staged DOCX Engine is missing {RESVG_LINUX_X64_GNU_PACKAGE} metadata")
+    package = json.loads(package_json.read_text(encoding="utf-8"))
+    expected = {
+        "name": "@resvg/resvg-js-linux-x64-gnu",
+        "version": "2.6.2",
+        "os": ["linux"],
+        "cpu": ["x64"],
+        "libc": ["glibc"],
+        "main": RESVG_LINUX_X64_GNU_MAIN,
+    }
+    if any(package.get(key) != value for key, value in expected.items()):
+        raise StageError(f"staged DOCX Engine {RESVG_LINUX_X64_GNU_PACKAGE} metadata mismatch")
+    if native.is_symlink() or not native.is_file():
+        raise StageError(f"staged DOCX Engine is missing regular {RESVG_LINUX_X64_GNU_MAIN}")
+    header = native.read_bytes()[:24]
+    if (
+        len(header) < 24
+        or header[:4] != b"\x7fELF"
+        or header[4] != 2
+        or header[5] != 1
+        or header[6] != 1
+        or int.from_bytes(header[18:20], "little") != 62
+    ):
+        raise StageError(f"staged DOCX Engine {RESVG_LINUX_X64_GNU_MAIN} is not Linux ELF64 x86_64")
 
 
 def remove_declared_excludes(root: Path, excludes: Iterable[object], *, skill_id: str) -> None:
@@ -398,10 +460,16 @@ def stage_components(repo_root: Path, install_root: Path, node_root: Path, expec
     engine_destination = install_root / "runtime/docx-engine-v2"
     shutil.rmtree(engine_destination, ignore_errors=True)
     engine_destination.mkdir(parents=True)
-    for directory in ("src", "node_modules", "templates"):
+    for directory in ("src", "templates"):
         copy_filtered(docx_source / directory, engine_destination / directory)
+    copy_filtered(
+        docx_source / "node_modules",
+        engine_destination / "node_modules",
+        ignore=docx_node_modules_ignored,
+    )
     for filename in ("package.json", "package-lock.json", "template-registry.json"):
         shutil.copy2(docx_source / filename, engine_destination / filename)
+    validate_staged_docx_resvg(engine_destination)
     engine_destination.chmod(0o755)
     make_template_seed_read_only(engine_destination)
 

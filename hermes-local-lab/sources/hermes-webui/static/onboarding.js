@@ -1,10 +1,11 @@
-const ONBOARDING={status:null,step:0,steps:['system','setup','workspace','password','finish'],form:{provider:'openrouter',workspace:'',model:'',password:'',apiKey:'',baseUrl:''},active:false,probe:{status:'idle',error:null,detail:'',models:null,probedKey:''}};
+const ONBOARDING={status:null,step:0,steps:['system','setup','workspace','password','finish'],form:{provider:'openrouter',workspace:'',model:'',password:'',apiKey:'',baseUrl:''},active:false,statusLoadFailed:false,probe:{status:'idle',error:null,detail:'',models:null,probedKey:''},preflight:null,preflightState:'idle',preflightError:'',retryingCheck:'',busy:false,savedOnce:false,confirmOverwrite:false,overwriteConflict:null};
+const ONBOARDING_SETUP_ITEM_IDS=['license','model','workspace','security'];
 let _onboardingDialog=null;
 
 function _getOnboardingDialog(){
   if(!_onboardingDialog){
     _onboardingDialog=ManagedDialog.create($('onboardingOverlay'),{
-      initialFocus:'#onboardingNextBtn',
+      initialFocus:'#onboardingTitle',
       returnFocus:'#msg',
       closeOnBackdrop:false,
       display:'flex',
@@ -12,6 +13,16 @@ function _getOnboardingDialog(){
     });
   }
   return _onboardingDialog;
+}
+
+function _syncOnboardingResumeEntry(){
+  const resume=$('onboardingResumeBtn');
+  if(!resume)return;
+  const overlay=$('onboardingOverlay');
+  const dialogOpen=!!overlay&&overlay.style.display!=='none';
+  const incomplete=!!ONBOARDING.status&&ONBOARDING.status.completed!==true;
+  resume.hidden=!incomplete||dialogOpen;
+  resume.setAttribute('aria-expanded',dialogOpen?'true':'false');
 }
 
 // ── Onboarding base-URL probe (#1499) ───────────────────────────────────────
@@ -28,8 +39,25 @@ function _onboardingProbeKey(provider,baseUrl,apiKey){
 
 function _setOnboardingProbeState(patch){
   ONBOARDING.probe={...ONBOARDING.probe,...patch};
-  // Re-render body so probe status / model dropdown reflect new state.
-  _renderOnboardingBody();
+  _syncOnboardingProbeUi();
+}
+
+function _syncOnboardingProbeUi(){
+  const probe=ONBOARDING.probe||{status:'idle'};
+  const status=$('onboardingProbeStatus');
+  const button=$('onboardingProbeBtn');
+  if(status){
+    const msg=_onboardingProbeMessage(probe);
+    status.textContent=msg;
+    status.style.display=msg?'block':'none';
+    status.className='onboarding-copy onboarding-probe-banner '+({ok:'onboarding-probe-ok',probing:'onboarding-probe-probing',error:'onboarding-probe-error'}[probe.status]||'');
+  }
+  if(button){
+    const probing=probe.status==='probing';
+    button.disabled=probing;
+    button.setAttribute('aria-busy',probing?'true':'false');
+  }
+  _syncOnboardingActionState();
 }
 
 async function _runOnboardingProbe({force=false}={}){
@@ -60,7 +88,7 @@ async function _runOnboardingProbe({force=false}={}){
       const stillPresent=ONBOARDING.form.model&&(res.models||[]).some(m=>m.id===ONBOARDING.form.model);
       if(!stillPresent&&(res.models||[]).length>0){
         ONBOARDING.form.model=res.models[0].id;
-        _renderOnboardingBody();
+        _markOnboardingDirty();
       }
     }else{
       const err=(res&&res.error)||'unreachable';
@@ -149,6 +177,8 @@ function _renderOnboardingSteps(){
     const meta=_onboardingStepMeta(key);
     const item=document.createElement('div');
     item.className='onboarding-step'+(idx===ONBOARDING.step?' active':idx<ONBOARDING.step?' done':'');
+    item.setAttribute('role','listitem');
+    if(idx===ONBOARDING.step)item.setAttribute('aria-current','step');
     item.innerHTML=`<div class="onboarding-step-index">${idx+1}</div><div><div class="onboarding-step-title">${meta.title}</div><div class="onboarding-step-desc">${meta.desc}</div></div>`;
     wrap.appendChild(item);
   });
@@ -161,6 +191,173 @@ function _setOnboardingNotice(msg,kind='info'){
   el.style.display='block';
   el.className='onboarding-status '+kind;
   el.textContent=msg;
+}
+
+function _setOnboardingBusy(busy){
+  ONBOARDING.busy=!!busy;
+  const body=$('onboardingBody');
+  const actions=$('onboardingActions');
+  if(body)body.setAttribute('aria-busy',ONBOARDING.busy?'true':'false');
+  if(actions)actions.setAttribute('aria-busy',ONBOARDING.busy?'true':'false');
+  _syncOnboardingActionState();
+}
+
+function _syncOnboardingActionState(){
+  const key=ONBOARDING.steps[ONBOARDING.step];
+  const nextBtn=$('onboardingNextBtn');
+  const backBtn=$('onboardingBackBtn');
+  const skipBtn=$('onboardingSkipBtn');
+  const preflightReady=!!(ONBOARDING.preflight&&ONBOARDING.preflight.overall_ready);
+  const finishBlocked=key==='finish'&&ONBOARDING.savedOnce&&(!preflightReady||ONBOARDING.preflightState!=='ready');
+  const initialStatusBlocked=key==='system'&&ONBOARDING.statusLoadFailed;
+  const setupProvider=_getOnboardingSetupProvider(ONBOARDING.form.provider);
+  const setupProbeBlocked=key==='setup'&&!!(setupProvider&&setupProvider.requires_base_url)&&ONBOARDING.probe.status!=='ok';
+  if(nextBtn){
+    nextBtn.disabled=ONBOARDING.busy||initialStatusBlocked||setupProbeBlocked||finishBlocked||!!ONBOARDING.overwriteConflict;
+    nextBtn.setAttribute('aria-disabled',nextBtn.disabled?'true':'false');
+    nextBtn.setAttribute('aria-busy',ONBOARDING.busy?'true':'false');
+    nextBtn.textContent=key==='finish'
+      ? (preflightReady?t('onboarding_open'):'保存并重新检查')
+      : t('onboarding_continue');
+  }
+  if(backBtn){
+    backBtn.disabled=ONBOARDING.busy;
+    backBtn.setAttribute('aria-disabled',backBtn.disabled?'true':'false');
+  }
+  if(skipBtn){
+    skipBtn.disabled=ONBOARDING.busy;
+    skipBtn.setAttribute('aria-disabled',skipBtn.disabled?'true':'false');
+  }
+}
+
+function _markOnboardingDirty(){
+  ONBOARDING.savedOnce=false;
+  ONBOARDING.confirmOverwrite=false;
+  ONBOARDING.overwriteConflict=null;
+  _syncOnboardingActionState();
+}
+
+function _setupStatusItem(id){
+  const items=Array.isArray((ONBOARDING.preflight||{}).items)?ONBOARDING.preflight.items:[];
+  return items.find(item=>item&&item.id===id)||null;
+}
+
+function _renderSetupWorkbench(){
+  if(ONBOARDING.statusLoadFailed&&ONBOARDING.preflightState!=='loading'){
+    return `<div class="onboarding-workbench-state error" role="status" aria-live="polite" aria-atomic="true"><strong>检查失败</strong><span>${esc(ONBOARDING.preflightError||'无法读取首次启动状态。')}</span><button type="button" class="sm-btn" id="onboardingStatusRetryBtn" onclick="retryOnboardingStatus()">重新检查</button></div>`;
+  }
+  if(ONBOARDING.preflightState==='loading'){
+    return `<div class="onboarding-workbench-state" role="status" aria-live="polite" aria-atomic="true"><strong>正在检查…</strong><span>正在读取授权、模型、工作区和安全策略。</span></div>`;
+  }
+  if(ONBOARDING.preflightState==='error'){
+    const retryAction=ONBOARDING.statusLoadFailed?'retryOnboardingStatus()':"retryOnboardingCheck('all')";
+    const retryId=ONBOARDING.statusLoadFailed?' id="onboardingStatusRetryBtn"':'';
+    return `<div class="onboarding-workbench-state error" role="status" aria-live="polite" aria-atomic="true"><strong>检查失败</strong><span>${esc(ONBOARDING.preflightError||'无法读取当前状态。')}</span><button type="button" class="sm-btn"${retryId} onclick="${retryAction}">重新检查</button></div>`;
+  }
+  const rawItems=Array.isArray((ONBOARDING.preflight||{}).items)?ONBOARDING.preflight.items:[];
+  const items=ONBOARDING_SETUP_ITEM_IDS.map(id=>rawItems.find(item=>item&&item.id===id)).filter(Boolean);
+  if(!items.length){
+    return `<div class="onboarding-workbench-state empty" role="status" aria-live="polite" aria-atomic="true"><strong>暂无检查项</strong><span>请重新读取当前状态。</span><button type="button" class="sm-btn" onclick="retryOnboardingCheck('all')">重新检查</button></div>`;
+  }
+  const rows=items.map(item=>{
+    const id=item.id;
+    const ready=!!item.ready;
+    const retrying=ONBOARDING.retryingCheck===id||ONBOARDING.retryingCheck==='all';
+    const recovery=item.recovery||{};
+    const statusLabel=ready?'已就绪':(item.status==='unavailable'?'暂不可用':'需要处理');
+    const recoveryButton=!ready&&recovery.id
+      ? `<button type="button" class="sm-btn onboarding-check-action" onclick="openOnboardingRecovery('${id}')">${esc(recovery.label||'去处理')}</button>`
+      : '';
+    return `<div class="onboarding-check-row ${ready?'ready':'blocked'}" id="onboardingCheck-${id}" data-setup-check="${id}" role="listitem" tabindex="-1">
+      <div class="onboarding-check-copy"><div class="onboarding-check-heading"><strong>${esc(item.label||id)}</strong><span class="onboarding-check-badge">${statusLabel}</span></div><p>${esc(item.reason||'状态暂时不可用。')}</p></div>
+      <div class="onboarding-check-actions">${recoveryButton}<button type="button" class="sm-btn onboarding-check-retry" onclick="retryOnboardingCheck('${id}')" aria-label="重新检查${esc(item.label||id)}" ${retrying?'disabled aria-busy="true"':''}>${retrying?'检查中…':'重新检查'}</button></div>
+    </div>`;
+  }).join('');
+  const overall=ONBOARDING.preflight&&ONBOARDING.preflight.overall_ready;
+  return `<div class="onboarding-check-list" role="list" aria-live="polite" aria-atomic="false">${rows}</div><p class="onboarding-workbench-summary ${overall?'success':'pending'}" role="status">${overall?'全部检查已通过，可以完成设置。':'尚有检查项未通过，请处理后重新检查。'}</p>`;
+}
+
+async function _loadSetupPreflight({focusId=''}={}){
+  ONBOARDING.preflightState='loading';
+  ONBOARDING.preflightError='';
+  ONBOARDING.retryingCheck=focusId||'all';
+  _renderOnboardingBody();
+  try{
+    ONBOARDING.preflight=await api('/api/setup/status');
+    ONBOARDING.preflightState='ready';
+    return ONBOARDING.preflight;
+  }catch(e){
+    ONBOARDING.preflight=null;
+    ONBOARDING.preflightState='error';
+    ONBOARDING.preflightError=(e&&e.message)||String(e);
+    throw e;
+  }finally{
+    ONBOARDING.retryingCheck='';
+    _renderOnboardingBody();
+    const focusTarget=focusId&&focusId!=='all'?$(`onboardingCheck-${focusId}`):document.querySelector('.onboarding-workbench-state button');
+    if(focusTarget)focusTarget.focus();
+  }
+}
+
+async function retryOnboardingCheck(id){
+  if(ONBOARDING.busy||ONBOARDING.retryingCheck)return;
+  try{
+    await _loadSetupPreflight({focusId:ONBOARDING_SETUP_ITEM_IDS.includes(id)?id:'all'});
+  }catch(e){
+    _setOnboardingNotice('检查失败：'+((e&&e.message)||String(e)),'warn');
+  }
+}
+
+async function retryOnboardingStatus(){
+  if(ONBOARDING.busy)return;
+  ONBOARDING.preflightState='loading';
+  ONBOARDING.preflightError='';
+  _renderOnboardingBody();
+  await loadOnboardingWizard();
+  const retry=$('onboardingStatusRetryBtn')||document.querySelector('.onboarding-check-row.blocked');
+  if(retry)retry.focus();
+}
+
+function openOnboardingRecovery(id){
+  const item=_setupStatusItem(id);
+  const recovery=(item&&item.recovery)||{};
+  if(recovery.target_step&&ONBOARDING.steps.includes(recovery.target_step)){
+    _markOnboardingDirty();
+    ONBOARDING.step=ONBOARDING.steps.indexOf(recovery.target_step);
+    _renderOnboardingSteps();
+    _renderOnboardingBody();
+    const target=$('onboardingProviderSelect')||$('onboardingWorkspaceInput')||$('onboardingNextBtn');
+    if(target)target.focus();
+    return;
+  }
+  if(recovery.target_section&&typeof switchSettingsSection==='function'){
+    dismissOnboardingWizard({focusResume:false});
+    switchSettingsSection(recovery.target_section);
+    requestAnimationFrame(()=>focusSettingsRecoveryTarget(recovery.target_section));
+    showToast('处理完成后点击“继续配置·开始使用检查”返回检查。',5000,'info');
+    return;
+  }
+  retryOnboardingCheck(id);
+}
+
+function focusSettingsRecoveryTarget(section){
+  const activePane=document.querySelector('[id^="settingsPane"].active');
+  const heading=activePane&&activePane.querySelector('.settings-section-title');
+  const fallback=document.querySelector(`#settingsMenu [data-settings-section="${CSS.escape(section||'')}"]`);
+  const target=heading||fallback;
+  if(!target)return;
+  if(!target.matches('button,a,input,select,textarea,[tabindex]'))target.setAttribute('tabindex','-1');
+  target.focus();
+}
+
+function _renderOnboardingOverwriteConflict(){
+  const conflict=ONBOARDING.overwriteConflict;
+  if(!conflict)return '';
+  return `<div class="onboarding-conflict" role="alert" aria-labelledby="onboardingConflictTitle" aria-describedby="onboardingConflictMessage">
+    <strong id="onboardingConflictTitle">已存在配置，需要你确认</strong>
+    <p id="onboardingConflictMessage">${esc(conflict.message||'当前终端已有模型配置。覆盖后将使用本次选择，其他设置保持不变。')}</p>
+    <div class="onboarding-conflict-actions"><button type="button" class="sm-btn" onclick="cancelOnboardingOverwrite()">返回检查</button><button type="button" class="sm-btn primary" id="onboardingConfirmOverwriteBtn" onclick="confirmOnboardingOverwrite()">确认覆盖并重试</button></div>
+  </div>`;
 }
 
 function _getOnboardingWorkspaceChoices(){
@@ -196,14 +393,11 @@ function _renderOnboardingBaseUrlField(showBaseUrl){
   if(!showBaseUrl)return '';
   const probe=ONBOARDING.probe||{status:'idle'};
   const msg=_onboardingProbeMessage(probe);
-  let banner='';
-  if(msg){
-    const cls={ok:'onboarding-probe-ok',probing:'onboarding-probe-probing',error:'onboarding-probe-error'}[probe.status]||'';
-    banner=`<p class="onboarding-copy onboarding-probe-banner ${cls}">${esc(msg)}</p>`;
-  }
+  const cls={ok:'onboarding-probe-ok',probing:'onboarding-probe-probing',error:'onboarding-probe-error'}[probe.status]||'';
+  const banner=`<p id="onboardingProbeStatus" class="onboarding-copy onboarding-probe-banner ${cls}" role="status" aria-live="polite" aria-atomic="true" style="display:${msg?'block':'none'}">${esc(msg)}</p>`;
   const testBtnLabel=t('onboarding_probe_test_button')||'Test connection';
   const testBtnDisabled=(probe.status==='probing')?'disabled':'';
-  return `<label class="onboarding-field"><span>${t('onboarding_base_url_label')}</span><input id="onboardingBaseUrlInput" value="${esc(ONBOARDING.form.baseUrl||'')}" placeholder="${t('onboarding_base_url_placeholder')}" oninput="ONBOARDING.form.baseUrl=this.value;_scheduleOnboardingProbe()" onblur="_runOnboardingProbe()"></label><div class="onboarding-probe-row"><button type="button" class="onboarding-probe-btn" ${testBtnDisabled} onclick="_runOnboardingProbe({force:true})">${esc(testBtnLabel)}</button></div>${banner}`;
+  return `<label class="onboarding-field"><span>${t('onboarding_base_url_label')}</span><input id="onboardingBaseUrlInput" value="${esc(ONBOARDING.form.baseUrl||'')}" placeholder="${t('onboarding_base_url_placeholder')}" oninput="ONBOARDING.form.baseUrl=this.value;_markOnboardingDirty();_scheduleOnboardingProbe()" onblur="_runOnboardingProbe()"></label><div class="onboarding-probe-row"><button type="button" class="onboarding-probe-btn" id="onboardingProbeBtn" aria-busy="${probe.status==='probing'?'true':'false'}" ${testBtnDisabled} onclick="_runOnboardingProbe({force:true})">${esc(testBtnLabel)}</button></div>${banner}`;
 }
 
 function _renderOnboardingApiKeyField(){
@@ -218,7 +412,7 @@ function _renderOnboardingApiKeyField(){
   const labelKey=keyOptional?'onboarding_api_key_label_optional':'onboarding_api_key_label';
   const placeholderKey=keyOptional?'onboarding_api_key_placeholder_optional':'onboarding_api_key_placeholder';
   const helpHtml=keyOptional?`<p class="onboarding-copy onboarding-api-key-help">${esc(t('onboarding_api_key_help_keyless')||'')}</p>`:'';
-  return `<label class="onboarding-field" id="onboardingApiKeyField"><span>${t(labelKey)}</span><input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t(placeholderKey)}" oninput="ONBOARDING.form.apiKey=this.value" onblur="_runOnboardingProbe()"></label>${helpHtml}`;
+  return `<label class="onboarding-field" id="onboardingApiKeyField"><span>${t(labelKey)}</span><input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t(placeholderKey)}" oninput="ONBOARDING.form.apiKey=this.value;_markOnboardingDirty()" onblur="_runOnboardingProbe()"></label>${helpHtml}`;
 }
 
 function _getOnboardingSelectedModel(){
@@ -228,10 +422,10 @@ function _getOnboardingSelectedModel(){
 function _renderOnboardingModelField(){
   const choices=_getOnboardingProviderModelChoices();
   if(ONBOARDING.form.provider==='custom'){
-    return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><input id="onboardingModelInput" value="${esc(_getOnboardingSelectedModel())}" placeholder="${t('onboarding_custom_model_placeholder')}" oninput="ONBOARDING.form.model=this.value"></label><p class="onboarding-copy">${t('onboarding_custom_model_help')}</p>`;
+    return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><input id="onboardingModelInput" value="${esc(_getOnboardingSelectedModel())}" placeholder="${t('onboarding_custom_model_placeholder')}" oninput="ONBOARDING.form.model=this.value;_markOnboardingDirty()"></label><p class="onboarding-copy">${t('onboarding_custom_model_help')}</p>`;
   }
   const options=choices.map(m=>`<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
-  return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><select id="onboardingModelSelect" onchange="ONBOARDING.form.model=this.value">${options}</select></label><p class="onboarding-copy">${t('onboarding_workspace_help')}</p>`;
+  return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><select id="onboardingModelSelect" onchange="ONBOARDING.form.model=this.value;_markOnboardingDirty()">${options}</select></label><p class="onboarding-copy">${t('onboarding_workspace_help')}</p>`;
 }
 
 function _renderOnboardingProviderOAuthField(provider){
@@ -263,24 +457,25 @@ function _renderOnboardingBody(){
   const nextBtn=$('onboardingNextBtn');
   const backBtn=$('onboardingBackBtn');
   if(backBtn) backBtn.style.display=ONBOARDING.step>0?'':'none';
-  if(nextBtn) nextBtn.textContent=key==='finish'?t('onboarding_open'):t('onboarding_continue');
+  _syncOnboardingActionState();
 
   if(key==='system'){
-    const hermesOk=system.hermes_found&&system.imports_ok;
-    const setupOk=!!system.chat_ready;
-    _setOnboardingNotice(system.provider_note|| (setupOk?t('onboarding_notice_system_ready'):t('onboarding_notice_system_unavailable')),setupOk?'success':(hermesOk?'info':'warn'));
+    const preflightReady=!!(ONBOARDING.preflight&&ONBOARDING.preflight.overall_ready);
+    const retryAllAction=ONBOARDING.statusLoadFailed?'retryOnboardingStatus()':"retryOnboardingCheck('all')";
+    if(ONBOARDING.statusLoadFailed){
+      _setOnboardingNotice('开始使用前状态读取失败，请重新检查；状态恢复前不能继续。','warn');
+    }else if(ONBOARDING.preflightState==='error'){
+      _setOnboardingNotice('开始使用前检查暂时失败，可重试或继续填写配置。','warn');
+    }else if(preflightReady){
+      _setOnboardingNotice('授权、模型、工作区和安全策略均已就绪。','success');
+    }else{
+      _setOnboardingNotice('请按下方检查项逐项处理；失败项可单独重新检查。','info');
+    }
     body.innerHTML=`
-      <div class="onboarding-panel-grid">
-        <div class="onboarding-check ${hermesOk?'ok':'warn'}"><strong>${t('onboarding_check_agent')}</strong><span>${hermesOk?t('onboarding_check_agent_ready'):t('onboarding_check_agent_missing')}</span></div>
-        <div class="onboarding-check ${(setupOk?'ok':system.provider_configured?'warn':'muted')}"><strong>${t('onboarding_check_provider')}</strong><span>${_providerStatusLabel(system)}</span></div>
-        <div class="onboarding-check ${(settings.password_enabled?'ok':'muted')}"><strong>${t('onboarding_check_password')}</strong><span>${settings.password_enabled?t('onboarding_check_password_enabled'):t('onboarding_check_password_disabled')}</span></div>
-      </div>
-      <div class="onboarding-copy">
-        <p><strong>${t('onboarding_config_status')}</strong> ${system.config_exists?t('onboarding_config_status_ready'):t('onboarding_config_status_pending')}</p>
-        <p><strong>${t('onboarding_credentials_status')}</strong> ${system.env_exists?t('onboarding_credentials_status_saved'):t('onboarding_credentials_status_pending')}</p>
-        <p><strong>${t('onboarding_provider_status')}</strong> ${esc(system.provider_note||t('onboarding_check_provider_pending'))}</p>
-        ${system.current_provider?`<p><strong>${t('onboarding_current_provider')}</strong> ${esc(system.current_provider)}${system.current_model?` — ${esc(system.current_model)}`:''}</p>`:''}
-      </div>`;
+      <section class="onboarding-workbench" aria-labelledby="onboardingWorkbenchTitle">
+        <div class="onboarding-workbench-heading"><div><h3 id="onboardingWorkbenchTitle">开始使用前检查</h3><p>这是你的配置工作台。四项全部通过后才会标记完成。</p></div><button type="button" class="sm-btn" onclick="${retryAllAction}" ${ONBOARDING.preflightState==='loading'?'disabled aria-busy="true"':''}>全部重新检查</button></div>
+        ${_renderSetupWorkbench()}
+      </section>`;
     return;
   }
 
@@ -371,7 +566,7 @@ function _renderOnboardingBody(){
       </label>
       <label class="onboarding-field">
         <span>${t('onboarding_workspace_or_path')}</span>
-        <input id="onboardingWorkspaceInput" value="${esc(ONBOARDING.form.workspace||'')}" placeholder="${t('onboarding_workspace_placeholder')}" oninput="ONBOARDING.form.workspace=this.value">
+        <input id="onboardingWorkspaceInput" value="${esc(ONBOARDING.form.workspace||'')}" placeholder="${t('onboarding_workspace_placeholder')}" oninput="ONBOARDING.form.workspace=this.value;_markOnboardingDirty()">
       </label>
       ${_renderOnboardingModelField()}`;
     const wsSel=$('onboardingWorkspaceSelect');
@@ -386,14 +581,18 @@ function _renderOnboardingBody(){
     body.innerHTML=`
       <label class="onboarding-field">
         <span>${t('onboarding_password_label')}</span>
-        <input id="onboardingPasswordInput" type="password" value="${esc(ONBOARDING.form.password||'')}" placeholder="${t('onboarding_password_placeholder')}" oninput="ONBOARDING.form.password=this.value">
+        <input id="onboardingPasswordInput" type="password" value="${esc(ONBOARDING.form.password||'')}" placeholder="${t('onboarding_password_placeholder')}" oninput="ONBOARDING.form.password=this.value;_markOnboardingDirty()">
       </label>
       <p class="onboarding-copy">${t('onboarding_password_help')}</p>`;
     return;
   }
 
   const provider=_getOnboardingSetupProvider(ONBOARDING.form.provider);
-  _setOnboardingNotice(t('onboarding_notice_finish'), 'success');
+  const finishReady=!!(ONBOARDING.preflight&&ONBOARDING.preflight.overall_ready);
+  _setOnboardingNotice(
+    finishReady?'检查已通过，可以完成并打开太极 Agent。':'先保存当前选择，系统会在完成前重新检查四项最低门槛。',
+    finishReady?'success':'info'
+  );
   body.innerHTML=`
     <div class="onboarding-summary">
       <div><strong>${t('onboarding_provider_label')}</strong><span>${esc((provider&&provider.label)||ONBOARDING.form.provider||t('onboarding_not_set'))}</span></div>
@@ -402,6 +601,8 @@ function _renderOnboardingBody(){
       <div><strong>${t('onboarding_check_password')}</strong><span>${t(_getOnboardingPasswordSummaryKey(settings))}</span></div>
     </div>
     ${ONBOARDING.form.baseUrl?`<p class="onboarding-copy"><strong>${t('onboarding_base_url_label')}</strong> ${esc(ONBOARDING.form.baseUrl)}</p>`:''}
+    ${_renderOnboardingOverwriteConflict()}
+    <section class="onboarding-workbench compact" aria-labelledby="onboardingFinishChecksTitle"><div class="onboarding-workbench-heading"><div><h3 id="onboardingFinishChecksTitle">完成前复检</h3><p>网络或 API 读取失败时不会继续完成。</p></div><button type="button" class="sm-btn" onclick="retryOnboardingCheck('all')" ${ONBOARDING.preflightState==='loading'?'disabled aria-busy="true"':''}>全部重新检查</button></div>${_renderSetupWorkbench()}</section>
     <p class="onboarding-copy">${t('onboarding_finish_help')}</p>`;
 }
 
@@ -414,6 +615,7 @@ function _getOnboardingPasswordSummaryKey(settings){
 
 function syncOnboardingWorkspaceSelect(value){
   ONBOARDING.form.workspace=value;
+  _markOnboardingDirty();
   const input=$('onboardingWorkspaceInput');
   if(input) input.value=value;
 }
@@ -421,6 +623,7 @@ function syncOnboardingWorkspaceSelect(value){
 function syncOnboardingProvider(value){
   const provider=_getOnboardingSetupProvider(value);
   ONBOARDING.form.provider=value;
+  _markOnboardingDirty();
   if(provider){
     if(!ONBOARDING.form.model || !_getOnboardingProviderModelChoices().some(m=>m.id===ONBOARDING.form.model) || value==='custom'){
       ONBOARDING.form.model=provider.default_model||'';
@@ -440,6 +643,7 @@ async function loadOnboardingWizard(){
   try{
     const status=await api('/api/onboarding/status');
     ONBOARDING.status=status;
+    ONBOARDING.statusLoadFailed=false;
     const current=((status.setup||{}).current)||{};
     ONBOARDING.form.provider=current.provider||'openrouter';
     ONBOARDING.form.workspace=(status.workspaces&&status.workspaces.last)||status.settings.default_workspace||'';
@@ -447,20 +651,71 @@ async function loadOnboardingWizard(){
     ONBOARDING.form.password='';
     ONBOARDING.form.apiKey='';
     ONBOARDING.form.baseUrl=current.base_url||'';
+    ONBOARDING.step=0;
+    ONBOARDING.savedOnce=false;
+    ONBOARDING.confirmOverwrite=false;
+    ONBOARDING.overwriteConflict=null;
+    ONBOARDING.preflight=null;
+    ONBOARDING.preflightState='loading';
+    ONBOARDING.preflightError='';
     ONBOARDING.active=!status.completed;
-    if(!ONBOARDING.active) return false;
+    if(!ONBOARDING.active){
+      _getOnboardingDialog().close();
+      _syncOnboardingResumeEntry();
+      return false;
+    }
     _renderOnboardingSteps();
     _renderOnboardingBody();
     _getOnboardingDialog().open();
+    _syncOnboardingResumeEntry();
+    try{
+      await _loadSetupPreflight();
+    }catch(e){
+      _setOnboardingNotice('检查状态读取失败：'+((e&&e.message)||String(e)),'warn');
+    }
     return true;
   }catch(e){
     console.warn('onboarding status failed',e);
-    return false;
+    ONBOARDING.status={
+      completed:false,
+      settings:{default_model:'',default_workspace:'',password_enabled:false,bot_name:'taiji Agent'},
+      system:{hermes_found:false,imports_ok:false,config_exists:false,chat_ready:false,provider_configured:false,provider_ready:false,setup_state:'unavailable',provider_note:'状态 API 暂不可用。',current_provider:'',current_model:''},
+      setup:{providers:[],categories:[],unsupported_note:'',current_is_oauth:false,current:{provider:'',model:'',base_url:''}},
+      workspaces:{items:[],last:null},
+      models:[],
+      preflight:null,
+    };
+    ONBOARDING.form={provider:'',workspace:'',model:'',password:'',apiKey:'',baseUrl:''};
+    ONBOARDING.step=0;
+    ONBOARDING.savedOnce=false;
+    ONBOARDING.confirmOverwrite=false;
+    ONBOARDING.overwriteConflict=null;
+    ONBOARDING.preflight=null;
+    ONBOARDING.preflightState='error';
+    ONBOARDING.preflightError='无法读取首次启动状态：'+((e&&e.message)||String(e));
+    ONBOARDING.statusLoadFailed=true;
+    ONBOARDING.active=true;
+    _renderOnboardingSteps();
+    _renderOnboardingBody();
+    _getOnboardingDialog().open();
+    _syncOnboardingResumeEntry();
+    requestAnimationFrame(()=>{const retry=$('onboardingStatusRetryBtn');if(retry)retry.focus();});
+    return true;
+  }
+}
+
+async function resumeOnboardingWizard(){
+  const resume=$('onboardingResumeBtn');
+  if(resume)resume.disabled=true;
+  try{
+    return await loadOnboardingWizard();
+  }finally{
+    if(resume)resume.disabled=false;
   }
 }
 
 function prevOnboardingStep(){
-  if(ONBOARDING.step===0)return;
+  if(ONBOARDING.step===0||ONBOARDING.busy)return;
   ONBOARDING.step--;
   _renderOnboardingSteps();
   _renderOnboardingBody();
@@ -485,8 +740,28 @@ async function _saveOnboardingProviderSetup(){
   const body={provider,model};
   if(apiKey) body.api_key=apiKey;
   if(baseUrl) body.base_url=baseUrl;
-  const status=await api('/api/onboarding/setup',{method:'POST',body:JSON.stringify(body)});
-  ONBOARDING.status=status;
+  if(ONBOARDING.confirmOverwrite)body.confirm_overwrite=true;
+  try{
+    const status=await api('/api/onboarding/setup',{method:'POST',body:JSON.stringify(body)});
+    ONBOARDING.status=status;
+    if(status&&status.preflight){
+      ONBOARDING.preflight=status.preflight;
+      ONBOARDING.preflightState='ready';
+    }
+    ONBOARDING.form.apiKey='';
+    ONBOARDING.confirmOverwrite=false;
+    ONBOARDING.overwriteConflict=null;
+  }catch(e){
+    const payload=e&&e.payload;
+    if(e&&e.status===409&&payload&&payload.error==='config_exists'){
+      ONBOARDING.confirmOverwrite=false;
+      ONBOARDING.overwriteConflict={message:payload.message||e.message};
+      e.onboardingConflict=true;
+      _renderOnboardingBody();
+      requestAnimationFrame(()=>{const btn=$('onboardingConfirmOverwriteBtn');if(btn)btn.focus();});
+    }
+    throw e;
+  }
 }
 
 async function _saveOnboardingDefaults(){
@@ -511,42 +786,120 @@ async function _saveOnboardingDefaults(){
 }
 
 async function _finishOnboarding(){
-  await _saveOnboardingProviderSetup();
-  await _saveOnboardingDefaults();
-  const done=await api('/api/onboarding/complete',{method:'POST',body:'{}'});
-  ONBOARDING.status=done;
-  ONBOARDING.active=false;
-  _getOnboardingDialog().close();
-  showToast(t('onboarding_complete'));
-  await loadWorkspaceList();
-  if(typeof renderSessionList==='function') await renderSessionList();
-  if(!S.session && typeof newSession==='function'){
-    await newSession(true);
-    await renderSessionList();
+  if(ONBOARDING.busy)return false;
+  _setOnboardingBusy(true);
+  try{
+    await _saveOnboardingProviderSetup();
+    await _saveOnboardingDefaults();
+    ONBOARDING.savedOnce=true;
+
+    try{
+      ONBOARDING.preflight=await api('/api/setup/status');
+      ONBOARDING.preflightState='ready';
+      ONBOARDING.preflightError='';
+    }catch(e){
+      ONBOARDING.preflight=null;
+      ONBOARDING.preflightState='error';
+      ONBOARDING.preflightError=(e&&e.message)||String(e);
+      _renderOnboardingBody();
+      _setOnboardingNotice('配置已保存，但复检 API 失败；本次不会标记完成。','warn');
+      return false;
+    }
+
+    if(!ONBOARDING.preflight.overall_ready){
+      _renderOnboardingBody();
+      _setOnboardingNotice('配置已保存，但仍有检查项未通过。请逐项处理并重新检查。','warn');
+      const blocked=document.querySelector('.onboarding-check-row.blocked');
+      if(blocked)blocked.focus();
+      return false;
+    }
+
+    let done;
+    try{
+      done=await api('/api/onboarding/complete',{method:'POST',body:'{}'});
+    }catch(e){
+      if(e&&e.status===409&&e.payload&&e.payload.preflight){
+        ONBOARDING.preflight=e.payload.preflight;
+        ONBOARDING.preflightState='ready';
+        ONBOARDING.savedOnce=true;
+        _renderOnboardingBody();
+      }
+      throw e;
+    }
+    if(!done||done.completed!==true||!done.preflight||done.preflight.overall_ready!==true){
+      ONBOARDING.status=done||ONBOARDING.status;
+      ONBOARDING.preflight=(done&&done.preflight)||null;
+      ONBOARDING.preflightState=ONBOARDING.preflight?'ready':'error';
+      ONBOARDING.preflightError=ONBOARDING.preflight?'':'服务端没有返回一致的完成状态。';
+      ONBOARDING.savedOnce=true;
+      _renderOnboardingBody();
+      _setOnboardingNotice('服务端未确认配置已完成；窗口将保持打开，请重新检查。','warn');
+      return false;
+    }
+    ONBOARDING.status=done;
+    ONBOARDING.active=false;
+    _getOnboardingDialog().close();
+    _syncOnboardingResumeEntry();
+    showToast(t('onboarding_complete'));
+    await loadWorkspaceList();
+    if(typeof renderSessionList==='function') await renderSessionList();
+    if(!S.session && typeof newSession==='function'){
+      await newSession(true);
+      await renderSessionList();
+    }
+    return true;
+  }catch(e){
+    if(e&&e.onboardingConflict){
+      _setOnboardingNotice('当前已有配置。只有在你明确确认后才会覆盖并重试。','warn');
+      return false;
+    }
+    _setOnboardingNotice((e&&e.message)||String(e),'warn');
+    return false;
+  }finally{
+    _setOnboardingBusy(false);
   }
 }
 
-function dismissOnboardingWizard(){
-  // Dismissal is deliberately local-only. The incomplete server state makes
-  // the wizard return on the next App launch, so Escape can never silently
-  // opt the user out of required first-run setup.
-  _getOnboardingDialog().close();
+async function confirmOnboardingOverwrite(){
+  if(ONBOARDING.busy)return;
+  ONBOARDING.confirmOverwrite=true;
+  ONBOARDING.overwriteConflict=null;
+  _renderOnboardingBody();
+  await _finishOnboarding();
+}
+
+function cancelOnboardingOverwrite(){
+  ONBOARDING.confirmOverwrite=false;
+  ONBOARDING.overwriteConflict=null;
+  _renderOnboardingBody();
+  const back=$('onboardingBackBtn');
+  if(back)back.focus();
+}
+
+function dismissOnboardingWizard({focusResume=true}={}){
+  // Dismissal is deliberately local-only. Keep a persistent, keyboard-usable
+  // re-entry control visible until the server confirms setup is complete.
+  _getOnboardingDialog().close({restoreFocus:false});
+  _syncOnboardingResumeEntry();
+  if(focusResume)requestAnimationFrame(()=>{
+    const resume=$('onboardingResumeBtn');
+    if(resume&&!resume.hidden)resume.focus();
+  });
 }
 
 async function skipOnboarding(){
-  try{
-    // Mark onboarding completed server-side without changing any config
-    await api('/api/onboarding/complete',{method:'POST',body:'{}'});
-    ONBOARDING.active=false;
-    _getOnboardingDialog().close();
-    showToast(t('onboarding_skipped')||'Setup skipped');
-  }catch(e){
-    _setOnboardingNotice((e.message||String(e)),'warn');
-  }
+  dismissOnboardingWizard();
+  showToast('检查窗口已暂时关闭；未通过检查前不会标记完成。',4000,'info');
 }
 
 async function nextOnboardingStep(){
+  if(ONBOARDING.busy)return;
   try{
+    if(ONBOARDING.steps[ONBOARDING.step]==='finish'){
+      await _finishOnboarding();
+      return;
+    }
+    _setOnboardingBusy(true);
     if(ONBOARDING.steps[ONBOARDING.step]==='setup'){
       ONBOARDING.form.provider=(($('onboardingProviderSelect')||{}).value||ONBOARDING.form.provider||'').trim();
       ONBOARDING.form.apiKey=(($('onboardingApiKeyInput')||{}).value||'').trim();
@@ -580,15 +933,13 @@ async function nextOnboardingStep(){
     if(ONBOARDING.steps[ONBOARDING.step]==='password'){
       ONBOARDING.form.password=(($('onboardingPasswordInput')||{}).value||'').trim();
     }
-    if(ONBOARDING.step===ONBOARDING.steps.length-1){
-      await _finishOnboarding();
-      return;
-    }
     ONBOARDING.step++;
     _renderOnboardingSteps();
     _renderOnboardingBody();
   }catch(e){
     _setOnboardingNotice(e.message||String(e),'warn');
+  }finally{
+    _setOnboardingBusy(false);
   }
 }
 

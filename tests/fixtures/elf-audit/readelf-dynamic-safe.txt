@@ -1,0 +1,4 @@
+Dynamic section at offset 0x100 contains 3 entries:
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN/../lib]
+ 0x0000000000000000 (NULL)               0x0

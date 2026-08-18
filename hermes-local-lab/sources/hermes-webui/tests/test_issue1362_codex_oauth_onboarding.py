@@ -100,6 +100,7 @@ const vm=require('vm');
 const source={json.dumps(function_source)};
 let focused='';
 let renders=0;
+let dirtyMarks=0;
 const controls={{
   onboardingProviderSelect:{{focus:()=>{{focused='provider-select';}}}},
   anthropicOAuthBtn:{{focus:()=>{{focused='oauth-button';}}}},
@@ -110,6 +111,7 @@ const context={{
     ? {{id:'anthropic',default_model:'claude-sonnet-4.6',requires_base_url:false,default_base_url:''}}
     : null,
   _getOnboardingProviderModelChoices:()=>[],
+  _markOnboardingDirty:()=>{{dirtyMarks+=1;}},
   _renderOnboardingBody:()=>{{renders+=1;}},
   $:(id)=>controls[id]||null,
 }};
@@ -119,6 +121,7 @@ vm.runInContext("syncOnboardingProvider('anthropic')",context);
 process.stdout.write(JSON.stringify({{
   focused,
   renders,
+  dirtyMarks,
   provider:context.ONBOARDING.form.provider,
 }}));
 """
@@ -978,7 +981,11 @@ def test_anthropic_onboarding_setup_allows_linked_oauth_without_api_key(monkeypa
     }), encoding="utf-8")
     monkeypatch.setattr(onboarding, "_get_config_path", lambda: cfg_path)
     monkeypatch.setattr(webui_config, "_get_config_path", lambda: cfg_path)
-    monkeypatch.setattr(onboarding, "get_onboarding_status", lambda: {"ok": True})
+    monkeypatch.setattr(
+        onboarding,
+        "get_onboarding_status",
+        lambda **_kwargs: {"ok": True},
+    )
     monkeypatch.setattr(onboarding, "reload_config", lambda: None)
 
     result = onboarding.apply_onboarding_setup({"provider": "anthropic", "model": "claude-sonnet-4.6"})
@@ -1492,5 +1499,6 @@ def test_provider_rerender_preserves_keyboard_focus():
     assert result == {
         "focused": "provider-select",
         "renders": 1,
+        "dirtyMarks": 1,
         "provider": "anthropic",
     }

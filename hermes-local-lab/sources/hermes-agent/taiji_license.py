@@ -1273,6 +1273,26 @@ class _LicenseVersionError(Exception):
     pass
 
 
+def _trusted_production_parent(
+    parent_stat: os.stat_result,
+    *,
+    user_uid: int | None,
+) -> bool:
+    """Accept only parents writable by the account itself or privileged root group."""
+    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+        return False
+    mode = stat.S_IMODE(parent_stat.st_mode)
+    if parent_stat.st_uid == 0:
+        if mode & 0o002:
+            return False
+        if mode & 0o020 and getattr(parent_stat, "st_gid", -1) != 0:
+            return False
+        return True
+    if user_uid is not None and parent_stat.st_uid == user_uid:
+        return not bool(mode & 0o022)
+    return False
+
+
 def _validate_production_user_file(path: Path, *, required: bool) -> bool:
     """Validate a canonical user-owned resource without following links."""
     try:
@@ -1298,11 +1318,7 @@ def _validate_production_user_file(path: Path, *, required: bool) -> bool:
             raise _LicenseUserResourceError
         for parent in path.parents:
             parent_stat = parent.lstat()
-            if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-                raise _LicenseUserResourceError
-            if parent_stat.st_uid not in {0, uid}:
-                raise _LicenseUserResourceError
-            if parent_stat.st_mode & 0o022:
+            if not _trusted_production_parent(parent_stat, user_uid=uid):
                 raise _LicenseUserResourceError
     except OSError:
         raise _LicenseUserResourceError from None
@@ -1331,9 +1347,7 @@ def _load_production_public_key(policy: LicensePolicy) -> str:
             raise _LicensePublicKeyError
         for parent in path.parents:
             parent_stat = parent.lstat()
-            if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-                raise _LicensePublicKeyError
-            if parent_stat.st_uid != 0 or parent_stat.st_mode & 0o022:
+            if not _trusted_production_parent(parent_stat, user_uid=None):
                 raise _LicensePublicKeyError
         public_key_pem = path.read_text(encoding="utf-8").strip()
         actual = _public_key_fingerprint(public_key_pem)
@@ -1354,9 +1368,7 @@ def _load_production_version() -> str:
             raise _LicenseVersionError
         for parent in path.parents:
             parent_stat = parent.lstat()
-            if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-                raise _LicenseVersionError
-            if parent_stat.st_uid != 0 or parent_stat.st_mode & 0o022:
+            if not _trusted_production_parent(parent_stat, user_uid=None):
                 raise _LicenseVersionError
         version = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):

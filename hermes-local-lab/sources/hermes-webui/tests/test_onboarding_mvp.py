@@ -10,6 +10,7 @@ import json
 import pathlib
 import urllib.error
 import urllib.request
+from unittest import mock
 
 import pytest
 
@@ -21,8 +22,11 @@ _needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed —
 
 
 def get(path):
-    with urllib.request.urlopen(BASE + path, timeout=10) as r:
-        return json.loads(r.read()), r.status
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=10) as r:
+            return json.loads(r.read()), r.status
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read()), e.code
 
 
 def post(path, body=None):
@@ -72,6 +76,40 @@ def test_onboarding_status_defaults_incomplete():
     assert "provider_note" in data["system"]
     assert isinstance(data["workspaces"]["items"], list)
     assert data["setup"]["providers"]
+
+
+def test_setup_status_is_read_only_and_has_stable_four_item_contract():
+    hermes_home = _server_hermes_home()
+    tracked = [hermes_home / "config.yaml", hermes_home / ".env", hermes_home / "settings.json"]
+
+    def snapshot():
+        return {
+            str(path): (path.exists(), path.read_bytes() if path.exists() else None)
+            for path in tracked
+        }
+
+    before = snapshot()
+    first, first_status = get("/api/setup/status")
+    second, second_status = get("/api/setup/status")
+
+    assert first_status == second_status == 200
+    assert first["schema_version"] == "taiji-setup-status/v1"
+    assert [item["id"] for item in first["items"]] == [
+        "license",
+        "model",
+        "workspace",
+        "security",
+    ]
+    assert all(item["status"] in {"ready", "action_required", "unavailable"} for item in first["items"])
+    assert all(isinstance(item["ready"], bool) for item in first["items"])
+    assert all(item.get("reason") for item in first["items"])
+    assert all(item.get("recovery", {}).get("id") for item in first["items"])
+    assert first["overall_ready"] is False
+    assert second["items"] == first["items"]
+    serialized = json.dumps(first, ensure_ascii=False)
+    assert "OPENROUTER_API_KEY" not in serialized
+    assert "existing-secret" not in serialized
+    assert snapshot() == before
 
 
 @_needs_yaml
@@ -167,7 +205,232 @@ def test_onboarding_setup_rejects_missing_custom_base_url():
     assert "base_url is required" in data["error"]
 
 
-def test_onboarding_complete_persists_flag():
+def test_onboarding_complete_rejects_not_ready_without_persisting_flag():
+    data, status = post("/api/onboarding/complete", {})
+    assert status == 409
+    assert data["error"] == "setup_not_ready"
+    assert data["error_code"] == "setup_not_ready"
+    assert data["preflight"]["overall_ready"] is False
+
+    settings = json.loads(
+        (_server_hermes_home() / "settings.json").read_text(encoding="utf-8")
+    )
+    assert settings["onboarding_completed"] is False
+
+    data2, status2 = get("/api/onboarding/status")
+    assert status2 == 200
+    assert data2["completed"] is False
+
+
+def test_complete_helper_never_writes_when_preflight_is_blocked(monkeypatch):
+    import api.onboarding as onboarding
+
+    begin = mock.Mock()
+    monkeypatch.setattr(
+        onboarding,
+        "get_setup_status",
+        lambda: {
+            "schema_version": "taiji-setup-status/v1",
+            "installed_production": True,
+            "overall_ready": False,
+            "items": [],
+        },
+    )
+    monkeypatch.setattr(onboarding, "_begin_onboarding_completion", begin, raising=False)
+
+    result = onboarding.complete_onboarding()
+
+    assert result["error"] == "setup_not_ready"
+    begin.assert_not_called()
+
+
+def test_complete_helper_rechecks_immediately_before_persisting(monkeypatch):
+    import api.onboarding as onboarding
+
+    ready = {
+        "schema_version": "taiji-setup-status/v1",
+        "installed_production": True,
+        "overall_ready": True,
+        "items": [],
+    }
+    blocked = {
+        "schema_version": "taiji-setup-status/v1",
+        "installed_production": True,
+        "overall_ready": False,
+        "items": [],
+    }
+    begin = mock.Mock()
+    monkeypatch.setattr(onboarding, "get_setup_status", mock.Mock(side_effect=[ready, blocked]))
+    monkeypatch.setattr(onboarding, "_begin_onboarding_completion", begin, raising=False)
+
+    result = onboarding.complete_onboarding()
+
+    assert result["error"] == "setup_not_ready"
+    assert result["preflight"] == blocked
+    begin.assert_not_called()
+
+
+def test_complete_helper_rolls_back_if_post_write_status_is_not_ready(monkeypatch):
+    import api.onboarding as onboarding
+
+    ready = {
+        "schema_version": "taiji-setup-status/v1",
+        "installed_production": True,
+        "overall_ready": True,
+        "items": [],
+    }
+    blocked = {
+        "schema_version": "taiji-setup-status/v1",
+        "installed_production": True,
+        "overall_ready": False,
+        "items": [],
+    }
+    marker = object()
+    begin = mock.Mock(return_value=marker)
+    commit = mock.Mock()
+    rollback = mock.Mock(return_value=True)
+    monkeypatch.setattr(onboarding, "get_setup_status", mock.Mock(side_effect=[ready, ready]))
+    monkeypatch.setattr(onboarding, "_begin_onboarding_completion", begin, raising=False)
+    monkeypatch.setattr(onboarding, "_commit_onboarding_completion", commit, raising=False)
+    monkeypatch.setattr(onboarding, "_rollback_onboarding_completion", rollback, raising=False)
+    status = mock.Mock(return_value={"completed": False, "preflight": blocked})
+    monkeypatch.setattr(onboarding, "get_onboarding_status", status)
+
+    result = onboarding.complete_onboarding()
+
+    assert result["error"] == "setup_not_ready"
+    assert result["preflight"] == blocked
+    begin.assert_called_once_with()
+    rollback.assert_called_once_with(marker)
+    commit.assert_not_called()
+    status.assert_called_once_with(allow_config_auto_complete=False)
+
+
+def test_complete_helper_rolls_back_if_post_write_projection_raises(monkeypatch):
+    import api.onboarding as onboarding
+
+    ready = {
+        "schema_version": "taiji-setup-status/v1",
+        "installed_production": True,
+        "overall_ready": True,
+        "items": [],
+    }
+    marker = object()
+    begin = mock.Mock(return_value=marker)
+    commit = mock.Mock()
+    rollback = mock.Mock(return_value=True)
+    monkeypatch.setattr(onboarding, "get_setup_status", mock.Mock(side_effect=[ready, ready]))
+    monkeypatch.setattr(onboarding, "_begin_onboarding_completion", begin, raising=False)
+    monkeypatch.setattr(onboarding, "_commit_onboarding_completion", commit, raising=False)
+    monkeypatch.setattr(onboarding, "_rollback_onboarding_completion", rollback, raising=False)
+    status = mock.Mock(side_effect=RuntimeError("projection failed"))
+    monkeypatch.setattr(onboarding, "get_onboarding_status", status)
+
+    with pytest.raises(RuntimeError, match="projection failed"):
+        onboarding.complete_onboarding()
+
+    begin.assert_called_once_with()
+    rollback.assert_called_once_with(marker)
+    commit.assert_not_called()
+    status.assert_called_once_with(allow_config_auto_complete=False)
+
+
+def test_unsupported_provider_setup_cannot_persist_completion(monkeypatch):
+    import api.onboarding as onboarding
+
+    save = mock.Mock()
+    status = mock.Mock(return_value={"completed": False})
+    monkeypatch.setattr(onboarding, "save_settings", save)
+    monkeypatch.setattr(onboarding, "get_onboarding_status", status)
+
+    result = onboarding.apply_onboarding_setup(
+        {"provider": "openai-codex", "model": "gpt-5.5"}
+    )
+
+    assert result == {"completed": False}
+    save.assert_not_called()
+    status.assert_called_once_with(allow_config_auto_complete=False)
+
+
+def test_source_skip_override_setup_cannot_persist_completion(monkeypatch):
+    import api.onboarding as onboarding
+
+    save = mock.Mock()
+    status = mock.Mock(return_value={"completed": True})
+    monkeypatch.setenv("HERMES_WEBUI_SKIP_ONBOARDING", "1")
+    monkeypatch.setattr(onboarding, "save_settings", save)
+    monkeypatch.setattr(onboarding, "get_onboarding_status", status)
+
+    result = onboarding.apply_onboarding_setup(
+        {"provider": "openrouter", "model": "model", "api_key": "secret"}
+    )
+
+    assert result == {"completed": True}
+    save.assert_not_called()
+    status.assert_called_once_with(allow_config_auto_complete=False)
+
+
+def test_installed_preflight_fails_closed_unless_security_is_restricted_strict(monkeypatch, tmp_path):
+    import api.onboarding as onboarding
+
+    ready_license = onboarding._setup_item(
+        "license",
+        "授权",
+        ready=True,
+        reason="ready",
+        recovery={"id": "open_license", "label": "open"},
+    )
+    runtime = {
+        "chat_ready": True,
+        "provider_note": "ready",
+        "current_provider": "openrouter",
+        "current_model": "model",
+    }
+    monkeypatch.setattr(onboarding, "_license_setup_item", lambda: (ready_license, True))
+    monkeypatch.setattr(onboarding, "get_config", lambda: {})
+    monkeypatch.setattr(onboarding, "verify_hermes_imports", lambda: (True, [], {}))
+    monkeypatch.setattr(onboarding, "_status_from_runtime", lambda _cfg, _imports_ok: runtime)
+    monkeypatch.setattr(onboarding, "load_settings", lambda: {"default_workspace": str(tmp_path)})
+    monkeypatch.setattr(onboarding, "validate_workspace_to_add", lambda _path: tmp_path)
+    monkeypatch.setattr(
+        onboarding,
+        "build_security_status_payload",
+        lambda: {"mode": "restricted", "profile": "local_controlled"},
+    )
+
+    blocked = onboarding.get_setup_status()
+    assert blocked["overall_ready"] is False
+    assert next(item for item in blocked["items"] if item["id"] == "security")["ready"] is False
+
+    monkeypatch.setattr(
+        onboarding,
+        "build_security_status_payload",
+        lambda: {"mode": "restricted", "profile": "strict"},
+    )
+    ready = onboarding.get_setup_status()
+    assert ready["overall_ready"] is True
+
+
+def _configure_ready_openrouter():
+    data, status = post(
+        "/api/onboarding/setup",
+        {
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4.6",
+            "api_key": "sk-or-ready-test",
+        },
+    )
+    assert status == 200, data
+    return data
+
+
+@_needs_yaml
+def test_onboarding_complete_persists_flag_only_after_preflight_ready():
+    _configure_ready_openrouter()
+    preflight, preflight_status = get("/api/setup/status")
+    assert preflight_status == 200
+    assert preflight["overall_ready"] is True, preflight
+
     data, status = post("/api/onboarding/complete", {})
     assert status == 200
     assert data["completed"] is True
@@ -177,11 +440,8 @@ def test_onboarding_complete_persists_flag():
     )
     assert settings["onboarding_completed"] is True
 
-    data2, status2 = get("/api/onboarding/status")
-    assert status2 == 200
-    assert data2["completed"] is True
 
-
+@_needs_yaml
 def test_onboarding_complete_preserves_other_settings():
     """Completing onboarding must not overwrite other user settings."""
     # Use send_key (a safe enum setting) to verify settings preservation
@@ -193,6 +453,7 @@ def test_onboarding_complete_preserves_other_settings():
         assert s1 == 200
         assert saved["send_key"] == "ctrl+enter"
 
+        _configure_ready_openrouter()
         _, s2 = post("/api/onboarding/complete", {})
         assert s2 == 200
 
@@ -204,9 +465,11 @@ def test_onboarding_complete_preserves_other_settings():
         # Always restore default send_key to avoid contaminating other tests
         post("/api/settings", {"send_key": "enter"})
 
+@_needs_yaml
 def test_onboarding_already_completed_status():
     """After marking onboarding complete, status must reflect completed=True
     so the wizard does not re-appear for returning users."""
+    _configure_ready_openrouter()
     done, status = post("/api/onboarding/complete", {})
     assert status == 200
     assert done["completed"] is True

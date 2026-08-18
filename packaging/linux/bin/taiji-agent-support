@@ -1,0 +1,26 @@
+#!/bin/bash -p
+# Export an allowlist-only support bundle from the installed payload.
+set -euo pipefail
+
+PATH="/usr/bin:/bin"
+export PATH
+
+APP_ROOT="/opt/taiji-agent"
+MODULE="$APP_ROOT/scripts/support_bundle.py"
+PYTHON_BIN="$APP_ROOT/runtime/agent/venv/bin/python"
+
+if [ ! -f "$MODULE" ] || [ -L "$MODULE" ]; then
+  printf '%s\n' 'Taiji Agent support bundle module is unavailable.' >&2
+  exit 1
+fi
+
+if [ ! -x "$PYTHON_BIN" ]; then
+  PYTHON_BIN="/usr/bin/python3"
+fi
+
+if [ ! -x "$PYTHON_BIN" ]; then
+  printf '%s\n' 'Taiji Agent support bundle runtime is unavailable.' >&2
+  exit 1
+fi
+
+exec "$PYTHON_BIN" -B "$MODULE" "$@"

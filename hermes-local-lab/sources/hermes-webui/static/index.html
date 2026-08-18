@@ -8,8 +8,9 @@
      MUST appear before manifest/favicon links so browsers resolve relative URLs against the
      correct base when the page is served from /session/<id> routes. See #2226. -->
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
-<link rel="icon" type="image/svg+xml" href="static/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="static/favicon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="static/favicon-512.png">
 <link rel="shortcut icon" href="static/favicon.ico">
 <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
 <meta name="mobile-web-app-capable" content="yes">
@@ -2355,22 +2356,23 @@
     </div>
   </aside>
 </div>
+<button class="onboarding-resume-entry" id="onboardingResumeBtn" type="button" onclick="resumeOnboardingWizard()" aria-controls="onboardingOverlay" aria-expanded="false" data-i18n="onboarding_resume" hidden>继续配置·开始使用检查</button>
 <div class="onboarding-overlay" id="onboardingOverlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle" aria-describedby="onboardingLead">
   <div class="onboarding-card">
     <div class="onboarding-shell">
       <div class="onboarding-sidebar">
-        <div class="onboarding-badge" data-i18n="onboarding_badge">FIRST RUN</div>
-        <h2 id="onboardingTitle" data-i18n="onboarding_title">Welcome to taiji Agent</h2>
-        <p id="onboardingLead" data-i18n="onboarding_lead">A quick guided setup will check your taiji Agent install, choose a workspace and model, and optionally protect the app with a password.</p>
-        <div class="onboarding-steps" id="onboardingSteps"></div>
+        <div class="onboarding-badge" data-i18n="onboarding_badge">首次启动</div>
+        <h2 id="onboardingTitle" tabindex="-1" data-i18n="onboarding_title">开始使用前检查</h2>
+        <p id="onboardingLead" data-i18n="onboarding_lead">在这个配置工作台中确认授权、模型、工作区和安全策略，全部就绪后再进入太极 Agent。</p>
+        <div class="onboarding-steps" id="onboardingSteps" role="list" aria-label="首次配置步骤"></div>
       </div>
       <div class="onboarding-main">
         <div class="onboarding-status" id="onboardingNotice" role="status" aria-live="polite" aria-atomic="true"></div>
-        <div class="onboarding-body" id="onboardingBody"></div>
-        <div class="onboarding-actions">
-          <button class="sm-btn" id="onboardingBackBtn" onclick="prevOnboardingStep()" style="display:none" data-i18n="onboarding_back">Back</button>
-          <button class="sm-btn" id="onboardingSkipBtn" onclick="skipOnboarding()" style="margin-right:auto;opacity:.7" data-i18n="onboarding_skip">Skip setup</button>
-          <button class="sm-btn" id="onboardingNextBtn" onclick="nextOnboardingStep()" style="font-weight:700;color:var(--blue);border-color:rgba(124,185,255,.32)" data-i18n="onboarding_continue">Continue</button>
+        <div class="onboarding-body" id="onboardingBody" role="region" aria-label="配置工作台" aria-busy="false"></div>
+        <div class="onboarding-actions" id="onboardingActions" aria-busy="false">
+          <button type="button" class="sm-btn" id="onboardingBackBtn" onclick="prevOnboardingStep()" style="display:none" data-i18n="onboarding_back">返回</button>
+          <button type="button" class="sm-btn" id="onboardingSkipBtn" onclick="skipOnboarding()" style="margin-right:auto;opacity:.7" data-i18n="onboarding_skip">暂时关闭</button>
+          <button type="button" class="sm-btn" id="onboardingNextBtn" onclick="nextOnboardingStep()" style="font-weight:700;color:var(--blue);border-color:rgba(124,185,255,.32)" data-i18n="onboarding_continue">继续</button>
         </div>
       </div>
     </div>

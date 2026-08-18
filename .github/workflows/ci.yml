@@ -27,6 +27,7 @@ jobs:
       run_docx: ${{ steps.scope.outputs.run_docx }}
       run_agent: ${{ steps.scope.outputs.run_agent }}
       run_webui: ${{ steps.scope.outputs.run_webui }}
+      run_linux_packaging: ${{ steps.scope.outputs.run_linux_packaging }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -65,6 +66,51 @@ jobs:
         run: |
           python -m unittest tests.test_ci_scope_classifier
           git diff --check "${{ needs.classify.outputs.base }}...${{ needs.classify.outputs.head }}"
+
+  linux_packaging:
+    name: Linux packaging contracts
+    needs: classify
+    if: needs.classify.outputs.run_linux_packaging == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Validate Linux packaging shell entrypoints
+        run: |
+          bash -n \
+            packaging/linux/deb/preinst \
+            packaging/linux/deb/postinst \
+            packaging/linux/deb/prerm \
+            packaging/linux/deb/postrm \
+            packaging/linux/deb/publish-single-deb.sh \
+            scripts/sign-taiji-release-evidence.sh \
+            scripts/taiji-release-check.sh \
+            taijiagent\ 打包交付/00_制包机_生成离线交付包.sh \
+            taijiagent\ 打包交付/01_制包机_发布预检.sh \
+            taijiagent\ 打包交付/02_目标终端_安装并验证.sh \
+            taijiagent\ 打包交付/04_目标终端_桌面App验收并导出证据.sh
+      - name: Run unified DEB contract tests
+        run: |
+          python -m unittest -v \
+            tests.test_linux_compatibility_policy \
+            tests.test_compatibility_policy_preinst \
+            tests.test_linux_elf_abi_closure \
+            tests.test_unified_deb_build_contract \
+            tests.test_certification_matrix_contract \
+            tests.test_certification_set_v1 \
+            tests.test_release_evidence_assembler_v3 \
+            tests.test_release_check_v3 \
+            tests.test_single_deb_publisher_gate \
+            tests.test_single_deb_sales_contract
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.8'
+      - name: Execute Kylin Python 3.8 packaging compatibility gate
+        run: python tests/python38_linux_packaging_gate.py
+      - name: Check packaging diff
+        run: git diff --check
 
   root:
     name: Root contracts
@@ -209,7 +255,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [classify, baseline, root, desktop, docx, agent, webui]
+    needs: [classify, baseline, linux_packaging, root, desktop, docx, agent, webui]
     runs-on: ubuntu-latest
     env:
       CLASSIFY: ${{ needs.classify.result }}
@@ -219,11 +265,13 @@ jobs:
       DOCX: ${{ needs.docx.result }}
       AGENT: ${{ needs.agent.result }}
       WEBUI: ${{ needs.webui.result }}
+      LINUX_PACKAGING: ${{ needs.linux_packaging.result }}
       RUN_ROOT: ${{ needs.classify.outputs.run_root }}
       RUN_DESKTOP: ${{ needs.classify.outputs.run_desktop }}
       RUN_DOCX: ${{ needs.classify.outputs.run_docx }}
       RUN_AGENT: ${{ needs.classify.outputs.run_agent }}
       RUN_WEBUI: ${{ needs.classify.outputs.run_webui }}
+      RUN_LINUX_PACKAGING: ${{ needs.classify.outputs.run_linux_packaging }}
     steps:
       - name: Require every selected job to pass
         run: |
@@ -231,7 +279,7 @@ jobs:
           import os
           required = {"CLASSIFY", "BASELINE"}
           failed = []
-          for name in ("CLASSIFY", "BASELINE", "ROOT", "DESKTOP", "DOCX", "AGENT", "WEBUI"):
+          for name in ("CLASSIFY", "BASELINE", "LINUX_PACKAGING", "ROOT", "DESKTOP", "DOCX", "AGENT", "WEBUI"):
               result = os.environ[name]
               selected = name in required or os.environ.get(f"RUN_{name}") == "true"
               if selected and result != "success":

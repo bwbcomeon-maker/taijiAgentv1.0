@@ -5,6 +5,7 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_GATE="$REPO_ROOT/scripts/check-clean-worktree.sh"
+TRUSTED_GIT="$REPO_ROOT/scripts/taiji-trusted-git"
 CHECKSUM_FILE="$SCRIPT_DIR/SHA256SUMS.txt"
 
 ok() { printf '[OK] %s\n' "$*"; }
@@ -27,6 +28,7 @@ preflight_repo() {
   require_cmd gzip
   require_cmd python3
   [ -x "$SOURCE_GATE" ] || fail "缺少正式源码门禁：$SOURCE_GATE"
+  [ -x "$TRUSTED_GIT" ] && [ ! -L "$TRUSTED_GIT" ] || fail "缺少可信 Git 边界：$TRUSTED_GIT"
   "$SOURCE_GATE" \
     --mode formal \
     --repo-root "$REPO_ROOT" \
@@ -35,22 +37,22 @@ preflight_repo() {
 }
 
 write_source_archive() {
-  local short archive archive_path digest
-  short="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
-  archive="taiji-agentv1.0-kylin-build-src-$short.tar.gz"
+  local commit archive archive_path digest
+  commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
+  archive="taiji-agentv1.0-kylin-build-src-$commit.tar.gz"
   archive_path="$SCRIPT_DIR/$archive"
   rm -f "$SCRIPT_DIR"/taiji-agentv1.0-kylin-build-src-*.tar.gz "$CHECKSUM_FILE"
   info "生成源码包：$archive"
-  git -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$archive_path"
+  "$TRUSTED_GIT" -C "$REPO_ROOT" archive --format=tar --prefix=taiji-agentv1.0/ HEAD | gzip -n > "$archive_path"
   digest="$(sha256_file "$archive_path")"
   printf '%s  %s\n' "$digest" "$archive" > "$CHECKSUM_FILE"
   ok "源码包 SHA256：$digest"
 }
 
 write_builder_input_package() {
-  local short output
-  short="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
-  output="$REPO_ROOT/taijiagent-制包机输入-$short.tar.gz"
+  local commit output
+  commit="$("$TRUSTED_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
+  output="$REPO_ROOT/taijiagent-制包机输入-$commit.tar.gz"
   rm -f "$REPO_ROOT"/taijiagent-制包机输入-*.tar.gz
   info "生成制包机输入包：$(basename "$output")"
   python3 - "$SCRIPT_DIR" "$output" <<'PY'
@@ -70,6 +72,11 @@ skip_dirs = {
     "构建日志",
     "旧版备份",
     "离线依赖",
+    "离线演练证据",
+    "目标基线",
+    "target-verification",
+    "offline-install-rehearsal",
+    "certification",
 }
 skip_names = {".DS_Store"}
 

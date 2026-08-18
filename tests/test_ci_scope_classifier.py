@@ -52,6 +52,26 @@ class CiScopeClassifierTest(unittest.TestCase):
         ):
             self.assertTrue(result[key], key)
 
+    def test_linux_packaging_contract_paths_select_linux_packaging_job(self):
+        for path in (
+            "packaging/linux/compatibility-policy.json",
+            "packaging/linux/deb/preinst",
+            "packaging/linux/deb/publish-single-deb.sh",
+            "scripts/validate-taiji-release-evidence.py",
+            "taijiagent 打包交付/04_目标终端_桌面App验收并导出证据.sh",
+        ):
+            with self.subTest(path=path):
+                result = load_classifier().classify_paths([path])
+                self.assertEqual("high", result["risk"])
+                self.assertTrue(result["run_linux_packaging"])
+
+    def test_unrelated_high_risk_path_keeps_linux_packaging_job_unselected(self):
+        result = load_classifier().classify_paths(
+            ["hermes-local-lab/sources/hermes-agent/provider_credentials.py"]
+        )
+        self.assertEqual("high", result["risk"])
+        self.assertFalse(result["run_linux_packaging"])
+
     def test_lockfile_and_workflow_changes_are_high_risk(self):
         for path in (
             ".github/workflows/ci.yml",
@@ -104,8 +124,10 @@ class CiScopeClassifierTest(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
-        for suite in ("ROOT", "DESKTOP", "DOCX", "AGENT", "WEBUI"):
+        for suite in ("ROOT", "DESKTOP", "DOCX", "AGENT", "WEBUI", "LINUX_PACKAGING"):
             self.assertIn(f"RUN_{suite}:", workflow)
+        self.assertIn("linux_packaging:", workflow)
+        self.assertIn("test_linux_compatibility_policy", workflow)
         self.assertIn('selected and result != "success"', workflow)
         self.assertGreaterEqual(workflow.count("UV_PROJECT_ENVIRONMENT: venv"), 3)
         action_refs = re.findall(r"uses: [^@\s]+@([0-9a-f]+)", workflow)

@@ -78,6 +78,14 @@ def mock_models_server():
                 self.wfile.write(b'{"error": "not found"}')
                 return
 
+            # /empty/models — valid envelope but no usable model IDs
+            if self.path == "/empty/models":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"data": []}')
+                return
+
             # /v1/parse/models — 200 with non-JSON body
             if self.path == "/v1/parse/models":
                 self.send_response(200)
@@ -239,6 +247,13 @@ class TestIssue1499OnboardingProbe:
         assert r["ok"] is True, f"Expected success, got {r}"
         ids = [m["id"] for m in r["models"]]
         assert ids == ["alpha", "beta"]
+
+    def test_empty_model_catalog_is_not_ready(self, mock_models_server):
+        from api.onboarding import probe_provider_endpoint
+        r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/empty")
+        assert r["ok"] is False
+        assert r["error"] == "parse"
+        assert "no usable models" in r["detail"].lower()
 
     def test_http_4xx(self, mock_models_server):
         from api.onboarding import probe_provider_endpoint

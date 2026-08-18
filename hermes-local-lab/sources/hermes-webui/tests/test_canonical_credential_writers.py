@@ -419,7 +419,11 @@ def test_onboarding_captures_active_config_path_once(
 
     monkeypatch.setattr(onboarding, "_get_config_path", one_lookup)
     monkeypatch.setattr(onboarding, "reload_config", lambda: None)
-    monkeypatch.setattr(onboarding, "get_onboarding_status", lambda: {"ok": True})
+    monkeypatch.setattr(
+        onboarding,
+        "get_onboarding_status",
+        lambda **_kwargs: {"ok": True},
+    )
     # apply_onboarding_setup projects the saved secret into os.environ. Track
     # the originally absent key so pytest removes that projection at teardown.
     monkeypatch.setenv("OPENROUTER_API_KEY", "")

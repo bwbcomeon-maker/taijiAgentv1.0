@@ -1,25 +1,38 @@
-太极 Agent 麒麟终端打包交付
+太极 Agent 国产 x86 Linux 打包交付
 
-源码包：taiji-agentv1.0-kylin-build-src-<hash>.tar.gz
-源码 commit：以源码包文件名、SHA256SUMS.txt 和制包机构建报告为准
-目标系统：Kylin V10 SP1 / Debian-like / x86_64 amd64 / glibc 2.31 / 图形桌面
-交付形态：联网 Linux amd64 制包机生成 DEB 和离线依赖仓库，完全离线目标终端只安装验证
-本机输入包：99_本机_准备制包输入包.sh 会刷新当前 commit 的源码包和 SHA256SUMS.txt，并生成无 macOS 拷贝元数据的 taijiagent-制包机输入-<hash>.tar.gz。
-发布预检：01_制包机_发布预检.sh 会检查 git 干净、单一源码包、SHA256SUMS.txt basename、旧包旧 zip 和 macOS 元数据；macOS 拷贝元数据会自动清理，旧包旧 zip 仍失败并停止发布。
-构建目录安全：仅允许清理名为 taiji-agent-build-* 的当前用户 0700 专用目录，且必须存在单链接 0600 所有权标记；不再使用 sudo rm -rf 回退清理自定义路径。
-失败诊断：制包主日志与失败诊断保存在制包机 `${XDG_STATE_HOME:-~/.local/state}/taiji-agent/build-logs/`，不进入客户交付目录；只有目标机执行 02 安装失败时，才会在当前交付目录生成 构建日志/失败诊断-<时间>.txt。
-发布 manifest：生成的安装包/taiji-package-manifest.json 记录源码包、DEB、Packages.gz、构建机 OS/glibc、目标系统矩阵和支持/不支持条件；目标机安装脚本会校验 manifest 匹配。
-离线边界：完全离线安装必须包含 生成的安装包/、离线依赖/Packages 和 离线依赖/Packages.gz；缺失时默认失败，只有显式 ONLINE_OK=1 才允许使用目标机在线源。
-不支持范围：RPM-only、ARM/aarch64、无 apt/dpkg、无图形桌面或强隔离环境不属于当前 DEB 一键安装范围；RPM 和 .run 需要后续单独制品。
-安装脚本：已支持同版本重装、apt 降级覆盖和 hold 包覆盖，不需要手动卸载旧 taiji-agent。
-旧版处理：安装前自动停止并禁用旧服务，清理旧进程，彻底删除旧浏览器 WebUI 版系统安装，不保留两个 Agent 并存运行。
-数据边界：旧 `/opt/taiji-agent`、旧配置、旧服务、旧入口会被删除，不再备份旧模型 Key、微信 token 或历史会话；普通用户家目录下的新版用户态目录不删除。
-启动修复：桌面启动和 taiji 命令已改为通过产品运行时入口启动 Agent，不再依赖控制台脚本的绝对 shebang；交付目录可放在带空格或中文路径下。
-配置修复：安装包内置非密默认产品配置，启动时自动同步菜单显隐、默认模型和首页控件；不会内置或覆盖模型 Key。
-窗口修复：Linux 桌面端隐藏应用菜单栏，不再显示“太极 Agent / 视图”，保留麒麟原生窗口按钮。
-附件修复：上传 PDF、PPTX、DOCX、XLSX、TXT/MD/CSV 和图片后，会先生成受控的模型上下文；聊天界面不再显示本机绝对路径。未配置视觉模型时，图片分析会明确提示能力缺失，不再泛泛回答。
-诊断能力：`taiji-agent-diagnose` 和 `03_目标终端_导出诊断报告.sh` 会导出脱敏诊断报告，并包含附件解析器、图片视觉路由和最近日志状态。
-桌面验收：`04_目标终端_桌面App验收并导出证据.sh` 只在 Kylin/UOS/openKylin x86_64 真实图形桌面运行安装态 Electron App，自动验收附件、真实模型回复、截图、支持包导出和关窗退出；不接受 Web 或手机端结果替代。
-证据边界：目标机脚本只产生未签名证据并执行 pre-sign 校验；离线发布私钥只留在受控发布主机，不进安装包或目标终端。
+产品版本：1.0.0
+源码包：taiji-agentv1.0-kylin-build-src-<完整提交绑定的短标识>.tar.gz
+源码 commit：以源码包、SHA256SUMS.txt、构建报告和发布 manifest 的完整 40 位 SHA 为准
 
-注意：本交付文件夹不包含模型 API Key、微信 token、企业微信 Secret、服务器地址或私钥。
+统一兼容策略：packaging/linux/compatibility-policy.json；不从终端采集 baseline，
+不在 manifest、DEB 文件名或客户目录中写入 profile_id。代表环境只通过
+packaging/linux/certification-matrix.json 和 signed certification-set 形成认证记录。
+
+客户交付形态：统一兼容范围只交付一个固定 basename 的 .deb 文件，客户终端不执行在线
+下载或源码构建。校验值、构建报告、断网演练和真机验收证据保留在内部发布档案，
+不增加客户安装步骤。
+
+构建失败日志：保存在制包机 `${XDG_STATE_HOME:-~/.local/state}/taiji-agent/build-logs/`，
+不进入只含一个 DEB 的客户目录。
+
+构建临时根：不再默认使用 `/tmp`；制包脚本按用户缓存、`$HOME/.cache`、`/var/tmp`
+顺序选择通过 ELF 执行与动态库加载探针的 owner-only 目录，并将 `TMPDIR/TMP/TEMP`
+统一指向该目录。探针失败会在诊断中记录 `findmnt -T`，不得通过关闭麒麟安全策略绕过。
+制包资源：建议至少预留 20 GiB 可用空间；脚本的强制下限是构建根所在文件系统剩余
+12 GiB 和 100000 个可用 inode，不足时会在解压源码之前终止。
+
+产品图标：蓝色太极机器人 RGBA PNG 为 canonical；Web favicon/PWA、ICO、Linux hicolor
+32/48/64/128/192/256/512、AppStream、desktop-id/WM_CLASS、Electron 窗口和安装态资源
+均由同一图标链校验。真实目标机桌面缓存刷新和双击安装仍需单独验收。
+
+适用前提：Kylin/UOS/openKylin、x86_64/amd64、apt/dpkg、systemctl 和图形桌面；包内不
+捆绑 glibc。所有系统能力必须满足 canonical policy。RPM-only、
+ARM/aarch64、无图形桌面或强隔离环境需要另行制品或现场方案。
+
+状态边界：源码测试、macOS 开发态运行、Ubuntu 容器构建和断网演练都不能替代
+Kylin/UOS 真实图形终端的双击安装、首次配置、真实模型/附件流程、关窗退出、
+卸载重装和升级验收。只有当前 DEB 绑定的目标机证据通过复核后，才可标记
+“目标机已验证”。
+
+安全边界：安装包不包含模型 API Key、token、密码、客户授权 JWT、私钥、历史
+会话或附件。首次启动由用户在目标终端完成授权、模型、工作区和安全策略配置。

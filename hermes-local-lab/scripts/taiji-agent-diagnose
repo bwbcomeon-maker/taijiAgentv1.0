@@ -1,652 +1,75 @@
-#!/usr/bin/env bash
-# Emit a redacted runtime diagnostic report for installed Taiji Agent packages.
-set -u
+#!/bin/bash -p
+# Print a compact, public diagnostic summary.
+set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export TAIJI_AGENT_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-1}"
-# shellcheck source=runtime-env.sh
-source "$SCRIPT_DIR/runtime-env.sh"
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
-AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
-AGENT_API_PORT="${AGENT_API_PORT:-18642}"
-WEBUI_HOST="${WEBUI_HOST:-127.0.0.1}"
-WEBUI_PORT="${WEBUI_PORT:-18787}"
-
-have() { command -v "$1" >/dev/null 2>&1; }
-
-taiji_truthy() {
-  case "${1:-}" in
-    1|true|TRUE|yes|YES|on|ON|y|Y) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-taiji_security_mode() {
+safe_security_mode() {
   case "${TAIJI_SECURITY_MODE:-restricted}" in
-    full) printf 'full\n' ;;
-    *) printf 'restricted\n' ;;
+    restricted|full) printf '%s' "${TAIJI_SECURITY_MODE:-restricted}" ;;
+    *) printf '%s' 'restricted' ;;
   esac
 }
 
-taiji_capability_allowed() {
-  local flag="$1"
-  if [ "$(taiji_security_mode)" = "full" ]; then
-    return 0
-  fi
-  taiji_truthy "${!flag:-}"
-}
-
-taiji_security_profile() {
-  if [ "$(taiji_security_mode)" = "full" ]; then
-    printf 'full\n'
+package_status() {
+  local status
+  if ! command -v dpkg-query >/dev/null 2>&1; then
+    printf '%s' 'unavailable'
     return
   fi
-  local enabled=0
-  for flag in TAIJI_ALLOW_TERMINAL TAIJI_ALLOW_EXECUTE_CODE TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS TAIJI_ALLOW_DELEGATE_TASK; do
-    if taiji_truthy "${!flag:-}"; then
-      enabled=$((enabled + 1))
-    fi
-  done
-  case "$enabled" in
-    0) printf 'strict\n' ;;
-    4) printf 'local_controlled\n' ;;
-    *) printf 'custom_restricted\n' ;;
+  status="$(dpkg-query -W -f='${db:Status-Status}' taiji-agent 2>/dev/null || true)"
+  case "$status" in
+    installed|config-files|unpacked|half-configured) printf '%s' "$status" ;;
+    *) printf '%s' 'not-installed' ;;
   esac
 }
 
-print_capability_state() {
-  # Output contract includes keys like approval_applicable.terminal= for static release gates.
-  local name="$1" flag="$2" approval="$3" allowed=false approval_applicable=false
-  if taiji_capability_allowed "$flag"; then
-    allowed=true
-  fi
-  if [ "$allowed" = "true" ] && [ "$approval" = "true" ] && [ "$(taiji_security_mode)" = "restricted" ]; then
-    approval_applicable=true
-  fi
-  printf 'capability.%s.allowed=%s\n' "$name" "$allowed"
-  printf 'approval_applicable.%s=%s\n' "$name" "$approval_applicable"
-}
-
-section() {
-  printf '\n==== %s ====\n' "$*"
-}
-
-redact_stream() {
-  sed -E \
-    -e 's/([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASS|AUTH)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*)[^[:space:],}"'"'"']+/\1[REDACTED]/gI' \
-    -e 's/(Bearer )[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/gI'
-}
-
-run() {
-  printf '$ %s\n' "$*"
-  "$@" 2>&1 | redact_stream || printf '[command failed: %s]\n' "$*" | redact_stream
-}
-
-python_bin() {
-  if [ -x "$AGENT_DIR/venv/bin/python" ]; then
-    printf '%s\n' "$AGENT_DIR/venv/bin/python"
-  elif have python3; then
-    command -v python3
-  else
-    printf '\n'
-  fi
-}
-
-desktop_access_token() {
-  if [ -n "${TAIJI_DESKTOP_ACCESS_TOKEN:-}" ]; then
-    printf '%s\n' "$TAIJI_DESKTOP_ACCESS_TOKEN"
-    return 0
-  fi
-  if ! have pgrep || [ ! -d /proc ]; then
-    return 0
-  fi
-
-  local pid token
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    [ -r "/proc/$pid/environ" ] || continue
-    token="$(
-      tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
-        | awk -F= '$1=="TAIJI_DESKTOP_ACCESS_TOKEN"{sub(/^[^=]*=/,""); print; exit}'
-    )"
-    if [ -n "$token" ]; then
-      printf '%s\n' "$token"
-      return 0
-    fi
-  done < <(pgrep -f "$WEBUI_DIR/server.py|$WEBUI_DIR/server.pyc|runtime/web/server.py|runtime/web/server.pyc" 2>/dev/null || true)
-}
-
-http_json_summary() {
-  local url="$1" kind="$2" py
-  py="$(python_bin)"
-  if [ -z "$py" ]; then
-    printf 'python unavailable; skipped %s\n' "$url"
-    return 0
-  fi
-  "$py" - "$url" "$kind" <<'PY' 2>&1 | redact_stream
-import json
-import os
-import sys
-import urllib.error
-import urllib.request
-
-url, kind = sys.argv[1], sys.argv[2]
-try:
-    headers = {}
-    token = os.environ.get("TAIJI_DIAG_DESKTOP_ACCESS_TOKEN", "").strip()
-    if token:
-        headers["X-Taiji-Desktop-Token"] = token
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=5) as response:
-        status = response.status
-        body = response.read(1024 * 1024)
-    print(f"{url} HTTP {status}")
-    data = json.loads(body.decode("utf-8"))
-except Exception as exc:
-    print(f"{url} failed: {exc}")
-    raise SystemExit(0)
-
-if kind == "settings":
-    visibility = data.get("ui_visibility") if isinstance(data, dict) else {}
-    for group in ("nav", "settings_sections", "composer"):
-        values = visibility.get(group, {}) if isinstance(visibility, dict) else {}
-        hidden = sorted(k for k, v in values.items() if v is False)
-        print(f"{group}.hidden={','.join(hidden) if hidden else '-'}")
-elif kind == "model":
-    main = data.get("main", {}) if isinstance(data, dict) else {}
-    providers = data.get("providers", []) if isinstance(data, dict) else []
-    image = data.get("image_gen", {}) if isinstance(data, dict) else {}
-    print(f"ok={data.get('ok')}")
-    print(f"profile={data.get('profile')}")
-    print(f"config_path={data.get('config_path')}")
-    print(f"main.provider={main.get('provider') or '-'}")
-    print(f"main.model={main.get('model') or '-'}")
-    print(f"main.base_url={main.get('base_url') or '-'}")
-    print(f"providers.count={len(providers) if isinstance(providers, list) else 0}")
-    print(f"image.provider={image.get('provider') or '-'}")
-    print(f"image.model={image.get('model') or '-'}")
-else:
-    print(json.dumps(data, ensure_ascii=False, indent=2)[:4000])
-PY
-}
-
-webui_static_asset_summary() {
-  local base_url="$1" py
-  py="$(python_bin)"
-  if [ -z "$py" ]; then
-    printf 'python unavailable; skipped WebUI static asset summary\n'
-    return 0
-  fi
-  "$py" - "$base_url" <<'PY' 2>&1 | redact_stream
-import os
-import re
-import sys
-import urllib.parse
-import urllib.request
-
-base_url = sys.argv[1].rstrip("/") + "/"
-headers = {}
-token = os.environ.get("TAIJI_DIAG_DESKTOP_ACCESS_TOKEN", "").strip()
-if token:
-    headers["X-Taiji-Desktop-Token"] = token
-
-def fetch_text(url: str, limit: int = 1024 * 1024) -> str:
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=5) as response:
-        body = response.read(limit)
-        print(f"{url} HTTP {response.status}")
-    return body.decode("utf-8", errors="replace")
-
-try:
-    html = fetch_text(base_url)
-except Exception as exc:
-    print(f"webui.index failed: {exc}")
-    raise SystemExit(0)
-
-assets = {}
-for src, name, version in re.findall(r"""(static/(commands|panels)\.js\?v=([^"']+))""", html):
-    assets[name] = {"src": src, "version": version}
-
-commands_version = assets.get("commands", {}).get("version", "")
-panels_version = assets.get("panels", {}).get("version", "")
-print(f"asset.commands.version={commands_version or '-'}")
-print(f"asset.panels.version={panels_version or '-'}")
-
-versions = [item["version"] for item in assets.values() if item.get("version")]
-print(f"asset.version_consistent={str(bool(versions) and len(set(versions)) == 1).lower()}")
-print(f"asset.version_unknown={str(any((not v) or v == 'unknown' for v in versions) or len(versions) < 2).lower()}")
-
-commands = assets.get("commands", {})
-if commands.get("src"):
-    try:
-        commands_js = fetch_text(urllib.parse.urljoin(base_url, commands["src"]), limit=2 * 1024 * 1024)
-        print(f"asset.commands.contains_sendExpertTeamAction={str('sendExpertTeamAction' in commands_js).lower()}")
-    except Exception as exc:
-        print(f"asset.commands.fetch_failed={exc}")
-else:
-    print("asset.commands.contains_sendExpertTeamAction=false")
-PY
-}
-
-config_summary() {
-  local py config_path
-  py="$(python_bin)"
-  config_path="$TAIJI_RUNTIME_HOME/config.yaml"
-  if [ -z "$py" ]; then
-    printf 'python unavailable; skipped config summary\n'
-    return 0
-  fi
-  "$py" - "$config_path" <<'PY' 2>&1 | redact_stream
-from pathlib import Path
-import sys
-
-try:
-    import yaml
-except Exception as exc:
-    print(f"yaml unavailable: {exc}")
-    raise SystemExit(0)
-
-path = Path(sys.argv[1])
-print(f"config_path={path}")
-print(f"exists={path.exists()}")
-if not path.exists():
-    raise SystemExit(0)
-data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-model = data.get("model") if isinstance(data, dict) else {}
-image = data.get("image_gen") if isinstance(data, dict) else {}
-webui = data.get("webui") if isinstance(data, dict) else {}
-visibility = webui.get("feature_visibility") if isinstance(webui, dict) else {}
-print(f"model.provider={(model or {}).get('provider') or '-'}")
-print(f"model.default={(model or {}).get('default') or '-'}")
-print(f"model.base_url={(model or {}).get('base_url') or '-'}")
-print(f"image.provider={(image or {}).get('provider') or '-'}")
-print(f"image.model={(image or {}).get('model') or '-'}")
-for group in ("nav", "settings_sections", "composer"):
-    values = visibility.get(group, {}) if isinstance(visibility, dict) else {}
-    hidden = sorted(k for k, v in values.items() if v is False)
-    print(f"{group}.hidden={','.join(hidden) if hidden else '-'}")
-PY
-}
-
-runtime_key_summary() {
-  local py legacy_env
-  py="$(python_bin)"
-  legacy_env="$LAB_DIR/her""mes-home/.env"
-  if [ -z "$py" ]; then
-    printf 'python unavailable; skipped runtime key summary\n'
-    return 0
-  fi
-  "$py" - "$TAIJI_ENV_FILE" "$legacy_env" <<'PY' 2>&1 | redact_stream
-from pathlib import Path
-import sys
-
-canonical = Path(sys.argv[1])
-legacy = Path(sys.argv[2])
-
-def read_env_value(path: Path, key: str) -> str:
-    if not path.exists():
-        return ""
-    try:
-        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            if name.strip() != key:
-                continue
-            return value.strip().strip('"').strip("'")
-    except OSError:
-        return ""
-    return ""
-
-def suffix(value: str) -> str:
-    return value[-4:] if len(value) >= 4 else "-"
-
-canonical_key = read_env_value(canonical, "DEEPSEEK_API_KEY")
-legacy_key = read_env_value(legacy, "DEEPSEEK_API_KEY")
-
-print(f"canonical_env.exists={str(canonical.exists()).lower()}")
-print(f"deepseek_key.canonical.configured={str(bool(canonical_key)).lower()}")
-print(f"deepseek_key.canonical.suffix={suffix(canonical_key)}")
-print(f"legacy_env.exists={str(legacy.exists()).lower()}")
-print(f"deepseek_key.legacy.configured={str(bool(legacy_key)).lower()}")
-print(f"deepseek_key.legacy.suffix={suffix(legacy_key)}")
-print(f"legacy_runtime_differs={str(bool(canonical_key and legacy_key and canonical_key != legacy_key)).lower()}")
-PY
-}
-
-license_summary() {
-  local py
-  py="$(python_bin)"
-  if [ -z "$py" ]; then
-    printf 'python unavailable; skipped license summary\n'
-    return 0
-  fi
-  "$py" - "$AGENT_DIR" <<'PY' 2>&1 | redact_stream
-import json
-import sys
-
-agent_dir = sys.argv[1]
-if agent_dir:
-    sys.path.insert(0, agent_dir)
-
-try:
-    import taiji_license
-    data = taiji_license.load_license_status().to_public_dict()
-except Exception as exc:
-    data = {
-        "status": "invalid",
-        "code": "license_status_unavailable",
-        "message": f"license status unavailable: {exc}",
-    }
-
-safe = {
-    "status": data.get("status"),
-    "code": data.get("code"),
-    "customer": data.get("customer"),
-    "expires_at": data.get("expires_at"),
-    "remaining_days": data.get("remaining_days"),
-    "machine_binding_required": data.get("machine_binding_required"),
-    "machine_bound": data.get("machine_bound"),
-    "machine_matched": data.get("machine_matched"),
-    "machine_code_short": data.get("machine_code_short"),
-    "bound_machine_code_short": data.get("bound_machine_code_short"),
-    "machine_label": data.get("machine_label"),
-    "message": data.get("message"),
-}
-print(json.dumps({k: v for k, v in safe.items() if v is not None}, ensure_ascii=False, indent=2))
-PY
-}
-
-attachment_capabilities() {
-  local py state_dir
-  py="$(python_bin)"
-  if [ -z "$py" ]; then
-    printf 'python unavailable; skipped attachment capability summary\n'
-    return 0
-  fi
-  state_dir="${TAIJI_WEBUI_STATE_DIR:-$TAIJI_RUNTIME_HOME/web}"
-  TAIJI_WEBUI_STATE_DIR="$state_dir" \
-  "$py" - "$WEBUI_DIR" "$TAIJI_WORKSPACE" "$TAIJI_RUNTIME_HOME" "$state_dir" <<'PY' 2>&1 | redact_stream
-from pathlib import Path
-import json
-import os
-import sys
-
-webui_dir = Path(sys.argv[1])
-workspace = sys.argv[2]
-runtime_home = sys.argv[3]
-state_dir = sys.argv[4]
-sys.path.insert(0, str(webui_dir))
-os.environ.setdefault("HER" + "MES_HOME", runtime_home)
-os.environ.setdefault("HER" + "MES_WORKSPACE", workspace)
-os.environ.setdefault("HER" + "MES_WEBUI_STATE_DIR", state_dir)
-try:
-    from api.attachment_context import diagnostic_summary, has_configured_vision
-    from api.upload import _attachment_root
-    try:
-        from api.config import get_config
-        cfg = get_config()
-    except Exception:
-        cfg = {}
-    summary = diagnostic_summary()
-    summary["attachment_root"] = str(_attachment_root())
-    summary["attachment_root_exists"] = _attachment_root().exists()
-    summary["workspace"] = workspace
-    summary["vision_configured"] = has_configured_vision(cfg)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-except Exception as exc:
-    print(f"attachment_capabilities_failed={exc}")
-PY
-}
-
-log_tail() {
-  local file="$1"
-  if [ -f "$file" ]; then
-    printf '\n--- %s ---\n' "$file"
-    tail -120 "$file" 2>&1 | redact_stream
-  else
-    printf '\n--- %s missing ---\n' "$file"
-  fi
-}
-
-path_status() {
-  local path="$1"
-  printf '%s exists=%s writable=%s executable=%s\n' \
-    "$path" \
-    "$(if [ -e "$path" ]; then printf true; else printf false; fi)" \
-    "$(if [ -w "$path" ]; then printf true; else printf false; fi)" \
-    "$(if [ -x "$path" ]; then printf true; else printf false; fi)"
+architecture() {
+  case "$(uname -m 2>/dev/null || true)" in
+    x86_64|amd64) printf '%s' 'amd64' ;;
+    *) printf '%s' 'unsupported' ;;
+  esac
 }
 
 print_security_report() {
-  section "Taiji Security Environment"
-  printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-  printf 'TAIJI_SECURITY_MODE=%s\n' "${TAIJI_SECURITY_MODE:-restricted}"
-  printf 'TAIJI_ALLOW_TERMINAL=%s\n' "${TAIJI_ALLOW_TERMINAL:-0}"
-  printf 'TAIJI_ALLOW_EXECUTE_CODE=%s\n' "${TAIJI_ALLOW_EXECUTE_CODE:-0}"
-  printf 'TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS=%s\n' "${TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS:-0}"
-  printf 'TAIJI_ALLOW_DELEGATE_TASK=%s\n' "${TAIJI_ALLOW_DELEGATE_TASK:-0}"
-  printf 'effective_security_profile=%s\n' "$(taiji_security_profile)"
-  print_capability_state terminal TAIJI_ALLOW_TERMINAL true
-  print_capability_state execute_code TAIJI_ALLOW_EXECUTE_CODE true
-  print_capability_state unapproved_skill_scripts TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS false
-  print_capability_state delegate_task TAIJI_ALLOW_DELEGATE_TASK false
-  printf 'capability.document_read.allowed=true\n'
-  printf 'approval_applicable.document_read=false\n'
-  printf 'document_read.native=true\n'
-  printf 'install_root=%s\n' "$LAB_DIR"
-  printf 'agent_dir=%s\n' "$AGENT_DIR"
-  printf 'webui_dir=%s\n' "$WEBUI_DIR"
-  printf 'runtime_home=%s\n' "$TAIJI_RUNTIME_HOME"
-  printf 'workspace=%s\n' "$TAIJI_WORKSPACE"
-  printf 'state_dir=%s\n' "$TAIJI_STATE_DIR"
-  printf 'log_dir=%s\n' "$LOG_DIR"
-  printf 'TAIJI_AGENT_TMP_DIR=%s\n' "$TAIJI_AGENT_TMP_DIR"
-  printf 'TMPDIR=%s\n' "${TMPDIR:-}"
-  printf 'TMP=%s\n' "${TMP:-}"
-  printf 'TEMP=%s\n' "${TEMP:-}"
-  printf 'agent_api=%s:%s\n' "$AGENT_API_HOST" "$AGENT_API_PORT"
-  printf 'webui=%s:%s\n' "$WEBUI_HOST" "$WEBUI_PORT"
-
-  section "Path Checks"
-  for path in \
-    "$LAB_DIR" \
-    "$AGENT_DIR" \
-    "$WEBUI_DIR" \
-    "$TAIJI_RUNTIME_HOME" \
-    "$TAIJI_WORKSPACE" \
-    "$TAIJI_STATE_DIR" \
-    "$LOG_DIR" \
-    "$TAIJI_AGENT_TMP_DIR" \
-    "$TAIJI_RUNTIME_HOME/skills" \
-    "$TAIJI_RUNTIME_HOME/scripts"; do
-    path_status "$path"
-  done
-
-  section "Runtime Checks"
-  printf 'python_bin=%s\n' "$(python_bin)"
-  if py="$(python_bin)" && [ -n "$py" ]; then
-    "$py" - "$TAIJI_AGENT_TMP_DIR" "$TAIJI_WORKSPACE" <<'PY' 2>&1 | redact_stream
-from pathlib import Path
-import sys
-import tempfile
-import zipfile
-
-tmp = Path(sys.argv[1])
-workspace = Path(sys.argv[2])
-for label, path in (("tmp", tmp), ("workspace", workspace)):
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".taiji-security-probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
-        print(f"{label}.write=true")
-    except Exception as exc:
-        print(f"{label}.write=false reason={exc}")
-
-try:
-    with tempfile.TemporaryDirectory(dir=tmp) as td:
-        print(f"tmpdir.controlled={str(str(td).startswith(str(tmp))).lower()}")
-except Exception as exc:
-    print(f"tmpdir.controlled=false reason={exc}")
-
-try:
-    docx = tmp / "taiji-diagnose-probe.docx"
-    with zipfile.ZipFile(docx, "w") as zf:
-        zf.writestr("[Content_Types].xml", "")
-    docx.unlink()
-    print("docx.minimal_write=true")
-except Exception as exc:
-    print(f"docx.minimal_write=false reason={exc}")
-PY
-  fi
+  printf '%s\n' 'security.schema=taiji-agent-diagnose-security/v1'
+  printf 'security.profile=%s\n' "$(safe_security_mode)"
+  printf '%s\n' 'effective_security_profile=restricted'
+  printf '%s\n' 'approval_applicable.terminal=false'
+  printf '%s\n' 'document_read.native=unknown'
+  printf '%s\n' 'taiji_tmp_policy=managed'
 }
 
 print_allowlist_report() {
-  section "Taiji Security Allowlist"
-  printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-  printf 'note=%s\n' "Do not globally allow /bin/bash, python3, or /tmp. Review these Taiji-owned paths first."
-
-  section "Folder Allowlist"
-  printf '%s\n' "$LAB_DIR/"
-  printf '%s\n' "$TAIJI_RUNTIME_HOME/"
-  printf '%s\n' "$TAIJI_WORKSPACE/"
-  printf '%s\n' "$TAIJI_STATE_DIR/"
-  printf '%s\n' "$LOG_DIR/"
-  printf '%s\n' "$TAIJI_AGENT_TMP_DIR/"
-  printf '%s\n' "$TAIJI_RUNTIME_HOME/skills/"
-  printf '%s\n' "$TAIJI_RUNTIME_HOME/scripts/"
-  printf '%s\n' "$(dirname "$TAIJI_LICENSE_FILE")/"
-
-  section "Process Path Allowlist"
-  printf '%s\n' "/usr/bin/taiji"
-  printf '%s\n' "/usr/bin/taiji-agent"
-  printf '%s\n' "/usr/bin/taiji-agent-diagnose"
-  printf '%s\n' "/usr/share/applications/taiji-agent.desktop"
-  printf '%s\n' "$LAB_DIR/scripts/start-agent.sh"
-  printf '%s\n' "$LAB_DIR/scripts/start-webui.sh"
-  printf '%s\n' "$LAB_DIR/scripts/stop-all.sh"
-  printf '%s\n' "$(python_bin)"
-
-  section "Parent Child Process Chain"
-  printf '%s\n' "taiji-agent.desktop -> /usr/bin/taiji-agent -> $LAB_DIR/scripts/start-agent.sh -> $(python_bin) -m taiji_runtime.main gateway run"
-  printf '%s\n' "taiji-agent.desktop -> /usr/bin/taiji-agent -> $LAB_DIR/scripts/start-webui.sh -> $(python_bin) $WEBUI_DIR/server.py"
-  printf '%s\n' "restricted mode: terminal, execute_code, unapproved skill scripts, cron scripts, delegate_task are blocked by default."
-  printf '%s\n' "full mode: customer IT must approve bash/python/script child processes before enabling."
-
-  section "Local Ports"
-  printf 'agent_api=%s:%s\n' "$AGENT_API_HOST" "$AGENT_API_PORT"
-  printf 'webui=%s:%s\n' "$WEBUI_HOST" "$WEBUI_PORT"
+  printf '%s\n' 'allowlist.schema=taiji-agent-diagnose-allowlist/v1'
+  printf '%s\n' 'allowlist.status=not-collected'
+  printf '%s\n' 'allowlist.scope=public-fields-only'
 }
 
-print_usage() {
-  printf 'Usage: taiji-agent-diagnose [--security|--allowlist]\n'
+print_summary() {
+  printf '%s\n' 'schema=taiji-agent-diagnose/v2'
+  printf '%s\n' 'product=taiji-agent'
+  printf 'architecture=%s\n' "$(architecture)"
+  printf 'package.status=%s\n' "$(package_status)"
+  printf '%s\n' 'runtime.source=installed-payload'
+  printf '%s\n' 'runtime.mode=system-only'
+  printf '%s\n' 'network.mode=offline-safe'
+  print_security_report
+  print_allowlist_report
 }
 
 case "${1:-}" in
   --security)
     print_security_report
-    exit 0
     ;;
   --allowlist)
     print_allowlist_report
-    exit 0
     ;;
-  -h|--help)
-    print_usage
-    exit 0
-    ;;
-  "")
+  --help|-h)
+    printf '%s\n' 'Usage: taiji-agent-diagnose [--security|--allowlist]'
     ;;
   *)
-    print_usage >&2
-    exit 2
+    print_summary
     ;;
 esac
-
-section "Taiji Agent Diagnose"
-printf 'generated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-printf 'user=%s\n' "$(id -un 2>/dev/null || true)"
-printf 'install_root=%s\n' "$LAB_DIR"
-printf 'runtime_home=%s\n' "$TAIJI_RUNTIME_HOME"
-printf 'workspace=%s\n' "$TAIJI_WORKSPACE"
-printf 'log_dir=%s\n' "$LOG_DIR"
-printf 'ignored_legacy_runtime_selectors=%s\n' "${TAIJI_IGNORED_RUNTIME_SELECTOR_COUNT:-0}"
-
-section "System"
-run uname -a
-if [ -f /etc/os-release ]; then
-  run cat /etc/os-release
-fi
-if have dpkg-query; then
-  run dpkg-query -W -f='${Package} ${Version} ${Architecture} ${db:Status-Abbrev}\n' taiji-agent
-fi
-if have apt-mark; then
-  run apt-mark showhold
-fi
-
-section "Launchers And Desktop Entry"
-run command -v taiji-agent
-run command -v taiji
-run command -v taiji-agent-diagnose
-if [ -f /usr/share/applications/taiji-agent.desktop ]; then
-  run grep -E '^(Name|Exec|Icon|Terminal|Categories)=' /usr/share/applications/taiji-agent.desktop
-fi
-run ls -ld /opt/taiji-agent /usr/bin/taiji-agent /usr/bin/taiji
-
-section "Processes And Ports"
-if have pgrep; then
-  run pgrep -af '/opt/taiji-agent|taiji-agent|taiji_runtime.main'
-fi
-if have lsof; then
-  for port in 8787 18642 18787 "$AGENT_API_PORT" "$WEBUI_PORT"; do
-    run lsof -nP -iTCP:"$port" -sTCP:LISTEN
-  done
-fi
-
-section "Legacy Services"
-if have systemctl; then
-  for svc in taiji-agent-webui.service taiji-agent-gateway.service; do
-    run systemctl status "$svc" --no-pager
-  done
-fi
-
-section "Config Summary"
-config_summary
-
-section "Runtime Key Summary"
-runtime_key_summary
-
-section "License Summary"
-license_summary
-
-section "Attachment Capabilities"
-attachment_capabilities
-
-print_security_report
-print_allowlist_report
-
-section "HTTP Probes"
-if have curl; then
-  DESKTOP_ACCESS_TOKEN="$(desktop_access_token)"
-  export TAIJI_DIAG_DESKTOP_ACCESS_TOKEN="$DESKTOP_ACCESS_TOKEN"
-  printf 'desktop_access_token.available=%s\n' "$(if [ -n "$DESKTOP_ACCESS_TOKEN" ]; then printf true; else printf false; fi)"
-  run curl -fsS "http://$AGENT_API_HOST:$AGENT_API_PORT/health"
-  run curl -fsS "http://$WEBUI_HOST:$WEBUI_PORT/health"
-  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/settings" settings
-  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/model-config" model
-  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/crons" crons
-  http_json_summary "http://$WEBUI_HOST:$WEBUI_PORT/api/expert-teams/catalog" expert_catalog
-  webui_static_asset_summary "http://$WEBUI_HOST:$WEBUI_PORT"
-  unset TAIJI_DIAG_DESKTOP_ACCESS_TOKEN
-fi
-
-section "Recent Logs"
-log_tail "$LOG_DIR/taiji-desktop.log"
-log_tail "$LOG_DIR/agent.log"
-log_tail "$LOG_DIR/web.log"
-log_tail /var/log/taiji-agent-postinst-verify.log
-
-section "End"
-printf 'diagnose_complete=1\n'

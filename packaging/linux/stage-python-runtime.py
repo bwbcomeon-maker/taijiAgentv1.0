@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -13,8 +15,48 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+_TRUSTED_READELF_CANDIDATES = (
+    Path("/usr/bin/readelf"),
+    Path("/bin/readelf"),
+    Path("/usr/bin/x86_64-linux-gnu-readelf"),
+    Path("/bin/x86_64-linux-gnu-readelf"),
+)
+_TRUSTED_READELF_DIRECTORIES = (Path("/usr/bin"), Path("/bin"))
+_TRUSTED_TOOLS_MODULE = None
+
+
 class PythonRuntimeStageError(RuntimeError):
     pass
+
+
+def _trusted_tools_module():
+    global _TRUSTED_TOOLS_MODULE
+    if _TRUSTED_TOOLS_MODULE is not None:
+        return _TRUSTED_TOOLS_MODULE
+    module_path = Path(__file__).with_name("trusted_system_tools.py")
+    spec = importlib.util.spec_from_file_location(
+        "taiji_trusted_system_tools_for_python_stager",
+        module_path,
+    )
+    if spec is None or spec.loader is None:
+        raise PythonRuntimeStageError(f"cannot load trusted system tool helper: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _TRUSTED_TOOLS_MODULE = module
+    return module
+
+
+def resolve_trusted_readelf() -> str:
+    module = _trusted_tools_module()
+    try:
+        return module.resolve_trusted_system_tool(
+            "readelf",
+            candidates=_TRUSTED_READELF_CANDIDATES,
+            trusted_directories=_TRUSTED_READELF_DIRECTORIES,
+            allowed_resolved_names=("readelf", "x86_64-linux-gnu-readelf"),
+        )
+    except module.TrustedSystemToolError as exc:
+        raise PythonRuntimeStageError(str(exc)) from exc
 
 
 def is_within(root: Path, candidate: Path) -> bool:
@@ -167,6 +209,148 @@ def prune_base_command_scripts(destination: Path, major_minor: str) -> None:
             candidate.unlink(missing_ok=True)
 
 
+def _remove_runtime_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _is_tcl_tk_library_name(name: str) -> bool:
+    lower = name.lower()
+    if lower.startswith(("tcl", "tk", "itcl", "tdbc", "libtcl", "libtk")):
+        return True
+    return lower.startswith("thread") and lower[len("thread") : len("thread") + 1].isdigit()
+
+
+def prune_optional_tcl_tk_components(destination: Path, major_minor: str) -> None:
+    stdlib = destination / "lib" / f"python{major_minor}"
+    for relative in ("tkinter", "idlelib", "turtledemo", "turtle.py"):
+        _remove_runtime_path(stdlib / relative)
+    dynamic = stdlib / "lib-dynload"
+    if dynamic.is_dir():
+        for candidate in dynamic.glob("_tkinter.*"):
+            _remove_runtime_path(candidate)
+
+    for parent_name in ("lib", "share", "include"):
+        parent = destination / parent_name
+        if not parent.is_dir():
+            continue
+        for candidate in list(parent.iterdir()):
+            if _is_tcl_tk_library_name(candidate.name):
+                _remove_runtime_path(candidate)
+
+
+def assert_no_optional_tcl_tk_components(destination: Path, major_minor: str) -> None:
+    stdlib = destination / "lib" / f"python{major_minor}"
+    forbidden: list[Path] = []
+    for relative in ("tkinter", "idlelib", "turtledemo", "turtle.py"):
+        candidate = stdlib / relative
+        if candidate.exists() or candidate.is_symlink():
+            forbidden.append(candidate)
+    dynamic = stdlib / "lib-dynload"
+    if dynamic.is_dir():
+        forbidden.extend(dynamic.glob("_tkinter.*"))
+    for parent_name in ("lib", "share", "include"):
+        parent = destination / parent_name
+        if not parent.is_dir():
+            continue
+        forbidden.extend(
+            candidate for candidate in parent.iterdir() if _is_tcl_tk_library_name(candidate.name)
+        )
+    if forbidden:
+        rendered = ", ".join(str(path.relative_to(destination)) for path in forbidden)
+        raise PythonRuntimeStageError(f"staged Python runtime still contains Tcl/Tk components: {rendered}")
+
+
+def _libpython_stub_candidates(destination: Path, major_minor: str) -> list[Path]:
+    library_root = destination / "lib"
+    if not library_root.is_dir():
+        return []
+    candidates: set[Path] = set()
+    for pattern in ("libpython3.so*", f"libpython{major_minor}.so*"):
+        candidates.update(
+            path
+            for path in library_root.glob(pattern)
+            if path.is_file() or path.is_symlink()
+        )
+    return sorted(candidates, key=lambda path: path.name)
+
+
+def _inspect_elf_needed_libraries(executable: Path) -> set[str]:
+    try:
+        completed = subprocess.run(
+            [resolve_trusted_readelf(), "-d", str(executable)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"},
+        )
+    except OSError as exc:
+        raise PythonRuntimeStageError(
+            f"trusted readelf could not execute for libpython inspection: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise PythonRuntimeStageError(
+            f"cannot inspect staged Python ELF dependencies: {detail or executable}"
+        )
+    return set(
+        re.findall(
+            r"\(NEEDED\)\s+Shared library:\s*\[([^\]]+)\]",
+            completed.stdout,
+        )
+    )
+
+
+def _staged_elf_consumers(destination: Path, excluded: set[Path]) -> list[Path]:
+    consumers: list[Path] = []
+    for candidate in destination.rglob("*"):
+        if candidate in excluded or candidate.is_symlink() or not candidate.is_file():
+            continue
+        with candidate.open("rb") as handle:
+            if handle.read(4) == b"\x7fELF":
+                consumers.append(candidate)
+    return sorted(consumers, key=lambda path: str(path.relative_to(destination)))
+
+
+def prune_unneeded_libpython_stubs(destination: Path, major_minor: str) -> None:
+    candidates = _libpython_stub_candidates(destination, major_minor)
+    if not candidates:
+        return
+    executable = destination / "bin/python"
+    if not executable.is_file() or executable.is_symlink():
+        raise PythonRuntimeStageError(
+            f"staged Python entrypoint is unavailable for libpython dependency inspection: {executable}"
+        )
+    consumers = _staged_elf_consumers(destination, set(candidates))
+    if executable not in consumers:
+        raise PythonRuntimeStageError(
+            f"staged Python entrypoint is not an inspectable ELF consumer: {executable}"
+        )
+    dependent_consumers: list[str] = []
+    for consumer in consumers:
+        needed = _inspect_elf_needed_libraries(consumer)
+        libpython_dependencies = sorted(
+            name for name in needed if name.startswith("libpython") and ".so" in name
+        )
+        if libpython_dependencies:
+            dependent_consumers.append(
+                f"{consumer.relative_to(destination)} -> {', '.join(libpython_dependencies)}"
+            )
+    if dependent_consumers:
+        raise PythonRuntimeStageError(
+            "staged ELF consumer depends on libpython; refusing unsafe stub pruning: "
+            + "; ".join(dependent_consumers)
+        )
+    for candidate in candidates:
+        _remove_runtime_path(candidate)
+    remaining = _libpython_stub_candidates(destination, major_minor)
+    if remaining:
+        rendered = ", ".join(str(path.relative_to(destination)) for path in remaining)
+        raise PythonRuntimeStageError(f"staged Python runtime still contains libpython stubs: {rendered}")
+
+
 def normalize_managed_base_paths(destination: Path, base_root: Path, source_platform: str) -> None:
     marker = str(base_root).encode("utf-8")
     installed_prefix = b"/opt/taiji-agent/runtime/agent/venv"
@@ -309,6 +493,9 @@ def stage_python_runtime(
         (destination / "pyvenv.cfg").unlink(missing_ok=True)
         make_python_entrypoint_regular(destination, base_root, source_python)
         prune_base_command_scripts(destination, info["major_minor"])
+        prune_unneeded_libpython_stubs(destination, info["major_minor"])
+        prune_optional_tcl_tk_components(destination, info["major_minor"])
+        assert_no_optional_tcl_tk_components(destination, info["major_minor"])
         normalize_managed_base_paths(destination, base_root, info["platform"])
         assert_safe_symlinks(destination, label="staged Python runtime")
         forbidden_paths = {

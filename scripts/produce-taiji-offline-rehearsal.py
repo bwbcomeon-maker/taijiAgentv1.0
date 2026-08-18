@@ -14,22 +14,26 @@ import stat
 import subprocess
 import sys
 import uuid
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TRUSTED_GIT = ROOT / "scripts" / "taiji-trusted-git"
 VALIDATOR = ROOT / "scripts" / "validate-taiji-release-evidence.py"
-PUBLIC_KEY = ROOT / "tools" / "taiji-release-evidence" / "signing-public.pem"
-PUBLIC_KEY_FINGERPRINT = "839b6c589f74bda533f54b660d977e6757ccc86f73554e10647d5f72d51ec1da"
+POLICY_HELPER = ROOT / "packaging" / "linux" / "compatibility_policy.py"
 IMAGE_ROLE_LABEL = "offline-rehearsal-v1"
 IMAGE_BASELINE_LABEL = "ubuntu-20.04"
+IMAGE_FIXTURE_LABEL = "kylin-os-release-v1"
+REHEARSAL_ENVIRONMENT = "container-kylin-policy-fixture-v1"
 SESSION_BASENAME = "offline-install-rehearsal-session.json"
 EVIDENCE_BASENAME = "offline-install-rehearsal.json"
 CHALLENGE_RE = re.compile(r"^[0-9a-f]{64,128}$")
 SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
-COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 OFFLINE_SESSION_KEYS = {
     "schema",
     "generated_at_utc",
@@ -111,8 +115,10 @@ def docker_json(docker: str, args: list[str], label: str) -> dict[str, Any]:
 
 
 def current_source_commit() -> str:
+    if not TRUSTED_GIT.is_file() or TRUSTED_GIT.is_symlink():
+        raise ProducerError(f"缺少可信 Git 边界：{TRUSTED_GIT}")
     commit = run_command(
-        ["git", "-C", str(ROOT), "rev-parse", "--short=8", "HEAD"]
+        [str(TRUSTED_GIT), "-C", str(ROOT), "rev-parse", "HEAD"]
     ).stdout.strip()
     if not COMMIT_RE.fullmatch(commit):
         raise ProducerError(f"当前源码 commit 格式不合法：{commit!r}")
@@ -133,6 +139,56 @@ def resolve_directory(path: Path, label: str) -> Path:
     return resolved
 
 
+def resolve_regular_file(path: Path, label: str) -> Path:
+    """Resolve one immutable, single-link regular input file."""
+
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ProducerError(f"{label} 不存在或不可读取：{path}: {exc}") from exc
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ProducerError(f"{label} 必须是单链接普通文件：{path}")
+    if info.st_size <= 0:
+        raise ProducerError(f"{label} 不能为空：{path}")
+    return path.resolve()
+
+
+def load_policy_identity(path: Path) -> tuple[str, str]:
+    """Load the checked-in compatibility policy and return its immutable identity."""
+
+    policy_path = resolve_regular_file(path, "compatibility policy")
+    if not POLICY_HELPER.is_file() or POLICY_HELPER.is_symlink():
+        raise ProducerError(f"缺少 compatibility policy helper：{POLICY_HELPER}")
+    spec = importlib.util.spec_from_file_location("taiji_offline_compatibility_policy", POLICY_HELPER)
+    if spec is None or spec.loader is None:
+        raise ProducerError(f"无法载入 compatibility policy helper：{POLICY_HELPER}")
+    helper = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = helper
+    spec.loader.exec_module(helper)
+    try:
+        policy = helper.load_and_validate(policy_path)
+        policy_id = policy["policy_id"]
+        policy_sha256 = helper.canonical_sha256(policy)
+    except Exception as exc:
+        raise ProducerError(f"compatibility policy 校验失败：{exc}") from exc
+    if not isinstance(policy_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", policy_id):
+        raise ProducerError("compatibility policy_id 格式不合法")
+    if not re.fullmatch(r"[0-9a-f]{64}", policy_sha256):
+        raise ProducerError("compatibility policy SHA256 格式不合法")
+    return policy_id, policy_sha256
+
+
+def parse_sha256_sidecar(path: Path, expected_file: Path, expected_hash: str) -> None:
+    sidecar = resolve_regular_file(path, "previous DEB SHA256 sidecar")
+    try:
+        text = sidecar.read_text(encoding="ascii")
+    except (OSError, UnicodeError) as exc:
+        raise ProducerError(f"previous DEB SHA256 sidecar 无法读取：{sidecar}") from exc
+    match = re.fullmatch(r"([0-9a-f]{64})[ \t]+\*?([^/\s]+)\n?", text)
+    if not match or match.group(1) != expected_hash or match.group(2) != expected_file.name:
+        raise ProducerError("previous DEB SHA256 sidecar 未准确绑定 previous DEB basename 和内容")
+
+
 def resolve_output(path: Path) -> Path:
     if path.exists() or path.is_symlink():
         raise ProducerError(f"证据输出目录已存在，拒绝覆盖历史证据：{path}")
@@ -146,7 +202,6 @@ def resolve_output(path: Path) -> Path:
 def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, Any]:
     commit = current_source_commit()
     package_dir = delivery / "生成的安装包"
-    offline_repo = delivery / "离线依赖"
     debs = sorted(package_dir.glob("taiji-agent_*_amd64.deb"))
     if len(debs) != 1:
         raise ProducerError(f"生成的安装包目录必须且只能包含一个 amd64 DEB，实际为 {len(debs)}")
@@ -155,8 +210,6 @@ def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, 
     manifest = package_dir / "taiji-package-manifest.json"
     build_marker = package_dir / ".build-success"
     source_archive = delivery / f"taiji-agentv1.0-kylin-build-src-{commit}.tar.gz"
-    packages = offline_repo / "Packages"
-    packages_gz = offline_repo / "Packages.gz"
     binding_args = argparse.Namespace(
         source_commit=commit,
         deb=deb,
@@ -164,29 +217,28 @@ def discover_release_inputs(delivery: Path, validator: ModuleType) -> dict[str, 
         manifest=manifest,
         build_marker=build_marker,
         source_archive=source_archive,
-        packages=packages,
-        packages_gz=packages_gz,
         delivery_dir=delivery,
     )
     try:
         binding = validator.validate_build_binding(binding_args)
     except Exception as exc:
         raise ProducerError(f"交付物与当前源码/manifest 绑定校验失败：{exc}") from exc
-    if type(binding) is not tuple or len(binding) < 3:
-        raise ProducerError("release evidence validator 返回了不兼容的 build binding")
-    deb_hash, version, release_hash = binding[:3]
+    if not isinstance(binding, validator.BuildBinding):
+        raise ProducerError("release evidence validator 未返回当前 v3 BuildBinding")
     return {
-        "source_commit": commit,
+        "source_commit": binding.source_commit,
         "deb": deb,
         "checksum": checksum,
         "manifest": manifest,
+        "deb_sha256": binding.deb_sha256,
+        "version": binding.version,
+        "architecture": binding.architecture,
+        "compatibility_policy_id": binding.compatibility_policy_id,
+        "compatibility_policy_sha256": binding.compatibility_policy_sha256,
         "build_marker": build_marker,
         "source_archive": source_archive,
-        "packages": packages,
-        "packages_gz": packages_gz,
-        "deb_sha256": deb_hash,
-        "version": version,
-        "release_artifacts_sha256": release_hash,
+        "delivery_inventory_sha256": binding.delivery_inventory_sha256,
+        "binding": binding,
     }
 
 
@@ -247,6 +299,9 @@ def run_lifecycle_container(
     evidence_dir: Path,
     challenge: str,
     release: dict[str, Any],
+    previous: dict[str, Any] | None = None,
+    policy: dict[str, str] | None = None,
+    expanded: bool = False,
 ) -> None:
     image_info = docker_json(docker, ["image", "inspect", image], "Docker image inspect")
     if image_info.get("Os") != "linux" or image_info.get("Architecture") != "amd64":
@@ -258,6 +313,8 @@ def run_lifecycle_container(
         raise ProducerError("演练镜像不是仓库定义的专用离线演练镜像")
     if labels.get("io.taiji.release-evidence.baseline") != IMAGE_BASELINE_LABEL:
         raise ProducerError("演练镜像兼容基线不是 ubuntu-20.04")
+    if labels.get("io.taiji.release-evidence.fixture") != IMAGE_FIXTURE_LABEL:
+        raise ProducerError("演练镜像不是固定的 Kylin policy fixture")
     if entrypoint != ["/usr/local/bin/run-lifecycle.sh"]:
         raise ProducerError("演练镜像入口不是固定 lifecycle runner")
     image_id = image_info.get("Id")
@@ -265,8 +322,7 @@ def run_lifecycle_container(
         raise ProducerError("Docker image inspect 缺少不可变镜像 ID")
 
     name = f"taiji-offline-rehearsal-{uuid.uuid4().hex[:12]}"
-    create = run_command(
-        [
+    create_args = [
             docker,
             "create",
             "--platform",
@@ -288,9 +344,35 @@ def run_lifecycle_container(
             f"TAIJI_EXPECTED_DEB_BASENAME={release['deb'].name}",
             "--env",
             f"TAIJI_EXPECTED_DEB_SHA256={release['deb_sha256']}",
-            image,
-        ]
-    )
+            "--env",
+            f"TAIJI_REHEARSAL_FIXTURE_ID={IMAGE_FIXTURE_LABEL}",
+    ]
+    if expanded:
+        if previous is None or policy is None:
+            raise ProducerError("扩展生命周期演练缺少 previous DEB 或 compatibility policy")
+        create_args.extend(
+            [
+                "--env",
+                "TAIJI_REHEARSAL_EXPANDED=1",
+                "--env",
+                f"TAIJI_EXPECTED_PREVIOUS_DEB_BASENAME={previous['deb'].name}",
+                "--env",
+                f"TAIJI_EXPECTED_PREVIOUS_DEB_SHA256={previous['sha256']}",
+                "--env",
+                "TAIJI_PREVIOUS_DEB_RELATIVE=.rehearsal-inputs/previous/"
+                f"{previous['deb'].name}",
+                "--env",
+                f"TAIJI_COMPATIBILITY_POLICY_ID={policy['id']}",
+                "--env",
+                f"TAIJI_COMPATIBILITY_POLICY_SHA256={policy['sha256']}",
+                "--env",
+                "TAIJI_TRANSACTION_HELPER_RELATIVE=.rehearsal-inputs/upgrade_transaction.py",
+                "--env",
+                "TAIJI_TRANSACTION_CONTRACT_RELATIVE=.rehearsal-inputs/upgrade-data-contract.json",
+            ]
+        )
+    create_args.append(image)
+    create = run_command(create_args)
     container_id = create.stdout.strip()
     if not container_id:
         raise ProducerError("docker create 未返回 container ID")
@@ -331,7 +413,7 @@ def run_lifecycle_container(
 
 
 def validate_session(session: dict[str, Any], release: dict[str, Any], challenge: str) -> None:
-    if set(session) != OFFLINE_SESSION_KEYS:
+    if set(session) != OFFLINE_SESSION_KEYS and not OFFLINE_SESSION_KEYS.issubset(session):
         missing = sorted(OFFLINE_SESSION_KEYS - set(session))
         extra = sorted(set(session) - OFFLINE_SESSION_KEYS)
         raise ProducerError(f"离线会话字段集合不合法：missing={missing}, extra={extra}")
@@ -342,7 +424,7 @@ def validate_session(session: dict[str, Any], release: dict[str, Any], challenge
         "deb_basename": release["deb"].name,
         "deb_sha256": release["deb_sha256"],
         "platform": "linux/amd64",
-        "environment": "container",
+        "environment": REHEARSAL_ENVIRONMENT,
         "os_id": "ubuntu",
         "os_version": "20.04",
         "network": "none",
@@ -358,8 +440,34 @@ def validate_session(session: dict[str, Any], release: dict[str, Any], challenge
         raise ProducerError("离线会话 generated_at_utc 格式不合法")
     checks = session.get("checks")
     expected_checks = {"install": True, "uninstall": True, "reinstall": True}
-    if checks != expected_checks or any(type(value) is not bool for value in checks.values()):
+    if not isinstance(checks, dict) or any(
+        checks.get(key) is not True or type(checks.get(key)) is not bool
+        for key in expected_checks
+    ):
         raise ProducerError("离线会话必须记录 install/uninstall/reinstall 三段真实通过")
+    if set(session) != OFFLINE_SESSION_KEYS:
+        steps = session.get("steps")
+        if steps != [
+            "fresh_install_n",
+            "same_version_reinstall_n",
+            "seed_n_minus_one",
+            "upgrade_n_minus_one_to_n",
+            "data_manifest_after_upgrade",
+            "inject_postinst_failure_same_candidate",
+            "automatic_rollback_to_n_minus_one",
+            "upgrade_n_again",
+            "remove_preserves_user_data",
+            "purge_clears_root_state_only",
+        ]:
+            raise ProducerError("扩展离线会话 lifecycle steps 不完整或顺序错误")
+        receipts = session.get("receipts")
+        if not isinstance(receipts, list) or len(receipts) < 4:
+            raise ProducerError("扩展离线会话缺少足够的 candidate receipts")
+        manifests = session.get("data_manifests")
+        if not isinstance(manifests, dict) or not {
+            "before_upgrade", "after_upgrade", "after_rollback"
+        }.issubset(manifests):
+            raise ProducerError("扩展离线会话缺少数据 manifest 对账")
 
 
 def sha256_file(path: Path) -> str:
@@ -384,7 +492,9 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def validate_pre_sign(evidence: Path, release: dict[str, Any], challenge: str, delivery: Path) -> None:
+def validate_current_offline(
+    evidence: Path, release: dict[str, Any], challenge: str
+) -> None:
     args = [
         sys.executable,
         str(VALIDATOR),
@@ -403,86 +513,224 @@ def validate_pre_sign(evidence: Path, release: dict[str, Any], challenge: str, d
         str(release["build_marker"]),
         "--source-archive",
         str(release["source_archive"]),
-        "--packages",
-        str(release["packages"]),
-        "--packages-gz",
-        str(release["packages_gz"]),
         "--delivery-dir",
-        str(delivery),
-        "--attestation-public-key",
-        str(PUBLIC_KEY),
-        "--attestation-public-key-fingerprint",
-        PUBLIC_KEY_FINGERPRINT,
+        str(release["source_archive"].parent),
         "--challenge",
         challenge,
-        "--pre-sign",
     ]
     run_command(args)
 
 
-def produce(delivery_arg: Path, output_arg: Path, image: str, challenge: str) -> Path:
+@contextmanager
+def staged_expanded_delivery(delivery: Path, previous: Path, policy_source: Path):
+    """Expose previous-release and transaction inputs without mutating delivery."""
+
+    with tempfile.TemporaryDirectory(prefix=".taiji-offline-rehearsal-", dir=delivery.parent) as temporary:
+        staged = Path(temporary) / delivery.name
+        shutil.copytree(delivery, staged, symlinks=True)
+        input_root = staged / ".rehearsal-inputs"
+        previous_dir = input_root / "previous"
+        previous_dir.mkdir(mode=0o700, parents=True)
+        previous_target = previous_dir / previous.name
+        shutil.copy2(previous, previous_target)
+        shutil.copy2(Path(f"{previous}.sha256"), Path(f"{previous_target}.sha256"))
+        for source in (
+            ROOT / "packaging" / "linux" / "upgrade_transaction.py",
+            ROOT / "packaging" / "linux" / "upgrade-data-contract.json",
+            policy_source,
+        ):
+            shutil.copy2(source, input_root / source.name)
+        yield staged
+
+
+@contextmanager
+def unmodified_delivery(delivery: Path):
+    yield delivery
+
+
+def prepare_explicit_inputs(
+    *,
+    delivery: Path,
+    validator: ModuleType,
+    deb_arg: Path,
+    previous_arg: Path,
+    manifest_arg: Path,
+    policy_arg: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+    """Validate the fixed explicit CLI contract against the current v3 release."""
+
+    release = discover_release_inputs(delivery, validator)
+    deb = resolve_regular_file(deb_arg, "candidate DEB")
+    manifest = resolve_regular_file(manifest_arg, "build manifest")
+    if deb != release["deb"].resolve():
+        raise ProducerError("candidate DEB 必须是交付目录生成的安装包中的唯一 amd64 DEB")
+    if manifest.name != release["manifest"].name:
+        raise ProducerError("build manifest basename 必须是 taiji-package-manifest.json")
+    if manifest.read_bytes() != release["manifest"].read_bytes():
+        raise ProducerError("build manifest 内容必须与交付目录中的 candidate manifest 完全一致")
+    release["manifest"] = manifest
+    previous = resolve_regular_file(previous_arg, "previous DEB")
+    if previous == deb:
+        raise ProducerError("previous DEB 不能与 candidate DEB 是同一文件")
+    previous_hash = sha256_file(previous)
+    parse_sha256_sidecar(Path(f"{previous}.sha256"), previous, previous_hash)
+    policy_id, policy_sha256 = load_policy_identity(policy_arg)
+    manifest_payload = load_json(manifest, "build manifest")
+    manifest_policy_id = manifest_payload.get("compatibility_policy_id")
+    manifest_policy_sha256 = manifest_payload.get("compatibility_policy_sha256")
+    if manifest_policy_id != policy_id or manifest_policy_sha256 != policy_sha256:
+        raise ProducerError("显式 policy identity 与 candidate build manifest 不一致")
+    return (
+        release,
+        {"deb": previous, "sha256": previous_hash},
+        {"id": policy_id, "sha256": policy_sha256, "path": str(Path(policy_arg).resolve())},
+    )
+
+
+def produce(
+    delivery_arg: Path | None,
+    output_arg: Path,
+    image: str,
+    challenge: str,
+    *,
+    deb_arg: Path | None = None,
+    previous_deb_arg: Path | None = None,
+    build_manifest_arg: Path | None = None,
+    policy_arg: Path | None = None,
+) -> Path:
     if not CHALLENGE_RE.fullmatch(challenge):
         raise ProducerError("challenge 必须是 64-128 位小写十六进制")
     if not image.strip() or any(character.isspace() for character in image):
         raise ProducerError("Docker image 名称不能为空或包含空白")
-    if not PUBLIC_KEY.is_file() or PUBLIC_KEY.is_symlink():
-        raise ProducerError(f"缺少固定 release evidence 验签公钥：{PUBLIC_KEY}")
     docker = shutil.which("docker")
     if docker is None:
         raise ProducerError("缺少 docker 命令")
 
-    delivery = resolve_directory(delivery_arg, "交付目录")
+    explicit = any(
+        value is not None
+        for value in (deb_arg, previous_deb_arg, build_manifest_arg, policy_arg)
+    )
+    if explicit and any(value is None for value in (deb_arg, previous_deb_arg, build_manifest_arg, policy_arg)):
+        raise ProducerError("显式生命周期入口必须同时提供 --deb、--previous-deb、--build-manifest、--policy")
+    if not explicit and delivery_arg is None:
+        raise ProducerError("必须提供 --delivery-dir，或完整的显式 DEB/previous/manifest/policy 输入")
+    if explicit and delivery_arg is not None:
+        raise ProducerError("--delivery-dir 与显式 --deb 输入不能混用")
+
+    if delivery_arg is not None:
+        delivery = resolve_directory(delivery_arg, "交付目录")
+    else:
+        candidate = resolve_regular_file(Path(deb_arg), "candidate DEB")
+        # The explicit first release is intentionally scoped to the canonical
+        # delivery layout; this keeps source/manifest/inventory binding stable.
+        expected_delivery = candidate.parent.parent
+        delivery = resolve_directory(expected_delivery, "candidate DEB 所属交付目录")
     output = resolve_output(output_arg)
     validator = load_validator()
-    release = discover_release_inputs(delivery, validator)
+    previous: dict[str, Any] | None = None
+    policy: dict[str, str] | None = None
+    expanded = explicit
+    if expanded:
+        release, previous, policy = prepare_explicit_inputs(
+            delivery=delivery,
+            validator=validator,
+            deb_arg=Path(deb_arg),
+            previous_arg=Path(previous_deb_arg),
+            manifest_arg=Path(build_manifest_arg),
+            policy_arg=Path(policy_arg),
+        )
+    else:
+        release = discover_release_inputs(delivery, validator)
 
     output.mkdir(mode=0o700)
     published = False
     try:
-        run_lifecycle_container(
-            docker=docker,
-            image=image,
-            delivery=delivery,
-            evidence_dir=output,
-            challenge=challenge,
-            release=release,
-        )
+        with (
+            staged_expanded_delivery(delivery, previous["deb"], Path(policy["path"]))
+            if expanded and previous
+            else unmodified_delivery(delivery)
+        ) as container_delivery:
+            run_lifecycle_container(
+                docker=docker,
+                image=image,
+                delivery=container_delivery,
+                evidence_dir=output,
+                challenge=challenge,
+                release=release,
+                previous=previous,
+                policy=policy,
+                expanded=expanded,
+            )
         session_path = output / SESSION_BASENAME
+        lifecycle_path = output / "offline-install-rehearsal-lifecycle.json"
+        if not session_path.is_file() and lifecycle_path.is_file():
+            lifecycle_session = load_json(lifecycle_path, "扩展离线生命周期会话")
+            base_session = {
+                key: lifecycle_session[key]
+                for key in OFFLINE_SESSION_KEYS
+                if key in lifecycle_session
+            }
+            atomic_write_json(session_path, base_session)
         session = load_json(session_path, "离线生命周期结构化会话")
         validate_session(session, release, challenge)
+        lifecycle_session = (
+            load_json(lifecycle_path, "扩展离线生命周期会话")
+            if lifecycle_path.is_file()
+            else session
+        )
+        if expanded:
+            validate_session(lifecycle_session, release, challenge)
+            if lifecycle_session.get("compatibility_policy_id") != policy["id"]:
+                raise ProducerError("lifecycle evidence compatibility_policy_id 与固定 policy 不一致")
+            if lifecycle_session.get("compatibility_policy_sha256") != policy["sha256"]:
+                raise ProducerError("lifecycle evidence compatibility_policy_sha256 与固定 policy 不一致")
 
         current_release = discover_release_inputs(delivery, validator)
-        if current_release["release_artifacts_sha256"] != release["release_artifacts_sha256"]:
-            raise ProducerError("交付目录在 Docker 演练期间发生变化")
-        if current_release["deb_sha256"] != release["deb_sha256"]:
-            raise ProducerError("DEB 在 Docker 演练期间发生变化")
+        if (
+            current_release["binding"] != release["binding"]
+            or current_release["delivery_inventory_sha256"]
+            != release["delivery_inventory_sha256"]
+        ):
+            raise ProducerError("当前 v3 交付目录在 Docker 演练期间发生变化")
 
         evidence = {
-            "schema_version": 1,
-            "evidence_type": "offline-install-rehearsal",
+            "schema": "taiji.offline-install-rehearsal.v1",
+            "status": "PASS",
             "generated_at_utc": session["generated_at_utc"],
             "rehearsal_session_id": session["rehearsal_session_id"],
             "challenge_nonce": challenge,
-            "release_artifacts_sha256": release["release_artifacts_sha256"],
             "source_commit": release["source_commit"],
+            "version": release["version"],
+            "architecture": release["architecture"],
             "deb_basename": release["deb"].name,
             "deb_sha256": release["deb_sha256"],
+            "compatibility_policy_id": release["compatibility_policy_id"],
+            "compatibility_policy_sha256": release["compatibility_policy_sha256"],
+            "delivery_inventory_sha256": release["delivery_inventory_sha256"],
             "platform": "linux/amd64",
-            "environment": "container",
+            "environment": REHEARSAL_ENVIRONMENT,
             "os_id": session["os_id"],
             "os_version": session["os_version"],
             "network": "none",
-            "install": True,
-            "uninstall": True,
-            "reinstall": True,
+            "checks": {"install": "PASS", "uninstall": "PASS", "reinstall": "PASS"},
             "desktop_app_verified": False,
             "target_verified": False,
             "log_basename": SESSION_BASENAME,
             "log_sha256": sha256_file(session_path),
         }
+        if expanded:
+            for key in (
+                "steps",
+                "receipts",
+                "data_manifests",
+                "journal",
+                "package_actions",
+            ):
+                if key in lifecycle_session:
+                    evidence[key] = lifecycle_session[key]
         evidence_path = output / EVIDENCE_BASENAME
         atomic_write_json(evidence_path, evidence)
-        validate_pre_sign(evidence_path, release, challenge, delivery)
+        validate_current_offline(evidence_path, release, challenge)
         published = True
         return evidence_path
     finally:
@@ -500,17 +748,42 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="在 --network none 的 linux/amd64 Docker 中生成太极离线安装生命周期证据。"
     )
-    parser.add_argument("--delivery-dir", required=True, type=Path)
+    parser.add_argument(
+        "--delivery-dir",
+        type=Path,
+        help="当前 v3 单 DEB 交付目录入口；与显式 DEB 输入互斥",
+    )
+    parser.add_argument("--deb", type=Path, help="本轮固定 candidate amd64 DEB")
+    parser.add_argument("--previous-deb", type=Path, help="必须存在且有 .sha256 sidecar 的 N-1 DEB")
+    parser.add_argument("--build-manifest", type=Path, help="绑定 candidate 的 taiji-package-manifest.json")
+    parser.add_argument("--policy", type=Path, help="固定 compatibility-policy.json")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--image", required=True)
     parser.add_argument("--challenge", required=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    explicit = (args.deb, args.previous_deb, args.build_manifest, args.policy)
+    if args.delivery_dir is None and any(item is None for item in explicit):
+        parser.error(
+            "必须提供 --delivery-dir，或完整提供 --deb --previous-deb --build-manifest --policy"
+        )
+    if args.delivery_dir is not None and any(item is not None for item in explicit):
+        parser.error("--delivery-dir 与显式 DEB 输入不能混用")
+    return args
 
 
 def main() -> int:
     args = parse_args()
     try:
-        evidence = produce(args.delivery_dir, args.output_dir, args.image, args.challenge)
+        evidence = produce(
+            args.delivery_dir,
+            args.output_dir,
+            args.image,
+            args.challenge,
+            deb_arg=args.deb,
+            previous_deb_arg=args.previous_deb,
+            build_manifest_arg=args.build_manifest,
+            policy_arg=args.policy,
+        )
     except (ProducerError, OSError, ValueError, TypeError) as exc:
         print(f"offline-rehearsal-producer-failed\t{exc}", file=sys.stderr)
         return 1

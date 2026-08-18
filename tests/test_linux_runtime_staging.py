@@ -136,6 +136,41 @@ class LinuxRuntimeStagingTest(unittest.TestCase):
         self._write(f"{root}/node_modules/runtime-dep/docs/leak.md")
         self._write(f"{root}/node_modules/.cache/leak")
         self._write(f"{root}/node_modules/runtime-dep/.nyc_output/leak.json")
+        self._write(
+            f"{root}/node_modules/@resvg/resvg-js/package.json",
+            json.dumps({"name": "@resvg/resvg-js", "version": "2.6.2"}),
+        )
+        for package_name, cpu, libc in (
+            ("resvg-js-linux-x64-gnu", "x64", "glibc"),
+            ("resvg-js-linux-x64-musl", "x64", "musl"),
+            ("resvg-js-linux-arm64-gnu", "arm64", "glibc"),
+            ("resvg-js-linux-arm64-musl", "arm64", "musl"),
+            ("resvg-js-darwin-arm64", "arm64", None),
+        ):
+            package = {
+                "name": f"@resvg/{package_name}",
+                "version": "2.6.2",
+                "os": ["linux"] if package_name.startswith("resvg-js-linux-") else ["darwin"],
+                "cpu": [cpu],
+                "main": f"resvgjs.{package_name.removeprefix('resvg-js-')}.node",
+            }
+            if libc is not None:
+                package["libc"] = [libc]
+            self._write(
+                f"{root}/node_modules/@resvg/{package_name}/package.json",
+                json.dumps(package),
+            )
+            native = self.repo / root / "node_modules/@resvg" / package_name / package["main"]
+            native.parent.mkdir(parents=True, exist_ok=True)
+            header = bytearray(64)
+            header[0:4] = b"\x7fELF"
+            header[4] = 2
+            header[5] = 1
+            header[6] = 1
+            header[16:18] = (3).to_bytes(2, "little")
+            header[18:20] = (62 if cpu == "x64" else 183).to_bytes(2, "little")
+            header[20:24] = (1).to_bytes(4, "little")
+            native.write_bytes(bytes(header))
         self._write(f"{root}/tests/source-test.js")
         self._write(f"{root}/docs/source-doc.md")
         self._write(f"{root}/.git/config")
@@ -231,6 +266,45 @@ class LinuxRuntimeStagingTest(unittest.TestCase):
         manifest = json.loads(manifest_text)
         self.assertEqual(manifest["schema_version"], "taiji-product-skills/v1")
         self.assertEqual({item["id"] for item in manifest["skills"]}, SKILL_IDS)
+
+    def test_deb_stage_keeps_only_linux_x64_gnu_resvg_native_package(self) -> None:
+        completed = self._run_stage()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        scope = self.install_root / "runtime/docx-engine-v2/node_modules/@resvg"
+        self.assertEqual(
+            {path.name for path in scope.iterdir()},
+            {"resvg-js", "resvg-js-linux-x64-gnu"},
+        )
+        native = scope / "resvg-js-linux-x64-gnu/resvgjs.linux-x64-gnu.node"
+        self.assertTrue(native.is_file())
+        self.assertEqual(int.from_bytes(native.read_bytes()[18:20], "little"), 62)
+
+    def test_deb_stage_rejects_missing_linux_x64_gnu_resvg(self) -> None:
+        shutil.rmtree(
+            self.repo
+            / "hermes-local-lab/sources/docx-engine-v2/node_modules/@resvg/resvg-js-linux-x64-gnu"
+        )
+
+        completed = self._run_stage()
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("resvg-js-linux-x64-gnu", completed.stderr)
+
+    def test_deb_stage_rejects_wrong_architecture_resvg_native_binary(self) -> None:
+        native = (
+            self.repo
+            / "hermes-local-lab/sources/docx-engine-v2/node_modules/@resvg/"
+            "resvg-js-linux-x64-gnu/resvgjs.linux-x64-gnu.node"
+        )
+        content = bytearray(native.read_bytes())
+        content[18:20] = (183).to_bytes(2, "little")
+        native.write_bytes(bytes(content))
+
+        completed = self._run_stage()
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("x86_64", completed.stderr)
 
     def test_packaged_node_is_an_explicit_byte_preserving_runtime_allowlist(self) -> None:
         source_node = self.node_root / "bin/node"

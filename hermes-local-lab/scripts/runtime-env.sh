@@ -30,8 +30,72 @@ unset _taiji_exported_function_scan_status
 
 set -euo pipefail
 
-TAIJI_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_DIR="${TAIJI_AGENT_ROOT:-$(cd "$TAIJI_SCRIPT_DIR/.." && pwd)}"
+TAIJI_SCRIPT_DIR="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+_TAIJI_CANONICAL_LAUNCH_PROFILE="${TAIJI_LAUNCH_PROFILE:-}"
+_TAIJI_CANONICAL_RELEASE_VERSION="${TAIJI_RELEASE_VERSION:-}"
+_TAIJI_CANONICAL_RELEASE_COMMIT="${TAIJI_RELEASE_COMMIT:-}"
+_TAIJI_CANONICAL_NATIVE_VERIFY_MODE="${TAIJI_NATIVE_VERIFY_MODE:-}"
+_TAIJI_CANONICAL_USE_USER_DIRS="${TAIJI_AGENT_USE_USER_DIRS:-0}"
+_TAIJI_SYSTEM_ONLY=0
+if [ "$_TAIJI_CANONICAL_LAUNCH_PROFILE" = "installed-production" ] \
+  && [ "$_TAIJI_CANONICAL_NATIVE_VERIFY_MODE" = "system-only" ]; then
+  _TAIJI_SYSTEM_ONLY=1
+  _TAIJI_CANONICAL_USE_USER_DIRS=0
+fi
+
+_taiji_clear_installed_code_environment() {
+  local _taiji_code_name
+  for _taiji_code_name in \
+    ${!PYTHON@} \
+    ${!NODE_@} \
+    ${!LD_@} \
+    ${!DYLD_@} \
+    ${!BASH_FUNC_@}; do
+    unset "$_taiji_code_name"
+  done
+  unset \
+    BASH_ENV ENV ELECTRON_RUN_AS_NODE NODE_OPTIONS RUBYOPT RUBYLIB PERL5OPT PERL5LIB \
+    JAVA_TOOL_OPTIONS CLASSPATH CDPATH GLOBIGNORE IFS PROMPT_COMMAND \
+    LUA_PATH LUA_CPATH
+  unset _taiji_code_name
+}
+
+_taiji_validate_installed_runtime_paths() {
+  local _taiji_physical_root _taiji_physical_agent _taiji_physical_web
+  local _taiji_python_parent _taiji_physical_python_parent
+  _taiji_physical_root="$(cd "$LAB_DIR" 2>/dev/null && pwd -P)" || return 1
+  _taiji_physical_agent="$(cd "$AGENT_DIR" 2>/dev/null && pwd -P)" || return 1
+  _taiji_physical_web="$(cd "$WEBUI_DIR" 2>/dev/null && pwd -P)" || return 1
+  _taiji_python_parent="${TAIJI_AGENT_PYTHON%/*}"
+  _taiji_physical_python_parent="$(cd "$_taiji_python_parent" 2>/dev/null && pwd -P)" || return 1
+  if [ "$_taiji_physical_root" != "$LAB_DIR" ] \
+    || [ "$_taiji_physical_agent" != "$AGENT_DIR" ] \
+    || [ "$_taiji_physical_web" != "$WEBUI_DIR" ] \
+    || [ "$_taiji_physical_python_parent/${TAIJI_AGENT_PYTHON##*/}" != "$TAIJI_AGENT_PYTHON" ] \
+    || [ -L "$TAIJI_AGENT_PYTHON" ] \
+    || [ ! -f "$TAIJI_AGENT_PYTHON" ] \
+    || [ ! -x "$TAIJI_AGENT_PYTHON" ]; then
+    /usr/bin/printf '%s\n' \
+      "Taiji Agent installed runtime paths are not fixed physical /opt paths." \
+      >&2
+    return 1
+  fi
+}
+
+if [ "$_TAIJI_CANONICAL_LAUNCH_PROFILE" = "installed-production" ]; then
+  _taiji_clear_installed_code_environment
+  # The installed payload is immutable.  System-only verification runs as
+  # root during postinst/silent deployment; without this trusted reset CPython
+  # creates untracked __pycache__ files below /opt and dpkg --purge leaves the
+  # installation root behind.
+  PYTHONDONTWRITEBYTECODE="1"
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+  export PATH PYTHONDONTWRITEBYTECODE
+  LAB_DIR="/opt/taiji-agent"
+  TAIJI_AGENT_ROOT="$LAB_DIR"
+else
+  LAB_DIR="${TAIJI_AGENT_ROOT:-$(cd "$TAIJI_SCRIPT_DIR/.." && pwd -P)}"
+fi
 
 _taiji_source_agent="$LAB_DIR/sources/her""mes-agent"
 _taiji_source_web="$LAB_DIR/sources/her""mes-webui"
@@ -45,18 +109,50 @@ if [ -d "$LAB_DIR/runtime/web" ]; then
 else
   _taiji_default_web="$_taiji_source_web"
 fi
-AGENT_DIR="${TAIJI_AGENT_AGENT_DIR:-$_taiji_default_agent}"
-WEBUI_DIR="${TAIJI_AGENT_WEBUI_DIR:-$_taiji_default_web}"
+if [ "$_TAIJI_CANONICAL_LAUNCH_PROFILE" = "installed-production" ]; then
+  AGENT_DIR="$LAB_DIR/runtime/agent"
+  WEBUI_DIR="$LAB_DIR/runtime/web"
+  TAIJI_AGENT_AGENT_DIR="$AGENT_DIR"
+  TAIJI_AGENT_WEBUI_DIR="$WEBUI_DIR"
+  TAIJI_AGENT_PYTHON="$AGENT_DIR/venv/bin/python"
+  TAIJI_WEBUI_PYTHON="$TAIJI_AGENT_PYTHON"
+  TAIJI_WEBUI_AGENT_DIR="$AGENT_DIR"
+  _taiji_validate_installed_runtime_paths
+  export \
+    TAIJI_AGENT_ROOT TAIJI_AGENT_AGENT_DIR TAIJI_AGENT_WEBUI_DIR \
+    TAIJI_AGENT_PYTHON TAIJI_WEBUI_PYTHON TAIJI_WEBUI_AGENT_DIR
+else
+  AGENT_DIR="${TAIJI_AGENT_AGENT_DIR:-$_taiji_default_agent}"
+  WEBUI_DIR="${TAIJI_AGENT_WEBUI_DIR:-$_taiji_default_web}"
+fi
 
-_xdg_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
-_xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-_xdg_state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+if [ "$_TAIJI_SYSTEM_ONLY" = "1" ]; then
+  TAIJI_AGENT_USE_USER_DIRS=0
+  TAIJI_CONFIG_DIR="/var/lib/taiji-agent/config"
+  TAIJI_DATA_DIR="/var/lib/taiji-agent/data"
+  TAIJI_STATE_DIR="/var/lib/taiji-agent/state"
+  TAIJI_RUNTIME_HOME="/var/lib/taiji-agent/runtime-home"
+  TAIJI_ENV_FILE="$TAIJI_RUNTIME_HOME/.env"
+  TAIJI_WORKSPACE="/var/lib/taiji-agent/workspace"
+  LOG_DIR="/var/log/taiji-agent"
+  TMP_DIR="/var/lib/taiji-agent/tmp"
+  TAIJI_AGENT_CONFIG_DIR="$TAIJI_CONFIG_DIR"
+  TAIJI_AGENT_DATA_DIR="$TAIJI_DATA_DIR"
+  TAIJI_AGENT_STATE_DIR="$TAIJI_STATE_DIR"
+  TAIJI_AGENT_LOG_DIR="$LOG_DIR"
+  TAIJI_AGENT_TMP_DIR="$TMP_DIR"
+else
+  _xdg_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  _xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+  _xdg_state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  TAIJI_CONFIG_DIR="${TAIJI_AGENT_CONFIG_DIR:-$_xdg_config_home/taiji-agent}"
+  TAIJI_DATA_DIR="${TAIJI_AGENT_DATA_DIR:-$_xdg_data_home/taiji-agent}"
+  TAIJI_STATE_DIR="${TAIJI_AGENT_STATE_DIR:-$_xdg_state_home/taiji-agent}"
+fi
 
-TAIJI_CONFIG_DIR="${TAIJI_AGENT_CONFIG_DIR:-$_xdg_config_home/taiji-agent}"
-TAIJI_DATA_DIR="${TAIJI_AGENT_DATA_DIR:-$_xdg_data_home/taiji-agent}"
-TAIJI_STATE_DIR="${TAIJI_AGENT_STATE_DIR:-$_xdg_state_home/taiji-agent}"
-
-if [ "${TAIJI_AGENT_USE_USER_DIRS:-0}" = "1" ]; then
+if [ "$_TAIJI_SYSTEM_ONLY" = "1" ]; then
+  :
+elif [ "$_TAIJI_CANONICAL_USE_USER_DIRS" = "1" ]; then
   mkdir -p "$TAIJI_CONFIG_DIR" "$TAIJI_DATA_DIR" "$TAIJI_STATE_DIR"
   TAIJI_RUNTIME_HOME="${TAIJI_RUNTIME_HOME:-$TAIJI_DATA_DIR/runtime-home}"
   TAIJI_ENV_FILE="$TAIJI_RUNTIME_HOME/.env"
@@ -74,7 +170,6 @@ fi
 mkdir -p "$LOG_DIR" "$TMP_DIR" "$TAIJI_RUNTIME_HOME" "$TAIJI_WORKSPACE" "$TAIJI_RUNTIME_HOME/skills" "$TAIJI_RUNTIME_HOME/scripts"
 _TAIJI_CANONICAL_RUNTIME_HOME="$TAIJI_RUNTIME_HOME"
 _TAIJI_CANONICAL_ENV_FILE="$TAIJI_ENV_FILE"
-
 if [ "${TAIJI_AGENT_SYNC_PACKAGED_CONFIG:-${TAIJI_AGENT_SYNC_FEATURE_VISIBILITY:-1}}" = "1" ]; then
   _taiji_packaged_config="$LAB_DIR/config/taiji-default-config.yaml"
   _taiji_target_config="$TAIJI_RUNTIME_HOME/config.yaml"
@@ -143,9 +238,19 @@ _taiji_load_dotenv_file() {
       OPTARG | OPTIND | FUNCNAME | GROUPS | DIRSTACK | PIPESTATUS | _ | \
       HOSTNAME | HOSTTYPE | MACHTYPE | OSTYPE | \
       PYTHONPATH | PYTHONHOME | PYTHONSTARTUP | PYTHONINSPECT | \
-      NODE_OPTIONS | RUBYOPT | RUBYLIB | PERL5OPT | PERL5LIB | \
+      ELECTRON_RUN_AS_NODE | NODE_OPTIONS | RUBYOPT | RUBYLIB | PERL5OPT | PERL5LIB | \
       JAVA_TOOL_OPTIONS | CLASSPATH | LUA_PATH | LUA_CPATH | \
       TAIJI_ACCOUNT_HOME | TAIJI_LICENSE_FILE | TAIJI_LICENSE_STATE_FILE | \
+      TAIJI_LAUNCH_PROFILE | TAIJI_AGENT_ROOT | \
+      TAIJI_NATIVE_VERIFY_MODE | TAIJI_VERIFY_DESKTOP_SMOKE | \
+      TAIJI_AGENT_USE_USER_DIRS | TAIJI_RUNTIME_HOME | TAIJI_WORKSPACE | \
+      TAIJI_AGENT_RUNTIME_ENV | TAIJI_AGENT_ENV_FILE | TAIJI_AGENT_HOME | \
+      TAIJI_PRIVATE_LIBRARY_DIR | \
+      TAIJI_AGENT_CONFIG_DIR | TAIJI_AGENT_DATA_DIR | TAIJI_AGENT_STATE_DIR | \
+      TAIJI_AGENT_LOG_DIR | TAIJI_AGENT_TMP_DIR | \
+      TAIJI_CONFIG_DIR | TAIJI_DATA_DIR | TAIJI_STATE_DIR | XDG_* | \
+      TAIJI_AGENT_AGENT_DIR | TAIJI_AGENT_WEBUI_DIR | \
+      TAIJI_AGENT_PYTHON | TAIJI_WEBUI_PYTHON | TAIJI_WEBUI_AGENT_DIR | \
       AGENT_DIR | WEBUI_DIR | LOG_DIR | TMP_DIR | SCRIPT_DIR | LAB_DIR | RUNTIME_ENV)
         continue
         ;;
@@ -196,10 +301,51 @@ unset _taiji_legacy_runtime_selector
 
 TAIJI_RUNTIME_HOME="$_TAIJI_CANONICAL_RUNTIME_HOME"
 TAIJI_ENV_FILE="$_TAIJI_CANONICAL_ENV_FILE"
+TAIJI_LAUNCH_PROFILE="$_TAIJI_CANONICAL_LAUNCH_PROFILE"
+TAIJI_NATIVE_VERIFY_MODE="$_TAIJI_CANONICAL_NATIVE_VERIFY_MODE"
+TAIJI_AGENT_USE_USER_DIRS="$_TAIJI_CANONICAL_USE_USER_DIRS"
 unset TAIJI_AGENT_HOME TAIJI_AGENT_RUNTIME_HOME TAIJI_AGENT_ENV_FILE
 unset HER""MES_HOME HER""MES_CONFIG_PATH HER""MES_CONFIG HER""MES_ENV
 
 TAIJI_SECURITY_MODE="${TAIJI_SECURITY_MODE:-restricted}"
+if [ "$TAIJI_LAUNCH_PROFILE" = "installed-production" ]; then
+  _taiji_clear_installed_code_environment
+  PYTHONDONTWRITEBYTECODE="1"
+  LAB_DIR="/opt/taiji-agent"
+  TAIJI_AGENT_ROOT="$LAB_DIR"
+  AGENT_DIR="$LAB_DIR/runtime/agent"
+  WEBUI_DIR="$LAB_DIR/runtime/web"
+  TAIJI_AGENT_AGENT_DIR="$AGENT_DIR"
+  TAIJI_AGENT_WEBUI_DIR="$WEBUI_DIR"
+  TAIJI_AGENT_PYTHON="$AGENT_DIR/venv/bin/python"
+  TAIJI_WEBUI_PYTHON="$TAIJI_AGENT_PYTHON"
+  TAIJI_WEBUI_AGENT_DIR="$AGENT_DIR"
+  _taiji_validate_installed_runtime_paths
+  TAIJI_RELEASE_VERSION="$_TAIJI_CANONICAL_RELEASE_VERSION"
+  TAIJI_RELEASE_COMMIT="$_TAIJI_CANONICAL_RELEASE_COMMIT"
+  unset TAIJI_SOURCE_ROOT TAIJI_SOURCE_COMMIT TAIJI_SOURCE_DIRTY TAIJI_SOURCE_MODE
+  TAIJI_SECURITY_PROFILE="strict"
+  TAIJI_SECURITY_MODE="restricted"
+  for _taiji_allow_name in ${!TAIJI_ALLOW_@}; do
+    export "$_taiji_allow_name=0"
+  done
+  for _taiji_allow_name in \
+    TAIJI_ALLOW_TERMINAL \
+    TAIJI_ALLOW_EXECUTE_CODE \
+    TAIJI_ALLOW_DELEGATE_TASK \
+    TAIJI_ALLOW_UNAPPROVED_SKILL_SCRIPTS; do
+    export "$_taiji_allow_name=0"
+  done
+  unset _taiji_allow_name
+  export \
+    TAIJI_AGENT_ROOT TAIJI_AGENT_AGENT_DIR TAIJI_AGENT_WEBUI_DIR \
+    TAIJI_AGENT_PYTHON TAIJI_WEBUI_PYTHON TAIJI_WEBUI_AGENT_DIR \
+    PYTHONDONTWRITEBYTECODE
+  export TAIJI_RELEASE_VERSION TAIJI_RELEASE_COMMIT
+  export TAIJI_SECURITY_PROFILE
+fi
+export TAIJI_LAUNCH_PROFILE
+export TAIJI_NATIVE_VERIFY_MODE TAIJI_AGENT_USE_USER_DIRS
 TMP_DIR="${TAIJI_AGENT_TMP_DIR:-$TMP_DIR}"
 TAIJI_AGENT_TMP_DIR="$TMP_DIR"
 export TAIJI_SECURITY_MODE
@@ -208,7 +354,9 @@ export TMPDIR="$TMP_DIR"
 export TMP="$TMP_DIR"
 export TEMP="$TMP_DIR"
 
-if ! _TAIJI_CANONICAL_ACCOUNT_HOME="$(
+if [ "$_TAIJI_SYSTEM_ONLY" = "1" ]; then
+  _TAIJI_CANONICAL_ACCOUNT_HOME="/nonexistent"
+elif ! _TAIJI_CANONICAL_ACCOUNT_HOME="$(
   /usr/bin/env -i \
     PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     /bin/bash --noprofile --norc -c '
@@ -340,3 +488,6 @@ esac
 /bin/mkdir -p "$LOG_DIR" "$TMP_DIR" "$TAIJI_RUNTIME_HOME" "$TAIJI_WORKSPACE" "$TAIJI_RUNTIME_HOME/skills" "$TAIJI_RUNTIME_HOME/scripts"
 unset _taiji_readonly_command_status _taiji_readonly_boundary_violation
 unset _TAIJI_CANONICAL_RUNTIME_HOME _TAIJI_CANONICAL_ENV_FILE _TAIJI_CANONICAL_ACCOUNT_HOME
+unset _TAIJI_CANONICAL_LAUNCH_PROFILE _TAIJI_CANONICAL_RELEASE_VERSION _TAIJI_CANONICAL_RELEASE_COMMIT
+unset _TAIJI_CANONICAL_NATIVE_VERIFY_MODE _TAIJI_CANONICAL_USE_USER_DIRS _TAIJI_SYSTEM_ONLY
+unset -f _taiji_clear_installed_code_environment _taiji_validate_installed_runtime_paths

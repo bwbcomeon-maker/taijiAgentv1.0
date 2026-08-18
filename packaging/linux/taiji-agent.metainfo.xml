@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>taiji-agent.desktop</id>
+  <name>太极 Agent</name>
+  <summary>本地智能体工作台</summary>
+  <description>
+    <p>太极 Agent 是面向国产 Linux 桌面的本地智能体工作台。</p>
+  </description>
+  <launchable type="desktop-id">taiji-agent.desktop</launchable>
+  <icon type="cached" width="32" height="32">taiji-agent</icon>
+  <icon type="cached" width="48" height="48">taiji-agent</icon>
+  <icon type="cached" width="64" height="64">taiji-agent</icon>
+  <icon type="cached" width="128" height="128">taiji-agent</icon>
+  <icon type="cached" width="192" height="192">taiji-agent</icon>
+  <icon type="cached" width="256" height="256">taiji-agent</icon>
+  <icon type="cached" width="512" height="512">taiji-agent</icon>
+  <provides>
+    <binary>taiji-agent</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+  </categories>
+</component>

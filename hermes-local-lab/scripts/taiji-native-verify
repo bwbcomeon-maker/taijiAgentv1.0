@@ -10,6 +10,32 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=runtime-env.sh
 source "$SCRIPT_DIR/runtime-env.sh"
+# runtime-env.sh enables strict options for launchers.  Native verification is
+# intentionally aggregate-only: warnings must reach the final summary even
+# when an installer/test harness exports SHELLOPTS=errexit:pipefail.
+set +e
+set +o pipefail 2>/dev/null || true
+
+_taiji_private_library_dir_secure() {
+  local _taiji_private_library_meta _taiji_private_library_uid _taiji_private_library_mode
+  local _taiji_private_library_physical
+  [ -n "${TAIJI_PRIVATE_LIBRARY_DIR:-}" ] || return 1
+  [ -d "$TAIJI_PRIVATE_LIBRARY_DIR" ] && [ ! -L "$TAIJI_PRIVATE_LIBRARY_DIR" ] || return 1
+  _taiji_private_library_physical="$(cd -- "$TAIJI_PRIVATE_LIBRARY_DIR" 2>/dev/null && pwd -P)" || return 1
+  [ "$_taiji_private_library_physical" = "$TAIJI_PRIVATE_LIBRARY_DIR" ] || return 1
+  _taiji_private_library_meta="$(/usr/bin/stat -c '%u %a' -- "$TAIJI_PRIVATE_LIBRARY_DIR" 2>/dev/null)" || return 1
+  read -r _taiji_private_library_uid _taiji_private_library_mode <<< "$_taiji_private_library_meta"
+  [ "$_taiji_private_library_uid" = "0" ] || return 1
+  (( (8#$_taiji_private_library_mode & 18) == 0 )) || return 1
+  return 0
+}
+
+if [ "${TAIJI_LAUNCH_PROFILE:-}" = "installed-production" ] \
+  && _taiji_private_library_dir_secure; then
+  LD_LIBRARY_PATH="$TAIJI_PRIVATE_LIBRARY_DIR"
+  export LD_LIBRARY_PATH
+fi
+unset -f _taiji_private_library_dir_secure
 
 AGENT_API_HOST="${AGENT_API_HOST:-127.0.0.1}"
 AGENT_API_PORT="${AGENT_API_PORT:-18642}"
@@ -35,6 +61,31 @@ runtime_issue() {
   else
     warn "$*"
   fi
+}
+
+verify_product_icon_chain() {
+  local resource_icon="$LAB_DIR/resources/icons/taiji-agent.png"
+  local web_icon="$WEBUI_DIR/static/favicon-512.png"
+  local icon_info
+  if [ ! -f "$resource_icon" ] || [ ! -f "$web_icon" ]; then
+    runtime_issue "Product icon chain is incomplete: resource=$resource_icon web=$web_icon"
+    return 1
+  fi
+  if command -v cmp >/dev/null 2>&1 && cmp -s "$resource_icon" "$web_icon"; then
+    :
+  else
+    runtime_issue "Product icon chain is not byte-identical between installed resource and Web favicon"
+    return 1
+  fi
+  if command -v file >/dev/null 2>&1; then
+    icon_info="$(file "$resource_icon" 2>/dev/null || true)"
+    case "$icon_info" in
+      *"PNG image data, 512 x 512, 8-bit/color RGBA"*) ;;
+      *) runtime_issue "Installed product icon is not a 512x512 RGBA PNG: ${icon_info:-unknown}"; return 1 ;;
+    esac
+  fi
+  ok "Product icon chain is consistent"
+  return 0
 }
 
 http_code() {
@@ -109,16 +160,32 @@ verify_webui_api_payloads() {
 import json
 import sys
 import urllib.request
+from urllib.error import HTTPError
 
 base_url = sys.argv[1].rstrip("/")
 
 def fetch(path):
-    with urllib.request.urlopen(base_url + path, timeout=5) as response:
-        if response.status < 200 or response.status >= 300:
-            raise RuntimeError(f"{path} HTTP {response.status}")
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(base_url + path, timeout=5) as response:
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"{path} HTTP {response.status}")
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        if error.code != 403:
+            raise
+        payload = json.loads(error.read().decode("utf-8"))
+        if payload != {"error": "请从桌面应用启动太极 Agent"}:
+            raise RuntimeError(f"{path} returned an unexpected HTTP 403 payload")
+        return None
 
 settings = fetch("/api/settings")
+model_config = fetch("/api/model-config")
+if settings is None or model_config is None:
+    if settings is None and model_config is None:
+        print("Desktop access gate rejected unauthenticated settings/model-config requests")
+        raise SystemExit(0)
+    raise SystemExit("desktop access gate is inconsistent across settings/model-config")
+
 visibility = settings.get("ui_visibility") or {}
 composer = visibility.get("composer") or {}
 nav = visibility.get("nav") or {}
@@ -127,7 +194,6 @@ if composer.get("workspace_files") is not False:
 if nav.get("kanban") is not False or nav.get("skills") is not False:
     raise SystemExit("expected packaged nav visibility is not reflected in /api/settings")
 
-model_config = fetch("/api/model-config")
 main = model_config.get("main") or {}
 providers = model_config.get("providers") or []
 if not main.get("provider") or not main.get("model"):
@@ -264,7 +330,9 @@ if [ -f /usr/share/applications/taiji-agent.desktop ]; then
   ok "Desktop entry installed: /usr/share/applications/taiji-agent.desktop"
   if grep -qx 'Exec=/usr/bin/taiji-agent' /usr/share/applications/taiji-agent.desktop \
     && grep -qx 'Icon=taiji-agent' /usr/share/applications/taiji-agent.desktop \
-    && grep -qx 'Terminal=false' /usr/share/applications/taiji-agent.desktop; then
+    && grep -qx 'Terminal=false' /usr/share/applications/taiji-agent.desktop \
+    && grep -qx 'StartupWMClass=taiji-agent' /usr/share/applications/taiji-agent.desktop \
+    && grep -qx 'X-GNOME-WMClass=taiji-agent' /usr/share/applications/taiji-agent.desktop; then
     ok "Desktop entry points to the packaged launcher and icon"
   else
     runtime_issue "Desktop entry is missing expected Exec/Icon/Terminal settings"
@@ -278,6 +346,8 @@ if [ -f /usr/share/icons/hicolor/512x512/apps/taiji-agent.png ]; then
 else
   runtime_issue "Desktop icon not found at /usr/share/icons/hicolor/512x512/apps/taiji-agent.png"
 fi
+
+verify_product_icon_chain
 
 if verify_packaged_config; then
   ok "Packaged non-secret config is active in the user runtime"
@@ -314,7 +384,7 @@ webui_code="$(http_code "http://$WEBUI_HOST:$WEBUI_PORT/health")"
 if [ "$webui_code" = "200" ]; then
   ok "WebUI health returned HTTP 200 at $WEBUI_HOST:$WEBUI_PORT"
   if verify_webui_api_payloads; then
-    ok "WebUI settings and model-config APIs returned packaged desktop defaults"
+    ok "WebUI desktop access gate and packaged configuration checks passed"
   else
     runtime_issue "WebUI settings/model-config API check failed"
   fi

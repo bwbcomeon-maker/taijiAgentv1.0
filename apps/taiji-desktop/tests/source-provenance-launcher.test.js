@@ -119,13 +119,61 @@ test("Electron boot and runtime logs preserve the exact source provenance", () =
 
 test("Electron verifies formal source provenance before creating a window", () => {
   const gateIndex = mainSource.indexOf("verifyFormalSourceBeforeWindow();");
+  const menuIndex = mainSource.indexOf("installMenu();", gateIndex);
   const windowIndex = mainSource.indexOf("createWindow();", gateIndex);
   assert.notEqual(gateIndex, -1);
+  assert.notEqual(menuIndex, -1);
   assert.notEqual(windowIndex, -1);
+  assert.ok(gateIndex < menuIndex);
   assert.ok(gateIndex < windowIndex);
   assert.match(mainSource, /check-clean-worktree\.sh/);
   assert.match(mainSource, /"--dirty-policy", "runtime"/);
   assert.doesNotMatch(mainSource, /Formal source worktree is dirty/);
+});
+
+test("installed Linux launcher fixes the install root and explicitly requests installed-production", () => {
+  const installedLauncher = fs.readFileSync(
+    path.join(repoRoot, "packaging", "linux", "bin", "taiji-agent"),
+    "utf8",
+  );
+  assert.match(installedLauncher, /APP_ROOT="\/opt\/taiji-agent"/);
+  assert.doesNotMatch(installedLauncher, /TAIJI_AGENT_ROOT:-\/opt\/taiji-agent/);
+  assert.match(installedLauncher, /TAIJI_LAUNCH_PROFILE="installed-production"/);
+  assert.match(installedLauncher, /export TAIJI_LAUNCH_PROFILE/);
+  assert.match(installedLauncher, /^#!\/bin\/bash -p$/m);
+  assert.match(installedLauncher, /PATH="\/usr\/bin:\/bin:\/usr\/sbin:\/sbin"/);
+  assert.match(installedLauncher, /export PATH/);
+  assert.match(installedLauncher, /\/usr\/bin\/env -0/);
+  assert.match(installedLauncher, /\/usr\/bin\/env "\$\{_taiji_unset_args\[@\]\}"/);
+  assert.match(installedLauncher, /\/bin\/bash --noprofile --norc -p "\$0" "\$@"/);
+  for (const selector of [
+    "ELECTRON_RUN_AS_NODE",
+    "NODE_*",
+    "PYTHON*",
+    "LD_*",
+    "BASH_ENV",
+    "ENV",
+  ]) {
+    assert.equal(installedLauncher.includes(selector), true, `${selector} must be sanitized`);
+  }
+});
+
+test("installed Electron integration uses release provenance and keeps local HTTP OIDC development-only", () => {
+  assert.match(mainSource, /TAIJI_RELEASE_VERSION/);
+  assert.match(mainSource, /TAIJI_RELEASE_COMMIT/);
+  assert.match(mainSource, /delete env\.TAIJI_SOURCE_ROOT/);
+  assert.match(mainSource, /delete env\.TAIJI_SOURCE_COMMIT/);
+  assert.match(mainSource, /delete env\.TAIJI_SOURCE_DIRTY/);
+  const installedRuntimeBoundaries = mainSource.match(
+    /applyInstalledRuntimePaths\(\{ launchProfile, runtimeEnv: env \}\)/g,
+  ) || [];
+  assert.equal(installedRuntimeBoundaries.length, 2, "both stop and start child environments must be pinned");
+  assert.match(mainSource, /allowLocalHttp:\s*launchProfile\.kind === "source"\s*&&\s*launchProfile\.mode === "development"/);
+});
+
+test("both desktop and identity windows apply the launch-profile DevTools policy", () => {
+  const matches = mainSource.match(/devTools:\s*allowsDevTools\(launchProfile\)/g) || [];
+  assert.equal(matches.length, 2);
 });
 
 test("Electron authenticates the desktop session without putting the bearer token in the URL", () => {

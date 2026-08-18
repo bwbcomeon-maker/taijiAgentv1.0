@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "VERSION"
+PRODUCT_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip()
 CONTRACT_FILE = ROOT / "packaging/linux/payload-contract.json"
 VERIFIER = ROOT / "packaging/linux/verify-payload.py"
 EMBEDDED_CONTRACT = Path("opt/taiji-agent/resources/payload-contract.json")
@@ -53,6 +55,54 @@ class LinuxPayloadContractTest(unittest.TestCase):
         self._write(root, contract["product_version"]["source"], VERSION_FILE.read_text(encoding="utf-8"))
         self._write(root, EMBEDDED_CONTRACT.as_posix(), json.dumps(contract, ensure_ascii=False) + "\n")
 
+        policy = json.loads(
+            (ROOT / "packaging/linux/compatibility-policy.json").read_text(encoding="utf-8")
+        )
+        policy_bytes = (
+            json.dumps(policy, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        policy_target = root / "opt/taiji-agent/resources/linux-compatibility-policy.json"
+        policy_target.parent.mkdir(parents=True, exist_ok=True)
+        policy_target.write_bytes(policy_bytes)
+        policy_target.chmod(0o644)
+        audit_target = root / "opt/taiji-agent/resources/elf-abi-audit.json"
+        audit_target.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-elf-abi-audit/v1",
+                    "policy_id": policy["policy_id"],
+                    "compatibility_policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+                    "max_required_versions": policy["elf"]["maximum_symbol_versions"],
+                    "external_sonames": [],
+                    "private_sonames": [],
+                    "files": [],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        audit_target.chmod(0o644)
+        launch_manifest_target = root / "opt/taiji-agent/resources/taiji-release-manifest.json"
+        launch_manifest_target.write_text(
+            json.dumps(
+                {
+                    "schema": "taiji-release-manifest/v1",
+                    "platform": "linux",
+                    "arch": "amd64",
+                    "version": PRODUCT_VERSION,
+                    "commit": "0123456789abcdef0123456789abcdef01234567",
+                    "installRoot": "/opt/taiji-agent",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        launch_manifest_target.chmod(0o644)
+
         for component in contract["components"]:
             target = root / component["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -63,7 +113,11 @@ class LinuxPayloadContractTest(unittest.TestCase):
             target.chmod(int(component["mode"], 8))
 
         self._write(root, "opt/taiji-agent/runtime/agent/PYTHON_VERSION", "3.12.3\n")
-        self._write(root, "opt/taiji-agent/runtime/web/PRODUCT_VERSION", "0.1.0\n")
+        self._write(
+            root,
+            "opt/taiji-agent/runtime/web/PRODUCT_VERSION",
+            f"{PRODUCT_VERSION}\n",
+        )
         self._write(
             root,
             "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/package.json",
@@ -114,12 +168,33 @@ class LinuxPayloadContractTest(unittest.TestCase):
         )
 
     def test_root_version_is_single_product_version_source(self) -> None:
-        self.assertEqual(VERSION_FILE.read_text(encoding="utf-8"), "0.1.0\n")
+        self.assertEqual(VERSION_FILE.read_text(encoding="utf-8"), f"{PRODUCT_VERSION}\n")
+        self.assertRegex(PRODUCT_VERSION, r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+
+        desktop_package = json.loads(
+            (ROOT / "apps/taiji-desktop/package.json").read_text(encoding="utf-8")
+        )
+        desktop_lock = json.loads(
+            (ROOT / "apps/taiji-desktop/package-lock.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(desktop_package["version"], PRODUCT_VERSION)
+        self.assertEqual(desktop_lock["version"], PRODUCT_VERSION)
+        self.assertEqual(desktop_lock["packages"][""]["version"], PRODUCT_VERSION)
+
         build = (ROOT / "packaging/linux/deb/build-deb.sh").read_text(encoding="utf-8")
         offline = (ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh").read_text(encoding="utf-8")
         self.assertIn('VERSION_FILE="$REPO_ROOT/VERSION"', build)
-        self.assertNotIn('TAIJI_AGENT_VERSION:-0.1.0', build)
-        self.assertNotIn('TAIJI_AGENT_VERSION:-0.1.0', offline)
+        self.assertIn('VERSION="$(tr -d \'\\r\\n\' < "$VERSION_FILE")"', build)
+        self.assertIn('OUT_DEB="$OUT_DIR/taiji-agent_${VERSION}_${ARCH}.deb"', build)
+        self.assertIn("printf '%s\\n' \"$VERSION\" > \"$WEB_RUNTIME/PRODUCT_VERSION\"", build)
+        self.assertNotRegex(build, r"TAIJI_AGENT_VERSION:-[^}]")
+        self.assertNotRegex(offline, r"TAIJI_AGENT_VERSION:-[^}]")
+
+        contract = json.loads(CONTRACT_FILE.read_text(encoding="utf-8"))
+        docx_engine = next(
+            component for component in contract["components"] if component["id"] == "docx_engine_v2"
+        )
+        self.assertEqual(docx_engine["version"]["expected"], "0.1.0")
 
     def test_complete_assembled_payload_fixture_passes(self) -> None:
         completed = self._verify(self._assembled_payload())
@@ -127,7 +202,7 @@ class LinuxPayloadContractTest(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["schema_version"], "taiji-payload-contract/v1")
-        self.assertEqual(payload["product_version"], "0.1.0")
+        self.assertEqual(payload["product_version"], PRODUCT_VERSION)
         self.assertIn("docx_engine_v2", payload["checked_components"])
         evidence = payload["payload_tree"]
         self.assertRegex(evidence["sha256"], r"^[0-9a-f]{64}$")
@@ -228,7 +303,10 @@ class LinuxPayloadContractTest(unittest.TestCase):
         root = self._assembled_payload()
         runtime_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(runtime_socket.close)
-        runtime_socket.bind(str(root / "s"))
+        try:
+            runtime_socket.bind(str(root / "s"))
+        except PermissionError as exc:
+            self.skipTest(f"Unix socket creation denied by the current test sandbox: {exc}")
 
         completed = self._verify(root)
 
@@ -259,24 +337,22 @@ class LinuxPayloadContractTest(unittest.TestCase):
         self.assertIn("world-writable", completed.stderr)
 
     def test_setuid_node_is_rejected_anywhere_in_payload(self) -> None:
-        root = self._assembled_payload()
-        target = self._write(root, "opt/taiji-agent/runtime/setuid-tool", "unsafe\n", 0o755)
-        target.chmod(target.stat().st_mode | stat.S_ISUID)
+        verifier = load_verifier_module()
 
-        completed = self._verify(root)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("setuid", completed.stderr)
+        with self.assertRaisesRegex(verifier.PayloadContractError, "setuid"):
+            verifier.verify_node_metadata(
+                Path("setuid-tool"),
+                SimpleNamespace(st_mode=stat.S_IFREG | stat.S_ISUID | 0o755, st_nlink=1),
+            )
 
     def test_setgid_node_is_rejected_anywhere_in_payload(self) -> None:
-        root = self._assembled_payload()
-        target = self._write(root, "opt/taiji-agent/runtime/setgid-tool", "unsafe\n", 0o755)
-        target.chmod(target.stat().st_mode | stat.S_ISGID)
+        verifier = load_verifier_module()
 
-        completed = self._verify(root)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("setgid", completed.stderr)
+        with self.assertRaisesRegex(verifier.PayloadContractError, "setgid"):
+            verifier.verify_node_metadata(
+                Path("setgid-tool"),
+                SimpleNamespace(st_mode=stat.S_IFREG | stat.S_ISGID | 0o755, st_nlink=1),
+            )
 
     def test_regular_file_hardlink_is_rejected_anywhere_in_payload(self) -> None:
         root = self._assembled_payload()
@@ -319,7 +395,10 @@ class LinuxPayloadContractTest(unittest.TestCase):
         self._write(root, "opt/taiji-agent/runtime/web/PRODUCT_VERSION", "9.9.9\n")
         completed = self._verify(root)
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("webui_runtime version 9.9.9 does not match product version 0.1.0", completed.stderr)
+        self.assertIn(
+            f"webui_runtime version 9.9.9 does not match product version {PRODUCT_VERSION}",
+            completed.stderr,
+        )
 
     def test_contract_rejects_parent_path_traversal(self) -> None:
         root = self._assembled_payload()

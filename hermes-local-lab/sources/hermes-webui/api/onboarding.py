@@ -19,7 +19,10 @@ from api.config import (
     _HERMES_FOUND,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _begin_onboarding_completion,
+    _commit_onboarding_completion,
     _get_config_path,
+    _rollback_onboarding_completion,
     get_available_models,
     get_config,
     load_settings,
@@ -27,9 +30,201 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
-from api.workspace import get_last_workspace, load_workspaces
+from api.security_status import build_security_status_payload
+from api.workspace import get_last_workspace, load_workspaces, validate_workspace_to_add
 
 logger = logging.getLogger(__name__)
+
+
+SETUP_STATUS_SCHEMA = "taiji-setup-status/v1"
+
+
+def _setup_recovery(recovery_id: str, label: str, *, target_step: str | None = None, target_section: str | None = None) -> dict:
+    recovery = {"id": recovery_id, "label": label}
+    if target_step:
+        recovery["target_step"] = target_step
+    if target_section:
+        recovery["target_section"] = target_section
+    return recovery
+
+
+def _setup_item(
+    item_id: str,
+    label: str,
+    *,
+    ready: bool,
+    reason: str,
+    recovery: dict,
+    unavailable: bool = False,
+) -> dict:
+    return {
+        "id": item_id,
+        "label": label,
+        "status": "unavailable" if unavailable else ("ready" if ready else "action_required"),
+        "ready": bool(ready),
+        "reason": str(reason or "").strip() or "状态暂时不可用，请重新检查。",
+        "recovery": dict(recovery),
+    }
+
+
+def _license_setup_item() -> tuple[dict, bool]:
+    """Project the canonical license validator into the setup contract."""
+    recovery = _setup_recovery("open_license", "打开授权管理", target_section="models")
+    try:
+        from api.product_diagnostics import _license_module
+
+        license_module = _license_module()
+        installed_production = bool(
+            license_module.taiji_runtime_profile.is_installed_production()
+        )
+        public = license_module.load_license_status().to_public_dict()
+        status = str(public.get("status") or "").strip().lower()
+        required = bool(public.get("required"))
+        ready = (not required) or status in {"valid", "not_required"}
+        if ready and required:
+            reason = "产品授权有效，可以离线使用。"
+        elif ready:
+            reason = "源码开发模式不要求产品授权。"
+        else:
+            reason = str(public.get("message") or "未检测到可用授权，请先导入离线授权文件。")
+        item = _setup_item(
+            "license",
+            "授权",
+            ready=ready,
+            reason=reason,
+            recovery=recovery,
+        )
+        item["code"] = str(public.get("code") or status or "unknown")
+        return item, installed_production
+    except Exception:
+        logger.exception("failed to load setup license status")
+        return (
+            _setup_item(
+                "license",
+                "授权",
+                ready=False,
+                reason="授权校验暂时不可用，请重新检查；持续失败时联系服务方。",
+                recovery=recovery,
+                unavailable=True,
+            ),
+            True,
+        )
+
+
+def get_setup_status(*, config: dict | None = None, imports_ok: bool | None = None) -> dict:
+    """Return a stable, secret-free, idempotent readiness projection."""
+    license_item, installed_production = _license_setup_item()
+
+    model_recovery = _setup_recovery("configure_model", "配置模型", target_step="setup")
+    try:
+        cfg = get_config() if config is None else config
+        if imports_ok is None:
+            imports_ok, _missing, _errors = verify_hermes_imports()
+        runtime = _status_from_runtime(cfg, bool(imports_ok))
+        model_item = _setup_item(
+            "model",
+            "模型",
+            ready=bool(runtime.get("chat_ready")),
+            reason=str(runtime.get("provider_note") or "请选择模型提供商并完成凭据配置。"),
+            recovery=model_recovery,
+        )
+        model_item["provider"] = runtime.get("current_provider")
+        model_item["model"] = runtime.get("current_model")
+    except Exception:
+        logger.exception("failed to build setup model status")
+        model_item = _setup_item(
+            "model",
+            "模型",
+            ready=False,
+            reason="模型配置状态暂时无法读取，请重新检查。",
+            recovery=model_recovery,
+            unavailable=True,
+        )
+
+    workspace_recovery = _setup_recovery("choose_workspace", "选择工作区", target_step="workspace")
+    try:
+        saved_workspace = str(load_settings().get("default_workspace") or "").strip()
+        workspace = saved_workspace or str(get_last_workspace() or "").strip()
+        if not workspace:
+            raise ValueError("尚未选择工作区。")
+        resolved_workspace = validate_workspace_to_add(workspace)
+        workspace_item = _setup_item(
+            "workspace",
+            "工作区",
+            ready=True,
+            reason=f"工作区可访问：{resolved_workspace}",
+            recovery=workspace_recovery,
+        )
+    except ValueError as exc:
+        workspace_item = _setup_item(
+            "workspace",
+            "工作区",
+            ready=False,
+            reason=str(exc),
+            recovery=workspace_recovery,
+        )
+    except Exception:
+        logger.exception("failed to build setup workspace status")
+        workspace_item = _setup_item(
+            "workspace",
+            "工作区",
+            ready=False,
+            reason="工作区状态暂时无法读取，请重新检查。",
+            recovery=workspace_recovery,
+            unavailable=True,
+        )
+
+    security_recovery = _setup_recovery("open_security", "打开安全设置", target_section="system")
+    try:
+        security = build_security_status_payload()
+        mode = str(security.get("mode") or "").strip().lower()
+        profile = str(security.get("profile") or "").strip().lower()
+        if installed_production:
+            security_ready = mode == "restricted" and profile == "strict"
+            security_reason = (
+                "已启用安装态严格安全策略。"
+                if security_ready
+                else "正式安装态必须使用 restricted/strict 安全策略。"
+            )
+        else:
+            security_ready = mode in {"restricted", "full"} and profile in {
+                "strict",
+                "local_controlled",
+                "custom_restricted",
+                "full",
+            }
+            security_reason = (
+                f"开发模式安全策略可用：{mode}/{profile}。"
+                if security_ready
+                else "安全策略无法识别，请重新检查。"
+            )
+        security_item = _setup_item(
+            "security",
+            "安全策略",
+            ready=security_ready,
+            reason=security_reason,
+            recovery=security_recovery,
+        )
+        security_item["mode"] = mode
+        security_item["profile"] = profile
+    except Exception:
+        logger.exception("failed to build setup security status")
+        security_item = _setup_item(
+            "security",
+            "安全策略",
+            ready=False,
+            reason="安全策略状态暂时无法读取，请重新检查。",
+            recovery=security_recovery,
+            unavailable=True,
+        )
+
+    items = [license_item, model_item, workspace_item, security_item]
+    return {
+        "schema_version": SETUP_STATUS_SCHEMA,
+        "installed_production": installed_production,
+        "overall_ready": all(item["ready"] for item in items),
+        "items": items,
+    }
 
 
 _SUPPORTED_PROVIDER_SETUPS = {
@@ -493,6 +688,13 @@ def probe_provider_endpoint(
         elif isinstance(entry, str) and entry.strip():
             models.append({"id": entry.strip(), "label": entry.strip()})
 
+    if not models:
+        return {
+            "ok": False,
+            "error": "parse",
+            "detail": "the endpoint returned no usable models; start or download a model, then retry",
+        }
+
     return {"ok": True, "models": models, "status": status}
 
 
@@ -805,11 +1007,12 @@ def _build_setup_catalog(cfg: dict) -> dict:
     }
 
 
-def get_onboarding_status() -> dict:
+def get_onboarding_status(*, allow_config_auto_complete: bool = True) -> dict:
     settings = load_settings()
     cfg = get_config()
     imports_ok, missing, errors = verify_hermes_imports()
     runtime = _status_from_runtime(cfg, imports_ok)
+    preflight = get_setup_status(config=cfg, imports_ok=imports_ok)
     workspaces = load_workspaces()
     last_workspace = get_last_workspace()
     available_models = get_available_models()
@@ -821,7 +1024,7 @@ def get_onboarding_status() -> dict:
     # it by requiring chat_ready to also be true.
     skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
     skip_requested = skip_env in {"1", "true", "yes"}
-    auto_completed = skip_requested  # unconditional: operator says skip, we skip
+    auto_completed = skip_requested and not preflight["installed_production"]
 
     # Auto-complete for existing Hermes users: if config.yaml already exists
     # AND the provider is configured (or the system is chat_ready), treat onboarding
@@ -848,7 +1051,7 @@ def get_onboarding_status() -> dict:
         _current_provider and _current_provider not in _SUPPORTED_PROVIDER_SETUPS
     )
 
-    config_auto_completed = config_exists and (
+    config_auto_completed = allow_config_auto_complete and config_exists and preflight["overall_ready"] and (
         bool(runtime.get("chat_ready"))
         or (_is_non_wizard_provider and bool(runtime.get("provider_configured")))
     )
@@ -873,7 +1076,10 @@ def get_onboarding_status() -> dict:
             logger.debug("Failed to persist onboarding_completed", exc_info=True)
 
     return {
-        "completed": bool(settings.get("onboarding_completed")) or auto_completed or config_auto_completed,
+        "completed": auto_completed or (
+            (bool(settings.get("onboarding_completed")) or config_auto_completed)
+            and preflight["overall_ready"]
+        ),
         "settings": {
             "default_model": settings.get("default_model") or DEFAULT_MODEL,
             "default_workspace": settings.get("default_workspace")
@@ -893,6 +1099,20 @@ def get_onboarding_status() -> dict:
             "last": last_workspace,
         },
         "models": available_models,
+        "preflight": preflight,
+    }
+
+
+def _config_exists_conflict() -> dict:
+    return {
+        "error": "config_exists",
+        "error_code": "config_exists",
+        "message": "太极 Agent 已经配置过。如需覆盖，请先在管理员设置中确认。",
+        "requires_confirm": True,
+        "recovery": {
+            "id": "confirm_overwrite",
+            "label": "确认覆盖并重试",
+        },
     }
 
 
@@ -904,12 +1124,11 @@ def apply_onboarding_setup(body: dict) -> dict:
     # Hard guard: if the operator set SKIP_ONBOARDING, the wizard should never
     # have appeared.  Even if the frontend somehow calls this endpoint anyway
     # (e.g. a stale JS bundle or a curious user), we must not overwrite the
-    # operator's config.yaml or .env files.  Just mark onboarding complete and
-    # return the current status — no file writes.
+    # operator's config.yaml or .env files. Return the source-development
+    # override status without persisting a completion flag — no file writes.
     skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
     if skip_env in {"1", "true", "yes"}:
-        save_settings({"onboarding_completed": True})
-        return get_onboarding_status()
+        return get_onboarding_status(allow_config_auto_complete=False)
 
     provider = str(body.get("provider") or "").strip().lower()
     model = str(body.get("model") or "").strip()
@@ -917,11 +1136,11 @@ def apply_onboarding_setup(body: dict) -> dict:
     base_url = _normalize_base_url(str(body.get("base_url") or ""))
 
     if provider not in _SUPPORTED_PROVIDER_SETUPS:
-        # Unsupported providers (openai-codex, copilot, nous, etc.) are already
-        # configured via the CLI. Just mark onboarding as complete and let the
-        # user through — the agent is already set up, no further setup needed.
-        save_settings({"onboarding_completed": True})
-        return get_onboarding_status()
+        # Unsupported providers (openai-codex, copilot, nous, etc.) are managed
+        # by their dedicated authentication path. This endpoint must not persist
+        # completion: /api/onboarding/complete is the only user-flow write gate,
+        # after all four setup checks have passed.
+        return get_onboarding_status(allow_config_auto_complete=False)
     if not model:
         raise ValueError("model is required")
 
@@ -940,14 +1159,9 @@ def apply_onboarding_setup(body: dict) -> dict:
     # Guard: if config.yaml already exists and the caller did not explicitly
     # acknowledge the overwrite, refuse to proceed.  The frontend must pass
     # confirm_overwrite=True after showing the user a confirmation step.
-    if Path(config_path).exists() and not body.get("confirm_overwrite"):
-        return {
-            "error": "config_exists",
-            "message": (
-                "太极 Agent 已经配置过。如需覆盖，请先在管理员设置中确认。"
-            ),
-            "requires_confirm": True,
-        }
+    overwrite_confirmed = body.get("confirm_overwrite") is True
+    if Path(config_path).exists() and not overwrite_confirmed:
+        return _config_exists_conflict()
 
     cfg = _load_yaml_config(config_path)
     env_path = hermes_home / ".env"
@@ -998,6 +1212,10 @@ def apply_onboarding_setup(body: dict) -> dict:
     )
     desired_model = dict(model_cfg)
     with credential_transaction(config_path):
+        # Close the check/write race: another process may create config.yaml
+        # after the fast guard above but before this credential lock is held.
+        if Path(config_path).exists() and not overwrite_confirmed:
+            return _config_exists_conflict()
         snapshot = load_credential_snapshot(config_path)
         changed_env_keys = tuple(
             key
@@ -1044,9 +1262,72 @@ def apply_onboarding_setup(body: dict) -> dict:
         logger.debug("Failed to reload hermes_cli config")
 
     reload_config()
-    return get_onboarding_status()
+    return get_onboarding_status(allow_config_auto_complete=False)
+
+
+def _setup_not_ready_result(preflight: dict) -> dict:
+    return {
+        "error": "setup_not_ready",
+        "error_code": "setup_not_ready",
+        "message": "开始使用前检查尚未全部通过，请按提示修复后重新检查。",
+        "preflight": preflight,
+    }
 
 
 def complete_onboarding() -> dict:
-    save_settings({"onboarding_completed": True})
-    return get_onboarding_status()
+    preflight = get_setup_status()
+    if not preflight["overall_ready"]:
+        return _setup_not_ready_result(preflight)
+
+    # Recheck immediately before the write. License files, credentials,
+    # workspace permissions, and the security profile may change between the
+    # browser's check and this endpoint (or even between two local reads).
+    before_write = get_setup_status()
+    if not before_write["overall_ready"]:
+        return _setup_not_ready_result(before_write)
+
+    completion_marker = _begin_onboarding_completion()
+    try:
+        result = get_onboarding_status(allow_config_auto_complete=False)
+    except Exception:
+        # A failed authoritative projection is an HTTP failure, so compensate
+        # the just-written completion marker before preserving the original
+        # exception. Subsequent reads also derive completion from readiness.
+        try:
+            _rollback_onboarding_completion(completion_marker)
+        except Exception:
+            logger.exception(
+                "failed to roll back onboarding completion after projection error"
+            )
+        raise
+    final_preflight = result.get("preflight")
+    final_ready = bool(
+        isinstance(final_preflight, dict)
+        and final_preflight.get("overall_ready") is True
+    )
+    if result.get("completed") is not True or not final_ready:
+        # Never leave a stale completion marker behind when the authoritative
+        # post-write projection says setup is blocked. A rollback failure is
+        # intentionally surfaced as a 500; subsequent status reads still gate
+        # `completed` on current readiness and therefore fail closed.
+        _rollback_onboarding_completion(completion_marker)
+        if not isinstance(final_preflight, dict):
+            final_preflight = get_setup_status()
+        return _setup_not_ready_result(final_preflight)
+    try:
+        commit_owned = _commit_onboarding_completion(completion_marker)
+    except Exception:
+        try:
+            _rollback_onboarding_completion(completion_marker)
+        except Exception:
+            logger.exception(
+                "failed to roll back onboarding completion after commit error"
+            )
+        raise
+    if not commit_owned:
+        # A newer completion request or an explicit settings write superseded
+        # this marker while its projection was running. Never return the stale
+        # successful projection: the caller (and UI) must see the same current
+        # truth that a fresh status request would return.
+        return get_onboarding_status(allow_config_auto_complete=False)
+    return result
