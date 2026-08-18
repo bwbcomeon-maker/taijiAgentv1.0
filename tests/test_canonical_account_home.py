@@ -43,6 +43,7 @@ def _poisoned_env(tmp_path: Path) -> dict[str, str]:
         "TAIJI_WORKSPACE",
         "TAIJI_STATE_DIR",
         "TAIJI_AGENT_TMP_DIR",
+        "TAIJI_AGENT_PYTHON",
         "TAIJI_LICENSE_FILE",
         "TAIJI_LICENSE_STATE_FILE",
         "LD_PRELOAD",
