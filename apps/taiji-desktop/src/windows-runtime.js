@@ -27,6 +27,7 @@ function resolveWindowsRuntimeLayout({ installRoot, localAppData }) {
     userRoot,
     electronDir: path.win32.join(userRoot, "electron"),
     runtimeHome: path.win32.join(userRoot, "runtime-home"),
+    packagedConfig: path.win32.join(labRoot, "config", "taiji-default-config.yaml"),
     workspace: path.win32.join(userRoot, "workspace"),
     stateDir: path.win32.join(userRoot, "state"),
     logDir: path.win32.join(userRoot, "logs"),
@@ -56,6 +57,7 @@ function requiredWindowsRuntimeFiles(layout) {
     layout.pythonExe,
     path.win32.join(layout.agentRoot, "taiji_runtime", "main.py"),
     path.win32.join(layout.webuiRoot, "server.py"),
+    layout.packagedConfig,
   ];
 }
 
@@ -104,6 +106,7 @@ function buildWindowsRuntimeEnvironment({
     HERMES_WEBUI_HOST: "127.0.0.1",
     HERMES_WEBUI_PORT: String(webuiPort),
     TAIJI_WEBUI_STATE_DIR: layout.webuiStateDir,
+    TAIJI_WEBUI_PACKAGED_CONFIG: layout.packagedConfig,
     HERMES_WEBUI_STATE_DIR: layout.webuiStateDir,
     TAIJI_WEBUI_DEFAULT_WORKSPACE: layout.workspace,
     TAIJI_WEBUI_CHAT_BACKEND: "gateway",

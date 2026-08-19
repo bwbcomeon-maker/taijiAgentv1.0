@@ -5250,6 +5250,30 @@ def _feature_visibility_group(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _load_packaged_feature_visibility() -> dict:
+    """Read the installed non-secret UI policy without mutating user config."""
+    config_path = os.getenv("TAIJI_WEBUI_PACKAGED_CONFIG", "").strip()
+    if not config_path:
+        return {}
+    path = Path(config_path).expanduser()
+    try:
+        import yaml as _yaml
+
+        loaded = _yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to load packaged WebUI config from %s", path)
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    webui_cfg = loaded.get("webui", {})
+    if not isinstance(webui_cfg, dict):
+        return {}
+    feature_cfg = webui_cfg.get("feature_visibility", {})
+    if not isinstance(feature_cfg, dict):
+        return {}
+    return feature_cfg
+
+
 def get_ui_visibility(config_data: dict | None = None) -> dict:
     """Return the computed product-entry visibility for the active profile.
 
@@ -5268,6 +5292,10 @@ def get_ui_visibility(config_data: dict | None = None) -> dict:
     )
     if not isinstance(feature_cfg, dict):
         feature_cfg = {}
+    if config_data is None:
+        packaged_feature_cfg = _load_packaged_feature_visibility()
+        if packaged_feature_cfg:
+            feature_cfg = packaged_feature_cfg
 
     result = {}
     for group, keys in _UI_VISIBILITY_FEATURES.items():

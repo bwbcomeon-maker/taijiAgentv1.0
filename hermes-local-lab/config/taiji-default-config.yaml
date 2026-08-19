@@ -37,7 +37,7 @@ webui:
       skills: false
       memory: false
       workspaces: false
-      profiles: true
+      profiles: false
       todos: false
       insights: false
       logs: false

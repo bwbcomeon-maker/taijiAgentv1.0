@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const test = require("node:test");
 const path = require("node:path");
 
@@ -17,6 +18,7 @@ test("Windows layout stays under install root and LOCALAPPDATA", () => {
   assert.equal(layout.pythonExe, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\runtime\\python\\python.exe");
   assert.equal(layout.agentRoot, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\sources\\hermes-agent");
   assert.equal(layout.webuiRoot, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\sources\\hermes-webui");
+  assert.equal(layout.packagedConfig, "C:\\Program Files\\Taiji Agent\\hermes-local-lab\\config\\taiji-default-config.yaml");
   assert.equal(layout.userRoot, "C:\\Users\\Customer\\AppData\\Local\\Taiji Agent");
   assert.equal(layout.stateDir, "C:\\Users\\Customer\\AppData\\Local\\Taiji Agent\\state");
 });
@@ -46,8 +48,19 @@ test("Windows runtime checks private files instead of shell scripts", () => {
     layout.pythonExe,
     path.win32.join(layout.agentRoot, "taiji_runtime", "main.py"),
     path.win32.join(layout.webuiRoot, "server.py"),
+    layout.packagedConfig,
   ]);
   assert.doesNotMatch(JSON.stringify(required), /start-agent\.sh|start-webui\.sh|stop-all\.sh/);
+});
+
+test("Packaged nav policy exposes exactly the four approved entries", () => {
+  const template = fs.readFileSync(
+    path.join(__dirname, "..", "..", "..", "hermes-local-lab", "config", "taiji-default-config.yaml"),
+    "utf8",
+  );
+  const navBlock = template.split(/\n\s*nav:\s*\n/, 2)[1].split(/\n\s*settings_sections:\s*\n/, 1)[0];
+  const visible = [...navBlock.matchAll(/^\s{6}([a-z_]+):\s*true\s*$/gm)].map((match) => match[1]);
+  assert.deepEqual(visible, ["chat", "tasks", "writing", "settings"]);
 });
 
 test("Windows environment is private and uses per-user state", () => {
@@ -68,6 +81,7 @@ test("Windows environment is private and uses per-user state", () => {
   assert.equal(env.TAIJI_STATE_DIR, layout.stateDir);
   assert.equal(env.TAIJI_AGENT_USE_USER_DIRS, "1");
   assert.equal(env.TAIJI_AGENT_LOG_DIR, layout.logDir);
+  assert.equal(env.TAIJI_WEBUI_PACKAGED_CONFIG, layout.packagedConfig);
   assert.equal(env.TAIJI_AGENT_PYTHON, layout.pythonExe);
   assert.equal(env.TAIJI_WEBUI_PYTHON, layout.pythonExe);
   assert.equal(env.AGENT_API_HOST, "127.0.0.1");

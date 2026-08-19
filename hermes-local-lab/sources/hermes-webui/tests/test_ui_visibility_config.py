@@ -34,6 +34,40 @@ def test_backend_ui_visibility_defaults_fail_open():
     assert vis["chat"]["activity_details"] is True
 
 
+def test_backend_uses_packaged_visibility_without_mutating_runtime_config(
+    monkeypatch, tmp_path
+):
+    from api import config
+
+    packaged = tmp_path / "taiji-default-config.yaml"
+    packaged.write_text(
+        """
+webui:
+  feature_visibility:
+    nav:
+      chat: true
+      tasks: true
+      kanban: false
+      writing: true
+      settings: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_config = {
+        "webui": {"feature_visibility": {"nav": {"kanban": True}}}
+    }
+    monkeypatch.setenv("TAIJI_WEBUI_PACKAGED_CONFIG", str(packaged))
+    monkeypatch.setattr(config, "get_config", lambda: runtime_config)
+
+    vis = config.get_ui_visibility()
+
+    assert vis["nav"]["chat"] is True
+    assert vis["nav"]["tasks"] is True
+    assert vis["nav"]["kanban"] is False
+    assert vis["nav"]["writing"] is True
+    assert runtime_config["webui"]["feature_visibility"]["nav"]["kanban"] is True
+
+
 def test_backend_ui_visibility_hides_known_features_and_ignores_unknown():
     from api.config import get_ui_visibility
 
