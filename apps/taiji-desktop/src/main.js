@@ -530,16 +530,23 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   env.TMP = tmpDir;
   env.TEMP = tmpDir;
   env.TAIJI_LICENSE_STATE_FILE = path.join(accountHome, ".local", "state", "taiji-agent", "license-state.json");
-  try {
-    fs.mkdirSync(tmpDir, { recursive: true });
-  } catch (error) {
-    desktopBootLog(`failed to create tmp dir ${tmpDir}: ${error.message}`);
-  }
   if (process.platform === "win32") {
     const layout = resolveWindowsRuntimeLayout({
       installRoot: path.resolve(labDir, ".."),
       localAppData: process.env.LOCALAPPDATA,
     });
+    for (const directory of [
+      layout.electronDir,
+      layout.runtimeHome,
+      layout.workspace,
+      layout.stateDir,
+      layout.logDir,
+      layout.tmpDir,
+      layout.licenseDir,
+      layout.webuiStateDir,
+    ]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
     return buildWindowsRuntimeEnvironment({
       baseEnv: env,
       layout,
@@ -548,6 +555,11 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
       desktopAccessToken,
       apiServerKey: env.API_SERVER_KEY,
     });
+  }
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  } catch (error) {
+    desktopBootLog(`failed to create tmp dir ${tmpDir}: ${error.message}`);
   }
   return env;
 }
@@ -617,7 +629,8 @@ async function startRuntime() {
     }
   }
 
-  loadStatus("正在启动太极 Agent", [
+  try {
+    loadStatus("正在启动太极 Agent", [
     "正在准备本机运行环境",
     "正在检查应用状态",
     "如遇异常可运行 taiji-agent-diagnose 导出诊断"
@@ -686,7 +699,11 @@ async function startRuntime() {
   } else {
     await runScript("start-webui.sh", runtimeEnv, desktopLog);
   }
-  await waitForHttp(`http://127.0.0.1:${webuiPort}/health`, 30000);
+    await waitForHttp(`http://127.0.0.1:${webuiPort}/health`, 30000);
+  } catch (error) {
+    if (process.platform === "win32") stopWindowsProcesses();
+    throw error;
+  }
 
   const target = new URL(`http://127.0.0.1:${webuiPort}`);
   target.searchParams.set("taiji_desktop", "1");
