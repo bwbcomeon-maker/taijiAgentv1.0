@@ -31,6 +31,7 @@ INSTALL_OBSERVER = (
     ROOT / "tools/taiji-desktop-acceptance/observe-single-deb-install.py"
 )
 GOLDEN_ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
+CANDIDATE_PIPELINE = ROOT / "scripts/taiji-package-candidate.py"
 CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
 RELEASE_TEST_RUNNER = ROOT / "scripts/run-taiji-release-python-tests.py"
 FORMAL_BUILDER = ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
@@ -73,6 +74,7 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "scripts/assemble-taiji-release-evidence.py",
     ROOT / "scripts/validate-taiji-release-evidence.py",
     GOLDEN_ORCHESTRATOR,
+    CANDIDATE_PIPELINE,
     CHALLENGE_ENVELOPE_HELPER,
     RELEASE_TEST_RUNNER,
     FORMAL_BUILD_DRIVER,

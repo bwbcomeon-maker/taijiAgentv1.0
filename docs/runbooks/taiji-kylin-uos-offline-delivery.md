@@ -111,9 +111,38 @@ taijiagent-制包机输入-<commit>.tar.gz.sha256
 
 私有 staging 的自动清理是另一个、明确收窄的边界：创建前必须验证物理 TMPDIR 父链（root 所有且不可被 group/other 写，或 root 所有的精确 `01777`；当前 uid 所有的节点不可被 group/other 写），随机创建后立即记录 `dev/ino/uid/0700`，清理前再复核同一父链和目录身份。缺失、替换、模式变化或身份不确定时保留 foreign/uncertain 路径并报告 poisoned，不执行 `rm -rf`。该边界仍明确假设没有同 uid 恶意连续写者；`0700` 不能隔离同 uid 进程。如威胁模型包含这类对手，必须使用独立账户/隔离环境或保留 staging 人工处理，不得把私有 staging 清理推广为共享发布路径的并发安全证明。
 
-### 5.1.1 黄金编排器唯一正式入口
+### 5.1.1 x86 麒麟候选 DEB 薄执行器
 
-输入三件套全部生成后，必须在首次输入校验、传输或远程制包前运行 `scripts/taiji-linux-golden-orchestrator.py init`。正式阶段顺序固定为 `input_verify` → `remote_build`（生成并绑定候选 DEB）→ `artifact_preflight` → `challenge_preparation` → offline → 正式 target → 十二条 records。certification envelope 必须在 `challenge_preparation` 签发并验证，不得先传输或采集证据，再在签名时补造 envelope 或替换 nonce。
+`taiji-package` 是 Mac 控制端的 candidate-only 日常入口，只把现有 `99 → 00 → 01` 封装成可计划、可记录、可恢复的候选构建流程，不复制这三个脚本的打包逻辑。它只使用操作员明确提供的仓库路径，不扫描其它目录；默认状态保存在 `~/.local/state/taiji-package/runs/<run-id>/`，远端 run 固定在 `/home/kylin/taiji-builds/<commit>/<run-id>/`。
+
+```bash
+cd <操作员明确提供的正式仓库路径>
+./taiji-package doctor
+./taiji-package plan
+./taiji-package build
+./taiji-package status --run <run-id>
+./taiji-package fetch --run <run-id>
+```
+
+`./taiji-package doctor` 只检查本地 clean `main`、完整 HEAD、接口、`99/00/01`、SSH alias 静态解析以及状态/产物根，不连接网络、不创建 run、不运行 `99`。本地就绪时输出 `CONTROLLER_READY`；同时出现 `BUILDER_UNREACHABLE` 表示 `online_checked=false`、本轮没有建立远端事实，不等于已证明麒麟主机故障。只有显式执行 `./taiji-package doctor --online` 才通过 SSH 对 `kylin` 检查 Linux x86_64、dpkg amd64、apt/dpkg、glibc、`sudo -n`、磁盘、inode、`/proc`、memfd 和远程目录权限；该命令仍不传输、不制包。
+
+`plan` 只输出不执行，并分别给出以下授权块：
+
+1. `SSH 与传输`：host、source commit、三件套 basename/bytes/SHA256、方向、唯一远程目录、失败保留方式。
+2. `依赖与网络`：冻结 `00` 可能执行的 apt/sudo、固定工具下载、网络和文件系统影响、失败停止位置。
+3. `候选构建`：commit、build host、本地/远端输出、网络和依赖边界，以及不会继续到的阶段。
+
+`build` 先做本地和 online doctor，再展示上述三个授权块；只有操作员对这三个明确阶段一次输入精确的 `BUILD` 后，才允许按顺序准备或复用三件套、创建唯一远程 run、验证输入、执行冻结 `00/01`、取回 review/log 并本地复核。主机不可达必须在调用 `99` 前停止。三件套全不存在时才可在确认后运行 `99`；三件套完整且验证通过时复用；部分存在、commit 错或摘要错均停止，不覆盖、不删除、不自动修复。
+
+每阶段原子更新 `run-state.json`。远端构建成功但本地取回或复核失败时标记 `FETCH_PENDING`；`fetch` 只允许重试 review/log 取回和本地验证，不重跑 online doctor、apt、`00` 或构建，且不得覆盖已有本地产物。成功时输出 commit、DEB basename/bytes/SHA256、host、耗时和日志位置，证据标签才可提升为 `候选 DEB 已构建`。
+
+该薄执行器严格不安装、不验收、不签名、不发布，也不执行离线生命周期、图形验收、N-1、certification 或自动远程清理。本地第一阶段的准确状态只能是：`已实现，本地模拟通过`、`真实麒麟连接未验证`、`候选 DEB 未构建`。
+
+薄执行器的状态和候选输出不属于黄金编排器 checkpoint，不能直接写成正式 `remote_build` pass。若后续目标扩大到离线演练、目标验收、认证、签名或客户发布，必须进入下一节的黄金编排器，按其当前 plan 重新执行并绑定同一正式证据链。
+
+### 5.1.2 黄金编排器唯一正式入口
+
+进入离线演练、目标验收、认证、签名或发布的正式证据链时，必须在首次正式输入校验、传输或远程制包前运行 `scripts/taiji-linux-golden-orchestrator.py init`。正式阶段顺序固定为 `input_verify` → `remote_build`（生成并绑定候选 DEB）→ `artifact_preflight` → `challenge_preparation` → offline → 正式 target → 十二条 records。certification envelope 必须在 `challenge_preparation` 签发并验证，不得先传输或采集证据，再在签名时补造 envelope 或替换 nonce。
 
 当前配置 schema 固定为 `taiji-linux-golden-orchestrator-config/v5`。除原有字段外，`workspace.execution_home` 与 `workspace.execution_tmp` 必须指向两个已存在、当前账户拥有且 group/other 不可写的独立目录；`remote.account_home` 必须是远端固定登录账户的绝对 home。前两者只是本机命令的隔离 `HOME`/`TMPDIR`，不会改变签名器 `used-nonces` 的位置；nonce 防重放状态仍从固定登录账户的 passwd home 推导，不能通过 plan 中的 `HOME` 改到其它目录。
 
@@ -206,7 +235,7 @@ sidecar 校验、manifest 绑定或 commit 任一不一致时停止，回到冻�
 
 ### 5.2 在兼容 Linux amd64 制包机生成完整交付目录
 
-正式候选生成只执行黄金编排器 `remote_build` 阶段经审批的 `commands[].argv`，其中已包含三件套传输、冻结 `00` 构建、完整 review tree 取回和日志保存。下方手工命令只用于解释制包入口或受控排障，不能代替该阶段的 checkpoint。
+进入正式黄金证据链的候选生成只执行黄金编排器 `remote_build` 阶段经审批的 `commands[].argv`，其中已包含三件套传输、冻结 `00` 构建、完整 review tree 取回和日志保存。`taiji-package` 的 candidate-only 输出不能代替该阶段 checkpoint。下方手工命令只用于解释制包入口或受控排障，不能代替该阶段的 checkpoint。
 
 解压输入包后进入 `taijiagent 打包交付/`：
 

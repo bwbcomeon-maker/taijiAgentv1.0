@@ -49,6 +49,26 @@ The six-field `taiji-packaging-interface/v1` contract keeps preparation and cons
 - `builder_input_entry` (`taijiagent 打包交付/99_本机_准备制包输入包.sh`) prepares the frozen trio from an accepted source checkout. Doctor 的 repo 模式只能把 99 报告为下一步，且仍需要当轮专项授权。
 - `build_host_entry` (`taijiagent 打包交付/00_制包机_生成离线交付包.sh`) consumes that frozen trio on the controlled Linux build host. Never skip directly from repo inspection to 00.
 
+## Candidate-only controller
+
+当操作员明确提供 Taiji 仓库路径，且目标只到 x86 麒麟候选 DEB 时，从该仓库根使用薄执行器；它不会扫描其它目录：
+
+```bash
+./taiji-package doctor
+./taiji-package plan
+./taiji-package build
+./taiji-package status --run <run-id>
+./taiji-package fetch --run <run-id>
+```
+
+`./taiji-package doctor` 只做本地检查，不发起网络访问。clean `main`、完整 HEAD、接口、`99/00/01`、SSH alias 静态解析和状态根检查都通过时，输出 `CONTROLLER_READY`；同一结果中的 `BUILDER_UNREACHABLE` 只表示本轮没有执行在线检查，不能推断真实主机故障。`./taiji-package doctor --online` 才通过 SSH 对 `kylin` 执行只读能力检查。
+
+`plan` 必须分别列出 `SSH 与传输`、`依赖与网络`、`候选构建` 三个授权块，包含 commit、三件套身份、主机、远程目录、网络/sudo 影响、输出、回滚和停止条件。`build` 只有在 online doctor 通过并展示这些块后，才接受一次精确的 `BUILD` 确认；该确认只覆盖列明的三个阶段。真实远端构建已经成功、但本地取回或复核失败时，状态才可为 `FETCH_PENDING`，且 `fetch` 只能重试取回与本地验证，不得重跑 apt、`00` 或构建。
+
+该入口的证据上限是 `候选 DEB 已构建`，明确不安装、不验收、不签名、不发布，也不执行离线生命周期、N-1 或 certification。未连接真机的本地实现只能写成“已实现，本地模拟通过；真实麒麟连接未验证；候选 DEB 未构建”。
+
+黄金编排器仍是进入离线演练、目标验收、认证、签名和客户发布的唯一正式入口。薄执行器的 run-state 不是黄金编排器 checkpoint；不得把候选输出直接记作 `remote_build` pass。需要进入正式六级证据链时，必须按黄金编排器的当前 plan 重新执行和绑定。
+
 ## Authorization boundary
 
 兼容检查通过不等于已获执行授权。Orchestrator `READY`, an existing script, a historical approval, or the user's word “继续” also does not authorize an external or privileged action.

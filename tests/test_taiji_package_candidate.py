@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import io
 import json
 import os
+import runpy
 import shutil
 import stat
 import subprocess
@@ -24,6 +26,7 @@ BUILDER_INPUT_HELPER = ROOT / "packaging/linux/builder-input-package.py"
 SOURCE_INTEGRITY_HELPER = ROOT / "packaging/linux/source-archive-integrity.py"
 COMPATIBILITY_POLICY = ROOT / "packaging/linux/compatibility-policy.json"
 COMPATIBILITY_POLICY_HELPER = ROOT / "packaging/linux/compatibility_policy.py"
+PYTHON38_GATE = ROOT / "tests/python38_linux_packaging_gate.py"
 FROZEN_DELIVERY_MEMBERS = {
     "00_制包机_生成离线交付包.sh",
     "01_制包机_发布预检.sh",
@@ -279,6 +282,11 @@ class CandidatePipelineContractTests(unittest.TestCase):
         for secret_name in ("password", "private_key", "token", "credential"):
             self.assertNotIn(secret_name, serialized.lower())
 
+    def test_candidate_entrypoint_uses_python38_grammar_and_is_in_formal_gate(self):
+        ast.parse(CANDIDATE.read_text(encoding="utf-8"), feature_version=(3, 8))
+        gate = runpy.run_path(str(PYTHON38_GATE))
+        self.assertIn(CANDIDATE, gate["PYTHON38_ENTRYPOINTS"])
+
     def test_parser_exposes_only_candidate_lifecycle_commands(self):
         self.assertTrue(CANDIDATE.is_file(), "candidate pipeline module is missing")
         module = load_candidate()
@@ -484,6 +492,26 @@ class CandidatePipelineContractTests(unittest.TestCase):
             self.assertEqual(git(repo, "status", "--porcelain").stdout, before)
             self.assertFalse(state_root.exists())
             self.assertFalse((repo / "taijiagent-制包机输入-unknown.tar.gz").exists())
+            authorization = plan["authorization_blocks"]
+            self.assertEqual(
+                [block["stage"] for block in authorization],
+                ["SSH 与传输", "依赖与网络", "候选构建"],
+            )
+            for block in authorization:
+                self.assertEqual(
+                    set(block),
+                    {"stage", "identity", "impact", "rollback_and_stop"},
+                )
+            input_files = authorization[0]["identity"]["input_files"]
+            self.assertEqual(len(input_files), 3)
+            for item in input_files:
+                self.assertEqual(
+                    set(item),
+                    {"role", "basename", "bytes", "sha256", "verification_status"},
+                )
+                self.assertIsNone(item["bytes"])
+                self.assertIsNone(item["sha256"])
+                self.assertEqual(item["verification_status"], "MISSING")
 
     def test_builder_input_is_missing_or_reused_only_as_a_complete_verified_trio(self):
         module = load_candidate()

@@ -1843,6 +1843,52 @@ def build_candidate_plan(
         "local_run_dir": str(local_run_dir),
         "input": input_status,
         "commands": commands,
+        "authorization_blocks": [
+            {
+                "stage": "SSH 与传输",
+                "identity": {
+                    "host_alias": target["host_alias"],
+                    "source_commit": source_commit,
+                    "input_files": [
+                        {
+                            "role": role,
+                            "basename": metadata["basename"],
+                            "bytes": metadata.get("bytes"),
+                            "sha256": metadata.get("sha256"),
+                            "verification_status": input_status["status"],
+                        }
+                        for role, metadata in input_status["files"].items()
+                    ],
+                    "direction": "controller-to-builder input; builder-to-controller review/log",
+                    "remote_run_dir": remote_dir,
+                },
+                "impact": "create one unique remote run directory and transfer the bound trio",
+                "rollback_and_stop": "preserve the failed remote run for audit; do not auto-clean or continue",
+            },
+            {
+                "stage": "依赖与网络",
+                "identity": {
+                    "host_alias": target["host_alias"],
+                    "build_entry": "taijiagent 打包交付/00_制包机_生成离线交付包.sh",
+                    "network": "apt and source-authorized fixed tool downloads may occur",
+                    "sudo": "frozen 00 may install its declared build dependencies",
+                },
+                "impact": "remote package metadata, declared build dependencies, and build caches may change",
+                "rollback_and_stop": "stop on doctor, apt, download, or capability failure; do not install the candidate",
+            },
+            {
+                "stage": "候选构建",
+                "identity": {
+                    "source_commit": source_commit,
+                    "host_alias": target["host_alias"],
+                    "remote_run_dir": remote_dir,
+                    "local_run_dir": str(local_run_dir),
+                    "success_label": "候选 DEB 已构建",
+                },
+                "impact": "run frozen 00/01 and retrieve one candidate review tree plus build log",
+                "rollback_and_stop": "retain evidence at the failed stage; never continue to install, accept, sign, or publish",
+            },
+        ],
         "boundaries": {
             "network": "remote 00 may use apt and source-authorized downloads",
             "sudo": "remote 00 may install its declared build dependencies",
