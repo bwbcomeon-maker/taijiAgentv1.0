@@ -36,8 +36,10 @@ def load_candidate():
 
 
 class RecordingRunner:
-    def __init__(self):
+    def __init__(self, *, glibc="ldd (GNU libc) 2.31", sudo="ready"):
         self.calls = []
+        self.glibc = glibc
+        self.sudo = sudo
 
     def __call__(self, argv, *, cwd, environment, timeout):
         call = {
@@ -57,8 +59,8 @@ class RecordingRunner:
                     "dpkg_arch=amd64",
                     "apt=/usr/bin/apt-get",
                     "dpkg=/usr/bin/dpkg",
-                    "glibc=ldd (GNU libc) 2.31",
-                    "sudo=ready",
+                    "glibc={}".format(self.glibc),
+                    "sudo={}".format(self.sudo),
                     "free_kib=20971520",
                     "free_inodes=200000",
                     "proc=ready",
@@ -219,6 +221,46 @@ class CandidateTransportContractTests(unittest.TestCase):
                 "publish-single-deb",
             ):
                 self.assertNotIn(forbidden, rendered)
+
+    def test_online_doctor_blocks_reachable_builder_below_policy_glibc(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-online-blocked-") as temporary:
+            root = Path(temporary)
+            repo, target, ssh_config, _plan = make_plan(module, root)
+            transport = module.RealSshTransport(
+                repo,
+                target,
+                ssh_config=ssh_config,
+                command_runner=RecordingRunner(
+                    glibc="ldd (GNU libc) 2.30", sudo="blocked"
+                ),
+            )
+
+            result = transport.online_doctor()
+
+            self.assertEqual(result["builder_status"], "BLOCKED")
+            self.assertEqual(result["glibc_version"], "2.30")
+            self.assertEqual(result["minimum_glibc"], "2.31")
+            self.assertTrue(any("glibc" in blocker for blocker in result["blockers"]))
+            self.assertTrue(any("sudo" in blocker for blocker in result["blockers"]))
+
+    def test_online_doctor_remote_probe_is_valid_bash_and_reports_blocked_values(self):
+        module = load_candidate()
+        target = module.load_target(TARGET)
+        script = module._online_doctor_script(target)
+
+        result = subprocess.run(
+            ["/bin/bash", "-n", "-c", script],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sudo_status=blocked", script)
+        self.assertIn("remote_root_status=blocked", script)
+        self.assertNotIn("set -Eeuo pipefail", script)
 
     def test_fake_transport_runs_complete_candidate_chain_without_external_commands(self):
         module = load_candidate()
@@ -447,6 +489,36 @@ class CandidateTransportContractTests(unittest.TestCase):
             self.assertEqual(recovered["stage"], "CANDIDATE_BUILT")
             self.assertFalse(recovered["fetch_allowed"])
 
+    def test_terminal_remote_build_failure_records_run_end_time(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-terminal-failure-") as temporary:
+            root = Path(temporary)
+            repo, _target, _ssh_config, plan = make_plan(module, root)
+            from tests.test_taiji_package_candidate import make_verified_triplet
+
+            make_verified_triplet(repo, plan["source_commit"], root / "input-fixture")
+            plan = module.build_candidate_plan(
+                repo,
+                module.load_target(TARGET),
+                root / "state",
+                run_id="terminal-failure",
+                ssh_config=write_ssh_config(root / "ssh_config-terminal"),
+            )
+            store = module.RunStateStore(root / "state")
+
+            with self.assertRaises(module.PipelineError):
+                module.run_candidate_build(
+                    plan,
+                    store,
+                    module.FakeSshTransport(fail_stage="build-00"),
+                    confirmed=True,
+                )
+
+            state = store.load("terminal-failure")
+            self.assertEqual(state["stage"], "FAILED")
+            self.assertEqual(state["failure"]["category"], "BUILD_00_FAILED")
+            self.assertIsNotNone(state["finished_at"])
+
     def test_fetch_rejects_non_remote_success_sha_mismatch_and_occupied_output(self):
         module = load_candidate()
         with tempfile.TemporaryDirectory(prefix="taiji-fetch-negative-") as temporary:
@@ -538,6 +610,26 @@ class CandidateTransportContractTests(unittest.TestCase):
                     command_runner=SuccessfulPreflightRunner(),
                 )
             self.assertEqual(linked_log.exception.category, "LOCAL_REVIEW_INVALID")
+
+    def test_local_review_verification_rechecks_main_commit_and_clean_state(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-review-source-drift-") as temporary:
+            root = Path(temporary)
+            repo, _target, _ssh_config, plan = make_plan(module, root)
+            review = make_candidate_review(repo, plan, root / "review")
+            remote_log = root / "remote-build.log"
+            remote_log.write_text("remote build log\n", encoding="utf-8")
+            (repo / "drift.txt").write_text("untracked drift\n", encoding="utf-8")
+
+            with self.assertRaises(module.PipelineError) as drift:
+                module.validate_candidate_review(
+                    plan,
+                    review,
+                    remote_log,
+                    command_runner=SuccessfulPreflightRunner(),
+                )
+
+            self.assertEqual(drift.exception.category, "SOURCE_DRIFT")
 
     def test_build_cli_displays_plan_confirms_once_and_persists_result(self):
         module = load_candidate()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -16,6 +17,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -282,6 +284,23 @@ class CandidatePipelineContractTests(unittest.TestCase):
         for secret_name in ("password", "private_key", "token", "credential"):
             self.assertNotIn(secret_name, serialized.lower())
 
+    def test_target_adapter_rejects_option_like_hosts_and_escaping_remote_paths(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-target-negative-") as temporary:
+            root = Path(temporary)
+            baseline = json.loads(TARGET.read_text(encoding="utf-8"))
+            for field, value in (
+                ("host_alias", "-oProxyCommand=unsafe"),
+                ("remote_root", "/home/kylin/../escape"),
+            ):
+                with self.subTest(field=field):
+                    payload = dict(baseline)
+                    payload[field] = value
+                    candidate = root / (field + ".json")
+                    candidate.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+                    with self.assertRaises(module.PipelineError):
+                        module.load_target(candidate)
+
     def test_candidate_entrypoint_uses_python38_grammar_and_is_in_formal_gate(self):
         ast.parse(CANDIDATE.read_text(encoding="utf-8"), feature_version=(3, 8))
         gate = runpy.run_path(str(PYTHON38_GATE))
@@ -353,6 +372,39 @@ class CandidatePipelineContractTests(unittest.TestCase):
                 store.create("run-link", {"stage": "CREATED"})
 
             self.assertEqual(list(actual_root.iterdir()), [])
+
+            actual_load_root = root / "actual-load-state"
+            module.RunStateStore(actual_load_root).create(
+                "run-load-link", {"stage": "CREATED"}
+            )
+            linked_load_root = root / "linked-load-state"
+            linked_load_root.symlink_to(actual_load_root, target_is_directory=True)
+            with self.assertRaises(module.PipelineError):
+                module.RunStateStore(linked_load_root).load("run-load-link")
+
+    def test_status_reads_bound_state_without_loading_current_target_adapter(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-status-bound-") as temporary:
+            root = Path(temporary)
+            store = module.RunStateStore(root / "state")
+            store.create("status-run", {"stage": "FETCH_PENDING"})
+            output = io.StringIO()
+
+            with contextlib.redirect_stdout(output):
+                return_code = module.main(
+                    [
+                        "--target",
+                        str(root / "missing-target.json"),
+                        "--state-root",
+                        str(root / "state"),
+                        "status",
+                        "--run",
+                        "status-run",
+                    ]
+                )
+
+            self.assertEqual(return_code, 0)
+            self.assertEqual(json.loads(output.getvalue())["stage"], "FETCH_PENDING")
 
     def test_local_doctor_accepts_only_clean_main_with_declared_interface(self):
         module = load_candidate()
@@ -474,6 +526,7 @@ class CandidatePipelineContractTests(unittest.TestCase):
             self.assertEqual(plan["input"]["status"], "MISSING")
             self.assertTrue(plan["input"]["prepare_required"])
             self.assertEqual(plan["host_alias"], "kylin")
+            self.assertEqual(plan["target_adapter"], module.load_target(TARGET))
             self.assertTrue(plan["remote_run_dir"].endswith("/run-plan-test"))
             self.assertEqual(
                 plan["local_run_dir"],
@@ -619,6 +672,55 @@ class CandidatePipelineContractTests(unittest.TestCase):
             self.assertNotIn(
                 "99_本机_准备制包输入包.sh", json.dumps(plan["commands"], ensure_ascii=False)
             )
+
+    def test_fetch_cli_rejects_target_adapter_drift_before_transport(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-fetch-target-drift-") as temporary:
+            root = Path(temporary)
+            repo = make_doctor_repo(root)
+            target = module.load_target(TARGET)
+            plan = module.build_candidate_plan(
+                repo,
+                target,
+                root / "state",
+                run_id="target-drift",
+                ssh_config=write_ssh_config(root / "ssh_config"),
+            )
+            module.RunStateStore(root / "state").create(
+                "target-drift",
+                {
+                    "stage": "FETCH_PENDING",
+                    "source_commit": plan["source_commit"],
+                    "remote_build_succeeded": True,
+                    "fetch_allowed": True,
+                    "plan": plan,
+                },
+            )
+            drifted = dict(target)
+            drifted["minimum_free_gib"] += 1
+            drifted_path = root / "drifted-target.json"
+            drifted_path.write_text(json.dumps(drifted) + "\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with mock.patch.object(
+                module,
+                "RealSshTransport",
+                side_effect=AssertionError("transport must not be constructed"),
+            ), contextlib.redirect_stderr(stderr):
+                return_code = module.main(
+                    [
+                        "--target",
+                        str(drifted_path),
+                        "--state-root",
+                        str(root / "state"),
+                        "fetch",
+                        "--run",
+                        "target-drift",
+                    ]
+                )
+
+            self.assertEqual(return_code, 2)
+            self.assertIn("PLAN_INVALID", stderr.getvalue())
 
 
 if __name__ == "__main__":

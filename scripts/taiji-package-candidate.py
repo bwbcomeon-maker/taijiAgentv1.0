@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import pwd
 import re
 import shlex
@@ -85,14 +86,29 @@ def load_target(path: Path) -> Dict[str, Any]:
     for key in ("host_alias", "remote_user", "remote_account_home", "remote_root"):
         if not isinstance(payload.get(key), str) or not payload[key]:
             raise PipelineError("target adapter {} is invalid".format(key))
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", payload["host_alias"]) is None:
+        raise PipelineError("target adapter host_alias is not a safe SSH alias")
+    if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", payload["remote_user"]) is None:
+        raise PipelineError("target adapter remote_user is invalid")
     if payload.get("architecture") != "amd64":
         raise PipelineError("target adapter architecture must be amd64")
     for key in ("minimum_free_gib", "minimum_free_inodes"):
         if type(payload.get(key)) is not int or payload[key] <= 0:
             raise PipelineError("target adapter {} must be a positive integer".format(key))
-    if not payload["remote_account_home"].startswith("/"):
-        raise PipelineError("remote_account_home must be absolute")
-    if not payload["remote_root"].startswith(payload["remote_account_home"] + "/"):
+    for key in ("remote_account_home", "remote_root"):
+        value = payload[key]
+        if (
+            re.fullmatch(r"/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+", value) is None
+            or posixpath.normpath(value) != value
+        ):
+            raise PipelineError("target adapter {} must be a normalized absolute path".format(key))
+    if (
+        payload["remote_root"] == payload["remote_account_home"]
+        or posixpath.commonpath(
+            [payload["remote_account_home"], payload["remote_root"]]
+        )
+        != payload["remote_account_home"]
+    ):
         raise PipelineError("remote_root must be inside the fixed remote account home")
     return payload
 
@@ -225,6 +241,20 @@ def _ensure_private_directory(path: Path) -> None:
         raise PipelineError("state directory is not current-user private: {}".format(path))
 
 
+def _require_private_directory(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise PipelineError("private state directory is unavailable: {}".format(path)) from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise PipelineError("state directory is not current-user private: {}".format(path))
+
+
 class RunStateStore:
     """No-scan, no-overwrite run-state storage under one explicit root."""
 
@@ -264,6 +294,10 @@ class RunStateStore:
         return state
 
     def load(self, run_id: str) -> Dict[str, Any]:
+        _validate_run_id(run_id)
+        _require_private_directory(self.root)
+        _require_private_directory(self.runs_root)
+        _require_private_directory(self.run_dir(run_id))
         path = self.state_path(run_id)
         try:
             metadata = path.lstat()
@@ -527,7 +561,6 @@ def _plan_command(plan: Dict[str, Any], stage: str) -> list:
 
 
 def _online_doctor_script(target: Dict[str, Any]) -> str:
-    minimum_kib = target["minimum_free_gib"] * 1024 * 1024
     remote_root = target["remote_root"]
     account_home = target["remote_account_home"]
     python_probe = (
@@ -539,41 +572,72 @@ def _online_doctor_script(target: Dict[str, Any]) -> str:
         "os.close(fd)"
     )
     statements = [
-        "set -Eeuo pipefail",
+        "set -u",
         "printf 'schema=taiji-online-doctor-v1\\n'",
-        "printf 'kernel=%s\\n' \"$(/usr/bin/uname -s)\"",
-        "printf 'machine=%s\\n' \"$(/usr/bin/uname -m)\"",
-        "printf 'dpkg_arch=%s\\n' \"$(/usr/bin/dpkg --print-architecture)\"",
-        "printf 'apt=%s\\n' \"$(command -v apt-get)\"",
-        "printf 'dpkg=%s\\n' \"$(command -v dpkg)\"",
-        "printf 'glibc=%s\\n' \"$(/usr/bin/ldd --version 2>&1 | /usr/bin/sed -n '1p')\"",
-        "/usr/bin/sudo -n /usr/bin/true",
-        "printf 'sudo=ready\\n'",
-        "free_kib=$(/bin/df -Pk {} | /usr/bin/awk 'NR==2 {{print $4}}')".format(
-            shlex.quote(account_home)
+        "kernel=$(/usr/bin/uname -s 2>/dev/null || :)",
+        "machine=$(/usr/bin/uname -m 2>/dev/null || :)",
+        "dpkg_arch=$(/usr/bin/dpkg --print-architecture 2>/dev/null || :)",
+        "apt=''; [ -x /usr/bin/apt-get ] && apt=/usr/bin/apt-get",
+        "dpkg=''; [ -x /usr/bin/dpkg ] && dpkg=/usr/bin/dpkg",
+        (
+            "glibc=''; if [ -x /usr/bin/ldd ]; then "
+            "glibc=$(/usr/bin/ldd --version 2>&1 | /usr/bin/sed -n '1p'); fi"
         ),
-        "free_inodes=$(/bin/df -Pi {} | /usr/bin/awk 'NR==2 {{print $4}}')".format(
-            shlex.quote(account_home)
+        (
+            "sudo_status=blocked; if [ -x /usr/bin/sudo ] "
+            "&& /usr/bin/sudo -n /usr/bin/true >/dev/null 2>&1; "
+            "then sudo_status=ready; fi"
         ),
-        "[ \"$free_kib\" -ge {} ]".format(minimum_kib),
-        "[ \"$free_inodes\" -ge {} ]".format(target["minimum_free_inodes"]),
+        "capacity_path={}".format(shlex.quote(account_home)),
+        (
+            "if [ -d {root} ] && [ ! -L {root} ]; then capacity_path={root}; fi"
+        ).format(root=shlex.quote(remote_root)),
+        "free_kib=$(/bin/df -Pk \"$capacity_path\" 2>/dev/null | /usr/bin/awk 'NR==2 {print $4}' || :)",
+        "free_inodes=$(/bin/df -Pi \"$capacity_path\" 2>/dev/null | /usr/bin/awk 'NR==2 {print $4}' || :)",
+        "case \"$free_kib\" in ''|*[!0-9]*) free_kib=0 ;; esac",
+        "case \"$free_inodes\" in ''|*[!0-9]*) free_inodes=0 ;; esac",
+        "printf 'kernel=%s\\n' \"$kernel\"",
+        "printf 'machine=%s\\n' \"$machine\"",
+        "printf 'dpkg_arch=%s\\n' \"$dpkg_arch\"",
+        "printf 'apt=%s\\n' \"$apt\"",
+        "printf 'dpkg=%s\\n' \"$dpkg\"",
+        "printf 'glibc=%s\\n' \"$glibc\"",
+        "printf 'sudo=%s\\n' \"$sudo_status\"",
         "printf 'free_kib=%s\\n' \"$free_kib\"",
         "printf 'free_inodes=%s\\n' \"$free_inodes\"",
-        "[ -d /proc/self/fd ] && [ -r /proc/self/fd/0 ]",
-        "printf 'proc=ready\\n'",
-        "/usr/bin/python3 -I -B -c {}".format(shlex.quote(python_probe)),
-        "printf 'memfd=ready\\n'",
         (
-            "if [ -e {root} ] || [ -L {root} ]; then "
-            "[ -d {root} ] && [ ! -L {root} ] && [ -O {root} ] && [ -w {root} ]; "
-            "else [ -d {home} ] && [ -O {home} ] && [ -w {home} ]; fi"
-        ).format(root=shlex.quote(remote_root), home=shlex.quote(account_home)),
-        "printf 'remote_root=ready\\n'",
+            "proc_status=blocked; if [ -d /proc/self/fd ] && [ -r /proc/self/fd/0 ]; "
+            "then proc_status=ready; fi; printf 'proc=%s\\n' \"$proc_status\""
+        ),
+        (
+            "memfd_status=blocked; if [ -x /usr/bin/python3 ] "
+            "&& /usr/bin/python3 -I -B -c {probe} >/dev/null 2>&1; "
+            "then memfd_status=ready; fi; printf 'memfd=%s\\n' \"$memfd_status\""
+        ).format(probe=shlex.quote(python_probe)),
+        "remote_candidate={}".format(shlex.quote(account_home)),
+        (
+            "if [ -e {root} ] || [ -L {root} ]; then remote_candidate={root}; fi"
+        ).format(root=shlex.quote(remote_root)),
+        (
+            "remote_root_status=blocked; if [ -d \"$remote_candidate\" ] "
+            "&& [ ! -L \"$remote_candidate\" ] && [ -O \"$remote_candidate\" ] "
+            "&& [ -w \"$remote_candidate\" ]; then "
+            "remote_mode=$(/usr/bin/stat -c '%a' \"$remote_candidate\" 2>/dev/null || :); "
+            "if [[ \"$remote_mode\" =~ ^[0-7]+$ ]] "
+            "&& (( (8#$remote_mode & 0022) == 0 )); then remote_root_status=ready; fi; fi; "
+            "printf 'remote_root=%s\\n' \"$remote_root_status\""
+        ),
     ]
     return "; ".join(statements)
 
 
-def _parse_online_payload(stdout: str, target: Dict[str, Any]) -> Dict[str, Any]:
+def _version_tuple(value: str) -> tuple:
+    return tuple(int(part) for part in value.split("."))
+
+
+def _parse_online_payload(
+    stdout: str, target: Dict[str, Any], minimum_glibc: str
+) -> Dict[str, Any]:
     values = {}  # type: Dict[str, str]
     for line in stdout.splitlines():
         key, separator, value = line.partition("=")
@@ -603,9 +667,19 @@ def _parse_online_payload(stdout: str, target: Dict[str, Any]) -> Dict[str, Any]
         blockers.append("builder machine must be x86_64")
     if values.get("dpkg_arch") != "amd64":
         blockers.append("dpkg architecture must be amd64")
-    for key in ("apt", "dpkg", "glibc"):
+    for key in ("apt", "dpkg"):
         if not values.get(key):
             blockers.append("remote capability {} is missing".format(key))
+    glibc_matches = re.findall(r"(?<![0-9])([0-9]+\.[0-9]+(?:\.[0-9]+)*)(?![0-9])", values.get("glibc", ""))
+    glibc_version = glibc_matches[-1] if glibc_matches else ""
+    if not glibc_version:
+        blockers.append("remote capability glibc is missing")
+    elif _version_tuple(glibc_version) < _version_tuple(minimum_glibc):
+        blockers.append(
+            "remote glibc {} is below policy minimum {}".format(
+                glibc_version, minimum_glibc
+            )
+        )
     for key in ("sudo", "proc", "memfd", "remote_root"):
         if values.get(key) != "ready":
             blockers.append("remote capability {} is not ready".format(key))
@@ -628,6 +702,8 @@ def _parse_online_payload(stdout: str, target: Dict[str, Any]) -> Dict[str, Any]
         "architecture": values.get("dpkg_arch", ""),
         "machine": values.get("machine", ""),
         "glibc": values.get("glibc", ""),
+        "glibc_version": glibc_version,
+        "minimum_glibc": minimum_glibc,
         "free_kib": free_kib,
         "free_inodes": free_inodes,
         "blockers": blockers,
@@ -649,6 +725,7 @@ class RealSshTransport:
         self.target = dict(target)
         self.ssh_config = Path(ssh_config).expanduser().resolve() if ssh_config else None
         self.command_runner = command_runner
+        self.minimum_glibc = _canonical_policy_minimum_glibc(self.repo)
 
     def _execute(self, argv: Sequence[str], category: str, timeout: int) -> None:
         result = self.command_runner(
@@ -683,7 +760,7 @@ class RealSshTransport:
                 "host_alias": self.target["host_alias"],
                 "blockers": [detail],
             }
-        return _parse_online_payload(result.stdout, self.target)
+        return _parse_online_payload(result.stdout, self.target, self.minimum_glibc)
 
     def create_remote_run(self, plan: Dict[str, Any]) -> None:
         self._execute(_plan_command(plan, "create-remote-run"), "SSH_FAILED", 30)
@@ -1121,11 +1198,13 @@ def run_candidate_build(
     except PipelineError as exc:
         current = store.load(run_id)
         remote_succeeded = bool(current.get("remote_build_succeeded")) or remote_succeeded
+        failure_stage = "FETCH_PENDING" if remote_succeeded else "FAILED"
         store.update(
             run_id,
             {
-                "stage": "FETCH_PENDING" if remote_succeeded else "FAILED",
+                "stage": failure_stage,
                 "status_label": "候选 DEB 取回待恢复" if remote_succeeded else "候选 DEB 未构建",
+                "finished_at": None if remote_succeeded else utc_now(),
                 "fetch_allowed": remote_succeeded,
                 "failure": _failure_payload(exc),
             },
@@ -1488,6 +1567,26 @@ def _canonical_policy_sha256(repo: Path) -> str:
     return digest
 
 
+def _canonical_policy_minimum_glibc(repo: Path) -> str:
+    _canonical_policy_sha256(repo)
+    policy = _load_json_object(
+        Path(repo) / "packaging/linux/compatibility-policy.json",
+        "canonical compatibility policy",
+    )
+    minimum_supported = policy.get("minimum_supported")
+    minimum = (
+        minimum_supported.get("glibc")
+        if isinstance(minimum_supported, dict)
+        else None
+    )
+    if not isinstance(minimum, str) or re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)*", minimum) is None:
+        raise PipelineError(
+            "canonical policy glibc minimum is invalid",
+            category="COMPATIBILITY_POLICY_INVALID",
+        )
+    return minimum
+
+
 def _safe_regular_file(path: Path, label: str) -> os.stat_result:
     try:
         metadata = path.lstat()
@@ -1521,6 +1620,37 @@ def _parse_marker(path: Path) -> Dict[str, str]:
             raise PipelineError("build marker is malformed", category="LOCAL_REVIEW_INVALID")
         result[key] = value
     return result
+
+
+def _verify_repo_source_identity(repo: Path, source_commit: str) -> None:
+    try:
+        repo_root = Path(repo).expanduser().resolve(strict=True)
+        top_level = _git(repo_root, "rev-parse", "--show-toplevel")
+        branch = _git(repo_root, "branch", "--show-current")
+        head = _git(repo_root, "rev-parse", "--verify", "HEAD")
+        status_result = _git(
+            repo_root, "status", "--porcelain", "--untracked-files=all"
+        )
+    except (OSError, RuntimeError, PipelineError) as exc:
+        raise PipelineError(
+            "source repository cannot be rechecked: {}".format(exc),
+            category="SOURCE_DRIFT",
+        ) from exc
+    checks = (
+        top_level.returncode == 0
+        and Path(top_level.stdout.strip()).resolve() == repo_root
+        and branch.returncode == 0
+        and branch.stdout.strip() == "main"
+        and head.returncode == 0
+        and head.stdout.strip() == source_commit
+        and status_result.returncode == 0
+        and not status_result.stdout
+    )
+    if not checks:
+        raise PipelineError(
+            "source repository is no longer clean main at the planned commit",
+            category="SOURCE_DRIFT",
+        )
 
 
 def validate_candidate_review(
@@ -1557,6 +1687,7 @@ def validate_candidate_review(
         raise PipelineError("plan source commit is invalid", category="PLAN_INVALID")
     if re.fullmatch(r"[0-9a-f]{64}", expected_policy_sha) is None:
         raise PipelineError("plan policy SHA256 is invalid", category="PLAN_INVALID")
+    _verify_repo_source_identity(repo, source_commit)
 
     delivery = review / "taijiagent 打包交付"
     output = delivery / "生成的安装包"
@@ -1838,6 +1969,7 @@ def build_candidate_plan(
         "source_commit": source_commit,
         "canonical_policy_sha256": _canonical_policy_sha256(repo_root),
         "target_id": target["target_id"],
+        "target_adapter": dict(target),
         "host_alias": target["host_alias"],
         "remote_run_dir": remote_dir,
         "local_run_dir": str(local_run_dir),
@@ -1930,6 +2062,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
+        if args.command == "status":
+            payload = RunStateStore(args.state_root).load(args.run_id)
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return 0
         target = load_target(args.target)
         if args.command == "doctor":
             local = local_doctor(
@@ -2018,17 +2154,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             print(json.dumps(state, ensure_ascii=False, sort_keys=True))
             return 0
-        if args.command == "status":
-            payload = RunStateStore(args.state_root).load(args.run_id)
-            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-            return 0
         if args.command == "fetch":
             store = RunStateStore(args.state_root)
             current = store.load(args.run_id)
             plan = current.get("plan")
             if not isinstance(plan, dict):
                 raise PipelineError("run state lacks its candidate plan", category="PLAN_INVALID")
-            if plan.get("target_id") != target["target_id"]:
+            if plan.get("target_adapter") != target:
                 raise PipelineError("target adapter differs from run state", category="PLAN_INVALID")
             transport = RealSshTransport(
                 Path(plan["repo_root"]), target, ssh_config=args.ssh_config
