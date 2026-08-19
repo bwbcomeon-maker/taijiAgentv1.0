@@ -628,6 +628,7 @@ async function startRuntime() {
       throw new Error(`Windows runtime files missing:\n${missing.join("\n")}`);
     }
   }
+  let webuiPort;
 
   try {
     loadStatus("正在启动太极 Agent", [
@@ -638,7 +639,7 @@ async function startRuntime() {
 
   await stopExistingRuntime(labDir, logDir);
   const agentPort = await findFreePort(DEFAULT_AGENT_PORT);
-  const webuiPort = await findFreePort(DEFAULT_WEBUI_PORT);
+  webuiPort = await findFreePort(DEFAULT_WEBUI_PORT);
   runtimeEnv = createRuntimeEnv(labDir, agentPort, webuiPort, logDir);
   stopped = false;
 
