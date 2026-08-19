@@ -229,7 +229,7 @@ class RunStateStore:
     """No-scan, no-overwrite run-state storage under one explicit root."""
 
     def __init__(self, root: Path) -> None:
-        self.root = Path(root).expanduser().resolve()
+        self.root = Path(os.path.abspath(os.path.expanduser(str(root))))
         self.runs_root = self.root / "runs"
 
     def run_dir(self, run_id: str) -> Path:
@@ -922,8 +922,35 @@ def _publish_fetched_outputs(
 ) -> Dict[str, str]:
     _assert_final_outputs_absent(store, run_id)
     run_dir = store.run_dir(run_id).resolve()
-    review_source = Path(fetched["review_path"]).resolve()
-    log_source = Path(fetched["remote_log_path"]).resolve()
+    review_requested = Path(
+        os.path.abspath(os.path.expanduser(str(fetched["review_path"])))
+    )
+    log_requested = Path(
+        os.path.abspath(os.path.expanduser(str(fetched["remote_log_path"])))
+    )
+    try:
+        review_metadata = review_requested.lstat()
+        log_metadata = log_requested.lstat()
+    except OSError as exc:
+        raise PipelineError(
+            "fetched outputs are missing: {}".format(exc),
+            category="LOCAL_PUBLISH_FAILED",
+        ) from exc
+    if (
+        stat.S_ISLNK(review_metadata.st_mode)
+        or not stat.S_ISDIR(review_metadata.st_mode)
+        or review_metadata.st_uid != os.getuid()
+        or stat.S_ISLNK(log_metadata.st_mode)
+        or not stat.S_ISREG(log_metadata.st_mode)
+        or log_metadata.st_uid != os.getuid()
+        or log_metadata.st_nlink != 1
+    ):
+        raise PipelineError(
+            "fetched review root or remote log is unsafe",
+            category="LOCAL_PUBLISH_FAILED",
+        )
+    review_source = review_requested.resolve()
+    log_source = log_requested.resolve()
     staging = review_source.parent
     if (
         log_source.parent != staging
@@ -934,10 +961,6 @@ def _publish_fetched_outputs(
             "fetched outputs are outside the private run staging directory",
             category="LOCAL_PUBLISH_FAILED",
         )
-    review_metadata = review_source.lstat()
-    _safe_regular_file(log_source, "fetched remote build log")
-    if stat.S_ISLNK(review_metadata.st_mode) or not stat.S_ISDIR(review_metadata.st_mode):
-        raise PipelineError("fetched review root is unsafe", category="LOCAL_PUBLISH_FAILED")
     final = _final_output_paths(store, run_id)
     try:
         os.rename(str(log_source), str(final["remote_log"]))
@@ -1507,9 +1530,11 @@ def validate_candidate_review(
     *,
     command_runner: Any = _run_command,
 ) -> Dict[str, Any]:
-    review = Path(review_path).expanduser().resolve()
+    review_requested = Path(
+        os.path.abspath(os.path.expanduser(str(review_path)))
+    )
     try:
-        review_metadata = review.lstat()
+        review_metadata = review_requested.lstat()
     except OSError as exc:
         raise PipelineError("retrieved review is missing", category="LOCAL_REVIEW_INVALID") from exc
     if (
@@ -1518,8 +1543,12 @@ def validate_candidate_review(
         or review_metadata.st_uid != os.getuid()
     ):
         raise PipelineError("retrieved review root is unsafe", category="LOCAL_REVIEW_INVALID")
-    remote_log = Path(remote_log_path).expanduser().resolve()
-    _safe_regular_file(remote_log, "remote build log")
+    review = review_requested.resolve()
+    remote_log_requested = Path(
+        os.path.abspath(os.path.expanduser(str(remote_log_path)))
+    )
+    _safe_regular_file(remote_log_requested, "remote build log")
+    remote_log = remote_log_requested.resolve()
 
     repo = Path(str(plan.get("repo_root", ""))).expanduser().resolve()
     source_commit = str(plan.get("source_commit", ""))
@@ -1718,7 +1747,7 @@ def build_candidate_plan(
     remote_dir = "{}/{}/{}".format(
         target["remote_root"].rstrip("/"), source_commit, actual_run_id
     )
-    state_root_path = Path(state_root).expanduser().resolve()
+    state_root_path = RunStateStore(state_root).root
     local_run_dir = state_root_path / "runs" / actual_run_id
     remote_parent = "{}/{}".format(target["remote_root"].rstrip("/"), source_commit)
     ssh_prefix = _ssh_prefix(target, ssh_config)

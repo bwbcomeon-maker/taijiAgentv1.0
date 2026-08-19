@@ -331,6 +331,21 @@ class CandidatePipelineContractTests(unittest.TestCase):
             with self.assertRaises(module.PipelineError):
                 store.load("../escape")
 
+    def test_run_state_store_rejects_a_symlinked_root(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-package-state-link-") as temporary:
+            root = Path(temporary)
+            actual_root = root / "actual-state"
+            actual_root.mkdir(mode=0o700)
+            linked_root = root / "linked-state"
+            linked_root.symlink_to(actual_root, target_is_directory=True)
+            store = module.RunStateStore(linked_root)
+
+            with self.assertRaises(module.PipelineError):
+                store.create("run-link", {"stage": "CREATED"})
+
+            self.assertEqual(list(actual_root.iterdir()), [])
+
     def test_local_doctor_accepts_only_clean_main_with_declared_interface(self):
         module = load_candidate()
         with tempfile.TemporaryDirectory(prefix="taiji-doctor-") as temporary:
@@ -453,7 +468,8 @@ class CandidatePipelineContractTests(unittest.TestCase):
             self.assertEqual(plan["host_alias"], "kylin")
             self.assertTrue(plan["remote_run_dir"].endswith("/run-plan-test"))
             self.assertEqual(
-                plan["local_run_dir"], str(state_root.resolve() / "runs/run-plan-test")
+                plan["local_run_dir"],
+                str(module.RunStateStore(state_root).root / "runs/run-plan-test"),
             )
             rendered = json.dumps(plan, ensure_ascii=False)
             self.assertIn("99_本机_准备制包输入包.sh", rendered)

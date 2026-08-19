@@ -508,6 +508,37 @@ class CandidateTransportContractTests(unittest.TestCase):
             self.assertEqual(occupied.exception.category, "LOCAL_OUTPUT_OCCUPIED")
             self.assertEqual(occupied_transport.calls, [])
 
+    def test_local_review_verification_rejects_symlinked_roots_and_logs(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-review-links-") as temporary:
+            root = Path(temporary)
+            repo, _target, _ssh_config, plan = make_plan(module, root)
+            review = make_candidate_review(repo, plan, root / "review")
+            review_link = root / "review-link"
+            review_link.symlink_to(review, target_is_directory=True)
+            remote_log = root / "remote-build.log"
+            remote_log.write_text("remote build log\n", encoding="utf-8")
+            remote_log_link = root / "remote-build-link.log"
+            remote_log_link.symlink_to(remote_log)
+
+            with self.assertRaises(module.PipelineError) as linked_review:
+                module.validate_candidate_review(
+                    plan,
+                    review_link,
+                    remote_log,
+                    command_runner=SuccessfulPreflightRunner(),
+                )
+            self.assertEqual(linked_review.exception.category, "LOCAL_REVIEW_INVALID")
+
+            with self.assertRaises(module.PipelineError) as linked_log:
+                module.validate_candidate_review(
+                    plan,
+                    review,
+                    remote_log_link,
+                    command_runner=SuccessfulPreflightRunner(),
+                )
+            self.assertEqual(linked_log.exception.category, "LOCAL_REVIEW_INVALID")
+
     def test_build_cli_displays_plan_confirms_once_and_persists_result(self):
         module = load_candidate()
         with tempfile.TemporaryDirectory(prefix="taiji-build-cli-") as temporary:
