@@ -10,6 +10,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -323,12 +324,405 @@ class RunStateStore:
                 pass
 
 
+def _ssh_environment() -> Dict[str, str]:
+    environment = _command_environment(include_home=True)
+    socket_path = os.environ.get("SSH_AUTH_SOCK")
+    if socket_path:
+        try:
+            metadata = os.lstat(socket_path)
+        except OSError:
+            metadata = None
+        if (
+            metadata is not None
+            and stat.S_ISSOCK(metadata.st_mode)
+            and metadata.st_uid == os.getuid()
+            and not (stat.S_IMODE(metadata.st_mode) & 0o022)
+        ):
+            environment["SSH_AUTH_SOCK"] = socket_path
+    return environment
+
+
+def _ssh_prefix(target: Dict[str, Any], ssh_config: Optional[Path]) -> list:
+    argv = [
+        "/usr/bin/ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+    ]
+    if ssh_config is not None:
+        argv.extend(["-F", str(Path(ssh_config).expanduser().resolve())])
+    argv.append(target["host_alias"])
+    return argv
+
+
+def _scp_prefix(ssh_config: Optional[Path]) -> list:
+    argv = [
+        "/usr/bin/scp",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+    ]
+    if ssh_config is not None:
+        argv.extend(["-F", str(Path(ssh_config).expanduser().resolve())])
+    return argv
+
+
+def _plan_command(plan: Dict[str, Any], stage: str) -> list:
+    matches = [command for command in plan.get("commands", []) if command.get("stage") == stage]
+    if len(matches) != 1 or not isinstance(matches[0].get("argv"), list):
+        raise PipelineError(
+            "candidate plan must contain exactly one {} command".format(stage),
+            category="PLAN_INVALID",
+        )
+    return list(matches[0]["argv"])
+
+
+def _online_doctor_script(target: Dict[str, Any]) -> str:
+    minimum_kib = target["minimum_free_gib"] * 1024 * 1024
+    remote_root = target["remote_root"]
+    account_home = target["remote_account_home"]
+    python_probe = (
+        "import fcntl,os; "
+        "fd=os.memfd_create('taiji-doctor', os.MFD_ALLOW_SEALING); "
+        "os.write(fd,b'x'); "
+        "fcntl.fcntl(fd,fcntl.F_ADD_SEALS,"
+        "fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL); "
+        "os.close(fd)"
+    )
+    statements = [
+        "set -Eeuo pipefail",
+        "printf 'schema=taiji-online-doctor-v1\\n'",
+        "printf 'kernel=%s\\n' \"$(/usr/bin/uname -s)\"",
+        "printf 'machine=%s\\n' \"$(/usr/bin/uname -m)\"",
+        "printf 'dpkg_arch=%s\\n' \"$(/usr/bin/dpkg --print-architecture)\"",
+        "printf 'apt=%s\\n' \"$(command -v apt-get)\"",
+        "printf 'dpkg=%s\\n' \"$(command -v dpkg)\"",
+        "printf 'glibc=%s\\n' \"$(/usr/bin/ldd --version 2>&1 | /usr/bin/sed -n '1p')\"",
+        "/usr/bin/sudo -n /usr/bin/true",
+        "printf 'sudo=ready\\n'",
+        "free_kib=$(/bin/df -Pk {} | /usr/bin/awk 'NR==2 {{print $4}}')".format(
+            shlex.quote(account_home)
+        ),
+        "free_inodes=$(/bin/df -Pi {} | /usr/bin/awk 'NR==2 {{print $4}}')".format(
+            shlex.quote(account_home)
+        ),
+        "[ \"$free_kib\" -ge {} ]".format(minimum_kib),
+        "[ \"$free_inodes\" -ge {} ]".format(target["minimum_free_inodes"]),
+        "printf 'free_kib=%s\\n' \"$free_kib\"",
+        "printf 'free_inodes=%s\\n' \"$free_inodes\"",
+        "[ -d /proc/self/fd ] && [ -r /proc/self/fd/0 ]",
+        "printf 'proc=ready\\n'",
+        "/usr/bin/python3 -I -B -c {}".format(shlex.quote(python_probe)),
+        "printf 'memfd=ready\\n'",
+        (
+            "if [ -e {root} ] || [ -L {root} ]; then "
+            "[ -d {root} ] && [ ! -L {root} ] && [ -O {root} ] && [ -w {root} ]; "
+            "else [ -d {home} ] && [ -O {home} ] && [ -w {home} ]; fi"
+        ).format(root=shlex.quote(remote_root), home=shlex.quote(account_home)),
+        "printf 'remote_root=ready\\n'",
+    ]
+    return "; ".join(statements)
+
+
+def _parse_online_payload(stdout: str, target: Dict[str, Any]) -> Dict[str, Any]:
+    values = {}  # type: Dict[str, str]
+    for line in stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key not in values:
+            values[key] = value
+    required = {
+        "schema",
+        "kernel",
+        "machine",
+        "dpkg_arch",
+        "apt",
+        "dpkg",
+        "glibc",
+        "sudo",
+        "free_kib",
+        "free_inodes",
+        "proc",
+        "memfd",
+        "remote_root",
+    }
+    blockers = []  # type: list
+    if set(values) != required or values.get("schema") != "taiji-online-doctor-v1":
+        blockers.append("remote doctor output schema is incomplete")
+    if values.get("kernel") != "Linux":
+        blockers.append("builder kernel must be Linux")
+    if values.get("machine") not in {"x86_64", "amd64"}:
+        blockers.append("builder machine must be x86_64")
+    if values.get("dpkg_arch") != "amd64":
+        blockers.append("dpkg architecture must be amd64")
+    for key in ("apt", "dpkg", "glibc"):
+        if not values.get(key):
+            blockers.append("remote capability {} is missing".format(key))
+    for key in ("sudo", "proc", "memfd", "remote_root"):
+        if values.get(key) != "ready":
+            blockers.append("remote capability {} is not ready".format(key))
+    try:
+        free_kib = int(values.get("free_kib", ""))
+        free_inodes = int(values.get("free_inodes", ""))
+    except ValueError:
+        free_kib = 0
+        free_inodes = 0
+        blockers.append("remote capacity values are invalid")
+    if free_kib < target["minimum_free_gib"] * 1024 * 1024:
+        blockers.append("remote free space is below {} GiB".format(target["minimum_free_gib"]))
+    if free_inodes < target["minimum_free_inodes"]:
+        blockers.append("remote free inode count is below {}".format(target["minimum_free_inodes"]))
+    return {
+        "schema": "taiji-package-online-doctor/v1",
+        "online_checked": True,
+        "builder_status": "BUILDER_READY" if not blockers else "BLOCKED",
+        "host_alias": target["host_alias"],
+        "architecture": values.get("dpkg_arch", ""),
+        "machine": values.get("machine", ""),
+        "glibc": values.get("glibc", ""),
+        "free_kib": free_kib,
+        "free_inodes": free_inodes,
+        "blockers": blockers,
+    }
+
+
 class RealSshTransport:
-    """Real SSH/SCP adapter. Behavior is added by the transport task."""
+    """Real SSH/SCP adapter using fixed argv and an optional explicit SSH config."""
+
+    def __init__(
+        self,
+        repo: Path,
+        target: Dict[str, Any],
+        *,
+        ssh_config: Optional[Path] = None,
+        command_runner: Any = _run_command,
+    ) -> None:
+        self.repo = Path(repo).expanduser().resolve()
+        self.target = dict(target)
+        self.ssh_config = Path(ssh_config).expanduser().resolve() if ssh_config else None
+        self.command_runner = command_runner
+
+    def _execute(self, argv: Sequence[str], category: str, timeout: int) -> None:
+        result = self.command_runner(
+            list(argv),
+            cwd=self.repo,
+            environment=_ssh_environment(),
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "command returned non-zero"
+            raise PipelineError("{}: {}".format(category, detail), category=category)
+
+    def online_doctor(self) -> Dict[str, Any]:
+        argv = _ssh_prefix(self.target, self.ssh_config)
+        argv.append(
+            _remote_clean_shell(
+                self.target["remote_account_home"], _online_doctor_script(self.target)
+            )
+        )
+        result = self.command_runner(
+            argv,
+            cwd=self.repo,
+            environment=_ssh_environment(),
+            timeout=20,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or "SSH connection or remote capability probe failed"
+            return {
+                "schema": "taiji-package-online-doctor/v1",
+                "online_checked": True,
+                "builder_status": "BUILDER_UNREACHABLE",
+                "host_alias": self.target["host_alias"],
+                "blockers": [detail],
+            }
+        return _parse_online_payload(result.stdout, self.target)
+
+    def create_remote_run(self, plan: Dict[str, Any]) -> None:
+        self._execute(_plan_command(plan, "create-remote-run"), "SSH_FAILED", 30)
+
+    def transfer_input(self, plan: Dict[str, Any]) -> None:
+        self._execute(_plan_command(plan, "transfer-input"), "SCP_INTERRUPTED", 3600)
+
+    def verify_remote_input(self, plan: Dict[str, Any]) -> None:
+        self._execute(_plan_command(plan, "remote-input-verify"), "REMOTE_VERIFY_FAILED", 300)
+
+    def build_remote_candidate(self, plan: Dict[str, Any]) -> None:
+        self._execute(
+            _plan_command(plan, "remote-candidate-build"), "REMOTE_BUILD_FAILED", 14400
+        )
+
+    def fetch(self, plan: Dict[str, Any], staging_dir: Path) -> Dict[str, str]:
+        staging = _create_private_directory_exclusive(Path(staging_dir))
+        review = staging / "review"
+        remote_log = staging / "remote-build.log"
+        review_argv = _scp_prefix(self.ssh_config) + [
+            "-r",
+            "{}:{}/review/taiji-agentv1.0".format(
+                self.target["host_alias"], plan["remote_run_dir"]
+            ),
+            str(review),
+        ]
+        log_argv = _scp_prefix(self.ssh_config) + [
+            "{}:{}/remote-build.log".format(
+                self.target["host_alias"], plan["remote_run_dir"]
+            ),
+            str(remote_log),
+        ]
+        self._execute(review_argv, "SCP_INTERRUPTED", 3600)
+        self._execute(log_argv, "SCP_INTERRUPTED", 600)
+        return {"review_path": str(review), "remote_log_path": str(remote_log)}
 
 
 class FakeSshTransport:
-    """Deterministic transport adapter for local pipeline tests."""
+    """Deterministic in-process transport used only by local pipeline tests."""
+
+    FAILURE_CATEGORIES = {
+        "create-remote-run": "SSH_FAILED",
+        "transfer-input": "SCP_INTERRUPTED",
+        "remote-input-verify": "REMOTE_VERIFY_FAILED",
+        "build-00": "BUILD_00_FAILED",
+        "build-01": "BUILD_01_FAILED",
+        "fetch-review": "SCP_INTERRUPTED",
+        "fetch-log": "SCP_INTERRUPTED",
+    }
+
+    def __init__(
+        self,
+        *,
+        builder_status: str = "BUILDER_READY",
+        fail_stage: Optional[str] = None,
+        review_source: Optional[Path] = None,
+    ) -> None:
+        self.builder_status = builder_status
+        self.fail_stage = fail_stage
+        self.review_source = Path(review_source) if review_source else None
+        self.calls = []  # type: list
+
+    def _record(self, stage: str) -> None:
+        self.calls.append(stage)
+        if self.fail_stage == stage:
+            raise PipelineError(
+                "fake transport failed at {}".format(stage),
+                category=self.FAILURE_CATEGORIES[stage],
+            )
+
+    def online_doctor(self) -> Dict[str, Any]:
+        self.calls.append("online-doctor")
+        return {
+            "schema": "taiji-package-online-doctor/v1",
+            "online_checked": True,
+            "builder_status": self.builder_status,
+            "host_alias": "kylin",
+            "architecture": "amd64" if self.builder_status == "BUILDER_READY" else "",
+            "free_kib": 20 * 1024 * 1024,
+            "free_inodes": 200000,
+            "blockers": [] if self.builder_status == "BUILDER_READY" else ["unreachable"],
+        }
+
+    def create_remote_run(self, plan: Dict[str, Any]) -> None:
+        del plan
+        self._record("create-remote-run")
+
+    def transfer_input(self, plan: Dict[str, Any]) -> None:
+        del plan
+        self._record("transfer-input")
+
+    def verify_remote_input(self, plan: Dict[str, Any]) -> None:
+        del plan
+        self._record("remote-input-verify")
+
+    def build_remote_candidate(self, plan: Dict[str, Any]) -> None:
+        del plan
+        self.calls.append("remote-candidate-build")
+        if self.fail_stage in {"build-00", "build-01"}:
+            stage = str(self.fail_stage)
+            raise PipelineError(
+                "fake transport failed at {}".format(stage),
+                category=self.FAILURE_CATEGORIES[stage],
+            )
+
+    def fetch(self, plan: Dict[str, Any], staging_dir: Path) -> Dict[str, str]:
+        del plan
+        self._record("fetch-review")
+        staging = _create_private_directory_exclusive(Path(staging_dir))
+        review = staging / "review"
+        if self.review_source is None:
+            review.mkdir(mode=0o700)
+        else:
+            shutil.copytree(str(self.review_source), str(review), symlinks=True)
+        self._record("fetch-log")
+        remote_log = staging / "remote-build.log"
+        remote_log.write_text("fake remote candidate build completed\n", encoding="utf-8")
+        remote_log.chmod(0o600)
+        return {"review_path": str(review), "remote_log_path": str(remote_log)}
+
+
+def _create_private_directory_exclusive(path: Path) -> Path:
+    candidate = Path(path).expanduser()
+    try:
+        candidate.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise PipelineError(
+            "local fetch staging already exists: {}".format(candidate),
+            category="LOCAL_OUTPUT_OCCUPIED",
+        ) from exc
+    except OSError as exc:
+        raise PipelineError(
+            "cannot create local fetch staging {}: {}".format(candidate, exc),
+            category="LOCAL_OUTPUT_UNWRITABLE",
+        ) from exc
+    metadata = candidate.lstat()
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise PipelineError(
+            "local fetch staging is not current-user private",
+            category="LOCAL_OUTPUT_UNWRITABLE",
+        )
+    return candidate.resolve()
+
+
+def execute_candidate_transport(
+    plan: Dict[str, Any],
+    transport: Any,
+    staging_dir: Path,
+    *,
+    confirmed: bool,
+    prepare_input: Optional[Any] = None,
+) -> Dict[str, Any]:
+    online = transport.online_doctor()
+    if online.get("builder_status") != "BUILDER_READY":
+        status = str(online.get("builder_status", "BLOCKED"))
+        category = "BUILDER_UNREACHABLE" if status == "BUILDER_UNREACHABLE" else "ONLINE_DOCTOR_BLOCKED"
+        raise PipelineError(
+            "online doctor did not report BUILDER_READY: {}".format(status),
+            category=category,
+        )
+    if not confirmed:
+        raise PipelineError(
+            "candidate build requires one explicit confirmation after the displayed plan",
+            category="CONFIRMATION_REQUIRED",
+        )
+    input_status = plan.get("input", {}).get("status")
+    if input_status == "MISSING":
+        if prepare_input is None:
+            raise PipelineError(
+                "builder input preparation callback is required",
+                category="INPUT_PREPARATION_REQUIRED",
+            )
+        prepare_input()
+    elif input_status != "REUSABLE":
+        raise PipelineError("candidate plan input is not reusable", category="PLAN_INVALID")
+    transport.create_remote_run(plan)
+    transport.transfer_input(plan)
+    transport.verify_remote_input(plan)
+    transport.build_remote_candidate(plan)
+    fetched = transport.fetch(plan, staging_dir)
+    return {
+        "online_doctor": online,
+        "remote_build_succeeded": True,
+        "review_path": fetched["review_path"],
+        "remote_log_path": fetched["remote_log_path"],
+    }
 
 
 def local_doctor(
@@ -588,19 +982,32 @@ def inspect_builder_input(repo: Path, source_commit: str) -> Dict[str, Any]:
     }
 
 
-def _planned_remote_script(remote_dir: str, source_commit: str, checksum_name: str) -> str:
+def _planned_remote_verify_script(remote_dir: str, checksum_name: str) -> str:
+    return "; ".join(
+        [
+            "set -Eeuo pipefail",
+            "umask 077",
+            "cd {}".format(shlex.quote(remote_dir)),
+            "/usr/bin/sha256sum -c {}".format(shlex.quote(checksum_name)),
+        ]
+    )
+
+
+def _planned_remote_script(remote_dir: str, source_commit: str) -> str:
     source_archive = "taiji-agentv1.0-kylin-build-src-{}.tar.gz".format(source_commit)
     delivery = "taijiagent 打包交付"
     statements = [
         "set -Eeuo pipefail",
         "umask 077",
         "cd {}".format(shlex.quote(remote_dir)),
-        "/usr/bin/sha256sum -c {}".format(shlex.quote(checksum_name)),
         "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {}".format(
             shlex.quote("taijiagent-制包机输入-{}.tar.gz".format(source_commit))
         ),
         "cd {}".format(shlex.quote(remote_dir + "/" + delivery)),
-        "TAIJI_UV_LOCK_MODE=strict /bin/bash -p ./00_制包机_生成离线交付包.sh",
+        (
+            "TAIJI_UV_LOCK_MODE=strict /bin/bash -p "
+            "./00_制包机_生成离线交付包.sh 2>&1 | /usr/bin/tee {}"
+        ).format(shlex.quote(remote_dir + "/remote-build.log")),
         "cd {}".format(shlex.quote(remote_dir)),
         "/usr/bin/install -d -m 0700 -- review",
         "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {} -C review".format(
@@ -644,14 +1051,8 @@ def build_candidate_plan(
     state_root_path = Path(state_root).expanduser().resolve()
     local_run_dir = state_root_path / "runs" / actual_run_id
     remote_parent = "{}/{}".format(target["remote_root"].rstrip("/"), source_commit)
-    ssh_prefix = [
-        "/usr/bin/ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=5",
-        target["host_alias"],
-    ]
+    ssh_prefix = _ssh_prefix(target, ssh_config)
+    scp_prefix = _scp_prefix(ssh_config)
     create_script = (
         "set -Eeuo pipefail; umask 077; /usr/bin/install -d -m 0700 -- {}; "
         "/bin/mkdir -m 0700 -- {}"
@@ -674,12 +1075,24 @@ def build_candidate_plan(
             },
             {
                 "stage": "transfer-input",
-                "argv": [
-                    "/usr/bin/scp",
+                "argv": scp_prefix
+                + [
                     str(triplet["archive"]),
                     str(triplet["manifest"]),
                     str(triplet["checksum"]),
                     "{}:{}/".format(target["host_alias"], remote_dir),
+                ],
+            },
+            {
+                "stage": "remote-input-verify",
+                "argv": ssh_prefix
+                + [
+                    _remote_clean_shell(
+                        target["remote_account_home"],
+                        _planned_remote_verify_script(
+                            remote_dir, triplet["checksum"].name
+                        ),
+                    )
                 ],
             },
             {
@@ -688,16 +1101,14 @@ def build_candidate_plan(
                 + [
                     _remote_clean_shell(
                         target["remote_account_home"],
-                        _planned_remote_script(
-                            remote_dir, source_commit, triplet["checksum"].name
-                        ),
+                        _planned_remote_script(remote_dir, source_commit),
                     )
                 ],
             },
             {
                 "stage": "fetch-review",
-                "argv": [
-                    "/usr/bin/scp",
+                "argv": scp_prefix
+                + [
                     "-r",
                     "{}:{}/review/taiji-agentv1.0".format(target["host_alias"], remote_dir),
                     str(local_run_dir / "review"),
@@ -705,8 +1116,8 @@ def build_candidate_plan(
             },
             {
                 "stage": "fetch-log",
-                "argv": [
-                    "/usr/bin/scp",
+                "argv": scp_prefix
+                + [
                     "{}:{}/remote-build.log".format(target["host_alias"], remote_dir),
                     str(local_run_dir / "remote-build.log"),
                 ],
