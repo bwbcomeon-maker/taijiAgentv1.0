@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
 
 PROFILE_SCHEMA_VERSION = "taiji-runtime-profile/v1"
 INSTALLED_PRODUCTION_PROFILE = "installed-production"
+WINDOWS_CANDIDATE_PROFILE = "windows-candidate"
 _PROFILE_PATH = Path(__file__).with_name("taiji-runtime-profile.json")
 
 
@@ -46,6 +49,13 @@ def installation_profile() -> str:
     payload = _read_profile()
     if payload is not None and payload["profile"] == INSTALLED_PRODUCTION_PROFILE:
         return INSTALLED_PRODUCTION_PROFILE
+    if (
+        payload is not None
+        and payload["profile"] == "source-development"
+        and sys.platform == "win32"
+        and os.environ.get("TAIJI_WINDOWS_CANDIDATE") == "1"
+    ):
+        return WINDOWS_CANDIDATE_PROFILE
     if payload is not None and _is_trusted_source_checkout():
         return str(payload["profile"])
     return INSTALLED_PRODUCTION_PROFILE

@@ -15,6 +15,12 @@ const {
   requiresSourceGate,
   resolveLaunchProfile,
 } = require("./launch-profile");
+const {
+  buildWindowsRuntimeEnvironment,
+  requiredWindowsRuntimeFiles,
+  resolveWindowsRuntimeLayout,
+  windowsRuntimeCommands,
+} = require("./windows-runtime");
 
 const APP_NAME = "太极 Agent";
 const DEFAULT_AGENT_PORT = 18642;
@@ -35,6 +41,8 @@ try {
 
 let mainWindow = null;
 let runtimeEnv = null;
+let agentProcess = null;
+let webuiProcess = null;
 let stopped = false;
 const trustedIdentityWindows = new Set();
 
@@ -42,6 +50,11 @@ function configureDesktopUserDataDir() {
   const override = process.env.TAIJI_DESKTOP_USER_DATA_DIR;
   if (override) {
     app.setPath("userData", path.resolve(override));
+    return;
+  }
+  if (process.platform === "win32") {
+    const localAppData = path.resolve(String(process.env.LOCALAPPDATA || ""));
+    app.setPath("userData", path.join(localAppData, "Taiji Agent", "electron"));
     return;
   }
   if ((launchProfile && launchProfile.kind === INSTALLED_PROFILE) || app.isPackaged) return;
@@ -90,6 +103,7 @@ function desktopBootLog(message) {
 }
 
 function verifyFormalSourceBeforeWindow() {
+  if (process.platform === "win32" && app.isPackaged) return;
   if (launchProfileError) throw launchProfileError;
   if (!requiresSourceGate(launchProfile)) return;
 
@@ -130,6 +144,9 @@ if (launchProfile && launchProfile.kind === INSTALLED_PROFILE) {
 }
 
 function resolveLabDir() {
+  if (process.platform === "win32") {
+    return path.join(path.resolve(process.resourcesPath, ".."), "hermes-local-lab");
+  }
   if (launchProfile && launchProfile.kind === INSTALLED_PROFILE) {
     return launchProfile.installRoot;
   }
@@ -168,11 +185,17 @@ function systemAccountHome() {
 }
 
 function userStateDir() {
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA, "Taiji Agent", "state");
+  }
   const base = process.env.XDG_STATE_HOME || path.join(systemAccountHome(), ".local", "state");
   return path.join(base, "taiji-agent");
 }
 
 function userDataDir() {
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA, "Taiji Agent");
+  }
   const base = process.env.XDG_DATA_HOME || path.join(systemAccountHome(), ".local", "share");
   return path.join(base, "taiji-agent");
 }
@@ -376,6 +399,10 @@ function installDesktopIpcHandlers() {
 }
 
 async function stopExistingRuntime(labDir, logDir) {
+  if (process.platform === "win32") {
+    stopWindowsProcesses();
+    return;
+  }
   const stopScript = path.join(labDir, "scripts", "stop-all.sh");
   if (!fs.existsSync(stopScript)) return;
   const desktopLog = path.join(logDir, "taiji-desktop.log");
@@ -508,12 +535,45 @@ function createRuntimeEnv(labDir, agentPort, webuiPort, logDir) {
   } catch (error) {
     desktopBootLog(`failed to create tmp dir ${tmpDir}: ${error.message}`);
   }
+  if (process.platform === "win32") {
+    const layout = resolveWindowsRuntimeLayout({
+      installRoot: path.resolve(labDir, ".."),
+      localAppData: process.env.LOCALAPPDATA,
+    });
+    return buildWindowsRuntimeEnvironment({
+      baseEnv: env,
+      layout,
+      agentPort,
+      webuiPort,
+      desktopAccessToken,
+      apiServerKey: env.API_SERVER_KEY,
+    });
+  }
   return env;
+}
+
+function stopWindowsProcesses() {
+  const taskkill = path.join(process.env.SystemRoot, "System32", "taskkill.exe");
+  for (const child of [webuiProcess, agentProcess]) {
+    if (!child || child.exitCode !== null || !child.pid) continue;
+    spawnSync(taskkill, ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      timeout: 12000,
+      windowsHide: true,
+      shell: false,
+    });
+  }
+  webuiProcess = null;
+  agentProcess = null;
 }
 
 function stopRuntime() {
   if (stopped || !runtimeEnv) return;
   stopped = true;
+  if (process.platform === "win32") {
+    stopWindowsProcesses();
+    return;
+  }
   const stopScript = path.join(runtimeEnv.TAIJI_AGENT_ROOT, "scripts", "stop-all.sh");
   spawnSync(stopScript, {
     cwd: runtimeEnv.TAIJI_AGENT_ROOT,
@@ -542,8 +602,19 @@ async function startRuntime() {
   const desktopLog = path.join(logDir, "taiji-desktop.log");
   const iconPath = resolveIconPath(labDir);
 
-  if (!fs.existsSync(path.join(labDir, "scripts", "start-agent.sh"))) {
+  if (process.platform !== "win32" && !fs.existsSync(path.join(labDir, "scripts", "start-agent.sh"))) {
     throw new Error(`Runtime scripts not found under ${labDir}`);
+  }
+  let windowsLayout = null;
+  if (process.platform === "win32") {
+    windowsLayout = resolveWindowsRuntimeLayout({
+      installRoot: path.resolve(labDir, ".."),
+      localAppData: process.env.LOCALAPPDATA,
+    });
+    const missing = requiredWindowsRuntimeFiles(windowsLayout).filter((file) => !fs.existsSync(file));
+    if (missing.length) {
+      throw new Error(`Windows runtime files missing:\n${missing.join("\n")}`);
+    }
   }
 
   loadStatus("正在启动太极 Agent", [
@@ -556,13 +627,36 @@ async function startRuntime() {
   const agentPort = await findFreePort(DEFAULT_AGENT_PORT);
   const webuiPort = await findFreePort(DEFAULT_WEBUI_PORT);
   runtimeEnv = createRuntimeEnv(labDir, agentPort, webuiPort, logDir);
+  stopped = false;
 
   loadStatus("正在启动太极 Agent", [
     "正在启动对话能力",
     "正在准备工作台界面",
     "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
-  await runScript("start-agent.sh", runtimeEnv, desktopLog);
+  if (process.platform === "win32") {
+    const commands = windowsRuntimeCommands(windowsLayout);
+    const startWindowsProcess = (command, label) => {
+      appendDesktopLog(desktopLog, `starting ${label}`);
+      const child = spawn(command.file, command.args, {
+        cwd: command.cwd,
+        env: runtimeEnv,
+        windowsHide: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stdout.on("data", (chunk) => appendDesktopLog(desktopLog, `[${label}] ${chunk.toString().trimEnd()}`));
+      child.stderr.on("data", (chunk) => appendDesktopLog(desktopLog, `[${label} error] ${chunk.toString().trimEnd()}`));
+      child.on("error", (error) => appendDesktopLog(desktopLog, `[${label} spawn error] ${error.message}`));
+      child.on("exit", (code, signal) => {
+        if (!stopped) appendDesktopLog(desktopLog, `[${label} unexpected exit] code=${code} signal=${signal}`);
+      });
+      return child;
+    };
+    agentProcess = startWindowsProcess(commands.agent, "agent");
+  } else {
+    await runScript("start-agent.sh", runtimeEnv, desktopLog);
+  }
   await waitForHttp(`http://127.0.0.1:${agentPort}/health`, 30000);
 
   loadStatus("正在启动太极 Agent", [
@@ -570,7 +664,28 @@ async function startRuntime() {
     "正在打开工作台界面",
     "如遇异常可运行 taiji-agent-diagnose 导出诊断"
   ]);
-  await runScript("start-webui.sh", runtimeEnv, desktopLog);
+  if (process.platform === "win32") {
+    const commands = windowsRuntimeCommands(windowsLayout);
+    webuiProcess = (() => {
+      appendDesktopLog(desktopLog, "starting webui");
+      const child = spawn(commands.webui.file, commands.webui.args, {
+        cwd: commands.webui.cwd,
+        env: runtimeEnv,
+        windowsHide: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stdout.on("data", (chunk) => appendDesktopLog(desktopLog, `[webui] ${chunk.toString().trimEnd()}`));
+      child.stderr.on("data", (chunk) => appendDesktopLog(desktopLog, `[webui error] ${chunk.toString().trimEnd()}`));
+      child.on("error", (error) => appendDesktopLog(desktopLog, `[webui spawn error] ${error.message}`));
+      child.on("exit", (code, signal) => {
+        if (!stopped) appendDesktopLog(desktopLog, `[webui unexpected exit] code=${code} signal=${signal}`);
+      });
+      return child;
+    })();
+  } else {
+    await runScript("start-webui.sh", runtimeEnv, desktopLog);
+  }
   await waitForHttp(`http://127.0.0.1:${webuiPort}/health`, 30000);
 
   const target = new URL(`http://127.0.0.1:${webuiPort}`);
