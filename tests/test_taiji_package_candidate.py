@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 import json
 import os
+import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +20,18 @@ ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = ROOT / "taiji-package"
 CANDIDATE = ROOT / "scripts/taiji-package-candidate.py"
 TARGET = ROOT / "packaging/pipeline/targets/kylin-amd64.json"
+BUILDER_INPUT_HELPER = ROOT / "packaging/linux/builder-input-package.py"
+SOURCE_INTEGRITY_HELPER = ROOT / "packaging/linux/source-archive-integrity.py"
+FROZEN_DELIVERY_MEMBERS = {
+    "00_制包机_生成离线交付包.sh",
+    "01_制包机_发布预检.sh",
+    "02_目标终端_安装并验证.sh",
+    "03_目标终端_导出诊断报告.sh",
+    "04_目标终端_桌面App验收并导出证据.sh",
+    "99_本机_准备制包输入包.sh",
+    "操作说明.md",
+    "版本信息.txt",
+}
 
 
 def git_environment():
@@ -77,13 +93,14 @@ def make_doctor_repo(parent: Path) -> Path:
         "taijiagent 打包交付/99_本机_准备制包输入包.sh",
         "taijiagent 打包交付/00_制包机_生成离线交付包.sh",
         "taijiagent 打包交付/01_制包机_发布预检.sh",
-        "packaging/linux/builder-input-package.py",
         "packaging/linux/compatibility-policy.json",
         "scripts/taiji-linux-golden-orchestrator.py",
     ):
         path = repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture:{}\n".format(relative), encoding="utf-8")
+    shutil.copy2(BUILDER_INPUT_HELPER, repo / "packaging/linux/builder-input-package.py")
+    (repo / ".gitignore").write_text("/taijiagent-制包机输入-*\n", encoding="utf-8")
     git(repo, "init", "-b", "main")
     git(repo, "add", ".")
     git(repo, "commit", "-m", "doctor fixture")
@@ -105,6 +122,107 @@ def implemented_result(callback):
         return callback()
     except Exception as exc:  # The RED assertion reports the missing behavior as a failure.
         raise AssertionError("candidate behavior is not implemented: {}".format(exc)) from exc
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load {}".format(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def make_verified_triplet(repo: Path, source_commit: str, fixture_root: Path):
+    delivery = fixture_root / "taijiagent 打包交付"
+    delivery.mkdir(parents=True, mode=0o700)
+    for name in FROZEN_DELIVERY_MEMBERS:
+        path = delivery / name
+        path.write_text("fixture:{}\n".format(name), encoding="utf-8")
+        path.chmod(0o755 if name.endswith(".sh") else 0o644)
+    source_helper = delivery / "source-archive-integrity.py"
+    builder_helper = delivery / "builder-input-package.py"
+    shutil.copy2(SOURCE_INTEGRITY_HELPER, source_helper)
+    shutil.copy2(BUILDER_INPUT_HELPER, builder_helper)
+
+    source_archive = delivery / (
+        "taiji-agentv1.0-kylin-build-src-{}.tar.gz".format(source_commit)
+    )
+    with tarfile.open(source_archive, "w:gz") as archive:
+        frozen = []
+        for name in sorted(FROZEN_DELIVERY_MEMBERS):
+            path = delivery / name
+            frozen.append(
+                (
+                    "taiji-agentv1.0/taijiagent 打包交付/{}".format(name),
+                    path.read_bytes(),
+                    stat.S_IMODE(path.stat().st_mode),
+                )
+            )
+        frozen.extend(
+            [
+                (
+                    "taiji-agentv1.0/packaging/linux/source-archive-integrity.py",
+                    source_helper.read_bytes(),
+                    0o644,
+                ),
+                (
+                    "taiji-agentv1.0/packaging/linux/builder-input-package.py",
+                    builder_helper.read_bytes(),
+                    stat.S_IMODE(builder_helper.stat().st_mode),
+                ),
+            ]
+        )
+        for member_name, payload, mode in frozen:
+            info = tarfile.TarInfo(member_name)
+            info.size = len(payload)
+            info.mode = mode
+            info.uid = os.getuid()
+            info.gid = os.getgid()
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(payload))
+
+    integrity = load_module(SOURCE_INTEGRITY_HELPER, "taiji_candidate_source_integrity")
+    inventory = delivery / (
+        "taiji-agentv1.0-kylin-build-src-{}.inventory.json".format(source_commit)
+    )
+    inventory.write_bytes(
+        integrity._canonical_bytes(integrity.build_inventory(source_archive, source_commit))
+    )
+    (delivery / "SHA256SUMS.txt").write_text(
+        "{}  {}\n{}  {}\n".format(
+            sha256(source_archive),
+            source_archive.name,
+            sha256(inventory),
+            inventory.name,
+        ),
+        encoding="ascii",
+    )
+
+    archive = repo / "taijiagent-制包机输入-{}.tar.gz".format(source_commit)
+    manifest = repo / "taijiagent-制包机输入-{}.manifest.json".format(source_commit)
+    checksum = repo / (archive.name + ".sha256")
+    helper = load_module(BUILDER_INPUT_HELPER, "taiji_candidate_builder_input")
+    helper.create_builder_input(
+        source_dir=delivery,
+        source_integrity_helper=source_helper,
+        output=archive,
+        manifest_path=manifest,
+        checksum_path=checksum,
+        source_commit=source_commit,
+    )
+    return {"archive": archive, "manifest": manifest, "checksum": checksum}
 
 
 def load_candidate():
@@ -347,6 +465,113 @@ class CandidatePipelineContractTests(unittest.TestCase):
             self.assertEqual(git(repo, "status", "--porcelain").stdout, before)
             self.assertFalse(state_root.exists())
             self.assertFalse((repo / "taijiagent-制包机输入-unknown.tar.gz").exists())
+
+    def test_builder_input_is_missing_or_reused_only_as_a_complete_verified_trio(self):
+        module = load_candidate()
+        self.assertTrue(
+            hasattr(module, "inspect_builder_input"), "builder input inspector is missing"
+        )
+        with tempfile.TemporaryDirectory(prefix="taiji-input-reuse-") as temporary:
+            root = Path(temporary)
+            repo = make_doctor_repo(root)
+            source_commit = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            missing = module.inspect_builder_input(repo, source_commit)
+            self.assertEqual(missing["status"], "MISSING")
+            self.assertTrue(missing["prepare_required"])
+
+            triplet = make_verified_triplet(repo, source_commit, root / "fixture")
+            first = module.inspect_builder_input(repo, source_commit)
+            second = module.inspect_builder_input(repo, source_commit)
+
+            self.assertEqual(first, second)
+            self.assertEqual(first["status"], "REUSABLE")
+            self.assertFalse(first["prepare_required"])
+            self.assertEqual(first["source_commit"], source_commit)
+            self.assertEqual(first["files"]["archive"]["sha256"], sha256(triplet["archive"]))
+            self.assertEqual(first["files"]["archive"]["bytes"], triplet["archive"].stat().st_size)
+
+    def test_builder_input_partial_commit_or_checksum_errors_stop_without_repair(self):
+        module = load_candidate()
+        self.assertTrue(
+            hasattr(module, "inspect_builder_input"), "builder input inspector is missing"
+        )
+        self.assertTrue(
+            hasattr(module, "input_triplet_paths"), "builder input path contract is missing"
+        )
+        with tempfile.TemporaryDirectory(prefix="taiji-input-negative-") as temporary:
+            root = Path(temporary)
+            repo = make_doctor_repo(root)
+            source_commit = git(repo, "rev-parse", "HEAD").stdout.strip()
+            paths = module.input_triplet_paths(repo, source_commit)
+
+            for missing_name in ("archive", "manifest", "checksum"):
+                for path in paths.values():
+                    if path.exists():
+                        path.unlink()
+                for name, path in paths.items():
+                    if name != missing_name:
+                        path.write_bytes(b"partial")
+                with self.subTest(missing=missing_name):
+                    with self.assertRaises(module.PipelineError) as raised:
+                        module.inspect_builder_input(repo, source_commit)
+                    self.assertEqual(raised.exception.category, "INPUT_TRIPLET_PARTIAL")
+
+            for path in paths.values():
+                if path.exists():
+                    path.unlink()
+            triplet = make_verified_triplet(repo, source_commit, root / "fixture")
+            triplet["checksum"].write_text("0" * 64 + "  wrong\n", encoding="ascii")
+            with self.assertRaises(module.PipelineError) as checksum_error:
+                module.inspect_builder_input(repo, source_commit)
+            self.assertEqual(checksum_error.exception.category, "INPUT_VERIFICATION_FAILED")
+
+            for path in triplet.values():
+                path.unlink()
+            triplet = make_verified_triplet(repo, source_commit, root / "fixture-commit")
+            payload = json.loads(triplet["manifest"].read_text(encoding="utf-8"))
+            payload["source_commit"] = "f" * 40
+            manifest_bytes = (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode("utf-8")
+            triplet["manifest"].write_bytes(manifest_bytes)
+            triplet["checksum"].write_text(
+                "{}  {}\n{}  {}\n".format(
+                    sha256(triplet["archive"]),
+                    triplet["archive"].name,
+                    sha256(triplet["manifest"]),
+                    triplet["manifest"].name,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(module.PipelineError) as commit_error:
+                module.inspect_builder_input(repo, source_commit)
+            self.assertEqual(commit_error.exception.category, "INPUT_VERIFICATION_FAILED")
+
+    def test_plan_reuses_verified_input_without_planning_99(self):
+        module = load_candidate()
+        self.assertTrue(
+            hasattr(module, "inspect_builder_input"), "builder input inspector is missing"
+        )
+        with tempfile.TemporaryDirectory(prefix="taiji-plan-reuse-") as temporary:
+            root = Path(temporary)
+            repo = make_doctor_repo(root)
+            source_commit = git(repo, "rev-parse", "HEAD").stdout.strip()
+            make_verified_triplet(repo, source_commit, root / "fixture")
+            plan = module.build_candidate_plan(
+                repo,
+                module.load_target(TARGET),
+                root / "state",
+                run_id="reuse-plan",
+                ssh_config=write_ssh_config(root / "ssh_config"),
+            )
+
+            self.assertEqual(plan["input"]["status"], "REUSABLE")
+            self.assertFalse(plan["input"]["prepare_required"])
+            self.assertNotIn(
+                "99_本机_准备制包输入包.sh", json.dumps(plan["commands"], ensure_ascii=False)
+            )
 
 
 if __name__ == "__main__":

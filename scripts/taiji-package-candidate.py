@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pwd
@@ -50,6 +51,10 @@ REQUIRED_PREFLIGHT_PATH = Path("taijiagent 打包交付/01_制包机_发布预�
 
 class PipelineError(RuntimeError):
     """A stable, operator-actionable candidate pipeline failure."""
+
+    def __init__(self, message: str, *, category: str = "PIPELINE_BLOCKED") -> None:
+        super().__init__(message)
+        self.category = category
 
 
 def utc_now() -> str:
@@ -458,12 +463,128 @@ def _new_run_id(source_commit: str) -> str:
     return "{}-{}-{}".format(stamp, source_commit[:12], uuid.uuid4().hex[:8])
 
 
-def _input_paths(repo: Path, source_commit: str) -> Dict[str, Path]:
+def input_triplet_paths(repo: Path, source_commit: str) -> Dict[str, Path]:
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise PipelineError("source commit must be a full SHA", category="SOURCE_COMMIT_INVALID")
     archive_name = "taijiagent-制包机输入-{}.tar.gz".format(source_commit)
     return {
-        "archive": repo / archive_name,
-        "manifest": repo / "taijiagent-制包机输入-{}.manifest.json".format(source_commit),
-        "checksum": repo / (archive_name + ".sha256"),
+        "archive": Path(repo) / archive_name,
+        "manifest": Path(repo) / "taijiagent-制包机输入-{}.manifest.json".format(source_commit),
+        "checksum": Path(repo) / (archive_name + ".sha256"),
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError as exc:
+        raise PipelineError(
+            "cannot hash builder input {}: {}".format(path.name, exc),
+            category="INPUT_VERIFICATION_FAILED",
+        ) from exc
+    return digest.hexdigest()
+
+
+def _input_file_metadata(path: Path) -> Dict[str, Any]:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise PipelineError(
+            "builder input disappeared during verification: {}".format(path.name),
+            category="INPUT_VERIFICATION_FAILED",
+        ) from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.getuid()
+    ):
+        raise PipelineError(
+            "builder input must be a current-user-owned single-link regular file: {}".format(
+                path.name
+            ),
+            category="INPUT_VERIFICATION_FAILED",
+        )
+    return {
+        "path": str(path),
+        "basename": path.name,
+        "bytes": metadata.st_size,
+        "sha256": _sha256_file(path),
+        "exists": True,
+    }
+
+
+def inspect_builder_input(repo: Path, source_commit: str) -> Dict[str, Any]:
+    repo_root = Path(repo).expanduser().resolve()
+    paths = input_triplet_paths(repo_root, source_commit)
+    presence = {
+        name: path.exists() or path.is_symlink() for name, path in paths.items()
+    }
+    if not any(presence.values()):
+        return {
+            "status": "MISSING",
+            "prepare_required": True,
+            "source_commit": source_commit,
+            "files": {
+                name: {"path": str(path), "basename": path.name, "exists": False}
+                for name, path in paths.items()
+            },
+        }
+    if not all(presence.values()):
+        raise PipelineError(
+            "builder input triplet is partial; preserve it and stop without repair",
+            category="INPUT_TRIPLET_PARTIAL",
+        )
+
+    helper = repo_root / "packaging/linux/builder-input-package.py"
+    if not helper.is_file() or helper.is_symlink():
+        raise PipelineError(
+            "formal builder-input verifier is missing or unsafe",
+            category="INPUT_VERIFICATION_FAILED",
+        )
+    result = _run_command(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            str(helper),
+            "verify",
+            "--archive",
+            str(paths["archive"]),
+            "--manifest",
+            str(paths["manifest"]),
+            "--checksum",
+            str(paths["checksum"]),
+        ],
+        cwd=repo_root,
+        environment=_command_environment(),
+        timeout=120,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "verifier returned non-zero"
+        raise PipelineError(
+            "formal builder-input verification failed: {}".format(detail),
+            category="INPUT_VERIFICATION_FAILED",
+        )
+    manifest = _load_json_object(paths["manifest"], "builder input manifest")
+    if manifest.get("source_commit") != source_commit:
+        raise PipelineError(
+            "builder input manifest source commit differs from HEAD",
+            category="INPUT_VERIFICATION_FAILED",
+        )
+    files = {name: _input_file_metadata(path) for name, path in paths.items()}
+    return {
+        "status": "REUSABLE",
+        "prepare_required": False,
+        "source_commit": source_commit,
+        "archive_sha256": manifest.get("archive_sha256"),
+        "files": files,
     }
 
 
@@ -515,11 +636,8 @@ def build_candidate_plan(
     source_commit = doctor["source_commit"]
     actual_run_id = run_id or _new_run_id(source_commit)
     _validate_run_id(actual_run_id)
-    triplet = _input_paths(repo_root, source_commit)
-    presence = {name: path.is_file() for name, path in triplet.items()}
-    if any(presence.values()) and not all(presence.values()):
-        raise PipelineError("builder input triplet is partial; no files were changed")
-    input_status = "PRESENT_UNVERIFIED" if all(presence.values()) else "MISSING"
+    triplet = input_triplet_paths(repo_root, source_commit)
+    input_status = inspect_builder_input(repo_root, source_commit)
     remote_dir = "{}/{}/{}".format(
         target["remote_root"].rstrip("/"), source_commit, actual_run_id
     )
@@ -539,7 +657,7 @@ def build_candidate_plan(
         "/bin/mkdir -m 0700 -- {}"
     ).format(shlex.quote(remote_parent), shlex.quote(remote_dir))
     commands = []  # type: list
-    if input_status == "MISSING":
+    if input_status["status"] == "MISSING":
         interface = _load_packaging_interface(repo_root)
         commands.append(
             {
@@ -611,14 +729,7 @@ def build_candidate_plan(
         "host_alias": target["host_alias"],
         "remote_run_dir": remote_dir,
         "local_run_dir": str(local_run_dir),
-        "input": {
-            "status": input_status,
-            "prepare_required": input_status == "MISSING",
-            "files": {
-                name: {"path": str(path), "basename": path.name, "exists": presence[name]}
-                for name, path in triplet.items()
-            },
-        },
+        "input": input_status,
         "commands": commands,
         "boundaries": {
             "network": "remote 00 may use apt and source-authorized downloads",
