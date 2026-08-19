@@ -14,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -322,6 +323,152 @@ class RunStateStore:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+class RunLock:
+    """Exclusive per-run lock with a token-bound, no-stale-repair contract."""
+
+    def __init__(self, store: RunStateStore, run_id: str) -> None:
+        self.store = store
+        self.run_id = run_id
+        self.path = store.run_dir(run_id) / "run.lock"
+        self.token = uuid.uuid4().hex
+        self.acquired = False
+
+    def __enter__(self) -> "RunLock":
+        payload = (
+            json.dumps(
+                {"pid": os.getpid(), "token": self.token, "acquired_at": utc_now()},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        try:
+            descriptor = os.open(
+                str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError as exc:
+            raise PipelineError(
+                "run is already locked: {}".format(self.run_id), category="RUN_LOCKED"
+            ) from exc
+        except OSError as exc:
+            raise PipelineError(
+                "cannot acquire run lock: {}".format(exc), category="RUN_LOCK_FAILED"
+            ) from exc
+        self.acquired = True
+        self.store.update(
+            self.run_id,
+            {
+                "lock": {
+                    "status": "held",
+                    "pid": os.getpid(),
+                    "token": self.token,
+                    "acquired_at": utc_now(),
+                }
+            },
+        )
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        if not self.acquired:
+            return
+        try:
+            metadata = self.path.lstat()
+            payload = _load_json_object(self.path, "run lock")
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+                or payload.get("token") != self.token
+            ):
+                raise PipelineError("run lock identity changed", category="RUN_LOCK_FAILED")
+            self.path.unlink()
+            self.store.update(
+                self.run_id,
+                {"lock": {"status": "released", "released_at": utc_now()}},
+            )
+        finally:
+            self.acquired = False
+
+
+def _controller_log(store: RunStateStore, run_id: str, message: str) -> None:
+    path = store.run_dir(run_id) / "controller.log"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    line = "{}\t{}\n".format(utc_now(), message).encode("utf-8")
+    try:
+        descriptor = os.open(str(path), flags, 0o600)
+        with os.fdopen(descriptor, "ab") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        metadata = path.lstat()
+    except OSError as exc:
+        raise PipelineError(
+            "cannot write controller log: {}".format(exc), category="STATE_WRITE_FAILED"
+        ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise PipelineError("controller log is unsafe", category="STATE_WRITE_FAILED")
+
+
+def _recorded_stage(
+    store: RunStateStore, run_id: str, stage: str, callback: Any
+) -> Any:
+    started_at = utc_now()
+    started = time.monotonic()
+    store.update(run_id, {"stage": stage, "stage_started_at": started_at})
+    _controller_log(store, run_id, "stage-start\t{}".format(stage))
+    try:
+        result = callback()
+    except PipelineError as exc:
+        duration = max(0.0, time.monotonic() - started)
+        state = store.load(run_id)
+        history = list(state.get("stage_history", []))
+        history.append(
+            {
+                "stage": stage,
+                "status": "failed",
+                "started_at": started_at,
+                "ended_at": utc_now(),
+                "duration_seconds": duration,
+                "failure_category": exc.category,
+            }
+        )
+        store.update(run_id, {"stage_history": history})
+        _controller_log(
+            store, run_id, "stage-fail\t{}\t{}".format(stage, exc.category)
+        )
+        raise
+    duration = max(0.0, time.monotonic() - started)
+    state = store.load(run_id)
+    history = list(state.get("stage_history", []))
+    history.append(
+        {
+            "stage": stage,
+            "status": "passed",
+            "started_at": started_at,
+            "ended_at": utc_now(),
+            "duration_seconds": duration,
+        }
+    )
+    store.update(run_id, {"stage": stage, "stage_history": history})
+    _controller_log(store, run_id, "stage-pass\t{}".format(stage))
+    return result
 
 
 def _ssh_environment() -> Dict[str, str]:
@@ -725,6 +872,317 @@ def execute_candidate_transport(
     }
 
 
+def _run_builder_input_preparer(
+    plan: Dict[str, Any], command_runner: Any = _run_command
+) -> None:
+    argv = _plan_command(plan, "prepare-input")
+    repo = Path(plan["repo_root"])
+    result = command_runner(
+        argv,
+        cwd=repo,
+        environment=_command_environment(),
+        timeout=7200,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "99 returned non-zero"
+        raise PipelineError(
+            "builder input preparation failed: {}".format(detail),
+            category="INPUT_PREPARATION_FAILED",
+        )
+
+
+def _final_output_paths(store: RunStateStore, run_id: str) -> Dict[str, Path]:
+    run_dir = store.run_dir(run_id)
+    return {"review": run_dir / "review", "remote_log": run_dir / "remote-build.log"}
+
+
+def _assert_final_outputs_absent(store: RunStateStore, run_id: str) -> None:
+    occupied = [
+        str(path)
+        for path in _final_output_paths(store, run_id).values()
+        if path.exists() or path.is_symlink()
+    ]
+    if occupied:
+        raise PipelineError(
+            "local candidate output is already occupied: {}".format(", ".join(occupied)),
+            category="LOCAL_OUTPUT_OCCUPIED",
+        )
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _publish_fetched_outputs(
+    store: RunStateStore, run_id: str, fetched: Dict[str, str]
+) -> Dict[str, str]:
+    _assert_final_outputs_absent(store, run_id)
+    run_dir = store.run_dir(run_id).resolve()
+    review_source = Path(fetched["review_path"]).resolve()
+    log_source = Path(fetched["remote_log_path"]).resolve()
+    staging = review_source.parent
+    if (
+        log_source.parent != staging
+        or not _path_is_within(staging, run_dir)
+        or staging == run_dir
+    ):
+        raise PipelineError(
+            "fetched outputs are outside the private run staging directory",
+            category="LOCAL_PUBLISH_FAILED",
+        )
+    review_metadata = review_source.lstat()
+    _safe_regular_file(log_source, "fetched remote build log")
+    if stat.S_ISLNK(review_metadata.st_mode) or not stat.S_ISDIR(review_metadata.st_mode):
+        raise PipelineError("fetched review root is unsafe", category="LOCAL_PUBLISH_FAILED")
+    final = _final_output_paths(store, run_id)
+    try:
+        os.rename(str(log_source), str(final["remote_log"]))
+        os.rename(str(review_source), str(final["review"]))
+        staging.rmdir()
+    except OSError as exc:
+        raise PipelineError(
+            "cannot publish fetched outputs without overwrite: {}".format(exc),
+            category="LOCAL_PUBLISH_FAILED",
+        ) from exc
+    return {"review_path": str(final["review"]), "remote_log_path": str(final["remote_log"])}
+
+
+def _fetch_staging_path(store: RunStateStore, run_id: str) -> Path:
+    return store.run_dir(run_id) / ".fetch-{}".format(uuid.uuid4().hex[:16])
+
+
+def _initial_run_state(plan: Dict[str, Any], online: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "source_commit": plan["source_commit"],
+        "canonical_policy_sha256": plan["canonical_policy_sha256"],
+        "stage": "PLANNED",
+        "status_label": "候选 DEB 未构建",
+        "started_at": utc_now(),
+        "finished_at": None,
+        "host_alias": plan["host_alias"],
+        "remote_run_dir": plan["remote_run_dir"],
+        "local_run_dir": plan["local_run_dir"],
+        "input": plan["input"],
+        "online_doctor": online,
+        "remote_build_succeeded": False,
+        "fetch_allowed": False,
+        "deb": None,
+        "failure": None,
+        "stage_history": [],
+        "lock": {"status": "released"},
+        "logs": {
+            "controller": str(Path(plan["local_run_dir"]) / "controller.log"),
+            "remote_build": str(Path(plan["local_run_dir"]) / "remote-build.log"),
+        },
+        "plan": plan,
+    }
+
+
+def _failure_payload(exc: PipelineError) -> Dict[str, Any]:
+    return {"category": exc.category, "detail": str(exc), "recorded_at": utc_now()}
+
+
+def run_candidate_build(
+    plan: Dict[str, Any],
+    store: RunStateStore,
+    transport: Any,
+    *,
+    confirmed: bool,
+    online_result: Optional[Dict[str, Any]] = None,
+    prepare_input: Optional[Any] = None,
+    command_runner: Any = _run_command,
+    review_validator: Optional[Any] = None,
+) -> Dict[str, Any]:
+    online = online_result if online_result is not None else transport.online_doctor()
+    if online.get("builder_status") != "BUILDER_READY":
+        status = str(online.get("builder_status", "BLOCKED"))
+        category = "BUILDER_UNREACHABLE" if status == "BUILDER_UNREACHABLE" else "ONLINE_DOCTOR_BLOCKED"
+        raise PipelineError(
+            "online doctor did not report BUILDER_READY: {}".format(status),
+            category=category,
+        )
+    if not confirmed:
+        raise PipelineError(
+            "candidate build requires one explicit confirmation",
+            category="CONFIRMATION_REQUIRED",
+        )
+    run_id = str(plan.get("run_id", ""))
+    validator = review_validator or validate_candidate_review
+    _validate_run_id(run_id)
+    if str(plan.get("local_run_dir", "")) != str(store.run_dir(run_id)):
+        raise PipelineError("plan/state root mismatch", category="PLAN_INVALID")
+    store.create(run_id, _initial_run_state(plan, online))
+    _controller_log(store, run_id, "run-created")
+    remote_succeeded = False
+    try:
+        with RunLock(store, run_id):
+            def verify_input() -> Dict[str, Any]:
+                if plan["input"]["status"] == "MISSING":
+                    callback = prepare_input
+                    if callback is None:
+                        callback = lambda: _run_builder_input_preparer(plan, command_runner)
+                    callback()
+                return inspect_builder_input(
+                    Path(plan["repo_root"]), str(plan["source_commit"])
+                )
+
+            input_identity = _recorded_stage(store, run_id, "INPUT_VERIFIED", verify_input)
+            if input_identity["status"] != "REUSABLE":
+                raise PipelineError(
+                    "builder input is not reusable after preparation",
+                    category="INPUT_VERIFICATION_FAILED",
+                )
+            plan["input"] = input_identity
+            store.update(run_id, {"input": input_identity, "plan": plan})
+
+            _recorded_stage(
+                store, run_id, "REMOTE_RUN_CREATED", lambda: transport.create_remote_run(plan)
+            )
+            _recorded_stage(
+                store, run_id, "INPUT_TRANSFERRED", lambda: transport.transfer_input(plan)
+            )
+            _recorded_stage(
+                store,
+                run_id,
+                "REMOTE_INPUT_VERIFIED",
+                lambda: transport.verify_remote_input(plan),
+            )
+            _recorded_stage(
+                store,
+                run_id,
+                "REMOTE_BUILD_SUCCEEDED",
+                lambda: transport.build_remote_candidate(plan),
+            )
+            remote_succeeded = True
+            store.update(
+                run_id, {"remote_build_succeeded": True, "fetch_allowed": True}
+            )
+            _assert_final_outputs_absent(store, run_id)
+            fetched = _recorded_stage(
+                store,
+                run_id,
+                "REVIEW_FETCHED",
+                lambda: transport.fetch(plan, _fetch_staging_path(store, run_id)),
+            )
+            candidate = _recorded_stage(
+                store,
+                run_id,
+                "LOCAL_REVIEW_VERIFIED",
+                lambda: validator(
+                    plan, Path(fetched["review_path"]), Path(fetched["remote_log_path"])
+                ),
+            )
+            published = _recorded_stage(
+                store,
+                run_id,
+                "CANDIDATE_BUILT",
+                lambda: _publish_fetched_outputs(store, run_id, fetched),
+            )
+            final_deb = Path(published["review_path"]) / candidate["relative_path"]
+            candidate["path"] = str(final_deb)
+            store.update(
+                run_id,
+                {
+                    "stage": "CANDIDATE_BUILT",
+                    "status_label": "候选 DEB 已构建",
+                    "finished_at": utc_now(),
+                    "fetch_allowed": False,
+                    "failure": None,
+                    "deb": candidate,
+                },
+            )
+    except PipelineError as exc:
+        current = store.load(run_id)
+        remote_succeeded = bool(current.get("remote_build_succeeded")) or remote_succeeded
+        store.update(
+            run_id,
+            {
+                "stage": "FETCH_PENDING" if remote_succeeded else "FAILED",
+                "status_label": "候选 DEB 取回待恢复" if remote_succeeded else "候选 DEB 未构建",
+                "fetch_allowed": remote_succeeded,
+                "failure": _failure_payload(exc),
+            },
+        )
+        raise
+    return store.load(run_id)
+
+
+def fetch_candidate(
+    store: RunStateStore,
+    run_id: str,
+    transport: Any,
+    *,
+    review_validator: Optional[Any] = None,
+) -> Dict[str, Any]:
+    state = store.load(run_id)
+    if (
+        state.get("stage") != "FETCH_PENDING"
+        or not state.get("remote_build_succeeded")
+        or not state.get("fetch_allowed")
+    ):
+        raise PipelineError(
+            "fetch is allowed only after remote build success and local retrieval failure",
+            category="FETCH_NOT_ALLOWED",
+        )
+    _assert_final_outputs_absent(store, run_id)
+    plan = state.get("plan")
+    if not isinstance(plan, dict):
+        raise PipelineError("run state lacks its candidate plan", category="PLAN_INVALID")
+    validator = review_validator or validate_candidate_review
+    try:
+        with RunLock(store, run_id):
+            fetched = _recorded_stage(
+                store,
+                run_id,
+                "REVIEW_FETCHED",
+                lambda: transport.fetch(plan, _fetch_staging_path(store, run_id)),
+            )
+            candidate = _recorded_stage(
+                store,
+                run_id,
+                "LOCAL_REVIEW_VERIFIED",
+                lambda: validator(
+                    plan, Path(fetched["review_path"]), Path(fetched["remote_log_path"])
+                ),
+            )
+            published = _recorded_stage(
+                store,
+                run_id,
+                "CANDIDATE_BUILT",
+                lambda: _publish_fetched_outputs(store, run_id, fetched),
+            )
+            candidate["path"] = str(
+                Path(published["review_path"]) / candidate["relative_path"]
+            )
+            store.update(
+                run_id,
+                {
+                    "stage": "CANDIDATE_BUILT",
+                    "status_label": "候选 DEB 已构建",
+                    "finished_at": utc_now(),
+                    "fetch_allowed": False,
+                    "failure": None,
+                    "deb": candidate,
+                },
+            )
+    except PipelineError as exc:
+        store.update(
+            run_id,
+            {
+                "stage": "FETCH_PENDING",
+                "status_label": "候选 DEB 取回待恢复",
+                "fetch_allowed": True,
+                "failure": _failure_payload(exc),
+            },
+        )
+        raise
+    return store.load(run_id)
+
+
 def local_doctor(
     repo: Path,
     target: Dict[str, Any],
@@ -982,6 +1440,218 @@ def inspect_builder_input(repo: Path, source_commit: str) -> Dict[str, Any]:
     }
 
 
+def _canonical_policy_sha256(repo: Path) -> str:
+    helper = Path(repo) / "packaging/linux/compatibility_policy.py"
+    policy = Path(repo) / "packaging/linux/compatibility-policy.json"
+    result = _run_command(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            str(helper),
+            "validate",
+            "--policy",
+            str(policy),
+            "--print-sha256",
+        ],
+        cwd=Path(repo),
+        environment=_command_environment(),
+        timeout=60,
+    )
+    digest = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        detail = result.stderr.strip() or "canonical policy helper returned invalid output"
+        raise PipelineError(detail, category="COMPATIBILITY_POLICY_INVALID")
+    return digest
+
+
+def _safe_regular_file(path: Path, label: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise PipelineError(
+            "{} is missing: {}".format(label, path), category="LOCAL_REVIEW_INVALID"
+        ) from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.getuid()
+    ):
+        raise PipelineError(
+            "{} is not a current-user-owned single-link regular file".format(label),
+            category="LOCAL_REVIEW_INVALID",
+        )
+    return metadata
+
+
+def _parse_marker(path: Path) -> Dict[str, str]:
+    _safe_regular_file(path, "build marker")
+    result = {}  # type: Dict[str, str]
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise PipelineError("build marker is unreadable", category="LOCAL_REVIEW_INVALID") from exc
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator or not key or not value or key in result:
+            raise PipelineError("build marker is malformed", category="LOCAL_REVIEW_INVALID")
+        result[key] = value
+    return result
+
+
+def validate_candidate_review(
+    plan: Dict[str, Any],
+    review_path: Path,
+    remote_log_path: Path,
+    *,
+    command_runner: Any = _run_command,
+) -> Dict[str, Any]:
+    review = Path(review_path).expanduser().resolve()
+    try:
+        review_metadata = review.lstat()
+    except OSError as exc:
+        raise PipelineError("retrieved review is missing", category="LOCAL_REVIEW_INVALID") from exc
+    if (
+        stat.S_ISLNK(review_metadata.st_mode)
+        or not stat.S_ISDIR(review_metadata.st_mode)
+        or review_metadata.st_uid != os.getuid()
+    ):
+        raise PipelineError("retrieved review root is unsafe", category="LOCAL_REVIEW_INVALID")
+    remote_log = Path(remote_log_path).expanduser().resolve()
+    _safe_regular_file(remote_log, "remote build log")
+
+    repo = Path(str(plan.get("repo_root", ""))).expanduser().resolve()
+    source_commit = str(plan.get("source_commit", ""))
+    expected_policy_sha = str(plan.get("canonical_policy_sha256", ""))
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise PipelineError("plan source commit is invalid", category="PLAN_INVALID")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_policy_sha) is None:
+        raise PipelineError("plan policy SHA256 is invalid", category="PLAN_INVALID")
+
+    delivery = review / "taijiagent 打包交付"
+    output = delivery / "生成的安装包"
+    if not delivery.is_dir() or delivery.is_symlink() or not output.is_dir() or output.is_symlink():
+        raise PipelineError("review delivery/output tree is incomplete", category="LOCAL_REVIEW_INVALID")
+    try:
+        output_names = {entry.name for entry in output.iterdir()}
+    except OSError as exc:
+        raise PipelineError("review output cannot be listed", category="LOCAL_REVIEW_INVALID") from exc
+    deb_names = [name for name in output_names if re.fullmatch(r"taiji-agent_.+_amd64\.deb", name)]
+    if len(deb_names) != 1:
+        raise PipelineError("review must contain exactly one amd64 DEB", category="LOCAL_REVIEW_INVALID")
+    deb_name = deb_names[0]
+    expected_names = {
+        deb_name,
+        deb_name + ".sha256",
+        "taiji-package-manifest.json",
+        "formal-build-tests.log",
+        "构建报告.txt",
+        ".build-success",
+    }
+    if output_names != expected_names:
+        raise PipelineError("review output file set is not canonical", category="LOCAL_REVIEW_INVALID")
+
+    deb = output / deb_name
+    deb_metadata = _safe_regular_file(deb, "candidate DEB")
+    deb_sha = _sha256_file(deb)
+    sidecar = output / (deb_name + ".sha256")
+    _safe_regular_file(sidecar, "candidate DEB sidecar")
+    try:
+        sidecar_payload = sidecar.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise PipelineError("candidate sidecar is unreadable", category="LOCAL_REVIEW_INVALID") from exc
+    if sidecar_payload != "{}  {}\n".format(deb_sha, deb_name):
+        raise PipelineError(
+            "candidate DEB SHA256 sidecar mismatch", category="ARTIFACT_SHA_MISMATCH"
+        )
+
+    manifest_path = output / "taiji-package-manifest.json"
+    _safe_regular_file(manifest_path, "candidate manifest")
+    manifest = _load_json_object(manifest_path, "candidate manifest")
+    required_manifest = {
+        "schema": "taiji-package-manifest/v3",
+        "architecture": "amd64",
+        "source_commit": source_commit,
+        "deb_basename": deb_name,
+        "deb_sha256": deb_sha,
+        "compatibility_policy_sha256": expected_policy_sha,
+        "formal_build_tests_status": "pass",
+        "formal_build_tests_log_basename": "formal-build-tests.log",
+    }
+    for key, expected in required_manifest.items():
+        if manifest.get(key) != expected:
+            category = "ARTIFACT_SHA_MISMATCH" if key == "deb_sha256" else "LOCAL_REVIEW_INVALID"
+            raise PipelineError(
+                "candidate manifest {} mismatch".format(key), category=category
+            )
+
+    formal_log = output / "formal-build-tests.log"
+    formal_metadata = _safe_regular_file(formal_log, "formal build test log")
+    if formal_metadata.st_size == 0 or manifest.get("formal_build_tests_log_sha256") != _sha256_file(
+        formal_log
+    ):
+        raise PipelineError("formal build test log mismatch", category="LOCAL_REVIEW_INVALID")
+    report = output / "构建报告.txt"
+    if _safe_regular_file(report, "build report").st_size == 0:
+        raise PipelineError("build report is empty", category="LOCAL_REVIEW_INVALID")
+
+    marker = _parse_marker(output / ".build-success")
+    marker_expected = {
+        "source_commit": source_commit,
+        "deb": deb_name,
+        "deb_sha256": deb_sha,
+        "compatibility_policy_sha256": expected_policy_sha,
+        "formal_build_tests_status": "pass",
+        "formal_build_tests_log_basename": "formal-build-tests.log",
+        "formal_build_tests_log_sha256": _sha256_file(formal_log),
+    }
+    for key, expected in marker_expected.items():
+        if marker.get(key) != expected:
+            category = "ARTIFACT_SHA_MISMATCH" if key == "deb_sha256" else "LOCAL_REVIEW_INVALID"
+            raise PipelineError("build marker {} mismatch".format(key), category=category)
+
+    local_preflight = repo / REQUIRED_PREFLIGHT_PATH
+    review_preflight = delivery / REQUIRED_PREFLIGHT_PATH.name
+    _safe_regular_file(local_preflight, "local frozen preflight")
+    _safe_regular_file(review_preflight, "review frozen preflight")
+    if local_preflight.read_bytes() != review_preflight.read_bytes():
+        raise PipelineError("review preflight differs from source commit", category="LOCAL_REVIEW_INVALID")
+    environment = _command_environment()
+    environment.update(
+        {
+            "TAIJI_RELEASE_REQUIRE_ARTIFACTS": "1",
+            "TAIJI_RELEASE_SKIP_GIT_CHECK": "1",
+            "TAIJI_REPO_ROOT": str(review),
+        }
+    )
+    preflight = command_runner(
+        ["/bin/bash", "-p", str(review_preflight)],
+        cwd=review,
+        environment=environment,
+        timeout=3600,
+    )
+    if preflight.returncode != 0:
+        detail = preflight.stderr.strip() or preflight.stdout.strip() or "preflight returned non-zero"
+        raise PipelineError(
+            "local candidate preflight failed: {}".format(detail),
+            category="LOCAL_PREFLIGHT_FAILED",
+        )
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise PipelineError("candidate version is invalid", category="LOCAL_REVIEW_INVALID")
+    return {
+        "basename": deb_name,
+        "bytes": deb_metadata.st_size,
+        "sha256": deb_sha,
+        "version": version,
+        "path": str(deb),
+        "relative_path": str(deb.relative_to(review)),
+        "manifest_path": str(manifest_path),
+        "marker_path": str(output / ".build-success"),
+    }
+
+
 def _planned_remote_verify_script(remote_dir: str, checksum_name: str) -> str:
     return "; ".join(
         [
@@ -1135,7 +1805,9 @@ def build_candidate_plan(
     return {
         "schema": "taiji-package-candidate-plan/v1",
         "run_id": actual_run_id,
+        "repo_root": str(repo_root),
         "source_commit": source_commit,
+        "canonical_policy_sha256": _canonical_policy_sha256(repo_root),
         "target_id": target["target_id"],
         "host_alias": target["host_alias"],
         "remote_run_dir": remote_dir,
@@ -1160,15 +1832,12 @@ def build_candidate_plan(
     }
 
 
-def fetch_candidate(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-    raise PipelineError("candidate fetch recovery is not implemented yet")
-
-
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--repo", type=Path, default=ROOT)
     parser.add_argument("--target", type=Path, default=DEFAULT_TARGET)
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    parser.add_argument("--ssh-config", type=Path)
     parser.add_argument("--json", action="store_true", dest="json_output")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1188,28 +1857,113 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         target = load_target(args.target)
         if args.command == "doctor":
-            if args.online:
-                raise PipelineError("online doctor is implemented by the transport task")
-            payload = local_doctor(args.repo, target, args.state_root)
+            local = local_doctor(
+                args.repo, target, args.state_root, ssh_config=args.ssh_config
+            )
+            online = None
+            if args.online and local["controller_status"] == "CONTROLLER_READY":
+                online = RealSshTransport(
+                    args.repo, target, ssh_config=args.ssh_config
+                ).online_doctor()
+            payload = {"local": local, "online": online}
             if args.json_output:
                 print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             else:
-                print(payload["controller_status"])
-                print(payload["builder_status"])
-                for blocker in payload["blockers"]:
+                print(local["controller_status"])
+                print(online["builder_status"] if online is not None else local["builder_status"])
+                for blocker in local["blockers"]:
                     print("BLOCKER\t{}".format(blocker))
-            return 0 if payload["controller_status"] == "CONTROLLER_READY" else 2
+                if online is not None:
+                    for blocker in online["blockers"]:
+                        print("BLOCKER\t{}".format(blocker))
+            local_ready = local["controller_status"] == "CONTROLLER_READY"
+            online_ready = not args.online or (
+                online is not None and online["builder_status"] == "BUILDER_READY"
+            )
+            return 0 if local_ready and online_ready else 2
         if args.command == "plan":
-            payload = build_candidate_plan(args.repo, target, args.state_root)
+            payload = build_candidate_plan(
+                args.repo,
+                target,
+                args.state_root,
+                ssh_config=args.ssh_config,
+            )
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+            return 0
+        if args.command == "build":
+            plan = build_candidate_plan(
+                args.repo,
+                target,
+                args.state_root,
+                ssh_config=args.ssh_config,
+            )
+            transport = RealSshTransport(
+                args.repo, target, ssh_config=args.ssh_config
+            )
+            online = transport.online_doctor()
+            if online.get("builder_status") != "BUILDER_READY":
+                status = str(online.get("builder_status", "BLOCKED"))
+                category = (
+                    "BUILDER_UNREACHABLE"
+                    if status == "BUILDER_UNREACHABLE"
+                    else "ONLINE_DOCTOR_BLOCKED"
+                )
+                raise PipelineError(
+                    "online doctor did not report BUILDER_READY: {}".format(status),
+                    category=category,
+                )
+            print(
+                json.dumps(
+                    {"online_doctor": online, "plan": plan},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+            )
+            try:
+                confirmation = input(
+                    "输入 BUILD 以确认输入准备、远程传输和候选构建三个阶段："
+                ).strip()
+            except EOFError as exc:
+                raise PipelineError(
+                    "interactive BUILD confirmation is required",
+                    category="CONFIRMATION_REQUIRED",
+                ) from exc
+            if confirmation != "BUILD":
+                raise PipelineError(
+                    "candidate build confirmation did not match BUILD",
+                    category="CONFIRMATION_REQUIRED",
+                )
+            state = run_candidate_build(
+                plan,
+                RunStateStore(args.state_root),
+                transport,
+                confirmed=True,
+                online_result=online,
+            )
+            print(json.dumps(state, ensure_ascii=False, sort_keys=True))
             return 0
         if args.command == "status":
             payload = RunStateStore(args.state_root).load(args.run_id)
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             return 0
+        if args.command == "fetch":
+            store = RunStateStore(args.state_root)
+            current = store.load(args.run_id)
+            plan = current.get("plan")
+            if not isinstance(plan, dict):
+                raise PipelineError("run state lacks its candidate plan", category="PLAN_INVALID")
+            if plan.get("target_id") != target["target_id"]:
+                raise PipelineError("target adapter differs from run state", category="PLAN_INVALID")
+            transport = RealSshTransport(
+                Path(plan["repo_root"]), target, ssh_config=args.ssh_config
+            )
+            state = fetch_candidate(store, args.run_id, transport)
+            print(json.dumps(state, ensure_ascii=False, sort_keys=True))
+            return 0
         raise PipelineError("{} is not implemented yet".format(args.command))
     except PipelineError as exc:
-        print("BLOCKED\t{}".format(exc), file=sys.stderr)
+        print("BLOCKED\t{}\t{}".format(exc.category, exc), file=sys.stderr)
         return 2
 
 

@@ -22,6 +22,8 @@ CANDIDATE = ROOT / "scripts/taiji-package-candidate.py"
 TARGET = ROOT / "packaging/pipeline/targets/kylin-amd64.json"
 BUILDER_INPUT_HELPER = ROOT / "packaging/linux/builder-input-package.py"
 SOURCE_INTEGRITY_HELPER = ROOT / "packaging/linux/source-archive-integrity.py"
+COMPATIBILITY_POLICY = ROOT / "packaging/linux/compatibility-policy.json"
+COMPATIBILITY_POLICY_HELPER = ROOT / "packaging/linux/compatibility_policy.py"
 FROZEN_DELIVERY_MEMBERS = {
     "00_制包机_生成离线交付包.sh",
     "01_制包机_发布预检.sh",
@@ -93,13 +95,14 @@ def make_doctor_repo(parent: Path) -> Path:
         "taijiagent 打包交付/99_本机_准备制包输入包.sh",
         "taijiagent 打包交付/00_制包机_生成离线交付包.sh",
         "taijiagent 打包交付/01_制包机_发布预检.sh",
-        "packaging/linux/compatibility-policy.json",
         "scripts/taiji-linux-golden-orchestrator.py",
     ):
         path = repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture:{}\n".format(relative), encoding="utf-8")
     shutil.copy2(BUILDER_INPUT_HELPER, repo / "packaging/linux/builder-input-package.py")
+    shutil.copy2(COMPATIBILITY_POLICY, repo / "packaging/linux/compatibility-policy.json")
+    shutil.copy2(COMPATIBILITY_POLICY_HELPER, repo / "packaging/linux/compatibility_policy.py")
     (repo / ".gitignore").write_text("/taijiagent-制包机输入-*\n", encoding="utf-8")
     git(repo, "init", "-b", "main")
     git(repo, "add", ".")

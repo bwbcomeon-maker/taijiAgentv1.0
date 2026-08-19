@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import importlib.util
+import io
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.test_taiji_package_candidate import (
     TARGET,
@@ -64,6 +69,22 @@ class RecordingRunner:
         return subprocess.CompletedProcess(list(argv), 0, stdout, "")
 
 
+class SuccessfulPreflightRunner:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, *, cwd, environment, timeout):
+        self.calls.append(
+            {
+                "argv": list(argv),
+                "cwd": str(cwd),
+                "environment": dict(environment),
+                "timeout": timeout,
+            }
+        )
+        return subprocess.CompletedProcess(list(argv), 0, "candidate preflight passed\n", "")
+
+
 def make_plan(module, root: Path):
     repo = make_doctor_repo(root)
     target = module.load_target(TARGET)
@@ -76,6 +97,71 @@ def make_plan(module, root: Path):
         ssh_config=ssh_config,
     )
     return repo, target, ssh_config, plan
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def make_candidate_review(
+    repo: Path,
+    plan,
+    review_root: Path,
+    *,
+    corrupt_deb: bool = False,
+) -> Path:
+    delivery = review_root / "taijiagent 打包交付"
+    output = delivery / "生成的安装包"
+    output.mkdir(parents=True)
+    shutil.copy2(
+        repo / "taijiagent 打包交付/01_制包机_发布预检.sh",
+        delivery / "01_制包机_发布预检.sh",
+    )
+    deb = output / "taiji-agent_1.2.3_amd64.deb"
+    deb.write_bytes(b"candidate-deb-bytes\n")
+    deb_sha = file_sha256(deb)
+    (output / (deb.name + ".sha256")).write_text(
+        "{}  {}\n".format(deb_sha, deb.name), encoding="utf-8"
+    )
+    formal_log = output / "formal-build-tests.log"
+    formal_log.write_text("formal-build-tests/v2\noverall_status=pass\n", encoding="utf-8")
+    policy_sha = plan.get("canonical_policy_sha256", "c" * 64)
+    manifest = {
+        "schema": "taiji-package-manifest/v3",
+        "package": "taiji-agent",
+        "version": "1.2.3",
+        "architecture": "amd64",
+        "source_commit": plan["source_commit"],
+        "deb_basename": deb.name,
+        "deb_sha256": deb_sha,
+        "compatibility_policy_sha256": policy_sha,
+        "formal_build_tests_status": "pass",
+        "formal_build_tests_log_basename": formal_log.name,
+        "formal_build_tests_log_sha256": file_sha256(formal_log),
+    }
+    (output / "taiji-package-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (output / "构建报告.txt").write_text("候选构建报告\n", encoding="utf-8")
+    (output / ".build-success").write_text(
+        "\n".join(
+            [
+                "version=1.2.3",
+                "source_commit={}".format(plan["source_commit"]),
+                "deb={}".format(deb.name),
+                "deb_sha256={}".format(deb_sha),
+                "compatibility_policy_sha256={}".format(policy_sha),
+                "formal_build_tests_status=pass",
+                "formal_build_tests_log_basename={}".format(formal_log.name),
+                "formal_build_tests_log_sha256={}".format(file_sha256(formal_log)),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if corrupt_deb:
+        deb.write_bytes(b"corrupted-after-manifest\n")
+    return review_root
 
 
 class CandidateTransportContractTests(unittest.TestCase):
@@ -247,6 +333,246 @@ class CandidateTransportContractTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.category, "CONFIRMATION_REQUIRED")
             self.assertEqual(transport.calls, ["online-doctor"])
+
+    def test_run_state_binds_successful_candidate_and_stage_timings(self):
+        module = load_candidate()
+        self.assertTrue(
+            hasattr(module, "run_candidate_build"), "stateful candidate build is missing"
+        )
+        with tempfile.TemporaryDirectory(prefix="taiji-stateful-build-") as temporary:
+            root = Path(temporary)
+            repo, _target, _ssh_config, plan = make_plan(module, root)
+            source_commit = plan["source_commit"]
+            from tests.test_taiji_package_candidate import make_verified_triplet
+
+            make_verified_triplet(repo, source_commit, root / "input-fixture")
+            plan = module.build_candidate_plan(
+                repo,
+                module.load_target(TARGET),
+                root / "state",
+                run_id="stateful-success",
+                ssh_config=write_ssh_config(root / "ssh_config-stateful"),
+            )
+            review_source = make_candidate_review(repo, plan, root / "remote-review")
+            transport = module.FakeSshTransport(review_source=review_source)
+            preflight = SuccessfulPreflightRunner()
+            store = module.RunStateStore(root / "state")
+
+            state = module.run_candidate_build(
+                plan,
+                store,
+                transport,
+                confirmed=True,
+                review_validator=lambda active_plan, review, remote_log: module.validate_candidate_review(
+                    active_plan,
+                    review,
+                    remote_log,
+                    command_runner=preflight,
+                ),
+            )
+
+            self.assertEqual(state["stage"], "CANDIDATE_BUILT")
+            self.assertEqual(state["status_label"], "候选 DEB 已构建")
+            self.assertTrue(state["remote_build_succeeded"])
+            self.assertFalse(state["fetch_allowed"])
+            self.assertEqual(state["source_commit"], source_commit)
+            self.assertRegex(state["canonical_policy_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(state["deb"]["sha256"], file_sha256(Path(state["deb"]["path"])))
+            self.assertEqual(state["lock"]["status"], "released")
+            passed_stages = [item["stage"] for item in state["stage_history"]]
+            self.assertEqual(
+                passed_stages,
+                [
+                    "INPUT_VERIFIED",
+                    "REMOTE_RUN_CREATED",
+                    "INPUT_TRANSFERRED",
+                    "REMOTE_INPUT_VERIFIED",
+                    "REMOTE_BUILD_SUCCEEDED",
+                    "REVIEW_FETCHED",
+                    "LOCAL_REVIEW_VERIFIED",
+                    "CANDIDATE_BUILT",
+                ],
+            )
+            self.assertTrue(all(item["duration_seconds"] >= 0 for item in state["stage_history"]))
+            self.assertTrue((store.run_dir("stateful-success") / "review").is_dir())
+            self.assertTrue((store.run_dir("stateful-success") / "remote-build.log").is_file())
+            self.assertEqual(len(preflight.calls), 1)
+            self.assertEqual(preflight.calls[0]["argv"][0:2], ["/bin/bash", "-p"])
+
+    def test_fetch_pending_retries_only_retrieval_and_local_verification(self):
+        module = load_candidate()
+        self.assertTrue(
+            hasattr(module, "run_candidate_build"), "stateful candidate build is missing"
+        )
+        with tempfile.TemporaryDirectory(prefix="taiji-fetch-recovery-") as temporary:
+            root = Path(temporary)
+            repo, _target, _ssh_config, plan = make_plan(module, root)
+            from tests.test_taiji_package_candidate import make_verified_triplet
+
+            make_verified_triplet(repo, plan["source_commit"], root / "input-fixture")
+            plan = module.build_candidate_plan(
+                repo,
+                module.load_target(TARGET),
+                root / "state",
+                run_id="fetch-pending",
+                ssh_config=write_ssh_config(root / "ssh_config-pending"),
+            )
+            store = module.RunStateStore(root / "state")
+            failed_transport = module.FakeSshTransport(fail_stage="fetch-review")
+            with self.assertRaises(module.PipelineError):
+                module.run_candidate_build(
+                    plan, store, failed_transport, confirmed=True
+                )
+            pending = store.load("fetch-pending")
+            self.assertEqual(pending["stage"], "FETCH_PENDING")
+            self.assertTrue(pending["remote_build_succeeded"])
+            self.assertTrue(pending["fetch_allowed"])
+
+            review_source = make_candidate_review(repo, plan, root / "remote-review")
+            retry_transport = module.FakeSshTransport(review_source=review_source)
+            preflight = SuccessfulPreflightRunner()
+            recovered = module.fetch_candidate(
+                store,
+                "fetch-pending",
+                retry_transport,
+                review_validator=lambda active_plan, review, remote_log: module.validate_candidate_review(
+                    active_plan,
+                    review,
+                    remote_log,
+                    command_runner=preflight,
+                ),
+            )
+
+            self.assertEqual(retry_transport.calls, ["fetch-review", "fetch-log"])
+            self.assertEqual(recovered["stage"], "CANDIDATE_BUILT")
+            self.assertFalse(recovered["fetch_allowed"])
+
+    def test_fetch_rejects_non_remote_success_sha_mismatch_and_occupied_output(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-fetch-negative-") as temporary:
+            root = Path(temporary)
+            repo, _target, _ssh_config, plan = make_plan(module, root)
+            store = module.RunStateStore(root / "state")
+
+            store.create(
+                "not-remote-success",
+                {
+                    "stage": "FAILED",
+                    "source_commit": plan["source_commit"],
+                    "remote_build_succeeded": False,
+                    "fetch_allowed": False,
+                    "plan": plan,
+                },
+            )
+            untouched = module.FakeSshTransport()
+            with self.assertRaises(module.PipelineError) as not_allowed:
+                module.fetch_candidate(store, "not-remote-success", untouched)
+            self.assertEqual(not_allowed.exception.category, "FETCH_NOT_ALLOWED")
+            self.assertEqual(untouched.calls, [])
+
+            pending_payload = {
+                "stage": "FETCH_PENDING",
+                "source_commit": plan["source_commit"],
+                "remote_build_succeeded": True,
+                "fetch_allowed": True,
+                "plan": plan,
+                "stage_history": [],
+                "lock": {"status": "released"},
+            }
+            store.create("sha-mismatch", pending_payload)
+            bad_review = make_candidate_review(
+                repo, plan, root / "bad-review", corrupt_deb=True
+            )
+            bad_transport = module.FakeSshTransport(review_source=bad_review)
+            with self.assertRaises(module.PipelineError) as mismatch:
+                module.fetch_candidate(
+                    store,
+                    "sha-mismatch",
+                    bad_transport,
+                    review_validator=lambda active_plan, review, remote_log: module.validate_candidate_review(
+                        active_plan,
+                        review,
+                        remote_log,
+                        command_runner=SuccessfulPreflightRunner(),
+                    ),
+                )
+            self.assertEqual(mismatch.exception.category, "ARTIFACT_SHA_MISMATCH")
+            self.assertEqual(store.load("sha-mismatch")["stage"], "FETCH_PENDING")
+
+            store.create("occupied", pending_payload)
+            occupied_dir = store.run_dir("occupied") / "review"
+            occupied_dir.mkdir()
+            occupied_transport = module.FakeSshTransport(review_source=bad_review)
+            with self.assertRaises(module.PipelineError) as occupied:
+                module.fetch_candidate(store, "occupied", occupied_transport)
+            self.assertEqual(occupied.exception.category, "LOCAL_OUTPUT_OCCUPIED")
+            self.assertEqual(occupied_transport.calls, [])
+
+    def test_build_cli_displays_plan_confirms_once_and_persists_result(self):
+        module = load_candidate()
+        with tempfile.TemporaryDirectory(prefix="taiji-build-cli-") as temporary:
+            root = Path(temporary)
+            repo, _target, ssh_config, seed_plan = make_plan(module, root)
+            from tests.test_taiji_package_candidate import make_verified_triplet
+
+            make_verified_triplet(repo, seed_plan["source_commit"], root / "input-fixture")
+            seed_plan = module.build_candidate_plan(
+                repo,
+                module.load_target(TARGET),
+                root / "state-seed",
+                run_id="seed-plan",
+                ssh_config=ssh_config,
+            )
+            review_source = make_candidate_review(repo, seed_plan, root / "remote-review")
+            transport = module.FakeSshTransport(review_source=review_source)
+            original_validator = module.validate_candidate_review
+            preflight = SuccessfulPreflightRunner()
+
+            def validator(active_plan, review, remote_log):
+                return original_validator(
+                    active_plan,
+                    review,
+                    remote_log,
+                    command_runner=preflight,
+                )
+
+            def invoke_main():
+                try:
+                    return module.main(
+                        [
+                            "--repo",
+                            str(repo),
+                            "--target",
+                            str(TARGET),
+                            "--state-root",
+                            str(root / "state"),
+                            "--ssh-config",
+                            str(ssh_config),
+                            "build",
+                        ]
+                    )
+                except SystemExit as exc:
+                    raise AssertionError("build CLI arguments are not implemented") from exc
+
+            output = io.StringIO()
+            with mock.patch.object(
+                module,
+                "RealSshTransport",
+                side_effect=lambda *args, **kwargs: transport,
+            ), mock.patch.object(
+                module, "validate_candidate_review", side_effect=validator
+            ), mock.patch("builtins.input", return_value="BUILD"), contextlib.redirect_stdout(
+                output
+            ):
+                return_code = implemented_result(invoke_main)
+
+            self.assertEqual(return_code, 0)
+            self.assertEqual(transport.calls.count("online-doctor"), 1)
+            self.assertIn("taiji-package-candidate-plan/v1", output.getvalue())
+            run_dirs = list((root / "state/runs").iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            state = module.RunStateStore(root / "state").load(run_dirs[0].name)
+            self.assertEqual(state["stage"], "CANDIDATE_BUILT")
 
 
 if __name__ == "__main__":
