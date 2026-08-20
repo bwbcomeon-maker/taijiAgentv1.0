@@ -86,7 +86,7 @@ class TaijiPackageCoreBoundaryTests(unittest.TestCase):
         facade = load_facade()
         factory = getattr(facade, "_facade_adapter_factory", None)
         self.assertTrue(callable(factory), "facade adapter factory is missing")
-        validator_marker = object()
+        validator_marker = {"marker": True}
 
         class PatchedTransport:
             def __init__(self, repo, target, *, ssh_config, command_runner):
@@ -110,7 +110,10 @@ class TaijiPackageCoreBoundaryTests(unittest.TestCase):
                 )
                 self.assertIsInstance(transport, PatchedTransport)
                 self.assertIs(transport.args[-1].__class__, ForbiddenExternalRunner)
-                self.assertIs(adapter.validate_review({}, Path("review"), Path("log")), validator_marker)
+                self.assertEqual(
+                    adapter.validate_review({}, Path("review"), Path("log")),
+                    {"marker": True, "kind": "deb"},
+                )
 
     def test_extracted_common_modules_have_no_platform_build_literals(self):
         forbidden = (
@@ -120,6 +123,22 @@ class TaijiPackageCoreBoundaryTests(unittest.TestCase):
         paths = [
             ROOT / "packaging/pipeline/core/{}.py".format(name)
             for name in ("models", "state", "errors", "registry")
+        ]
+        for path in paths:
+            self.assertTrue(path.is_file(), str(path))
+            text = path.read_text(encoding="utf-8")
+            for literal in forbidden:
+                with self.subTest(path=str(path), literal=literal):
+                    self.assertIsNone(re.search(literal, text))
+
+    def test_final_common_modules_have_no_platform_build_literals(self):
+        forbidden = (
+            r"99_本机", r"00_制包机", r"01_制包机", r"\bdpkg\b", r"\bapt\b",
+            r"\.deb\b", r"canonical_policy_sha256", r"deb_sha256",
+        )
+        paths = [
+            ROOT / "packaging/pipeline/cli.py",
+            ROOT / "packaging/pipeline/core/orchestration.py",
         ]
         for path in paths:
             self.assertTrue(path.is_file(), str(path))

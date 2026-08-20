@@ -362,7 +362,7 @@ def controller_log(store, run_id, message):
 def recorded_stage(store, run_id, stage, callback):
     started_at = utc_now()
     started = time.monotonic()
-    store.update(run_id, {"stage": stage, "stage_started_at": started_at})
+    store.update(run_id, {"stage": stage})
     controller_log(store, run_id, "stage-start\t{}".format(stage))
     try:
         result = callback()

@@ -131,7 +131,12 @@ class KylinAmd64Adapter(CandidateAdapter):
         validator = self.review_validator
         if validator is None:
             validator = _legacy("_legacy_validate_candidate_review")
-        return validator(plan, review, remote_log)
+        artifact = validator(plan, review, remote_log)
+        if not isinstance(artifact, dict):
+            raise PipelineError("Kylin review result must be an object", category="LOCAL_REVIEW_INVALID")
+        artifact = copy.deepcopy(artifact)
+        artifact.setdefault("kind", self.artifact_kind)
+        return artifact
 
     def initial_state_patch(self, plan, online):
         del online

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 from copy import deepcopy
 from pathlib import Path
 import subprocess
@@ -193,3 +194,165 @@ class ForbiddenExternalRunner:
         if normalized and normalized[0] in ("/usr/bin/ssh", "/usr/bin/scp", "ssh", "scp"):
             raise AssertionError("external transport is forbidden in unit tests")
         return subprocess.CompletedProcess(normalized, 0, "", "")
+
+
+class RecordingTransport:
+    def __init__(self, events, builder_status="BUILDER_READY"):
+        self.events = events
+        self.builder_status = builder_status
+
+    def online_doctor(self):
+        self.events.append("online_doctor")
+        return complete_online(self.builder_status)
+
+    def create_remote_run(self, plan):
+        del plan
+        self.events.append("create_remote_run")
+
+    def transfer_input(self, plan):
+        del plan
+        self.events.append("transfer_input")
+
+    def verify_remote_input(self, plan):
+        del plan
+        self.events.append("verify_remote_input")
+
+    def build_remote_candidate(self, plan):
+        del plan
+        self.events.append("build_remote_candidate")
+
+    def fetch(self, plan, staging_dir):
+        del plan
+        staging_dir = Path(staging_dir)
+        review = staging_dir / "review"
+        review.mkdir(parents=True, mode=0o700)
+        artifact = review / "candidate.bin"
+        artifact.write_bytes(b"candidate")
+        artifact.chmod(0o600)
+        self.events.append("fetch-review")
+        remote_log = staging_dir / "remote-build.log"
+        remote_log.write_text("fake remote build\n", encoding="utf-8")
+        remote_log.chmod(0o600)
+        self.events.append("fetch-log")
+        return {"review_path": str(review), "remote_log_path": str(remote_log)}
+
+
+class RecordingAdapter:
+    target_id = "kylin-amd64"
+    artifact_kind = "bin"
+    success_label = "candidate built"
+    pending_label = "candidate fetch pending"
+    not_built_label = "candidate not built"
+    online_plan_keys = ()
+
+    def __init__(self, root, events, input_status="REUSABLE", builder_status="BUILDER_READY"):
+        self.root = Path(root)
+        self.events = events
+        self.input_status = input_status
+        self.transport = RecordingTransport(events, builder_status)
+        self.transport_repo = None
+
+    def validate_target(self, payload):
+        self.events.append("validate_target")
+        if payload.get("target_id") != self.target_id:
+            raise AssertionError("fixture target id mismatch")
+        return deepcopy(payload)
+
+    def local_doctor(self, repo, target, state_root, *, ssh_config):
+        del repo, target, state_root, ssh_config
+        self.events.append("local_doctor")
+        return {
+            "controller_status": "CONTROLLER_READY",
+            "builder_status": "BUILDER_UNREACHABLE",
+            "blockers": [],
+        }
+
+    def inspect_input(self, repo, source_commit):
+        del repo
+        self.events.append("inspect_input")
+        files = (
+            complete_input_files(self.root, source_commit)
+            if self.input_status == "REUSABLE" else {}
+        )
+        return {"status": self.input_status, "files": files}
+
+    def build_plan(self, repo, target, state_root, *, run_id, ssh_config):
+        del ssh_config
+        self.events.append("build_plan")
+        plan = complete_plan(
+            self.root, run_id=run_id or "run-1", input_status=self.input_status
+        )
+        plan["repo_root"] = str(Path(repo).resolve())
+        plan["target_config"] = deepcopy(target)
+        plan["target_adapter"] = deepcopy(target)
+        plan["local_run_dir"] = str(
+            Path(state_root).resolve() / "runs" / plan["run_id"]
+        )
+        return plan
+
+    def bind_online_plan(self, plan, online):
+        del online
+        self.events.append("bind_online_plan")
+        return deepcopy(plan)
+
+    def prepare_input(self, plan, command_runner):
+        del plan, command_runner
+        self.events.append("prepare_input")
+        self.input_status = "REUSABLE"
+
+    def create_transport(self, repo, target, *, ssh_config, command_runner):
+        del target, ssh_config, command_runner
+        self.events.append("create_transport")
+        self.transport_repo = str(Path(repo).resolve())
+        return self.transport
+
+    def validate_review(self, plan, review, remote_log):
+        del plan, remote_log
+        self.events.append("validate_review")
+        artifact = Path(review) / "candidate.bin"
+        return {
+            "kind": "bin",
+            "basename": artifact.name,
+            "bytes": artifact.stat().st_size,
+            "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "path": str(artifact),
+            "relative_path": "candidate.bin",
+        }
+
+    def initial_state_patch(self, plan, online):
+        del plan, online
+        self.events.append("initial_state_patch")
+        return {"policy": None, "identity": {}}
+
+    def success_state_patch(self, artifact):
+        del artifact
+        self.events.append("success_state_patch")
+        return {}
+
+    def normalize_legacy_state(self, state):
+        self.events.append("normalize_legacy_state")
+        normalized = deepcopy(state)
+        normalized["target_id"] = "kylin-amd64"
+        normalized["target_config"] = deepcopy(state["plan"]["target_adapter"])
+        normalized["target_config_sha256"] = canonical_json_sha256_for_fixture(
+            normalized["target_config"]
+        )
+        return normalized
+
+
+class RecordingPublisher:
+    def __init__(self, events):
+        self.events = events
+
+    def __call__(self, store, run_id, fetched, artifact):
+        self.events.append("publish")
+        published = deepcopy(artifact)
+        review = store.run_dir(run_id) / "review"
+        if review.exists():
+            raise AssertionError("recording publisher would overwrite output")
+        review.mkdir(mode=0o700)
+        destination = review / artifact["basename"]
+        shutil.copy2(artifact["path"], str(destination))
+        destination.chmod(0o600)
+        published["path"] = str(destination)
+        return published

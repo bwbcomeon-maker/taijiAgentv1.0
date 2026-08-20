@@ -2077,7 +2077,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def _legacy_main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
         if args.command == "status":
@@ -2212,6 +2212,10 @@ from packaging.pipeline.adapters.kylin_amd64 import (
 from packaging.pipeline.core.registry import create_adapter
 from packaging.pipeline.core.state import RunLock as _CoreRunLock
 from packaging.pipeline.core.state import RunStateStore as _CoreRunStateStore
+from packaging.pipeline import cli as pipeline_cli
+from packaging.pipeline.core.orchestration import (
+    _publish_fetched_outputs as _core_publish_fetched_outputs,
+)
 
 bind_legacy_namespace(globals(), _legacy_real_transport, _legacy_fake_transport)
 RunStateStore = _CoreRunStateStore
@@ -2234,6 +2238,25 @@ def _facade_adapter_factory(target_id):
             )
         )
     return adapter
+
+
+def _facade_publisher(store, run_id, fetched, artifact):
+    published_paths = _core_publish_fetched_outputs(store, run_id, fetched)
+    published = dict(artifact)
+    published["path"] = str(
+        Path(published_paths["review_path"]) / artifact["relative_path"]
+    )
+    return published
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    return pipeline_cli.main(
+        argv,
+        adapter_factory=_facade_adapter_factory,
+        command_runner=_run_command,
+        input_reader=input,
+        publisher=_facade_publisher,
+    )
 
 
 if __name__ == "__main__":
