@@ -377,7 +377,7 @@ if (Test-Path -LiteralPath $parent) {{ throw 'import run already exists' }}
 New-Item -ItemType Directory -Path $parent | Out-Null
 & $git -C $repo bundle create $bundle refs/heads/{branch}
 $sha = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText($bundle + '.sha256', ($sha + '  ' + [IO.Path]::GetFileName($bundle) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($bundle + '.sha256', ($sha + '  ' + [IO.Path]::GetFileName($bundle) + [char]10), [Text.UTF8Encoding]::new($false))
 """.format(git=quote(git_path), repo=quote(product_repo), bundle=quote(bundle_path), branch=PRODUCT_BRANCH)
 
 
@@ -419,7 +419,10 @@ def _scp_argv(host, remote_path, local_path, ssh_config=None):
     argv = ["/usr/bin/scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
     if ssh_config is not None:
         argv.extend(["-F", str(Path(ssh_config).expanduser().resolve())])
-    argv.extend(["{}:{}".format(host, remote_path), str(local_path)])
+    # OpenSSH scp treats backslashes in a Windows source path as escapes.
+    # Forward slashes are accepted by Windows OpenSSH and preserve the drive.
+    scp_remote_path = str(remote_path).replace("\\", "/")
+    argv.extend(["{}:{}".format(host, scp_remote_path), str(local_path)])
     return argv
 
 
@@ -458,7 +461,9 @@ def fetch(args):
         _fail("fetch host differs from target config", "TARGET_INVALID")
     if IMPORT_ID_RE.fullmatch(args.import_id) is None:
         _fail("import id is invalid", "IMPORT_ID_INVALID")
-    import_dir = _private_dir(Path(args.state_root).expanduser() / "imports" / args.import_id, create=True)
+    import_path = Path(args.state_root).expanduser() / "imports" / args.import_id
+    import_was_present = import_path.exists() or import_path.is_symlink()
+    import_dir = _private_dir(import_path, create=not import_was_present)
     tip = _commit_sha(args.tip, "tip")
     _commit_sha(args.base, "base")
     remote_dir = target["remote_root"] + "\\" + tip + "\\" + args.import_id + "\\import"
@@ -466,13 +471,27 @@ def fetch(args):
     remote_bundle = remote_dir + "\\" + bundle_name
     script = _encoded_product_bundle_script(args.product_repo, remote_bundle, target["git"])
     ssh = powershell_argv(target["host_alias"], target["powershell"], script, args.ssh_config)
-    _run(ssh, check=True)
+    if not import_was_present:
+        _run(ssh, check=True)
     local_bundle = import_dir / bundle_name
     local_sidecar = import_dir / (bundle_name + ".sha256")
-    _run(_scp_argv(target["host_alias"], remote_bundle, local_bundle, args.ssh_config), check=True)
-    _run(_scp_argv(target["host_alias"], remote_bundle + ".sha256", local_sidecar, args.ssh_config), check=True)
-    local_bundle.chmod(0o600)
-    local_sidecar.chmod(0o600)
+    for remote_path, local_path, label in (
+        (remote_bundle, local_bundle, "bundle"),
+        (remote_bundle + ".sha256", local_sidecar, "sidecar"),
+    ):
+        if local_path.exists() or local_path.is_symlink():
+            metadata = local_path.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.getuid()
+            ):
+                _fail("{} staging file is not a private regular file".format(label))
+            local_path.chmod(0o600)
+            continue
+        _run(_scp_argv(target["host_alias"], remote_path, local_path, args.ssh_config), check=True)
+        local_path.chmod(0o600)
     print(json.dumps({"import_dir": str(import_dir), "bundle": bundle_name}, sort_keys=True))
 
 

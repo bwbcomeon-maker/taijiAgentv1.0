@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,7 +186,57 @@ class WindowsProductImportTests(unittest.TestCase):
         self.assertIn("refs/heads/codex/windows-local", script)
         scp = helper._scp_argv("windows-direct", r"D:\tw\x.bundle", "/tmp/x.bundle")
         self.assertEqual(scp[0], "/usr/bin/scp")
+        self.assertEqual(scp[-2], "windows-direct:D:/tw/x.bundle")
         self.assertNotIn("shell=True", script)
+
+    def test_remote_sidecar_script_uses_lf_only(self):
+        helper = load_helper(self)
+        script = helper._encoded_product_bundle_script(
+            r"D:\tw\source\taijiAgentv1.0",
+            r"D:\tw\taiji-builds\tip\run\import\windows-product-tip.bundle",
+            r"C:\Program Files\Git\cmd\git.exe",
+        )
+        self.assertIn("[char]10", script)
+        self.assertNotIn("[Environment]::NewLine", script)
+
+    def test_fetch_resumes_existing_staging_without_remote_rebuild(self):
+        helper = load_helper(self)
+        with tempfile.TemporaryDirectory(prefix="taiji-product-import-resume-") as temporary:
+            state = Path(temporary)
+            import_dir = state / "imports" / "resume-1"
+            import_dir.mkdir(parents=True, mode=0o700)
+            tip = "a" * 40
+            bundle = import_dir / "windows-product-{}.bundle".format(tip)
+            bundle.write_bytes(b"preserved bundle")
+            bundle.chmod(0o644)
+            calls = []
+
+            def fake_run(argv, check=True):
+                del check
+                calls.append(list(argv))
+                destination = Path(argv[-1])
+                digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+                destination.write_text(
+                    "{}  {}\n".format(digest, bundle.name), encoding="utf-8"
+                )
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+            args = SimpleNamespace(
+                target_config=str(ROOT / "packaging/pipeline/targets/windows-x64.json"),
+                import_id="resume-1",
+                host="windows-direct",
+                product_repo=r"D:\tw\source\taijiAgentv1.0",
+                base="b" * 40,
+                tip=tip,
+                state_root=str(state),
+                ssh_config=None,
+            )
+            with mock.patch.object(helper, "_run", side_effect=fake_run):
+                helper.fetch(args)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "/usr/bin/scp")
+            self.assertEqual(calls[0][-2], "windows-direct:D:/tw/taiji-builds/{}/resume-1/import/{}.sha256".format(tip, bundle.name))
+            self.assertEqual(bundle.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":
