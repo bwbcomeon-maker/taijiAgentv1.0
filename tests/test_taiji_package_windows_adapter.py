@@ -4,8 +4,10 @@ import copy
 import hashlib
 import importlib
 import json
+import runpy
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -256,6 +258,30 @@ class WindowsAdapterContractTests(unittest.TestCase):
         with self.assertRaises(pipeline_error) as context:
             adapter.create_transport(Path("/tmp/repo"), EXPECTED_TARGET, ssh_config=None, command_runner=lambda argv: None)
         self.assertEqual(context.exception.category, "BUILDER_UNREACHABLE")
+
+    def test_facade_windows_factory_wires_real_transport_at_call_time(self):
+        facade = runpy.run_path(
+            str(ROOT / "scripts/taiji-package-candidate.py"),
+            run_name="taiji_package_facade_test",
+        )
+        calls = []
+
+        class RecordingTransport:
+            def __init__(self, target, *, ssh_config, command_runner):
+                calls.append((target, ssh_config, command_runner))
+
+        runner = object()
+        with patch.dict(
+            facade["_facade_adapter_factory"].__globals__,
+            {"WindowsSshTransport": RecordingTransport},
+        ):
+            adapter = facade["_facade_adapter_factory"]("windows-x64")
+            transport = adapter.create_transport(
+                Path("/tmp/repo"), EXPECTED_TARGET,
+                ssh_config="/tmp/ssh-config", command_runner=runner,
+            )
+        self.assertIsInstance(transport, RecordingTransport)
+        self.assertEqual(calls, [(EXPECTED_TARGET, "/tmp/ssh-config", runner)])
 
     def test_online_plan_binding_adds_only_frozen_cache_and_host_identity(self):
         _registry, adapter_module = load_windows_contract()

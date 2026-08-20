@@ -2216,6 +2216,7 @@ from packaging.pipeline import cli as pipeline_cli
 from packaging.pipeline.core.orchestration import (
     _publish_fetched_outputs as _core_publish_fetched_outputs,
 )
+from packaging.pipeline.adapters.windows_ssh import WindowsSshTransport
 
 bind_legacy_namespace(globals(), _legacy_real_transport, _legacy_fake_transport)
 RunStateStore = _CoreRunStateStore
@@ -2235,6 +2236,14 @@ def _facade_adapter_factory(target_id):
         adapter.review_validator = (
             lambda plan, review, remote_log: validate_candidate_review(
                 plan, review, remote_log
+            )
+        )
+    elif target_id == "windows-x64":
+        adapter.transport_factory = (
+            lambda target, *, ssh_config, command_runner: WindowsSshTransport(
+                target,
+                ssh_config=ssh_config,
+                command_runner=command_runner,
             )
         )
     return adapter

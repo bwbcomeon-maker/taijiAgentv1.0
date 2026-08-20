@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -465,7 +466,14 @@ class WindowsX64Adapter(CandidateAdapter):
 
     def create_transport(self, repo, target, *, ssh_config, command_runner):
         if self.transport_factory is not None:
-            return self.transport_factory(repo, target, ssh_config, command_runner)
+            parameters = inspect.signature(self.transport_factory).parameters
+            if "repo" in parameters or len(parameters) >= 4:
+                return self.transport_factory(repo, target, ssh_config, command_runner)
+            return self.transport_factory(
+                target,
+                ssh_config=ssh_config,
+                command_runner=command_runner,
+            )
         del repo, target, ssh_config, command_runner
         _pipeline_error("real Windows transport is not enabled in fake phase", "BUILDER_UNREACHABLE")
 
