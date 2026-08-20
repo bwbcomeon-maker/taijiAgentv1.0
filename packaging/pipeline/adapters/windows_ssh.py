@@ -75,6 +75,7 @@ $remoteRoot = {remote_root}
 $cacheRoot = {cache_root}
 $minimumBytes = {minimum_bytes}
 $drive = Get-PSDrive -Name $cacheRoot.Substring(0, 1)
+$driveInfo = New-Object System.IO.DriveInfo -ArgumentList ($cacheRoot.Substring(0, 1) + ':\\')
 $cacheChecks = @(
   [ordered]@{{ name = 'npm-cache'; present = Test-Path -LiteralPath (Join-Path $cacheRoot 'npm') }},
   [ordered]@{{ name = 'electron-39.8.10-win32-x64'; present = Test-Path -LiteralPath (Join-Path $cacheRoot 'electron/electron-v39.8.10-win32-x64.zip') }},
@@ -91,7 +92,7 @@ foreach ($pair in @(
 }}
 $blockers = @()
 if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {{ $blockers += 'WINDOWS_ARCHITECTURE_INVALID' }}
-if ($drive.FileSystem -ne 'NTFS') {{ $blockers += 'WINDOWS_FILESYSTEM_INVALID' }}
+if ($driveInfo.DriveFormat -ne 'NTFS') {{ $blockers += 'WINDOWS_FILESYSTEM_INVALID' }}
 if ($drive.Free -lt $minimumBytes) {{ $blockers += 'WINDOWS_FREE_SPACE_LOW' }}
 if (@($toolChecks | Where-Object {{ -not $_.present }}).Count -gt 0) {{ $blockers += 'WINDOWS_TOOL_MISSING' }}
 if (@($cacheChecks | Where-Object {{ -not $_.present }}).Count -gt 0) {{ $blockers += 'WINDOWS_CACHE_MISSING' }}
@@ -109,7 +110,7 @@ if (@($cacheChecks | Where-Object {{ -not $_.present }}).Count -gt 0) {{ $blocke
   npm_path = $path_npm
   python_path = $path_python
   iscc_path = $path_iscc
-  filesystem = $drive.FileSystem
+  filesystem = $driveInfo.DriveFormat
   free_bytes = [int64]$drive.Free
   cache_root = $cacheRoot
   cache_checks = @($cacheChecks)
@@ -212,7 +213,7 @@ def parse_product_probe(payload):
 
 def _invoke_runner(runner, argv):
     if runner is None:
-        return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, check=False)
     try:
         signature = inspect.signature(runner)
         accepts_kwargs = any(

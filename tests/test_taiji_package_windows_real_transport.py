@@ -4,6 +4,7 @@ import base64
 import json
 import subprocess
 import unittest
+from unittest import mock
 
 from packaging.pipeline.adapters import windows_ssh
 
@@ -35,6 +36,11 @@ class WindowsRealTransportTests(unittest.TestCase):
         script = windows_ssh.builder_probe_script(TARGET)
         self.assertNotIn(r"D:\tw\source\taijiAgentv1.0", script)
         self.assertNotIn("git bundle", script)
+
+    def test_builder_probe_reads_filesystem_format_from_drive_info(self):
+        script = windows_ssh.builder_probe_script(TARGET)
+        self.assertIn("DriveInfo", script)
+        self.assertIn("DriveFormat", script)
 
     def test_product_probe_never_checks_or_mutates_builder_run(self):
         script = windows_ssh.product_probe_script(
@@ -79,6 +85,27 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertEqual(result["builder_status"], "BUILDER_READY")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "/usr/bin/ssh")
+
+    def test_real_runner_keeps_windows_stderr_as_bytes(self):
+        payload = json.dumps({
+            "schema": "taiji-windows-builder-doctor/v1",
+            "architecture": "AMD64",
+            "filesystem": "NTFS",
+            "free_bytes": 30 * 1024 * 1024 * 1024,
+            "cache_checks": [],
+            "blockers": [],
+        }).encode("ascii")
+        completed = subprocess.CompletedProcess(
+            ["/usr/bin/ssh"], 0, stdout=payload, stderr=b"\xd5\xce Windows warning"
+        )
+        with mock.patch.object(
+            windows_ssh.subprocess, "run", return_value=completed
+        ) as run:
+            result = windows_ssh.WindowsSshTransport(
+                TARGET, ssh_config=None, command_runner=None
+            ).online_doctor()
+        self.assertEqual(result["builder_status"], "BUILDER_READY")
+        self.assertFalse(run.call_args.kwargs["text"])
 
 
 if __name__ == "__main__":
