@@ -53,3 +53,13 @@ def load_target_reference(path, expected_target_id=None):
     if expected_target_id is not None and payload.get("target_id") != expected_target_id:
         _target_invalid("target_id does not match the registered target")
     return payload
+
+
+def create_adapter(target_id):
+    from ..adapters.kylin_amd64 import KylinAmd64Adapter
+
+    factories = {"kylin-amd64": KylinAmd64Adapter}
+    factory = factories.get(target_id)
+    if factory is None:
+        _target_invalid("no adapter is registered for target: {}".format(target_id))
+    return factory()
