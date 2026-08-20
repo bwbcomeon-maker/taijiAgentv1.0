@@ -20,6 +20,7 @@ SKILL_ROOT = REPO_ROOT / ".agents/skills/taiji-kylin-packaging"
 DOCTOR = SKILL_ROOT / "scripts/doctor.py"
 PACKAGER = REPO_ROOT / "scripts/package-taiji-kylin-packaging-skill.py"
 INTERFACE = REPO_ROOT / "packaging/linux/taiji-packaging-interface.json"
+RUNBOOK = REPO_ROOT / "docs/runbooks/taiji-kylin-uos-offline-delivery.md"
 COMMIT = "a" * 40
 
 SOURCE_FILES = {
@@ -231,6 +232,35 @@ class SkillSourceContractTests(unittest.TestCase):
             "Doctor 的 repo 模式只能把 99 报告为下一步",
         ):
             self.assertIn(required, content)
+
+    def test_candidate_only_pipeline_is_documented_with_narrow_authorization(self) -> None:
+        for path in (SKILL_ROOT / "SKILL.md", RUNBOOK):
+            content = path.read_text(encoding="utf-8")
+            for required in (
+                "./taiji-package doctor",
+                "./taiji-package doctor --online",
+                "./taiji-package plan",
+                "./taiji-package build",
+                "./taiji-package status --run <run-id>",
+                "./taiji-package fetch --run <run-id>",
+                "CONTROLLER_READY",
+                "BUILDER_UNREACHABLE",
+                "FETCH_PENDING",
+                "SSH 与传输",
+                "依赖与网络",
+                "候选构建",
+                "候选 DEB 已构建",
+                "不安装、不验收、不签名、不发布",
+                "黄金编排器",
+            ):
+                self.assertIn(required, content, "{} missing {!r}".format(path, required))
+        runbook = RUNBOOK.read_text(encoding="utf-8")
+        for local_status in (
+            "已实现，本地模拟通过",
+            "真实麒麟连接未验证",
+            "候选 DEB 未构建",
+        ):
+            self.assertIn(local_status, runbook)
 
     def test_evals_use_current_object_schema_and_cover_pressure_cases(self) -> None:
         payload = json.loads((SKILL_ROOT / "evals/evals.json").read_text(encoding="utf-8"))

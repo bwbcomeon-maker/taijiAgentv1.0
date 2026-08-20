@@ -1,0 +1,30 @@
+{
+  "entries": [
+    {
+      "architecture": "any",
+      "id": "npm-cache",
+      "relative_path": "npm",
+      "required_members": ["_cacache"],
+      "type": "directory",
+      "version": "package-lock-bound"
+    },
+    {
+      "architecture": "x64",
+      "id": "electron-39.8.10-win32-x64",
+      "relative_path": "electron/electron-v39.8.10-win32-x64.zip",
+      "required_members": ["electron.exe"],
+      "type": "regular-file",
+      "version": "39.8.10"
+    },
+    {
+      "architecture": "x64",
+      "id": "private-python-runtime",
+      "relative_path": "python-runtime",
+      "required_members": ["python.exe", "python311._pth"],
+      "type": "directory",
+      "version": "3.11"
+    }
+  ],
+  "schema": "taiji-windows-cache-requirements/v1",
+  "target_id": "windows-x64"
+}

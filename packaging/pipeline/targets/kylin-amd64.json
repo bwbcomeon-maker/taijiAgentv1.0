@@ -1,0 +1,11 @@
+{
+  "architecture": "amd64",
+  "host_alias": "kylin",
+  "minimum_free_gib": 12,
+  "minimum_free_inodes": 100000,
+  "remote_account_home": "/home/kylin",
+  "remote_root": "/home/kylin/taiji-builds",
+  "remote_user": "kylin",
+  "schema": "taiji-package-target/v1",
+  "target_id": "kylin-amd64"
+}

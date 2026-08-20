@@ -6,7 +6,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-import py_compile
 import runpy
 import stat
 import subprocess
@@ -31,6 +30,7 @@ INSTALL_OBSERVER = (
     ROOT / "tools/taiji-desktop-acceptance/observe-single-deb-install.py"
 )
 GOLDEN_ORCHESTRATOR = ROOT / "scripts/taiji-linux-golden-orchestrator.py"
+CANDIDATE_PIPELINE = ROOT / "scripts/taiji-package-candidate.py"
 CHALLENGE_ENVELOPE_HELPER = ROOT / "scripts/taiji-challenge-envelope.py"
 RELEASE_TEST_RUNNER = ROOT / "scripts/run-taiji-release-python-tests.py"
 FORMAL_BUILDER = ROOT / "taijiagent 打包交付/00_制包机_生成离线交付包.sh"
@@ -73,6 +73,7 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "scripts/assemble-taiji-release-evidence.py",
     ROOT / "scripts/validate-taiji-release-evidence.py",
     GOLDEN_ORCHESTRATOR,
+    CANDIDATE_PIPELINE,
     CHALLENGE_ENVELOPE_HELPER,
     RELEASE_TEST_RUNNER,
     FORMAL_BUILD_DRIVER,
@@ -82,6 +83,31 @@ PYTHON38_RUNTIME_SOURCES = (
     AGENT_PARALLEL_RUNNER,
     ROOT / "tests/test_linux_desktop_packaging_static.py",
 )
+CANDIDATE_CORE_GRAMMAR_ENTRYPOINTS = (
+    ROOT / "scripts/taiji-package-candidate.py",
+    ROOT / "packaging/pipeline/__init__.py",
+    ROOT / "packaging/pipeline/cli.py",
+    ROOT / "packaging/pipeline/core/__init__.py",
+    ROOT / "packaging/pipeline/core/errors.py",
+    ROOT / "packaging/pipeline/core/models.py",
+    ROOT / "packaging/pipeline/core/orchestration.py",
+    ROOT / "packaging/pipeline/core/registry.py",
+    ROOT / "packaging/pipeline/core/state.py",
+    ROOT / "packaging/pipeline/adapters/__init__.py",
+    ROOT / "packaging/pipeline/adapters/base.py",
+    ROOT / "packaging/pipeline/adapters/kylin_amd64.py",
+    ROOT / "packaging/windows/__init__.py",
+    ROOT / "packaging/windows/verify_legacy_assets.py",
+    ROOT / "packaging/pipeline/adapters/windows_x64.py",
+    ROOT / "tests/windows_pipeline_fixtures.py",
+    ROOT / "tests/test_windows_legacy_asset_provenance.py",
+    ROOT / "tests/test_taiji_package_windows_adapter.py",
+    ROOT / "tests/test_taiji_package_windows_transport.py",
+    ROOT / "tests/test_windows_packaging_script_contract.py",
+)
+PYTHON38_GRAMMAR_ENTRYPOINTS = PYTHON38_ENTRYPOINTS + CANDIDATE_CORE_GRAMMAR_ENTRYPOINTS
+
+
 def extract_single_deb_publisher_python() -> str:
     source = SINGLE_DEB_PUBLISHER.read_text(encoding="utf-8")
     marker = "/usr/bin/python3 -I -B - \"$@\" <<'PY'\n"
@@ -350,12 +376,8 @@ def main() -> int:
             "exec",
         )
         exercise_sealed_snapshot_python(temp_root)
-        for index, entrypoint in enumerate(PYTHON38_ENTRYPOINTS):
-            py_compile.compile(
-                str(entrypoint),
-                cfile=str(temp_root / f"entrypoint-{index}.pyc"),
-                doraise=True,
-            )
+        for entrypoint in PYTHON38_GRAMMAR_ENTRYPOINTS:
+            compile(entrypoint.read_bytes(), str(entrypoint), "exec")
 
         loaded_entrypoints = {
             entrypoint: runpy.run_path(str(entrypoint))
