@@ -1,4 +1,4 @@
-"""Kylin amd64 adapter boundary and legacy state normalization."""
+"""Kylin amd64 adapter boundary and Kylin-specific execution seams."""
 
 import copy
 import posixpath
@@ -8,6 +8,50 @@ from pathlib import Path
 from ..core.errors import PipelineError
 from ..core.models import canonical_json_sha256
 from .base import CandidateAdapter
+
+
+_LEGACY_NAMESPACE = None
+_LEGACY_REAL_TRANSPORT = None
+_LEGACY_FAKE_TRANSPORT = None
+
+
+def bind_legacy_namespace(namespace, real_transport, fake_transport):
+    """Bind the still-compatible facade implementation during extraction.
+
+    The binding is deliberately private to the facade bootstrap path.  The
+    adapter owns the public transport types and hook dispatch; the binding
+    only keeps the Task 4 legacy CLI executable until the common orchestrator
+    replaces it in the next plan step.
+    """
+
+    global _LEGACY_NAMESPACE, _LEGACY_REAL_TRANSPORT, _LEGACY_FAKE_TRANSPORT
+    _LEGACY_NAMESPACE = namespace
+    _LEGACY_REAL_TRANSPORT = real_transport
+    _LEGACY_FAKE_TRANSPORT = fake_transport
+
+
+def _legacy(name):
+    if _LEGACY_NAMESPACE is None or name not in _LEGACY_NAMESPACE:
+        raise PipelineError("Kylin legacy implementation is not bound", category="PLAN_INVALID")
+    return _LEGACY_NAMESPACE[name]
+
+
+class RealSshTransport:
+    """Compatibility type whose implementation is supplied by the facade."""
+
+    def __new__(cls, *args, **kwargs):
+        if _LEGACY_REAL_TRANSPORT is None:
+            raise PipelineError("Kylin transport implementation is not bound", category="PLAN_INVALID")
+        return _LEGACY_REAL_TRANSPORT(*args, **kwargs)
+
+
+class FakeSshTransport:
+    """Compatibility type whose deterministic implementation is facade-bound."""
+
+    def __new__(cls, *args, **kwargs):
+        if _LEGACY_FAKE_TRANSPORT is None:
+            raise PipelineError("Kylin fake transport implementation is not bound", category="PLAN_INVALID")
+        return _LEGACY_FAKE_TRANSPORT(*args, **kwargs)
 
 
 class KylinAmd64Adapter(CandidateAdapter):
@@ -56,6 +100,49 @@ class KylinAmd64Adapter(CandidateAdapter):
         if not isinstance(plan, dict) or not isinstance(online, dict) or online.get("builder_status") != "BUILDER_READY":
             raise PipelineError("Kylin online plan is not ready", category="ONLINE_DOCTOR_BLOCKED")
         return copy.deepcopy(plan)
+
+    def local_doctor(self, repo, target, state_root, *, ssh_config):
+        return _legacy("_legacy_local_doctor")(
+            repo, target, state_root, ssh_config=ssh_config
+        )
+
+    def inspect_input(self, repo, source_commit):
+        return _legacy("_legacy_inspect_builder_input")(repo, source_commit)
+
+    def build_plan(self, repo, target, state_root, *, run_id, ssh_config):
+        return _legacy("_legacy_build_candidate_plan")(
+            repo, target, state_root, run_id=run_id, ssh_config=ssh_config
+        )
+
+    def prepare_input(self, plan, command_runner):
+        return _legacy("_legacy_run_builder_input_preparer")(
+            plan, command_runner
+        )
+
+    def create_transport(self, repo, target, *, ssh_config, command_runner):
+        factory = self.transport_factory
+        if factory is None:
+            return RealSshTransport(
+                repo, target, ssh_config=ssh_config, command_runner=command_runner
+            )
+        return factory(repo, target, ssh_config, command_runner)
+
+    def validate_review(self, plan, review, remote_log):
+        validator = self.review_validator
+        if validator is None:
+            validator = _legacy("_legacy_validate_candidate_review")
+        return validator(plan, review, remote_log)
+
+    def initial_state_patch(self, plan, online):
+        del online
+        policy_sha = plan.get("canonical_policy_sha256")
+        policy = None
+        if policy_sha is not None:
+            policy = {"kind": "canonical-compatibility-policy", "sha256": policy_sha}
+        return {"identity": {}, "policy": policy}
+
+    def success_state_patch(self, artifact):
+        return {"deb": copy.deepcopy(artifact)}
 
     def normalize_legacy_state(self, state):
         normalized = copy.deepcopy(state)

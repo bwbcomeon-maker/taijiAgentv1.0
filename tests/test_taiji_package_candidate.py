@@ -19,6 +19,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.taiji_package_fixtures import complete_v2_payload
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = ROOT / "taiji-package"
@@ -326,24 +328,18 @@ class CandidatePipelineContractTests(unittest.TestCase):
         self.assertTrue(CANDIDATE.is_file(), "candidate pipeline module is missing")
         module = load_candidate()
         with tempfile.TemporaryDirectory(prefix="taiji-package-state-") as temporary:
+            root = Path(temporary)
             state_root = Path(temporary) / "state"
             store = module.RunStateStore(state_root)
 
-            created = store.create(
-                "run-1",
-                {
-                    "source_commit": "a" * 40,
-                    "stage": "CREATED",
-                    "host_alias": "kylin",
-                },
-            )
+            created = store.create("run-1", complete_v2_payload(root))
             loaded = store.load("run-1")
 
             self.assertEqual(created, loaded)
-            self.assertEqual(loaded["schema"], "taiji-package-run-state/v1")
+            self.assertEqual(loaded["schema"], "taiji-package-run-state/v2")
             self.assertEqual(loaded["run_id"], "run-1")
-            self.assertEqual(loaded["source_commit"], "a" * 40)
-            self.assertEqual(loaded["stage"], "CREATED")
+            self.assertEqual(loaded["source"]["commit"], "a" * 40)
+            self.assertEqual(loaded["stage"], "PLANNED")
             run_dir = state_root / "runs/run-1"
             self.assertEqual(stat.S_IMODE(run_dir.stat().st_mode), 0o700)
             self.assertEqual(
@@ -354,7 +350,7 @@ class CandidatePipelineContractTests(unittest.TestCase):
             self.assertEqual(updated["stage"], "FETCH_PENDING")
             self.assertEqual(store.load("run-1")["stage"], "FETCH_PENDING")
             with self.assertRaises(module.PipelineError):
-                store.create("run-1", {"stage": "CREATED"})
+                store.create("run-1", complete_v2_payload(root))
             with self.assertRaises(module.PipelineError):
                 store.load("../escape")
 
@@ -369,13 +365,13 @@ class CandidatePipelineContractTests(unittest.TestCase):
             store = module.RunStateStore(linked_root)
 
             with self.assertRaises(module.PipelineError):
-                store.create("run-link", {"stage": "CREATED"})
+                store.create("run-link", complete_v2_payload(root, run_id="run-link"))
 
             self.assertEqual(list(actual_root.iterdir()), [])
 
             actual_load_root = root / "actual-load-state"
             module.RunStateStore(actual_load_root).create(
-                "run-load-link", {"stage": "CREATED"}
+                "run-load-link", complete_v2_payload(root, run_id="run-load-link")
             )
             linked_load_root = root / "linked-load-state"
             linked_load_root.symlink_to(actual_load_root, target_is_directory=True)
@@ -387,7 +383,16 @@ class CandidatePipelineContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="taiji-status-bound-") as temporary:
             root = Path(temporary)
             store = module.RunStateStore(root / "state")
-            store.create("status-run", {"stage": "FETCH_PENDING"})
+            store.create(
+                "status-run",
+                complete_v2_payload(
+                    root,
+                    run_id="status-run",
+                    stage="FETCH_PENDING",
+                    remote_build_succeeded=True,
+                    fetch_allowed=True,
+                ),
+            )
             output = io.StringIO()
 
             with contextlib.redirect_stdout(output):
@@ -686,16 +691,17 @@ class CandidatePipelineContractTests(unittest.TestCase):
                 run_id="target-drift",
                 ssh_config=write_ssh_config(root / "ssh_config"),
             )
-            module.RunStateStore(root / "state").create(
-                "target-drift",
-                {
-                    "stage": "FETCH_PENDING",
-                    "source_commit": plan["source_commit"],
-                    "remote_build_succeeded": True,
-                    "fetch_allowed": True,
-                    "plan": plan,
-                },
+            payload = complete_v2_payload(
+                root,
+                run_id="target-drift",
+                input_status="MISSING",
+                stage="FETCH_PENDING",
+                remote_build_succeeded=True,
+                fetch_allowed=True,
             )
+            payload["plan"] = dict(plan)
+            payload["plan"]["input"] = payload["input"]
+            module.RunStateStore(root / "state").create("target-drift", payload)
             drifted = dict(target)
             drifted["minimum_free_gib"] += 1
             drifted_path = root / "drifted-target.json"

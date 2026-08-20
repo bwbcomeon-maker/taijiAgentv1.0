@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import packaging.pipeline as _pipeline_package
 from packaging.pipeline.core.errors import PipelineError
+from packaging.pipeline.core.models import new_run_state
 
 
 _EXPECTED_PIPELINE = (_REPO_ROOT / "packaging/pipeline/__init__.py").resolve()
@@ -473,7 +475,7 @@ def _recorded_stage(
 ) -> Any:
     started_at = utc_now()
     started = time.monotonic()
-    store.update(run_id, {"stage": stage, "stage_started_at": started_at})
+    store.update(run_id, {"stage": stage})
     _controller_log(store, run_id, "stage-start\t{}".format(stage))
     try:
         result = callback()
@@ -1064,30 +1066,11 @@ def _fetch_staging_path(store: RunStateStore, run_id: str) -> Path:
 
 
 def _initial_run_state(plan: Dict[str, Any], online: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "source_commit": plan["source_commit"],
-        "canonical_policy_sha256": plan["canonical_policy_sha256"],
-        "stage": "PLANNED",
-        "status_label": "候选 DEB 未构建",
-        "started_at": utc_now(),
-        "finished_at": None,
-        "host_alias": plan["host_alias"],
-        "remote_run_dir": plan["remote_run_dir"],
-        "local_run_dir": plan["local_run_dir"],
-        "input": plan["input"],
-        "online_doctor": online,
-        "remote_build_succeeded": False,
-        "fetch_allowed": False,
-        "deb": None,
-        "failure": None,
-        "stage_history": [],
-        "lock": {"status": "released"},
-        "logs": {
-            "controller": str(Path(plan["local_run_dir"]) / "controller.log"),
-            "remote_build": str(Path(plan["local_run_dir"]) / "remote-build.log"),
-        },
-        "plan": plan,
-    }
+    adapter = _facade_adapter_factory(plan.get("target_id", "kylin-amd64"))
+    state_plan = deepcopy(plan)
+    if state_plan.get("input", {}).get("status") == "MISSING":
+        state_plan["input"] = {"status": "MISSING", "files": {}}
+    return new_run_state(state_plan, online, adapter)
 
 
 def _failure_payload(exc: PipelineError) -> Dict[str, Any]:
@@ -1138,14 +1121,20 @@ def run_candidate_build(
                     Path(plan["repo_root"]), str(plan["source_commit"])
                 )
 
-            input_identity = _recorded_stage(store, run_id, "INPUT_VERIFIED", verify_input)
+            input_identity = verify_input()
             if input_identity["status"] != "REUSABLE":
                 raise PipelineError(
                     "builder input is not reusable after preparation",
                     category="INPUT_VERIFICATION_FAILED",
                 )
-            plan["input"] = input_identity
-            store.update(run_id, {"input": input_identity, "plan": plan})
+            manifest_sha256 = input_identity["files"]["manifest"]["sha256"]
+            bound_state = store.bind_verified_input(
+                run_id, input_identity, manifest_sha256
+            )
+            plan = bound_state["plan"]
+            _recorded_stage(
+                store, run_id, "INPUT_VERIFIED", lambda: None
+            )
 
             _recorded_stage(
                 store, run_id, "REMOTE_RUN_CREATED", lambda: transport.create_remote_run(plan)
@@ -1192,6 +1181,7 @@ def run_candidate_build(
             )
             final_deb = Path(published["review_path"]) / candidate["relative_path"]
             candidate["path"] = str(final_deb)
+            candidate["kind"] = "deb"
             store.update(
                 run_id,
                 {
@@ -1200,6 +1190,7 @@ def run_candidate_build(
                     "finished_at": utc_now(),
                     "fetch_allowed": False,
                     "failure": None,
+                    "artifact": candidate,
                     "deb": candidate,
                 },
             )
@@ -1268,6 +1259,7 @@ def fetch_candidate(
             candidate["path"] = str(
                 Path(published["review_path"]) / candidate["relative_path"]
             )
+            candidate["kind"] = "deb"
             store.update(
                 run_id,
                 {
@@ -1276,6 +1268,7 @@ def fetch_candidate(
                     "finished_at": utc_now(),
                     "fetch_allowed": False,
                     "failure": None,
+                    "artifact": candidate,
                     "deb": candidate,
                 },
             )
@@ -1970,14 +1963,31 @@ def build_candidate_plan(
             },
         ]
     )
+    source_tree_result = _git(repo_root, "rev-parse", "HEAD^{tree}")
+    source_tree = source_tree_result.stdout.strip() if source_tree_result.returncode == 0 else ""
+    controller_commit_result = _git(ROOT, "rev-parse", "HEAD")
+    controller_commit = (
+        controller_commit_result.stdout.strip()
+        if controller_commit_result.returncode == 0
+        else ""
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", source_tree) is None:
+        raise PipelineError("source tree must be a full SHA", category="PLAN_INVALID")
+    if re.fullmatch(r"[0-9a-f]{40}", controller_commit) is None:
+        raise PipelineError("controller commit must be a full SHA", category="PLAN_INVALID")
     return {
         "schema": "taiji-package-candidate-plan/v1",
         "run_id": actual_run_id,
         "repo_root": str(repo_root),
         "source_commit": source_commit,
+        "source_branch": doctor["branch"],
+        "source_tree": source_tree,
+        "controller_commit": controller_commit,
         "canonical_policy_sha256": _canonical_policy_sha256(repo_root),
         "target_id": target["target_id"],
+        "target_config": dict(target),
         "target_adapter": dict(target),
+        "architecture": target["architecture"],
         "host_alias": target["host_alias"],
         "remote_run_dir": remote_dir,
         "local_run_dir": str(local_run_dir),
@@ -2183,6 +2193,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except PipelineError as exc:
         print("BLOCKED\t{}\t{}".format(exc.category, exc), file=sys.stderr)
         return 2
+
+
+_legacy_local_doctor = local_doctor
+_legacy_inspect_builder_input = inspect_builder_input
+_legacy_build_candidate_plan = build_candidate_plan
+_legacy_run_builder_input_preparer = _run_builder_input_preparer
+_legacy_validate_candidate_review = validate_candidate_review
+_legacy_real_transport = RealSshTransport
+_legacy_fake_transport = FakeSshTransport
+
+from packaging.pipeline.adapters.kylin_amd64 import (
+    FakeSshTransport as _KylinFakeSshTransport,
+    KylinAmd64Adapter,
+    RealSshTransport as _KylinRealSshTransport,
+    bind_legacy_namespace,
+)
+from packaging.pipeline.core.registry import create_adapter
+from packaging.pipeline.core.state import RunLock as _CoreRunLock
+from packaging.pipeline.core.state import RunStateStore as _CoreRunStateStore
+
+bind_legacy_namespace(globals(), _legacy_real_transport, _legacy_fake_transport)
+RunStateStore = _CoreRunStateStore
+RunLock = _CoreRunLock
+RealSshTransport = _KylinRealSshTransport
+FakeSshTransport = _KylinFakeSshTransport
+
+
+def _facade_adapter_factory(target_id):
+    adapter = create_adapter(target_id)
+    if target_id == "kylin-amd64":
+        adapter.transport_factory = (
+            lambda repo, target, ssh_config, command_runner: RealSshTransport(
+                repo, target, ssh_config=ssh_config, command_runner=command_runner
+            )
+        )
+        adapter.review_validator = (
+            lambda plan, review, remote_log: validate_candidate_review(
+                plan, review, remote_log
+            )
+        )
+    return adapter
 
 
 if __name__ == "__main__":

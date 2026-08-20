@@ -20,6 +20,7 @@ from tests.test_taiji_package_candidate import (
     make_doctor_repo,
     write_ssh_config,
 )
+from tests.taiji_package_fixtures import complete_v2_payload
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -417,8 +418,9 @@ class CandidateTransportContractTests(unittest.TestCase):
             self.assertEqual(state["status_label"], "候选 DEB 已构建")
             self.assertTrue(state["remote_build_succeeded"])
             self.assertFalse(state["fetch_allowed"])
-            self.assertEqual(state["source_commit"], source_commit)
-            self.assertRegex(state["canonical_policy_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(state["source"]["commit"], source_commit)
+            self.assertRegex(state["policy"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(state["artifact"]["sha256"], file_sha256(Path(state["artifact"]["path"])))
             self.assertEqual(state["deb"]["sha256"], file_sha256(Path(state["deb"]["path"])))
             self.assertEqual(state["lock"]["status"], "released")
             passed_stages = [item["stage"] for item in state["stage_history"]]
@@ -526,31 +528,33 @@ class CandidateTransportContractTests(unittest.TestCase):
             repo, _target, _ssh_config, plan = make_plan(module, root)
             store = module.RunStateStore(root / "state")
 
-            store.create(
-                "not-remote-success",
-                {
-                    "stage": "FAILED",
-                    "source_commit": plan["source_commit"],
-                    "remote_build_succeeded": False,
-                    "fetch_allowed": False,
-                    "plan": plan,
-                },
+            not_remote = complete_v2_payload(
+                root,
+                run_id="not-remote-success",
+                input_status="MISSING",
+                stage="FAILED",
+                remote_build_succeeded=False,
+                fetch_allowed=False,
             )
+            not_remote["plan"] = dict(plan)
+            not_remote["plan"]["input"] = not_remote["input"]
+            store.create("not-remote-success", not_remote)
             untouched = module.FakeSshTransport()
             with self.assertRaises(module.PipelineError) as not_allowed:
                 module.fetch_candidate(store, "not-remote-success", untouched)
             self.assertEqual(not_allowed.exception.category, "FETCH_NOT_ALLOWED")
             self.assertEqual(untouched.calls, [])
 
-            pending_payload = {
-                "stage": "FETCH_PENDING",
-                "source_commit": plan["source_commit"],
-                "remote_build_succeeded": True,
-                "fetch_allowed": True,
-                "plan": plan,
-                "stage_history": [],
-                "lock": {"status": "released"},
-            }
+            pending_payload = complete_v2_payload(
+                root,
+                run_id="sha-mismatch",
+                input_status="MISSING",
+                stage="FETCH_PENDING",
+                remote_build_succeeded=True,
+                fetch_allowed=True,
+            )
+            pending_payload["plan"] = dict(plan)
+            pending_payload["plan"]["input"] = pending_payload["input"]
             store.create("sha-mismatch", pending_payload)
             bad_review = make_candidate_review(
                 repo, plan, root / "bad-review", corrupt_deb=True
@@ -571,7 +575,17 @@ class CandidateTransportContractTests(unittest.TestCase):
             self.assertEqual(mismatch.exception.category, "ARTIFACT_SHA_MISMATCH")
             self.assertEqual(store.load("sha-mismatch")["stage"], "FETCH_PENDING")
 
-            store.create("occupied", pending_payload)
+            occupied_payload = complete_v2_payload(
+                root,
+                run_id="occupied",
+                input_status="MISSING",
+                stage="FETCH_PENDING",
+                remote_build_succeeded=True,
+                fetch_allowed=True,
+            )
+            occupied_payload["plan"] = dict(plan)
+            occupied_payload["plan"]["input"] = occupied_payload["input"]
+            store.create("occupied", occupied_payload)
             occupied_dir = store.run_dir("occupied") / "review"
             occupied_dir.mkdir()
             occupied_transport = module.FakeSshTransport(review_source=bad_review)

@@ -59,7 +59,10 @@ def validate_v2_state(state):
     """Validate a complete v2 state without applying platform-specific rules."""
 
     _require(isinstance(state, dict), "run state must be an object")
-    _require(set(state) == V2_REQUIRED_TOP_LEVEL, "run state v2 fields are incomplete")
+    _require(
+        V2_REQUIRED_TOP_LEVEL.issubset(set(state)),
+        "run state v2 fields are incomplete",
+    )
     _require(state["schema"] == CURRENT_STATE_SCHEMA, "unsupported run state schema")
     _require(isinstance(state["run_id"], str) and state["run_id"], "run id is invalid")
     _require(isinstance(state["target_id"], str) and state["target_id"], "target id is invalid")
