@@ -1,0 +1,18 @@
+{
+  "allowed_source_branches": ["main"],
+  "architecture": "x64",
+  "cache_requirements": "packaging/windows/cache-requirements.json",
+  "cache_root": "D:\\tw\\cache",
+  "git": "C:\\Program Files\\Git\\cmd\\git.exe",
+  "host_alias": "windows-direct",
+  "iscc": "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe",
+  "minimum_free_gib": 20,
+  "node": "C:\\Program Files\\nodejs\\node.exe",
+  "npm": "C:\\Program Files\\nodejs\\npm.cmd",
+  "powershell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  "python": "D:\\tw\\cache\\python-runtime\\python.exe",
+  "remote_root": "D:\\tw\\taiji-builds",
+  "schema": "taiji-package-target/v2",
+  "target_id": "windows-x64",
+  "tar": "C:\\Windows\\System32\\tar.exe"
+}

@@ -8,7 +8,10 @@ from .errors import PipelineError
 
 
 SAFE_TARGET_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
-BUILTIN_TARGET_FILES = {"kylin-amd64": "kylin-amd64.json"}
+BUILTIN_TARGET_FILES = {
+    "kylin-amd64": "kylin-amd64.json",
+    "windows-x64": "windows-x64.json",
+}
 
 
 def _target_invalid(message):
@@ -57,8 +60,12 @@ def load_target_reference(path, expected_target_id=None):
 
 def create_adapter(target_id):
     from ..adapters.kylin_amd64 import KylinAmd64Adapter
+    from ..adapters.windows_x64 import WindowsX64Adapter
 
-    factories = {"kylin-amd64": KylinAmd64Adapter}
+    factories = {
+        "kylin-amd64": KylinAmd64Adapter,
+        "windows-x64": WindowsX64Adapter,
+    }
     factory = factories.get(target_id)
     if factory is None:
         _target_invalid("no adapter is registered for target: {}".format(target_id))

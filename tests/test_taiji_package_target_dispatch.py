@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FACADE = ROOT / "scripts/taiji-package-candidate.py"
 LAUNCHER = ROOT / "taiji-package"
 TARGET_DIR = ROOT / "packaging/pipeline/targets"
+WINDOWS_TARGET = TARGET_DIR / "windows-x64.json"
 
 
 def required(module_name, symbol):
@@ -55,6 +56,21 @@ class TaijiPackageTargetDispatchTests(unittest.TestCase):
             registered={"kylin-amd64": "kylin-amd64.json"},
         )
         self.assertEqual(path, (TARGET_DIR / "kylin-amd64.json").resolve())
+
+    def test_registered_windows_id_resolves_exact_builtin_file(self):
+        resolve_target_reference = required(
+            "packaging.pipeline.core.registry", "resolve_target_reference"
+        )
+        self.assertTrue(WINDOWS_TARGET.is_file(), str(WINDOWS_TARGET))
+        path = resolve_target_reference(
+            "windows-x64",
+            TARGET_DIR,
+            registered={
+                "kylin-amd64": "kylin-amd64.json",
+                "windows-x64": "windows-x64.json",
+            },
+        )
+        self.assertEqual(path, WINDOWS_TARGET.resolve())
 
     def test_absolute_config_remains_supported(self):
         resolve_target_reference = required(
@@ -142,15 +158,21 @@ class TaijiPackageTargetDispatchTests(unittest.TestCase):
             with self.subTest(hook=hook):
                 self.assertTrue(callable(getattr(adapter_type, hook, None)))
 
-    def test_registry_returns_only_kylin_adapter(self):
+    def test_registry_returns_platform_specific_adapters(self):
         create_adapter = required(
             "packaging.pipeline.core.registry", "create_adapter"
         )
         pipeline_error = required("packaging.pipeline.core.errors", "PipelineError")
-        adapter = create_adapter("kylin-amd64")
-        self.assertEqual(adapter.target_id, "kylin-amd64")
+        windows_adapter_type = required(
+            "packaging.pipeline.adapters.windows_x64", "WindowsX64Adapter"
+        )
+        kylin = create_adapter("kylin-amd64")
+        self.assertEqual(kylin.target_id, "kylin-amd64")
+        windows = create_adapter("windows-x64")
+        self.assertIsInstance(windows, windows_adapter_type)
+        self.assertEqual(windows.target_id, "windows-x64")
         with self.assertRaises(pipeline_error) as context:
-            create_adapter("windows-x64")
+            create_adapter("unknown-target")
         self.assertEqual(context.exception.category, "TARGET_INVALID")
 
     def test_registry_never_imports_class_from_target_json(self):
