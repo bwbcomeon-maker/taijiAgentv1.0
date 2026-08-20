@@ -423,8 +423,17 @@ class WindowsX64Adapter(CandidateAdapter):
             _pipeline_error("Windows online plan must be objects")
         if any(key in plan for key in self.online_plan_keys):
             _pipeline_error("Windows online identity already exists")
-        required_keys = {"schema", "builder_status", "blockers"} | set(self.online_plan_keys)
-        if set(online) != required_keys or online.get("builder_status") != "BUILDER_READY":
+        minimal_online_keys = {"schema", "builder_status", "blockers"} | set(self.online_plan_keys)
+        full_online_keys = {
+            "schema", "builder_status", "host_alias", "os", "os_version",
+            "architecture", "powershell_version", "git_path", "tar_path",
+            "node_path", "npm_path", "python_path", "iscc_path", "filesystem",
+            "free_bytes", "cache_root", "cache_checks",
+            "cache_requirements_sha256", "cache_observation",
+            "cache_observation_sha256", "host_facts", "host_facts_sha256",
+            "remote_root_parent_exists", "blockers", "failure_categories",
+        }
+        if set(online) not in (minimal_online_keys, full_online_keys) or online.get("builder_status") != "BUILDER_READY":
             _pipeline_error("Windows online result fields are incomplete", "ONLINE_DOCTOR_BLOCKED")
         if online.get("schema") != "taiji-package-online-doctor/v2" or online.get("blockers") != []:
             _pipeline_error("Windows online result is not ready", "ONLINE_DOCTOR_BLOCKED")

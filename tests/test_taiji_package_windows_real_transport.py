@@ -7,6 +7,8 @@ import unittest
 from unittest import mock
 
 from packaging.pipeline.adapters import windows_ssh
+from packaging.pipeline.core.errors import PipelineError
+from packaging.pipeline.core.models import canonical_json_sha256
 
 
 POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -42,6 +44,20 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertIn("DriveInfo", script)
         self.assertIn("DriveFormat", script)
 
+    def test_builder_probe_contains_full_online_identity_contract(self):
+        script = windows_ssh.builder_probe_script(TARGET)
+        for field in (
+            "cache_requirements_sha256",
+            "cache_observation",
+            "cache_observation_sha256",
+            "host_facts",
+            "host_facts_sha256",
+            "observed_at",
+        ):
+            self.assertIn(field, script)
+        self.assertNotIn("D:\\tw\\source\\taijiAgentv1.0", script)
+        self.assertNotIn("New-Item", script)
+
     def test_product_probe_never_checks_or_mutates_builder_run(self):
         script = windows_ssh.product_probe_script(
             r"D:\tw\source\taijiAgentv1.0",
@@ -64,6 +80,59 @@ class WindowsRealTransportTests(unittest.TestCase):
         result = windows_ssh.parse_builder_probe(payload)
         self.assertEqual(result["builder_status"], "BLOCKED")
         self.assertEqual(result["failure_categories"], ["WINDOWS_CACHE_MISSING"])
+
+    def test_parse_builder_probe_rejects_observation_hash_drift(self):
+        requirements = json.loads(
+            windows_ssh.CACHE_REQUIREMENTS_PATH.read_text(encoding="utf-8")
+        )
+        requirements_sha = canonical_json_sha256(requirements)
+        observation = {
+            "schema": "taiji-windows-cache-observation/v1",
+            "target_id": "windows-x64",
+            "requirements_sha256": requirements_sha,
+            "cache_root": r"D:\tw\cache",
+            "entries": [],
+            "observed_at": "2026-08-20T12:00:00.000Z",
+        }
+        host_facts = {
+            "schema": "taiji-windows-host-facts/v1",
+            "host_alias": "WIN-TEST",
+            "os": "Windows",
+            "os_version": "10.0",
+            "architecture": "AMD64",
+            "filesystem": "NTFS",
+            "powershell_version": "5.1",
+        }
+        payload = {
+            "schema": "taiji-package-online-doctor/v2",
+            "builder_status": "BLOCKED",
+            "host_alias": "WIN-TEST",
+            "os": "Windows",
+            "os_version": "10.0",
+            "architecture": "AMD64",
+            "powershell_version": "5.1",
+            "git_path": r"C:\git.exe",
+            "tar_path": r"C:\tar.exe",
+            "node_path": r"C:\node.exe",
+            "npm_path": r"C:\npm.cmd",
+            "python_path": r"D:\python.exe",
+            "iscc_path": r"C:\iscc.exe",
+            "filesystem": "NTFS",
+            "free_bytes": 30 * 1024 * 1024 * 1024,
+            "cache_root": r"D:\tw\cache",
+            "cache_checks": [],
+            "cache_requirements_sha256": requirements_sha,
+            "cache_observation": observation,
+            "cache_observation_sha256": "f" * 64,
+            "host_facts": host_facts,
+            "host_facts_sha256": canonical_json_sha256(host_facts),
+            "remote_root_parent_exists": True,
+            "blockers": ["WINDOWS_CACHE_MISSING"],
+            "failure_categories": ["WINDOWS_CACHE_MISSING"],
+        }
+        with self.assertRaises(PipelineError) as context:
+            windows_ssh.parse_builder_probe(json.dumps(payload))
+        self.assertEqual(context.exception.category, "ONLINE_DOCTOR_BLOCKED")
 
     def test_transport_uses_injected_runner_without_external_call(self):
         calls = []
@@ -106,6 +175,21 @@ class WindowsRealTransportTests(unittest.TestCase):
             ).online_doctor()
         self.assertEqual(result["builder_status"], "BUILDER_READY")
         self.assertFalse(run.call_args.kwargs["text"])
+
+    def test_long_powershell_probe_uses_stdin_command_boundary(self):
+        calls = {}
+
+        def runner(argv, input=None):
+            calls["argv"] = argv
+            calls["input"] = input
+            return subprocess.CompletedProcess(argv, 0, "{}", b"")
+
+        transport = windows_ssh.WindowsSshTransport(
+            TARGET, ssh_config=None, command_runner=runner
+        )
+        transport._run_powershell("Write-Output '{}'\n" + ("x" * 6000))
+        self.assertTrue(calls["argv"][-1].endswith("-Command -"))
+        self.assertTrue(calls["input"].endswith(b"\nWrite-Output ''\n"))
 
 
 if __name__ == "__main__":
