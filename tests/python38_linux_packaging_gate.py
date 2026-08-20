@@ -96,6 +96,14 @@ CANDIDATE_CORE_GRAMMAR_ENTRYPOINTS = (
     ROOT / "packaging/pipeline/adapters/__init__.py",
     ROOT / "packaging/pipeline/adapters/base.py",
     ROOT / "packaging/pipeline/adapters/kylin_amd64.py",
+    ROOT / "packaging/windows/__init__.py",
+    ROOT / "packaging/windows/verify_legacy_assets.py",
+    ROOT / "packaging/pipeline/adapters/windows_x64.py",
+    ROOT / "tests/windows_pipeline_fixtures.py",
+    ROOT / "tests/test_windows_legacy_asset_provenance.py",
+    ROOT / "tests/test_taiji_package_windows_adapter.py",
+    ROOT / "tests/test_taiji_package_windows_transport.py",
+    ROOT / "tests/test_windows_packaging_script_contract.py",
 )
 PYTHON38_GRAMMAR_ENTRYPOINTS = PYTHON38_ENTRYPOINTS + CANDIDATE_CORE_GRAMMAR_ENTRYPOINTS
 

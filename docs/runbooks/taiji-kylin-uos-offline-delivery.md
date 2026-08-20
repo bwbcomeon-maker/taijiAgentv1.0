@@ -126,6 +126,10 @@ cd <操作员明确提供的正式仓库路径>
 
 `./taiji-package doctor` 只检查本地 clean `main`、完整 HEAD、接口、`99/00/01`、SSH alias 静态解析以及状态/产物根，不连接网络、不创建 run、不运行 `99`。本地就绪时输出 `CONTROLLER_READY`；同时出现 `BUILDER_UNREACHABLE` 表示 `online_checked=false`、本轮没有建立远端事实，不等于已证明麒麟主机故障。只有显式执行 `./taiji-package doctor --online` 才通过 SSH 对 `kylin` 检查 Linux x86_64、dpkg amd64、apt/dpkg、glibc、`sudo -n`、磁盘、inode、`/proc`、memfd 和远程目录权限；该命令仍不传输、不制包。
 
+跨平台统一入口现在也支持显式 target dispatch；Windows x64 的 target、adapter、fake 链和当前未验证边界见 [`taiji-windows-candidate-pipeline.md`](./taiji-windows-candidate-pipeline.md)。Kylin 仍只使用本手册既有的独立 adapter 和 `99 → 00 → 01` 权威链，不把 Windows 流程混入 Linux transport。
+
+Kylin 本地候选控制器的暂停 handoff 见 [`2026-08-20-kylin-pipeline-pause-handoff.md`](../superpowers/plans/2026-08-20-kylin-pipeline-pause-handoff.md)。该 handoff 只允许 local-only 指针更新；真实 Kylin doctor、SSH、`99/00/01`、DEB 构建、安装、签名和发布仍按本手册的独立门禁执行。
+
 `plan` 只输出不执行，并分别给出以下授权块：
 
 1. `SSH 与传输`：host、source commit、三件套 basename/bytes/SHA256、方向、唯一远程目录、失败保留方式。
