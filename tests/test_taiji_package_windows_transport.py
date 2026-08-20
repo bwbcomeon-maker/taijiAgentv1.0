@@ -40,6 +40,12 @@ FULL_BUILD_EVENTS = [
     "local-review-verify",
     "publish",
 ]
+FETCH_ONLY_EVENTS = [
+    "fetch-review",
+    "fetch-log",
+    "local-review-verify",
+    "publish",
+]
 
 
 class FixtureControllerRunner:
@@ -145,6 +151,33 @@ class TaijiPackageWindowsTransportTests(unittest.TestCase):
         state_files = sorted((Path(root) / "state" / "runs").glob("*/run-state.json")) if (Path(root) / "state" / "runs").exists() else []
         state = json.loads(state_files[0].read_text(encoding="utf-8")) if state_files else None
         return result, output.getvalue(), events, state, external_runner, plan, adapter, transport
+
+    def run_fetch(self, fixtures, root, state, events, transport):
+        import packaging.pipeline.cli as cli
+
+        adapter = self.make_adapter(fixtures, events, transport)
+        external_runner = ForbiddenExternalRunner()
+
+        def publisher(store, run_id, fetched, artifact):
+            events.append("publish")
+            paths = _publish_fetched_outputs(store, run_id, fetched)
+            published = copy.deepcopy(artifact)
+            published["path"] = str((Path(paths["review_path"]) / artifact["relative_path"]).resolve())
+            return published
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            result = cli.main(
+                [
+                    "--state-root", str(Path(root) / "state"),
+                    "fetch", "--run", state["run_id"],
+                ],
+                adapter_factory=lambda target_id: adapter,
+                command_runner=external_runner,
+                input_reader=lambda prompt: "BUILD",
+                publisher=publisher,
+            )
+        return result, output.getvalue(), external_runner
 
     def test_fixture_api_is_explicit_and_review_factory_is_shared(self):
         fixtures = self.load_fixture_api()
@@ -311,6 +344,123 @@ class TaijiPackageWindowsTransportTests(unittest.TestCase):
             self.assertEqual(state["stage"], "FETCH_PENDING")
             self.assertTrue(state["remote_build_succeeded"])
             self.assertTrue(state["fetch_allowed"])
+
+    def test_fetch_pending_retry_has_exact_fetch_only_events(self):
+        fixtures = self.load_fixture_api()
+        for initial_failure in ("fetch-review", "fetch-log"):
+            with self.subTest(initial_failure=initial_failure):
+                with tempfile.TemporaryDirectory(prefix="taiji-windows-fetch-only-") as temporary:
+                    root = Path(temporary)
+                    result, output, _events, state, _external, _plan, _adapter, _transport = self.run_build(
+                        fixtures, root, failure_at=initial_failure
+                    )
+                    self.assertEqual(result, 2)
+                    self.assertIn("SCP_INTERRUPTED", output)
+                    events = []
+                    retry_transport = fixtures.FakeWindowsTransport(
+                        fixtures.make_windows_review, events=events
+                    )
+                    retry_transport.remote_build_succeeded = True
+                    result, output, external = self.run_fetch(
+                        fixtures, root, state, events, retry_transport
+                    )
+                    self.assertEqual(result, 0, output)
+                    self.assertEqual(events, FETCH_ONLY_EVENTS)
+                    self.assertFalse(external.calls)
+                    recovered = RunStateStore(root / "state").load(state["run_id"])
+                    self.assertEqual(recovered["stage"], "CANDIDATE_BUILT")
+                    self.assertFalse(recovered["fetch_allowed"])
+                    self.assertTrue(recovered["remote_build_succeeded"])
+                    for forbidden in (
+                        "online-doctor", "prepare-input", "create-remote-run", "transfer-input",
+                        "remote-input-verify", "remote-candidate-build",
+                    ):
+                        self.assertNotIn(forbidden, events)
+
+    def test_fetch_rejects_non_pending_or_unfinished_remote_state_before_adapter(self):
+        fixtures = self.load_fixture_api()
+        with tempfile.TemporaryDirectory(prefix="taiji-windows-fetch-guard-") as temporary:
+            root = Path(temporary)
+            result, _output, _events, state, _external, _plan, _adapter, _transport = self.run_build(
+                fixtures, root, failure_at="transfer"
+            )
+            self.assertEqual(result, 2)
+            events = []
+            import packaging.pipeline.cli as cli
+
+            def forbidden_factory(target_id):
+                raise AssertionError("fetch guard must run before adapter creation")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                result = cli.main(
+                    ["--state-root", str(root / "state"), "fetch", "--run", state["run_id"]],
+                    adapter_factory=forbidden_factory,
+                    command_runner=ForbiddenExternalRunner(),
+                    input_reader=lambda prompt: "BUILD",
+                    publisher=lambda *args: events.append("publish"),
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("FETCH_NOT_ALLOWED", output.getvalue())
+            self.assertEqual(events, [])
+
+            store = RunStateStore(root / "state")
+            store.update(
+                state["run_id"],
+                {"stage": "FETCH_PENDING", "fetch_allowed": True},
+            )
+            pending_without_remote_success = store.load(state["run_id"])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                result = cli.main(
+                    [
+                        "--state-root", str(root / "state"),
+                        "fetch", "--run", pending_without_remote_success["run_id"],
+                    ],
+                    adapter_factory=forbidden_factory,
+                    command_runner=ForbiddenExternalRunner(),
+                    input_reader=lambda prompt: "BUILD",
+                    publisher=lambda *args: events.append("publish"),
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("FETCH_NOT_ALLOWED", output.getvalue())
+            self.assertEqual(events, [])
+
+    def test_corrupt_fetch_review_stays_pending_without_rebuild(self):
+        fixtures = self.load_fixture_api()
+        with tempfile.TemporaryDirectory(prefix="taiji-windows-fetch-corrupt-") as temporary:
+            root = Path(temporary)
+            result, _output, _events, state, _external, _plan, _adapter, _transport = self.run_build(
+                fixtures, root, failure_at="fetch-review"
+            )
+            self.assertEqual(result, 2)
+            events = []
+
+            class CorruptingFetchTransport(fixtures.FakeWindowsTransport):
+                def fetch(self, plan, staging_dir):
+                    fetched = super().fetch(plan, staging_dir)
+                    artifact = next(Path(fetched["review_path"]).glob("TaijiAgent-Setup-*.exe"))
+                    artifact.write_bytes(artifact.read_bytes() + b"corrupt")
+                    return fetched
+
+            retry_transport = CorruptingFetchTransport(
+                fixtures.make_windows_review, events=events
+            )
+            retry_transport.remote_build_succeeded = True
+            result, output, external = self.run_fetch(
+                fixtures, root, state, events, retry_transport
+            )
+            self.assertEqual(result, 2)
+            self.assertIn("LOCAL_REVIEW_INVALID", output)
+            self.assertEqual(
+                events,
+                ["fetch-review", "fetch-log"],
+            )
+            self.assertFalse(external.calls)
+            pending = RunStateStore(root / "state").load(state["run_id"])
+            self.assertEqual(pending["stage"], "FETCH_PENDING")
+            self.assertTrue(pending["fetch_allowed"])
+            self.assertTrue(pending["remote_build_succeeded"])
 
 
 if __name__ == "__main__":
