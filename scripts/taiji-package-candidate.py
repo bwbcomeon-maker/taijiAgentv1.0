@@ -22,7 +22,23 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 
-ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import packaging.pipeline as _pipeline_package
+from packaging.pipeline.core.errors import PipelineError
+
+
+_EXPECTED_PIPELINE = (_REPO_ROOT / "packaging/pipeline/__init__.py").resolve()
+_ACTUAL_PIPELINE = Path(_pipeline_package.__file__).resolve()
+if _ACTUAL_PIPELINE != _EXPECTED_PIPELINE:
+    raise RuntimeError(
+        "unexpected packaging.pipeline origin: {}".format(_ACTUAL_PIPELINE)
+    )
+
+
+ROOT = _REPO_ROOT
 DEFAULT_TARGET = ROOT / "packaging/pipeline/targets/kylin-amd64.json"
 ACCOUNT_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 DEFAULT_STATE_ROOT = ACCOUNT_HOME / ".local/state/taiji-package"
@@ -50,14 +66,6 @@ GIT_LOCATION_VARIABLES = (
 )
 REQUIRED_INTERFACE_PATH = Path("packaging/linux/taiji-packaging-interface.json")
 REQUIRED_PREFLIGHT_PATH = Path("taijiagent 打包交付/01_制包机_发布预检.sh")
-
-
-class PipelineError(RuntimeError):
-    """A stable, operator-actionable candidate pipeline failure."""
-
-    def __init__(self, message: str, *, category: str = "PIPELINE_BLOCKED") -> None:
-        super().__init__(message)
-        self.category = category
 
 
 def utc_now() -> str:
@@ -2042,7 +2050,7 @@ def build_candidate_plan(
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--repo", type=Path, default=ROOT)
-    parser.add_argument("--target", type=Path, default=DEFAULT_TARGET)
+    parser.add_argument("--target", default=None)
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     parser.add_argument("--ssh-config", type=Path)
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -2066,7 +2074,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload = RunStateStore(args.state_root).load(args.run_id)
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             return 0
-        target = load_target(args.target)
+        target_reference = args.target
+        if target_reference is None and args.command in ("doctor", "plan", "build"):
+            target_reference = DEFAULT_TARGET
+        target = load_target(Path(target_reference))
         if args.command == "doctor":
             local = local_doctor(
                 args.repo, target, args.state_root, ssh_config=args.ssh_config
