@@ -6,7 +6,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-import py_compile
 import runpy
 import stat
 import subprocess
@@ -84,6 +83,23 @@ PYTHON38_RUNTIME_SOURCES = (
     AGENT_PARALLEL_RUNNER,
     ROOT / "tests/test_linux_desktop_packaging_static.py",
 )
+CANDIDATE_CORE_GRAMMAR_ENTRYPOINTS = (
+    ROOT / "scripts/taiji-package-candidate.py",
+    ROOT / "packaging/pipeline/__init__.py",
+    ROOT / "packaging/pipeline/cli.py",
+    ROOT / "packaging/pipeline/core/__init__.py",
+    ROOT / "packaging/pipeline/core/errors.py",
+    ROOT / "packaging/pipeline/core/models.py",
+    ROOT / "packaging/pipeline/core/orchestration.py",
+    ROOT / "packaging/pipeline/core/registry.py",
+    ROOT / "packaging/pipeline/core/state.py",
+    ROOT / "packaging/pipeline/adapters/__init__.py",
+    ROOT / "packaging/pipeline/adapters/base.py",
+    ROOT / "packaging/pipeline/adapters/kylin_amd64.py",
+)
+PYTHON38_GRAMMAR_ENTRYPOINTS = PYTHON38_ENTRYPOINTS + CANDIDATE_CORE_GRAMMAR_ENTRYPOINTS
+
+
 def extract_single_deb_publisher_python() -> str:
     source = SINGLE_DEB_PUBLISHER.read_text(encoding="utf-8")
     marker = "/usr/bin/python3 -I -B - \"$@\" <<'PY'\n"
@@ -352,12 +368,8 @@ def main() -> int:
             "exec",
         )
         exercise_sealed_snapshot_python(temp_root)
-        for index, entrypoint in enumerate(PYTHON38_ENTRYPOINTS):
-            py_compile.compile(
-                str(entrypoint),
-                cfile=str(temp_root / f"entrypoint-{index}.pyc"),
-                doraise=True,
-            )
+        for entrypoint in PYTHON38_GRAMMAR_ENTRYPOINTS:
+            compile(entrypoint.read_bytes(), str(entrypoint), "exec")
 
         loaded_entrypoints = {
             entrypoint: runpy.run_path(str(entrypoint))
