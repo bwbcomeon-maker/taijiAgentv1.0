@@ -111,7 +111,7 @@ taijiagent-制包机输入-<commit>.tar.gz.sha256
 
 私有 staging 的自动清理是另一个、明确收窄的边界：创建前必须验证物理 TMPDIR 父链（root 所有且不可被 group/other 写，或 root 所有的精确 `01777`；当前 uid 所有的节点不可被 group/other 写），随机创建后立即记录 `dev/ino/uid/0700`，清理前再复核同一父链和目录身份。缺失、替换、模式变化或身份不确定时保留 foreign/uncertain 路径并报告 poisoned，不执行 `rm -rf`。该边界仍明确假设没有同 uid 恶意连续写者；`0700` 不能隔离同 uid 进程。如威胁模型包含这类对手，必须使用独立账户/隔离环境或保留 staging 人工处理，不得把私有 staging 清理推广为共享发布路径的并发安全证明。
 
-### 5.1.1 x86 麒麟候选 DEB 薄执行器
+#### x86 麒麟候选 DEB 薄执行器
 
 `taiji-package` 是 Mac 控制端的 candidate-only 日常入口，只把现有 `99 → 00 → 01` 封装成可计划、可记录、可恢复的候选构建流程，不复制这三个脚本的打包逻辑。它只使用操作员明确提供的仓库路径，不扫描其它目录；默认状态保存在 `~/.local/state/taiji-package/runs/<run-id>/`，远端 run 固定在 `/home/kylin/taiji-builds/<commit>/<run-id>/`。
 
@@ -142,9 +142,9 @@ Kylin 本地候选控制器的暂停 handoff 见 [`2026-08-20-kylin-pipeline-pau
 
 该薄执行器严格不安装、不验收、不签名、不发布，也不执行离线生命周期、图形验收、N-1、certification 或自动远程清理。本地第一阶段的准确状态只能是：`已实现，本地模拟通过`、`真实麒麟连接未验证`、`候选 DEB 未构建`。
 
-薄执行器的状态和候选输出不属于黄金编排器 checkpoint，不能直接写成正式 `remote_build` pass。若后续目标扩大到离线演练、目标验收、认证、签名或客户发布，必须进入下一节的黄金编排器，按其当前 plan 重新执行并绑定同一正式证据链。
+薄执行器的状态和候选输出不属于黄金编排器 checkpoint，不能直接写成正式黄金编排器候选构建阶段的 pass。若后续目标扩大到离线演练、目标验收、认证、签名或客户发布，必须进入下一节的黄金编排器，按其当前 plan 重新执行并绑定同一正式证据链。
 
-### 5.1.2 黄金编排器唯一正式入口
+### 5.1.1 黄金编排器唯一正式入口
 
 进入离线演练、目标验收、认证、签名或发布的正式证据链时，必须在首次正式输入校验、传输或远程制包前运行 `scripts/taiji-linux-golden-orchestrator.py init`。正式阶段顺序固定为 `input_verify` → `remote_build`（生成并绑定候选 DEB）→ `artifact_preflight` → `challenge_preparation` → offline → 正式 target → 十二条 records。certification envelope 必须在 `challenge_preparation` 签发并验证，不得先传输或采集证据，再在签名时补造 envelope 或替换 nonce。
 
