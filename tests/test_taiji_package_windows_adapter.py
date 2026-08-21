@@ -292,6 +292,9 @@ class WindowsAdapterContractTests(unittest.TestCase):
             def __init__(self, target, *, ssh_config, command_runner):
                 calls.append((target, ssh_config, command_runner))
 
+            def inspect(self, _artifact_path):
+                raise AssertionError("not called by factory wiring test")
+
         runner = object()
         with patch.dict(
             facade["_facade_adapter_factory"].__globals__,
@@ -303,6 +306,7 @@ class WindowsAdapterContractTests(unittest.TestCase):
                 ssh_config="/tmp/ssh-config", command_runner=runner,
             )
         self.assertIsInstance(transport, RecordingTransport)
+        self.assertIs(adapter.artifact_inspector, transport)
         self.assertEqual(calls, [(EXPECTED_TARGET, "/tmp/ssh-config", runner)])
 
     def test_online_plan_binding_adds_only_frozen_cache_and_host_identity(self):

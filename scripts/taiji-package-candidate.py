@@ -2242,13 +2242,16 @@ def _facade_adapter_factory(target_id):
             )
         )
     elif target_id == "windows-x64":
-        adapter.transport_factory = (
-            lambda target, *, ssh_config, command_runner: WindowsSshTransport(
+        def create_windows_transport(target, *, ssh_config, command_runner):
+            transport = WindowsSshTransport(
                 target,
                 ssh_config=ssh_config,
                 command_runner=command_runner,
             )
-        )
+            adapter.artifact_inspector = transport
+            return transport
+
+        adapter.transport_factory = create_windows_transport
     return adapter
 
 

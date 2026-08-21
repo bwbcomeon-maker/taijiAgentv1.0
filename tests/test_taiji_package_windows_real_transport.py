@@ -313,6 +313,51 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertEqual(result["builder_status"], "BUILDER_READY")
         self.assertFalse(run.call_args.kwargs["text"])
 
+    def test_artifact_inspector_reads_remote_metadata_for_fetched_bytes(self):
+        calls = []
+        metadata = {
+            "bytes": len(b"candidate"),
+            "pe_machine": "0x014c",
+            "pe_optional_magic": "0x10b",
+            "file_version": "1.0.2.0",
+            "product_version": "1.0.2.0",
+            "authenticode_status": "NotSigned",
+        }
+
+        def runner(argv, **kwargs):
+            calls.append((list(argv), dict(kwargs)))
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps(metadata).encode("utf-8"), b""
+            )
+
+        with tempfile.TemporaryDirectory(prefix="windows-artifact-inspector-") as temporary:
+            artifact = windows_pipeline_fixtures.write_regular(
+                Path(temporary) / "TaijiAgent-Setup-1.0.2-win-x64.exe",
+                b"candidate",
+            )
+            transport = windows_ssh.WindowsSshTransport(
+                TARGET, ssh_config=None, command_runner=runner
+            )
+            transport._inspection_plan = {
+                "remote_run_dir": r"D:\tw\taiji-builds\commit\run-id",
+            }
+            result = transport.inspect(artifact)
+
+        self.assertEqual(
+            result,
+            {
+                "pe_machine": "0x014c",
+                "pe_optional_magic": "0x10b",
+                "file_version": "1.0.2.0",
+                "product_version": "1.0.2.0",
+                "authenticode_status": "NotSigned",
+            },
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], "/usr/bin/ssh")
+        self.assertIn("-EncodedCommand", calls[0][0][6])
+        self.assertNotIn("input", calls[0][1])
+
     def test_long_powershell_probe_uses_compressed_loader_with_safe_length(self):
         script = "Write-Output 'probe'\n" + ("x" * 24000)
         argv = windows_ssh.powershell_argv("windows-direct", POWERSHELL, script)

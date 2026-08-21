@@ -612,6 +612,7 @@ Expected：main clean，包含 Plan 4 全部提交。
 - **版本裁决：** Windows `VersionInfo` 可能返回带尾随空格的固定宽度字符串；比较前只做 `.Trim()`，随后仍与 `$Version.0` 精确比较。
 - **时间精度裁决：** PowerShell 5.1 的 UTC round-trip 时间可能带 7 位小数秒；本地 review 在严格 `...Z` 格式校验后只截取 Python 3.9 可表达的前 6 位微秒再解析，不放宽 UTC、时间顺序或字段精确集合。
 - **空文件裁决：** payload 可包含 Python 包的空 `__init__.py`、`py.typed`、`REQUESTED` 等普通文件；payload entry 的 `bytes` 允许为 0，但仍必须是非负整数、保留逐文件 SHA256、参与 file count/total bytes/canonical manifest 校验。input、工具、日志和候选 EXE 的字节数仍必须大于 0。
+- **本地 review 接线裁决：** 统一入口创建的同一个 `WindowsSshTransport` 同时承担 fetch 和 concrete artifact inspector；fetch 后只对冻结 plan 指向的远端 EXE 做一次只读 PE/VersionInfo/Authenticode/bytes 复查，本地 adapter 继续独立校验已取回 EXE 的 SHA、sidecar、manifest 和实际 PE bytes，不新增整文件重复摘要。
 
 执行顺序固定为：上述三项分别完成聚焦 RED→最小 GREEN；只运行一次隔离 Stage；只运行一次 Inno 预演；二者通过后再运行一次正式 doctor/build；候选 EXE 成功取回后才运行一次完整回归。若只读检查发现 Stage 仍在运行，不得打断或并发；若已结束，先读取持久化结果，不得因 SSH 输出缺失盲目重跑。
 

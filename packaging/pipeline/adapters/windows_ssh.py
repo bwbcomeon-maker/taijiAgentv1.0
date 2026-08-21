@@ -899,6 +899,7 @@ class WindowsSshTransport:
         self.remote_build_succeeded = False
         self.remote_run_created = False
         self._contexts = {}
+        self._inspection_plan = None
 
     def _run_powershell(self, script):
         script_text = (
@@ -959,6 +960,95 @@ class WindowsSshTransport:
                 return result
             last_error = result
         raise PipelineError("Windows SCP transfer was interrupted", category="SCP_INTERRUPTED")
+
+    def inspect(self, artifact_path):
+        plan = self._inspection_plan
+        if not isinstance(plan, dict) or not isinstance(plan.get("remote_run_dir"), str):
+            raise PipelineError(
+                "Windows artifact inspector is not bound to a fetched run",
+                category="LOCAL_REVIEW_INVALID",
+            )
+        artifact_path = Path(artifact_path).resolve()
+        basename = artifact_path.name
+        remote_path = _remote_join(plan["remote_run_dir"], "review", basename)
+        script = r"""$ErrorActionPreference = 'Stop'
+$artifactPath = {artifact_path}
+$item = Get-Item -LiteralPath $artifactPath -Force
+$stream = [IO.File]::Open($artifactPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+$reader = [IO.BinaryReader]::new($stream)
+try {{
+  $mz = $reader.ReadBytes(2)
+  if ($mz.Length -ne 2 -or $mz[0] -ne 0x4d -or $mz[1] -ne 0x5a) {{
+    throw 'artifact is not an MZ executable'
+  }}
+  $stream.Position = 0x3c
+  $peOffset = $reader.ReadInt32()
+  $stream.Position = $peOffset
+  $signature = $reader.ReadBytes(4)
+  if ($signature.Length -ne 4 -or $signature[0] -ne 0x50 -or $signature[1] -ne 0x45 -or
+      $signature[2] -ne 0 -or $signature[3] -ne 0) {{
+    throw 'artifact PE signature is invalid'
+  }}
+  $machine = $reader.ReadUInt16()
+  $stream.Position = $peOffset + 24
+  $optionalMagic = $reader.ReadUInt16()
+}} finally {{
+  $reader.Dispose()
+  $stream.Dispose()
+}}
+$versionInfo = $item.VersionInfo
+$signatureStatus = (Get-AuthenticodeSignature -FilePath $artifactPath).Status.ToString()
+[ordered]@{{
+  bytes = [int64]$item.Length
+  pe_machine = ('0x{{0:x4}}' -f $machine)
+  pe_optional_magic = ('0x{{0:x3}}' -f $optionalMagic)
+  file_version = ([string]$versionInfo.FileVersion).Trim()
+  product_version = ([string]$versionInfo.ProductVersion).Trim()
+  authenticode_status = $signatureStatus
+}} | ConvertTo-Json -Compress
+""".format(artifact_path=_ps_literal(remote_path))
+        result = _invoke_runner(
+            self.command_runner,
+            powershell_argv(
+                self.target["host_alias"],
+                self.target["powershell"],
+                script,
+                self.ssh_config,
+            ),
+        )
+        if getattr(result, "returncode", 0) != 0:
+            raise PipelineError(
+                "Windows artifact metadata probe failed",
+                category="BUILDER_UNREACHABLE",
+            )
+        try:
+            inspected = json.loads(getattr(result, "stdout", result))
+        except (TypeError, ValueError) as exc:
+            raise PipelineError(
+                "Windows artifact metadata is invalid: {}".format(exc),
+                category="LOCAL_REVIEW_INVALID",
+            ) from exc
+        expected = {
+            "bytes", "pe_machine", "pe_optional_magic", "file_version",
+            "product_version", "authenticode_status",
+        }
+        if not isinstance(inspected, dict) or set(inspected) != expected:
+            raise PipelineError(
+                "Windows artifact metadata fields are not exact",
+                category="LOCAL_REVIEW_INVALID",
+            )
+        if type(inspected["bytes"]) is not int or inspected["bytes"] != artifact_path.stat().st_size:
+            raise PipelineError(
+                "remote and fetched artifact byte counts differ",
+                category="LOCAL_REVIEW_INVALID",
+            )
+        return {
+            key: inspected[key]
+            for key in (
+                "pe_machine", "pe_optional_magic", "file_version",
+                "product_version", "authenticode_status",
+            )
+        }
 
     def _require_plan(self, plan):
         required = {
@@ -1469,6 +1559,7 @@ if (-not (Test-Path -LiteralPath {review_manifest} -PathType Leaf)) {{
                     entry.chmod(0o600)
         if remote_log_path.exists():
             remote_log_path.chmod(0o600)
+        self._inspection_plan = copy.deepcopy(state["plan"])
         return {
             "review_path": str(review_path),
             "remote_log_path": str(remote_log_path),
