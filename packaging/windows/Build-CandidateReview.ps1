@@ -330,18 +330,22 @@ Invoke-FormalCheck -Id "payload-import-menu-policy" -Action {
   }
   $GatePath = Join-Path $StagingRoot 'build-menu-gate.py'
   $importGate = @'
+import os
 import pathlib
 import re
 
 payload = pathlib.Path(r"__PAYLOAD_ROOT__")
 agent_root = (payload / "hermes-local-lab" / "sources" / "hermes-agent").resolve()
 webui_root = (payload / "hermes-local-lab" / "sources" / "hermes-webui").resolve()
+packaged_config = payload / "hermes-local-lab" / "config" / "taiji-default-config.yaml"
 main_source = payload / "resources" / "app" / "src" / "main.js"
 assert agent_root.is_dir()
 assert webui_root.is_dir()
+assert packaged_config.is_file()
 assert main_source.is_file()
 assert (payload / "resources" / "app" / "package.json").is_file()
 assert (payload / "resources" / "app" / "src").is_dir()
+os.environ["TAIJI_WEBUI_PACKAGED_CONFIG"] = str(packaged_config)
 import taiji_runtime.main
 import taiji_runtime_profile
 import taiji_license
@@ -361,7 +365,7 @@ for module, expected_root in (
 ):
     module_path = pathlib.Path(module.__file__).resolve()
     assert str(module_path).startswith(str(expected_root))
-visibility = get_ui_visibility({})
+visibility = get_ui_visibility()
 nav = {name for name, visible in visibility.get("nav", {}).items() if visible}
 assert nav == {"chat", "tasks", "writing", "settings"}
 source = main_source.read_text(encoding="utf-8")
@@ -373,13 +377,22 @@ assert re.search(r"settings", source)
 print("PAYLOAD_MENU_POLICY_OK")
 '@
   Write-Utf8Text -Path $GatePath -Text ($importGate.Replace('__PAYLOAD_ROOT__', $PayloadRoot.Replace('\', '\\')) + [char]10)
+  $previousMenuErrorActionPreference = $ErrorActionPreference
+  $menuExitCode = $null
+  $menuOutput = ''
   try {
+    $ErrorActionPreference = 'Continue'
     $menuOutput = (& $payloadPython -I -B $GatePath 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $menuOutput -notmatch 'PAYLOAD_MENU_POLICY_OK') {
-      throw 'payload private python import/menu gate failed'
-    }
+    $menuExitCode = $LASTEXITCODE
   } finally {
+    $ErrorActionPreference = $previousMenuErrorActionPreference
     Remove-Item -LiteralPath $GatePath -Force -ErrorAction SilentlyContinue
+  }
+  if ($null -eq $menuExitCode -or $menuExitCode -ne 0 -or $menuOutput -notmatch 'PAYLOAD_MENU_POLICY_OK') {
+    if (-not [string]::IsNullOrWhiteSpace($menuOutput)) {
+      Write-Output ($menuOutput.TrimEnd())
+    }
+    throw 'payload private python import/menu gate failed'
   }
 }
 

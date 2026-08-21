@@ -161,6 +161,17 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("if ($null -eq $npmExitCode -or $npmExitCode -ne 0)", text)
         self.assertIn('throw "offline npm ci failed: $npmExitCode"', text)
 
+    def test_payload_menu_gate_consumes_packaged_policy_and_preserves_native_exit_code(self):
+        text = read_script(BUILD)
+        self.assertIn('os.environ["TAIJI_WEBUI_PACKAGED_CONFIG"] = str(packaged_config)', text)
+        self.assertIn("visibility = get_ui_visibility()", text)
+        self.assertNotIn("visibility = get_ui_visibility({})", text)
+        self.assertIn("$previousMenuErrorActionPreference = $ErrorActionPreference", text)
+        self.assertIn("$menuExitCode = $LASTEXITCODE", text)
+        self.assertIn("$ErrorActionPreference = $previousMenuErrorActionPreference", text)
+        self.assertIn("Write-Output ($menuOutput.TrimEnd())", text)
+        self.assertIn("$null -eq $menuExitCode -or $menuExitCode -ne 0", text)
+
     def test_review_exact_set_and_separate_log_are_explicit(self):
         text = read_script(BUILD)
         for literal in (
