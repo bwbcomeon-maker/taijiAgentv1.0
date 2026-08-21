@@ -16,6 +16,23 @@ function Assert-RegularFile {
   }
 }
 
+function ConvertTo-ExtendedPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if ($Path.StartsWith('\\?\')) { return $Path }
+  if ($Path -notmatch '^[A-Za-z]:\\') {
+    throw "working tree path must be an absolute drive path: $Path"
+  }
+  return '\\?\' + $Path
+}
+
+function Join-PathText {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$Child
+  )
+  return $Root.TrimEnd('\') + '\' + $Child.TrimStart('\')
+}
+
 function ConvertTo-CanonicalValue {
   param([Parameter(Mandatory = $true)]$Value)
   if ($null -eq $Value) { return $null }
@@ -73,7 +90,7 @@ function Copy-DirectoryChildren {
   param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Destination)
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
   foreach ($child in @(Get-ChildItem -LiteralPath $Source -Force)) {
-    Copy-Item -LiteralPath $child.FullName -Destination (Join-Path $Destination $child.Name) -Recurse -Force
+    Copy-Item -LiteralPath $child.FullName -Destination (Join-PathText $Destination $child.Name) -Recurse -Force
   }
 }
 
@@ -89,7 +106,7 @@ function Copy-PythonRuntimeFile {
       $relativeLeaf -like '*.pyc' -or $relativeLeaf -like '*.pyo') {
     return
   }
-  $destination = Join-Path $DestinationRoot $relative
+  $destination = Join-PathText $DestinationRoot $relative
   New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
   Copy-Item -LiteralPath $File.FullName -Destination $destination -Force
 }
@@ -146,7 +163,6 @@ function Get-Sha256Stream {
   param([Parameter(Mandatory = $true)][System.IO.Stream]$Stream)
   $sha = [Security.Cryptography.SHA256]::Create()
   try {
-    $Stream.Position = 0
     return ([BitConverter]::ToString($sha.ComputeHash($Stream)) -replace '-', '').ToLowerInvariant()
   } finally {
     $sha.Dispose()
@@ -187,7 +203,7 @@ function Get-CacheEntry {
     members = @()
   }
   if (-not (Test-SafePosixPath $relativePath)) { return $null }
-  $fullPath = Join-Path $CacheRoot ($relativePath -replace '/', '\')
+  $fullPath = Join-PathText $CacheRoot ($relativePath -replace '/', '\')
   if (-not (Test-Path -LiteralPath $fullPath)) { return $null }
   $item = Get-Item -LiteralPath $fullPath -Force
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.LinkType) { return $null }
@@ -196,7 +212,7 @@ function Get-CacheEntry {
     if ($item -isnot [System.IO.DirectoryInfo]) { return $null }
     foreach ($requiredMember in @($Requirement.required_members)) {
       if (-not (Test-SafePosixPath ([string]$requiredMember))) { return $null }
-      $requiredPath = Join-Path $fullPath (([string]$requiredMember) -replace '/', '\')
+      $requiredPath = Join-PathText $fullPath (([string]$requiredMember) -replace '/', '\')
       if (-not (Test-Path -LiteralPath $requiredPath)) { return $null }
     }
     $seen = @{}
@@ -214,11 +230,11 @@ function Get-CacheEntry {
         sha256 = Get-Sha256 $child.FullName
       }
     }
-    $members = @(Sort-MembersByUtf8 $members)
+    $members = Sort-MembersByUtf8 $members
     $totalBytes = [int64]0
     foreach ($member in @($members)) { $totalBytes += [int64]$member.bytes }
     $entry.bytes = $totalBytes
-    $entry.sha256 = Get-CanonicalHash $members
+    $entry.sha256 = Get-CanonicalHash (,$members)
     $entry.members = @($members)
     return $entry
   }
@@ -258,7 +274,7 @@ function Get-CacheEntry {
     }
     $entry.bytes = [int64]$item.Length
     $entry.sha256 = Get-Sha256 $fullPath
-    $entry.members = @(Sort-MembersByUtf8 $members)
+    $entry.members = Sort-MembersByUtf8 $members
     return $entry
   } finally {
     $archive.Dispose()
@@ -271,10 +287,10 @@ if ($session.schema -ne 'taiji-windows-candidate-session/v1' -or $session.target
   throw 'candidate session identity is invalid'
 }
 
-$sourceRoot = [string]$session.paths.source_root
-$stagingRoot = [string]$session.paths.staging_root
-$stagingCacheRoot = [string]$session.paths.staging_cache_root
-$payloadRoot = [string]$session.paths.payload_root
+$sourceRoot = ConvertTo-ExtendedPath ([string]$session.paths.source_root)
+$stagingRoot = ConvertTo-ExtendedPath ([string]$session.paths.staging_root)
+$stagingCacheRoot = ConvertTo-ExtendedPath ([string]$session.paths.staging_cache_root)
+$payloadRoot = ConvertTo-ExtendedPath ([string]$session.paths.payload_root)
 if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
   throw "safe source root is missing: $sourceRoot"
 }
@@ -318,8 +334,8 @@ if ($observation.schema -ne 'taiji-windows-cache-observation/v1' -or
 }
 
 foreach ($entry in @($requirements.entries)) {
-  $source = Join-Path $sharedCacheRoot $entry.relative_path.Replace('/', '\')
-  $destination = Join-Path $stagingCacheRoot $entry.relative_path.Replace('/', '\')
+  $source = Join-PathText $sharedCacheRoot $entry.relative_path.Replace('/', '\')
+  $destination = Join-PathText $stagingCacheRoot $entry.relative_path.Replace('/', '\')
   if (-not (Test-Path -LiteralPath $source)) {
     throw "WINDOWS_CACHE_MISSING: $($entry.id)"
   }
@@ -350,27 +366,27 @@ if ((Get-CanonicalHash $stagingObservationIdentity) -ne $session.cache.observati
   throw 'staging observation identity drifted before payload assembly'
 }
 
-$desktopRoot = Join-Path $sourceRoot 'apps\taiji-desktop'
-$packageJson = Join-Path $desktopRoot 'package.json'
-$packageLock = Join-Path $desktopRoot 'package-lock.json'
-$desktopSrc = Join-Path $desktopRoot 'src'
+$desktopRoot = Join-PathText $sourceRoot 'apps\taiji-desktop'
+$packageJson = Join-PathText $desktopRoot 'package.json'
+$packageLock = Join-PathText $desktopRoot 'package-lock.json'
+$desktopSrc = Join-PathText $desktopRoot 'src'
 Assert-RegularFile $packageJson 'desktop package'
 Assert-RegularFile $packageLock 'desktop package lock'
 if (-not (Test-Path -LiteralPath $desktopSrc -PathType Container)) {
   throw "desktop source is missing: $desktopSrc"
 }
-$desktopNpmCheckRoot = Join-Path $stagingRoot 'desktop-npm-check'
+$desktopNpmCheckRoot = Join-PathText $stagingRoot 'desktop-npm-check'
 New-Item -ItemType Directory -Path $desktopNpmCheckRoot -Force | Out-Null
-Copy-Item -LiteralPath $packageJson -Destination (Join-Path $desktopNpmCheckRoot 'package.json') -Force
-Copy-Item -LiteralPath $packageLock -Destination (Join-Path $desktopNpmCheckRoot 'package-lock.json') -Force
-$stagingNpmCache = Join-Path $stagingCacheRoot 'npm'
-if (-not (Test-Path -LiteralPath (Join-Path $stagingNpmCache '_cacache'))) {
+Copy-Item -LiteralPath $packageJson -Destination (Join-PathText $desktopNpmCheckRoot 'package.json') -Force
+Copy-Item -LiteralPath $packageLock -Destination (Join-PathText $desktopNpmCheckRoot 'package-lock.json') -Force
+$stagingNpmCache = Join-PathText $stagingCacheRoot 'npm'
+if (-not (Test-Path -LiteralPath (Join-PathText $stagingNpmCache '_cacache'))) {
   throw 'WINDOWS_CACHE_MISSING: npm cache'
 }
 Push-Location $desktopNpmCheckRoot
 try {
   $npmOutput = (& $session.tools.npm.path ci --offline --ignore-scripts --no-audit --cache $stagingNpmCache 2>&1 | Out-String)
-  Write-Utf8Text -Path (Join-Path $desktopNpmCheckRoot 'npm-check.log') -Text ($npmOutput.TrimEnd() + [char]10)
+  Write-Utf8Text -Path (Join-PathText $desktopNpmCheckRoot 'npm-check.log') -Text ($npmOutput.TrimEnd() + [char]10)
   if ($LASTEXITCODE -ne 0) {
     throw "offline npm ci failed: $LASTEXITCODE"
   }
@@ -378,42 +394,42 @@ try {
   Pop-Location
 }
 
-$appRoot = Join-Path $payloadRoot 'resources\app'
+$appRoot = Join-PathText $payloadRoot 'resources\app'
 New-Item -ItemType Directory -Path $appRoot -Force | Out-Null
 # resources\app\package.json is staged explicitly from the safe desktop source.
-Copy-Item -LiteralPath $packageJson -Destination (Join-Path $appRoot 'package.json') -Force
+Copy-Item -LiteralPath $packageJson -Destination (Join-PathText $appRoot 'package.json') -Force
 # resources\app\src is staged explicitly from the safe desktop source.
-Copy-Item -LiteralPath $desktopSrc -Destination (Join-Path $appRoot 'src') -Recurse -Force
+Copy-Item -LiteralPath $desktopSrc -Destination (Join-PathText $appRoot 'src') -Recurse -Force
 
-$agentSource = Join-Path $sourceRoot 'hermes-local-lab\sources\hermes-agent'
-$webuiSource = Join-Path $sourceRoot 'hermes-local-lab\sources\hermes-webui'
+$agentSource = Join-PathText $sourceRoot 'hermes-local-lab\sources\hermes-agent'
+$webuiSource = Join-PathText $sourceRoot 'hermes-local-lab\sources\hermes-webui'
 if (-not (Test-Path -LiteralPath $agentSource -PathType Container)) {
   throw "Agent source is missing: $agentSource"
 }
 if (-not (Test-Path -LiteralPath $webuiSource -PathType Container)) {
   throw "WebUI source is missing: $webuiSource"
 }
-$payloadSourcesRoot = Join-Path $payloadRoot 'hermes-local-lab\sources'
-Copy-DirectoryChildren -Source $agentSource -Destination (Join-Path $payloadSourcesRoot 'hermes-agent')
-Copy-DirectoryChildren -Source $webuiSource -Destination (Join-Path $payloadSourcesRoot 'hermes-webui')
+$payloadSourcesRoot = Join-PathText $payloadRoot 'hermes-local-lab\sources'
+Copy-DirectoryChildren -Source $agentSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-agent')
+Copy-DirectoryChildren -Source $webuiSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-webui')
 
-$pythonSource = Join-Path $stagingCacheRoot 'python-runtime'
-$pythonDestination = Join-Path $payloadRoot 'hermes-local-lab\runtime\python'
-Assert-RegularFile (Join-Path $pythonSource 'python.exe') 'python runtime'
-Assert-RegularFile (Join-Path $pythonSource 'python311._pth') 'python path file'
+$pythonSource = Join-PathText $stagingCacheRoot 'python-runtime'
+$pythonDestination = Join-PathText $payloadRoot 'hermes-local-lab\runtime\python'
+Assert-RegularFile (Join-PathText $pythonSource 'python.exe') 'python runtime'
+Assert-RegularFile (Join-PathText $pythonSource 'python311._pth') 'python path file'
 New-Item -ItemType Directory -Path $pythonDestination -Force | Out-Null
 foreach ($pythonFile in @(Get-ChildItem -LiteralPath $pythonSource -File -Recurse -Force)) {
   Copy-PythonRuntimeFile -File $pythonFile -SourceRoot $pythonSource -DestinationRoot $pythonDestination
 }
 
-$electronArchive = Join-Path $stagingCacheRoot 'electron\electron-v39.8.10-win32-x64.zip'
+$electronArchive = Join-PathText $stagingCacheRoot 'electron\electron-v39.8.10-win32-x64.zip'
 Assert-RegularFile $electronArchive 'Electron cache archive'
 Expand-Archive -LiteralPath $electronArchive -DestinationPath $payloadRoot -Force
-$electronBinary = Join-Path $payloadRoot 'electron.exe'
+$electronBinary = Join-PathText $payloadRoot 'electron.exe'
 if (-not (Test-Path -LiteralPath $electronBinary -PathType Leaf)) {
   throw 'Electron cache expansion did not produce root electron.exe'
 }
-$taijiAgentExe = Join-Path $payloadRoot 'TaijiAgent.exe'
+$taijiAgentExe = Join-PathText $payloadRoot 'TaijiAgent.exe'
 if (Test-Path -LiteralPath $taijiAgentExe) {
   throw 'TaijiAgent.exe already exists before rename'
 }
@@ -434,18 +450,18 @@ try {
   }
 }
 
-$sharedConfigPath = Join-Path $payloadRoot 'hermes-local-lab\config'
+$sharedConfigPath = Join-PathText $payloadRoot 'hermes-local-lab\config'
 New-Item -ItemType Directory -Path $sharedConfigPath -Force | Out-Null
-$defaultConfigSource = Join-Path $sourceRoot 'packaging\windows\taiji-default-config.yaml'
-$diagnoseSource = Join-Path $sourceRoot 'packaging\windows\diagnose.ps1'
+$defaultConfigSource = Join-PathText $sourceRoot 'packaging\windows\taiji-default-config.yaml'
+$diagnoseSource = Join-PathText $sourceRoot 'packaging\windows\diagnose.ps1'
 Assert-RegularFile $defaultConfigSource 'Windows default config'
 Assert-RegularFile $diagnoseSource 'Windows diagnose script'
 # hermes-local-lab\config\taiji-default-config.yaml is the shared payload config path.
-Copy-Item -LiteralPath $defaultConfigSource -Destination (Join-Path $sharedConfigPath 'taiji-default-config.yaml') -Force
-New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'tools') -Force | Out-Null
-Copy-Item -LiteralPath $diagnoseSource -Destination (Join-Path $payloadRoot 'tools\diagnose.ps1') -Force
+Copy-Item -LiteralPath $defaultConfigSource -Destination (Join-PathText $sharedConfigPath 'taiji-default-config.yaml') -Force
+New-Item -ItemType Directory -Path (Join-PathText $payloadRoot 'tools') -Force | Out-Null
+Copy-Item -LiteralPath $diagnoseSource -Destination (Join-PathText $payloadRoot 'tools\diagnose.ps1') -Force
 
-$pthPath = Join-Path $pythonDestination 'python311._pth'
+$pthPath = Join-PathText $pythonDestination 'python311._pth'
 $pthText = @(
   'python311.zip',
   '.',
@@ -456,7 +472,7 @@ $pthText = @(
 ) -join [char]10
 Write-Utf8Text -Path $pthPath -Text ($pthText + [char]10)
 
-$payloadPython = Join-Path $pythonDestination 'python.exe'
+$payloadPython = Join-PathText $pythonDestination 'python.exe'
 Assert-RegularFile $payloadPython 'payload python runtime'
 Assert-RegularFile $session.tools.python.path 'controller python'
 $runtimeHelp = (& $payloadPython -I -B -m taiji_runtime.main --help 2>&1 | Out-String)
@@ -506,7 +522,7 @@ assert re.search(r"writing", source)
 assert re.search(r"settings", source)
 print("PAYLOAD_MENU_POLICY_OK")
 '@
-$gatePath = Join-Path $stagingRoot 'payload-import-gate.py'
+$gatePath = Join-PathText $stagingRoot 'payload-import-gate.py'
 Write-Utf8Text -Path $gatePath -Text ($importGate.Replace('__PAYLOAD_ROOT__', $payloadRoot.Replace('\', '\\')) + [char]10)
 try {
   $gateOutput = (& $payloadPython -I -B $gatePath 2>&1 | Out-String)
@@ -539,7 +555,7 @@ $unsortedPayloadEntries = @(
       }
     }
 )
-$payloadEntries = @(Sort-MembersByUtf8 $unsortedPayloadEntries)
+$payloadEntries = Sort-MembersByUtf8 $unsortedPayloadEntries
 $payloadManifest = [ordered]@{
   schema = 'taiji-windows-payload-manifest/v1'
   source_commit = $session.source.commit
@@ -549,6 +565,6 @@ $payloadManifest = [ordered]@{
   total_bytes = ($payloadEntries | Measure-Object -Property bytes -Sum).Sum
 }
 $payloadManifest.manifest_sha256 = Get-CanonicalHash $payloadManifest
-$manifestPath = Join-Path $stagingRoot 'payload-manifest.json'
+$manifestPath = Join-PathText $stagingRoot 'payload-manifest.json'
 Write-Utf8Text -Path $manifestPath -Text ((ConvertTo-CanonicalJson $payloadManifest) + [char]10)
 Write-Host 'WINDOWS_CANDIDATE_PAYLOAD_STAGED'

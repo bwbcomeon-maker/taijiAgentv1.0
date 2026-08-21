@@ -262,8 +262,8 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertNotIn("Push-Location $desktopRoot", stage)
         self.assertIn("Push-Location $desktopNpmCheckRoot", stage)
         self.assertIn("foreach ($entry in @($requirements.entries))", stage)
-        self.assertIn("Join-Path $sharedCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
-        self.assertIn("Join-Path $stagingCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
+        self.assertIn("Join-PathText $sharedCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
+        self.assertIn("Join-PathText $stagingCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
         self.assertIn("Get-CacheEntry", stage)
         self.assertIn("staging observation identity drifted before payload assembly", stage)
         self.assertIn("__pycache__", stage)
@@ -285,15 +285,35 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, stage)
 
+    def test_stage_uses_extended_paths_for_remote_working_trees(self):
+        stage = read_script(STAGE)
+        self.assertIn("function ConvertTo-ExtendedPath", stage)
+        self.assertIn("function Join-PathText", stage)
+        self.assertIsNone(re.search(r"\bJoin-Path\s", stage))
+        for assignment in (
+            "$sourceRoot = ConvertTo-ExtendedPath ([string]$session.paths.source_root)",
+            "$stagingRoot = ConvertTo-ExtendedPath ([string]$session.paths.staging_root)",
+            "$stagingCacheRoot = ConvertTo-ExtendedPath ([string]$session.paths.staging_cache_root)",
+            "$payloadRoot = ConvertTo-ExtendedPath ([string]$session.paths.payload_root)",
+        ):
+            with self.subTest(assignment=assignment):
+                self.assertIn(assignment, stage)
+        self.assertNotIn(
+            "$sharedCacheRoot = ConvertTo-ExtendedPath", stage
+        )
+
     def test_stage_cache_revalidation_preserves_bound_root_and_canonical_member_order(self):
         stage = read_script(STAGE)
         self.assertIn("$observation.cache_root", stage)
         self.assertIn("$sharedCacheRoot", stage)
+        self.assertNotIn("$Stream.Position = 0", stage)
         self.assertIn("cache observation root drifted before staging", stage)
         self.assertIn("cache_root = [string]$observation.cache_root", stage)
-        sort_index = stage.index("$members = @(Sort-MembersByUtf8 $members)")
-        digest_index = stage.index("$entry.sha256 = Get-CanonicalHash $members")
+        sort_index = stage.index("$members = Sort-MembersByUtf8 $members")
+        digest_index = stage.index("$entry.sha256 = Get-CanonicalHash (,$members)")
         self.assertLess(sort_index, digest_index)
+        self.assertIn("$entry.members = Sort-MembersByUtf8 $members", stage)
+        self.assertNotIn("@(Sort-MembersByUtf8", stage)
         self.assertTrue(
             ".ComputeHash($Stream)" in stage
             or ".CopyTo(" in stage
@@ -304,7 +324,7 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
     def test_payload_manifest_entries_use_the_same_utf8_byte_order_as_local_review(self):
         stage = read_script(STAGE)
         self.assertIn("$unsortedPayloadEntries = @(", stage)
-        self.assertIn("$payloadEntries = @(Sort-MembersByUtf8 $unsortedPayloadEntries)", stage)
+        self.assertIn("$payloadEntries = Sort-MembersByUtf8 $unsortedPayloadEntries", stage)
         self.assertNotIn("| Sort-Object path", stage)
         chinese_paths = ["构建报告.txt", "z.txt", "é.txt"]
         self.assertEqual(
