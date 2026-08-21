@@ -202,6 +202,12 @@ def _positive_bytes(value, label):
     return value
 
 
+def _nonnegative_bytes(value, label):
+    if type(value) is not int or value < 0:
+        _review_error("{} is not a non-negative byte count".format(label))
+    return value
+
+
 def _new_run_id(source_commit):
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return "{}-{}-{}".format(timestamp, uuid.uuid4().hex[:12], source_commit[:8])
@@ -801,7 +807,7 @@ class WindowsX64Adapter(CandidateAdapter):
             if previous is not None and path_value.encode("utf-8") <= previous:
                 _review_error("payload entries are not UTF-8 path sorted")
             previous = path_value.encode("utf-8")
-            _positive_bytes(entry["bytes"], "payload entry bytes")
+            _nonnegative_bytes(entry["bytes"], "payload entry bytes")
             _sha256_value(entry["sha256"], "payload entry SHA")
             total_bytes += entry["bytes"]
             if path_value == artifact_basename:

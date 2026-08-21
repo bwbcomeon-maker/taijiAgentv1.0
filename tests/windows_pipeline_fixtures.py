@@ -310,9 +310,14 @@ def make_windows_review(root, plan, *, corruption=None):
         "source_commit": plan["source_commit"],
         "source_tree": plan["source_tree"],
         "entries": [
-            {"path": basename, "bytes": artifact.stat().st_size, "sha256": artifact_sha}
+            {"path": basename, "bytes": artifact.stat().st_size, "sha256": artifact_sha},
+            {
+                "path": "empty-marker",
+                "bytes": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+            },
         ],
-        "file_count": 1,
+        "file_count": 2,
         "total_bytes": artifact.stat().st_size,
     }
     payload = copy.deepcopy(payload_identity)
