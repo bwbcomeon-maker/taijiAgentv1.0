@@ -143,6 +143,7 @@ class WindowsRealTransportTests(unittest.TestCase):
         result = windows_ssh._invoke_runner(binary_runner, ["command"])
         self.assertEqual(result.returncode, 0)
         self.assertFalse(observed["text"])
+        self.assertEqual(observed["timeout"], 3600)
 
     def test_encoded_command_uses_target_absolute_powershell(self):
         argv = windows_ssh.powershell_argv("windows-direct", POWERSHELL, "$env:PROCESSOR_ARCHITECTURE")
@@ -191,6 +192,10 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertIn("$requiredNormalized = Normalize-ZipMemberName ([string]$requiredMember)", script)
         self.assertIn("Get-PathIdentity $normalizedName", script)
         self.assertIn("$Path.Normalize([System.Text.NormalizationForm]::FormC) -cne $Path", script)
+
+    def test_builder_probe_hashes_fresh_non_seekable_zip_member_stream(self):
+        script = windows_ssh.builder_probe_script(TARGET)
+        self.assertIn("if ($Stream.CanSeek) { $Stream.Position = 0 }", script)
 
     def test_product_probe_never_checks_or_mutates_builder_run(self):
         script = windows_ssh.product_probe_script(
@@ -319,6 +324,22 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertIn("IO.MemoryStream", loader)
         self.assertNotIn("cmd.exe", loader)
         self.assertNotIn("Start-Process", loader)
+
+    def test_read_only_probe_uses_short_stdin_command_below_windows_cmd_limit(self):
+        observed = {}
+
+        def runner(argv, **kwargs):
+            observed.update(argv=list(argv), kwargs=kwargs)
+            return subprocess.CompletedProcess(argv, 0, b"{}", b"")
+
+        transport = windows_ssh.WindowsSshTransport(
+            TARGET, ssh_config=None, command_runner=runner
+        )
+        script = "Write-Output 'probe'\n" + ("x" * 24000)
+        transport._run_powershell(script)
+        self.assertLess(len(observed["argv"][6]), 8191)
+        self.assertIn("-Command -", observed["argv"][6])
+        self.assertIn(script.encode("utf-8"), observed["kwargs"]["input"])
 
     def test_real_stage_contracts_are_exact_and_fetch_pending_is_fetch_only(self):
         self.assertEqual(

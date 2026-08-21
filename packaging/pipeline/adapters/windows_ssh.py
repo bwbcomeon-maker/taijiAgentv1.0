@@ -25,6 +25,7 @@ from ..core.state import RunStateStore
 SSH = "/usr/bin/ssh"
 SCP = "/usr/bin/scp"
 DEFAULT_CONNECT_TIMEOUT = "5"
+WINDOWS_COMMAND_TIMEOUT_SECONDS = 3600
 WINDOWS_CACHE_SCHEMA = "taiji-windows-cache-observation/v1"
 WINDOWS_HOST_SCHEMA = "taiji-windows-host-facts/v1"
 ONLINE_SCHEMA = "taiji-package-online-doctor/v2"
@@ -114,6 +115,23 @@ try {{
         "-NonInteractive",
         "-EncodedCommand",
         encoded,
+    ]
+    argv = [SSH, "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + DEFAULT_CONNECT_TIMEOUT]
+    if ssh_config is not None:
+        argv.extend(["-F", str(Path(ssh_config).expanduser().resolve())])
+    argv.append(str(host_alias))
+    argv.append(subprocess.list2cmdline(remote_args))
+    return argv
+
+
+def _powershell_stdin_argv(host_alias, powershell_path, ssh_config=None):
+    remote_args = [
+        str(powershell_path),
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "-",
     ]
     argv = [SSH, "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + DEFAULT_CONNECT_TIMEOUT]
     if ssh_config is not None:
@@ -220,7 +238,7 @@ function Get-Sha256Stream {
   param([System.IO.Stream]$Stream)
   $sha = [System.Security.Cryptography.SHA256]::Create()
   try {
-    $Stream.Position = 0
+    if ($Stream.CanSeek) { $Stream.Position = 0 }
     return ([BitConverter]::ToString($sha.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant()
   } finally {
     $sha.Dispose()
@@ -712,7 +730,7 @@ def _invoke_runner(runner, argv, input_bytes=None):
             kwargs = {
                 "cwd": Path.cwd(),
                 "environment": os.environ.copy(),
-                "timeout": 30,
+                "timeout": WINDOWS_COMMAND_TIMEOUT_SECONDS,
             }
             if accepts_kwargs or "text" in signature.parameters:
                 kwargs["text"] = False
@@ -769,14 +787,23 @@ class WindowsSshTransport:
         self._contexts = {}
 
     def _run_powershell(self, script):
-        script_text = str(script)
-        argv = powershell_argv(
+        script_text = (
+            "$utf8 = [Text.UTF8Encoding]::new($false)\n"
+            "[Console]::OutputEncoding = $utf8\n"
+            "$OutputEncoding = $utf8\n"
+            + str(script)
+            + "\n"
+        )
+        argv = _powershell_stdin_argv(
             self.target["host_alias"],
             self.target["powershell"],
-            script_text,
             self.ssh_config,
         )
-        result = _invoke_runner(self.command_runner, argv, input_bytes=None)
+        result = _invoke_runner(
+            self.command_runner,
+            argv,
+            input_bytes=script_text.encode("utf-8"),
+        )
         if getattr(result, "returncode", 0) != 0:
             raise PipelineError("Windows read-only probe failed", category="BUILDER_UNREACHABLE")
         return getattr(result, "stdout", result)
