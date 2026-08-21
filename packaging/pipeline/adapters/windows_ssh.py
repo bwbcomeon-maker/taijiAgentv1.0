@@ -714,6 +714,8 @@ def _invoke_runner(runner, argv, input_bytes=None):
                 "environment": os.environ.copy(),
                 "timeout": 30,
             }
+            if accepts_kwargs or "text" in signature.parameters:
+                kwargs["text"] = False
             if input_bytes is not None:
                 kwargs["input"] = input_bytes
             return runner(argv, **kwargs)

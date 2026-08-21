@@ -128,6 +128,22 @@ class WindowsRealTransportTests(unittest.TestCase):
             windows_ssh._invoke_runner(failing_runner, ["command"])
         self.assertEqual(len(calls), 1)
 
+    def test_windows_runner_requests_binary_output_from_unified_command_runner(self):
+        observed = {}
+
+        def binary_runner(
+            argv, *, cwd, environment=None, timeout=10, text=True, input=None
+        ):
+            observed.update(
+                argv=list(argv), cwd=cwd, environment=environment,
+                timeout=timeout, text=text, input=input,
+            )
+            return subprocess.CompletedProcess(argv, 0, b"{}", b"\xc3")
+
+        result = windows_ssh._invoke_runner(binary_runner, ["command"])
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(observed["text"])
+
     def test_encoded_command_uses_target_absolute_powershell(self):
         argv = windows_ssh.powershell_argv("windows-direct", POWERSHELL, "$env:PROCESSOR_ARCHITECTURE")
         self.assertEqual(argv[:6], [

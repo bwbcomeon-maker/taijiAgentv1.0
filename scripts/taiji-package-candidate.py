@@ -156,13 +156,16 @@ def _run_command(
     cwd: Path,
     environment: Optional[Dict[str, str]] = None,
     timeout: int = 10,
+    text: bool = True,
+    input: Optional[bytes] = None,
 ) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             list(argv),
             cwd=str(cwd),
             env=environment or _command_environment(),
-            text=True,
+            input=input,
+            text=text,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
