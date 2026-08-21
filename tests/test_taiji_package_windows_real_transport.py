@@ -543,6 +543,8 @@ class WindowsRealTransportTests(unittest.TestCase):
                     "[IO.File]::AppendAllText",
                 ):
                     self.assertIn(literal, script)
+                self.assertIn("[IO.File]::WriteAllText($resultPath", script)
+                self.assertNotIn("[IO.File]::Replace", script)
                 self.assertLess(
                     script.index("status = 'RUNNING'"),
                     script.index("-SessionPath"),

@@ -163,6 +163,58 @@ function Get-PathIdentity {
   return $Path.Normalize([System.Text.NormalizationForm]::FormC).ToLowerInvariant()
 }
 
+function Expand-SafeZipArchive {
+  param(
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$DestinationRoot
+  )
+  [void](Add-Type -AssemblyName System.IO.Compression.FileSystem)
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+  try {
+    $seen = @{}
+    foreach ($entry in @($archive.Entries)) {
+      $normalized = Normalize-ZipMemberName ([string]$entry.FullName)
+      if (-not (Test-SafeZipMemberName $normalized)) {
+        throw "Electron cache contains an unsafe ZIP member: $normalized"
+      }
+      $relative = $normalized.TrimEnd('/')
+      $identity = Get-PathIdentity $relative
+      if ($seen.ContainsKey($identity)) {
+        throw "Electron cache contains a duplicate ZIP member: $relative"
+      }
+      $seen[$identity] = $true
+      $destination = Join-PathText $DestinationRoot ($relative.Replace('/', '\'))
+      if ($normalized.EndsWith('/')) {
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+          throw "Electron cache directory collides with a file: $relative"
+        }
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        continue
+      }
+      $parent = [IO.Path]::GetDirectoryName($destination)
+      New-Item -ItemType Directory -Path $parent -Force | Out-Null
+      $sourceStream = $entry.Open()
+      try {
+        $destinationStream = [IO.File]::Open(
+          $destination,
+          [IO.FileMode]::CreateNew,
+          [IO.FileAccess]::Write,
+          [IO.FileShare]::None
+        )
+        try {
+          $sourceStream.CopyTo($destinationStream)
+        } finally {
+          $destinationStream.Dispose()
+        }
+      } finally {
+        $sourceStream.Dispose()
+      }
+    }
+  } finally {
+    $archive.Dispose()
+  }
+}
+
 function Get-ObservationEntry {
   param(
     [Parameter(Mandatory = $true)]$Observation,
@@ -454,7 +506,7 @@ if ([int64]$electronObservation.bytes -ne [int64](Get-Item -LiteralPath $electro
     [string]$electronObservation.sha256 -cne (Get-Sha256 $electronArchive)) {
   throw 'Electron cache identity drifted before payload assembly'
 }
-Expand-Archive -LiteralPath $electronArchive -DestinationPath $payloadRoot -Force
+Expand-SafeZipArchive -ArchivePath $electronArchive -DestinationRoot $payloadRoot
 $electronBinary = Join-PathText $payloadRoot 'electron.exe'
 if (-not (Test-Path -LiteralPath $electronBinary -PathType Leaf)) {
   throw 'Electron cache expansion did not produce root electron.exe'

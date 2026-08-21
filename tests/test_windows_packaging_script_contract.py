@@ -339,6 +339,18 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("PAYLOAD_MENU_POLICY_OK", build)
         self.assertEqual((stage + build).count("ci --offline --ignore-scripts --no-audit"), 1)
 
+    def test_stage_extracts_electron_with_long_path_safe_zip_streams(self):
+        stage = read_script(STAGE)
+        self.assertIn("function Expand-SafeZipArchive", stage)
+        self.assertIn("Test-SafeZipMemberName", stage)
+        self.assertIn("[IO.FileMode]::CreateNew", stage)
+        self.assertIn("$sourceStream.CopyTo($destinationStream)", stage)
+        self.assertIn(
+            "Expand-SafeZipArchive -ArchivePath $electronArchive -DestinationRoot $payloadRoot",
+            stage,
+        )
+        self.assertNotIn("Expand-Archive", stage)
+
     def test_payload_manifest_entries_use_the_same_utf8_byte_order_as_local_review(self):
         stage = read_script(STAGE)
         self.assertIn("$unsortedPayloadEntries = @(", stage)

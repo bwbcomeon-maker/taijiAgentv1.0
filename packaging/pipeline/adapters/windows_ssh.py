@@ -801,17 +801,10 @@ $resultPath = __RESULT_PATH__
 
 function Write-ExecutionResult {
   param([Parameter(Mandatory = $true)]$Value)
-  $temporary = "$resultPath.$([Guid]::NewGuid().ToString('N')).tmp"
-  [IO.File]::WriteAllText(
-    $temporary,
+  [IO.File]::WriteAllText($resultPath,
     ((ConvertTo-Json -InputObject $Value -Depth 8 -Compress) + [char]10),
     $utf8NoBom
   )
-  if (Test-Path -LiteralPath $resultPath) {
-    [IO.File]::Replace($temporary, $resultPath, $null)
-  } else {
-    [IO.File]::Move($temporary, $resultPath)
-  }
 }
 
 [IO.File]::WriteAllText($stdoutPath, '', $utf8NoBom)
