@@ -332,17 +332,18 @@ Invoke-FormalCheck -Id "payload-import-menu-policy" -Action {
   $importGate = @'
 import os
 import pathlib
-import re
 
 payload = pathlib.Path(r"__PAYLOAD_ROOT__")
 agent_root = (payload / "hermes-local-lab" / "sources" / "hermes-agent").resolve()
 webui_root = (payload / "hermes-local-lab" / "sources" / "hermes-webui").resolve()
 packaged_config = payload / "hermes-local-lab" / "config" / "taiji-default-config.yaml"
 main_source = payload / "resources" / "app" / "src" / "main.js"
+runtime_source = payload / "resources" / "app" / "src" / "windows-runtime.js"
 assert agent_root.is_dir()
 assert webui_root.is_dir()
 assert packaged_config.is_file()
 assert main_source.is_file()
+assert runtime_source.is_file()
 assert (payload / "resources" / "app" / "package.json").is_file()
 assert (payload / "resources" / "app" / "src").is_dir()
 os.environ["TAIJI_WEBUI_PACKAGED_CONFIG"] = str(packaged_config)
@@ -369,11 +370,11 @@ visibility = get_ui_visibility()
 nav = {name for name, visible in visibility.get("nav", {}).items() if visible}
 assert nav == {"chat", "tasks", "writing", "settings"}
 source = main_source.read_text(encoding="utf-8")
-assert "taiji_runtime.main" in source
-assert re.search(r"chat", source)
-assert re.search(r"tasks", source)
-assert re.search(r"writing", source)
-assert re.search(r"settings", source)
+runtime_source_text = runtime_source.read_text(encoding="utf-8")
+assert "windowsRuntimeCommands" in source
+assert "startWindowsProcess(commands.agent" in source
+assert 'args: ["-m", "taiji_runtime.main", "gateway", "run", "--accept-hooks"]' in runtime_source_text
+assert "TAIJI_WEBUI_PACKAGED_CONFIG" in runtime_source_text
 print("PAYLOAD_MENU_POLICY_OK")
 '@
   Write-Utf8Text -Path $GatePath -Text ($importGate.Replace('__PAYLOAD_ROOT__', $PayloadRoot.Replace('\', '\\')) + [char]10)

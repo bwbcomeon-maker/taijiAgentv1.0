@@ -172,6 +172,28 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("Write-Output ($menuOutput.TrimEnd())", text)
         self.assertIn("$null -eq $menuExitCode -or $menuExitCode -ne 0", text)
 
+    def test_payload_menu_gate_checks_the_current_windows_runtime_launch_chain(self):
+        text = read_script(BUILD)
+        self.assertIn(
+            'runtime_source = payload / "resources" / "app" / "src" / "windows-runtime.js"',
+            text,
+        )
+        self.assertIn("assert runtime_source.is_file()", text)
+        self.assertIn('assert "windowsRuntimeCommands" in source', text)
+        self.assertIn('assert "startWindowsProcess(commands.agent" in source', text)
+        self.assertIn(
+            'assert \'args: ["-m", "taiji_runtime.main", "gateway", "run", "--accept-hooks"]\' in runtime_source_text',
+            text,
+        )
+        self.assertIn('assert "TAIJI_WEBUI_PACKAGED_CONFIG" in runtime_source_text', text)
+        for obsolete in (
+            'assert re.search(r"chat", source)',
+            'assert re.search(r"tasks", source)',
+            'assert re.search(r"writing", source)',
+            'assert re.search(r"settings", source)',
+        ):
+            self.assertNotIn(obsolete, text)
+
     def test_review_exact_set_and_separate_log_are_explicit(self):
         text = read_script(BUILD)
         for literal in (
