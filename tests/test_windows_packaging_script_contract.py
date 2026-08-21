@@ -207,6 +207,14 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
             text,
         )
 
+    def test_inno_uses_the_bundled_default_language_file(self):
+        text = read_script(INNO)
+        self.assertIn(
+            'Name: "english"; MessagesFile: "compiler:Default.isl"',
+            text,
+        )
+        self.assertNotIn("ChineseSimplified.isl", text)
+
     def test_review_exact_set_and_separate_log_are_explicit(self):
         text = read_script(BUILD)
         for literal in (
