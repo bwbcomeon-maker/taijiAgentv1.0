@@ -622,13 +622,18 @@ if ($seenPythonMembers.Count -ne $expectedPythonMembers.Count) {
   throw 'consumed Python payload identity drifted from cache observation'
 }
 
+$payloadTotalBytes = [int64]0
+foreach ($payloadEntryForTotal in @($payloadEntries)) {
+  $payloadTotalBytes += [int64]$payloadEntryForTotal.bytes
+}
+
 $payloadManifest = [ordered]@{
   schema = 'taiji-windows-payload-manifest/v1'
   source_commit = $session.source.commit
   source_tree = $session.source.tree
   entries = @($payloadEntries)
   file_count = $payloadEntries.Count
-  total_bytes = ($payloadEntries | Measure-Object -Property bytes -Sum).Sum
+  total_bytes = $payloadTotalBytes
 }
 $payloadManifest.manifest_sha256 = Get-CanonicalHash $payloadManifest
 $manifestPath = Join-PathText $stagingRoot 'payload-manifest.json'

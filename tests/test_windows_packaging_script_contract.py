@@ -384,6 +384,16 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         )
         self.assertIn("[Text.Encoding]::UTF8.GetBytes", stage)
 
+    def test_payload_total_bytes_uses_powershell_51_dictionary_compatible_sum(self):
+        stage = read_script(STAGE)
+        self.assertIn("$payloadTotalBytes = [int64]0", stage)
+        self.assertIn(
+            "$payloadTotalBytes += [int64]$payloadEntryForTotal.bytes",
+            stage,
+        )
+        self.assertIn("total_bytes = $payloadTotalBytes", stage)
+        self.assertNotIn("Measure-Object -Property bytes", stage)
+
     def test_initialize_session_captures_tool_identities_not_only_paths(self):
         initialize = read_script(INITIALIZE)
         for literal in (
