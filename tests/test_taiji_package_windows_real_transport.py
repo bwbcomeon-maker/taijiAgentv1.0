@@ -117,6 +117,17 @@ def _write_canonical_state(plan, *, stage, remote_build_succeeded, fetch_allowed
 
 
 class WindowsRealTransportTests(unittest.TestCase):
+    def test_runner_type_error_is_not_swallowed_and_retried_without_required_kwargs(self):
+        calls = []
+
+        def failing_runner(argv, *, cwd, environment=None, timeout=10):
+            calls.append((list(argv), cwd, environment, timeout))
+            raise TypeError("injected runner body failure")
+
+        with self.assertRaisesRegex(TypeError, "injected runner body failure"):
+            windows_ssh._invoke_runner(failing_runner, ["command"])
+        self.assertEqual(len(calls), 1)
+
     def test_encoded_command_uses_target_absolute_powershell(self):
         argv = windows_ssh.powershell_argv("windows-direct", POWERSHELL, "$env:PROCESSOR_ARCHITECTURE")
         self.assertEqual(argv[:6], [

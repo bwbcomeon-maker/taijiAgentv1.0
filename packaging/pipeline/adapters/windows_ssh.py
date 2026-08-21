@@ -701,6 +701,9 @@ def _invoke_runner(runner, argv, input_bytes=None):
         )
     try:
         signature = inspect.signature(runner)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
         accepts_kwargs = any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in signature.parameters.values()
@@ -716,8 +719,6 @@ def _invoke_runner(runner, argv, input_bytes=None):
             return runner(argv, **kwargs)
         if input_bytes is not None and "input" in signature.parameters:
             return runner(argv, input=input_bytes)
-    except (TypeError, ValueError):
-        pass
     return runner(argv)
 
 
