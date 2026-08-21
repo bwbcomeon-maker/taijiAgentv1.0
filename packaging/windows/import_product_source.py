@@ -47,8 +47,12 @@ ALLOWED_PATHS = [
     "apps/taiji-desktop/src/main.js",
     "apps/taiji-desktop/src/windows-runtime.js",
     "apps/taiji-desktop/tests/windows-runtime.test.js",
+    "apps/taiji-desktop/tests/windows-startup-scope.test.js",
+    "hermes-local-lab/config/taiji-default-config.yaml",
     "hermes-local-lab/sources/hermes-agent/taiji_runtime_profile.py",
     "hermes-local-lab/sources/hermes-agent/tests/test_taiji_runtime_profile.py",
+    "hermes-local-lab/sources/hermes-webui/api/config.py",
+    "hermes-local-lab/sources/hermes-webui/tests/test_ui_visibility_config.py",
     "packaging/windows/diagnose.ps1",
 ]
 

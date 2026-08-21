@@ -14,6 +14,18 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = ROOT / "packaging/windows/import_product_source.py"
+EXPECTED_PRODUCT_PATHS = [
+    "apps/taiji-desktop/src/main.js",
+    "apps/taiji-desktop/src/windows-runtime.js",
+    "apps/taiji-desktop/tests/windows-runtime.test.js",
+    "apps/taiji-desktop/tests/windows-startup-scope.test.js",
+    "hermes-local-lab/config/taiji-default-config.yaml",
+    "hermes-local-lab/sources/hermes-agent/taiji_runtime_profile.py",
+    "hermes-local-lab/sources/hermes-agent/tests/test_taiji_runtime_profile.py",
+    "hermes-local-lab/sources/hermes-webui/api/config.py",
+    "hermes-local-lab/sources/hermes-webui/tests/test_ui_visibility_config.py",
+    "packaging/windows/diagnose.ps1",
+]
 
 
 def run_git(cwd, *args, check=True):
@@ -86,6 +98,10 @@ class WindowsProductImportTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertIn(b"{probe,fetch,verify,install-ref,inventory}", result.stdout)
+
+    def test_fixed_product_tip_uses_the_reviewed_ten_path_allowlist(self):
+        helper = load_helper(self)
+        self.assertEqual(helper.ALLOWED_PATHS, EXPECTED_PRODUCT_PATHS)
 
     def test_valid_bundle_writes_exact_manifest_and_inventory_order(self):
         helper = load_helper(self)
