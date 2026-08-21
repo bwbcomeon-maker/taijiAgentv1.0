@@ -152,6 +152,15 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("from api.config import get_ui_visibility", text)
         self.assertIn('assert nav == {"chat", "tasks", "writing", "settings"}', text)
 
+    def test_offline_npm_warning_does_not_mask_the_native_exit_code(self):
+        text = read_script(BUILD)
+        self.assertIn("$previousNpmErrorActionPreference = $ErrorActionPreference", text)
+        self.assertIn("$ErrorActionPreference = 'Continue'", text)
+        self.assertIn("$npmExitCode = $LASTEXITCODE", text)
+        self.assertIn("$ErrorActionPreference = $previousNpmErrorActionPreference", text)
+        self.assertIn("if ($null -eq $npmExitCode -or $npmExitCode -ne 0)", text)
+        self.assertIn('throw "offline npm ci failed: $npmExitCode"', text)
+
     def test_review_exact_set_and_separate_log_are_explicit(self):
         text = read_script(BUILD)
         for literal in (

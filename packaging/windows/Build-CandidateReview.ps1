@@ -269,9 +269,17 @@ Invoke-FormalCheck -Id "offline-npm-ci" -Action {
   }
   Push-Location $desktopNpmCheckRoot
   try {
-    & $session.tools.npm.path ci --offline --ignore-scripts --no-audit --cache $npmCache
-    if ($LASTEXITCODE -ne 0) {
-      throw "offline npm ci failed: $LASTEXITCODE"
+    $previousNpmErrorActionPreference = $ErrorActionPreference
+    $npmExitCode = $null
+    try {
+      $ErrorActionPreference = 'Continue'
+      & $session.tools.npm.path ci --offline --ignore-scripts --no-audit --cache $npmCache
+      $npmExitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousNpmErrorActionPreference
+    }
+    if ($null -eq $npmExitCode -or $npmExitCode -ne 0) {
+      throw "offline npm ci failed: $npmExitCode"
     }
   } finally {
     Pop-Location
