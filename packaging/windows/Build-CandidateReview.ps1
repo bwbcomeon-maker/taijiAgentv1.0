@@ -16,6 +16,15 @@ function Assert-RegularFile {
   }
 }
 
+function ConvertTo-ExtendedPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if ($Path.StartsWith('\\?\')) { return $Path }
+  if ($Path -notmatch '^[A-Za-z]:\\') {
+    throw "working tree path must be an absolute drive path: $Path"
+  }
+  return '\\?\' + $Path
+}
+
 function Get-Sha256 {
   param([Parameter(Mandatory = $true)][string]$Path)
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -398,7 +407,8 @@ print("PAYLOAD_MENU_POLICY_OK")
 }
 
 Invoke-FormalCheck -Id "payload-hygiene-closure" -Action {
-  $forbidden = Get-ChildItem -LiteralPath $PayloadRoot -Force -Recurse |
+  $payloadHygieneRoot = ConvertTo-ExtendedPath $PayloadRoot
+  $forbidden = Get-ChildItem -LiteralPath $payloadHygieneRoot -Force -Recurse |
     Where-Object {
       $_.Name -eq '.git' -or $_.Name -eq '.env' -or $_.Name -like '.env.*' -or
       $_.Name -eq '__pycache__' -or $_.Extension -in @('.db', '.sqlite', '.sqlite3', '.pyc', '.pyo')

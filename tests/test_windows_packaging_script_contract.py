@@ -194,6 +194,19 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         ):
             self.assertNotIn(obsolete, text)
 
+    def test_inno_payload_hygiene_uses_extended_path_enumeration(self):
+        text = read_script(BUILD)
+        self.assertIn("function ConvertTo-ExtendedPath", text)
+        self.assertIn("$payloadHygieneRoot = ConvertTo-ExtendedPath $PayloadRoot", text)
+        self.assertIn(
+            "Get-ChildItem -LiteralPath $payloadHygieneRoot -Force -Recurse",
+            text,
+        )
+        self.assertNotIn(
+            "$forbidden = Get-ChildItem -LiteralPath $PayloadRoot -Force -Recurse",
+            text,
+        )
+
     def test_review_exact_set_and_separate_log_are_explicit(self):
         text = read_script(BUILD)
         for literal in (
