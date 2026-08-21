@@ -168,8 +168,12 @@ def _commit_value(value, label):
 def _utc_value(value, label):
     if not isinstance(value, str) or UTC_RE.fullmatch(value) is None:
         _review_error("{} is not a UTC timestamp".format(label))
+    normalized = value[:-1]
+    if "." in normalized:
+        timestamp, fraction = normalized.split(".", 1)
+        normalized = timestamp + "." + fraction[:6]
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(normalized + "+00:00")
     except ValueError as exc:
         _review_error("{} is invalid: {}".format(label, exc))
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):

@@ -383,7 +383,7 @@ def make_windows_review(root, plan, *, corruption=None):
             "signing": False,
             "publication": False,
         },
-        "started_at": "2026-08-20T12:00:00Z",
+        "started_at": "2026-08-20T12:00:00.1234567Z",
         "finished_at": "2026-08-20T12:01:00Z",
     }
     if corruption == "manifest-source":

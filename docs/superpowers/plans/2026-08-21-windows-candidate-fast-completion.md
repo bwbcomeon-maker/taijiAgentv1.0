@@ -610,6 +610,7 @@ Expected：main clean，包含 Plan 4 全部提交。
 - **可以删除：** 45 秒 SSH 轮询、因终端输出丢失而整轮重跑、重复复制相同文件、重复泛化审查、第三个 Stage 或并行 build。
 - **真实主机 PE 裁决：** Inno Setup 生成的安装器 bootstrap 是 x86 PE32（machine=`0x014c`、optional magic=`0x10b`）；`windows-x64` 目标身份由 Electron `win32-x64` 实际运行检查和 Inno 的 `ArchitecturesAllowed=x64compatible`、`ArchitecturesInstallIn64BitMode=x64compatible` 独立证明。本裁决优先于旧计划中要求安装器 bootstrap 为 AMD64 PE32+（`0x8664`、`0x20b`）的文字，不放宽 x64 payload 合同。
 - **版本裁决：** Windows `VersionInfo` 可能返回带尾随空格的固定宽度字符串；比较前只做 `.Trim()`，随后仍与 `$Version.0` 精确比较。
+- **时间精度裁决：** PowerShell 5.1 的 UTC round-trip 时间可能带 7 位小数秒；本地 review 在严格 `...Z` 格式校验后只截取 Python 3.9 可表达的前 6 位微秒再解析，不放宽 UTC、时间顺序或字段精确集合。
 
 执行顺序固定为：上述三项分别完成聚焦 RED→最小 GREEN；只运行一次隔离 Stage；只运行一次 Inno 预演；二者通过后再运行一次正式 doctor/build；候选 EXE 成功取回后才运行一次完整回归。若只读检查发现 Stage 仍在运行，不得打断或并发；若已结束，先读取持久化结果，不得因 SSH 输出缺失盲目重跑。
 
