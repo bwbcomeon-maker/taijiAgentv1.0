@@ -16,6 +16,18 @@ function Assert-RegularFile {
   }
 }
 
+function Assert-CacheFile {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "$Label is missing: $Path"
+  }
+  $item = Get-Item -LiteralPath $Path -Force
+  if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      ($item.LinkType -and [string]$item.LinkType -cne 'HardLink')) {
+    throw "$Label is not a safe cache file: $Path"
+  }
+}
+
 function ConvertTo-ExtendedPath {
   param([Parameter(Mandatory = $true)][string]$Path)
   if ($Path.StartsWith('\\?\')) { return $Path }
@@ -106,6 +118,10 @@ function Copy-PythonRuntimeFile {
       $relativeLeaf -like '*.pyc' -or $relativeLeaf -like '*.pyo') {
     return
   }
+  if (($File.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      ($File.LinkType -and [string]$File.LinkType -cne 'HardLink')) {
+    throw "Python cache contains an unsafe file: $($File.FullName)"
+  }
   $destination = Join-PathText $DestinationRoot $relative
   New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
   Copy-Item -LiteralPath $File.FullName -Destination $destination -Force
@@ -145,6 +161,27 @@ function Test-SafeZipMemberName {
 function Get-PathIdentity {
   param([string]$Path)
   return $Path.Normalize([System.Text.NormalizationForm]::FormC).ToLowerInvariant()
+}
+
+function Get-ObservationEntry {
+  param(
+    [Parameter(Mandatory = $true)]$Observation,
+    [Parameter(Mandatory = $true)][string]$Id
+  )
+  $matches = @($Observation.entries | Where-Object { [string]$_.id -ceq $Id })
+  if ($matches.Count -ne 1) {
+    throw "cache observation entry is missing or duplicated: $Id"
+  }
+  return $matches[0]
+}
+
+function Test-ExcludedPythonMember {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $parts = @($Path.Replace('\', '/').Split('/'))
+  $leaf = $parts[$parts.Count - 1]
+  return ($parts -contains '__pycache__') -or
+    $leaf.EndsWith('.pyc', [StringComparison]::OrdinalIgnoreCase) -or
+    $leaf.EndsWith('.pyo', [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Compare-ByteArrays {
@@ -341,39 +378,30 @@ if ($observation.schema -ne 'taiji-windows-cache-observation/v1' -or
     (Get-CanonicalHash $observationIdentity) -ne $session.cache.observation_sha256) {
   throw 'cache observation identity drifted before staging'
 }
-
-foreach ($entry in @($requirements.entries)) {
-  $source = Join-PathText $sharedCacheRoot $entry.relative_path.Replace('/', '\')
-  $destination = Join-PathText $stagingCacheRoot $entry.relative_path.Replace('/', '\')
-  if (-not (Test-Path -LiteralPath $source)) {
-    throw "WINDOWS_CACHE_MISSING: $($entry.id)"
-  }
-  if ($entry.type -eq 'directory') {
-    Copy-DirectoryChildren -Source $source -Destination $destination
-  } else {
-    New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
-    Copy-Item -LiteralPath $source -Destination $destination -Force
-  }
+$sharedCacheAccessRoot = ConvertTo-ExtendedPath $sharedCacheRoot
+$npmObservation = Get-ObservationEntry -Observation $observation -Id 'npm-cache'
+$electronObservation = Get-ObservationEntry -Observation $observation -Id 'electron-39.8.10-win32-x64'
+$pythonObservation = Get-ObservationEntry -Observation $observation -Id 'private-python-runtime'
+if ([string]$npmObservation.type -cne 'directory' -or
+    [string]$npmObservation.relative_path -cne 'npm' -or
+    [string]$electronObservation.type -cne 'regular-file' -or
+    [string]$electronObservation.relative_path -cne 'electron/electron-v39.8.10-win32-x64.zip' -or
+    [string]$pythonObservation.type -cne 'directory' -or
+    [string]$pythonObservation.relative_path -cne 'python-runtime') {
+  throw 'cache observation entry contract drifted before staging'
 }
 
-$stagingEntries = @()
-foreach ($entry in @($requirements.entries)) {
-  $stagingEntry = Get-CacheEntry -Requirement $entry -CacheRoot $stagingCacheRoot
-  if ($null -eq $stagingEntry) {
-    throw "WINDOWS_CACHE_MISSING: $($entry.id)"
-  }
-  $stagingEntries += $stagingEntry
+# npm may update its cache metadata, so copy only this small cache into the mutable run staging area.
+$npmCacheSource = Join-PathText $sharedCacheAccessRoot 'npm'
+$stagingNpmCache = Join-PathText $stagingCacheRoot 'npm'
+if (-not (Test-Path -LiteralPath (Join-PathText $npmCacheSource '_cacache') -PathType Container)) {
+  throw 'WINDOWS_CACHE_MISSING: npm cache'
 }
-$stagingObservationIdentity = [ordered]@{
-  schema = 'taiji-windows-cache-observation/v1'
-  target_id = 'windows-x64'
-  requirements_sha256 = $session.cache.requirements_sha256
-  cache_root = [string]$observation.cache_root
-  entries = @($stagingEntries)
+$npmCacheItem = Get-Item -LiteralPath $npmCacheSource -Force
+if (($npmCacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $npmCacheItem.LinkType) {
+  throw 'WINDOWS_CACHE_MISSING: npm cache'
 }
-if ((Get-CanonicalHash $stagingObservationIdentity) -ne $session.cache.observation_sha256) {
-  throw 'staging observation identity drifted before payload assembly'
-}
+Copy-DirectoryChildren -Source $npmCacheSource -Destination $stagingNpmCache
 
 $desktopRoot = Join-PathText $sourceRoot 'apps\taiji-desktop'
 $packageJson = Join-PathText $desktopRoot 'package.json'
@@ -388,19 +416,8 @@ $desktopNpmCheckRoot = Join-PathText $stagingRoot 'desktop-npm-check'
 New-Item -ItemType Directory -Path $desktopNpmCheckRoot -Force | Out-Null
 Copy-Item -LiteralPath $packageJson -Destination (Join-PathText $desktopNpmCheckRoot 'package.json') -Force
 Copy-Item -LiteralPath $packageLock -Destination (Join-PathText $desktopNpmCheckRoot 'package-lock.json') -Force
-$stagingNpmCache = Join-PathText $stagingCacheRoot 'npm'
 if (-not (Test-Path -LiteralPath (Join-PathText $stagingNpmCache '_cacache'))) {
   throw 'WINDOWS_CACHE_MISSING: npm cache'
-}
-Push-Location $desktopNpmCheckRoot
-try {
-  $npmOutput = (& $session.tools.npm.path ci --offline --ignore-scripts --no-audit --cache $stagingNpmCache 2>&1 | Out-String)
-  Write-Utf8Text -Path (Join-PathText $desktopNpmCheckRoot 'npm-check.log') -Text ($npmOutput.TrimEnd() + [char]10)
-  if ($LASTEXITCODE -ne 0) {
-    throw "offline npm ci failed: $LASTEXITCODE"
-  }
-} finally {
-  Pop-Location
 }
 
 $appRoot = Join-PathText $payloadRoot 'resources\app'
@@ -422,17 +439,21 @@ $payloadSourcesRoot = Join-PathText $payloadRoot 'hermes-local-lab\sources'
 Copy-DirectoryChildren -Source $agentSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-agent')
 Copy-DirectoryChildren -Source $webuiSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-webui')
 
-$pythonSource = Join-PathText $stagingCacheRoot 'python-runtime'
+$pythonSource = Join-PathText $sharedCacheAccessRoot 'python-runtime'
 $pythonDestination = Join-PathText $payloadRoot 'hermes-local-lab\runtime\python'
-Assert-RegularFile (Join-PathText $pythonSource 'python.exe') 'python runtime'
-Assert-RegularFile (Join-PathText $pythonSource 'python311._pth') 'python path file'
+Assert-CacheFile (Join-PathText $pythonSource 'python.exe') 'python runtime'
+Assert-CacheFile (Join-PathText $pythonSource 'python311._pth') 'python path file'
 New-Item -ItemType Directory -Path $pythonDestination -Force | Out-Null
 foreach ($pythonFile in @(Get-ChildItem -LiteralPath $pythonSource -File -Recurse -Force)) {
   Copy-PythonRuntimeFile -File $pythonFile -SourceRoot $pythonSource -DestinationRoot $pythonDestination
 }
 
-$electronArchive = Join-PathText $stagingCacheRoot 'electron\electron-v39.8.10-win32-x64.zip'
-Assert-RegularFile $electronArchive 'Electron cache archive'
+$electronArchive = Join-PathText $sharedCacheAccessRoot 'electron\electron-v39.8.10-win32-x64.zip'
+Assert-CacheFile $electronArchive 'Electron cache archive'
+if ([int64]$electronObservation.bytes -ne [int64](Get-Item -LiteralPath $electronArchive).Length -or
+    [string]$electronObservation.sha256 -cne (Get-Sha256 $electronArchive)) {
+  throw 'Electron cache identity drifted before payload assembly'
+}
 Expand-Archive -LiteralPath $electronArchive -DestinationPath $payloadRoot -Force
 $electronBinary = Join-PathText $payloadRoot 'electron.exe'
 if (-not (Test-Path -LiteralPath $electronBinary -PathType Leaf)) {
@@ -443,21 +464,6 @@ if (Test-Path -LiteralPath $taijiAgentExe) {
   throw 'TaijiAgent.exe already exists before rename'
 }
 Rename-Item -LiteralPath $electronBinary -NewName 'TaijiAgent.exe'
-$previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
-$hadElectronRunAsNode = Test-Path Env:\ELECTRON_RUN_AS_NODE
-try {
-  $env:ELECTRON_RUN_AS_NODE = '1'
-  $electronOutput = (& $taijiAgentExe -e "console.log(process.platform + ' ' + process.arch)" 2>&1 | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0 -or $electronOutput -cne 'win32 x64') {
-    throw 'electron-win32-x64 verification failed'
-  }
-} finally {
-  if ($hadElectronRunAsNode) {
-    $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode
-  } else {
-    Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-  }
-}
 
 $sharedConfigPath = Join-PathText $payloadRoot 'hermes-local-lab\config'
 New-Item -ItemType Directory -Path $sharedConfigPath -Force | Out-Null
@@ -480,67 +486,6 @@ $pthText = @(
   'import site'
 ) -join [char]10
 Write-Utf8Text -Path $pthPath -Text ($pthText + [char]10)
-
-$payloadPython = Join-PathText $pythonDestination 'python.exe'
-Assert-RegularFile $payloadPython 'payload python runtime'
-Assert-RegularFile $session.tools.python.path 'controller python'
-$runtimeHelp = (& $payloadPython -I -B -m taiji_runtime.main --help 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0) {
-  throw 'taiji_runtime.main help failed'
-}
-$importGate = @'
-import pathlib
-import re
-
-payload = pathlib.Path(r"__PAYLOAD_ROOT__")
-agent_root = (payload / "hermes-local-lab" / "sources" / "hermes-agent").resolve()
-webui_root = (payload / "hermes-local-lab" / "sources" / "hermes-webui").resolve()
-main_source = payload / "resources" / "app" / "src" / "main.js"
-assert agent_root.is_dir()
-assert webui_root.is_dir()
-assert main_source.is_file()
-assert (payload / "resources" / "app" / "package.json").is_file()
-assert (payload / "resources" / "app" / "src").is_dir()
-import taiji_runtime.main
-import taiji_runtime_profile
-import taiji_license
-import aiohttp
-import fastapi
-import uvicorn
-import yaml
-import cryptography
-import psutil
-import api.config
-from api.config import get_ui_visibility
-for module, expected_root in (
-    (taiji_runtime.main, agent_root),
-    (taiji_runtime_profile, agent_root),
-    (taiji_license, agent_root),
-    (api.config, webui_root),
-):
-    module_path = pathlib.Path(module.__file__).resolve()
-    assert str(module_path).startswith(str(expected_root))
-visibility = get_ui_visibility({})
-nav = {name for name, visible in visibility.get("nav", {}).items() if visible}
-assert nav == {"chat", "tasks", "writing", "settings"}
-source = main_source.read_text(encoding="utf-8")
-assert "taiji_runtime.main" in source
-assert re.search(r"chat", source)
-assert re.search(r"tasks", source)
-assert re.search(r"writing", source)
-assert re.search(r"settings", source)
-print("PAYLOAD_MENU_POLICY_OK")
-'@
-$gatePath = Join-PathText $stagingRoot 'payload-import-gate.py'
-Write-Utf8Text -Path $gatePath -Text ($importGate.Replace('__PAYLOAD_ROOT__', $payloadRoot.Replace('\', '\\')) + [char]10)
-try {
-  $gateOutput = (& $payloadPython -I -B $gatePath 2>&1 | Out-String)
-  if ($LASTEXITCODE -ne 0 -or $gateOutput -notmatch 'PAYLOAD_MENU_POLICY_OK') {
-    throw 'payload private Python import/menu gate failed'
-  }
-} finally {
-  Remove-Item -LiteralPath $gatePath -Force -ErrorAction SilentlyContinue
-}
 
 $forbiddenDirectories = @('.git', '.ssh', '.gnupg', '.aws', '__pycache__', 'node_modules')
 # payload hygiene patterns include *.db, *.sqlite, *.sqlite3, *.pyc, and *.pyo.
@@ -565,6 +510,55 @@ $unsortedPayloadEntries = @(
     }
 )
 $payloadEntries = Sort-MembersByUtf8 $unsortedPayloadEntries
+
+$electronMembers = @($electronObservation.members | Where-Object { [string]$_.path -ceq 'electron.exe' })
+$payloadElectron = @($payloadEntries | Where-Object { [string]$_.path -ceq 'TaijiAgent.exe' })
+if ($electronMembers.Count -ne 1 -or $payloadElectron.Count -ne 1 -or
+    [int64]$electronMembers[0].bytes -ne [int64]$payloadElectron[0].bytes -or
+    [string]$electronMembers[0].sha256 -cne [string]$payloadElectron[0].sha256) {
+  throw 'Electron payload identity drifted from cache observation'
+}
+
+$expectedPythonMembers = @{}
+foreach ($member in @($pythonObservation.members)) {
+  $memberPath = [string]$member.path
+  if (-not (Test-SafePosixPath $memberPath)) {
+    throw 'Python cache observation contains an unsafe member path'
+  }
+  if ((Test-ExcludedPythonMember $memberPath) -or $memberPath -ceq 'python311._pth') {
+    continue
+  }
+  $identity = Get-PathIdentity $memberPath
+  if ($expectedPythonMembers.ContainsKey($identity)) {
+    throw 'Python cache observation contains a duplicate member path'
+  }
+  $expectedPythonMembers[$identity] = $member
+}
+
+$pythonPayloadPrefix = 'hermes-local-lab/runtime/python/'
+$seenPythonMembers = @{}
+foreach ($payloadEntry in @($payloadEntries)) {
+  $payloadPath = [string]$payloadEntry.path
+  if (-not $payloadPath.StartsWith($pythonPayloadPrefix, [StringComparison]::Ordinal)) {
+    continue
+  }
+  $memberPath = $payloadPath.Substring($pythonPayloadPrefix.Length)
+  if ($memberPath -ceq 'python311._pth') { continue }
+  $identity = Get-PathIdentity $memberPath
+  if (-not $expectedPythonMembers.ContainsKey($identity) -or $seenPythonMembers.ContainsKey($identity)) {
+    throw 'consumed Python payload identity drifted from cache observation'
+  }
+  $expected = $expectedPythonMembers[$identity]
+  if ([int64]$expected.bytes -ne [int64]$payloadEntry.bytes -or
+      [string]$expected.sha256 -cne [string]$payloadEntry.sha256) {
+    throw 'consumed Python payload identity drifted from cache observation'
+  }
+  $seenPythonMembers[$identity] = $true
+}
+if ($seenPythonMembers.Count -ne $expectedPythonMembers.Count) {
+  throw 'consumed Python payload identity drifted from cache observation'
+}
+
 $payloadManifest = [ordered]@{
   schema = 'taiji-windows-payload-manifest/v1'
   source_commit = $session.source.commit

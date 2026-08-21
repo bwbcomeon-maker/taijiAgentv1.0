@@ -230,6 +230,7 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
 
     def test_stage_payload_contract_is_windows_candidate_specific(self):
         stage = read_script(STAGE)
+        build = read_script(BUILD)
         for literal in (
             "TaijiAgent.exe",
             "resources\\app\\src",
@@ -239,33 +240,17 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
             "hermes-local-lab\\config\\taiji-default-config.yaml",
             "diagnose.ps1",
             "python311._pth",
-            "menu gate",
             "desktop-npm-check",
             "package-lock.json",
             "Lib\\site-packages",
-            "taiji_runtime_profile",
-            "taiji_license",
-            "aiohttp",
-            "fastapi",
-            "uvicorn",
-            "cryptography",
-            "psutil",
-            "ELECTRON_RUN_AS_NODE",
-            "win32 x64",
         ):
             with self.subTest(literal=literal):
                 self.assertIn(literal, stage)
-        self.assertIn("$session.tools.npm.path", stage)
-        self.assertIn("$session.tools.python.path", stage)
-        self.assertNotIn("& $session.tools.npm ci", stage)
+        self.assertNotIn("$session.tools.npm.path", stage)
+        self.assertNotIn("$session.tools.python.path", stage)
         self.assertNotIn("Copy-Item -LiteralPath $pythonSource -Destination $pythonDestination -Recurse -Force", stage)
         self.assertNotIn("Push-Location $desktopRoot", stage)
-        self.assertIn("Push-Location $desktopNpmCheckRoot", stage)
-        self.assertIn("foreach ($entry in @($requirements.entries))", stage)
-        self.assertIn("Join-PathText $sharedCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
-        self.assertIn("Join-PathText $stagingCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
-        self.assertIn("Get-CacheEntry", stage)
-        self.assertIn("staging observation identity drifted before payload assembly", stage)
+        self.assertNotIn("Push-Location $desktopNpmCheckRoot", stage)
         self.assertIn("__pycache__", stage)
         self.assertIn(".pyc", stage)
         self.assertIn(".pyo", stage)
@@ -276,10 +261,17 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("python311.zip", stage)
         self.assertIn("import site", stage)
         self.assertIn("[char]10", stage)
-        self.assertIn("import taiji_runtime.main", stage)
-        self.assertIn("from api.config import get_ui_visibility", stage)
-        self.assertIn('assert nav == {"chat", "tasks", "writing", "settings"}', stage)
-        self.assertIn("-m taiji_runtime.main --help", stage)
+        for runtime_literal in (
+            "import taiji_runtime.main",
+            "from api.config import get_ui_visibility",
+            'assert nav == {"chat", "tasks", "writing", "settings"}',
+            "-m taiji_runtime.main --help",
+            "ELECTRON_RUN_AS_NODE",
+            "win32 x64",
+        ):
+            with self.subTest(runtime_literal=runtime_literal):
+                self.assertNotIn(runtime_literal, stage)
+                self.assertIn(runtime_literal, build)
         self.assertNotIn("[Environment]::NewLine", stage)
         for forbidden in ("resources\\app\\tests", "payloadRoot 'Agent'", "payloadRoot 'WebUI'"):
             with self.subTest(forbidden=forbidden):
@@ -301,25 +293,51 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertNotIn(
             "$sharedCacheRoot = ConvertTo-ExtendedPath", stage
         )
+        self.assertIn(
+            "$sharedCacheAccessRoot = ConvertTo-ExtendedPath $sharedCacheRoot", stage
+        )
 
-    def test_stage_cache_revalidation_preserves_bound_root_and_canonical_member_order(self):
+    def test_stage_binds_consumed_cache_without_rehashing_staging_copy(self):
         stage = read_script(STAGE)
         self.assertIn("$observation.cache_root", stage)
         self.assertIn("$sharedCacheRoot", stage)
-        self.assertNotIn("$Stream.Position = 0", stage)
         self.assertIn("cache observation root drifted before staging", stage)
-        self.assertIn("cache_root = [string]$observation.cache_root", stage)
-        sort_index = stage.index("$members = Sort-MembersByUtf8 $members")
-        digest_index = stage.index("$entry.sha256 = Get-CanonicalHash (,$members)")
-        self.assertLess(sort_index, digest_index)
-        self.assertIn("$entry.members = Sort-MembersByUtf8 $members", stage)
-        self.assertNotIn("@(Sort-MembersByUtf8", stage)
-        self.assertTrue(
-            ".ComputeHash($Stream)" in stage
-            or ".CopyTo(" in stage
-            or ("while (" in stage and "$stream.Read(" in stage),
-            "ZIP member hashing must consume the complete stream",
+        self.assertIn("(Get-CanonicalHash $observationIdentity) -ne $session.cache.observation_sha256", stage)
+        self.assertIn("Electron cache identity drifted before payload assembly", stage)
+        self.assertIn("Electron payload identity drifted from cache observation", stage)
+        self.assertIn("consumed Python payload identity drifted from cache observation", stage)
+        self.assertNotIn("Get-CacheEntry -Requirement", stage)
+        self.assertNotIn("staging observation identity drifted", stage)
+
+    def test_stage_avoids_duplicate_cache_copy_hash_and_runtime_checks(self):
+        stage = read_script(STAGE)
+        build = read_script(BUILD)
+        self.assertIn(
+            "Copy-DirectoryChildren -Source $npmCacheSource -Destination $stagingNpmCache",
+            stage,
         )
+        self.assertNotIn("foreach ($entry in @($requirements.entries))", stage)
+        self.assertNotIn("Get-CacheEntry -Requirement", stage)
+        self.assertNotIn("staging observation identity drifted", stage)
+        self.assertIn(
+            "$pythonSource = Join-PathText $sharedCacheAccessRoot 'python-runtime'",
+            stage,
+        )
+        self.assertIn(
+            "$electronArchive = Join-PathText $sharedCacheAccessRoot 'electron\\electron-v39.8.10-win32-x64.zip'",
+            stage,
+        )
+        self.assertIn("function Assert-CacheFile", stage)
+        self.assertIn("[string]$item.LinkType -cne 'HardLink'", stage)
+        self.assertIn("Electron cache identity drifted before payload assembly", stage)
+        self.assertIn("consumed Python payload identity drifted from cache observation", stage)
+        self.assertNotIn("ELECTRON_RUN_AS_NODE", stage)
+        self.assertNotIn("-m taiji_runtime.main --help", stage)
+        self.assertNotIn("PAYLOAD_MENU_POLICY_OK", stage)
+        self.assertIn("ELECTRON_RUN_AS_NODE", build)
+        self.assertIn("-m taiji_runtime.main --help", build)
+        self.assertIn("PAYLOAD_MENU_POLICY_OK", build)
+        self.assertEqual((stage + build).count("ci --offline --ignore-scripts --no-audit"), 1)
 
     def test_payload_manifest_entries_use_the_same_utf8_byte_order_as_local_review(self):
         stage = read_script(STAGE)
