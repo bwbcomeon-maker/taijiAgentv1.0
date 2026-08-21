@@ -130,6 +130,8 @@ def _powershell_stdin_argv(host_alias, powershell_path, ssh_config=None):
         "-NoLogo",
         "-NoProfile",
         "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
         "-Command",
         "-",
     ]

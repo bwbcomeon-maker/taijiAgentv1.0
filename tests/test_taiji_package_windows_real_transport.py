@@ -352,6 +352,7 @@ class WindowsRealTransportTests(unittest.TestCase):
         script = "Write-Output 'stage'\n" + ("x" * 24000)
         transport._run_remote_stage(script, "INPUT_VERIFICATION_FAILED")
         self.assertLess(len(observed["argv"][6]), 8191)
+        self.assertIn("-ExecutionPolicy Bypass", observed["argv"][6])
         self.assertIn("-Command -", observed["argv"][6])
         self.assertIn(script.encode("utf-8"), observed["kwargs"]["input"])
 
