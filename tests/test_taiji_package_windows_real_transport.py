@@ -197,6 +197,11 @@ class WindowsRealTransportTests(unittest.TestCase):
         script = windows_ssh.builder_probe_script(TARGET)
         self.assertIn("if ($Stream.CanSeek) { $Stream.Position = 0 }", script)
 
+    def test_builder_probe_keeps_zip_members_as_a_flat_list(self):
+        script = windows_ssh.builder_probe_script(TARGET)
+        self.assertIn("$entry.members = Sort-MembersByUtf8 $zipMembers", script)
+        self.assertNotIn("$entry.members = @(Sort-MembersByUtf8 $zipMembers)", script)
+
     def test_product_probe_never_checks_or_mutates_builder_run(self):
         script = windows_ssh.product_probe_script(
             r"D:\tw\source\taijiAgentv1.0",

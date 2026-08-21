@@ -419,7 +419,7 @@ function Get-CacheEntry {
     }
     $entry.bytes = [int64]$item.Length
     $entry.sha256 = Get-Sha256Path $fullPath
-    $entry.members = @(Sort-MembersByUtf8 $zipMembers)
+    $entry.members = Sort-MembersByUtf8 $zipMembers
     return [ordered]@{ present = $true; entry = $entry }
   } catch {
     return New-MissingCacheResult $entry
