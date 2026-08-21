@@ -54,10 +54,17 @@ test("Windows runtime checks private files instead of shell scripts", () => {
 });
 
 test("Packaged nav policy exposes exactly the four approved entries", () => {
-  const template = fs.readFileSync(
-    path.join(__dirname, "..", "..", "..", "hermes-local-lab", "config", "taiji-default-config.yaml"),
-    "utf8",
+  const templatePath = path.join(
+    __dirname,
+    "..",
+    "..",
+    "..",
+    "packaging",
+    "windows",
+    "taiji-default-config.yaml",
   );
+  assert.equal(fs.existsSync(templatePath), true, "Windows menu policy must use a dedicated packaging config");
+  const template = fs.readFileSync(templatePath, "utf8");
   const navBlock = template.split(/\n\s*nav:\s*\n/, 2)[1].split(/\n\s*settings_sections:\s*\n/, 1)[0];
   const visible = [...navBlock.matchAll(/^\s{6}([a-z_]+):\s*true\s*$/gm)].map((match) => match[1]);
   assert.deepEqual(visible, ["chat", "tasks", "writing", "settings"]);
