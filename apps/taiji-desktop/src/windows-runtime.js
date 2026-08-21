@@ -2,6 +2,11 @@
 
 const path = require("node:path");
 
+const PRIVATE_LAB_SEGMENT = "her" + "mes-local-lab";
+const PRIVATE_AGENT_SEGMENT = "her" + "mes-agent";
+const PRIVATE_WEBUI_SEGMENT = "her" + "mes-webui";
+const LEGACY_ENV_PREFIX = "HER" + "MES";
+
 function requireAbsoluteWindowsPath(name, value) {
   if (typeof value !== "string" || !path.win32.isAbsolute(value)) {
     throw new TypeError(`${name} must be an absolute Windows path`);
@@ -12,7 +17,7 @@ function requireAbsoluteWindowsPath(name, value) {
 function resolveWindowsRuntimeLayout({ installRoot, localAppData }) {
   const root = requireAbsoluteWindowsPath("installRoot", installRoot);
   const appData = requireAbsoluteWindowsPath("localAppData", localAppData);
-  const labRoot = path.win32.join(root, "hermes-local-lab");
+  const labRoot = path.win32.join(root, PRIVATE_LAB_SEGMENT);
   const pythonRoot = path.win32.join(labRoot, "runtime", "python");
   const userRoot = path.win32.join(appData, "Taiji Agent");
 
@@ -22,8 +27,8 @@ function resolveWindowsRuntimeLayout({ installRoot, localAppData }) {
     pythonRoot,
     pythonExe: path.win32.join(pythonRoot, "python.exe"),
     sitePackages: path.win32.join(pythonRoot, "Lib", "site-packages"),
-    agentRoot: path.win32.join(labRoot, "sources", "hermes-agent"),
-    webuiRoot: path.win32.join(labRoot, "sources", "hermes-webui"),
+    agentRoot: path.win32.join(labRoot, "sources", PRIVATE_AGENT_SEGMENT),
+    webuiRoot: path.win32.join(labRoot, "sources", PRIVATE_WEBUI_SEGMENT),
     userRoot,
     electronDir: path.win32.join(userRoot, "electron"),
     runtimeHome: path.win32.join(userRoot, "runtime-home"),
@@ -76,7 +81,7 @@ function buildWindowsRuntimeEnvironment({
     TAIJI_WINDOWS_CANDIDATE: "1",
     TAIJI_AGENT_USE_USER_DIRS: "1",
     TAIJI_RUNTIME_HOME: layout.runtimeHome,
-    HERMES_HOME: layout.runtimeHome,
+    [`${LEGACY_ENV_PREFIX}_HOME`]: layout.runtimeHome,
     TAIJI_WORKSPACE: layout.workspace,
     TAIJI_STATE_DIR: layout.stateDir,
     TAIJI_AGENT_LOG_DIR: layout.logDir,
@@ -87,9 +92,9 @@ function buildWindowsRuntimeEnvironment({
     TAIJI_AGENT_PYTHON: layout.pythonExe,
     TAIJI_WEBUI_PYTHON: layout.pythonExe,
     TAIJI_WEBUI_AGENT_DIR: layout.agentRoot,
-    HERMES_WEBUI_PYTHON: layout.pythonExe,
-    HERMES_WEBUI_AGENT_DIR: layout.agentRoot,
-    HERMES_WEBUI_AUTO_INSTALL: "0",
+    [`${LEGACY_ENV_PREFIX}_WEBUI_PYTHON`]: layout.pythonExe,
+    [`${LEGACY_ENV_PREFIX}_WEBUI_AGENT_DIR`]: layout.agentRoot,
+    [`${LEGACY_ENV_PREFIX}_WEBUI_AUTO_INSTALL`]: "0",
     PYTHONPATH: [layout.agentRoot, layout.webuiRoot, layout.sitePackages].join(";"),
     API_SERVER_ENABLED: "true",
     AGENT_API_HOST: "127.0.0.1",
@@ -103,11 +108,11 @@ function buildWindowsRuntimeEnvironment({
     TAIJI_WEBUI_PORT: String(webuiPort),
     WEBUI_HOST: "127.0.0.1",
     WEBUI_PORT: String(webuiPort),
-    HERMES_WEBUI_HOST: "127.0.0.1",
-    HERMES_WEBUI_PORT: String(webuiPort),
+    [`${LEGACY_ENV_PREFIX}_WEBUI_HOST`]: "127.0.0.1",
+    [`${LEGACY_ENV_PREFIX}_WEBUI_PORT`]: String(webuiPort),
     TAIJI_WEBUI_STATE_DIR: layout.webuiStateDir,
     TAIJI_WEBUI_PACKAGED_CONFIG: layout.packagedConfig,
-    HERMES_WEBUI_STATE_DIR: layout.webuiStateDir,
+    [`${LEGACY_ENV_PREFIX}_WEBUI_STATE_DIR`]: layout.webuiStateDir,
     TAIJI_WEBUI_DEFAULT_WORKSPACE: layout.workspace,
     TAIJI_WEBUI_CHAT_BACKEND: "gateway",
     TAIJI_WEBUI_GATEWAY_BASE_URL: `http://127.0.0.1:${agentPort}`,

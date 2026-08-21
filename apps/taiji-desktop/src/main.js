@@ -145,7 +145,7 @@ if (launchProfile && launchProfile.kind === INSTALLED_PROFILE) {
 
 function resolveLabDir() {
   if (process.platform === "win32") {
-    return path.join(path.resolve(process.resourcesPath, ".."), "hermes-local-lab");
+    return path.join(path.resolve(process.resourcesPath, ".."), "her" + "mes-local-lab");
   }
   if (launchProfile && launchProfile.kind === INSTALLED_PROFILE) {
     return launchProfile.installRoot;

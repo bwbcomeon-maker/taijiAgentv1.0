@@ -1422,6 +1422,7 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
             "packaging/linux/bin/taiji-agent-diagnose",
             "packaging/linux/deb/prerm",
             "apps/taiji-desktop/src/main.js",
+            "apps/taiji-desktop/src/windows-runtime.js",
         ]
         forbidden = ("hermes", "HERMES_", "hermes_cli", "hermes-agent", "hermes-webui", "hermes-home")
         for path in paths:
