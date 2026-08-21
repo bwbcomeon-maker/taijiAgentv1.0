@@ -809,12 +809,18 @@ class WindowsSshTransport:
         return getattr(result, "stdout", result)
 
     def _run_remote_stage(self, script, category):
-        result = _invoke_runner(self.command_runner, powershell_argv(
+        script_text = (
+            "$utf8 = [Text.UTF8Encoding]::new($false)\n"
+            "[Console]::OutputEncoding = $utf8\n"
+            "$OutputEncoding = $utf8\n"
+            + str(script)
+            + "\n"
+        )
+        result = _invoke_runner(self.command_runner, _powershell_stdin_argv(
             self.target["host_alias"],
             self.target["powershell"],
-            str(script),
             self.ssh_config,
-        ))
+        ), input_bytes=script_text.encode("utf-8"))
         if getattr(result, "returncode", 0) != 0:
             raise PipelineError("Windows remote stage failed", category=category)
         return getattr(result, "stdout", result)

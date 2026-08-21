@@ -1,9 +1,7 @@
 """Local contracts for the gated Windows SSH transport."""
 
 import base64
-import gzip
 import json
-import re
 import subprocess
 import tempfile
 import unittest
@@ -51,16 +49,11 @@ class FailOnCallRunner:
         return subprocess.CompletedProcess(argv, returncode, b"{}", b"injected failure")
 
 
-def _decode_encoded_command(argv):
-    remote = argv[6]
-    marker = "-EncodedCommand "
-    index = remote.index(marker) + len(marker)
-    encoded = remote[index:].strip().strip('"')
-    decoded = base64.b64decode(encoded).decode("utf-16le")
-    payload_match = re.search(r"\$payload = '([^']+)'", decoded)
-    if payload_match is None:
-        return decoded
-    return gzip.decompress(base64.b64decode(payload_match.group(1))).decode("utf-8")
+def _decode_stdin_command(call):
+    argv, kwargs = call
+    if "-Command -" not in argv[6]:
+        raise AssertionError("runner call does not use PowerShell stdin")
+    return kwargs["input"].decode("utf-8")
 
 
 def _decode_loader(argv):
@@ -346,6 +339,22 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertIn("-Command -", observed["argv"][6])
         self.assertIn(script.encode("utf-8"), observed["kwargs"]["input"])
 
+    def test_remote_stage_uses_short_stdin_command_below_windows_cmd_limit(self):
+        observed = {}
+
+        def runner(argv, **kwargs):
+            observed.update(argv=list(argv), kwargs=kwargs)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        transport = windows_ssh.WindowsSshTransport(
+            TARGET, ssh_config=None, command_runner=runner
+        )
+        script = "Write-Output 'stage'\n" + ("x" * 24000)
+        transport._run_remote_stage(script, "INPUT_VERIFICATION_FAILED")
+        self.assertLess(len(observed["argv"][6]), 8191)
+        self.assertIn("-Command -", observed["argv"][6])
+        self.assertIn(script.encode("utf-8"), observed["kwargs"]["input"])
+
     def test_real_stage_contracts_are_exact_and_fetch_pending_is_fetch_only(self):
         self.assertEqual(
             windows_ssh.REAL_BUILD_STAGES,
@@ -407,7 +416,7 @@ class WindowsRealTransportTests(unittest.TestCase):
                 }
             }
             transport.create_remote_run(plan)
-        script = _decode_encoded_command(runner.calls[0][0])
+        script = _decode_stdin_command(runner.calls[0])
         self.assertIn("REMOTE_RUN_CONFLICT", script)
         self.assertIn("Test-Path -LiteralPath", script)
         self.assertEqual(script.count("New-Item -ItemType Directory"), 6)
@@ -520,7 +529,7 @@ class WindowsRealTransportTests(unittest.TestCase):
             transport.create_remote_run(plan)
             transport.transfer_input(plan)
             transport.verify_remote_input(plan)
-        script = _decode_encoded_command(runner.calls[-1][0])
+        script = _decode_stdin_command(runner.calls[-1])
         checkout = plan["remote_run_dir"] + r"\source\checkout"
         self.assertIn(r"\input\controller-safe-tar.py", script)
         self.assertIn(plan["target_config"]["python"], script)
