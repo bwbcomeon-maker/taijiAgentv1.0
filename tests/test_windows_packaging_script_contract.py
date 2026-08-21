@@ -215,6 +215,15 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         )
         self.assertNotIn("ChineseSimplified.isl", text)
 
+    def test_inno_compile_reads_payload_through_a_verified_short_junction(self):
+        text = read_script(BUILD)
+        self.assertIn("'tw\\inno-links'", text)
+        self.assertIn("New-Item -ItemType Junction", text)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", text)
+        self.assertIn("Join-Path $innoPayloadRoot 'TaijiAgent.exe'", text)
+        self.assertIn('"/DPayloadRoot=$innoPayloadRoot"', text)
+        self.assertNotIn('"/DPayloadRoot=$PayloadRoot"', text)
+
     def test_review_exact_set_and_separate_log_are_explicit(self):
         text = read_script(BUILD)
         for literal in (

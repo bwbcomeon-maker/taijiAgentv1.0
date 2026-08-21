@@ -422,9 +422,20 @@ Invoke-FormalCheck -Id "inno-compile" -Action {
   if (-not (Test-Path -LiteralPath $InnoScript -PathType Leaf)) {
     throw "parameterized Inno script is missing: $InnoScript"
   }
+  $innoLinksRoot = Join-Path ([IO.Path]::GetPathRoot($PayloadRoot)) 'tw\inno-links'
+  New-Item -ItemType Directory -Path $innoLinksRoot -Force | Out-Null
+  $innoPayloadRoot = Join-Path $innoLinksRoot ([string]$session.run_id)
+  if (Test-Path -LiteralPath $innoPayloadRoot) {
+    throw "Inno payload junction already exists: $innoPayloadRoot"
+  }
+  $innoPayloadJunction = New-Item -ItemType Junction -Path $innoPayloadRoot -Target $PayloadRoot
+  if (-not ($innoPayloadJunction.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      -not (Test-Path -LiteralPath (Join-Path $innoPayloadRoot 'TaijiAgent.exe') -PathType Leaf)) {
+    throw "Inno payload junction verification failed: $innoPayloadRoot"
+  }
   $isccArguments = @(
     "/DMyAppVersion=$Version",
-    "/DPayloadRoot=$PayloadRoot",
+    "/DPayloadRoot=$innoPayloadRoot",
     "/DOutputDir=$OutputRoot",
     "/DOutputBaseFilename=$OutputBaseName",
     $InnoScript
