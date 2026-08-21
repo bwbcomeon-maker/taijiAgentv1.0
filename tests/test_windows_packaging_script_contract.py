@@ -329,6 +329,20 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertNotIn("Get-CacheEntry -Requirement", stage)
         self.assertNotIn("staging observation identity drifted", stage)
 
+    def test_stage_reads_large_cache_observation_without_powershell_provider_copy(self):
+        stage = read_script(STAGE)
+        self.assertIn("$observationText = [IO.File]::ReadAllText(", stage)
+        self.assertIn("[Text.UTF8Encoding]::new($false, $true)", stage)
+        self.assertIn(
+            "$observation = ConvertFrom-Json -InputObject $observationText",
+            stage,
+        )
+        self.assertIn("$observationText = $null", stage)
+        self.assertNotIn(
+            "$observation = Get-Content -LiteralPath $session.cache.observation_path -Raw",
+            stage,
+        )
+
     def test_stage_avoids_duplicate_cache_copy_hash_and_runtime_checks(self):
         stage = read_script(STAGE)
         build = read_script(BUILD)

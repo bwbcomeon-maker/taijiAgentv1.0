@@ -419,7 +419,15 @@ if ((Get-CanonicalHash $requirements) -ne $session.cache.requirements_sha256) {
   throw 'cache requirements identity drifted before staging'
 }
 Assert-RegularFile $session.cache.observation_path 'cache observation'
-$observation = Get-Content -LiteralPath $session.cache.observation_path -Raw | ConvertFrom-Json
+$observationText = [IO.File]::ReadAllText(
+  [string]$session.cache.observation_path,
+  [Text.UTF8Encoding]::new($false, $true)
+)
+try {
+  $observation = ConvertFrom-Json -InputObject $observationText
+} finally {
+  $observationText = $null
+}
 $sharedCacheRoot = [string]$session.cache.root
 $observationKeys = @($observation.PSObject.Properties.Name | Sort-Object)
 $expectedObservationKeys = @('cache_root', 'entries', 'observed_at', 'requirements_sha256', 'schema', 'target_id')
