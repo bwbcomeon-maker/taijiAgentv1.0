@@ -7,6 +7,7 @@ import os
 import struct
 from pathlib import Path
 import subprocess
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +120,9 @@ def _complete_online():
         "schema": "taiji-package-online-doctor/v2",
         "builder_status": "BUILDER_READY",
         "blockers": [],
+        "python_path": json.loads(
+            (ROOT / "packaging/pipeline/targets/windows-x64.json").read_text(encoding="utf-8")
+        )["python"],
         "cache_requirements_sha256": requirements_sha,
         "cache_observation": observation,
         "cache_observation_sha256": _canonical_sha(observation_identity),
@@ -138,7 +142,7 @@ def _tool_evidence(plan):
             "version": "1.0.0",
         }
     tools["safe_tar"] = {
-        "path": plan["remote_run_dir"] + r"\safe-tar.exe",
+        "path": plan["remote_run_dir"] + "\\" + plan["controller_bootstrap"]["safe_tar"]["remote_path"].lstrip("\\"),
         "bytes": 1,
         "sha256": "b" * 64,
         "version": "taiji-safe-tar/v1",
@@ -147,10 +151,9 @@ def _tool_evidence(plan):
 
 
 class _FixtureControllerGitRunner:
-    def __call__(self, argv):
+    def __call__(self, argv, **_kwargs):
         command = [str(item) for item in argv]
-        repo = command[2]
-        del repo
+        repo = Path(command[2])
         if command[3:] == ["status", "--porcelain=v2", "--branch"]:
             stdout = "# branch.oid {}\n# branch.head main\n".format("a" * 40)
         elif command[3:] == ["rev-parse", "HEAD^{commit}"]:
@@ -161,22 +164,37 @@ class _FixtureControllerGitRunner:
             stdout = "1.0.4\n"
         elif command[3:] == ["show", "a" * 40 + ":apps/taiji-desktop/package.json"]:
             stdout = '{"name":"taiji-desktop","version":"1.0.4"}\n'
+        elif command[3] == "show" and command[4].startswith("a" * 40 + ":"):
+            relative_path = command[4].split(":", 1)[1]
+            stdout = (repo / relative_path).read_bytes()
         else:
             raise AssertionError("unexpected fixture Git command: {}".format(command))
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
 
 def make_windows_plan(root, **overrides):
+    from packaging.pipeline.adapters import windows_x64 as adapter_module
     from packaging.pipeline.adapters.windows_x64 import WindowsX64Adapter
+
+    class FixtureWindowsAdapter(WindowsX64Adapter):
+        def inspect_input(self, repo, source_commit):
+            del repo, source_commit
+            return {"status": "MISSING", "files": {}}
 
     root = Path(root).resolve()
     repo = root / "source"
     repo.mkdir(parents=True, exist_ok=True)
+    for relative_path in (
+        "packaging/pipeline/targets/windows-x64.json",
+        "packaging/windows/asset-provenance.json",
+        "packaging/windows/safe_tar.py",
+    ):
+        write_regular(repo / relative_path, (ROOT / relative_path).read_bytes())
     state_root = root / "state"
     target = json.loads(
         (ROOT / "packaging/pipeline/targets/windows-x64.json").read_text(encoding="utf-8")
     )
-    adapter = WindowsX64Adapter(controller_runner=_FixtureControllerGitRunner())
+    adapter = FixtureWindowsAdapter(controller_runner=_FixtureControllerGitRunner())
     source_commit = "a" * 40
     input_stem = "taijiagent-windows-builder-input-{}".format(source_commit)
     input_basenames = {
@@ -199,13 +217,19 @@ def make_windows_plan(root, **overrides):
             "sha256": sha256_bytes(data),
             "exists": True,
         }
-    plan = adapter.build_plan(
-        repo,
-        target,
-        state_root,
-        run_id=overrides.pop("run_id", "20260820T120000Z-aaaaaaaaaaaa-aaaaaaaa"),
-        ssh_config=None,
-    )
+    with mock.patch.multiple(
+        adapter_module,
+        TARGET_CONFIG_PATH=repo / "packaging/pipeline/targets/windows-x64.json",
+        ASSET_PROVENANCE_PATH=repo / "packaging/windows/asset-provenance.json",
+        SAFE_TAR_SOURCE_PATH=repo / "packaging/windows/safe_tar.py",
+    ):
+        plan = adapter.build_plan(
+            repo,
+            target,
+            state_root,
+            run_id=overrides.pop("run_id", "20260820T120000Z-aaaaaaaaaaaa-aaaaaaaa"),
+            ssh_config=None,
+        )
     plan["input"] = {"status": "REUSABLE", "files": files}
     plan["cache_requirements"] = _requirements()
     online = _complete_online()

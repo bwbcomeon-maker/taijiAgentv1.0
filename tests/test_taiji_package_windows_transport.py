@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import hashlib
 import importlib
 import inspect
 import io
@@ -10,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from packaging.pipeline.adapters.windows_x64 import WindowsX64Adapter
 from packaging.pipeline.core.errors import PipelineError
@@ -51,8 +53,9 @@ FETCH_ONLY_EVENTS = [
 class FixtureControllerRunner:
     """Only the adapter's allowlisted local controller-Git calls are accepted."""
 
-    def __call__(self, argv):
+    def __call__(self, argv, **_kwargs):
         command = [str(item) for item in argv]
+        repo = Path(command[2])
         if command[:3] != ["/usr/bin/git", "-C", command[2]]:
             raise AssertionError("unexpected controller command: {}".format(command))
         if command[3:] == ["status", "--porcelain=v2", "--branch"]:
@@ -65,6 +68,8 @@ class FixtureControllerRunner:
             stdout = "1.0.4\n"
         elif command[3:] == ["show", "{}:apps/taiji-desktop/package.json".format("a" * 40)]:
             stdout = '{"name":"taiji-desktop","version":"1.0.4"}\n'
+        elif command[3] == "show" and command[4].startswith("a" * 40 + ":"):
+            stdout = (repo / command[4].split(":", 1)[1]).read_bytes()
         else:
             raise AssertionError("unexpected controller Git command: {}".format(command))
         return subprocess.CompletedProcess(command, 0, stdout, "")
@@ -88,6 +93,26 @@ class EventRecordingWindowsAdapter(WindowsX64Adapter):
         artifact = super().validate_review(plan, review, remote_log)
         self.events.append("local-review-verify")
         return artifact
+
+    def inspect_input(self, repo, source_commit):
+        stem = "taijiagent-windows-builder-input-{}".format(source_commit)
+        names = {
+            "archive": stem + ".tar.gz",
+            "manifest": stem + ".manifest.json",
+            "checksum": stem + ".tar.gz.sha256",
+        }
+        files = {}
+        for role, basename in names.items():
+            path = Path(repo) / basename
+            data = path.read_bytes()
+            files[role] = {
+                "path": str(path.resolve()),
+                "basename": basename,
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "exists": True,
+            }
+        return {"status": "REUSABLE", "files": files}
 
 
 class TaijiPackageWindowsTransportTests(unittest.TestCase):
@@ -116,6 +141,7 @@ class TaijiPackageWindowsTransportTests(unittest.TestCase):
 
     def run_build(self, fixtures, root, *, failure_at=None, publisher=None):
         import packaging.pipeline.cli as cli
+        import packaging.pipeline.adapters.windows_x64 as adapter_module
 
         plan = fixtures.make_windows_plan(root)
         events = []
@@ -135,7 +161,13 @@ class TaijiPackageWindowsTransportTests(unittest.TestCase):
                 return published
 
         output = io.StringIO()
-        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        source_root = Path(root) / "source"
+        with patch.multiple(
+            adapter_module,
+            TARGET_CONFIG_PATH=source_root / "packaging/pipeline/targets/windows-x64.json",
+            ASSET_PROVENANCE_PATH=source_root / "packaging/windows/asset-provenance.json",
+            SAFE_TAR_SOURCE_PATH=source_root / "packaging/windows/safe_tar.py",
+        ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             result = cli.main(
                 [
                     "--repo", str(Path(root) / "source"),

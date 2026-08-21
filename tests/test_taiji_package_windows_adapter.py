@@ -372,6 +372,82 @@ class WindowsAdapterContractTests(unittest.TestCase):
             self.assertEqual(identity["cache_observation_sha256"], finalized["cache_observation_sha256"])
             self.assertEqual(patch["policy"], None)
 
+    def test_prepare_input_calls_frozen_windows_builder_helper(self):
+        _registry, adapter_module = load_windows_contract()
+        adapter = adapter_module.WindowsX64Adapter()
+        plan = {"repo_root": "/tmp/taiji-source", "source_commit": "a" * 40}
+        with patch.object(adapter_module, "create_windows_input") as create_input:
+            adapter.prepare_input(plan, command_runner=object())
+        create_input.assert_called_once_with(
+            plan["repo_root"],
+            plan["source_commit"],
+            adapter_module.TARGET_CONFIG_PATH,
+            adapter_module.ASSET_PROVENANCE_PATH,
+        )
+
+    def test_finalized_plan_preserves_safe_tar_bootstrap_for_transport(self):
+        _registry, adapter_module = load_windows_contract()
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = adapter_module.WindowsX64Adapter(controller_runner=ControllerGitRunner())
+            plan = adapter.build_plan(
+                ROOT,
+                adapter.validate_target(EXPECTED_TARGET),
+                Path(temporary) / "state",
+                run_id="run-1",
+                ssh_config=None,
+            )
+            bootstrap = copy.deepcopy(plan["controller_bootstrap"])
+            requirements = json.loads(CACHE_REQUIREMENTS_PATH.read_text(encoding="utf-8"))
+            finalized = adapter.bind_online_plan(plan, complete_online(canonical_sha(requirements)))
+            self.assertEqual(finalized["controller_bootstrap"], bootstrap)
+            self.assertEqual(
+                set(finalized["controller_bootstrap"]["safe_tar"]),
+                {"source_path", "remote_path", "bytes", "sha256", "python_path"},
+            )
+
+    def test_review_tools_accept_real_versions_but_reject_missing_fields_and_bad_sha(self):
+        _registry, adapter_module = load_windows_contract()
+        pipeline_error = importlib.import_module("packaging.pipeline.core.errors").PipelineError
+        plan = {
+            "target_config": copy.deepcopy(EXPECTED_TARGET),
+            "remote_run_dir": r"D:\tw\taiji-builds\run-1",
+        }
+        versions = {
+            "iscc": "Inno Setup 6 Command-Line Compiler",
+            "node": "v22.17.0",
+            "npm": "10.9.2",
+            "powershell": "5.1.26100.4652",
+            "python": "Python 3.11.9",
+            "tar": "bsdtar 3.5.2 - libarchive 3.5.2",
+        }
+        tools = {
+            name: {
+                "path": plan["target_config"][name],
+                "bytes": 1,
+                "sha256": "a" * 64,
+                "version": versions[name],
+            }
+            for name in versions
+        }
+        tools["safe_tar"] = {
+            "path": plan["remote_run_dir"] + r"\input\controller-safe-tar.py",
+            "bytes": 1,
+            "sha256": "b" * 64,
+            "version": "taiji-safe-tar/v1",
+        }
+        adapter = adapter_module.WindowsX64Adapter()
+        adapter._validate_review_tools(tools, plan)
+
+        missing = copy.deepcopy(tools)
+        del missing["python"]["version"]
+        bad_sha = copy.deepcopy(tools)
+        bad_sha["node"]["sha256"] = "not-a-sha"
+        for invalid in (missing, bad_sha):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(pipeline_error) as context:
+                    adapter._validate_review_tools(invalid, plan)
+                self.assertEqual(context.exception.category, "LOCAL_REVIEW_INVALID")
+
 
 if __name__ == "__main__":
     unittest.main()

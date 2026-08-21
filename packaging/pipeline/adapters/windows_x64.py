@@ -750,8 +750,6 @@ class WindowsX64Adapter(CandidateAdapter):
             _sha256_value(tool["sha256"], "tool {} SHA".format(name))
             if not isinstance(tool["version"], str) or not tool["version"]:
                 _review_error("tool {} version is empty".format(name))
-            if name != "safe_tar" and VERSION_RE.fullmatch(tool["version"]) is None:
-                _review_error("tool {} version is invalid".format(name))
             if name == "safe_tar":
                 if tool["version"] != "taiji-safe-tar/v1" or not tool["path"].startswith(plan.get("remote_run_dir", "") + "\\"):
                     _review_error("safe_tar evidence is not bound to the remote run")
