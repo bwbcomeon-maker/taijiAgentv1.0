@@ -106,6 +106,17 @@ function Copy-DirectoryChildren {
   }
 }
 
+function Copy-ProductSourceChildren {
+  param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Destination)
+  New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  foreach ($child in @(Get-ChildItem -LiteralPath $Source -Force)) {
+    if ($child.Name -ceq '.env' -or $child.Name -like '.env.*') {
+      continue
+    }
+    Copy-Item -LiteralPath $child.FullName -Destination (Join-PathText $Destination $child.Name) -Recurse -Force
+  }
+}
+
 function Copy-PythonRuntimeFile {
   param(
     [Parameter(Mandatory = $true)][System.IO.FileInfo]$File,
@@ -488,8 +499,8 @@ if (-not (Test-Path -LiteralPath $webuiSource -PathType Container)) {
   throw "WebUI source is missing: $webuiSource"
 }
 $payloadSourcesRoot = Join-PathText $payloadRoot 'hermes-local-lab\sources'
-Copy-DirectoryChildren -Source $agentSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-agent')
-Copy-DirectoryChildren -Source $webuiSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-webui')
+Copy-ProductSourceChildren -Source $agentSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-agent')
+Copy-ProductSourceChildren -Source $webuiSource -Destination (Join-PathText $payloadSourcesRoot 'hermes-webui')
 
 $pythonSource = Join-PathText $sharedCacheAccessRoot 'python-runtime'
 $pythonDestination = Join-PathText $payloadRoot 'hermes-local-lab\runtime\python'

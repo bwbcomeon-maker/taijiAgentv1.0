@@ -351,6 +351,24 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         )
         self.assertNotIn("Expand-Archive", stage)
 
+    def test_product_source_env_templates_are_excluded_without_relaxing_hygiene(self):
+        stage = read_script(STAGE)
+        build = read_script(BUILD)
+        self.assertIn("function Copy-ProductSourceChildren", stage)
+        self.assertIn("$child.Name -ceq '.env' -or $child.Name -like '.env.*'", stage)
+        self.assertIn(
+            "Copy-ProductSourceChildren -Source $agentSource",
+            stage,
+        )
+        self.assertIn(
+            "Copy-ProductSourceChildren -Source $webuiSource",
+            stage,
+        )
+        self.assertIn("$item.Name -eq '.env'", stage)
+        self.assertIn("$item.Name -like '.env.*'", stage)
+        self.assertIn("$_.Name -eq '.env'", build)
+        self.assertIn("$_.Name -like '.env.*'", build)
+
     def test_payload_manifest_entries_use_the_same_utf8_byte_order_as_local_review(self):
         stage = read_script(STAGE)
         self.assertIn("$unsortedPayloadEntries = @(", stage)
