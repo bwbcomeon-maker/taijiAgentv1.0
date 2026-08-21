@@ -600,6 +600,17 @@ Expected：main clean，包含 Plan 4 全部提交。
 
 ## Task 8: 正式 main 单次真实构建、恢复和证据（主 Agent，30—45 分钟）
 
+### Step 0: 真实构建前最小充分验证裁决（2026-08-21）
+
+在正式 doctor/build 前先完成以下收敛；本节优先于本任务后文的旧轮询口径：
+
+- **必须保留：** source commit/tree 与缓存 observation 身份绑定、共享缓存只读、最终 payload manifest 和文件 SHA256、安全卫生检查、Electron/Python 实际运行检查，以及 `FETCH_PENDING` 只能 fetch；
+- **每候选一次：** 隔离 Stage、Stage GREEN 后的 Inno 预演、二者通过后的正式 doctor/build、候选 EXE 取回后的完整回归；
+- **应优化：** Stage 持久化 stdout/stderr/exit code/开始结束时间/失败阶段；UTF-8 byte-order 排序改为语义等价 O(n log n)；共享缓存直接作为只读输入，取消共享缓存到临时缓存的整树复制与重复逐文件摘要，Python runtime 只复制到最终 payload；
+- **可以删除：** 45 秒 SSH 轮询、因终端输出丢失而整轮重跑、重复复制相同文件、重复泛化审查、第三个 Stage 或并行 build。
+
+执行顺序固定为：上述三项分别完成聚焦 RED→最小 GREEN；只运行一次隔离 Stage；只运行一次 Inno 预演；二者通过后再运行一次正式 doctor/build；候选 EXE 成功取回后才运行一次完整回归。若只读检查发现 Stage 仍在运行，不得打断或并发；若已结束，先读取持久化结果，不得因 SSH 输出缺失盲目重跑。
+
 - [ ] **Step 1: 从正式 main 运行统一 online doctor**
 
 ```bash
@@ -632,7 +643,7 @@ Expected：source branch=`main`、source commit=当前 main HEAD、input=`MISSIN
 BUILD
 ```
 
-每 60 秒轮询现有 session，不得重新执行 build。成功必须得到 stage=`CANDIDATE_BUILT`、label=`候选 EXE 已构建`。
+不得使用固定 45/60 秒 SSH 轮询；以持久化阶段结果和本地长命令完成状态为证据，不得重新执行 build。成功必须得到 stage=`CANDIDATE_BUILT`、label=`候选 EXE 已构建`。
 
 - [ ] **Step 4: 仅在 FETCH_PENDING 时恢复**
 
