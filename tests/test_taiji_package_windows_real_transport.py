@@ -491,6 +491,57 @@ class WindowsRealTransportTests(unittest.TestCase):
                     self.assertEqual(context.exception.category, expected)
                     self.assertEqual(len(runner.calls), fail_on)
 
+    def test_stage_and_inno_persist_execution_results_before_returning(self):
+        with tempfile.TemporaryDirectory(prefix="windows-transport-stage-results-") as temporary:
+            plan = windows_pipeline_fixtures.make_windows_plan(temporary)
+            safe_tar = windows_pipeline_fixtures.write_regular(
+                Path(temporary) / "controller-safe-tar.py",
+                b"print('safe tar helper')\n",
+            )
+            plan["controller_bootstrap"] = {
+                "safe_tar": {
+                    "source_path": str(safe_tar),
+                    "remote_path": r"input\controller-safe-tar.py",
+                    "bytes": safe_tar.stat().st_size,
+                    "sha256": windows_pipeline_fixtures.sha256_bytes(safe_tar.read_bytes()),
+                    "python_path": plan["target_config"]["python"],
+                }
+            }
+            runner = RecordingRunner()
+            transport = windows_ssh.WindowsSshTransport(
+                plan["target_config"], ssh_config=None, command_runner=runner
+            )
+            transport.build_remote_candidate(plan)
+
+        self.assertEqual(len(runner.calls), 2)
+        stage_script = _decode_stdin_command(runner.calls[0])
+        inno_script = _decode_stdin_command(runner.calls[1])
+        for script, prefix, failure_stage in (
+            (stage_script, "payload", "WINDOWS_PAYLOAD_FAILED"),
+            (inno_script, "inno", "WINDOWS_INNO_FAILED"),
+        ):
+            with self.subTest(prefix=prefix):
+                for literal in (
+                    "{}.stdout.log".format(prefix),
+                    "{}.stderr.log".format(prefix),
+                    "{}-result.json".format(prefix),
+                    "started_at",
+                    "finished_at",
+                    "exit_code",
+                    "failure_stage",
+                    "status = 'RUNNING'",
+                    "status = 'PASS'",
+                    "status = 'FAIL'",
+                    failure_stage,
+                    "[Text.UTF8Encoding]::new($false)",
+                    "[IO.File]::AppendAllText",
+                ):
+                    self.assertIn(literal, script)
+                self.assertLess(
+                    script.index("status = 'RUNNING'"),
+                    script.index("-SessionPath"),
+                )
+
     def test_scp_retry_exhaustion_has_stable_category(self):
         runner = FailOnCallRunner(1)
 

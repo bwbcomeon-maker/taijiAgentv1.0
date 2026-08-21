@@ -777,6 +777,116 @@ def _quote_ps(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _render_candidate_stage_invocation(
+    *, stage_name, script_path, session_path, logs_root, failure_category, postcheck=""
+):
+    stdout_path = _remote_join(logs_root, "{}.stdout.log".format(stage_name))
+    stderr_path = _remote_join(logs_root, "{}.stderr.log".format(stage_name))
+    result_path = _remote_join(logs_root, "{}-result.json".format(stage_name))
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$utf8NoBom = [Text.UTF8Encoding]::new($false)
+$stdoutPath = __STDOUT_PATH__
+$stderrPath = __STDERR_PATH__
+$resultPath = __RESULT_PATH__
+
+function Write-ExecutionResult {
+  param([Parameter(Mandatory = $true)]$Value)
+  $temporary = "$resultPath.$([Guid]::NewGuid().ToString('N')).tmp"
+  [IO.File]::WriteAllText(
+    $temporary,
+    ((ConvertTo-Json -InputObject $Value -Depth 8 -Compress) + [char]10),
+    $utf8NoBom
+  )
+  if (Test-Path -LiteralPath $resultPath) {
+    [IO.File]::Replace($temporary, $resultPath, $null)
+  } else {
+    [IO.File]::Move($temporary, $resultPath)
+  }
+}
+
+[IO.File]::WriteAllText($stdoutPath, '', $utf8NoBom)
+[IO.File]::WriteAllText($stderrPath, '', $utf8NoBom)
+$startedAt = [DateTime]::UtcNow.ToString('o')
+Write-ExecutionResult ([ordered]@{
+  schema = 'taiji-windows-stage-result/v1'
+  stage = '__STAGE_NAME__'
+  status = 'RUNNING'
+  started_at = $startedAt
+  finished_at = $null
+  exit_code = $null
+  failure_stage = $null
+  stdout_path = $stdoutPath
+  stderr_path = $stderrPath
+})
+
+try {
+  $global:LASTEXITCODE = 0
+  & __SCRIPT_PATH__ -SessionPath __SESSION_PATH__ *>&1 | ForEach-Object {
+    $line = ($_ | Out-String).TrimEnd()
+    $destination = if ($_ -is [System.Management.Automation.ErrorRecord]) {
+      $stderrPath
+    } else {
+      $stdoutPath
+    }
+    if ($line.Length -gt 0) {
+      [IO.File]::AppendAllText($destination, ($line + [char]10), $utf8NoBom)
+    }
+    Write-Output $_
+  }
+__POSTCHECK__
+  $finishedAt = [DateTime]::UtcNow.ToString('o')
+  Write-ExecutionResult ([ordered]@{
+    schema = 'taiji-windows-stage-result/v1'
+    stage = '__STAGE_NAME__'
+    status = 'PASS'
+    started_at = $startedAt
+    finished_at = $finishedAt
+    exit_code = 0
+    failure_stage = $null
+    stdout_path = $stdoutPath
+    stderr_path = $stderrPath
+  })
+} catch {
+  $finishedAt = [DateTime]::UtcNow.ToString('o')
+  $exitCode = if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) {
+    [int]$LASTEXITCODE
+  } else {
+    1
+  }
+  $failure = ($_ | Out-String).TrimEnd()
+  if ($failure.Length -gt 0) {
+    [IO.File]::AppendAllText($stderrPath, ($failure + [char]10), $utf8NoBom)
+  }
+  Write-ExecutionResult ([ordered]@{
+    schema = 'taiji-windows-stage-result/v1'
+    stage = '__STAGE_NAME__'
+    status = 'FAIL'
+    started_at = $startedAt
+    finished_at = $finishedAt
+    exit_code = $exitCode
+    failure_stage = '__FAILURE_CATEGORY__'
+    stdout_path = $stdoutPath
+    stderr_path = $stderrPath
+  })
+  throw
+}
+"""
+    replacements = {
+        "__STAGE_NAME__": str(stage_name),
+        "__SCRIPT_PATH__": _quote_ps(script_path),
+        "__SESSION_PATH__": _quote_ps(session_path),
+        "__STDOUT_PATH__": _quote_ps(stdout_path),
+        "__STDERR_PATH__": _quote_ps(stderr_path),
+        "__RESULT_PATH__": _quote_ps(result_path),
+        "__FAILURE_CATEGORY__": str(failure_category),
+        "__POSTCHECK__": str(postcheck).rstrip(),
+    }
+    for marker, value in replacements.items():
+        script = script.replace(marker, value)
+    return script
+
+
 class WindowsSshTransport:
     """Real Windows SSH transport for the candidate build/fetch stages."""
 
@@ -1298,18 +1408,16 @@ if (-not (Test-Path -LiteralPath {session_path} -PathType Leaf)) {{
         context = self._context_for(plan)
         remote = context["remote"]
         session_path = _remote_join(remote["root"], "session.json")
-        stage_script = """
-$ErrorActionPreference = 'Stop'
-& {stage_script} -SessionPath {session_path}
-""".format(
-            stage_script=_quote_ps(_remote_join(remote["scripts"], "Stage-CandidatePayload.ps1")),
-            session_path=_quote_ps(session_path),
+        stage_script = _render_candidate_stage_invocation(
+            stage_name="payload",
+            script_path=_remote_join(remote["scripts"], "Stage-CandidatePayload.ps1"),
+            session_path=session_path,
+            logs_root=remote["logs"],
+            failure_category="WINDOWS_PAYLOAD_FAILED",
         )
         self._run_remote_stage(stage_script, "WINDOWS_PAYLOAD_FAILED")
 
-        build_script = """
-$ErrorActionPreference = 'Stop'
-& {build_script} -SessionPath {session_path}
+        postcheck = """
 if (-not (Test-Path -LiteralPath {marker_path} -PathType Leaf)) {{
   throw 'remote marker is missing'
 }}
@@ -1317,10 +1425,16 @@ if (-not (Test-Path -LiteralPath {review_manifest} -PathType Leaf)) {{
   throw 'remote review manifest is missing'
 }}
 """.format(
-            build_script=_quote_ps(_remote_join(remote["scripts"], "Build-CandidateReview.ps1")),
-            session_path=_quote_ps(session_path),
             marker_path=_quote_ps(_remote_join(remote["review"], ".build-success")),
             review_manifest=_quote_ps(_remote_join(remote["review"], "taiji-package-manifest.json")),
+        )
+        build_script = _render_candidate_stage_invocation(
+            stage_name="inno",
+            script_path=_remote_join(remote["scripts"], "Build-CandidateReview.ps1"),
+            session_path=session_path,
+            logs_root=remote["logs"],
+            failure_category="WINDOWS_INNO_FAILED",
+            postcheck=postcheck,
         )
         self._run_remote_stage(build_script, "WINDOWS_INNO_FAILED")
         self.remote_build_succeeded = True
