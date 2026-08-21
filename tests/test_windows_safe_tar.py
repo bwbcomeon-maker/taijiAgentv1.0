@@ -184,6 +184,13 @@ class WindowsSafeTarTests(unittest.TestCase):
                 helper.extract_tar(archive, target, manifest)
             self.assertEqual(raised.exception.category, "SAFE_TAR_TARGET_INVALID")
 
+    def test_windows_extended_target_prefix_is_idempotent(self):
+        helper = self.assert_helper_help_and_api()
+        target = r"D:\tw\taiji-builds\run\source\checkout"
+        extended = r"\\?\D:\tw\taiji-builds\run\source\checkout"
+        self.assertEqual(helper._windows_extended_path_text(target), extended)
+        self.assertEqual(helper._windows_extended_path_text(extended), extended)
+
     def test_target_accepts_real_run_id_shape_and_rejects_outside_source_or_deeper_paths(self):
         helper = self.assert_helper_help_and_api()
         with tempfile.TemporaryDirectory(prefix="taiji-safe-tar-run-shape-") as temporary:

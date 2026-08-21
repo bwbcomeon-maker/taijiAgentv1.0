@@ -84,6 +84,13 @@ def _absolute_path(path: Path | str) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
+def _windows_extended_path_text(path: Path | str) -> str:
+    text = os.fspath(path)
+    if text.startswith("\\\\?\\"):
+        return text
+    return "\\\\?\\" + text
+
+
 def _open_private_regular(path: Path, label: str, category: str):
     path = _absolute_path(path)
     descriptor = None
@@ -147,7 +154,10 @@ def _target_root(target_dir: Path) -> Path:
     _require_private_dir(source_dir, "source directory")
     run_root = source_dir.parent
     _require_private_dir(run_root, "run root")
-    return target_dir.resolve(strict=False)
+    resolved = target_dir.resolve(strict=False)
+    if os.name == "nt":
+        return Path(_windows_extended_path_text(resolved))
+    return resolved
 
 
 def _read_manifest(
