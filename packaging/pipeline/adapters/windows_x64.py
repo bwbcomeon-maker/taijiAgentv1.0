@@ -17,11 +17,21 @@ from pathlib import Path
 from ..core.errors import PipelineError
 from ..core.models import canonical_json_sha256
 from .base import CandidateAdapter
+from ...windows.builder_input_package import _canonical_json_bytes
+from ...windows.builder_input_package import _git_env
+from ...windows.builder_input_package import _strict_regular_bytes
+from ...windows.builder_input_package import _validate_asset_provenance
+from ...windows.builder_input_package import _validate_target_config
+from ...windows.builder_input_package import create_input as create_windows_input
+from ...windows.builder_input_package import inspect_input as inspect_windows_input
 
 
 ROOT = Path(__file__).resolve().parents[3]
 CACHE_REQUIREMENTS_PATH = ROOT / "packaging/windows/cache-requirements.json"
 ASSET_PROVENANCE_PATH = ROOT / "packaging/windows/asset-provenance.json"
+TARGET_CONFIG_PATH = ROOT / "packaging/pipeline/targets/windows-x64.json"
+SAFE_TAR_SOURCE_PATH = ROOT / "packaging/windows/safe_tar.py"
+SAFE_TAR_RELATIVE_PATH = Path("packaging/windows/safe_tar.py")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -188,13 +198,6 @@ def _positive_bytes(value, label):
     return value
 
 
-def _sha256_file(path):
-    try:
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    except OSError as exc:
-        _pipeline_error("cannot read {}: {}".format(path, exc), "PLAN_INVALID")
-
-
 def _new_run_id(source_commit):
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return "{}-{}-{}".format(timestamp, uuid.uuid4().hex[:12], source_commit[:8])
@@ -260,7 +263,7 @@ class WindowsX64Adapter(CandidateAdapter):
             _pipeline_error("Windows remote root is invalid", "TARGET_INVALID")
         return copy.deepcopy(payload)
 
-    def _controller_git(self, repo, args):
+    def _controller_git_command(self, repo, args):
         allowed = (
             ("status", "--porcelain=v2", "--branch"),
             ("rev-parse", "HEAD^{commit}"),
@@ -270,13 +273,44 @@ class WindowsX64Adapter(CandidateAdapter):
             len(args) == 2 and args[0] == "show" and ":" in args[1]
         ):
             _pipeline_error("Windows controller Git command is outside allowlist", "LOCAL_PREFLIGHT_FAILED")
-        command = ["/usr/bin/git", "-C", str(Path(repo))] + list(args)
+        return ["/usr/bin/git", "-C", str(Path(repo))] + list(args)
+
+    def _controller_git(self, repo, args):
+        command = self._controller_git_command(repo, args)
         runner = self.controller_runner
         if runner is None:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                env=_git_env(),
+            )
         else:
-            result = runner(command)
+            result = runner(command, env=_git_env(), text=True)
         return _result_stdout(result)
+
+    def _controller_git_bytes(self, repo, args):
+        command = self._controller_git_command(repo, args)
+        runner = self.controller_runner
+        if runner is None:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                check=False,
+                env=_git_env(),
+            )
+        else:
+            result = runner(command, env=_git_env(), text=False)
+        if getattr(result, "returncode", 0) != 0:
+            _pipeline_error("controller Git command failed", "LOCAL_PREFLIGHT_FAILED")
+        stdout = getattr(result, "stdout", result)
+        if isinstance(stdout, bytes):
+            return bytes(stdout)
+        return str(stdout).encode("utf-8")
 
     def _controller_identity(self, repo):
         status = str(self._controller_git(repo, ("status", "--porcelain=v2", "--branch")))
@@ -297,10 +331,22 @@ class WindowsX64Adapter(CandidateAdapter):
             _pipeline_error("controller tree identity is invalid", "REPO_IDENTITY_MISMATCH")
         if dirty:
             _pipeline_error("controller worktree is dirty", "WORKTREE_NOT_CLEAN")
-        version = str(self._controller_git(repo, ("show", "{}:VERSION".format(commit)))).strip()
+        version_raw = self._controller_git_bytes(repo, ("show", "{}:VERSION".format(commit)))
         package_text = str(
             self._controller_git(repo, ("show", "{}:apps/taiji-desktop/package.json".format(commit)))
         )
+        if (
+            version_raw.startswith(b"\xef\xbb\xbf")
+            or not version_raw.endswith(b"\n")
+            or version_raw.count(b"\n") != 1
+            or version_raw.endswith(b"\r\n")
+            or b"\r" in version_raw
+        ):
+            _pipeline_error("controller VERSION is invalid", "REPO_IDENTITY_MISMATCH")
+        try:
+            version = version_raw[:-1].decode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            _pipeline_error("controller VERSION is invalid: {}".format(exc), "REPO_IDENTITY_MISMATCH")
         if VERSION_RE.fullmatch(version) is None:
             _pipeline_error("controller VERSION is invalid", "REPO_IDENTITY_MISMATCH")
         try:
@@ -310,6 +356,45 @@ class WindowsX64Adapter(CandidateAdapter):
         if not isinstance(package, dict) or package.get("version") != version:
             _pipeline_error("controller version sources differ", "REPO_IDENTITY_MISMATCH")
         return {"branch": branch, "commit": commit, "tree": tree, "version": version}
+
+    def _controller_bound_json_payload(self, repo, source_commit, provided_path, relative_path, label, validator):
+        repo = Path(repo).resolve()
+        provided_path = Path(provided_path).resolve()
+        repo_local = (repo / relative_path).resolve()
+        if provided_path != repo_local:
+            _pipeline_error("{} must use {}".format(label, repo_local), "PLAN_INVALID")
+        worktree_raw = _strict_regular_bytes(provided_path, label, "PLAN_INVALID")
+        committed_raw = self._controller_git_bytes(
+            repo,
+            ("show", "{}:{}".format(source_commit, relative_path.as_posix())),
+        )
+        if worktree_raw != committed_raw:
+            _pipeline_error("{} worktree bytes drifted from source commit".format(label), "PLAN_INVALID")
+        if worktree_raw.startswith(b"\xef\xbb\xbf"):
+            _pipeline_error("{} contains a BOM".format(label), "PLAN_INVALID")
+        try:
+            payload = json.loads(worktree_raw.decode("utf-8", errors="strict"))
+        except (UnicodeError, ValueError) as exc:
+            _pipeline_error("{} is unreadable: {}".format(label, exc), "PLAN_INVALID")
+        if not isinstance(payload, dict):
+            _pipeline_error("{} must be an object".format(label), "PLAN_INVALID")
+        validator(payload, label, "PLAN_INVALID")
+        return payload, hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
+    def _controller_safe_tar_bytes(self, repo, source_commit):
+        repo = Path(repo).resolve()
+        provided_path = SAFE_TAR_SOURCE_PATH.resolve()
+        repo_local = (repo / SAFE_TAR_RELATIVE_PATH).resolve()
+        if provided_path != repo_local:
+            _pipeline_error("controller safe_tar path is outside the source worktree", "PLAN_INVALID")
+        worktree_raw = _strict_regular_bytes(provided_path, "controller safe_tar", "PLAN_INVALID")
+        committed_raw = self._controller_git_bytes(
+            repo,
+            ("show", "{}:{}".format(source_commit, SAFE_TAR_RELATIVE_PATH.as_posix())),
+        )
+        if worktree_raw != committed_raw:
+            _pipeline_error("controller safe_tar drifted from the source commit", "PLAN_INVALID")
+        return committed_raw
 
     def local_doctor(self, repo, target, state_root, *, ssh_config):
         del state_root, ssh_config
@@ -339,26 +424,7 @@ class WindowsX64Adapter(CandidateAdapter):
         }
 
     def inspect_input(self, repo, source_commit):
-        names = self._input_basenames(source_commit)
-        files = {}
-        roles = (("archive", names["archive"]), ("manifest", names["manifest"]), ("checksum", names["sidecar"]))
-        for role, basename in roles:
-            path = Path(repo) / basename
-            try:
-                metadata = path.lstat()
-                if not path.is_file() or path.is_symlink() or metadata.st_nlink != 1:
-                    return {"status": "MISSING", "files": {}}
-                data = path.read_bytes()
-            except OSError:
-                return {"status": "MISSING", "files": {}}
-            files[role] = {
-                "path": str(path),
-                "basename": basename,
-                "bytes": len(data),
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "exists": True,
-            }
-        return {"status": "REUSABLE", "files": files}
+        return inspect_windows_input(repo, source_commit)
 
     def _input_basenames(self, source_commit):
         if COMMIT_RE.fullmatch(str(source_commit)) is None:
@@ -376,34 +442,65 @@ class WindowsX64Adapter(CandidateAdapter):
         repo = Path(repo).resolve()
         target = self.validate_target(target)
         identity = self._controller_identity(controller_repo)
-        if identity["branch"] not in target["allowed_source_branches"]:
+        _target_payload, target_config_sha = self._controller_bound_json_payload(
+            Path(controller_repo),
+            identity["commit"],
+            TARGET_CONFIG_PATH,
+            Path("packaging/pipeline/targets/windows-x64.json"),
+            "target config",
+            _validate_target_config,
+        )
+        if target != _target_payload:
+            _pipeline_error("caller target drifted from committed target config", "PLAN_INVALID")
+        if identity["branch"] not in _target_payload["allowed_source_branches"]:
             _pipeline_error("source branch is not allowed", "BRANCH_NOT_MAIN")
         run_id = run_id or _new_run_id(identity["commit"])
         names = self._input_basenames(identity["commit"])
         requirements = _read_json(CACHE_REQUIREMENTS_PATH, "Windows cache requirements")
         if requirements.get("target_id") != self.target_id:
             _pipeline_error("Windows cache requirements target is invalid")
+        _asset_payload, asset_provenance_sha = self._controller_bound_json_payload(
+            Path(controller_repo),
+            identity["commit"],
+            ASSET_PROVENANCE_PATH,
+            Path("packaging/windows/asset-provenance.json"),
+            "asset provenance",
+            _validate_asset_provenance,
+        )
+        safe_tar_commit_payload = self._controller_safe_tar_bytes(
+            controller_repo,
+            identity["commit"],
+        )
         return {
             "schema": "taiji-package-candidate-plan/v1",
             "run_id": run_id,
             "target_id": self.target_id,
-            "target_config": copy.deepcopy(target),
-            "target_adapter": copy.deepcopy(target),
+            "target_config": copy.deepcopy(_target_payload),
+            "target_adapter": copy.deepcopy(_target_payload),
             "repo_root": str(Path(repo).resolve()),
             "source_branch": identity["branch"],
             "source_commit": identity["commit"],
             "source_tree": identity["tree"],
             "controller_commit": identity["commit"],
             "version": identity["version"],
-            "host_alias": target["host_alias"],
-            "architecture": target["architecture"],
-            "remote_run_dir": target["remote_root"] + "\\" + identity["commit"] + "\\" + run_id,
+            "host_alias": _target_payload["host_alias"],
+            "architecture": _target_payload["architecture"],
+            "remote_run_dir": _target_payload["remote_root"] + "\\" + identity["commit"] + "\\" + run_id,
             "local_run_dir": str(Path(state_root).resolve() / "runs" / run_id),
             "input": self.inspect_input(repo, identity["commit"]),
             "input_basenames": names,
-            "asset_provenance_sha256": _sha256_file(ASSET_PROVENANCE_PATH),
-            "target_config_sha256": canonical_json_sha256(target),
+            "asset_provenance_sha256": asset_provenance_sha,
+            "target_config_sha256": target_config_sha,
             "cache_requirements": copy.deepcopy(requirements),
+            "controller_bootstrap": {
+                "safe_tar": {
+                    "source_path": str(SAFE_TAR_SOURCE_PATH.resolve()),
+                    "remote_path": r"input\controller-safe-tar.py",
+                    "bytes": len(safe_tar_commit_payload),
+                    "sha256": hashlib.sha256(safe_tar_commit_payload).hexdigest(),
+                    "python_path": _target_payload["python"],
+                }
+            },
             "authorization_blocks": [
                 "ssh-and-transfer",
                 "offline-cache-and-filesystem",
@@ -423,7 +520,7 @@ class WindowsX64Adapter(CandidateAdapter):
             _pipeline_error("Windows online plan must be objects")
         if any(key in plan for key in self.online_plan_keys):
             _pipeline_error("Windows online identity already exists")
-        minimal_online_keys = {"schema", "builder_status", "blockers"} | set(self.online_plan_keys)
+        minimal_online_keys = {"schema", "builder_status", "blockers", "python_path"} | set(self.online_plan_keys)
         full_online_keys = {
             "schema", "builder_status", "host_alias", "os", "os_version",
             "architecture", "powershell_version", "git_path", "tar_path",
@@ -461,6 +558,16 @@ class WindowsX64Adapter(CandidateAdapter):
             _pipeline_error("Windows host facts identity drifted")
         if host_facts.get("schema") != "taiji-windows-host-facts/v1" or host_facts.get("architecture") != "AMD64" or host_facts.get("filesystem") != "NTFS":
             _pipeline_error("Windows host facts stable identity is invalid")
+        bootstrap = plan.get("controller_bootstrap")
+        if (
+            not isinstance(bootstrap, dict)
+            or set(bootstrap) != {"safe_tar"}
+            or not isinstance(bootstrap["safe_tar"], dict)
+            or set(bootstrap["safe_tar"]) != {"source_path", "remote_path", "bytes", "sha256", "python_path"}
+        ):
+            _pipeline_error("Windows controller bootstrap is invalid", "ONLINE_DOCTOR_BLOCKED")
+        if bootstrap["safe_tar"]["python_path"] != online.get("python_path"):
+            _pipeline_error("Windows controller bootstrap Python drifted", "ONLINE_DOCTOR_BLOCKED")
         finalized = copy.deepcopy(plan)
         finalized["cache_requirements_sha256"] = requirements_sha
         finalized["cache_observation"] = copy.deepcopy(observation)
@@ -470,8 +577,15 @@ class WindowsX64Adapter(CandidateAdapter):
         return finalized
 
     def prepare_input(self, plan, command_runner):
-        del plan, command_runner
-        _pipeline_error("Windows input preparation requires the later real builder phase", "INPUT_PREPARATION_REQUIRED")
+        del command_runner
+        if not isinstance(plan, dict):
+            _pipeline_error("Windows plan is invalid", "PLAN_INVALID")
+        create_windows_input(
+            plan["repo_root"],
+            plan["source_commit"],
+            TARGET_CONFIG_PATH,
+            ASSET_PROVENANCE_PATH,
+        )
 
     def create_transport(self, repo, target, *, ssh_config, command_runner):
         if self.transport_factory is not None:

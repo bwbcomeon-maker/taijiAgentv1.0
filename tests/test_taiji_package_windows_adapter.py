@@ -102,6 +102,12 @@ class ControllerGitRunner:
             stdout = "1.0.4\n"
         elif command[3:] == ["show", "a" * 40 + ":apps/taiji-desktop/package.json"]:
             stdout = '{"name":"taiji-desktop","version":"1.0.4"}\n'
+        elif command[3:] == ["show", "a" * 40 + ":packaging/pipeline/targets/windows-x64.json"]:
+            stdout = TARGET_PATH.read_text(encoding="utf-8")
+        elif command[3:] == ["show", "a" * 40 + ":packaging/windows/asset-provenance.json"]:
+            stdout = (ROOT / "packaging/windows/asset-provenance.json").read_text(encoding="utf-8")
+        elif command[3:] == ["show", "a" * 40 + ":packaging/windows/safe_tar.py"]:
+            stdout = (ROOT / "packaging/windows/safe_tar.py").read_text(encoding="utf-8")
         else:
             raise AssertionError("Windows adapter used an unapproved Git command: {}".format(command))
         return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
@@ -171,6 +177,7 @@ def complete_online(requirements_sha):
         "schema": "taiji-package-online-doctor/v2",
         "builder_status": "BUILDER_READY",
         "blockers": [],
+        "python_path": EXPECTED_TARGET["python"],
         "cache_requirements_sha256": requirements_sha,
         "cache_observation": observation,
         "cache_observation_sha256": canonical_sha(observation_identity),
@@ -224,10 +231,10 @@ class WindowsAdapterContractTests(unittest.TestCase):
             runner = ControllerGitRunner()
             adapter = adapter_module.WindowsX64Adapter(controller_runner=runner)
             target = adapter.validate_target(EXPECTED_TARGET)
-            local = adapter.local_doctor(Path(temporary), target, Path(temporary) / "state", ssh_config=None)
+            local = adapter.local_doctor(ROOT, target, Path(temporary) / "state", ssh_config=None)
             self.assertEqual(local["controller_status"], "CONTROLLER_READY")
             plan = adapter.build_plan(
-                Path(temporary), target, Path(temporary) / "state", run_id="run-1", ssh_config=None
+                ROOT, target, Path(temporary) / "state", run_id="run-1", ssh_config=None
             )
             self.assertEqual(plan["source_branch"], "main")
             self.assertEqual(plan["source_commit"], "a" * 40)
@@ -238,7 +245,22 @@ class WindowsAdapterContractTests(unittest.TestCase):
             self.assertEqual(plan["input_basenames"]["sidecar"], "taijiagent-windows-builder-input-{}.tar.gz.sha256".format("a" * 40))
             for command in runner.calls:
                 self.assertEqual(command[0], "/usr/bin/git")
-                self.assertEqual(command[1:3], ["-C", str(Path(temporary))])
+                self.assertEqual(command[1:3], ["-C", str(ROOT)])
+
+    def test_injected_git_runner_rejection_never_falls_back_to_real_subprocess(self):
+        _registry, adapter_module = load_windows_contract()
+
+        def rejecting_runner(_argv, **_kwargs):
+            raise AssertionError("injected runner rejected command")
+
+        adapter = adapter_module.WindowsX64Adapter(controller_runner=rejecting_runner)
+        with patch.object(adapter_module.subprocess, "run") as real_subprocess:
+            with self.assertRaisesRegex(AssertionError, "injected runner rejected command"):
+                adapter._controller_git_bytes(
+                    ROOT,
+                    ("show", "{}:VERSION".format("a" * 40)),
+                )
+        real_subprocess.assert_not_called()
 
     def test_feature_branch_is_blocked_before_plan(self):
         _registry, adapter_module = load_windows_contract()
@@ -246,7 +268,7 @@ class WindowsAdapterContractTests(unittest.TestCase):
             runner = ControllerGitRunner(branch="codex/windows")
             adapter = adapter_module.WindowsX64Adapter(controller_runner=runner)
             local = adapter.local_doctor(
-                Path(temporary), EXPECTED_TARGET, Path(temporary) / "state", ssh_config=None
+                ROOT, EXPECTED_TARGET, Path(temporary) / "state", ssh_config=None
             )
             self.assertEqual(local["controller_status"], "BLOCKED")
             self.assertEqual(local["failure_categories"], ["BRANCH_NOT_MAIN"])
@@ -289,7 +311,7 @@ class WindowsAdapterContractTests(unittest.TestCase):
             runner = ControllerGitRunner()
             adapter = adapter_module.WindowsX64Adapter(controller_runner=runner)
             target = adapter.validate_target(EXPECTED_TARGET)
-            plan = adapter.build_plan(Path(temporary), target, Path(temporary) / "state", run_id="run-1", ssh_config=None)
+            plan = adapter.build_plan(ROOT, target, Path(temporary) / "state", run_id="run-1", ssh_config=None)
             requirements = json.loads(CACHE_REQUIREMENTS_PATH.read_text(encoding="utf-8"))
             requirements_sha = canonical_sha(requirements)
             online = complete_online(requirements_sha)
@@ -310,7 +332,7 @@ class WindowsAdapterContractTests(unittest.TestCase):
             runner = ControllerGitRunner()
             adapter = adapter_module.WindowsX64Adapter(controller_runner=runner)
             target = adapter.validate_target(EXPECTED_TARGET)
-            plan = adapter.build_plan(Path(temporary), target, Path(temporary) / "state", run_id="run-1", ssh_config=None)
+            plan = adapter.build_plan(ROOT, target, Path(temporary) / "state", run_id="run-1", ssh_config=None)
             requirements = json.loads(CACHE_REQUIREMENTS_PATH.read_text(encoding="utf-8"))
             requirements_sha = canonical_sha(requirements)
             base = complete_online(requirements_sha)
@@ -339,7 +361,7 @@ class WindowsAdapterContractTests(unittest.TestCase):
             runner = ControllerGitRunner()
             adapter = adapter_module.WindowsX64Adapter(controller_runner=runner)
             target = adapter.validate_target(EXPECTED_TARGET)
-            plan = adapter.build_plan(Path(temporary), target, Path(temporary) / "state", run_id="run-1", ssh_config=None)
+            plan = adapter.build_plan(ROOT, target, Path(temporary) / "state", run_id="run-1", ssh_config=None)
             requirements = json.loads(CACHE_REQUIREMENTS_PATH.read_text(encoding="utf-8"))
             online = complete_online(canonical_sha(requirements))
             finalized = adapter.bind_online_plan(plan, online)
