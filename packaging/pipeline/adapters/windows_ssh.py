@@ -7,25 +7,48 @@ remote repository.  Those operations remain separate plan tasks and gates.
 
 import base64
 import copy
+import gzip
+import hashlib
 import inspect
 import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ..core.errors import PipelineError
-from ..core.models import canonical_json_sha256
+from ..core.models import canonical_json_sha256, validate_v2_state
+from ..core.state import RunStateStore
 
 
 SSH = "/usr/bin/ssh"
+SCP = "/usr/bin/scp"
 DEFAULT_CONNECT_TIMEOUT = "5"
 WINDOWS_CACHE_SCHEMA = "taiji-windows-cache-observation/v1"
 WINDOWS_HOST_SCHEMA = "taiji-windows-host-facts/v1"
 ONLINE_SCHEMA = "taiji-package-online-doctor/v2"
 PRODUCT_SCHEMA = "taiji-windows-product-probe/v1"
+REAL_BUILD_STAGES = [
+    "online-doctor",
+    "create-remote-run",
+    "transfer-input",
+    "remote-input-verify",
+    "remote-candidate-build",
+    "fetch-review",
+    "fetch-log",
+    "local-review-verify",
+    "publish",
+]
+REAL_FETCH_STAGES = [
+    "fetch-review",
+    "fetch-log",
+    "local-review-verify",
+    "publish",
+]
 ROOT = Path(__file__).resolve().parents[3]
 CACHE_REQUIREMENTS_PATH = ROOT / "packaging/windows/cache-requirements.json"
+WINDOWS_SCRIPTS_ROOT = ROOT / "packaging" / "windows"
 FULL_ONLINE_FIELDS = {
     "schema",
     "builder_status",
@@ -56,28 +79,42 @@ FULL_ONLINE_FIELDS = {
 
 
 def powershell_argv(host_alias, powershell_path, script, ssh_config=None):
-    """Return one safe SSH argv using encoded command or stdin for long scripts."""
+    """Return one safe SSH argv using the target PowerShell absolute path + EncodedCommand."""
 
     script_text = str(script)
-    if len(script_text) > 6000:
-        remote_args = [
-            str(powershell_path),
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "-",
-        ]
-    else:
-        encoded = base64.b64encode(script_text.encode("utf-16le")).decode("ascii")
-        remote_args = [
-            str(powershell_path),
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-EncodedCommand",
-            encoded,
-        ]
+    payload = base64.b64encode(gzip.compress(script_text.encode("utf-8"))).decode("ascii")
+    loader = """
+$payload = '{payload}'
+$memory = [System.IO.MemoryStream]::new([Convert]::FromBase64String($payload))
+try {{
+  $gzip = [System.IO.Compression.GzipStream]::new(
+    $memory,
+    [System.IO.Compression.CompressionMode]::Decompress
+  )
+  try {{
+    $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
+    try {{
+      $script = $reader.ReadToEnd()
+    }} finally {{
+      $reader.Dispose()
+    }}
+  }} finally {{
+    $gzip.Dispose()
+  }}
+}} finally {{
+  $memory.Dispose()
+}}
+& ([scriptblock]::Create($script))
+""".strip().format(payload=payload)
+    encoded = base64.b64encode(loader.encode("utf-16le")).decode("ascii")
+    remote_args = [
+        str(powershell_path),
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        encoded,
+    ]
     argv = [SSH, "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + DEFAULT_CONNECT_TIMEOUT]
     if ssh_config is not None:
         argv.extend(["-F", str(Path(ssh_config).expanduser().resolve())])
@@ -202,10 +239,15 @@ function Test-SafePosixPath {
   return $true
 }
 
+function Normalize-ZipMemberName {
+  param([string]$Name)
+  return $Name.Replace('\', '/')
+}
+
 function Test-SafeZipMemberName {
   param([string]$Name)
-  if ([string]::IsNullOrEmpty($Name) -or $Name.IndexOf([char]0) -ge 0 -or $Name.Contains('\')) { return $false }
-  $candidate = $Name
+  if ([string]::IsNullOrEmpty($Name) -or $Name.IndexOf([char]0) -ge 0) { return $false }
+  $candidate = Normalize-ZipMemberName $Name
   if ($candidate.EndsWith('/')) {
     $candidate = $candidate.Substring(0, $candidate.Length - 1)
   }
@@ -328,23 +370,28 @@ function Get-CacheEntry {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($fullPath)
     $seen = @{}
     foreach ($zipEntry in @($archive.Entries)) {
-      $name = [string]$zipEntry.FullName
-      if (-not (Test-SafeZipMemberName $name)) { return New-MissingCacheResult $entry }
-      $identityName = Get-PathIdentity $name.TrimEnd('/')
+      $normalizedName = Normalize-ZipMemberName $zipEntry.FullName
+      if (-not (Test-SafeZipMemberName $normalizedName)) { return New-MissingCacheResult $entry }
+      $identityName = Get-PathIdentity $normalizedName.TrimEnd('/')
       if ($seen.ContainsKey($identityName)) { return New-MissingCacheResult $entry }
       $seen[$identityName] = $true
     }
     $zipMembers = @()
     foreach ($requiredMember in @($Requirement.required_members)) {
-      if (-not (Test-SafePosixPath ([string]$requiredMember))) { return New-MissingCacheResult $entry }
-      $matches = @($archive.Entries | Where-Object { [string]$_.FullName -eq [string]$requiredMember })
-      if ($matches.Count -ne 1 -or $matches[0].FullName.EndsWith('/')) {
+      $requiredNormalized = Normalize-ZipMemberName ([string]$requiredMember)
+      if (-not (Test-SafePosixPath $requiredNormalized)) { return New-MissingCacheResult $entry }
+      $matches = @(
+        $archive.Entries | Where-Object {
+          (Normalize-ZipMemberName ([string]$_.FullName)) -eq $requiredNormalized
+        }
+      )
+      if ($matches.Count -ne 1 -or (Normalize-ZipMemberName $matches[0].FullName).EndsWith('/')) {
         return New-MissingCacheResult $entry
       }
       $stream = $matches[0].Open()
       try {
         $zipMembers += ,[ordered]@{
-          path = [string]$requiredMember
+          path = [string]$requiredNormalized
           bytes = [int64]$matches[0].Length
           sha256 = Get-Sha256Stream $stream
         }
@@ -674,13 +721,49 @@ def _invoke_runner(runner, argv, input_bytes=None):
     return runner(argv)
 
 
+def _sha256_path(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _dump_canonical_json(path, value):
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    Path(path).write_bytes(payload + b"\n")
+    return payload
+
+
+def _remote_join(root, *parts):
+    value = str(root).rstrip("\\/")
+    for part in parts:
+        value = value + "\\" + str(part).strip("\\/")
+    return value
+
+
+def _resolve_remote_relative(root, relative_path):
+    value = str(relative_path).replace("/", "\\")
+    if not value or value.startswith("\\") or re.match(r"^[A-Za-z]:\\", value):
+        raise PipelineError("remote path must stay within the run root", category="PLAN_INVALID")
+    parts = [part for part in value.split("\\") if part]
+    if not parts or any(part in (".", "..") for part in parts):
+        raise PipelineError("remote path must stay within the run root", category="PLAN_INVALID")
+    return _remote_join(root, *parts)
+
+
+def _quote_ps(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 class WindowsSshTransport:
-    """Transport seam for the later real Windows phase."""
+    """Real Windows SSH transport for the candidate build/fetch stages."""
 
     def __init__(self, target, *, ssh_config, command_runner):
         self.target = copy.deepcopy(target)
         self.ssh_config = ssh_config
         self.command_runner = command_runner
+        self.remote_build_succeeded = False
+        self.remote_run_created = False
+        self._contexts = {}
 
     def _run_powershell(self, script):
         script_text = str(script)
@@ -690,15 +773,214 @@ class WindowsSshTransport:
             script_text,
             self.ssh_config,
         )
-        input_bytes = (
-            (script_text + "\nWrite-Output ''\n").encode("utf-8")
-            if len(script_text) > 6000
-            else None
-        )
-        result = _invoke_runner(self.command_runner, argv, input_bytes=input_bytes)
+        result = _invoke_runner(self.command_runner, argv, input_bytes=None)
         if getattr(result, "returncode", 0) != 0:
             raise PipelineError("Windows read-only probe failed", category="BUILDER_UNREACHABLE")
         return getattr(result, "stdout", result)
+
+    def _run_remote_stage(self, script, category):
+        result = _invoke_runner(self.command_runner, powershell_argv(
+            self.target["host_alias"],
+            self.target["powershell"],
+            str(script),
+            self.ssh_config,
+        ))
+        if getattr(result, "returncode", 0) != 0:
+            raise PipelineError("Windows remote stage failed", category=category)
+        return getattr(result, "stdout", result)
+
+    def _scp_argv(self, source, destination, *, recursive=False):
+        argv = [SCP, "-o", "BatchMode=yes", "-o", "ConnectTimeout=" + DEFAULT_CONNECT_TIMEOUT]
+        if self.ssh_config is not None:
+            argv.extend(["-F", str(Path(self.ssh_config).expanduser().resolve())])
+        if recursive:
+            argv.append("-r")
+        argv.extend([str(source), str(destination)])
+        return argv
+
+    def _run_scp(self, source, destination, *, recursive=False):
+        last_error = None
+        for _attempt in range(2):
+            result = _invoke_runner(
+                self.command_runner,
+                self._scp_argv(source, destination, recursive=recursive),
+            )
+            if getattr(result, "returncode", 0) == 0:
+                return result
+            last_error = result
+        raise PipelineError("Windows SCP transfer was interrupted", category="SCP_INTERRUPTED")
+
+    def _require_plan(self, plan):
+        required = {
+            "run_id",
+            "remote_run_dir",
+            "input",
+            "source_branch",
+            "source_commit",
+            "source_tree",
+            "version",
+            "target_config",
+            "asset_provenance_sha256",
+            "target_config_sha256",
+            "cache_requirements_sha256",
+            "cache_observation",
+            "cache_observation_sha256",
+            "host_facts_sha256",
+            "local_run_dir",
+            "target_id",
+        }
+        if not isinstance(plan, dict) or not required.issubset(set(plan)):
+            raise PipelineError("Windows plan is incomplete", category="PLAN_INVALID")
+        return plan
+
+    def _context_for(self, plan):
+        plan = self._require_plan(plan)
+        run_id = str(plan["run_id"])
+        if run_id not in self._contexts:
+            local_root = Path(tempfile.mkdtemp(prefix="windows-ssh-transport-"))
+            input_root = local_root / "input"
+            scripts_root = local_root / "scripts"
+            input_root.mkdir(mode=0o700)
+            scripts_root.mkdir(mode=0o700)
+            observation_path = input_root / "cache-observation.json"
+            _dump_canonical_json(observation_path, plan["cache_observation"])
+            host_facts_path = input_root / "host-facts-sha256.txt"
+            host_facts_path.write_text(str(plan["host_facts_sha256"]) + "\n", encoding="utf-8")
+            target_path = input_root / "target-config.json"
+            target_path.write_text(
+                json.dumps(plan["target_config"], ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            bootstrap = plan.get("controller_bootstrap")
+            safe_tar = bootstrap.get("safe_tar") if isinstance(bootstrap, dict) else None
+            required_safe_tar = {"source_path", "remote_path", "bytes", "sha256", "python_path"}
+            if not isinstance(safe_tar, dict) or set(safe_tar) != required_safe_tar:
+                raise PipelineError("Windows safe-tar bootstrap is incomplete", category="PLAN_INVALID")
+            safe_tar_path = Path(str(safe_tar["source_path"]))
+            if not safe_tar_path.is_file():
+                raise PipelineError("controller safe-tar source is missing", category="PLAN_INVALID")
+            if safe_tar_path.is_symlink():
+                raise PipelineError("controller safe-tar source is unsafe", category="PLAN_INVALID")
+            safe_tar_bytes = safe_tar_path.stat().st_size
+            safe_tar_sha256 = _sha256_path(safe_tar_path)
+            if safe_tar_bytes != safe_tar["bytes"] or safe_tar_sha256 != safe_tar["sha256"]:
+                raise PipelineError("controller safe-tar identity drifted", category="PLAN_INVALID")
+            safe_tar_remote_path = _resolve_remote_relative(
+                plan["remote_run_dir"], safe_tar["remote_path"]
+            )
+            if not re.match(r"^[A-Za-z]:\\", str(safe_tar["python_path"])):
+                raise PipelineError("controller safe-tar python must be absolute", category="PLAN_INVALID")
+            scripts = {}
+            for name in (
+                "Initialize-CandidateSession.ps1",
+                "Stage-CandidatePayload.ps1",
+                "Build-CandidateReview.ps1",
+                "TaijiAgent.iss",
+            ):
+                source = WINDOWS_SCRIPTS_ROOT / name
+                destination = scripts_root / name
+                destination.write_bytes(source.read_bytes())
+                scripts[name] = destination
+            self._contexts[run_id] = {
+                "local_root": local_root,
+                "input_root": input_root,
+                "scripts_root": scripts_root,
+                "observation_path": observation_path,
+                "host_facts_path": host_facts_path,
+                "target_path": target_path,
+                "safe_tar_path": safe_tar_path,
+                "safe_tar_remote_path": safe_tar_remote_path,
+                "safe_tar_sha256": safe_tar_sha256,
+                "safe_tar_bytes": safe_tar_bytes,
+                "safe_tar_python_path": str(safe_tar["python_path"]),
+                "scripts": scripts,
+                "state_path": Path(plan["local_run_dir"]) / "run-state.json",
+                "remote": {
+                    "root": str(plan["remote_run_dir"]),
+                    "input": _remote_join(plan["remote_run_dir"], "input"),
+                    "source": _remote_join(plan["remote_run_dir"], "source"),
+                    "review": _remote_join(plan["remote_run_dir"], "review"),
+                    "logs": _remote_join(plan["remote_run_dir"], "logs"),
+                    "scripts": _remote_join(plan["remote_run_dir"], "scripts"),
+                },
+            }
+        return self._contexts[run_id]
+
+    def _load_fetch_state(self, plan):
+        plan = self._require_plan(plan)
+        run_id = str(plan["run_id"])
+        run_dir = Path(plan["local_run_dir"]).resolve()
+        if run_dir.name != run_id or run_dir.parent.name != "runs":
+            raise PipelineError("frozen run state path drifted", category="FETCH_NOT_ALLOWED")
+        state_root = run_dir.parent.parent
+        store = RunStateStore(state_root)
+        if store.run_dir(run_id).resolve() != run_dir:
+            raise PipelineError("frozen run state root drifted", category="FETCH_NOT_ALLOWED")
+        try:
+            state = store.load(run_id)
+            validate_v2_state(state)
+        except PipelineError as exc:
+            raise PipelineError(
+                "frozen run state is invalid: {}".format(exc),
+                category="FETCH_NOT_ALLOWED",
+            ) from exc
+        path = store.state_path(run_id)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise PipelineError("frozen run state is unavailable: {}".format(exc), category="FETCH_NOT_ALLOWED") from exc
+        if (
+            metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or not path.is_file()
+            or path.is_symlink()
+            or (metadata.st_mode & 0o777) != 0o600
+        ):
+            raise PipelineError("frozen run state is unsafe", category="FETCH_NOT_ALLOWED")
+        payload = path.read_bytes()
+        canonical = json.dumps(
+            state, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") + b"\n"
+        if payload != canonical:
+            raise PipelineError("frozen run state is not canonical", category="FETCH_NOT_ALLOWED")
+        if (
+            state.get("schema") != "taiji-package-run-state/v2"
+            or state.get("run_id") != run_id
+            or state.get("target_id") != plan["target_id"]
+            or state.get("paths", {}).get("local_run_dir") != plan["local_run_dir"]
+            or state.get("plan") != plan
+            or state.get("target_config") != self.target
+            or state.get("host", {}).get("alias") != self.target["host_alias"]
+            or state.get("host", {}).get("remote_run_dir") != plan["remote_run_dir"]
+        ):
+            raise PipelineError("frozen run state identity drifted", category="FETCH_NOT_ALLOWED")
+        if state.get("stage") not in (
+            "REMOTE_BUILD_SUCCEEDED",
+            "FETCH_PENDING",
+            "REVIEW_FETCHED",
+        ):
+            raise PipelineError("frozen run state stage does not allow fetch", category="FETCH_NOT_ALLOWED")
+        if not state.get("remote_build_succeeded") or not state.get("fetch_allowed"):
+            raise PipelineError("frozen run state does not allow fetch", category="FETCH_NOT_ALLOWED")
+        return state
+
+    def _fetch_context_from_state(self, state):
+        validate_v2_state(state)
+        frozen_plan = state["plan"]
+        remote_root = frozen_plan["remote_run_dir"]
+        return {
+            "remote": {
+                "root": remote_root,
+                "review": _remote_join(remote_root, "review"),
+                "logs": _remote_join(remote_root, "logs"),
+            }
+        }
+
+    def _remote_destination(self, remote_path):
+        return "{}:{}".format(
+            self.target["host_alias"],
+            str(remote_path).replace("\\", "/"),
+        )
 
     def online_doctor(self):
         payload = self._run_powershell(builder_probe_script(self.target))
@@ -710,10 +992,329 @@ class WindowsSshTransport:
         )
         return parse_product_probe(payload)
 
-    def build(self, plan, input_files):
-        del plan, input_files
-        raise PipelineError("real Windows build is gated by Plan 4 R4", category="BUILD_NOT_AUTHORIZED")
+    def create_remote_run(self, plan):
+        context = self._context_for(plan)
+        remote = context["remote"]
+        script = """
+$ErrorActionPreference = 'Stop'
+if (Test-Path -LiteralPath {root}) {{
+  throw 'REMOTE_RUN_CONFLICT: remote run root already exists'
+}}
+New-Item -ItemType Directory -Path {root} | Out-Null
+New-Item -ItemType Directory -Path {input} | Out-Null
+New-Item -ItemType Directory -Path {source} | Out-Null
+New-Item -ItemType Directory -Path {review} | Out-Null
+New-Item -ItemType Directory -Path {logs} | Out-Null
+New-Item -ItemType Directory -Path {scripts} | Out-Null
+Write-Host 'REMOTE_RUN_READY'
+""".format(
+            root=_quote_ps(remote["root"]),
+            input=_quote_ps(remote["input"]),
+            source=_quote_ps(remote["source"]),
+            review=_quote_ps(remote["review"]),
+            logs=_quote_ps(remote["logs"]),
+            scripts=_quote_ps(remote["scripts"]),
+        )
+        self._run_remote_stage(script, "WINDOWS_RUN_FAILED")
+        self.remote_run_created = True
+        self.remote_build_succeeded = False
+
+    def transfer_input(self, plan):
+        context = self._context_for(plan)
+        if not self.remote_run_created:
+            raise PipelineError("remote run has not been created", category="WINDOWS_RUN_FAILED")
+        remote = context["remote"]
+        files = plan["input"]["files"]
+        transfers = [
+            (files["archive"]["path"], _remote_join(remote["input"], files["archive"]["basename"])),
+            (files["manifest"]["path"], _remote_join(remote["input"], files["manifest"]["basename"])),
+            (files["checksum"]["path"], _remote_join(remote["input"], files["checksum"]["basename"])),
+            (context["observation_path"], _remote_join(remote["input"], "cache-observation.json")),
+            (context["host_facts_path"], _remote_join(remote["input"], "host-facts-sha256.txt")),
+            (context["target_path"], _remote_join(remote["input"], "target-config.json")),
+            (WINDOWS_SCRIPTS_ROOT / "asset-provenance.json", _remote_join(remote["input"], "asset-provenance.json")),
+            (CACHE_REQUIREMENTS_PATH, _remote_join(remote["input"], "cache-requirements.json")),
+            (context["safe_tar_path"], context["safe_tar_remote_path"]),
+            (context["scripts"]["Initialize-CandidateSession.ps1"], _remote_join(remote["scripts"], "Initialize-CandidateSession.ps1")),
+            (context["scripts"]["Stage-CandidatePayload.ps1"], _remote_join(remote["scripts"], "Stage-CandidatePayload.ps1")),
+            (context["scripts"]["Build-CandidateReview.ps1"], _remote_join(remote["scripts"], "Build-CandidateReview.ps1")),
+            (context["scripts"]["TaijiAgent.iss"], _remote_join(remote["scripts"], "TaijiAgent.iss")),
+        ]
+        for source, remote_path in transfers:
+            self._run_scp(source, self._remote_destination(remote_path))
+
+    def verify_remote_input(self, plan):
+        context = self._context_for(plan)
+        remote = context["remote"]
+        files = plan["input"]["files"]
+        session_path = _remote_join(remote["root"], "session.json")
+        checkout_root = _remote_join(remote["source"], "checkout")
+        script = """
+$ErrorActionPreference = 'Stop'
+function Assert-RegularRemoteFile {{
+  param([string]$Path, [string]$Label)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {{
+    throw "$Label is missing: $Path"
+  }}
+}}
+function ConvertTo-CanonicalValue {{
+  param([Parameter(Mandatory = $true)]$Value)
+  if ($null -eq $Value) {{ return $null }}
+  if ($Value -is [System.Collections.IDictionary]) {{
+    $ordered = [ordered]@{{}}
+    foreach ($key in @($Value.Keys | ForEach-Object {{ [string]$_ }} | Sort-Object)) {{
+      $ordered[$key] = ConvertTo-CanonicalValue $Value[$key]
+    }}
+    return $ordered
+  }}
+  if ($Value -is [System.Management.Automation.PSCustomObject]) {{
+    $ordered = [ordered]@{{}}
+    foreach ($key in @($Value.PSObject.Properties.Name | Sort-Object)) {{
+      $ordered[$key] = ConvertTo-CanonicalValue $Value.$key
+    }}
+    return $ordered
+  }}
+  if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {{
+    $items = @()
+    foreach ($item in @($Value)) {{ $items += ,(ConvertTo-CanonicalValue $item) }}
+    return ,$items
+  }}
+  return $Value
+}}
+function ConvertTo-CanonicalJson {{
+  param([Parameter(Mandatory = $true)]$Value)
+  return (ConvertTo-Json -InputObject (ConvertTo-CanonicalValue $Value) -Depth 100 -Compress)
+}}
+function Get-Sha256Bytes {{
+  param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+  $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
+  return ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+}}
+Assert-RegularRemoteFile {archive_path} 'builder input archive'
+Assert-RegularRemoteFile {manifest_path} 'builder input manifest'
+Assert-RegularRemoteFile {sidecar_path} 'builder input sidecar'
+Assert-RegularRemoteFile {observation_path} 'cache observation'
+Assert-RegularRemoteFile {host_facts_path} 'host facts sha'
+Assert-RegularRemoteFile {bootstrap_path} 'controller safe tar'
+if ((Get-Item -LiteralPath {archive_path}).Length -ne {archive_bytes}) {{
+  throw 'builder input archive bytes drifted'
+}}
+if ((Get-FileHash -LiteralPath {archive_path} -Algorithm SHA256).Hash.ToLowerInvariant() -ne {archive_sha256}) {{
+  throw 'builder input archive sha256 drifted'
+}}
+if ((Get-Item -LiteralPath {manifest_path}).Length -ne {manifest_bytes}) {{
+  throw 'builder input manifest bytes drifted'
+}}
+if ((Get-FileHash -LiteralPath {manifest_path} -Algorithm SHA256).Hash.ToLowerInvariant() -ne {manifest_sha256}) {{
+  throw 'builder input manifest sha256 drifted'
+}}
+if ((Get-Item -LiteralPath {sidecar_path}).Length -ne {sidecar_bytes}) {{
+  throw 'builder input sidecar bytes drifted'
+}}
+if ((Get-FileHash -LiteralPath {sidecar_path} -Algorithm SHA256).Hash.ToLowerInvariant() -ne {sidecar_sha256}) {{
+  throw 'builder input sidecar sha256 drifted'
+}}
+if ((Get-Content -LiteralPath {sidecar_path} -Raw) -cne {sidecar_text}) {{
+  throw 'builder input sidecar text drifted'
+}}
+if ((Get-Content -LiteralPath {host_facts_path} -Raw).Trim().ToLowerInvariant() -ne {host_facts_sha256}) {{
+  throw 'host facts sha256 drifted'
+}}
+$observation = Get-Content -LiteralPath {observation_path} -Raw | ConvertFrom-Json
+$observationKeys = @($observation.PSObject.Properties.Name | Sort-Object)
+$expectedObservationKeys = @('cache_root', 'entries', 'observed_at', 'requirements_sha256', 'schema', 'target_id')
+if (($observationKeys -join '|') -cne ($expectedObservationKeys -join '|')) {{
+  throw 'cache observation fields drifted before extract'
+}}
+$observationIdentity = [ordered]@{{}}
+foreach ($property in $observation.PSObject.Properties) {{
+  if ($property.Name -ne 'observed_at') {{
+    $observationIdentity[$property.Name] = $property.Value
+  }}
+}}
+$observationSha256 = Get-Sha256Bytes ([Text.Encoding]::UTF8.GetBytes((ConvertTo-CanonicalJson $observationIdentity)))
+if ($observation.schema -ne 'taiji-windows-cache-observation/v1' -or
+    $observation.target_id -ne 'windows-x64' -or
+    $observation.requirements_sha256 -ne {cache_requirements_sha256} -or
+    [string]$observation.cache_root -cne {cache_root} -or
+    $observationSha256 -ne {cache_observation_sha256}) {{
+  throw 'cache observation identity drifted before extract'
+}}
+if ((Get-Item -LiteralPath {bootstrap_path}).Length -ne {bootstrap_bytes}) {{
+  throw 'controller safe tar bytes drifted'
+}}
+if ((Get-FileHash -LiteralPath {bootstrap_path} -Algorithm SHA256).Hash.ToLowerInvariant() -ne {bootstrap_sha256}) {{
+  throw 'controller safe tar SHA256 drifted'
+}}
+if (Test-Path -LiteralPath {checkout_root}) {{
+  throw 'controller safe tar destination must not exist before extract'
+}}
+& {bootstrap_python} -I -B {bootstrap_path} extract --archive {archive_path} --destination {checkout_root} --manifest {manifest_path}
+if ($LASTEXITCODE -ne 0) {{
+  throw "controller safe tar extract failed: $LASTEXITCODE"
+}}
+& {initialize} `
+  -RunRoot {run_root} `
+  -RunId {run_id} `
+  -SourceRoot {source_root} `
+  -SourceBranch {source_branch} `
+  -SourceCommit {source_commit} `
+  -SourceTree {source_tree} `
+  -InputManifestPath {input_manifest} `
+  -TargetConfigPath {target_config} `
+  -AssetProvenancePath {asset_provenance} `
+  -InputArchiveBasename {input_archive_basename} `
+  -InputArchiveBytes {input_archive_bytes} `
+  -InputArchiveSha256 {input_archive_sha256} `
+  -InputManifestBasename {input_manifest_basename} `
+  -InputManifestBytes {input_manifest_bytes} `
+  -InputManifestSha256 {input_manifest_sha256} `
+  -InputSidecarBasename {input_sidecar_basename} `
+  -InputSidecarBytes {input_sidecar_bytes} `
+  -InputSidecarSha256 {input_sidecar_sha256} `
+  -CacheRoot {cache_root} `
+  -CacheRequirementsPath {cache_requirements} `
+  -ExpectedCacheRequirementsSha256 {cache_requirements_sha256} `
+  -ExpectedCacheObservationSha256 {cache_observation_sha256} `
+  -PowerShellPath {powershell_path} `
+  -TarPath {tar_path} `
+  -NodePath {node_path} `
+  -NpmPath {npm_path} `
+  -PythonPath {python_path} `
+  -IsccPath {iscc_path} `
+  -SafeTarPath {safe_tar_path} `
+  -ExpectedSafeTarSha256 {safe_tar_sha256} `
+  -ExpectedTargetConfigSha256 {target_config_sha256} `
+  -ExpectedAssetProvenanceSha256 {asset_provenance_sha256} `
+  -ExpectedHostFactsSha256 {host_facts_sha256} `
+  -Version {version}
+if (-not (Test-Path -LiteralPath {session_path} -PathType Leaf)) {{
+  throw 'candidate session was not created'
+}}
+""".format(
+            initialize=_quote_ps(_remote_join(remote["scripts"], "Initialize-CandidateSession.ps1")),
+            run_root=_quote_ps(remote["root"]),
+            run_id=_quote_ps(plan["run_id"]),
+            source_root=_quote_ps(checkout_root),
+            source_branch=_quote_ps(plan["source_branch"]),
+            source_commit=_quote_ps(plan["source_commit"]),
+            source_tree=_quote_ps(plan["source_tree"]),
+            input_manifest=_quote_ps(_remote_join(remote["input"], files["manifest"]["basename"])),
+            target_config=_quote_ps(_remote_join(remote["input"], "target-config.json")),
+            asset_provenance=_quote_ps(_remote_join(remote["input"], "asset-provenance.json")),
+            input_archive_basename=_quote_ps(files["archive"]["basename"]),
+            input_archive_bytes=files["archive"]["bytes"],
+            input_archive_sha256=_quote_ps(files["archive"]["sha256"]),
+            input_manifest_basename=_quote_ps(files["manifest"]["basename"]),
+            input_manifest_bytes=files["manifest"]["bytes"],
+            input_manifest_sha256=_quote_ps(files["manifest"]["sha256"]),
+            input_sidecar_basename=_quote_ps(files["checksum"]["basename"]),
+            input_sidecar_bytes=files["checksum"]["bytes"],
+            input_sidecar_sha256=_quote_ps(files["checksum"]["sha256"]),
+            cache_root=_quote_ps(plan["target_config"]["cache_root"]),
+            cache_requirements=_quote_ps(_remote_join(remote["input"], "cache-requirements.json")),
+            cache_requirements_sha256=_quote_ps(plan["cache_requirements_sha256"]),
+            cache_observation_sha256=_quote_ps(plan["cache_observation_sha256"]),
+            powershell_path=_quote_ps(plan["target_config"]["powershell"]),
+            tar_path=_quote_ps(plan["target_config"]["tar"]),
+            node_path=_quote_ps(plan["target_config"]["node"]),
+            npm_path=_quote_ps(plan["target_config"]["npm"]),
+            python_path=_quote_ps(plan["target_config"]["python"]),
+            iscc_path=_quote_ps(plan["target_config"]["iscc"]),
+            safe_tar_path=_quote_ps(context["safe_tar_remote_path"]),
+            safe_tar_sha256=_quote_ps(context["safe_tar_sha256"]),
+            target_config_sha256=_quote_ps(plan["target_config_sha256"]),
+            asset_provenance_sha256=_quote_ps(plan["asset_provenance_sha256"]),
+            version=_quote_ps(plan["version"]),
+            session_path=_quote_ps(session_path),
+            archive_path=_quote_ps(_remote_join(remote["input"], files["archive"]["basename"])),
+            manifest_path=_quote_ps(_remote_join(remote["input"], files["manifest"]["basename"])),
+            sidecar_path=_quote_ps(_remote_join(remote["input"], files["checksum"]["basename"])),
+            observation_path=_quote_ps(_remote_join(remote["input"], "cache-observation.json")),
+            host_facts_path=_quote_ps(_remote_join(remote["input"], "host-facts-sha256.txt")),
+            bootstrap_path=_quote_ps(context["safe_tar_remote_path"]),
+            bootstrap_bytes=context["safe_tar_bytes"],
+            bootstrap_sha256=_quote_ps(context["safe_tar_sha256"]),
+            bootstrap_python=_quote_ps(context["safe_tar_python_path"]),
+            checkout_root=_quote_ps(checkout_root),
+            archive_bytes=files["archive"]["bytes"],
+            archive_sha256=_quote_ps(files["archive"]["sha256"]),
+            manifest_bytes=files["manifest"]["bytes"],
+            manifest_sha256=_quote_ps(files["manifest"]["sha256"]),
+            sidecar_bytes=files["checksum"]["bytes"],
+            sidecar_sha256=_quote_ps(files["checksum"]["sha256"]),
+            sidecar_text=_quote_ps(
+                "{}  {}\n{}  {}\n".format(
+                    files["archive"]["sha256"],
+                    files["archive"]["basename"],
+                    files["manifest"]["sha256"],
+                    files["manifest"]["basename"],
+                )
+            ),
+            host_facts_sha256=_quote_ps(plan["host_facts_sha256"]),
+        )
+        self._run_remote_stage(script, "INPUT_VERIFICATION_FAILED")
+
+    def build_remote_candidate(self, plan):
+        context = self._context_for(plan)
+        remote = context["remote"]
+        session_path = _remote_join(remote["root"], "session.json")
+        stage_script = """
+$ErrorActionPreference = 'Stop'
+& {stage_script} -SessionPath {session_path}
+""".format(
+            stage_script=_quote_ps(_remote_join(remote["scripts"], "Stage-CandidatePayload.ps1")),
+            session_path=_quote_ps(session_path),
+        )
+        self._run_remote_stage(stage_script, "WINDOWS_PAYLOAD_FAILED")
+
+        build_script = """
+$ErrorActionPreference = 'Stop'
+& {build_script} -SessionPath {session_path}
+if (-not (Test-Path -LiteralPath {marker_path} -PathType Leaf)) {{
+  throw 'remote marker is missing'
+}}
+if (-not (Test-Path -LiteralPath {review_manifest} -PathType Leaf)) {{
+  throw 'remote review manifest is missing'
+}}
+""".format(
+            build_script=_quote_ps(_remote_join(remote["scripts"], "Build-CandidateReview.ps1")),
+            session_path=_quote_ps(session_path),
+            marker_path=_quote_ps(_remote_join(remote["review"], ".build-success")),
+            review_manifest=_quote_ps(_remote_join(remote["review"], "taiji-package-manifest.json")),
+        )
+        self._run_remote_stage(build_script, "WINDOWS_INNO_FAILED")
+        self.remote_build_succeeded = True
 
     def fetch(self, plan, staging_dir):
-        del plan, staging_dir
-        raise PipelineError("real Windows fetch is not enabled before R4", category="FETCH_NOT_AUTHORIZED")
+        state = self._load_fetch_state(plan)
+        context = self._fetch_context_from_state(state)
+        staging_dir = Path(staging_dir).resolve()
+        if staging_dir.exists():
+            raise PipelineError("local fetch staging is occupied", category="LOCAL_OUTPUT_OCCUPIED")
+        staging_dir.mkdir(parents=True, mode=0o700)
+        review_path = staging_dir / "review"
+        remote_log_path = staging_dir / "remote-build.log"
+        self._run_scp(
+            self._remote_destination(context["remote"]["review"]),
+            review_path,
+            recursive=True,
+        )
+        self._run_scp(
+            self._remote_destination(_remote_join(context["remote"]["logs"], "remote-build.log")),
+            remote_log_path,
+        )
+        staging_dir.chmod(0o700)
+        if review_path.exists():
+            review_path.chmod(0o700)
+            for entry in review_path.iterdir():
+                if entry.is_dir():
+                    entry.chmod(0o700)
+                else:
+                    entry.chmod(0o600)
+        if remote_log_path.exists():
+            remote_log_path.chmod(0o600)
+        return {
+            "review_path": str(review_path),
+            "remote_log_path": str(remote_log_path),
+        }

@@ -17,10 +17,14 @@ EXPECTED_PARAMETERS = {
     INITIALIZE: {
         "RunRoot", "RunId", "SourceRoot", "SourceBranch", "SourceCommit", "SourceTree",
         "InputManifestPath", "TargetConfigPath", "AssetProvenancePath",
+        "InputArchiveBasename", "InputArchiveBytes", "InputArchiveSha256",
+        "InputManifestBasename", "InputManifestBytes", "InputManifestSha256",
+        "InputSidecarBasename", "InputSidecarBytes", "InputSidecarSha256",
         "CacheRoot", "CacheRequirementsPath", "ExpectedCacheRequirementsSha256",
         "ExpectedCacheObservationSha256", "PowerShellPath", "TarPath", "NodePath",
         "NpmPath", "PythonPath", "IsccPath", "SafeTarPath", "ExpectedSafeTarSha256",
-        "Version",
+        "ExpectedTargetConfigSha256", "ExpectedAssetProvenanceSha256",
+        "ExpectedHostFactsSha256", "Version",
     },
     STAGE: {"SessionPath"},
     BUILD: {"SessionPath"},
@@ -51,6 +55,7 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         for path, expected in EXPECTED_PARAMETERS.items():
             with self.subTest(path=str(path)):
                 text = read_script(path)
+                self.assertTrue(path.read_bytes().isascii())
                 self.assertEqual(parameter_names(text), expected)
 
     def test_scripts_never_derive_source_from_git_or_worktree(self):
@@ -91,16 +96,25 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
             "formal-build-tests.log",
             ".build-success",
             "run-state.json",
-            "构建报告.txt",
             "remote-build.log",
         ):
             self.assertIn(basename, build)
+        self.assertEqual("".join(chr(value) for value in (0x6784, 0x5EFA, 0x62A5, 0x544A)) + ".txt", "构建报告.txt")
+        for codepoint in ("0x6784", "0x5efa", "0x62a5", "0x544a"):
+            self.assertIn(codepoint, build.lower())
+        self.assertIn("$ReportBasename", build)
 
     def test_formal_checks_are_single_ordered_and_fail_closed(self):
         text = read_script(BUILD)
         self.assertIn("function Invoke-FormalCheck", text)
         self.assertIn("$LASTEXITCODE -ne 0", text)
         self.assertIn("throw", text)
+        self.assertNotIn("'01 source-session-identity PASS exit=0'", text)
+        self.assertNotIn("'07 installer-pe-version-authenticode PASS exit=0'", text)
+        self.assertIn("Append-Utf8Line", text)
+        self.assertIn("Write-Utf8Text", text)
+        self.assertNotIn("Add-Content", text)
+        self.assertNotIn("WriteAllLines", text)
         ids = re.findall(
             r'Invoke-FormalCheck\s+-Id\s+["\']([^"\']+)["\']\s+-Action\s+\{',
             text,
@@ -120,6 +134,14 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         summary_index = text.index("SUMMARY PASS checks=7")
         self.assertGreater(text.index("Write-PackageManifest", summary_index), summary_index)
         self.assertGreater(text.index("Write-SuccessMarker", summary_index), summary_index)
+        self.assertIn("$session.tools.npm.path ci --offline --ignore-scripts --no-audit", text)
+        self.assertIn("PAYLOAD_MENU_POLICY_OK", text)
+        self.assertIn("& $payloadPython -I -B $GatePath", text)
+        self.assertIn("ELECTRON_RUN_AS_NODE", text)
+        self.assertIn("win32 x64", text)
+        self.assertIn("import taiji_runtime.main", text)
+        self.assertIn("from api.config import get_ui_visibility", text)
+        self.assertIn('assert nav == {"chat", "tasks", "writing", "settings"}', text)
 
     def test_review_exact_set_and_separate_log_are_explicit(self):
         text = read_script(BUILD)
@@ -128,7 +150,7 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
             "TaijiAgent-Setup-$Version-win-x64.exe.sha256",
             "taiji-package-manifest.json",
             "formal-build-tests.log",
-            "构建报告.txt",
+            "$ReportBasename",
             ".build-success",
             "run-state.json",
             "logs\\remote-build.log",
@@ -137,26 +159,30 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         ):
             self.assertIn(literal, text)
         self.assertIn("review exact set", text.lower())
+        self.assertIn("ReviewExpectedBeforeMarker", text)
+        self.assertIn("ReviewExpectedAfterMarker", text)
+        self.assertNotIn(".build-success',\n  'run-state.json'\n)", text)
 
     def test_offline_cache_and_payload_hygiene_contracts_are_explicit(self):
         initialize = read_script(INITIALIZE)
         stage = read_script(STAGE)
         build = read_script(BUILD)
-        for literal in (
+        shared_literals = (
             "ExpectedCacheRequirementsSha256",
             "ExpectedCacheObservationSha256",
             "cache-observation.json",
             "staging\\cache",
-            "npm ci --offline --ignore-scripts --no-audit",
             "payload-hygiene-closure",
             ".git",
             ".env",
             "*.db",
             "*.sqlite",
             "__pycache__",
-        ):
+        )
+        for literal in shared_literals:
             with self.subTest(literal=literal):
                 self.assertIn(literal, initialize + stage + build)
+        self.assertIn("ci --offline --ignore-scripts --no-audit", stage + build)
         for forbidden in (
             "Invoke-WebRequest", "Start-BitsTransfer", "DownloadFile", "Set-AuthenticodeSignature",
             "Install-Module", "winget", "choco", "publish-to-customer", "Start-Process",
@@ -192,6 +218,178 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         defines = re.findall(r"/D([A-Za-z][A-Za-z0-9_]*)", inno)
         self.assertEqual(set(defines), {"MyAppVersion", "PayloadRoot", "OutputDir", "OutputBaseFilename"})
         self.assertIn(".build-success", build[marker_index:])
+
+    def test_stage_payload_contract_is_windows_candidate_specific(self):
+        stage = read_script(STAGE)
+        for literal in (
+            "TaijiAgent.exe",
+            "resources\\app\\src",
+            "resources\\app\\package.json",
+            "hermes-local-lab\\sources\\hermes-agent",
+            "hermes-local-lab\\sources\\hermes-webui",
+            "hermes-local-lab\\config\\taiji-default-config.yaml",
+            "diagnose.ps1",
+            "python311._pth",
+            "menu gate",
+            "desktop-npm-check",
+            "package-lock.json",
+            "Lib\\site-packages",
+            "taiji_runtime_profile",
+            "taiji_license",
+            "aiohttp",
+            "fastapi",
+            "uvicorn",
+            "cryptography",
+            "psutil",
+            "ELECTRON_RUN_AS_NODE",
+            "win32 x64",
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, stage)
+        self.assertIn("$session.tools.npm.path", stage)
+        self.assertIn("$session.tools.python.path", stage)
+        self.assertNotIn("& $session.tools.npm ci", stage)
+        self.assertNotIn("Copy-Item -LiteralPath $pythonSource -Destination $pythonDestination -Recurse -Force", stage)
+        self.assertNotIn("Push-Location $desktopRoot", stage)
+        self.assertIn("Push-Location $desktopNpmCheckRoot", stage)
+        self.assertIn("foreach ($entry in @($requirements.entries))", stage)
+        self.assertIn("Join-Path $sharedCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
+        self.assertIn("Join-Path $stagingCacheRoot $entry.relative_path.Replace('/', '\\')", stage)
+        self.assertIn("Get-CacheEntry", stage)
+        self.assertIn("staging observation identity drifted before payload assembly", stage)
+        self.assertIn("__pycache__", stage)
+        self.assertIn(".pyc", stage)
+        self.assertIn(".pyo", stage)
+        self.assertNotIn("..\\..\\..\\Agent", stage)
+        self.assertNotIn("..\\..\\..\\WebUI", stage)
+        self.assertIn("..\\..\\sources\\hermes-agent", stage)
+        self.assertIn("..\\..\\sources\\hermes-webui", stage)
+        self.assertIn("python311.zip", stage)
+        self.assertIn("import site", stage)
+        self.assertIn("[char]10", stage)
+        self.assertIn("import taiji_runtime.main", stage)
+        self.assertIn("from api.config import get_ui_visibility", stage)
+        self.assertIn('assert nav == {"chat", "tasks", "writing", "settings"}', stage)
+        self.assertIn("-m taiji_runtime.main --help", stage)
+        self.assertNotIn("[Environment]::NewLine", stage)
+        for forbidden in ("resources\\app\\tests", "payloadRoot 'Agent'", "payloadRoot 'WebUI'"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, stage)
+
+    def test_stage_cache_revalidation_preserves_bound_root_and_canonical_member_order(self):
+        stage = read_script(STAGE)
+        self.assertIn("$observation.cache_root", stage)
+        self.assertIn("$sharedCacheRoot", stage)
+        self.assertIn("cache observation root drifted before staging", stage)
+        self.assertIn("cache_root = [string]$observation.cache_root", stage)
+        sort_index = stage.index("$members = @(Sort-MembersByUtf8 $members)")
+        digest_index = stage.index("$entry.sha256 = Get-CanonicalHash $members")
+        self.assertLess(sort_index, digest_index)
+        self.assertTrue(
+            ".ComputeHash($Stream)" in stage
+            or ".CopyTo(" in stage
+            or ("while (" in stage and "$stream.Read(" in stage),
+            "ZIP member hashing must consume the complete stream",
+        )
+
+    def test_payload_manifest_entries_use_the_same_utf8_byte_order_as_local_review(self):
+        stage = read_script(STAGE)
+        self.assertIn("$unsortedPayloadEntries = @(", stage)
+        self.assertIn("$payloadEntries = @(Sort-MembersByUtf8 $unsortedPayloadEntries)", stage)
+        self.assertNotIn("| Sort-Object path", stage)
+        chinese_paths = ["构建报告.txt", "z.txt", "é.txt"]
+        self.assertEqual(
+            sorted(chinese_paths, key=lambda value: value.encode("utf-8")),
+            ["z.txt", "é.txt", "构建报告.txt"],
+        )
+        self.assertIn("[Text.Encoding]::UTF8.GetBytes", stage)
+
+    def test_initialize_session_captures_tool_identities_not_only_paths(self):
+        initialize = read_script(INITIALIZE)
+        for literal in (
+            "host_facts_sha256",
+            "cache_observation_sha256",
+            "taiji-safe-tar/v1",
+            "bytes",
+            "sha256",
+            "version",
+            "ExpectedTargetConfigSha256",
+            "ExpectedAssetProvenanceSha256",
+            "ExpectedHostFactsSha256",
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, initialize)
+
+    def test_initialize_reuses_transport_reserved_root_and_preserves_transferred_observation(self):
+        initialize = read_script(INITIALIZE)
+        self.assertNotIn("run root already exists", initialize.lower())
+        self.assertNotIn("Write-AtomicJson (Join-Path $RunRoot 'input\\cache-observation.json')", initialize)
+        self.assertIn("cache-observation.json", initialize)
+        self.assertIn("host-facts-sha256.txt", initialize)
+        self.assertIn("input\\cache-observation.json", initialize)
+
+    def test_build_review_contract_uses_output_base_without_double_exe(self):
+        build = read_script(BUILD)
+        self.assertIn('OutputBaseFilename=$OutputBaseName', build)
+        self.assertIn('$ArtifactBasename = "$OutputBaseName.exe"', build)
+        self.assertNotIn('OutputBaseFilename=$ArtifactBasename', build)
+
+    def test_build_manifest_and_marker_bind_remote_state_and_formal_checks_exactly(self):
+        build = read_script(BUILD)
+        for literal in (
+            "host_facts_sha256",
+            "remote_state_basename",
+            "remote_state_bytes",
+            "remote_state_sha256",
+            "taiji-package-remote-run/v1",
+            "SUMMARY PASS checks=7",
+            "'{0:d2} {1} PASS exit=0' -f $formalIndex, [string]$check.id",
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, build)
+        self.assertNotIn("started_at = $session.source.commit", build)
+
+    def test_build_review_verifies_pre_marker_six_files_and_pe_signature_bytes(self):
+        build = read_script(BUILD)
+        self.assertIn("ReviewExpectedBeforeMarker", build)
+        self.assertIn("ReviewExpectedAfterMarker", build)
+        self.assertIn("Compare-ByteArrays", build)
+        self.assertNotIn("[Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4)", build)
+        self.assertIn("Move-Item -LiteralPath $OutputArtifactPath -Destination $ArtifactPath", build)
+        self.assertNotIn("[Environment]::NewLine", build)
+        self.assertIn("[char]10", build)
+        self.assertIn("desktop-npm-check", build)
+        self.assertIn("ELECTRON_RUN_AS_NODE", build)
+        self.assertIn("win32 x64", build)
+
+    def test_build_review_durably_rereads_six_files_before_atomic_marker(self):
+        build = read_script(BUILD)
+        self.assertIn("Flush($true)", build)
+        self.assertIn("[IO.FileMode]::CreateNew", build)
+        reread_start = build.index("function ReReadAndVerifyReview")
+        reread_end = build.index("function Write-PackageManifest", reread_start)
+        reread_body = build[reread_start:reread_end]
+        self.assertIn("ReadAllBytes", reread_body)
+        self.assertIn("Get-Sha256", reread_body)
+        marker_call = build.rindex("Write-SuccessMarker")
+        pre_marker_verify = build.rindex("ReReadAndVerifyReview", 0, marker_call)
+        self.assertLess(pre_marker_verify, marker_call)
+        atomic_start = build.index("function Write-AtomicJson")
+        atomic_end = build.index("function Append-Utf8Line", atomic_start)
+        self.assertIn("Move-Item", build[atomic_start:atomic_end])
+        marker_writer_start = build.index("function Write-SuccessMarker")
+        marker_writer_end = build.index("Assert-RegularFile $SessionPath", marker_writer_start)
+        self.assertIn("Write-AtomicJson", build[marker_writer_start:marker_writer_end])
+
+    def test_all_three_scripts_share_recursive_canonical_json_and_utf8_lf(self):
+        for path in (INITIALIZE, STAGE, BUILD):
+            text = read_script(path)
+            with self.subTest(path=str(path)):
+                self.assertIn("function ConvertTo-CanonicalValue", text)
+                self.assertIn("function ConvertTo-CanonicalJson", text)
+                self.assertIn("[Text.UTF8Encoding]::new($false)", text)
+                self.assertIn("[char]10", text)
+                self.assertNotIn("[Environment]::NewLine", text)
 
 
 if __name__ == "__main__":

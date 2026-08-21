@@ -21,12 +21,84 @@ function Get-Sha256 {
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function ConvertTo-CanonicalValue {
+  param([Parameter(Mandatory = $true)]$Value)
+  if ($null -eq $Value) { return $null }
+  if ($Value -is [System.Collections.IDictionary]) {
+    $ordered = [ordered]@{}
+    foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
+      $ordered[$key] = ConvertTo-CanonicalValue $Value[$key]
+    }
+    return $ordered
+  }
+  if ($Value -is [System.Management.Automation.PSCustomObject]) {
+    $ordered = [ordered]@{}
+    foreach ($key in @($Value.PSObject.Properties.Name | Sort-Object)) {
+      $ordered[$key] = ConvertTo-CanonicalValue $Value.$key
+    }
+    return $ordered
+  }
+  if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+    $items = @()
+    foreach ($item in @($Value)) {
+      $items += ,(ConvertTo-CanonicalValue $item)
+    }
+    return ,$items
+  }
+  return $Value
+}
+
+function ConvertTo-CanonicalJson {
+  param([Parameter(Mandatory = $true)]$Value)
+  return (ConvertTo-Json -InputObject (ConvertTo-CanonicalValue $Value) -Depth 100 -Compress)
+}
+
 function Get-CanonicalHash {
   param([Parameter(Mandatory = $true)]$Value)
-  $json = $Value | ConvertTo-Json -Compress -Depth 100
-  $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+  $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-CanonicalJson $Value))
   $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
   return ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+}
+
+function Get-Sha256Bytes {
+  param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+  $hash = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($hash.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
+  } finally {
+    $hash.Dispose()
+  }
+}
+
+function Compare-ByteArrays {
+  param([byte[]]$Left, [byte[]]$Right)
+  if ($Left.Length -ne $Right.Length) { return $false }
+  for ($index = 0; $index -lt $Left.Length; $index++) {
+    if ($Left[$index] -ne $Right[$index]) { return $false }
+  }
+  return $true
+}
+
+function Write-DurableBytes {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][byte[]]$Bytes
+  )
+  if (Test-Path -LiteralPath $Path) {
+    throw "refusing to overwrite review file: $Path"
+  }
+  $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  try {
+    $stream.Write($Bytes, 0, $Bytes.Length)
+    $stream.Flush($true)
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function Write-Utf8Text {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Text)
+  Write-DurableBytes -Path $Path -Bytes ([Text.UTF8Encoding]::new($false).GetBytes($Text))
 }
 
 function Write-AtomicJson {
@@ -35,12 +107,26 @@ function Write-AtomicJson {
     throw "refusing to overwrite review file: $Path"
   }
   $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
-  [IO.File]::WriteAllText(
-    $temporary,
-    (($Value | ConvertTo-Json -Compress -Depth 100) + [Environment]::NewLine),
-    [Text.UTF8Encoding]::new($false)
-  )
-  Move-Item -LiteralPath $temporary -Destination $Path
+  try {
+    Write-DurableBytes -Path $temporary -Bytes (
+      [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-CanonicalJson $Value) + [char]10)
+    )
+    Move-Item -LiteralPath $temporary -Destination $Path
+  } finally {
+    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Append-Utf8Line {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Line)
+  $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+  try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Line + [char]10)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+  } finally {
+    $stream.Dispose()
+  }
 }
 
 function Invoke-FormalCheck {
@@ -58,33 +144,35 @@ function Invoke-FormalCheck {
       result = 'PASS'
       exit_code = 0
     }
+    Append-Utf8Line -Path $script:RemoteLog -Line "$Id PASS exit=0"
   } catch {
     $exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { $LASTEXITCODE }
-    Add-Content -LiteralPath $script:RemoteLog -Value "$Id FAIL exit=$exitCode"
+    Append-Utf8Line -Path $script:RemoteLog -Line "$Id FAIL exit=$exitCode"
     throw
   }
 }
 
 function ReReadAndVerifyReview {
-  param([Parameter(Mandatory = $true)][string]$ReviewRoot)
-  $expected = @(
-    "TaijiAgent-Setup-$Version-win-x64.exe",
-    "TaijiAgent-Setup-$Version-win-x64.exe.sha256",
-    'taiji-package-manifest.json',
-    'formal-build-tests.log',
-    '构建报告.txt',
-    '.build-success',
-    'run-state.json'
+  param(
+    [Parameter(Mandatory = $true)][string]$ReviewRoot,
+    [Parameter(Mandatory = $true)][string[]]$ExpectedNames
   )
   $actual = @(Get-ChildItem -LiteralPath $ReviewRoot -Force | ForEach-Object { $_.Name } | Sort-Object)
-  $expectedSorted = @($expected | Sort-Object)
+  $expectedSorted = @($ExpectedNames | Sort-Object)
   if (($actual -join '|') -ne ($expectedSorted -join '|')) {
     throw 'review exact set changed during final verification'
   }
-  foreach ($name in $expected) {
+  $identities = [ordered]@{}
+  foreach ($name in $ExpectedNames) {
     $path = Join-Path $ReviewRoot $name
     Assert-RegularFile $path "review file $name"
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $identities[$name] = [ordered]@{
+      bytes = [int64]$bytes.Length
+      sha256 = Get-Sha256Bytes $bytes
+    }
   }
+  return $identities
 }
 
 function Write-PackageManifest {
@@ -124,14 +212,18 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $RemoteLog) -Force | Out-
 if (Test-Path -LiteralPath $RemoteLog) {
   throw "remote build log already exists: $RemoteLog"
 }
-[IO.File]::WriteAllText($RemoteLog, '', [Text.UTF8Encoding]::new($false))
+Write-Utf8Text -Path $RemoteLog -Text ("remote build started" + [char]10)
 
-$ArtifactBasename = "TaijiAgent-Setup-$Version-win-x64.exe"
+$OutputBaseName = "TaijiAgent-Setup-$Version-win-x64"
+$ArtifactBasename = "$OutputBaseName.exe"
+# review exact set includes TaijiAgent-Setup-$Version-win-x64.exe and TaijiAgent-Setup-$Version-win-x64.exe.sha256.
+$OutputArtifactPath = Join-Path $OutputRoot $ArtifactBasename
 $ArtifactPath = Join-Path $ReviewRoot $ArtifactBasename
 $SidecarPath = Join-Path $ReviewRoot "$ArtifactBasename.sha256"
 $ManifestPath = Join-Path $ReviewRoot 'taiji-package-manifest.json'
 $FormalLogPath = Join-Path $ReviewRoot 'formal-build-tests.log'
-$ReportPath = Join-Path $ReviewRoot '构建报告.txt'
+$ReportBasename = ([string][char]0x6784) + [char]0x5efa + [char]0x62a5 + [char]0x544a + '.txt'
+$ReportPath = Join-Path $ReviewRoot $ReportBasename
 $RemoteStatePath = Join-Path $ReviewRoot 'run-state.json'
 $MarkerPath = Join-Path $ReviewRoot '.build-success'
 $InnoScript = Join-Path $PSScriptRoot 'TaijiAgent.iss'
@@ -142,10 +234,11 @@ $ReviewExpectedNames = @(
   "$ArtifactBasename.sha256",
   'taiji-package-manifest.json',
   'formal-build-tests.log',
-  '构建报告.txt',
-  '.build-success',
+  $ReportBasename,
   'run-state.json'
 )
+$ReviewExpectedBeforeMarker = @($ReviewExpectedNames)
+$ReviewExpectedAfterMarker = @($ReviewExpectedNames + '.build-success')
 $ForbiddenReviewEntry = Get-ChildItem -LiteralPath $ReviewRoot -Force | Select-Object -First 1
 if ($ForbiddenReviewEntry) {
   throw "review root must be new: $ReviewRoot"
@@ -164,19 +257,44 @@ Invoke-FormalCheck -Id "source-session-identity" -Action {
 }
 
 Invoke-FormalCheck -Id "offline-npm-ci" -Action {
-  $offlineCommand = 'npm ci --offline --ignore-scripts --no-audit'
+  $desktopNpmCheckRoot = Join-Path $StagingRoot 'desktop-npm-check'
   if (-not (Test-Path -LiteralPath (Join-Path $StagingRoot 'payload-manifest.json') -PathType Leaf)) {
     throw 'staged payload manifest is missing'
   }
-  if (-not (Test-Path -LiteralPath (Join-Path $session.paths.staging_cache_root 'npm\_cacache'))) {
+  Assert-RegularFile (Join-Path $desktopNpmCheckRoot 'package.json') 'staging desktop package'
+  Assert-RegularFile (Join-Path $desktopNpmCheckRoot 'package-lock.json') 'staging desktop package lock'
+  $npmCache = Join-Path $session.paths.staging_cache_root 'npm'
+  if (-not (Test-Path -LiteralPath (Join-Path $npmCache '_cacache'))) {
     throw 'staging npm cache is missing'
+  }
+  Push-Location $desktopNpmCheckRoot
+  try {
+    & $session.tools.npm.path ci --offline --ignore-scripts --no-audit --cache $npmCache
+    if ($LASTEXITCODE -ne 0) {
+      throw "offline npm ci failed: $LASTEXITCODE"
+    }
+  } finally {
+    Pop-Location
   }
 }
 
 Invoke-FormalCheck -Id "electron-win32-x64" -Action {
   $electron = Join-Path $PayloadRoot 'TaijiAgent.exe'
-  if (-not (Test-Path -LiteralPath $electron -PathType Leaf)) {
-    throw 'staged Windows Electron executable is missing'
+  Assert-RegularFile $electron 'staged Windows Electron executable'
+  $previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
+  $hadElectronRunAsNode = Test-Path Env:\ELECTRON_RUN_AS_NODE
+  try {
+    $env:ELECTRON_RUN_AS_NODE = '1'
+    $electronOutput = (& $electron -e "console.log(process.platform + ' ' + process.arch)" 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $electronOutput -cne 'win32 x64') {
+      throw 'electron-win32-x64 verification failed'
+    }
+  } finally {
+    if ($hadElectronRunAsNode) {
+      $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode
+    } else {
+      Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+    }
   }
 }
 
@@ -184,8 +302,76 @@ Invoke-FormalCheck -Id "payload-import-menu-policy" -Action {
   if (-not (Test-Path -LiteralPath (Join-Path $PayloadRoot 'resources\app\package.json') -PathType Leaf)) {
     throw 'payload package.json is missing'
   }
+  if (-not (Test-Path -LiteralPath (Join-Path $PayloadRoot 'resources\app\src') -PathType Container)) {
+    throw 'payload src is missing'
+  }
   if (-not (Test-Path -LiteralPath (Join-Path $PayloadRoot 'hermes-local-lab\config\taiji-default-config.yaml') -PathType Leaf)) {
     throw 'packaged default config is missing'
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $PayloadRoot 'hermes-local-lab\sources\hermes-agent') -PathType Container)) {
+    throw 'payload hermes-agent source is missing'
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $PayloadRoot 'hermes-local-lab\sources\hermes-webui') -PathType Container)) {
+    throw 'payload hermes-webui source is missing'
+  }
+  $payloadPython = Join-Path $PayloadRoot 'hermes-local-lab\runtime\python\python.exe'
+  Assert-RegularFile $payloadPython 'payload python runtime'
+  $runtimeHelp = (& $payloadPython -I -B -m taiji_runtime.main --help 2>&1 | Out-String)
+  if ($LASTEXITCODE -ne 0) {
+    throw 'taiji_runtime.main help failed'
+  }
+  $GatePath = Join-Path $StagingRoot 'build-menu-gate.py'
+  $importGate = @'
+import pathlib
+import re
+
+payload = pathlib.Path(r"__PAYLOAD_ROOT__")
+agent_root = (payload / "hermes-local-lab" / "sources" / "hermes-agent").resolve()
+webui_root = (payload / "hermes-local-lab" / "sources" / "hermes-webui").resolve()
+main_source = payload / "resources" / "app" / "src" / "main.js"
+assert agent_root.is_dir()
+assert webui_root.is_dir()
+assert main_source.is_file()
+assert (payload / "resources" / "app" / "package.json").is_file()
+assert (payload / "resources" / "app" / "src").is_dir()
+import taiji_runtime.main
+import taiji_runtime_profile
+import taiji_license
+import aiohttp
+import fastapi
+import uvicorn
+import yaml
+import cryptography
+import psutil
+import api.config
+from api.config import get_ui_visibility
+for module, expected_root in (
+    (taiji_runtime.main, agent_root),
+    (taiji_runtime_profile, agent_root),
+    (taiji_license, agent_root),
+    (api.config, webui_root),
+):
+    module_path = pathlib.Path(module.__file__).resolve()
+    assert str(module_path).startswith(str(expected_root))
+visibility = get_ui_visibility({})
+nav = {name for name, visible in visibility.get("nav", {}).items() if visible}
+assert nav == {"chat", "tasks", "writing", "settings"}
+source = main_source.read_text(encoding="utf-8")
+assert "taiji_runtime.main" in source
+assert re.search(r"chat", source)
+assert re.search(r"tasks", source)
+assert re.search(r"writing", source)
+assert re.search(r"settings", source)
+print("PAYLOAD_MENU_POLICY_OK")
+'@
+  Write-Utf8Text -Path $GatePath -Text ($importGate.Replace('__PAYLOAD_ROOT__', $PayloadRoot.Replace('\', '\\')) + [char]10)
+  try {
+    $menuOutput = (& $payloadPython -I -B $GatePath 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $menuOutput -notmatch 'PAYLOAD_MENU_POLICY_OK') {
+      throw 'payload private python import/menu gate failed'
+    }
+  } finally {
+    Remove-Item -LiteralPath $GatePath -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -208,10 +394,29 @@ Invoke-FormalCheck -Id "inno-compile" -Action {
     "/DMyAppVersion=$Version",
     "/DPayloadRoot=$PayloadRoot",
     "/DOutputDir=$OutputRoot",
-    "/DOutputBaseFilename=$ArtifactBasename",
+    "/DOutputBaseFilename=$OutputBaseName",
     $InnoScript
   )
-  & $session.tools.iscc @isccArguments
+  & $session.tools.iscc.path @isccArguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Inno compile failed: $LASTEXITCODE"
+  }
+  Assert-RegularFile $OutputArtifactPath 'Inno output artifact'
+  if (Test-Path -LiteralPath $ArtifactPath) {
+    throw "review artifact already exists: $ArtifactPath"
+  }
+  $artifactStream = [IO.File]::Open(
+    $OutputArtifactPath,
+    [IO.FileMode]::Open,
+    [IO.FileAccess]::ReadWrite,
+    [IO.FileShare]::None
+  )
+  try {
+    $artifactStream.Flush($true)
+  } finally {
+    $artifactStream.Dispose()
+  }
+  Move-Item -LiteralPath $OutputArtifactPath -Destination $ArtifactPath
 }
 
 Invoke-FormalCheck -Id "installer-pe-version-authenticode" -Action {
@@ -221,8 +426,10 @@ Invoke-FormalCheck -Id "installer-pe-version-authenticode" -Action {
     throw 'installer is not an MZ executable'
   }
   $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
-  $peSignature = [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4)
-  if ($peSignature -cne 'PE\0\0') {
+  # PE\0\0 bytes are validated directly to avoid string-literal ambiguity.
+  $expectedSignature = [byte[]](0x50, 0x45, 0x00, 0x00)
+  $actualSignature = $bytes[$peOffset..($peOffset + 3)]
+  if (-not (Compare-ByteArrays $actualSignature $expectedSignature)) {
     throw 'installer PE signature is invalid'
   }
   $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4).ToString('x')
@@ -240,25 +447,19 @@ Invoke-FormalCheck -Id "installer-pe-version-authenticode" -Action {
   }
 }
 
-$formalLogLines = @(
-  '01 source-session-identity PASS exit=0',
-  '02 offline-npm-ci PASS exit=0',
-  '03 electron-win32-x64 PASS exit=0',
-  '04 payload-import-menu-policy PASS exit=0',
-  '05 payload-hygiene-closure PASS exit=0',
-  '06 inno-compile PASS exit=0',
-  '07 installer-pe-version-authenticode PASS exit=0',
-  'SUMMARY PASS checks=7'
-)
-[IO.File]::WriteAllLines($FormalLogPath, $formalLogLines, [Text.UTF8Encoding]::new($false))
+$formalLogLines = @()
+$formalIndex = 1
+foreach ($check in @($script:FormalChecks)) {
+  $formalLogLines += ('{0:d2} {1} PASS exit=0' -f $formalIndex, [string]$check.id)
+  $formalIndex += 1
+}
+$formalLogLines += 'SUMMARY PASS checks=7'
+Write-Utf8Text -Path $FormalLogPath -Text (($formalLogLines -join [char]10) + [char]10)
+Append-Utf8Line -Path $RemoteLog -Line 'SUMMARY PASS checks=7'
 
 $artifactBytes = (Get-Item -LiteralPath $ArtifactPath).Length
 $artifactSha256 = Get-Sha256 $ArtifactPath
-[IO.File]::WriteAllText(
-  $SidecarPath,
-  "$artifactSha256  $ArtifactBasename" + [Environment]::NewLine,
-  [Text.UTF8Encoding]::new($false)
-)
+Write-Utf8Text -Path $SidecarPath -Text ("$artifactSha256  $ArtifactBasename" + [char]10)
 $payloadManifest = Get-Content -LiteralPath (Join-Path $StagingRoot 'payload-manifest.json') -Raw | ConvertFrom-Json
 $manifest = [ordered]@{
   schema = 'taiji-package-manifest/v2'
@@ -292,7 +493,7 @@ $manifest = [ordered]@{
     authenticode_status = 'NotSigned'
   }
   boundaries = $session.boundaries
-  started_at = $session.source.commit
+  started_at = $session.started_at
   finished_at = [DateTime]::UtcNow.ToString('o')
 }
 Write-PackageManifest $ManifestPath $manifest
@@ -302,7 +503,7 @@ $remoteState = [ordered]@{
   run_id = $session.run_id
   target_id = 'windows-x64'
   source_commit = $session.source.commit
-  host_facts_sha256 = $session.cache.observation_sha256
+  host_facts_sha256 = $session.identity.host_facts_sha256
   stage_history = @(
     [ordered]@{
       stage = 'review-ready'
@@ -316,33 +517,33 @@ $remoteState = [ordered]@{
   finished_at = [DateTime]::UtcNow.ToString('o')
 }
 Write-AtomicJson $RemoteStatePath $remoteState
-$reportText = 'Windows candidate review PASS' + [Environment]::NewLine +
-  'run=' + [string]$session.run_id + [Environment]::NewLine
-[IO.File]::WriteAllText($ReportPath, $reportText, [Text.UTF8Encoding]::new($false))
+$reportText = 'Windows candidate review PASS' + [char]10 +
+  'run=' + [string]$session.run_id + [char]10
+Write-Utf8Text -Path $ReportPath -Text $reportText
 
 # fetch-review and fetch-log remain separate controller stages; logs\remote-build.log is independent.
-ReReadAndVerifyReview $ReviewRoot
+$reviewIdentity = ReReadAndVerifyReview -ReviewRoot $ReviewRoot -ExpectedNames $ReviewExpectedBeforeMarker
 $marker = [ordered]@{
   schema = 'taiji-package-build-success/v1'
   run_id = $session.run_id
   target_id = 'windows-x64'
   source_commit = $session.source.commit
   artifact_basename = $ArtifactBasename
-  artifact_bytes = $artifactBytes
-  artifact_sha256 = $artifactSha256
+  artifact_bytes = $reviewIdentity[$ArtifactBasename].bytes
+  artifact_sha256 = $reviewIdentity[$ArtifactBasename].sha256
   package_manifest_basename = 'taiji-package-manifest.json'
-  package_manifest_bytes = (Get-Item -LiteralPath $ManifestPath).Length
-  package_manifest_sha256 = Get-Sha256 $ManifestPath
+  package_manifest_bytes = $reviewIdentity['taiji-package-manifest.json'].bytes
+  package_manifest_sha256 = $reviewIdentity['taiji-package-manifest.json'].sha256
   formal_build_tests_log_basename = 'formal-build-tests.log'
-  formal_build_tests_log_bytes = (Get-Item -LiteralPath $FormalLogPath).Length
-  formal_build_tests_log_sha256 = Get-Sha256 $FormalLogPath
-  report_basename = '构建报告.txt'
-  report_bytes = (Get-Item -LiteralPath $ReportPath).Length
-  report_sha256 = Get-Sha256 $ReportPath
+  formal_build_tests_log_bytes = $reviewIdentity['formal-build-tests.log'].bytes
+  formal_build_tests_log_sha256 = $reviewIdentity['formal-build-tests.log'].sha256
+  report_basename = $ReportBasename
+  report_bytes = $reviewIdentity[$ReportBasename].bytes
+  report_sha256 = $reviewIdentity[$ReportBasename].sha256
   remote_state_basename = 'run-state.json'
-  remote_state_bytes = (Get-Item -LiteralPath $RemoteStatePath).Length
-  remote_state_sha256 = Get-Sha256 $RemoteStatePath
+  remote_state_bytes = $reviewIdentity['run-state.json'].bytes
+  remote_state_sha256 = $reviewIdentity['run-state.json'].sha256
 }
 Write-SuccessMarker $MarkerPath $marker
-ReReadAndVerifyReview $ReviewRoot
+$null = ReReadAndVerifyReview -ReviewRoot $ReviewRoot -ExpectedNames $ReviewExpectedAfterMarker
 Write-Host 'WINDOWS_CANDIDATE_REVIEW_READY'
