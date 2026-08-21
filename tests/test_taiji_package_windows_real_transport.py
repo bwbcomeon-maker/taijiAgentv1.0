@@ -545,7 +545,7 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertIn("--archive", script)
         self.assertIn("--destination", script)
         self.assertIn("--manifest", script)
-        self.assertIn("-SourceRoot '{}'".format(checkout), script)
+        self.assertIn("-SourceRoot '\\\\?\\{}'".format(checkout), script)
         files = plan["input"]["files"]
         expected_sidecar = "{}  {}\n{}  {}\n".format(
             files["archive"]["sha256"],

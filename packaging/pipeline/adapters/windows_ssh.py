@@ -1085,6 +1085,7 @@ Write-Host 'REMOTE_RUN_READY'
         files = plan["input"]["files"]
         session_path = _remote_join(remote["root"], "session.json")
         checkout_root = _remote_join(remote["source"], "checkout")
+        extended_checkout_root = "\\\\?\\" + checkout_root
         script = """
 $ErrorActionPreference = 'Stop'
 function Assert-RegularRemoteFile {{
@@ -1231,7 +1232,7 @@ if (-not (Test-Path -LiteralPath {session_path} -PathType Leaf)) {{
             initialize=_quote_ps(_remote_join(remote["scripts"], "Initialize-CandidateSession.ps1")),
             run_root=_quote_ps(remote["root"]),
             run_id=_quote_ps(plan["run_id"]),
-            source_root=_quote_ps(checkout_root),
+            source_root=_quote_ps(extended_checkout_root),
             source_branch=_quote_ps(plan["source_branch"]),
             source_commit=_quote_ps(plan["source_commit"]),
             source_tree=_quote_ps(plan["source_tree"]),
