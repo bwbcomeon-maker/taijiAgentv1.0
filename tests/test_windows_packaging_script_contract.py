@@ -326,6 +326,9 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         self.assertIn("$unsortedPayloadEntries = @(", stage)
         self.assertIn("$payloadEntries = Sort-MembersByUtf8 $unsortedPayloadEntries", stage)
         self.assertNotIn("| Sort-Object path", stage)
+        self.assertIn("utf8_path = [Text.Encoding]::UTF8.GetBytes", stage)
+        self.assertIn("$decorated.Sort($comparison)", stage)
+        self.assertNotIn("$sorted.Insert", stage)
         chinese_paths = ["构建报告.txt", "z.txt", "é.txt"]
         self.assertEqual(
             sorted(chinese_paths, key=lambda value: value.encode("utf-8")),

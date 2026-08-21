@@ -171,21 +171,30 @@ function Get-Sha256Stream {
 
 function Sort-MembersByUtf8 {
   param([object[]]$Members)
-  $sorted = New-Object System.Collections.ArrayList
+  $decorated = New-Object 'System.Collections.Generic.List[object]'
+  $ordinal = 0
   foreach ($member in @($Members)) {
-    $inserted = $false
-    for ($index = 0; $index -lt $sorted.Count; $index++) {
-      $left = [Text.Encoding]::UTF8.GetBytes([string]$sorted[$index].path)
-      $right = [Text.Encoding]::UTF8.GetBytes([string]$member.path)
-      if ((Compare-ByteArrays $left $right) -gt 0) {
-        [void]$sorted.Insert($index, $member)
-        $inserted = $true
-        break
-      }
-    }
-    if (-not $inserted) { [void]$sorted.Add($member) }
+    $decorated.Add([pscustomobject]@{
+      member = $member
+      utf8_path = [Text.Encoding]::UTF8.GetBytes([string]$member.path)
+      ordinal = $ordinal
+    })
+    $ordinal += 1
   }
-  return ,@($sorted.ToArray())
+  $comparison = [System.Comparison[object]]{
+    param($left, $right)
+    $result = Compare-ByteArrays $left.utf8_path $right.utf8_path
+    if ($result -ne 0) { return $result }
+    if ($left.ordinal -lt $right.ordinal) { return -1 }
+    if ($left.ordinal -gt $right.ordinal) { return 1 }
+    return 0
+  }
+  $decorated.Sort($comparison)
+  $sorted = [Array]::CreateInstance([object], $decorated.Count)
+  for ($index = 0; $index -lt $decorated.Count; $index++) {
+    $sorted[$index] = $decorated[$index].member
+  }
+  return ,$sorted
 }
 
 function Get-CacheEntry {

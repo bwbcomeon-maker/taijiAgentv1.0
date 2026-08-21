@@ -339,6 +339,12 @@ class WindowsRealTransportTests(unittest.TestCase):
         self.assertIn("-Command -", observed["argv"][6])
         self.assertIn(script.encode("utf-8"), observed["kwargs"]["input"])
 
+    def test_online_doctor_uses_nlogn_utf8_member_sort(self):
+        script = windows_ssh.builder_probe_script(TARGET)
+        self.assertIn("utf8_path = [System.Text.Encoding]::UTF8.GetBytes", script)
+        self.assertIn("$decorated.Sort($comparison)", script)
+        self.assertNotIn("$sorted.Insert", script)
+
     def test_remote_stage_uses_short_stdin_command_below_windows_cmd_limit(self):
         observed = {}
 
