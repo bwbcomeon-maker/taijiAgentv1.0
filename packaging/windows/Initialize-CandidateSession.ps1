@@ -39,7 +39,11 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Assert-RegularFile {
-  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Label,
+    [switch]$AllowHardLink
+  )
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "$Label is missing: $Path"
   }
@@ -47,7 +51,8 @@ function Assert-RegularFile {
   if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw "$Label is a reparse point: $Path"
   }
-  if ($item.LinkType) {
+  if ($item.LinkType -and
+      (-not $AllowHardLink -or [string]$item.LinkType -cne 'HardLink')) {
     throw "$Label is a link: $Path"
   }
 }
@@ -122,7 +127,7 @@ function Get-ToolEvidence {
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$Name
   )
-  Assert-RegularFile $Path "tool $Name"
+  Assert-RegularFile $Path "tool $Name" -AllowHardLink
   return [ordered]@{
     path = $Path
     bytes = (Get-Item -LiteralPath $Path -Force).Length

@@ -58,6 +58,15 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
                 self.assertTrue(path.read_bytes().isascii())
                 self.assertEqual(parameter_names(text), expected)
 
+    def test_initialize_allows_ntfs_hardlinks_only_for_pinned_tools(self):
+        initialize = read_script(INITIALIZE)
+        self.assertIn("[switch]$AllowHardLink", initialize)
+        self.assertIn("[string]$item.LinkType -cne 'HardLink'", initialize)
+        self.assertIn(
+            'Assert-RegularFile $Path "tool $Name" -AllowHardLink', initialize
+        )
+        self.assertEqual(initialize.count("-AllowHardLink"), 1)
+
     def test_scripts_never_derive_source_from_git_or_worktree(self):
         forbidden = (
             "RepositoryRoot", "ProductRepository", "GitPath", "git archive",
