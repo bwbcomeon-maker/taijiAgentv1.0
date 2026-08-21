@@ -429,7 +429,7 @@ Lane C 先逐项复制原 Plan 4 Task 5 的 RED 矩阵，不得遗漏：`REAL_BU
 5. package/remote state 的 `started_at/finished_at` 都是 UTC，不得写 source commit；
 6. success remote log 非空并逐项记录七个 formal checks；
 7. ISCC `/DOutputBaseFilename` 不含 `.exe`，最终 artifact basename 只含一个 `.exe`；
-8. review exact set、PE x64、版本、NotSigned、marker-last 和 fetch-only 合同保持不变。
+8. review exact set、Inno x86 PE32 bootstrap 身份、独立的 x64 payload 证据、版本、NotSigned、marker-last 和 fetch-only 合同保持不变。
 
 Run：
 
@@ -608,6 +608,8 @@ Expected：main clean，包含 Plan 4 全部提交。
 - **每候选一次：** 隔离 Stage、Stage GREEN 后的 Inno 预演、二者通过后的正式 doctor/build、候选 EXE 取回后的完整回归；
 - **应优化：** Stage 持久化 stdout/stderr/exit code/开始结束时间/失败阶段；UTF-8 byte-order 排序改为语义等价 O(n log n)；共享缓存直接作为只读输入，取消共享缓存到临时缓存的整树复制与重复逐文件摘要，Python runtime 只复制到最终 payload；
 - **可以删除：** 45 秒 SSH 轮询、因终端输出丢失而整轮重跑、重复复制相同文件、重复泛化审查、第三个 Stage 或并行 build。
+- **真实主机 PE 裁决：** Inno Setup 生成的安装器 bootstrap 是 x86 PE32（machine=`0x014c`、optional magic=`0x10b`）；`windows-x64` 目标身份由 Electron `win32-x64` 实际运行检查和 Inno 的 `ArchitecturesAllowed=x64compatible`、`ArchitecturesInstallIn64BitMode=x64compatible` 独立证明。本裁决优先于旧计划中要求安装器 bootstrap 为 AMD64 PE32+（`0x8664`、`0x20b`）的文字，不放宽 x64 payload 合同。
+- **版本裁决：** Windows `VersionInfo` 可能返回带尾随空格的固定宽度字符串；比较前只做 `.Trim()`，随后仍与 `$Version.0` 精确比较。
 
 执行顺序固定为：上述三项分别完成聚焦 RED→最小 GREEN；只运行一次隔离 Stage；只运行一次 Inno 预演；二者通过后再运行一次正式 doctor/build；候选 EXE 成功取回后才运行一次完整回归。若只读检查发现 Stage 仍在运行，不得打断或并发；若已结束，先读取持久化结果，不得因 SSH 输出缺失盲目重跑。
 

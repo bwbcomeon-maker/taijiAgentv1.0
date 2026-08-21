@@ -276,14 +276,18 @@ class WindowsPackagingScriptContractTests(unittest.TestCase):
         for literal in (
             "Get-AuthenticodeSignature",
             "NotSigned",
-            "0x8664",
-            "0x20b",
+            "0x014c",
+            "0x10b",
             "FileVersion",
             "ProductVersion",
             "PE\\0\\0",
             "MZ",
         ):
             self.assertIn(literal, build)
+        self.assertNotIn("0x8664", build)
+        self.assertNotIn("0x20b", build)
+        self.assertIn("([string]$versionInfo.FileVersion).Trim()", build)
+        self.assertIn("([string]$versionInfo.ProductVersion).Trim()", build)
         self.assertIn("ArchitecturesAllowed=x64compatible", inno)
         self.assertIn("ArchitecturesInstallIn64BitMode=x64compatible", inno)
         for define in ("MyAppVersion", "PayloadRoot", "OutputDir", "OutputBaseFilename"):

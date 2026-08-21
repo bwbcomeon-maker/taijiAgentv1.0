@@ -851,7 +851,7 @@ class WindowsX64Adapter(CandidateAdapter):
         expected_file_version = plan["version"] + ".0"
         if value["file_version"] != expected_file_version or value["product_version"] != expected_file_version:
             _review_error("artifact version information is invalid")
-        if value["pe_machine"] != "0x8664" or value["pe_optional_magic"] != "0x20b":
+        if value["pe_machine"] != "0x014c" or value["pe_optional_magic"] != "0x10b":
             _review_error("artifact PE identity is invalid")
         if value["authenticode_status"] != "NotSigned":
             _review_error("artifact Authenticode status is not NotSigned")
@@ -874,8 +874,8 @@ class WindowsX64Adapter(CandidateAdapter):
             optional_magic = struct.unpack_from("<H", raw, pe_offset + 0x18)[0]
         except (IndexError, struct.error) as exc:
             _review_error("artifact PE headers are unreadable: {}".format(exc))
-        if signature != b"PE\x00\x00" or machine != 0x8664 or optional_magic != 0x20B:
-            _review_error("artifact PE headers are not AMD64 PE32+")
+        if signature != b"PE\x00\x00" or machine != 0x014C or optional_magic != 0x10B:
+            _review_error("artifact PE headers are not the expected Inno x86 PE32 bootstrap")
         actual_pe = {
             "pe_machine": "0x{:04x}".format(machine),
             "pe_optional_magic": "0x{:03x}".format(optional_magic),

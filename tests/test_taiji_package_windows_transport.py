@@ -25,7 +25,7 @@ PUBLIC_FIXTURE_API = (
     "sha256_bytes",
     "canonical_json_bytes",
     "write_regular",
-    "make_minimal_amd64_pe",
+    "make_minimal_inno_setup_pe",
     "make_windows_plan",
     "make_windows_review",
     "FakeArtifactInspector",

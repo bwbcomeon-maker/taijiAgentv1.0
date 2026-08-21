@@ -436,11 +436,11 @@ def _inspect_review(state):
         raise EvidenceError("manifest PE version drifted", category="LOCAL_REVIEW_INVALID")
     if manifest_artifact.get("authenticode_status") != "NotSigned":
         raise EvidenceError("artifact must remain NotSigned", category="LOCAL_REVIEW_INVALID")
-    if manifest_artifact.get("pe_machine") != "0x8664":
+    if manifest_artifact.get("pe_machine") != "0x014c":
         raise EvidenceError("artifact PE machine drifted", category="LOCAL_REVIEW_INVALID")
-    if manifest_artifact.get("pe_optional_magic") != "0x20b":
+    if manifest_artifact.get("pe_optional_magic") != "0x10b":
         raise EvidenceError("artifact PE optional magic drifted", category="LOCAL_REVIEW_INVALID")
-    if pe_identity["pe_machine"] != "0x8664" or pe_identity["pe_optional_magic"] != "0x20b":
+    if pe_identity["pe_machine"] != "0x014c" or pe_identity["pe_optional_magic"] != "0x10b":
         raise EvidenceError("artifact PE bytes drifted", category="LOCAL_REVIEW_INVALID")
     payload_manifest = manifest.get("payload")
     _require_exact(payload_manifest, PAYLOAD_KEYS, "payload manifest")

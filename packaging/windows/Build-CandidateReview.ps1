@@ -475,13 +475,15 @@ Invoke-FormalCheck -Id "installer-pe-version-authenticode" -Action {
   if (-not (Compare-ByteArrays $actualSignature $expectedSignature)) {
     throw 'installer PE signature is invalid'
   }
-  $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4).ToString('x')
-  $optionalMagic = [BitConverter]::ToUInt16($bytes, $peOffset + 24).ToString('x')
-  if ($machine -cne '8664' -or $optionalMagic -cne '20b') {
-    throw 'installer PE architecture is not AMD64 PE32+'
+  $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4).ToString('x4')
+  $optionalMagic = [BitConverter]::ToUInt16($bytes, $peOffset + 24).ToString('x3')
+  if ($machine -cne '014c' -or $optionalMagic -cne '10b') {
+    throw 'installer PE format is not the expected Inno x86 PE32 bootstrap'
   }
   $versionInfo = (Get-Item -LiteralPath $ArtifactPath).VersionInfo
-  if ($versionInfo.FileVersion -cne "$Version.0" -or $versionInfo.ProductVersion -cne "$Version.0") {
+  $fileVersion = ([string]$versionInfo.FileVersion).Trim()
+  $productVersion = ([string]$versionInfo.ProductVersion).Trim()
+  if ($fileVersion -cne "$Version.0" -or $productVersion -cne "$Version.0") {
     throw 'installer FileVersion/ProductVersion is invalid'
   }
   $signature = Get-AuthenticodeSignature -FilePath $ArtifactPath
@@ -529,8 +531,8 @@ $manifest = [ordered]@{
     version = $Version
     bytes = $artifactBytes
     sha256 = $artifactSha256
-    pe_machine = '0x8664'
-    pe_optional_magic = '0x20b'
+    pe_machine = '0x014c'
+    pe_optional_magic = '0x10b'
     file_version = "$Version.0"
     product_version = "$Version.0"
     authenticode_status = 'NotSigned'

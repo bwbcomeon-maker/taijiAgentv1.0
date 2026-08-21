@@ -34,14 +34,14 @@ def write_regular(path, data, mode=0o600):
     return path
 
 
-def make_minimal_amd64_pe(version="1.0.4.0"):
+def make_minimal_inno_setup_pe(version="1.0.4.0"):
     del version
     data = bytearray(512)
     data[0:2] = b"MZ"
     struct.pack_into("<I", data, 0x3C, 0x80)
     data[0x80:0x84] = b"PE\x00\x00"
-    struct.pack_into("<H", data, 0x84, 0x8664)
-    struct.pack_into("<H", data, 0x98, 0x20B)
+    struct.pack_into("<H", data, 0x84, 0x014C)
+    struct.pack_into("<H", data, 0x98, 0x10B)
     return bytes(data)
 
 
@@ -256,8 +256,8 @@ class FakeArtifactInspector:
         if not path.is_file():
             raise AssertionError("fake artifact is missing: {}".format(path))
         return {
-            "pe_machine": "0x8664",
-            "pe_optional_magic": "0x20b",
+            "pe_machine": "0x014c",
+            "pe_optional_magic": "0x10b",
             "file_version": self.file_version,
             "product_version": self.product_version,
             "authenticode_status": self.authenticode_status,
@@ -300,7 +300,7 @@ def make_windows_review(root, plan, *, corruption=None):
     remote_log = root / "logs" / "remote-build.log"
     version = plan["version"]
     basename = "TaijiAgent-Setup-{}-win-x64.exe".format(version)
-    artifact = write_regular(review / basename, make_minimal_amd64_pe(version))
+    artifact = write_regular(review / basename, make_minimal_inno_setup_pe(version))
     artifact_sha = sha256_bytes(artifact.read_bytes())
     sidecar = "{}  {}\n".format(artifact_sha, basename).encode("utf-8")
     write_regular(review / (basename + ".sha256"), sidecar)
@@ -370,8 +370,8 @@ def make_windows_review(root, plan, *, corruption=None):
             "version": version,
             "bytes": artifact.stat().st_size,
             "sha256": artifact_sha,
-            "pe_machine": "0x8664",
-            "pe_optional_magic": "0x20b",
+            "pe_machine": "0x014c",
+            "pe_optional_magic": "0x10b",
             "file_version": version + ".0",
             "product_version": version + ".0",
             "authenticode_status": "NotSigned",
@@ -464,11 +464,11 @@ def make_windows_review(root, plan, *, corruption=None):
         write_regular(review / (basename + ".sha256"), ("0" * 64 + "  " + basename + "\n").encode("utf-8"))
     if corruption == "pe-machine":
         data = bytearray(artifact.read_bytes())
-        struct.pack_into("<H", data, 0x84, 0x14C)
+        struct.pack_into("<H", data, 0x84, 0x8664)
         write_regular(artifact, bytes(data))
     if corruption == "pe-optional-magic":
         data = bytearray(artifact.read_bytes())
-        struct.pack_into("<H", data, 0x98, 0x10B)
+        struct.pack_into("<H", data, 0x98, 0x20B)
         write_regular(artifact, bytes(data))
     if corruption == "missing-review-file":
         (review / "构建报告.txt").unlink()
@@ -572,7 +572,7 @@ __all__ = [
     "sha256_bytes",
     "canonical_json_bytes",
     "write_regular",
-    "make_minimal_amd64_pe",
+    "make_minimal_inno_setup_pe",
     "make_windows_plan",
     "make_windows_review",
     "FakeArtifactInspector",
