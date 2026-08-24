@@ -239,6 +239,60 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         )
         self.assertIn('--source-root "$SRC_DIR"', function)
 
+    def test_formal_docx_audit_forces_lock_only_against_omitted_install_tree(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("npm_audit_fail_closed() {")
+        function_end = builder.index("\n}\n\nrun_setup_local()", function_start)
+        function = builder[function_start:function_end + len("\n}")]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            capture = root / "npm-call.txt"
+            npm = fake_bin / "npm"
+            npm.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                'printf "lock_only=%s\\nargs=%s\\n" '
+                '"${NPM_CONFIG_PACKAGE_LOCK_ONLY:-}" "$*" '
+                '> "$TAIJI_TEST_CAPTURE"\n',
+                encoding="utf-8",
+            )
+            npm.chmod(0o755)
+            harness = root / "audit-lock-only.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "info() { :; }\n"
+                "fail() { printf '%s\\n' \"$*\" >&2; exit 91; }\n"
+                "run_build_npm() { npm \"$@\"; }\n"
+                f"{function}\n"
+                f'export PATH="{fake_bin}:$PATH"\n'
+                f'export TAIJI_TEST_CAPTURE="{capture}"\n'
+                "export NPM_CONFIG_PACKAGE_LOCK_ONLY=false\n"
+                "unset TAIJI_NPM_AUDIT_REGISTRY\n"
+                "npm_audit_fail_closed\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["bash", str(harness)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                capture.read_text(encoding="utf-8").splitlines(),
+                [
+                    "lock_only=true",
+                    "args=audit --omit=dev --audit-level=high "
+                    "--registry=https://registry.npmjs.org",
+                ],
+            )
+
     def test_linux_payload_compiles_an_installed_only_runtime_profile_module(self):
         builder = DEB_BUILDER.read_text(encoding="utf-8")
         function_start = builder.index("write_installed_runtime_profile_module() {")

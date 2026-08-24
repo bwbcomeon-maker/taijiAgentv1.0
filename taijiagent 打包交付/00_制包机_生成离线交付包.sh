@@ -2453,7 +2453,8 @@ print(host)
     fail "TAIJI_NPM_AUDIT_REGISTRY 必须是单个 ASCII HTTPS URL，且不得包含凭据、空白、控制字符、查询参数或片段"
   fi
   info "使用 npm audit registry 主机：$audit_registry_host"
-  run_build_npm audit --omit=dev --audit-level=high --registry="$audit_registry" \
+  NPM_CONFIG_PACKAGE_LOCK_ONLY=true \
+    run_build_npm audit --omit=dev --audit-level=high --registry="$audit_registry" \
     || fail "DOCX Engine 生产依赖包含 high/critical 漏洞或 npm audit 不可用，拒绝生成正式安装包"
 }
 
