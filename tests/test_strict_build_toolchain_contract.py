@@ -168,6 +168,22 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             seal + validate,
         )
 
+    def test_formal_build_test_driver_comes_from_archive_derived_source_root(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("run_formal_build_tests_direct() {")
+        function_end = builder.index("\n}\n", function_start)
+        function = builder[function_start:function_end]
+
+        self.assertIn(
+            '/usr/bin/python3 -I -B "$SRC_DIR/scripts/run-taiji-formal-build-tests.py"',
+            function,
+        )
+        self.assertNotIn(
+            '"$SCRIPT_DIR/../scripts/run-taiji-formal-build-tests.py"',
+            function,
+        )
+        self.assertIn('--source-root "$SRC_DIR"', function)
+
     def test_linux_payload_compiles_an_installed_only_runtime_profile_module(self):
         builder = DEB_BUILDER.read_text(encoding="utf-8")
         function_start = builder.index("write_installed_runtime_profile_module() {")

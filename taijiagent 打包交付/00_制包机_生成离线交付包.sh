@@ -3643,7 +3643,7 @@ run_formal_build_tests_direct() {
   local direct_work="$BUILD_ROOT/formal-build-tests-direct" status
   mkdir -p -- "$direct_work/home" "$direct_work/tmp"
   open_formal_build_test_log
-  if /usr/bin/python3 -I -B "$SCRIPT_DIR/../scripts/run-taiji-formal-build-tests.py" \
+  if /usr/bin/python3 -I -B "$SRC_DIR/scripts/run-taiji-formal-build-tests.py" \
       --source-root "$SRC_DIR" \
       --source-commit "$MARKER_SOURCE_COMMIT" \
       --work-root "$direct_work" \
