@@ -1757,7 +1757,7 @@ PY
   UV_EXECUTABLE_SHA256="$(sha256sum "$UV_BIN" | awk '{print $1}')"
   [ "$UV_EXECUTABLE_SHA256" = "$UV_PINNED_EXECUTABLE_SHA256" ] \
     || fail "uv 可执行文件 SHA256 不等于官方固定归档身份"
-  [ "$("$UV_BIN" --version)" = "uv $UV_VERSION" ] \
+  [ "$("$UV_BIN" --version)" = "uv $UV_VERSION (x86_64-unknown-linux-gnu)" ] \
     || fail "uv 可执行文件版本不等于固定版本 $UV_VERSION"
   file "$UV_BIN" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
     || fail "uv 可执行文件不是 Linux x86_64 ELF"

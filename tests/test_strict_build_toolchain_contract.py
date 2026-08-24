@@ -79,6 +79,19 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertIn(f'NODE_PINNED_EXECUTABLE_SHA256="{NODE_EXECUTABLE_SHA256}"', builder)
         self.assertIn('[ "$NODE_EXECUTABLE_SHA256" = "$NODE_PINNED_EXECUTABLE_SHA256" ]', builder)
 
+    def test_pinned_uv_binary_uses_its_target_qualified_version_identity(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        deb_builder = DEB_BUILDER.read_text(encoding="utf-8")
+
+        self.assertIn(
+            '[ "$("$UV_BIN" --version)" = "uv $UV_VERSION (x86_64-unknown-linux-gnu)" ]',
+            builder,
+        )
+        self.assertIn(
+            '[ "$("$UV_EXECUTABLE" --version)" = "uv $PINNED_UV_VERSION (x86_64-unknown-linux-gnu)" ]',
+            deb_builder,
+        )
+
     def test_formal_builder_pins_the_complete_python_archive_and_binary_identity(self):
         builder = BUILDER.read_text(encoding="utf-8")
         setup = SETUP.read_text(encoding="utf-8")
@@ -988,7 +1001,10 @@ validate_locked_python_environment
             lock = agent / "uv.lock"
             lock.write_text("version = 1\n", encoding="utf-8")
             uv = root / "uv"
-            uv.write_text("#!/bin/sh\nprintf '%s\\n' 'uv 0.12.2'\n", encoding="utf-8")
+            uv.write_text(
+                "#!/bin/sh\nprintf '%s\\n' 'uv 0.12.2 (x86_64-unknown-linux-gnu)'\n",
+                encoding="utf-8",
+            )
             uv.chmod(0o755)
             uv_archive = root / "uv.tar.gz"
             uv_archive.write_bytes(b"verified-uv-archive")
@@ -1063,7 +1079,7 @@ validate_strict_toolchain_contract
             accepted = run()
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
             uv.write_text(
-                "#!/bin/sh\nprintf '%s\\n' 'uv 0.12.2'\n# forged replacement\n",
+                "#!/bin/sh\nprintf '%s\\n' 'uv 0.12.2 (x86_64-unknown-linux-gnu)'\n# forged replacement\n",
                 encoding="utf-8",
             )
             uv.chmod(0o755)
@@ -1071,7 +1087,8 @@ validate_strict_toolchain_contract
             self.assertNotEqual(forged_uv.returncode, 0)
             self.assertIn("uv executable SHA256", forged_uv.stderr)
             uv.write_text(
-                "#!/bin/sh\nprintf '%s\\n' 'uv 0.12.2'\n", encoding="utf-8"
+                "#!/bin/sh\nprintf '%s\\n' 'uv 0.12.2 (x86_64-unknown-linux-gnu)'\n",
+                encoding="utf-8",
             )
             uv.chmod(0o755)
             node_bin.write_text(

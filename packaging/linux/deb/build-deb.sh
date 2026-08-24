@@ -353,7 +353,7 @@ validate_strict_toolchain_contract() {
     || fail "TAIJI_UV_EXECUTABLE must be a regular single-link file"
   actual="$(sha256sum "$UV_EXECUTABLE" | awk '{print $1}')"
   [ "$actual" = "$UV_EXECUTABLE_SHA256" ] || fail "uv executable SHA256 mismatch"
-  [ "$("$UV_EXECUTABLE" --version)" = "uv $PINNED_UV_VERSION" ] || fail "uv executable version mismatch"
+  [ "$("$UV_EXECUTABLE" --version)" = "uv $PINNED_UV_VERSION (x86_64-unknown-linux-gnu)" ] || fail "uv executable version mismatch"
   file "$UV_EXECUTABLE" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
     || fail "uv executable is not Linux x86_64 ELF"
 
