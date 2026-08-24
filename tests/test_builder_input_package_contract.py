@@ -201,6 +201,55 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
         self.assertEqual(verified, expected)
 
+    def test_verifier_accepts_safe_empty_build_output_directory(self):
+        helper = load_helper()
+        expected = self.create()
+        extracted_parent = self.root / "extracted-with-output"
+        extracted_parent.mkdir()
+        with tarfile.open(self.output, "r:gz") as archive:
+            archive.extractall(extracted_parent)
+        extracted = extracted_parent / self.source.name
+        (extracted / "生成的安装包").mkdir(mode=0o755)
+
+        try:
+            verified = helper.verify_builder_input(
+                archive_path=self.output,
+                manifest_path=self.manifest,
+                checksum_path=self.checksum,
+                extracted_dir=extracted,
+            )
+        except helper.BuilderInputError as exc:
+            self.fail("safe empty build output directory was rejected: {}".format(exc))
+
+        self.assertEqual(verified, expected)
+
+    def test_verifier_rejects_nonempty_or_unknown_extracted_directory(self):
+        helper = load_helper()
+        self.create()
+
+        for label, extra_name, add_payload in (
+            ("nonempty-output", "生成的安装包", True),
+            ("unknown-directory", "unexpected", False),
+        ):
+            with self.subTest(case=label):
+                extracted_parent = self.root / ("extracted-" + label)
+                extracted_parent.mkdir()
+                with tarfile.open(self.output, "r:gz") as archive:
+                    archive.extractall(extracted_parent)
+                extracted = extracted_parent / self.source.name
+                extra = extracted / extra_name
+                extra.mkdir(mode=0o755)
+                if add_payload:
+                    (extra / "stale.deb").write_bytes(b"stale")
+
+                with self.assertRaises(helper.BuilderInputError):
+                    helper.verify_builder_input(
+                        archive_path=self.output,
+                        manifest_path=self.manifest,
+                        checksum_path=self.checksum,
+                        extracted_dir=extracted,
+                    )
+
     def test_verifier_rejects_tampered_archive_manifest_sidecar_or_extracted_member(self):
         helper = load_helper()
 

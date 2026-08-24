@@ -36,6 +36,7 @@ STATIC_INPUT_NAMES = (
 SOURCE_HELPER_BASENAME = "source-archive-integrity.py"
 BUILDER_HELPER_BASENAME = "builder-input-package.py"
 INPUT_ROOT_BASENAME = "taijiagent 打包交付"
+BUILD_OUTPUT_BASENAME = "生成的安装包"
 MAX_INPUT_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MANIFEST_KEYS = {
     "schema",
@@ -813,8 +814,27 @@ def _verify_extracted_members(
         actual_names = {path.name for path in extracted_dir.iterdir()}
     except OSError as exc:
         raise BuilderInputError("extracted builder input directory cannot be listed") from exc
-    if actual_names != set(expected):
+    expected_names = set(expected)
+    if actual_names not in (expected_names, expected_names | {BUILD_OUTPUT_BASENAME}):
         raise BuilderInputError("extracted builder input member set is invalid")
+    if BUILD_OUTPUT_BASENAME in actual_names:
+        output_dir = extracted_dir / BUILD_OUTPUT_BASENAME
+        try:
+            output_metadata = output_dir.lstat()
+        except OSError as exc:
+            raise BuilderInputError("extracted build output directory is unsafe") from exc
+        if (
+            output_dir.is_symlink()
+            or not stat.S_ISDIR(output_metadata.st_mode)
+            or output_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(output_metadata.st_mode) & 0o022
+        ):
+            raise BuilderInputError("extracted build output directory is unsafe")
+        try:
+            if next(output_dir.iterdir(), None) is not None:
+                raise BuilderInputError("extracted build output directory is not empty")
+        except OSError as exc:
+            raise BuilderInputError("extracted build output directory cannot be listed") from exc
     for basename, record in expected.items():
         payload, mode = _read_regular(
             extracted_dir / basename,
