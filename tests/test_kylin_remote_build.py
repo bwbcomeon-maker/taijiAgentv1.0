@@ -374,6 +374,28 @@ class KylinRemoteBuildResultTests(unittest.TestCase):
         self.assertIn('tee_status=${pipeline_status[1]}', script)
         self.assertIn('if [ "$tee_status" -ne 0 ]; then exit "$tee_status"; fi', script)
 
+    def test_worker_passes_each_archive_immediately_after_tar_f_option(self):
+        remote_dir = "/home/kylin/taiji-builds/{}/{}".format(
+            SOURCE_COMMIT, REMOTE_ATTEMPT_ID
+        )
+        script = self.module._worker_script(
+            remote_dir,
+            SOURCE_COMMIT,
+            REMOTE_ATTEMPT_ID,
+            INPUT_IDENTITY,
+            "2026-08-24T00:00:00Z",
+        )
+        archive = self.module._shell_quote(INPUT_IDENTITY["archive"]["basename"])
+        source_archive = self.module._shell_quote(
+            "{}/taijiagent 打包交付/taiji-agentv1.0-kylin-build-src-{}.tar.gz".format(
+                remote_dir, SOURCE_COMMIT
+            )
+        )
+
+        self.assertNotIn("-xzf --", script)
+        self.assertIn("-xzf {}".format(archive), script)
+        self.assertIn("-xzf {} -C ".format(source_archive), script)
+
 
 if __name__ == "__main__":
     unittest.main()
