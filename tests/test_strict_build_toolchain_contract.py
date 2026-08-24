@@ -217,6 +217,29 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             audit,
         )
 
+    def test_deb_builder_validates_the_formal_electron_archive_fd(self):
+        builder = DEB_BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("validate_strict_toolchain_contract() {")
+        function_end = builder.index("\n}\n", function_start) + len("\n}\n")
+        contract = builder[function_start:function_end]
+
+        self.assertIn('if [ -n "${ELECTRON_ARCHIVE_FD:-}" ]; then', contract)
+        self.assertIn(
+            'electron_archive_ref="/proc/self/fd/$ELECTRON_ARCHIVE_FD"',
+            contract,
+        )
+        self.assertIn(
+            'expected_electron_archive_basename="electron-v${ELECTRON_VERSION}-linux-x64.zip"',
+            contract,
+        )
+        self.assertIn(
+            '[ "$ELECTRON_ARCHIVE_BASENAME" = "$expected_electron_archive_basename" ]',
+            contract,
+        )
+        self.assertIn('electron_archive_ref="$ELECTRON_ARCHIVE"', contract)
+        self.assertIn('sha256sum "$electron_archive_ref"', contract)
+        self.assertNotIn('sha256sum "$ELECTRON_ARCHIVE"', contract)
+
     def test_formal_builder_prefers_an_exact_adjacent_uv_archive_before_downloading(self):
         builder = BUILDER.read_text(encoding="utf-8")
         ensure_uv = builder[

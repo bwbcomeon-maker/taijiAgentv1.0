@@ -331,7 +331,7 @@ validate_build_host_glibc() {
 }
 
 validate_strict_toolchain_contract() {
-  local actual lock_path python_real expected_python_real node_bin node_archive_marker actual_electron_archive_sha
+  local actual lock_path python_real expected_python_real node_bin node_archive_marker actual_electron_archive_sha electron_archive_ref expected_electron_archive_basename
   [ "$PYTHON_DEPENDENCY_LOCK_STATUS" = "strict-locked" ] \
     || fail "TAIJI_PYTHON_DEPENDENCY_LOCK_STATUS must be strict-locked"
   [ "$PYTHON_LOCK_BASENAME" = "uv.lock" ] \
@@ -401,8 +401,23 @@ validate_strict_toolchain_contract() {
 
   ELECTRON_VERSION="$TAIJI_ELECTRON_VERSION"
   ELECTRON_ARCHIVE_SHA256="$TAIJI_ELECTRON_ARCHIVE_SHA256"
-  [ -f "$ELECTRON_ARCHIVE" ] && [ ! -L "$ELECTRON_ARCHIVE" ] || fail "verified Electron archive is required"
-  actual_electron_archive_sha="$(sha256sum "$ELECTRON_ARCHIVE" | awk '{print $1}')"
+  if [ -n "${ELECTRON_ARCHIVE_FD:-}" ]; then
+    [ -z "$ELECTRON_ARCHIVE" ] && [ -n "$ELECTRON_ARCHIVE_BASENAME" ] \
+      || fail "Electron archive path and FD modes are mutually exclusive"
+    case "$ELECTRON_ARCHIVE_FD" in
+      *[!0-9]*|"") fail "Electron archive FD is invalid" ;;
+    esac
+    electron_archive_ref="/proc/self/fd/$ELECTRON_ARCHIVE_FD"
+    expected_electron_archive_basename="electron-v${ELECTRON_VERSION}-linux-x64.zip"
+    [ "$ELECTRON_ARCHIVE_BASENAME" = "$expected_electron_archive_basename" ] \
+      || fail "Electron archive basename mismatch"
+    [ -f "$electron_archive_ref" ] || fail "verified Electron archive FD is required"
+  else
+    electron_archive_ref="$ELECTRON_ARCHIVE"
+    [ -f "$electron_archive_ref" ] && [ ! -L "$electron_archive_ref" ] \
+      || fail "verified Electron archive is required"
+  fi
+  actual_electron_archive_sha="$(sha256sum "$electron_archive_ref" | awk '{print $1}')"
   [ "$actual_electron_archive_sha" = "$ELECTRON_ARCHIVE_SHA256" ] || fail "Electron archive SHA256 mismatch"
 }
 
