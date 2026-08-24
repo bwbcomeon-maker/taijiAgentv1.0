@@ -141,6 +141,11 @@ FORMAL_PYTHON_PATH=""
 FORMAL_PYTHON_FD=""
 FORMAL_PYTHON_IDENTITY=""
 FORMAL_PYTHON_SHA256=""
+FORMAL_PYTHON_LAUNCHER_PATH=""
+FORMAL_PYTHON_LAUNCHER_FD=""
+FORMAL_PYTHON_LAUNCHER_IDENTITY=""
+FORMAL_PYTHON_LAUNCHER_SHA256=""
+FORMAL_PYTHON_LAUNCHER_HELD_PATH=""
 FORMAL_NODE_CURRENT_PATH=""
 FORMAL_NODE_CURRENT_RAW_TARGET=""
 FORMAL_NODE_CURRENT_IDENTITY=""
@@ -2967,8 +2972,9 @@ run_held_python() {
 }
 
 seal_formal_test_python_runtime() {
-  local result version prefix current_uid mode
+  local result version prefix current_uid mode previous_umask had_noclobber
   FORMAL_PYTHON_PATH="$FORMAL_AGENT_VENV/bin/python"
+  FORMAL_PYTHON_LAUNCHER_PATH="$FORMAL_AGENT_VENV/bin/.taiji-python-launcher"
   current_uid="$(id -u)"
   [ -f "$FORMAL_PYTHON_PATH" ] && [ ! -L "$FORMAL_PYTHON_PATH" ] \
     && [ -x "$FORMAL_PYTHON_PATH" ] && [ "$(stat -c '%h' "$FORMAL_PYTHON_PATH")" = 1 ] \
@@ -2983,7 +2989,7 @@ seal_formal_test_python_runtime() {
     && [ "$(stat -c '%u' "$FORMAL_AGENT_VENV/pyvenv.cfg")" = "$current_uid" ] \
     || fail "正式 Agent 测试 pyvenv.cfg 不安全"
   exec {FORMAL_PYTHON_FD}< "$FORMAL_PYTHON_PATH" \
-    || fail "无法固定正式 Agent 测试 Python held FD"
+    || fail "无法打开正式 Agent 测试 Python held FD"
   FORMAL_PYTHON_HELD_PATH="/proc/$$/fd/$FORMAL_PYTHON_FD"
   result="$(held_file_identity_and_sha256 "$FORMAL_PYTHON_HELD_PATH" \
     "$FORMAL_PYTHON_PATH")" \
@@ -2991,18 +2997,54 @@ seal_formal_test_python_runtime() {
   IFS=$'\t' read -r FORMAL_PYTHON_IDENTITY FORMAL_PYTHON_SHA256 <<< "$result"
   [ "$FORMAL_PYTHON_SHA256" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
     || fail "正式 Agent 测试 Python held FD 不是固定实体"
-  version="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH" \
+  [ ! -e "$FORMAL_PYTHON_LAUNCHER_PATH" ] \
+    && [ ! -L "$FORMAL_PYTHON_LAUNCHER_PATH" ] \
+    || fail "正式 Agent 测试 Python launcher 路径已被占用"
+
+  previous_umask="$(umask)"
+  had_noclobber=0
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! {
+    printf '#!/bin/bash -p\n'
+    printf 'exec -a %q %q "$@"\n' \
+      "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH"
+  } > "$FORMAL_PYTHON_LAUNCHER_PATH"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    fail "无法以 no-clobber 方式创建正式 Agent 测试 Python launcher"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  chmod 0500 "$FORMAL_PYTHON_LAUNCHER_PATH" \
+    || fail "无法固定正式 Agent 测试 Python launcher 权限"
+  [ -f "$FORMAL_PYTHON_LAUNCHER_PATH" ] \
+    && [ ! -L "$FORMAL_PYTHON_LAUNCHER_PATH" ] \
+    && [ -x "$FORMAL_PYTHON_LAUNCHER_PATH" ] \
+    && [ "$(stat -c '%h' "$FORMAL_PYTHON_LAUNCHER_PATH")" = 1 ] \
+    && [ "$(stat -c '%u:%a' "$FORMAL_PYTHON_LAUNCHER_PATH")" = "$current_uid:500" ] \
+    || fail "正式 Agent 测试 Python launcher 身份不安全"
+  exec {FORMAL_PYTHON_LAUNCHER_FD}< "$FORMAL_PYTHON_LAUNCHER_PATH" \
+    || fail "无法固定正式 Agent 测试 Python launcher held FD"
+  FORMAL_PYTHON_LAUNCHER_HELD_PATH="/proc/$$/fd/$FORMAL_PYTHON_LAUNCHER_FD"
+  result="$(held_file_identity_and_sha256 "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
+    "$FORMAL_PYTHON_LAUNCHER_PATH")" \
+    || fail "正式 Agent 测试 Python launcher 身份不稳定"
+  IFS=$'\t' read -r FORMAL_PYTHON_LAUNCHER_IDENTITY \
+    FORMAL_PYTHON_LAUNCHER_SHA256 <<< "$result"
+  version="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
     -I -B -c \
     'import platform; print(platform.python_version())')" \
-    || fail "无法执行 held Python FD"
+    || fail "无法执行 held Python launcher FD"
   [ "$version" = "$PYTHON_VERSION_PINNED" ] \
-    || fail "held Python FD 版本不是固定版本"
-  prefix="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH" \
+    || fail "held Python launcher FD 版本不是固定版本"
+  prefix="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
     -I -B -c \
     'import pathlib, sys; import pytest; print(pathlib.Path(sys.prefix).resolve())')" \
-    || fail "held Python FD 未保留正式 venv/site-packages 语义"
+    || fail "held Python launcher FD 未保留正式 venv/site-packages 语义"
   [ "$prefix" = "$(readlink -f "$FORMAL_AGENT_VENV")" ] \
-    || fail "held Python FD 的 sys.prefix 未精确指向正式测试 venv"
+    || fail "held Python launcher FD 的 sys.prefix 未精确指向正式测试 venv"
 }
 
 seal_formal_test_eslint() {
@@ -3085,6 +3127,12 @@ validate_formal_test_runtime_identity() {
   [ "$identity" = "$FORMAL_PYTHON_IDENTITY" ] \
     && [ "$digest" = "$FORMAL_PYTHON_SHA256" ] \
     || return 1
+  result="$(held_file_identity_and_sha256 "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
+    "$FORMAL_PYTHON_LAUNCHER_PATH")" || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$FORMAL_PYTHON_LAUNCHER_IDENTITY" ] \
+    && [ "$digest" = "$FORMAL_PYTHON_LAUNCHER_SHA256" ] \
+    || return 1
   if [ -n "${FORMAL_ESLINT_FD:-}" ]; then
     result="$(held_file_identity_and_sha256 "$FORMAL_ESLINT_HELD_PATH" \
       "$FORMAL_ESLINT_PATH")" || return 1
@@ -3101,7 +3149,7 @@ validate_formal_test_runtime_identity() {
     "$FORMAL_NPM_CLI_HELD_PATH" "$FORMAL_NPM_CLI_PATH" --version)" \
     || return 1
   [ "$version" = "$NODE_NPM_VERSION_ARCHIVE" ] || return 1
-  version="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH" \
+  version="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
     -I -B -c \
     'import platform, pytest; print(platform.python_version())')" \
     || return 1
@@ -3125,7 +3173,15 @@ close_formal_test_runtime_fds() {
     exec {FORMAL_PYTHON_FD}<&- || true
     FORMAL_PYTHON_FD=""
   fi
+  if [ -n "${FORMAL_PYTHON_LAUNCHER_FD:-}" ]; then
+    exec {FORMAL_PYTHON_LAUNCHER_FD}<&- || true
+    FORMAL_PYTHON_LAUNCHER_FD=""
+  fi
   FORMAL_PYTHON_HELD_PATH=""
+  FORMAL_PYTHON_LAUNCHER_HELD_PATH=""
+  FORMAL_PYTHON_LAUNCHER_PATH=""
+  FORMAL_PYTHON_LAUNCHER_IDENTITY=""
+  FORMAL_PYTHON_LAUNCHER_SHA256=""
   FORMAL_NODE_HELD_PATH=""
   FORMAL_NPM_CLI_HELD_PATH=""
   FORMAL_ESLINT_HELD_PATH=""
@@ -3636,14 +3692,20 @@ PY
 run_formal_build_tests_direct() {
   require_candidate_deb_fixed
   [ -x /usr/bin/python3 ] || fail "正式构建测试需要受信任的 /usr/bin/python3"
-  [ -n "${FORMAL_PYTHON_FD:-}" ] && [ -n "${FORMAL_NODE_FD:-}" ] \
+  [ -n "${FORMAL_PYTHON_FD:-}" ] \
+    && [ -n "${FORMAL_PYTHON_LAUNCHER_FD:-}" ] \
+    && [ -n "${FORMAL_PYTHON_LAUNCHER_HELD_PATH:-}" ] \
+    && [ -n "${FORMAL_NODE_FD:-}" ] \
     && [ -n "${FORMAL_NPM_CLI_FD:-}" ] && [ -n "${FORMAL_ESLINT_FD:-}" ] \
     || fail "正式构建测试工具 held FD 未完整准备"
   [ -d "$SRC_DIR" ] && [ ! -L "$SRC_DIR" ] || fail "正式构建测试源码根不安全"
   local direct_work="$BUILD_ROOT/formal-build-tests-direct" status
   mkdir -p -- "$direct_work/home" "$direct_work/tmp"
   open_formal_build_test_log
-  if /usr/bin/python3 -I -B "$SRC_DIR/scripts/run-taiji-formal-build-tests.py" \
+  if /usr/bin/python3 -I -B - \
+      "$SRC_DIR/scripts/run-taiji-formal-build-tests.py" \
+      "$FORMAL_PYTHON_FD" \
+      "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
       --source-root "$SRC_DIR" \
       --source-commit "$MARKER_SOURCE_COMMIT" \
       --work-root "$direct_work" \
@@ -3652,7 +3714,32 @@ run_formal_build_tests_direct() {
       --npm-cli-fd "$FORMAL_NPM_CLI_FD" \
       --eslint-fd "$FORMAL_ESLINT_FD" \
       --log-fd "$FORMAL_BUILD_TEST_LOG_FD" \
-      2>&1; then
+      2>&1 <<'PY'
+import runpy
+import sys
+
+driver_path = sys.argv[1]
+python_fd = int(sys.argv[2])
+launcher_held_path = sys.argv[3]
+driver_argv = [driver_path] + sys.argv[4:]
+namespace = runpy.run_path(
+    driver_path, run_name="taiji_formal_held_python_driver"
+)
+driver_globals = namespace["run"].__globals__
+original_fd_path = driver_globals["_fd_path"]
+
+
+def held_python_fd_path(descriptor):
+    if descriptor == python_fd:
+        return launcher_held_path
+    return original_fd_path(descriptor)
+
+
+driver_globals["_fd_path"] = held_python_fd_path
+sys.argv = driver_argv
+raise SystemExit(namespace["main"]())
+PY
+  then
     status=0
   else
     status=$?

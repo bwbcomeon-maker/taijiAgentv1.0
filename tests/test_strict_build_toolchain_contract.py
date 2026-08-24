@@ -156,16 +156,71 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertIn('local canonical_path="$1" held_path="$2"', helper)
         self.assertIn('/bin/bash -p -c \'exec -a "$1" "$2" "${@:3}"\'', helper)
         self.assertIn(
-            'run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH"',
+            'run_held_python "$FORMAL_PYTHON_PATH" '
+            '"$FORMAL_PYTHON_LAUNCHER_HELD_PATH"',
             seal,
         )
         self.assertIn(
-            'run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH"',
+            'run_held_python "$FORMAL_PYTHON_PATH" '
+            '"$FORMAL_PYTHON_LAUNCHER_HELD_PATH"',
             validate,
         )
         self.assertNotIn(
             '"$FORMAL_PYTHON_HELD_PATH" -I -B',
             seal + validate,
+        )
+
+    def test_formal_driver_hashes_real_python_fd_but_executes_held_launcher(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        seal_start = builder.index("seal_formal_test_python_runtime() {")
+        seal_end = builder.index("\n}\n", seal_start)
+        seal = builder[seal_start:seal_end]
+        validate_start = builder.index("validate_formal_test_runtime_identity() {")
+        validate_end = builder.index("\n}\n", validate_start)
+        validate = builder[validate_start:validate_end]
+        close_start = builder.index("close_formal_test_runtime_fds() {")
+        close_end = builder.index("\n}\n", close_start)
+        close = builder[close_start:close_end]
+        run_start = builder.index("run_formal_build_tests_direct() {")
+        run_end = builder.index("\n}\n", run_start)
+        run = builder[run_start:run_end]
+
+        self.assertIn(
+            'FORMAL_PYTHON_LAUNCHER_PATH='
+            '"$FORMAL_AGENT_VENV/bin/.taiji-python-launcher"',
+            seal,
+        )
+        self.assertIn(
+            'exec {FORMAL_PYTHON_FD}< "$FORMAL_PYTHON_PATH"', seal
+        )
+        self.assertIn(
+            '[ "$FORMAL_PYTHON_SHA256" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ]',
+            seal,
+        )
+        self.assertIn(
+            'exec {FORMAL_PYTHON_LAUNCHER_FD}< "$FORMAL_PYTHON_LAUNCHER_PATH"',
+            seal,
+        )
+        self.assertIn(
+            'FORMAL_PYTHON_LAUNCHER_HELD_PATH='
+            '"/proc/$$/fd/$FORMAL_PYTHON_LAUNCHER_FD"',
+            seal,
+        )
+        self.assertIn(
+            '"$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH"', seal
+        )
+        self.assertIn(
+            '"$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \\\n'
+            '    "$FORMAL_PYTHON_LAUNCHER_PATH"',
+            validate,
+        )
+        self.assertIn('exec {FORMAL_PYTHON_LAUNCHER_FD}<&-', close)
+        self.assertIn('driver_globals["_fd_path"] = held_python_fd_path', run)
+        self.assertIn('return launcher_held_path', run)
+        self.assertIn('--python-fd "$FORMAL_PYTHON_FD"', run)
+        self.assertIn('"$FORMAL_PYTHON_LAUNCHER_HELD_PATH"', run)
+        self.assertNotIn(
+            'mv -- "$FORMAL_PYTHON_PATH"', seal
         )
 
     def test_formal_build_test_driver_comes_from_archive_derived_source_root(self):
@@ -175,7 +230,7 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         function = builder[function_start:function_end]
 
         self.assertIn(
-            '/usr/bin/python3 -I -B "$SRC_DIR/scripts/run-taiji-formal-build-tests.py"',
+            '"$SRC_DIR/scripts/run-taiji-formal-build-tests.py"',
             function,
         )
         self.assertNotIn(
