@@ -259,6 +259,33 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             builder,
         )
 
+    def test_formal_node_test_clears_only_the_parent_eval_execargv(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        run_start = builder.index("run_formal_build_tests_direct() {")
+        run_end = builder.index("\n}\n", run_start)
+        run = builder[run_start:run_end]
+
+        self.assertIn(
+            'original_popen = driver_globals["subprocess"].Popen', run
+        )
+        self.assertIn("def controlled_formal_popen(argv, *args, **kwargs):", run)
+        self.assertIn('len(replacement) == 6', run)
+        self.assertIn('replacement[1] == "-e"', run)
+        self.assertIn(
+            '"const {run}=require(\'node:test\');" in replacement[2]', run
+        )
+        self.assertIn(
+            'replacement[2] = "process.execArgv=[];" + replacement[2]', run
+        )
+        self.assertIn(
+            "return original_popen(replacement, *args, **kwargs)", run
+        )
+        self.assertIn(
+            'driver_globals["subprocess"].Popen = controlled_formal_popen', run
+        )
+        self.assertNotIn("--test-name-pattern", run)
+        self.assertNotIn("run-installed-electron-acceptance.test.js =", run)
+
     def test_formal_build_test_driver_comes_from_archive_derived_source_root(self):
         builder = BUILDER.read_text(encoding="utf-8")
         function_start = builder.index("run_formal_build_tests_direct() {")

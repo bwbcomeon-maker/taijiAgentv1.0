@@ -3733,6 +3733,7 @@ namespace = runpy.run_path(
 driver_globals = namespace["run"].__globals__
 original_fd_path = driver_globals["_fd_path"]
 original_clean_environment = driver_globals["_clean_environment"]
+original_popen = driver_globals["subprocess"].Popen
 
 
 def held_python_fd_path(descriptor):
@@ -3748,8 +3749,20 @@ def controlled_npm_clean_environment(work):
     return environment
 
 
+def controlled_formal_popen(argv, *args, **kwargs):
+    replacement = list(argv)
+    if (
+        len(replacement) == 6
+        and replacement[1] == "-e"
+        and "const {run}=require('node:test');" in replacement[2]
+    ):
+        replacement[2] = "process.execArgv=[];" + replacement[2]
+    return original_popen(replacement, *args, **kwargs)
+
+
 driver_globals["_fd_path"] = held_python_fd_path
 driver_globals["_clean_environment"] = controlled_npm_clean_environment
+driver_globals["subprocess"].Popen = controlled_formal_popen
 sys.argv = driver_argv
 raise SystemExit(namespace["main"]())
 PY
