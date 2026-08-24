@@ -2663,6 +2663,12 @@ class LinuxDesktopPackagingStaticTest(unittest.TestCase):
         self.assertIn("taiji-agent/build-logs", version_info)
         self.assertNotIn("制包失败会生成 构建日志/", version_info)
 
+    def test_delivery_version_info_matches_canonical_version(self):
+        version = read_text("VERSION").strip()
+        version_info = read_text("taijiagent 打包交付/版本信息.txt")
+
+        self.assertIn(f"产品版本：{version}", version_info)
+
     def test_offline_builder_materializes_locked_portable_resvg_dependencies_before_docx_tests(self):
         builder = read_text("taijiagent 打包交付/00_制包机_生成离线交付包.sh")
         materializer = read_text(

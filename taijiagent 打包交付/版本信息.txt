@@ -1,6 +1,6 @@
 太极 Agent 国产 x86 Linux 打包交付
 
-产品版本：1.0.0
+产品版本：1.0.2
 源码包：taiji-agentv1.0-kylin-build-src-<完整提交绑定的短标识>.tar.gz
 源码 commit：以源码包、SHA256SUMS.txt、构建报告和发布 manifest 的完整 40 位 SHA 为准
 
