@@ -55,6 +55,7 @@ PYTHON38_ENTRYPOINTS = (
     ROOT / "packaging/linux/verify-python-lock-contract.py",
     ROOT / "packaging/linux/source-archive-integrity.py",
     ROOT / "packaging/linux/builder-input-package.py",
+    ROOT / "packaging/linux/kylin_remote_build.py",
     PYTHON_STAGER,
     COMPONENT_STAGER,
     PAYLOAD_VERIFIER,

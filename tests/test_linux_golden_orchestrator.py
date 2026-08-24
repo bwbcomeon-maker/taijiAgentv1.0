@@ -1402,7 +1402,6 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         flattened = "\n".join(
             " ".join(item.get("argv", [])) for item in remote_plan["commands"]
         )
-        self.assertIn("00_制包机_生成离线交付包.sh", flattened)
         self.assertIn("ssh", flattened)
         self.assertIn("scp", flattened)
         self.assertNotIn("sed -i", flattened)
@@ -1410,17 +1409,30 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         build_command = next(
             command
             for command in remote_plan["commands"]
-            if command["label"] == "run frozen 00 builder and prepare immutable review tree"
+            if command["label"] == "run or resume frozen 00 builder"
         )
-        remote_host_index = build_command["argv"].index("kylin")
-        self.assertEqual(len(build_command["argv"][remote_host_index + 1 :]), 1)
-        self.assertNotIn("bash -lc", build_command["argv"][-1])
-        self.assertIn("/usr/bin/env -i", build_command["argv"][-1])
-        self.assertIn("/bin/bash -p -c", build_command["argv"][-1])
-        self.assertIn("/bin/bash -p ./00_制包机_生成离线交付包.sh", build_command["argv"][-1])
-        self.assertIn("unset TAIJI_ALLOW_UV_LOCK_REFRESH", build_command["argv"][-1])
+        self.assertEqual(
+            build_command["argv"][:4],
+            ["/usr/bin/python3", "-I", "-B", str(self.repo / "packaging/linux/kylin_remote_build.py")],
+        )
+        self.assertIn("kylin", build_command["argv"])
+        self.assertIn("/home/kylin", build_command["argv"])
+        self.assertIn("/home/kylin/taiji-builds", " ".join(build_command["argv"]))
+        self.assertIn(self.source_commit, build_command["argv"])
+        self.assertIn("--remote-attempt-id", build_command["argv"])
+        self.assertNotIn("300", build_command["argv"])
+        self.assertNotIn("00_制包机_生成离线交付包.sh", build_command["argv"])
+        result_command = next(
+            command
+            for command in remote_plan["commands"]
+            if command["label"] == "retrieve remote build result"
+        )
+        self.assertIn("remote-build-result.json", " ".join(result_command["argv"]))
+        self.assertEqual(
+            result_command["argv"][-1],
+            str(self.logs_dir / "remote-build-result.json"),
+        )
         for command in remote_plan["commands"]:
-            self.assertIn(command["argv"][0], {"/usr/bin/ssh", "/usr/bin/scp"})
             self.assertEqual(command["env_mode"], "replace")
             self.assertEqual(command["env_passthrough"], ["SSH_AUTH_SOCK"])
             self.assertEqual(command["env_sensitive"], ["SSH_AUTH_SOCK"])
@@ -1449,6 +1461,25 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
         cannot_skip = self.checkpoint("artifact_preflight")
         self.assertNotEqual(cannot_skip.returncode, 0)
 
+        attempt_before_retry = json.loads(self.state.read_text(encoding="utf-8"))[
+            "remote_attempt_id"
+        ]
+        unconfirmed = self.command(
+            "retry",
+            "--state",
+            str(self.state),
+            "--expect-source-commit",
+            self.source_commit,
+            "--stage",
+            "remote_build",
+        )
+        self.assertNotEqual(unconfirmed.returncode, 0)
+        self.assertIn("terminal failed", unconfirmed.stderr.lower())
+        self.assertEqual(
+            json.loads(self.state.read_text(encoding="utf-8"))["remote_attempt_id"],
+            attempt_before_retry,
+        )
+
         retry = self.command(
             "retry",
             "--state",
@@ -1457,6 +1488,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             self.source_commit,
             "--stage",
             "remote_build",
+            "--confirm-remote-terminal-failed",
         )
         self.assertEqual(retry.returncode, 0, retry.stderr)
         resumed = json.loads(self.plan().stdout)
@@ -1483,6 +1515,7 @@ class LinuxGoldenOrchestratorTests(unittest.TestCase):
             self.source_commit,
             "--stage",
             "remote_build",
+            "--confirm-remote-terminal-failed",
         )
         self.assertEqual(retry.returncode, 0, retry.stderr)
         second = json.loads(self.plan().stdout)
