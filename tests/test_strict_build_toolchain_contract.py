@@ -94,6 +94,25 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertIn('TAIJI_PYTHON_EXECUTABLE', setup)
         self.assertIn('--python "$PYTHON_EXECUTABLE"', setup)
 
+    def test_formal_builder_prefers_an_exact_adjacent_uv_archive_before_downloading(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        ensure_uv = builder[
+            builder.index("ensure_uv() {") : builder.index("\n}\n\nensure_python()", builder.index("ensure_uv() {"))
+        ]
+
+        self.assertIn('prestaged_archive="$SCRIPT_DIR/../$UV_ARCHIVE"', ensure_uv)
+        self.assertIn('[ ! -L "$prestaged_archive" ]', ensure_uv)
+        self.assertIn('stat -c \'%h\' "$prestaged_archive"', ensure_uv)
+        self.assertIn('stat -c \'%u\' "$prestaged_archive"', ensure_uv)
+        self.assertIn("$((8#$prestaged_mode & 8#022))", ensure_uv)
+        self.assertIn("预置 uv 归档不允许 group/other 写入", ensure_uv)
+        self.assertIn('install -m 0600 -- "$prestaged_archive" "$UV_ARCHIVE_PATH"', ensure_uv)
+        self.assertLess(
+            ensure_uv.index('install -m 0600 -- "$prestaged_archive" "$UV_ARCHIVE_PATH"'),
+            ensure_uv.index('curl_download "$UV_ARCHIVE_URL" "$UV_ARCHIVE_PATH"'),
+        )
+        self.assertIn("else\n    info \"下载固定版 uv", ensure_uv)
+
     def test_formal_builder_is_strict_only_and_never_refreshes_lock(self):
         builder = BUILDER.read_text(encoding="utf-8")
 

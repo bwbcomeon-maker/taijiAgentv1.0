@@ -1699,19 +1699,32 @@ source_agent_dir() {
 }
 
 ensure_uv() {
-  local download_dir extract_dir extracted_bin current_uid
+  local download_dir extract_dir extracted_bin current_uid prestaged_archive prestaged_mode
   current_uid="$(id -u)"
   download_dir="$UV_ROOT/download"
   extract_dir="$UV_ROOT/extract"
   UV_ARCHIVE_PATH="$download_dir/$UV_ARCHIVE"
+  prestaged_archive="$SCRIPT_DIR/../$UV_ARCHIVE"
   [ "$UV_ROOT" = "$TOOL_ROOT/uv" ] || fail "uv 工具根未绑定受控 owner-only 工具根"
   install -d -m 0700 "$UV_ROOT" "$download_dir" "$extract_dir" "$UV_ROOT/current"
   [ "$(stat -c '%u' "$UV_ROOT")" = "$current_uid" ] \
     && [ "$(stat -c '%a' "$UV_ROOT")" = 700 ] \
     || fail "uv 工具根必须由当前用户以 0700 独占"
 
-  info "下载固定版 uv ${UV_VERSION} Linux x86_64 GNU 归档"
-  curl_download "$UV_ARCHIVE_URL" "$UV_ARCHIVE_PATH"
+  if [ -e "$prestaged_archive" ] || [ -L "$prestaged_archive" ]; then
+    [ -f "$prestaged_archive" ] && [ ! -L "$prestaged_archive" ] \
+      && [ "$(stat -c '%h' "$prestaged_archive")" = 1 ] \
+      && [ "$(stat -c '%u' "$prestaged_archive")" = "$current_uid" ] \
+      || fail "预置 uv 归档不是当前用户独占的普通文件"
+    prestaged_mode="$(stat -c '%a' "$prestaged_archive")"
+    [ $((8#$prestaged_mode & 8#022)) -eq 0 ] \
+      || fail "预置 uv 归档不允许 group/other 写入"
+    info "使用已预置的固定版 uv ${UV_VERSION} Linux x86_64 GNU 归档"
+    install -m 0600 -- "$prestaged_archive" "$UV_ARCHIVE_PATH"
+  else
+    info "下载固定版 uv ${UV_VERSION} Linux x86_64 GNU 归档"
+    curl_download "$UV_ARCHIVE_URL" "$UV_ARCHIVE_PATH"
+  fi
   [ -f "$UV_ARCHIVE_PATH" ] && [ ! -L "$UV_ARCHIVE_PATH" ] \
     && [ "$(stat -c '%h' "$UV_ARCHIVE_PATH")" = 1 ] \
     && [ "$(stat -c '%u' "$UV_ARCHIVE_PATH")" = "$current_uid" ] \
