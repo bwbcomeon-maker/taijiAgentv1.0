@@ -4912,7 +4912,8 @@ normalize_delivery_permissions() {
   unsafe_node="$(find "$SCRIPT_DIR" -xdev -mindepth 1 \( -type l -o \( -type f -links +1 \) \) -print -quit)"
   [ -z "$unsafe_node" ] || fail "交付目录含符号链接或硬链接，拒绝修改其权限：$unsafe_node"
   chmod go-w "$SCRIPT_DIR"
-  find "$SCRIPT_DIR" -xdev -mindepth 1 \( -type d -o -type f \) -exec chmod go-w -- {} +
+  find "$SCRIPT_DIR" -xdev -mindepth 1 \( -type d -o -type f \) \
+    -perm /022 -exec chmod go-w -- {} +
   for script in \
     "$SCRIPT_DIR/00_制包机_生成离线交付包.sh" \
     "$SCRIPT_DIR/01_制包机_发布预检.sh" \

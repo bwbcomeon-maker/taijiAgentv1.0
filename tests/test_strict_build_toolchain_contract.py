@@ -367,6 +367,22 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertLess(run.index(rebind), run.index(pin_sha))
         self.assertLess(run.index(pin_sha), run.index(final_check))
 
+    def test_permission_normalization_does_not_chmod_compliant_held_artifacts(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("normalize_delivery_permissions() {")
+        function_end = builder.index("\n}\n", function_start)
+        function = builder[function_start:function_end]
+        normalized = " ".join(
+            line.strip().rstrip("\\").rstrip() for line in function.splitlines()
+        )
+
+        self.assertIn(
+            'find "$SCRIPT_DIR" -xdev -mindepth 1 '
+            '\\( -type d -o -type f \\) -perm /022 '
+            "-exec chmod go-w -- {} +",
+            normalized,
+        )
+
     def test_formal_build_test_driver_comes_from_archive_derived_source_root(self):
         builder = BUILDER.read_text(encoding="utf-8")
         function_start = builder.index("run_formal_build_tests_direct() {")
