@@ -235,10 +235,10 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             run.index('"$BUILD_NPM_USERCONFIG"'),
             run.index('"$BUILD_NPM_GLOBALCONFIG"'),
         )
-        self.assertIn("npm_userconfig = sys.argv[4]", run)
-        self.assertIn("npm_globalconfig = sys.argv[5]", run)
+        self.assertIn("npm_userconfig = sys.argv[5]", run)
+        self.assertIn("npm_globalconfig = sys.argv[6]", run)
         self.assertIn(
-            "driver_argv = [driver_path] + sys.argv[6:]", run
+            "driver_argv = [driver_path] + sys.argv[8:]", run
         )
         self.assertIn(
             'original_clean_environment = driver_globals["_clean_environment"]',
@@ -285,6 +285,67 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         )
         self.assertNotIn("--test-name-pattern", run)
         self.assertNotIn("run-installed-electron-acceptance.test.js =", run)
+
+    def test_formal_source_tests_use_a_bounded_checkout_marker(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        run_start = builder.index("run_formal_build_tests_direct() {")
+        run_end = builder.index("\n}\n", run_start)
+        run = builder[run_start:run_end]
+        cleanup_start = builder.index("cleanup_transient_delivery() {")
+        cleanup_end = builder.index("\n}\n", cleanup_start)
+        cleanup = builder[cleanup_start:cleanup_end]
+
+        self.assertIn('FORMAL_SOURCE_CHECKOUT_MARKER="$SRC_DIR/.git"', builder)
+        self.assertIn("open_formal_source_checkout_marker() {", builder)
+        self.assertIn("formal_source_checkout_marker_identity_matches() {", builder)
+        self.assertIn("close_formal_source_checkout_marker() {", builder)
+        self.assertIn('set -o noclobber', builder)
+        self.assertIn(
+            '/usr/bin/unlink -- "$FORMAL_SOURCE_CHECKOUT_MARKER"', builder
+        )
+        self.assertIn("close_formal_source_checkout_marker", cleanup)
+        self.assertEqual(run.count("verify_build_source_integrity"), 2)
+        self.assertLess(
+            run.index("verify_build_source_integrity"),
+            run.index("open_formal_source_checkout_marker"),
+        )
+        self.assertLess(
+            run.index("open_formal_source_checkout_marker"),
+            run.index("driver_path = sys.argv[1]"),
+        )
+        self.assertLess(
+            run.index("driver_path = sys.argv[1]"),
+            run.index("close_formal_source_checkout_marker"),
+        )
+        self.assertLess(
+            run.index("close_formal_source_checkout_marker"),
+            run.rindex("verify_build_source_integrity"),
+        )
+        self.assertNotIn('--allow-extra-prefix ".git"', builder)
+
+    def test_formal_gateway_license_target_uses_an_isolated_account_home(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        run_start = builder.index("run_formal_build_tests_direct() {")
+        run_end = builder.index("\n}\n", run_start)
+        run = builder[run_start:run_end]
+
+        self.assertIn("open_formal_test_passwd", run)
+        self.assertIn('tests/gateway/test_api_server_license.py', run)
+        self.assertIn('"/usr/bin/unshare"', run)
+        self.assertIn('"--user", "--map-root-user", "--mount"', run)
+        self.assertIn('/bin/mount --bind "$1" /etc/passwd', run)
+        self.assertIn('/bin/mount -o remount,bind,ro /etc/passwd', run)
+        self.assertIn("formal_test_passwd_fd_path", builder)
+        self.assertIn('"$FORMAL_TEST_PASSWD"', run)
+        self.assertIn('"$FORMAL_PYTHON_PATH"', run)
+        self.assertIn('exec -a "$python_argv0" "/proc/self/fd/$python_fd"', run)
+        self.assertIn('python_fd not in kwargs.get("pass_fds", ())', run)
+        self.assertGreaterEqual(
+            run.count("formal_test_passwd_identity_matches"), 2
+        )
+        self.assertIn("close_formal_test_passwd", run)
+        self.assertNotIn("TAIJI_LICENSE_FILE=", run)
+        self.assertNotIn("TAIJI_LICENSE_REQUIRED=", run)
 
     def test_formal_build_test_driver_comes_from_archive_derived_source_root(self):
         builder = BUILDER.read_text(encoding="utf-8")

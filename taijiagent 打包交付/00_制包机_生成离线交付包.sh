@@ -111,6 +111,14 @@ FORMAL_BUILD_TEST_LOG_POISON="$OUTPUT_DIR/.formal-build-tests.poisoned.$$"
 FORMAL_BUILD_TESTS_STATUS=""
 FORMAL_BUILD_TESTS_LOG_BASENAME="formal-build-tests.log"
 FORMAL_BUILD_TESTS_LOG_SHA256=""
+FORMAL_SOURCE_CHECKOUT_MARKER=""
+FORMAL_SOURCE_CHECKOUT_MARKER_FD=""
+FORMAL_SOURCE_CHECKOUT_MARKER_IDENTITY=""
+FORMAL_SOURCE_CHECKOUT_MARKER_SHA256=""
+FORMAL_TEST_PASSWD=""
+FORMAL_TEST_PASSWD_FD=""
+FORMAL_TEST_PASSWD_IDENTITY=""
+FORMAL_TEST_PASSWD_SHA256=""
 POLICY_FILE=""
 POLICY_HELPER=""
 POLICY_ID=""
@@ -456,6 +464,16 @@ cleanup_transient_delivery() {
   close_fixed_tool_archive
   close_retained_formal_archive_snapshots
   close_build_node_runtime_fds
+  if [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER:-}" ]; then
+    if ! close_formal_source_checkout_marker; then
+      warn "正式源码测试 checkout marker 身份漂移；保留未知路径并拒绝按路径删除"
+    fi
+  fi
+  if [ -n "${FORMAL_TEST_PASSWD:-}" ]; then
+    if ! close_formal_test_passwd; then
+      warn "正式 gateway 测试 passwd 身份漂移；保留未知路径并拒绝按路径删除"
+    fi
+  fi
   close_formal_test_runtime_fds
   if [ -n "${CANDIDATE_DEB_FD:-}" ] || [ -n "${CANDIDATE_DEB_SIDECAR_FD:-}" ]; then
     if [ "${CANDIDATE_DEB_FIXED:-0}" != 1 ] || ! candidate_deb_identity_matches; then
@@ -2334,6 +2352,166 @@ verify_build_source_integrity() {
     || fail "构建源码树已偏离原始归档；拒绝继续声明原始 source commit"
 }
 
+formal_source_checkout_marker_fd_path() {
+  [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER_FD:-}" ] || return 1
+  printf '/proc/%s/fd/%s\n' "$$" "$FORMAL_SOURCE_CHECKOUT_MARKER_FD"
+}
+
+formal_source_checkout_marker_identity_matches() {
+  local result identity digest
+  [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER:-}" ] \
+    && [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER_FD:-}" ] \
+    && [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER_IDENTITY:-}" ] \
+    && [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER_SHA256:-}" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 \
+    "$(formal_source_checkout_marker_fd_path)" \
+    "$FORMAL_SOURCE_CHECKOUT_MARKER")" \
+    || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$FORMAL_SOURCE_CHECKOUT_MARKER_IDENTITY" ] \
+    && [ "$digest" = "$FORMAL_SOURCE_CHECKOUT_MARKER_SHA256" ]
+}
+
+open_formal_source_checkout_marker() {
+  local current_uid previous_umask had_noclobber=0 write_fd="" result
+  current_uid="$(id -u)"
+  FORMAL_SOURCE_CHECKOUT_MARKER="$SRC_DIR/.git"
+  [ ! -e "$FORMAL_SOURCE_CHECKOUT_MARKER" ] \
+    && [ ! -L "$FORMAL_SOURCE_CHECKOUT_MARKER" ] \
+    || fail "archive-derived 正式源码测试根已存在 .git，拒绝覆盖"
+  previous_umask="$(umask)"
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {write_fd}> "$FORMAL_SOURCE_CHECKOUT_MARKER"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    fail "无法以 no-clobber 方式创建正式源码测试 checkout marker"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  printf 'taiji-archive-derived-formal-source=%s\n' \
+    "$MARKER_SOURCE_COMMIT" >&"$write_fd" \
+    || fail "无法写入正式源码测试 checkout marker"
+  chmod 0400 "/proc/$$/fd/$write_fd" \
+    || fail "无法固定正式源码测试 checkout marker 权限"
+  exec {FORMAL_SOURCE_CHECKOUT_MARKER_FD}< "/proc/$$/fd/$write_fd" \
+    || fail "无法持有正式源码测试 checkout marker"
+  exec {write_fd}>&-
+  [ "$(stat -c '%h:%u:%a' "$FORMAL_SOURCE_CHECKOUT_MARKER")" \
+      = "1:$current_uid:400" ] \
+    || fail "正式源码测试 checkout marker 身份不安全"
+  result="$(held_file_identity_and_sha256 \
+    "$(formal_source_checkout_marker_fd_path)" \
+    "$FORMAL_SOURCE_CHECKOUT_MARKER")" \
+    || fail "无法固定正式源码测试 checkout marker 身份"
+  IFS=$'\t' read -r FORMAL_SOURCE_CHECKOUT_MARKER_IDENTITY \
+    FORMAL_SOURCE_CHECKOUT_MARKER_SHA256 <<< "$result"
+  formal_source_checkout_marker_identity_matches \
+    || fail "正式源码测试 checkout marker 创建后已漂移"
+}
+
+close_formal_source_checkout_marker() {
+  [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER:-}" ] || return 0
+  if ! formal_source_checkout_marker_identity_matches; then
+    if [ -n "${FORMAL_SOURCE_CHECKOUT_MARKER_FD:-}" ]; then
+      exec {FORMAL_SOURCE_CHECKOUT_MARKER_FD}<&-
+      FORMAL_SOURCE_CHECKOUT_MARKER_FD=""
+    fi
+    return 1
+  fi
+  exec {FORMAL_SOURCE_CHECKOUT_MARKER_FD}<&-
+  FORMAL_SOURCE_CHECKOUT_MARKER_FD=""
+  /usr/bin/unlink -- "$FORMAL_SOURCE_CHECKOUT_MARKER" || return 1
+  [ ! -e "$FORMAL_SOURCE_CHECKOUT_MARKER" ] \
+    && [ ! -L "$FORMAL_SOURCE_CHECKOUT_MARKER" ] \
+    || return 1
+  FORMAL_SOURCE_CHECKOUT_MARKER=""
+  FORMAL_SOURCE_CHECKOUT_MARKER_IDENTITY=""
+  FORMAL_SOURCE_CHECKOUT_MARKER_SHA256=""
+}
+
+formal_test_passwd_fd_path() {
+  [ -n "${FORMAL_TEST_PASSWD_FD:-}" ] || return 1
+  printf '/proc/%s/fd/%s\n' "$$" "$FORMAL_TEST_PASSWD_FD"
+}
+
+formal_test_passwd_identity_matches() {
+  local result identity digest
+  [ -n "${FORMAL_TEST_PASSWD:-}" ] \
+    && [ -n "${FORMAL_TEST_PASSWD_FD:-}" ] \
+    && [ -n "${FORMAL_TEST_PASSWD_IDENTITY:-}" ] \
+    && [ -n "${FORMAL_TEST_PASSWD_SHA256:-}" ] \
+    || return 1
+  result="$(held_file_identity_and_sha256 \
+    "$(formal_test_passwd_fd_path)" "$FORMAL_TEST_PASSWD")" \
+    || return 1
+  IFS=$'\t' read -r identity digest <<< "$result"
+  [ "$identity" = "$FORMAL_TEST_PASSWD_IDENTITY" ] \
+    && [ "$digest" = "$FORMAL_TEST_PASSWD_SHA256" ]
+}
+
+open_formal_test_passwd() {
+  local direct_work="$1" clean_home="$2" current_uid previous_umask
+  local had_noclobber=0 write_fd="" result
+  current_uid="$(id -u)"
+  case "$clean_home" in
+    ""|*:*|*$'\n'*|*$'\r'*) fail "正式 gateway 测试隔离 HOME 路径不安全" ;;
+  esac
+  FORMAL_TEST_PASSWD="$direct_work/passwd"
+  [ ! -e "$FORMAL_TEST_PASSWD" ] && [ ! -L "$FORMAL_TEST_PASSWD" ] \
+    || fail "正式 gateway 测试 passwd 路径已存在，拒绝覆盖"
+  previous_umask="$(umask)"
+  [[ -o noclobber ]] && had_noclobber=1
+  umask 077
+  set -o noclobber
+  if ! exec {write_fd}> "$FORMAL_TEST_PASSWD"; then
+    [ "$had_noclobber" = 1 ] || set +o noclobber
+    umask "$previous_umask"
+    fail "无法以 no-clobber 方式创建正式 gateway 测试 passwd"
+  fi
+  [ "$had_noclobber" = 1 ] || set +o noclobber
+  umask "$previous_umask"
+  printf 'root:x:0:0:taiji-formal-tests:%s:/usr/sbin/nologin\n' \
+    "$clean_home" >&"$write_fd" \
+    || fail "无法写入正式 gateway 测试 passwd"
+  chmod 0400 "/proc/$$/fd/$write_fd" \
+    || fail "无法固定正式 gateway 测试 passwd 权限"
+  exec {FORMAL_TEST_PASSWD_FD}< "/proc/$$/fd/$write_fd" \
+    || fail "无法持有正式 gateway 测试 passwd"
+  exec {write_fd}>&-
+  [ "$(stat -c '%h:%u:%a' "$FORMAL_TEST_PASSWD")" \
+      = "1:$current_uid:400" ] \
+    || fail "正式 gateway 测试 passwd 身份不安全"
+  result="$(held_file_identity_and_sha256 \
+    "$(formal_test_passwd_fd_path)" "$FORMAL_TEST_PASSWD")" \
+    || fail "无法固定正式 gateway 测试 passwd 身份"
+  IFS=$'\t' read -r FORMAL_TEST_PASSWD_IDENTITY \
+    FORMAL_TEST_PASSWD_SHA256 <<< "$result"
+  formal_test_passwd_identity_matches \
+    || fail "正式 gateway 测试 passwd 创建后已漂移"
+}
+
+close_formal_test_passwd() {
+  [ -n "${FORMAL_TEST_PASSWD:-}" ] || return 0
+  if ! formal_test_passwd_identity_matches; then
+    if [ -n "${FORMAL_TEST_PASSWD_FD:-}" ]; then
+      exec {FORMAL_TEST_PASSWD_FD}<&-
+      FORMAL_TEST_PASSWD_FD=""
+    fi
+    return 1
+  fi
+  exec {FORMAL_TEST_PASSWD_FD}<&-
+  FORMAL_TEST_PASSWD_FD=""
+  /usr/bin/unlink -- "$FORMAL_TEST_PASSWD" || return 1
+  [ ! -e "$FORMAL_TEST_PASSWD" ] && [ ! -L "$FORMAL_TEST_PASSWD" ] \
+    || return 1
+  FORMAL_TEST_PASSWD=""
+  FORMAL_TEST_PASSWD_IDENTITY=""
+  FORMAL_TEST_PASSWD_SHA256=""
+}
+
 load_source_controlled_policy() {
   local policy_exports
   POLICY_FILE="$SRC_DIR/packaging/linux/compatibility-policy.json"
@@ -3693,7 +3871,10 @@ PY
 run_formal_build_tests_direct() {
   require_candidate_deb_fixed
   [ -x /usr/bin/python3 ] || fail "正式构建测试需要受信任的 /usr/bin/python3"
+  [ -x /usr/bin/unshare ] && [ -x /bin/mount ] \
+    || fail "正式 gateway 测试需要受信任的 user/mount namespace 工具"
   [ -n "${FORMAL_PYTHON_FD:-}" ] \
+    && [ -n "${FORMAL_PYTHON_PATH:-}" ] \
     && [ -n "${FORMAL_PYTHON_LAUNCHER_FD:-}" ] \
     && [ -n "${FORMAL_PYTHON_LAUNCHER_HELD_PATH:-}" ] \
     && [ -n "${FORMAL_NODE_FD:-}" ] \
@@ -3701,14 +3882,24 @@ run_formal_build_tests_direct() {
     || fail "正式构建测试工具 held FD 未完整准备"
   [ -d "$SRC_DIR" ] && [ ! -L "$SRC_DIR" ] || fail "正式构建测试源码根不安全"
   local direct_work="$BUILD_ROOT/formal-build-tests-direct" status
-  mkdir -p -- "$direct_work/home" "$direct_work/tmp"
+  mkdir -m 0700 -- "$direct_work" \
+    || fail "无法创建正式构建测试隔离工作根"
+  mkdir -m 0700 -- "$direct_work/home" "$direct_work/tmp" \
+    || fail "无法创建正式构建测试隔离 HOME/TMPDIR"
   open_formal_build_test_log
+  verify_build_source_integrity
+  open_formal_source_checkout_marker
+  open_formal_test_passwd "$direct_work" "$direct_work/home"
+  formal_test_passwd_identity_matches \
+    || fail "正式 gateway 测试 passwd 启动前已漂移"
   if /usr/bin/python3 -I -B - \
       "$SRC_DIR/scripts/run-taiji-formal-build-tests.py" \
       "$FORMAL_PYTHON_FD" \
       "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
+      "$FORMAL_PYTHON_PATH" \
       "$BUILD_NPM_USERCONFIG" \
       "$BUILD_NPM_GLOBALCONFIG" \
+      "$FORMAL_TEST_PASSWD" \
       --source-root "$SRC_DIR" \
       --source-commit "$MARKER_SOURCE_COMMIT" \
       --work-root "$direct_work" \
@@ -3724,9 +3915,11 @@ import sys
 driver_path = sys.argv[1]
 python_fd = int(sys.argv[2])
 launcher_held_path = sys.argv[3]
-npm_userconfig = sys.argv[4]
-npm_globalconfig = sys.argv[5]
-driver_argv = [driver_path] + sys.argv[6:]
+python_path = sys.argv[4]
+npm_userconfig = sys.argv[5]
+npm_globalconfig = sys.argv[6]
+formal_passwd_path = sys.argv[7]
+driver_argv = [driver_path] + sys.argv[8:]
 namespace = runpy.run_path(
     driver_path, run_name="taiji_formal_held_python_driver"
 )
@@ -3757,6 +3950,35 @@ def controlled_formal_popen(argv, *args, **kwargs):
         and "const {run}=require('node:test');" in replacement[2]
     ):
         replacement[2] = "process.execArgv=[];" + replacement[2]
+    if (
+        replacement
+        and replacement[0] == launcher_held_path
+        and "--formal-results-fd" in replacement
+        and replacement[-1] == "tests/gateway/test_api_server_license.py"
+    ):
+        if python_fd not in kwargs.get("pass_fds", ()):
+            raise RuntimeError("formal gateway Python FD was not inherited")
+        namespace_script = (
+            "set -eu\n"
+            "/bin/mount --make-rprivate /\n"
+            '/bin/mount --bind "$1" /etc/passwd\n'
+            '/bin/mount -o remount,bind,ro /etc/passwd\n'
+            "python_fd=$2\n"
+            "python_argv0=$3\n"
+            "shift 3\n"
+            "shift\n"
+            'exec -a "$python_argv0" "/proc/self/fd/$python_fd" "$@"\n'
+        )
+        replacement = [
+            "/usr/bin/unshare",
+            "--user", "--map-root-user", "--mount",
+            "/bin/bash", "-p", "-c", namespace_script,
+            "taiji-formal-license-home",
+            formal_passwd_path,
+            str(python_fd),
+            python_path,
+            *replacement,
+        ]
     return original_popen(replacement, *args, **kwargs)
 
 
@@ -3771,6 +3993,13 @@ PY
   else
     status=$?
   fi
+  formal_test_passwd_identity_matches \
+    || fail "正式 gateway 测试 passwd 运行后已漂移"
+  close_formal_test_passwd \
+    || fail "正式 gateway 测试 passwd 无法安全移除"
+  close_formal_source_checkout_marker \
+    || fail "正式源码测试 checkout marker 无法安全移除"
+  verify_build_source_integrity
   [ "$status" = 0 ] || fail "direct formal-build-tests/v2 失败 (exit=$status)"
   FORMAL_BUILD_TESTS_STATUS=pass
   FORMAL_BUILD_TESTS_LOG_SHA256="$(sha256sum "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_FD")" | awk '{print $1}')"
