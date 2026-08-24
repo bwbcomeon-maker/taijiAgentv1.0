@@ -103,6 +103,7 @@ SOURCE_TRUST_PATHS = (
     "packaging/linux/builder-input-package.py",
     "taijiagent 打包交付/01_制包机_发布预检.sh",
     "scripts/taiji-challenge-envelope.py",
+    "packaging/linux/kylin_remote_build.py",
     "scripts/produce-taiji-offline-rehearsal.py",
     "scripts/produce-taiji-negative-boundary-evidence.py",
     "scripts/validate-taiji-release-evidence.py",
@@ -1657,40 +1658,6 @@ def _remote_directory(state: Dict[str, Any]) -> str:
     )
 
 
-def _remote_script(state: Dict[str, Any]) -> str:
-    config = state["config"]
-    source_commit = state["source_commit"]
-    remote_dir = _remote_directory(state)
-    archive = Path(config["input"]["archive"]).name
-    checksum = Path(config["input"]["checksum"]).name
-    source_archive = "taiji-agentv1.0-kylin-build-src-{}.tar.gz".format(source_commit)
-    delivery = "taijiagent 打包交付"
-    remote_log = remote_dir + "/02-remote-build.log"
-    statements = [
-        "set -Eeuo pipefail",
-        "umask 077",
-        "unset TAIJI_ALLOW_UV_LOCK_REFRESH",
-        "cd {}".format(shlex.quote(remote_dir)),
-        "/usr/bin/sha256sum -c {}".format(shlex.quote(checksum)),
-        "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {}".format(
-            shlex.quote(archive)
-        ),
-        "cd {}".format(shlex.quote(remote_dir + "/" + delivery)),
-        "TAIJI_UV_LOCK_MODE=strict /bin/bash -p ./00_制包机_生成离线交付包.sh "
-        "2>&1 | /usr/bin/tee {}".format(shlex.quote(remote_log)),
-        "cd {}".format(shlex.quote(remote_dir)),
-        "/usr/bin/install -d -m 0700 -- review",
-        "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {} -C review".format(
-            shlex.quote(remote_dir + "/" + delivery + "/" + source_archive)
-        ),
-        "/bin/cp -a -- {}/. {}/".format(
-            shlex.quote(remote_dir + "/" + delivery),
-            shlex.quote(remote_dir + "/review/taiji-agentv1.0/" + delivery),
-        ),
-    ]
-    return "; ".join(statements)
-
-
 def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any]]:
     config = state["config"]
     repo = Path(config["repo_root"])
@@ -1735,6 +1702,34 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
         remote_dir = _remote_directory(state)
         remote_log = remote_dir + "/02-remote-build.log"
         review_parent = str(review.parent)
+        helper = repo / "packaging/linux/kylin_remote_build.py"
+        input_identity = state["input_identity"]
+        helper_argv = [
+            *TRUSTED_PYTHON_ARGV,
+            str(helper),
+            "--host",
+            remote["host"],
+            "--account-home",
+            remote["account_home"],
+            "--remote-dir",
+            remote_dir,
+            "--source-commit",
+            state["source_commit"],
+            "--remote-attempt-id",
+            state["remote_attempt_id"],
+        ]
+        for key in ("archive", "manifest", "checksum"):
+            helper_argv.extend(
+                [
+                    "--{}-basename".format(key),
+                    input_identity[key]["basename"],
+                    "--{}-bytes".format(key),
+                    str(input_identity[key]["size"]),
+                    "--{}-sha256".format(key),
+                    input_identity[key]["sha256"],
+                ]
+            )
+        helper_argv.extend(["--result-basename", "remote-build-result.json"])
         return [
             _command(
                 "create commit-specific remote build directory",
@@ -1778,17 +1773,23 @@ def _commands_for_stage(state: Dict[str, Any], stage: str) -> List[Dict[str, Any
                 SSH_ENV_PASSTHROUGH,
             ),
             _command(
-                "run frozen 00 builder and prepare immutable review tree",
+                "run or resume frozen 00 builder",
+                helper_argv,
+                str(repo),
+                _stage_log(config, 2, stage),
+                "remote-external-approval",
+                common_env,
+                SSH_ENV_PASSTHROUGH,
+                SSH_ENV_PASSTHROUGH,
+            ),
+            _command(
+                "retrieve remote build result",
                 [
-                    "/usr/bin/ssh",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=5",
-                    remote["host"],
-                    _remote_clean_shell(
-                        remote["account_home"], _remote_script(state)
+                    "/usr/bin/scp",
+                    "{}:{}/remote-build-result.json".format(
+                        remote["host"], remote_dir
                     ),
+                    str(Path(logs) / "remote-build-result.json"),
                 ],
                 str(repo),
                 _stage_log(config, 2, stage),
@@ -2545,6 +2546,7 @@ def retry(
     expected_source_commit: str,
     expected_deb_sha256: Optional[str],
     stage: str,
+    confirm_remote_terminal_failed: bool = False,
 ) -> Dict[str, Any]:
     state = _load_state(state_path)
     _validate_expectations(state, expected_source_commit, expected_deb_sha256)
@@ -2553,6 +2555,15 @@ def retry(
     entry = state["stages"][stage]
     if entry.get("status") != "failed":
         raise OrchestratorError("retry is allowed only after a recorded failure")
+    if stage == "remote_build" and not confirm_remote_terminal_failed:
+        raise OrchestratorError(
+            "remote_build retry requires confirmed terminal FAILED result; "
+            "transport/query uncertainty must resume the same attempt"
+        )
+    if stage != "remote_build" and confirm_remote_terminal_failed:
+        raise OrchestratorError(
+            "--confirm-remote-terminal-failed is valid only for remote_build"
+        )
     _validate_challenges_for_stage(state, stage)
     entry["history"].append({"event": "retry", "recorded_at_utc": _now()})
     entry["status"] = "pending"
@@ -2610,6 +2621,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     retry_parser = subparsers.add_parser("retry", allow_abbrev=False)
     _add_expectations(retry_parser)
     retry_parser.add_argument("--stage", required=True, choices=STAGES)
+    retry_parser.add_argument(
+        "--confirm-remote-terminal-failed",
+        action="store_true",
+        help="allow a new remote attempt only after validating terminal FAILED",
+    )
     return parser.parse_args(argv)
 
 
@@ -2654,6 +2670,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     args.expect_source_commit,
                     args.expect_deb_sha256,
                     args.stage,
+                    args.confirm_remote_terminal_failed,
                 )
             )
             exit_code = 0

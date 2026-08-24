@@ -200,7 +200,12 @@ EXPECT_DEB_ARGS=()
 # remote_build pass 绑定候选后立即设置；此后所有 plan/checkpoint/retry 都携带该组：
 # EXPECT_DEB_ARGS=(--expect-deb-sha256 "<已绑定候选摘要>")
 
-# 若本阶段失败，用实际失败日志和受控失败证据记录 fail，不得先记 pass：
+# remote_build 的 SSH/查询中断属于未知态：不得 checkpoint fail/retry；恢复连接后
+# 直接重跑未变的 plan command，以同一 remote_attempt_id 只读查询。
+# 只有 remote-build-result.json 已严格验证为 FAILED，才按下方记录 fail，并设置：
+# RETRY_ARGS=(--confirm-remote-terminal-failed)
+# 其它阶段：RETRY_ARGS=()
+# 若本阶段已明确失败，用实际失败日志和受控失败证据记录 fail，不得先记 pass：
 /usr/bin/python3 -I -B "$ORCHESTRATOR" checkpoint \
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
@@ -215,7 +220,8 @@ EXPECT_DEB_ARGS=()
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
   "${EXPECT_DEB_ARGS[@]}" \
-  --stage "$STAGE"
+  --stage "$STAGE" \
+  "${RETRY_ARGS[@]}"
 /usr/bin/python3 -I -B "$ORCHESTRATOR" plan \
   --state "$STATE" \
   --expect-source-commit "$SOURCE_COMMIT" \
@@ -240,6 +246,32 @@ sidecar 校验、manifest 绑定或 commit 任一不一致时停止，回到冻�
 ### 5.2 在兼容 Linux amd64 制包机生成完整交付目录
 
 进入正式黄金证据链的候选生成只执行黄金编排器 `remote_build` 阶段经审批的 `commands[].argv`，其中已包含三件套传输、冻结 `00` 构建、完整 review tree 取回和日志保存。`taiji-package` 的 candidate-only 输出不能代替该阶段 checkpoint。下方手工命令只用于解释制包入口或受控排障，不能代替该阶段的 checkpoint。
+
+#### 5.2.1 远程构建结果与断线恢复
+
+黄金编排器通过 `packaging/linux/kylin_remote_build.py` 管理同一
+`remote_attempt_id`，并把唯一状态文件固定为远程 attempt 目录内的
+`remote-build-result.json`。其 schema 为
+`taiji-kylin-remote-build-result/v1`，完整绑定 `source_commit`、
+`remote_attempt_id`、输入三件套各自的 basename/bytes/SHA256、`status`、
+`phase`、`exit_code`、`started_at`、`finished_at`，以及正式远程日志的
+basename/bytes/SHA256。
+
+只有状态文件确实缺失时才允许启动一次。启动器先分离固定 wrapper；
+wrapper 只有在以 no-clobber 方式原子发布完整 `RUNNING` 的竞争中获胜，
+才立即 `exec` 唯一 worker 执行冻结 `00` 和 review tree 准备。worker
+最终原子替换为 `FAILED` 或 `SUCCEEDED`。`RUNNING` 期间只允许每
+300 秒只读查询，不能再次启动；`FAILED` 必须以失败返回，只有显式确认该
+terminal 结果后才能生成新 attempt；
+`SUCCEEDED` 只允许继续取回 review tree 和正式日志。SSH 输出丢失、查询
+失败、JSON 损坏、未知状态、身份或三件套不一致，以及不安全的状态文件，
+都必须失败关闭，不能降级解释为“状态缺失”。
+
+`SUCCEEDED` 只证明该远程 attempt 已结束且允许进入取回和本地复核，不能
+单独记为 `remote_build` pass，也不能据此标记“候选 DEB 已构建”。只有
+取回的同一 DEB、manifest、报告、sidecar、`.build-success`、正式日志及
+remote result 完成身份和摘要闭合，并按本阶段要求提交全部实体证据后，
+才允许 checkpoint 候选。
 
 解压输入包后进入 `taijiagent 打包交付/`：
 

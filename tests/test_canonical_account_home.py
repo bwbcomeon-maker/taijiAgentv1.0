@@ -1111,6 +1111,9 @@ class CanonicalAccountHomeBehaviorTest(unittest.TestCase):
               if (name === "./launch-profile") {
                 return require(path.join(path.dirname(mainPath), "launch-profile.js"));
               }
+              if (name === "./windows-runtime") {
+                return require(path.join(path.dirname(mainPath), "windows-runtime.js"));
+              }
               return require(name);
             };
             const sandbox = {

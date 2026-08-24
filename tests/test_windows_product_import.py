@@ -92,10 +92,11 @@ def make_bundle_fixture(root):
 
 class WindowsProductImportTests(unittest.TestCase):
     def test_direct_help_from_non_repo_cwd_bootstraps_only_its_root(self):
-        result = subprocess.run(
-            ["/usr/bin/python3", "-I", "-B", str(HELPER_PATH), "--help"],
-            cwd="/private/tmp", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
+        with tempfile.TemporaryDirectory(prefix="taiji-product-import-help-") as non_repo_cwd:
+            result = subprocess.run(
+                ["/usr/bin/python3", "-I", "-B", str(HELPER_PATH), "--help"],
+                cwd=non_repo_cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertIn(b"{probe,fetch,verify,install-ref,inventory}", result.stdout)
 
