@@ -126,6 +126,34 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         )
         self.assertIn("else\n    info \"下载固定版 uv", ensure_uv)
 
+    def test_formal_builder_prefers_an_exact_adjacent_python_archive_before_downloading(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        ensure_python = builder[
+            builder.index("ensure_python() {") : builder.index(
+                "\n}\n\nvalidate_formal_uv_contract()", builder.index("ensure_python() {")
+            )
+        ]
+
+        self.assertIn('prestaged_archive="$SCRIPT_DIR/../$PYTHON_ARCHIVE"', ensure_python)
+        self.assertIn('[ ! -L "$prestaged_archive" ]', ensure_python)
+        self.assertIn('stat -c \'%h\' "$prestaged_archive"', ensure_python)
+        self.assertIn('stat -c \'%u\' "$prestaged_archive"', ensure_python)
+        self.assertIn("$((8#$prestaged_mode & 8#022))", ensure_python)
+        self.assertIn("预置 Python 归档不允许 group/other 写入", ensure_python)
+        self.assertIn(
+            'install -m 0600 -- "$prestaged_archive" "$PYTHON_ARCHIVE_PATH"',
+            ensure_python,
+        )
+        self.assertLess(
+            ensure_python.index(
+                'install -m 0600 -- "$prestaged_archive" "$PYTHON_ARCHIVE_PATH"'
+            ),
+            ensure_python.index(
+                'curl_download "$PYTHON_ARCHIVE_URL" "$PYTHON_ARCHIVE_PATH"'
+            ),
+        )
+        self.assertIn("else\n    info \"下载固定版 CPython", ensure_python)
+
     def test_formal_builder_is_strict_only_and_never_refreshes_lock(self):
         builder = BUILDER.read_text(encoding="utf-8")
 

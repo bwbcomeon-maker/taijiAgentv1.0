@@ -1767,11 +1767,12 @@ PY
 }
 
 ensure_python() {
-  local download_dir extract_dir actual_executable_sha current_uid
+  local download_dir extract_dir actual_executable_sha current_uid prestaged_archive prestaged_mode
   current_uid="$(id -u)"
   download_dir="$PYTHON_ROOT/download"
   extract_dir="$PYTHON_ROOT/extract"
   PYTHON_ARCHIVE_PATH="$download_dir/$PYTHON_ARCHIVE"
+  prestaged_archive="$SCRIPT_DIR/../$PYTHON_ARCHIVE"
   [ "$PYTHON_ROOT" = "$TOOL_ROOT/python" ] \
     || fail "Python 工具根未绑定受控 owner-only 工具根"
   install -d -m 0700 "$PYTHON_ROOT" "$download_dir"
@@ -1779,8 +1780,20 @@ ensure_python() {
     && [ "$(stat -c '%a' "$PYTHON_ROOT")" = 700 ] \
     || fail "Python 工具根必须由当前用户以 0700 独占"
 
-  info "下载固定版 CPython ${PYTHON_VERSION_PINNED} Linux x86_64 GNU 归档"
-  curl_download "$PYTHON_ARCHIVE_URL" "$PYTHON_ARCHIVE_PATH"
+  if [ -e "$prestaged_archive" ] || [ -L "$prestaged_archive" ]; then
+    [ -f "$prestaged_archive" ] && [ ! -L "$prestaged_archive" ] \
+      && [ "$(stat -c '%h' "$prestaged_archive")" = 1 ] \
+      && [ "$(stat -c '%u' "$prestaged_archive")" = "$current_uid" ] \
+      || fail "预置 Python 归档不是当前用户独占的普通文件"
+    prestaged_mode="$(stat -c '%a' "$prestaged_archive")"
+    [ $((8#$prestaged_mode & 8#022)) -eq 0 ] \
+      || fail "预置 Python 归档不允许 group/other 写入"
+    info "使用已预置的固定版 CPython ${PYTHON_VERSION_PINNED} Linux x86_64 GNU 归档"
+    install -m 0600 -- "$prestaged_archive" "$PYTHON_ARCHIVE_PATH"
+  else
+    info "下载固定版 CPython ${PYTHON_VERSION_PINNED} Linux x86_64 GNU 归档"
+    curl_download "$PYTHON_ARCHIVE_URL" "$PYTHON_ARCHIVE_PATH"
+  fi
   [ -f "$PYTHON_ARCHIVE_PATH" ] && [ ! -L "$PYTHON_ARCHIVE_PATH" ] \
     && [ "$(stat -c '%h' "$PYTHON_ARCHIVE_PATH")" = 1 ] \
     && [ "$(stat -c '%u' "$PYTHON_ARCHIVE_PATH")" = "$current_uid" ] \
