@@ -107,6 +107,39 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertIn('TAIJI_PYTHON_EXECUTABLE', setup)
         self.assertIn('--python "$PYTHON_EXECUTABLE"', setup)
 
+    def test_formal_builder_materializes_the_pinned_uv_python_build_identity(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        ensure_python = builder[
+            builder.index("ensure_python() {") : builder.index(
+                "\n}\n\nvalidate_formal_uv_contract()", builder.index("ensure_python() {")
+            )
+        ]
+
+        self.assertIn('PYTHON_BUILD_ID="20260805"', builder)
+        self.assertIn(
+            '"cpython-${PYTHON_VERSION_PINNED}+${PYTHON_BUILD_ID}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"',
+            ensure_python,
+        )
+        self.assertIn('python_build_marker="$extract_dir/python/BUILD"', ensure_python)
+        self.assertIn('printf \'%s\\n\' "$PYTHON_BUILD_ID" > "$python_build_marker"', ensure_python)
+        self.assertIn('[ "$(<"$python_build_marker")" = "$PYTHON_BUILD_ID" ]', ensure_python)
+
+        archive_recheck = ensure_python.index(
+            'require_open_fixed_tool_archive_unchanged "$PYTHON_ARCHIVE_SHA256"'
+        )
+        executable_sha_check = ensure_python.index(
+            '[ "$actual_executable_sha" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ]'
+        )
+        executable_version_check = ensure_python.index(
+            '[ "$("$PYTHON_BIN" -c \'import platform; print(platform.python_version())\')" = "$PYTHON_VERSION_PINNED" ]'
+        )
+        marker_write = ensure_python.index(
+            'printf \'%s\\n\' "$PYTHON_BUILD_ID" > "$python_build_marker"'
+        )
+        self.assertLess(archive_recheck, marker_write)
+        self.assertLess(executable_sha_check, marker_write)
+        self.assertLess(executable_version_check, marker_write)
+
     def test_formal_builder_prefers_an_exact_adjacent_uv_archive_before_downloading(self):
         builder = BUILDER.read_text(encoding="utf-8")
         ensure_uv = builder[

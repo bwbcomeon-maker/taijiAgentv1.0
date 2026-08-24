@@ -51,6 +51,7 @@ UV_ARCHIVE_SHA256="d66e96b5f1ca3b99806eee283a8125d33a0bd669e6e6d9bc4ab7ffda63c41
 UV_PINNED_EXECUTABLE_SHA256="72c5f455cd0e9793910f6a1db255de37b610a36a8db858afa3c72e34668e23e2"
 UV_EXECUTABLE_SHA256=""
 PYTHON_VERSION_PINNED="3.11.15"
+PYTHON_BUILD_ID="20260805"
 PYTHON_ARCHIVE="cpython-3.11.15+20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
 PYTHON_ARCHIVE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260805/cpython-3.11.15%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
 PYTHON_ARCHIVE_SHA256="2ed5c2b6d2a018e0345219d6391a85b1eb0d0d1752b19cde6fc210d9392a752a"
@@ -1768,6 +1769,7 @@ PY
 
 ensure_python() {
   local download_dir extract_dir actual_executable_sha current_uid prestaged_archive prestaged_mode
+  local python_build_marker marker_mode
   current_uid="$(id -u)"
   download_dir="$PYTHON_ROOT/download"
   extract_dir="$PYTHON_ROOT/extract"
@@ -1775,6 +1777,9 @@ ensure_python() {
   prestaged_archive="$SCRIPT_DIR/../$PYTHON_ARCHIVE"
   [ "$PYTHON_ROOT" = "$TOOL_ROOT/python" ] \
     || fail "Python 工具根未绑定受控 owner-only 工具根"
+  [ "$PYTHON_ARCHIVE" = \
+      "cpython-${PYTHON_VERSION_PINNED}+${PYTHON_BUILD_ID}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" ] \
+    || fail "Python 固定归档名称与 uv managed build 身份不一致"
   install -d -m 0700 "$PYTHON_ROOT" "$download_dir"
   [ "$(stat -c '%u' "$PYTHON_ROOT")" = "$current_uid" ] \
     && [ "$(stat -c '%a' "$PYTHON_ROOT")" = 700 ] \
@@ -1851,6 +1856,23 @@ PY
     || fail "Python 可执行文件版本不等于固定版本 $PYTHON_VERSION_PINNED"
   file "$PYTHON_BIN" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' \
     || fail "Python 可执行文件不是 Linux x86_64 ELF"
+  python_build_marker="$extract_dir/python/BUILD"
+  [ ! -e "$python_build_marker" ] && [ ! -L "$python_build_marker" ] \
+    || fail "Python 固定归档解压根已存在非预期 BUILD 元数据"
+  (
+    umask 077
+    set -o noclobber
+    printf '%s\n' "$PYTHON_BUILD_ID" > "$python_build_marker"
+  ) || fail "无法写入固定 Python uv managed BUILD 元数据"
+  [ -f "$python_build_marker" ] && [ ! -L "$python_build_marker" ] \
+    && [ "$(stat -c '%h' "$python_build_marker")" = 1 ] \
+    && [ "$(stat -c '%u' "$python_build_marker")" = "$current_uid" ] \
+    || fail "固定 Python BUILD 元数据不是当前用户独占的普通文件"
+  marker_mode="$(stat -c '%a' "$python_build_marker")"
+  [ "$marker_mode" = 600 ] \
+    || fail "固定 Python BUILD 元数据权限不是 0600"
+  [ "$(<"$python_build_marker")" = "$PYTHON_BUILD_ID" ] \
+    || fail "固定 Python BUILD 元数据与归档 build 身份不一致"
   ok "固定 CPython 已验证：$PYTHON_BIN ($PYTHON_VERSION_PINNED)"
 }
 
