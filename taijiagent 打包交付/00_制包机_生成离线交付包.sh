@@ -4002,6 +4002,7 @@ PY
   verify_build_source_integrity
   [ "$status" = 0 ] || fail "direct formal-build-tests/v2 失败 (exit=$status)"
   FORMAL_BUILD_TESTS_STATUS=pass
+  require_formal_build_test_log_identity "after direct formal-build-tests/v2 write"
   FORMAL_BUILD_TESTS_LOG_SHA256="$(sha256sum "$(formal_build_test_log_fd_path "$FORMAL_BUILD_TEST_LOG_FD")" | awk '{print $1}')"
   require_formal_build_test_log_identity "after direct formal-build-tests/v2"
   bind_formal_build_test_evidence_to_manifest

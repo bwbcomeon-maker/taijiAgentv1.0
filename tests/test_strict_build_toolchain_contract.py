@@ -347,6 +347,26 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertNotIn("TAIJI_LICENSE_FILE=", run)
         self.assertNotIn("TAIJI_LICENSE_REQUIRED=", run)
 
+    def test_formal_build_log_rebinds_identity_after_driver_write_before_pinning_sha(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        run_start = builder.index("run_formal_build_tests_direct() {")
+        run_end = builder.index("\n}\n", run_start)
+        run = builder[run_start:run_end]
+
+        rebind = (
+            'require_formal_build_test_log_identity '
+            '"after direct formal-build-tests/v2 write"'
+        )
+        pin_sha = 'FORMAL_BUILD_TESTS_LOG_SHA256="$(sha256sum '
+        final_check = (
+            'require_formal_build_test_log_identity '
+            '"after direct formal-build-tests/v2"'
+        )
+        self.assertIn(rebind, run)
+        self.assertLess(run.rindex("verify_build_source_integrity"), run.index(rebind))
+        self.assertLess(run.index(rebind), run.index(pin_sha))
+        self.assertLess(run.index(pin_sha), run.index(final_check))
+
     def test_formal_build_test_driver_comes_from_archive_derived_source_root(self):
         builder = BUILDER.read_text(encoding="utf-8")
         function_start = builder.index("run_formal_build_tests_direct() {")
