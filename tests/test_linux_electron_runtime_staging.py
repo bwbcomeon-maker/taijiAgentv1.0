@@ -11,6 +11,8 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +144,45 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
             "archive SHA256",
         ):
             self.stage()
+
+    def test_archive_fd_contract_accepts_only_fully_sealed_unlinked_memfd(self) -> None:
+        metadata = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o400,
+            st_nlink=0,
+            st_size=self.archive.stat().st_size,
+        )
+        seal_constants = {
+            "F_GET_SEALS": 1034,
+            "F_SEAL_SEAL": 0x0001,
+            "F_SEAL_SHRINK": 0x0002,
+            "F_SEAL_GROW": 0x0004,
+            "F_SEAL_WRITE": 0x0008,
+        }
+        required_seals = 0x000F
+
+        with mock.patch.multiple(
+            self.stager.fcntl,
+            create=True,
+            **seal_constants,
+        ):
+            with mock.patch.object(
+                self.stager.fcntl,
+                "fcntl",
+                return_value=required_seals,
+            ) as get_seals:
+                self.stager.validate_archive_fd_identity(15, metadata)
+            get_seals.assert_called_once_with(15, seal_constants["F_GET_SEALS"])
+
+            with mock.patch.object(
+                self.stager.fcntl,
+                "fcntl",
+                return_value=seal_constants["F_SEAL_WRITE"],
+            ):
+                with self.assertRaisesRegex(
+                    self.stager.ElectronRuntimeStageError,
+                    "fully sealed memfd",
+                ):
+                    self.stager.validate_archive_fd_identity(15, metadata)
 
     def test_staged_runtime_is_extracted_from_archive_and_binds_the_electron_elf(self) -> None:
         electron_sha256 = hashlib.sha256(

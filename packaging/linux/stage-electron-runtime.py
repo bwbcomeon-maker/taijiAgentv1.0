@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -202,6 +203,35 @@ def verified_archive_snapshot(
             os.close(descriptor)
 
 
+def validate_archive_fd_identity(descriptor: int, info: os.stat_result) -> None:
+    if not stat.S_ISREG(info.st_mode):
+        raise ElectronRuntimeStageError("Electron archive FD is not a regular file")
+    if info.st_size <= 0 or info.st_size > MAX_ELECTRON_ARCHIVE_BYTES:
+        raise ElectronRuntimeStageError("Electron archive FD size is invalid")
+    if info.st_nlink == 1:
+        return
+    if info.st_nlink != 0:
+        raise ElectronRuntimeStageError(
+            "Electron archive FD is neither single-link nor a fully sealed memfd"
+        )
+    try:
+        required_seals = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        actual_seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+    except (AttributeError, OSError) as exc:
+        raise ElectronRuntimeStageError(
+            "Electron archive FD is not a fully sealed memfd"
+        ) from exc
+    if actual_seals & required_seals != required_seals:
+        raise ElectronRuntimeStageError(
+            "Electron archive FD is not a fully sealed memfd"
+        )
+
+
 @contextmanager
 def verified_archive_fd_snapshot(
     descriptor: int,
@@ -221,8 +251,7 @@ def verified_archive_fd_snapshot(
         ) as snapshot:
             source_descriptor = -1
             info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size <= 0:
-                raise ElectronRuntimeStageError("Electron archive FD is not a regular single-link file")
+            validate_archive_fd_identity(source.fileno(), info)
             digest = hashlib.sha256()
             source.seek(0)
             copied = 0
