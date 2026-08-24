@@ -2951,6 +2951,21 @@ seal_formal_test_node_runtime() {
     || fail "held npm CLI 版本与已固定 Node 归档不一致"
 }
 
+run_held_python() {
+  local canonical_path="$1" held_path="$2"
+  shift 2
+  /usr/bin/env -i \
+    HOME="$BUILD_ROOT/formal-build-test-home" \
+    TMPDIR="$BUILD_TMP_DIR" \
+    PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    /bin/bash -p -c 'exec -a "$1" "$2" "${@:3}"' _ \
+    "$canonical_path" "$held_path" "$@"
+}
+
 seal_formal_test_python_runtime() {
   local result version prefix current_uid mode
   FORMAL_PYTHON_PATH="$FORMAL_AGENT_VENV/bin/python"
@@ -2976,18 +2991,14 @@ seal_formal_test_python_runtime() {
   IFS=$'\t' read -r FORMAL_PYTHON_IDENTITY FORMAL_PYTHON_SHA256 <<< "$result"
   [ "$FORMAL_PYTHON_SHA256" = "$PYTHON_PINNED_EXECUTABLE_SHA256" ] \
     || fail "正式 Agent 测试 Python held FD 不是固定实体"
-  version="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
-    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-    PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-    "$FORMAL_PYTHON_HELD_PATH" -I -B -c \
+  version="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH" \
+    -I -B -c \
     'import platform; print(platform.python_version())')" \
     || fail "无法执行 held Python FD"
   [ "$version" = "$PYTHON_VERSION_PINNED" ] \
     || fail "held Python FD 版本不是固定版本"
-  prefix="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
-    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-    PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-    "$FORMAL_PYTHON_HELD_PATH" -I -B -c \
+  prefix="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH" \
+    -I -B -c \
     'import pathlib, sys; import pytest; print(pathlib.Path(sys.prefix).resolve())')" \
     || fail "held Python FD 未保留正式 venv/site-packages 语义"
   [ "$prefix" = "$(readlink -f "$FORMAL_AGENT_VENV")" ] \
@@ -3090,10 +3101,8 @@ validate_formal_test_runtime_identity() {
     "$FORMAL_NPM_CLI_HELD_PATH" "$FORMAL_NPM_CLI_PATH" --version)" \
     || return 1
   [ "$version" = "$NODE_NPM_VERSION_ARCHIVE" ] || return 1
-  version="$(/usr/bin/env -i HOME="$BUILD_ROOT/formal-build-test-home" \
-    TMPDIR="$BUILD_TMP_DIR" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-    PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-    "$FORMAL_PYTHON_HELD_PATH" -I -B -c \
+  version="$(run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH" \
+    -I -B -c \
     'import platform, pytest; print(platform.python_version())')" \
     || return 1
   [ "$version" = "$PYTHON_VERSION_PINNED" ]

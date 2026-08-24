@@ -140,6 +140,34 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertLess(executable_sha_check, marker_write)
         self.assertLess(executable_version_check, marker_write)
 
+    def test_formal_held_python_executes_with_the_canonical_venv_argv0(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        helper_start = builder.index("run_held_python() {")
+        helper_end = builder.index("\n}\n", helper_start)
+        helper = builder[helper_start:helper_end]
+        seal_start = builder.index("seal_formal_test_python_runtime() {")
+        seal_end = builder.index("\n}\n", seal_start)
+        seal = builder[seal_start:seal_end]
+        validate_start = builder.index("validate_formal_test_runtime_identity() {")
+        validate_end = builder.index("\n}\n", validate_start)
+        validate = builder[validate_start:validate_end]
+
+        self.assertLess(helper_start, seal_start)
+        self.assertIn('local canonical_path="$1" held_path="$2"', helper)
+        self.assertIn('/bin/bash -p -c \'exec -a "$1" "$2" "${@:3}"\'', helper)
+        self.assertIn(
+            'run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH"',
+            seal,
+        )
+        self.assertIn(
+            'run_held_python "$FORMAL_PYTHON_PATH" "$FORMAL_PYTHON_HELD_PATH"',
+            validate,
+        )
+        self.assertNotIn(
+            '"$FORMAL_PYTHON_HELD_PATH" -I -B',
+            seal + validate,
+        )
+
     def test_linux_payload_compiles_an_installed_only_runtime_profile_module(self):
         builder = DEB_BUILDER.read_text(encoding="utf-8")
         function_start = builder.index("write_installed_runtime_profile_module() {")
