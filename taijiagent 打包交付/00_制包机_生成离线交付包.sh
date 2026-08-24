@@ -2443,6 +2443,8 @@ run_setup_local() {
   TAIJI_UV_EXECUTABLE="$UV_BIN" \
   TAIJI_PYTHON_EXECUTABLE="$PYTHON_BIN" \
   UV_LINK_MODE=copy \
+  UV_NO_EDITABLE=1 \
+  UV_NO_INSTALL_PROJECT=1 \
   UV_PYTHON_DOWNLOADS=never \
     /bin/bash -p ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
   status="${PIPESTATUS[0]}"
@@ -2568,6 +2570,8 @@ build_runtime_and_deb() {
   TAIJI_UV_ARCHIVE_SHA256="$UV_ARCHIVE_SHA256" \
   TAIJI_UV_EXECUTABLE_SHA256="$UV_EXECUTABLE_SHA256" \
   TAIJI_NODE_ARCHIVE_PATH="$NODE_ARCHIVE_PATH" \
+  UV_NO_EDITABLE=1 \
+  UV_NO_INSTALL_PROJECT=1 \
     /bin/bash -p ./packaging/linux/deb/build-deb.sh
   portable_node_is_exact \
     || fail "build-deb 返回后 Node/npm sealed memfd 已漂移"
@@ -3139,6 +3143,8 @@ prepare_formal_build_test_dependencies() {
     LC_ALL=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_NO_CONFIG=1 \
+    UV_NO_EDITABLE=1 \
+    UV_NO_INSTALL_PROJECT=1 \
     UV_PROJECT_ENVIRONMENT="$FORMAL_AGENT_VENV" \
     UV_PYTHON_DOWNLOADS=never \
     UV_INDEX_URL="$UV_INDEX_URL" \

@@ -755,6 +755,41 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         )
         self.assertNotIn('UV_LINK_MODE="${', run_setup_local)
 
+    def test_formal_builder_forces_non_editable_mode_for_the_production_uv_sync(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        run_setup_local = builder[
+            builder.index("run_setup_local() {") : builder.index(
+                "\n}\n\nbuild_runtime_and_deb()", builder.index("run_setup_local() {")
+            )
+        ]
+        setup_call = run_setup_local.index("/bin/bash -p ./scripts/setup-local.sh")
+
+        for fixed_setting in (
+            'TAIJI_UV_LOCK_MODE="$uv_lock_mode"',
+            "UV_LINK_MODE=copy",
+            "UV_NO_EDITABLE=1",
+            "UV_NO_INSTALL_PROJECT=1",
+            "UV_PYTHON_DOWNLOADS=never",
+        ):
+            self.assertIn(fixed_setting, run_setup_local)
+            self.assertLess(run_setup_local.index(fixed_setting), setup_call)
+        self.assertNotIn('UV_NO_EDITABLE="${', run_setup_local)
+        self.assertNotIn('UV_NO_INSTALL_PROJECT="${', run_setup_local)
+
+        build_deb_call = builder[
+            builder.index('TAIJI_UV_EXECUTABLE="$UV_BIN"', setup_call) :
+            builder.index('/bin/bash -p ./packaging/linux/deb/build-deb.sh', setup_call)
+        ]
+        self.assertIn("UV_NO_EDITABLE=1", build_deb_call)
+        self.assertIn("UV_NO_INSTALL_PROJECT=1", build_deb_call)
+
+        formal_test_sync = builder[
+            builder.index('info "用固定 uv 和当前 uv.lock 准备正式 Agent 测试依赖"') :
+            builder.index('固定 uv 无法按当前 uv.lock 准备正式 Agent 测试依赖')
+        ]
+        self.assertIn("UV_NO_EDITABLE=1", formal_test_sync)
+        self.assertIn("UV_NO_INSTALL_PROJECT=1", formal_test_sync)
+
     def test_webui_requirements_are_exact_agent_direct_lock_subset(self):
         result = subprocess.run(
             [
