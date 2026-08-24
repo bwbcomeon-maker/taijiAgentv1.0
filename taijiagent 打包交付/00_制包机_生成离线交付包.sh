@@ -72,6 +72,8 @@ BUILD_NODE_HELD_PATH=""
 BUILD_NPM_CLI_PATH=""
 BUILD_NPM_CLI_HELD_PATH=""
 BUILD_NODE_RUNTIME_SEALED=0
+BUILD_NPM_USERCONFIG=""
+BUILD_NPM_GLOBALCONFIG=""
 SEALED_SNAPSHOT_HOLDER_PID=""
 SEALED_SNAPSHOT_TRANSPORT_DIR=""
 SEALED_SNAPSHOT_CONTROL_OPEN=0
@@ -1917,12 +1919,40 @@ portable_node_files_are_exact() {
   file "$root/bin/node" | grep -Eq 'ELF 64-bit.*(x86-64|X86-64|80386)' || return 1
 }
 
+prepare_build_npm_configs() {
+  local config current_uid
+  BUILD_NPM_USERCONFIG="$BUILD_TMP_DIR/npm-userconfig"
+  BUILD_NPM_GLOBALCONFIG="$BUILD_TMP_DIR/npm-globalconfig"
+  [ "$BUILD_NPM_USERCONFIG" != "$BUILD_NPM_GLOBALCONFIG" ] \
+    || fail "npm user/global 配置路径必须不同"
+  for config in "$BUILD_NPM_USERCONFIG" "$BUILD_NPM_GLOBALCONFIG"; do
+    [ ! -e "$config" ] && [ ! -L "$config" ] \
+      || fail "npm 空配置路径已被占用：$config"
+  done
+  (
+    umask 077
+    set -o noclobber
+    : > "$BUILD_NPM_USERCONFIG"
+    : > "$BUILD_NPM_GLOBALCONFIG"
+  ) || fail "无法创建 npm 隔离空配置"
+  current_uid="$(id -u)"
+  for config in "$BUILD_NPM_USERCONFIG" "$BUILD_NPM_GLOBALCONFIG"; do
+    [ -f "$config" ] && [ ! -L "$config" ] \
+      && [ "$(stat -c '%h' "$config")" = 1 ] \
+      && [ "$(stat -c '%u' "$config")" = "$current_uid" ] \
+      && [ "$(stat -c '%a' "$config")" = 600 ] \
+      && [ "$(stat -c '%s' "$config")" = 0 ] \
+      || fail "npm 隔离空配置身份无效：$config"
+  done
+}
+
 run_build_node_script() {
   local held_script="$1" canonical_script="$2"
   shift 2
   [ "$BUILD_NODE_RUNTIME_SEALED" = 1 ] || return 1
   NODE_OPTIONS= NODE_PATH= \
-  NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/dev/null \
+  NPM_CONFIG_USERCONFIG="$BUILD_NPM_USERCONFIG" \
+  NPM_CONFIG_GLOBALCONFIG="$BUILD_NPM_GLOBALCONFIG" \
   npm_node_execpath="$BUILD_NODE_HELD_PATH" \
   npm_execpath="$BUILD_NPM_CLI_HELD_PATH" \
     "$BUILD_NODE_HELD_PATH" -e '
@@ -1980,6 +2010,7 @@ seal_build_node_runtime() {
   done
   portable_node_files_are_exact \
     || fail "候选构建 Node/npm 文件身份未通过被动校验"
+  prepare_build_npm_configs
   adopt_sealed_snapshot \
     "$BUILD_NODE_PATH" "$NODE_PINNED_EXECUTABLE_SHA256" node \
     || fail "无法固定候选构建 Node sealed memfd"
@@ -2948,8 +2979,8 @@ run_held_node_script() {
     PATH=/usr/bin:/bin
     LANG=C.UTF-8
     LC_ALL=C.UTF-8
-    NPM_CONFIG_USERCONFIG=/dev/null
-    NPM_CONFIG_GLOBALCONFIG=/dev/null
+    NPM_CONFIG_USERCONFIG="$BUILD_NPM_USERCONFIG"
+    NPM_CONFIG_GLOBALCONFIG="$BUILD_NPM_GLOBALCONFIG"
     NPM_CONFIG_CACHE="$BUILD_ROOT/npm-formal-test-cache"
     NPM_CONFIG_AUDIT=false
     NPM_CONFIG_FUND=false

@@ -301,6 +301,42 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             deb_builder,
         )
 
+    def test_sealed_npm_uses_two_distinct_controlled_config_files(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        prepare_start = builder.index("prepare_build_npm_configs() {")
+        prepare_end = builder.index("\n}\n", prepare_start)
+        prepare = builder[prepare_start:prepare_end]
+        candidate_start = builder.index("run_build_node_script() {")
+        candidate_end = builder.index("\n}\n", candidate_start)
+        candidate = builder[candidate_start:candidate_end]
+        seal_start = builder.index("seal_build_node_runtime() {")
+        seal_end = builder.index("\n}\n", seal_start)
+        seal = builder[seal_start:seal_end]
+        formal_start = builder.index("run_held_node_script() {")
+        formal_end = builder.index("\n}\n", formal_start)
+        formal = builder[formal_start:formal_end]
+
+        self.assertIn(
+            'BUILD_NPM_USERCONFIG="$BUILD_TMP_DIR/npm-userconfig"', prepare
+        )
+        self.assertIn(
+            'BUILD_NPM_GLOBALCONFIG="$BUILD_TMP_DIR/npm-globalconfig"', prepare
+        )
+        self.assertIn('prepare_build_npm_configs', seal)
+        for runner in (candidate, formal):
+            self.assertIn(
+                'NPM_CONFIG_USERCONFIG="$BUILD_NPM_USERCONFIG"', runner
+            )
+            self.assertIn(
+                'NPM_CONFIG_GLOBALCONFIG="$BUILD_NPM_GLOBALCONFIG"', runner
+            )
+            self.assertNotIn(
+                "NPM_CONFIG_USERCONFIG=/dev/null", runner
+            )
+            self.assertNotIn(
+                "NPM_CONFIG_GLOBALCONFIG=/dev/null", runner
+            )
+
     def test_success_marker_is_atomically_published_only_after_the_final_gate(self):
         builder = BUILDER.read_text(encoding="utf-8")
         collect_start = builder.index("collect_artifacts() {")

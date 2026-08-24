@@ -561,6 +561,7 @@ SHA256SUMS.txt
 
 | 症状 | 根因 | 修复 | 防复发门禁 | 验证边界 |
 | --- | --- | --- | --- | --- |
+| 真实 Kylin 在 Node/npm sealed memfd 身份检查阶段失败，npm 10.9.8 报 `double-loading config "/dev/null"` | `00` 把 `NPM_CONFIG_USERCONFIG` 和 `NPM_CONFIG_GLOBALCONFIG` 同时指向 `/dev/null`；npm 10.9.8 拒绝把同一路径重复加载为两类配置，`/proc noexec` 与 sealed memfd 执行本身不是根因 | 在 owner-only 构建根中创建两个不同的 `0600` 空配置文件，候选构建和正式测试均使用这两个受控路径；不修改挂载或安全策略 | 先红后绿合同测试 + 官方 Node 22.23.1/npm 10.9.8 在 Linux amd64、非 root、只读容器、`--network none` 和 `/proc noexec` 下的 sealed memfd 实测 | 本机真实 runtime 子检查已通过；仍须由新正式 main、新 99 和全新 00 attempt 证明完整 Kylin 制包 |
 | 真实 Kylin 制包拒绝 uid 1000 的 `innogpu-fh2m/libepoxy.so.0.0.0` | 私有库收集器递归扫描整个 sysroot，误把未被系统动态链接器选中的 GPU 厂商副本当作候选 | Debian amd64 只扫描标准多架构目录直接文件，不进入厂商子目录；不放宽文件信任校验 | 先红后绿回归 + 真实 sysroot staging + 新 commit 从头制包 | 候选源码快速验证已通过；新冻结提交完整制包待验证 |
 | 真实 Kylin 终端安装在 `preinst` 返回 `TAIJI-LINUX-E011-KYSEC`，但 `getstatus` 显示 `exec control : off` | 旧逻辑把“存在 Kysec”等同于“执行控制已阻断”，未读取真实执行控制状态 | 信任固定且 root 管理的 `/usr/sbin/getstatus`；唯一 `off` 放行、`on` 阻断，未知或不可信状态失败关闭，不改动 Kysec | 27 项 preinst 聚焦回归 + 真实 Kylin 渲染脚本独立预检 + 最终 DEB 断网安装 | 当前源码回归已通过；最终制品、图形安装和其他 Kysec 版本仍需实物证据 |
 | 太极 Agent 已在真实 Kylin 桌面安装并启动，`taiji-native-verify --system-only` 却因 `/api/settings`、`/api/model-config` 返回 `403` 失败 | 桌面版正确要求 Electron 持有私有桌面令牌；系统级校验器无令牌访问受保护接口，却把预期的拒绝误判为产品配置失败 | 系统级校验继续通过安装态配置文件校验产品默认值；当两个接口均返回精确的桌面访问拒绝时，改为确认安全门禁有效；不读取、传递或记录桌面令牌，也不放宽接口保护 | 回归模拟两个精确 `403` 响应必须成功；其它状态、拒绝内容不一致或只有单个接口被拒绝均失败关闭；新制品须在真实 Kylin 安装态重验 | 当前 1.0.1 制品暴露此校验误报；修复会生成新源码身份，必须重建 DEB，旧制品不能作为完整安装态通过证据 |
