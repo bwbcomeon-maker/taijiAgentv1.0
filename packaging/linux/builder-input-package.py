@@ -840,9 +840,11 @@ def _verify_extracted_members(
             extracted_dir / basename,
             "extracted builder input {}".format(basename),
         )
+        expected_mode = int(str(record["mode"]), 8)
+        allowed_modes = {expected_mode, expected_mode & ~0o077}
         if (
             len(payload) != record["size"]
-            or format(mode, "04o") != record["mode"]
+            or mode not in allowed_modes
             or _sha256(payload) != record["sha256"]
         ):
             raise BuilderInputError("extracted builder input member differs from manifest")

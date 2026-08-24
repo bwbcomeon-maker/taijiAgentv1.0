@@ -223,6 +223,47 @@ class BuilderInputPackageContractTest(unittest.TestCase):
 
         self.assertEqual(verified, expected)
 
+    def test_verifier_accepts_exact_umask_077_mode_narrowing_only(self):
+        helper = load_helper()
+        expected = self.create()
+        extracted_parent = self.root / "extracted-with-private-umask"
+        extracted_parent.mkdir()
+        previous_umask = os.umask(0o077)
+        try:
+            with tarfile.open(self.output, "r:gz") as archive:
+                archive.extractall(extracted_parent)
+            extracted = extracted_parent / self.source.name
+            for record in expected["members"]:
+                narrowed_mode = int(record["mode"], 8) & ~0o077
+                (extracted / record["basename"]).chmod(narrowed_mode)
+            (extracted / "生成的安装包").mkdir(mode=0o755)
+        finally:
+            os.umask(previous_umask)
+
+        try:
+            verified = helper.verify_builder_input(
+                archive_path=self.output,
+                manifest_path=self.manifest,
+                checksum_path=self.checksum,
+                extracted_dir=extracted,
+            )
+        except helper.BuilderInputError as exc:
+            self.fail("exact umask 077 mode narrowing was rejected: {}".format(exc))
+
+        self.assertEqual(verified, expected)
+
+        (extracted / "00_制包机_生成离线交付包.sh").chmod(0o600)
+        with self.assertRaisesRegex(
+            helper.BuilderInputError,
+            "extracted builder input member differs from manifest",
+        ):
+            helper.verify_builder_input(
+                archive_path=self.output,
+                manifest_path=self.manifest,
+                checksum_path=self.checksum,
+                extracted_dir=extracted,
+            )
+
     def test_verifier_rejects_nonempty_or_unknown_extracted_directory(self):
         helper = load_helper()
         self.create()
