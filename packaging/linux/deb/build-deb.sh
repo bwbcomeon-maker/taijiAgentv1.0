@@ -569,6 +569,27 @@ PROFILE
   chmod 0644 "$AGENT_RUNTIME/taiji-runtime-profile.json"
 }
 
+write_installed_runtime_profile_module() {
+  cat > "$AGENT_RUNTIME/taiji_runtime_profile.py" <<'PY'
+"""Build-controlled runtime profile for an installed Taiji payload."""
+
+from __future__ import annotations
+
+
+PROFILE_SCHEMA_VERSION = "taiji-runtime-profile/v1"
+INSTALLED_PRODUCTION_PROFILE = "installed-production"
+
+
+def installation_profile() -> str:
+    return INSTALLED_PRODUCTION_PROFILE
+
+
+def is_installed_production() -> bool:
+    return True
+PY
+  chmod 0644 "$AGENT_RUNTIME/taiji_runtime_profile.py"
+}
+
 stage_python_runtime() {
   mkdir -p "$AGENT_RUNTIME" "$WEB_RUNTIME"
   rsync -a --exclude '.git' --exclude '.github' --exclude '.DS_Store' --exclude '._*' --exclude '__pycache__' --exclude '*.pyc' --exclude '.env' --exclude '.env.example' --exclude '.env.docker.example' --exclude '*.example' --exclude '.envrc' --exclude '.dockerignore' --exclude '.gitattributes' --exclude '.gitignore' --exclude '.hadolint.yaml' --exclude '.mailmap' --exclude 'license.jwt' --exclude '*.jwt' --exclude '.pytest_cache' --exclude '.playwright-mcp' --exclude 'docs' --exclude 'tests' --exclude 'website' --exclude 'articles' --exclude 'demos' --exclude 'datagen-config-examples' --exclude 'docker' --exclude 'nix' --exclude 'packaging' --exclude 'plugins/hermes-achievements' --exclude 'plugins/kanban/systemd' --exclude 'plugins/security-guidance' --exclude 'skills' --exclude 'scripts' --exclude 'optional-skills' --exclude 'optional-mcps' --exclude 'locales' --exclude 'ui-tui' --exclude 'web' --exclude 'venv' --exclude 'Dockerfile' --exclude 'docker-compose*' --exclude 'flake.*' --exclude 'MANIFEST.in' --exclude 'uv.lock' --exclude 'package*.json' --exclude 'pyproject.toml' --exclude 'LICENSE' --exclude '*.md' "$SOURCE_AGENT_DIR"/ "$AGENT_RUNTIME"/
@@ -580,6 +601,7 @@ stage_python_runtime() {
   rewrite_product_text_tokens "$WEB_RUNTIME"
   write_packaged_webui_version
   write_installed_runtime_profile
+  write_installed_runtime_profile_module
   compile_sourceless_python "$AGENT_RUNTIME" "$SOURCE_AGENT_PYTHON"
   compile_sourceless_python "$WEB_RUNTIME" "$SOURCE_AGENT_PYTHON"
 }

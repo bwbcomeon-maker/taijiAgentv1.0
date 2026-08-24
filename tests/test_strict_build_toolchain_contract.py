@@ -140,6 +140,59 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertLess(executable_sha_check, marker_write)
         self.assertLess(executable_version_check, marker_write)
 
+    def test_linux_payload_compiles_an_installed_only_runtime_profile_module(self):
+        builder = DEB_BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("write_installed_runtime_profile_module() {")
+        function_end = builder.index("\n}\n\n", function_start) + len("\n}\n")
+        function_source = builder[function_start:function_end]
+        heredoc_start = (
+            'cat > "$AGENT_RUNTIME/taiji_runtime_profile.py" <<\'PY\'\n'
+        )
+        module_source = function_source.split(heredoc_start, 1)[1].split(
+            "\nPY\n", 1
+        )[0] + "\n"
+
+        self.assertNotIn("source-development", module_source)
+        self.assertIn('INSTALLED_PRODUCTION_PROFILE = "installed-production"', module_source)
+        self.assertIn("def installation_profile()", module_source)
+        self.assertIn("def is_installed_production()", module_source)
+        self.assertLess(
+            builder.index("  write_installed_runtime_profile_module\n"),
+            builder.index('  compile_sourceless_python "$AGENT_RUNTIME"'),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            module_path = Path(directory) / "taiji_runtime_profile.py"
+            module_path.write_text(module_source, encoding="utf-8")
+            compile_result = subprocess.run(
+                [sys.executable, "-I", "-B", "-m", "compileall", "-q", "-b", str(module_path)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
+            compiled_path = module_path.with_suffix(".pyc")
+            self.assertNotIn(b"source-development", compiled_path.read_bytes())
+            module_path.unlink()
+            runtime_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    (
+                        "import runpy,sys; m=runpy.run_path(sys.argv[1]); "
+                        "assert m['installation_profile']() == 'installed-production'; "
+                        "assert m['is_installed_production']() is True"
+                    ),
+                    str(compiled_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(runtime_result.returncode, 0, runtime_result.stderr)
+
     def test_formal_builder_prefers_an_exact_adjacent_uv_archive_before_downloading(self):
         builder = BUILDER.read_text(encoding="utf-8")
         ensure_uv = builder[
