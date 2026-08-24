@@ -193,6 +193,30 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             )
             self.assertEqual(runtime_result.returncode, 0, runtime_result.stderr)
 
+    def test_deb_payload_required_paths_use_the_extracted_tree_not_locale_rendered_listing(self):
+        builder = DEB_BUILDER.read_text(encoding="utf-8")
+        function_start = builder.index("audit_deb_payload() {")
+        function_end = builder.index("\n}\n", function_start) + len("\n}\n")
+        audit = builder[function_start:function_end]
+
+        listing = 'dpkg-deb -c "$OUT_DEB" > "$contents"'
+        extraction = 'dpkg-deb -x "$OUT_DEB" "$audit_root"'
+        first_required_loop = 'for required in "./opt/taiji-agent/runtime/agent/venv/bin/python"'
+
+        self.assertIn(listing, audit)
+        self.assertIn(extraction, audit)
+        self.assertLess(audit.index(extraction), audit.index(first_required_loop))
+        self.assertIn('payload_path="$audit_root/${required#./}"', audit)
+        self.assertIn(
+            '[ -e "$payload_path" ] || [ -L "$payload_path" ]',
+            audit,
+        )
+        self.assertNotIn('grep -F "$required" "$contents"', audit)
+        self.assertIn(
+            "./opt/taiji-agent/libexec/target-acceptance/验收工具/acceptance-tools-manifest.json",
+            audit,
+        )
+
     def test_formal_builder_prefers_an_exact_adjacent_uv_archive_before_downloading(self):
         builder = BUILDER.read_text(encoding="utf-8")
         ensure_uv = builder[
