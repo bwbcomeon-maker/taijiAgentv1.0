@@ -519,7 +519,7 @@ def _worker_script(remote_dir: str, source_commit: str, remote_attempt_id: str, 
             "unset TAIJI_ALLOW_UV_LOCK_REFRESH",
             "cd -- \"$remote_dir\"",
             "/usr/bin/sha256sum -c -- {}".format(_shell_quote(checksum)),
-            "/usr/bin/tar --no-same-owner --no-same-permissions -xzf -- {}".format(_shell_quote(archive)),
+            "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {}".format(_shell_quote(archive)),
             "cd -- {}".format(_shell_quote(delivery)),
             "set +e",
             "TAIJI_UV_LOCK_MODE=strict /bin/bash -p ./00_制包机_生成离线交付包.sh 2>&1 | /usr/bin/tee -- \"$remote_log\"",
@@ -531,7 +531,7 @@ def _worker_script(remote_dir: str, source_commit: str, remote_attempt_id: str, 
             "if [ \"$tee_status\" -ne 0 ]; then exit \"$tee_status\"; fi",
             "phase=review",
             "/usr/bin/install -d -m 0700 -- {}".format(_shell_quote(remote_dir + "/review")),
-            "/usr/bin/tar --no-same-owner --no-same-permissions -xzf -- {} -C {}".format(
+            "/usr/bin/tar --no-same-owner --no-same-permissions -xzf {} -C {}".format(
                 _shell_quote(delivery + "/" + source_archive), _shell_quote(remote_dir + "/review")
             ),
             "/bin/cp -a -- {}/. {}/".format(
