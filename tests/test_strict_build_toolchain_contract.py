@@ -223,6 +223,42 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
             'mv -- "$FORMAL_PYTHON_PATH"', seal
         )
 
+    def test_formal_driver_uses_distinct_controlled_npm_configs(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        run_start = builder.index("run_formal_build_tests_direct() {")
+        run_end = builder.index("\n}\n", run_start)
+        run = builder[run_start:run_end]
+
+        self.assertIn('"$BUILD_NPM_USERCONFIG"', run)
+        self.assertIn('"$BUILD_NPM_GLOBALCONFIG"', run)
+        self.assertLess(
+            run.index('"$BUILD_NPM_USERCONFIG"'),
+            run.index('"$BUILD_NPM_GLOBALCONFIG"'),
+        )
+        self.assertIn("npm_userconfig = sys.argv[4]", run)
+        self.assertIn("npm_globalconfig = sys.argv[5]", run)
+        self.assertIn(
+            "driver_argv = [driver_path] + sys.argv[6:]", run
+        )
+        self.assertIn(
+            'original_clean_environment = driver_globals["_clean_environment"]',
+            run,
+        )
+        self.assertIn(
+            'environment["NPM_CONFIG_USERCONFIG"] = npm_userconfig', run
+        )
+        self.assertIn(
+            'environment["NPM_CONFIG_GLOBALCONFIG"] = npm_globalconfig', run
+        )
+        self.assertIn(
+            'driver_globals["_clean_environment"] = controlled_npm_clean_environment',
+            run,
+        )
+        self.assertIn(
+            '[ "$BUILD_NPM_USERCONFIG" != "$BUILD_NPM_GLOBALCONFIG" ]',
+            builder,
+        )
+
     def test_formal_build_test_driver_comes_from_archive_derived_source_root(self):
         builder = BUILDER.read_text(encoding="utf-8")
         function_start = builder.index("run_formal_build_tests_direct() {")

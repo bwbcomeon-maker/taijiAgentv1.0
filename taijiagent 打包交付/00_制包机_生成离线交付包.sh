@@ -3707,6 +3707,8 @@ run_formal_build_tests_direct() {
       "$SRC_DIR/scripts/run-taiji-formal-build-tests.py" \
       "$FORMAL_PYTHON_FD" \
       "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" \
+      "$BUILD_NPM_USERCONFIG" \
+      "$BUILD_NPM_GLOBALCONFIG" \
       --source-root "$SRC_DIR" \
       --source-commit "$MARKER_SOURCE_COMMIT" \
       --work-root "$direct_work" \
@@ -3722,12 +3724,15 @@ import sys
 driver_path = sys.argv[1]
 python_fd = int(sys.argv[2])
 launcher_held_path = sys.argv[3]
-driver_argv = [driver_path] + sys.argv[4:]
+npm_userconfig = sys.argv[4]
+npm_globalconfig = sys.argv[5]
+driver_argv = [driver_path] + sys.argv[6:]
 namespace = runpy.run_path(
     driver_path, run_name="taiji_formal_held_python_driver"
 )
 driver_globals = namespace["run"].__globals__
 original_fd_path = driver_globals["_fd_path"]
+original_clean_environment = driver_globals["_clean_environment"]
 
 
 def held_python_fd_path(descriptor):
@@ -3736,7 +3741,15 @@ def held_python_fd_path(descriptor):
     return original_fd_path(descriptor)
 
 
+def controlled_npm_clean_environment(work):
+    environment = original_clean_environment(work)
+    environment["NPM_CONFIG_USERCONFIG"] = npm_userconfig
+    environment["NPM_CONFIG_GLOBALCONFIG"] = npm_globalconfig
+    return environment
+
+
 driver_globals["_fd_path"] = held_python_fd_path
+driver_globals["_clean_environment"] = controlled_npm_clean_environment
 sys.argv = driver_argv
 raise SystemExit(namespace["main"]())
 PY
