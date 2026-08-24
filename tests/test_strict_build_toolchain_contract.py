@@ -740,6 +740,21 @@ class StrictBuildToolchainContractTests(unittest.TestCase):
         self.assertIn('UV_EXECUTABLE="${TAIJI_UV_EXECUTABLE:-uv}"', setup)
         self.assertIn('"$UV_EXECUTABLE" sync "${sync_args[@]}" --locked', production)
 
+    def test_formal_builder_forces_copy_link_mode_for_the_production_uv_sync(self):
+        builder = BUILDER.read_text(encoding="utf-8")
+        run_setup_local = builder[
+            builder.index("run_setup_local() {") : builder.index(
+                "\n}\n\nbuild_runtime_and_deb()", builder.index("run_setup_local() {")
+            )
+        ]
+
+        self.assertIn("UV_LINK_MODE=copy \\\n", run_setup_local)
+        self.assertLess(
+            run_setup_local.index("UV_LINK_MODE=copy"),
+            run_setup_local.index("/bin/bash -p ./scripts/setup-local.sh"),
+        )
+        self.assertNotIn('UV_LINK_MODE="${', run_setup_local)
+
     def test_webui_requirements_are_exact_agent_direct_lock_subset(self):
         result = subprocess.run(
             [

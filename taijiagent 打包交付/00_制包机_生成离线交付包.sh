@@ -2442,6 +2442,7 @@ run_setup_local() {
   TAIJI_UV_LOCK_MODE="$uv_lock_mode" \
   TAIJI_UV_EXECUTABLE="$UV_BIN" \
   TAIJI_PYTHON_EXECUTABLE="$PYTHON_BIN" \
+  UV_LINK_MODE=copy \
   UV_PYTHON_DOWNLOADS=never \
     /bin/bash -p ./scripts/setup-local.sh 2>&1 | tee -a "$setup_log"
   status="${PIPESTATUS[0]}"
