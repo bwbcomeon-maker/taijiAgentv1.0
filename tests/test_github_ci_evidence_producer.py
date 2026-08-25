@@ -83,7 +83,7 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
             "id": RUN_ID,
             "run_attempt": RUN_ATTEMPT,
             "workflow_id": 778899,
-            "name": "Pull Request CI",
+            "name": "Main Validation",
             "path": ".github/workflows/ci.yml",
             "event": "push",
             "status": "completed",
@@ -100,7 +100,7 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
             "id": 987654321,
             "run_id": RUN_ID,
             "run_attempt": RUN_ATTEMPT,
-            "workflow_name": "Pull Request CI",
+            "workflow_name": "Main Validation",
             "name": "CI Gate",
             "head_sha": SOURCE_COMMIT,
             "status": "completed",
@@ -258,6 +258,7 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
         self.assertEqual(evidence["schema"], "taiji-github-ci-evidence/v2")
         self.assertEqual(evidence["provider"], "github-actions-rest-api")
         self.assertEqual(evidence["repository"], REPOSITORY)
+        self.assertEqual(evidence["workflow_name"], "Main Validation")
         self.assertEqual(evidence["workflow_path"], ".github/workflows/ci.yml")
         self.assertEqual(evidence["event"], "push")
         self.assertEqual(evidence["head_branch"], "main")
@@ -439,7 +440,7 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
         opener = SuccessfulOpener()
         with patch.object(producer, "build_opener", return_value=opener), patch.dict(
             producer.os.environ,
-            {"GITHUB_TOKEN": "test-token-must-not-appear-in-output"},
+            {"GITHUB_TOKEN": "TEST_ONLY_token-must-not-appear-in-output"},
             clear=True,
         ):
             actual, final_url = producer._github_fetch_bytes(RUN_URL)
@@ -454,7 +455,7 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
         )
         self.assertEqual(
             opener.request.get_header("Authorization"),
-            "Bearer test-token-must-not-appear-in-output",
+            "Bearer TEST_ONLY_token-must-not-appear-in-output",
         )
         self.assertEqual(opener.timeout, producer.HTTP_TIMEOUT_SECONDS)
 
@@ -481,14 +482,14 @@ class GitHubCiEvidenceProducerTests(unittest.TestCase):
                     return_value=FailingOpener(failure),
                 ), patch.dict(
                     producer.os.environ,
-                    {"GITHUB_TOKEN": "test-token-must-not-escape"},
+                    {"GITHUB_TOKEN": "TEST_ONLY_token-must-not-escape"},
                     clear=True,
                 ):
                     with self.assertRaises(
                         producer.GitHubCiEvidenceError
                     ) as caught:
                         producer._github_fetch_bytes(RUN_URL)
-                self.assertNotIn("test-token", str(caught.exception))
+                self.assertNotIn("TEST_ONLY_token", str(caught.exception))
 
         with self.assertRaises(producer.GitHubCiEvidenceError):
             producer._github_fetch_bytes(

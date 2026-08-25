@@ -1,8 +1,8 @@
-name: Pull Request CI
+name: Main Validation
 
+# Asynchronous main evidence; daily pushes do not wait on this run, while formal
+# release evidence may bind to a successful run through the release chain.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -34,21 +34,34 @@ jobs:
           fetch-depth: 0
       - id: scope
         env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
-          base="${PR_BASE:-$BEFORE}"
-          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}"; then
-            base="$(git rev-parse "$HEAD_SHA^")"
-          fi
+          base="${BEFORE:-}"
+          case "$EVENT_NAME" in
+            push)
+              if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+                echo "push event requires a non-empty, non-zero, resolvable github.event.before" >&2
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              if ! base="$(git rev-parse --verify "$HEAD_SHA^" 2>/dev/null)"; then
+                echo "workflow_dispatch requires a resolvable HEAD^ comparison base" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "unsupported event for change classification: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           python3 scripts/classify-ci-scope.py \
             --base "$base" \
             --head "$HEAD_SHA" \
-            --label "$LABELS" \
             --github-output "$GITHUB_OUTPUT"
 
   baseline:

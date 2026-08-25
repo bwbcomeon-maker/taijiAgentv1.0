@@ -2,7 +2,7 @@
 
 ## 基本执行口径
 
-- 修改前先核对实际仓库、分支、worktree、HEAD、源码入口和运行来源。
+- 修改前先核对实际仓库、分支、worktree 清单、HEAD、源码入口和运行来源。
 - 遇到 Bug 必须给出根因和影响面，不得只修当前表象。
 - 没有实际验证，不得宣称“已完成”或“已修复”。
 - 状态报告必须区分：`已实时验证`、`未实时验证`、`历史线索`。
@@ -10,7 +10,7 @@
 
 ## 开发生命周期强制规则
 
-凡涉及仓库文件修改、Git/GitHub、分支/worktree、PR/CI、源码启动、开发或运行目录、持久服务、打包或发布，必须先完整阅读并遵循：
+凡涉及仓库文件修改、Git/GitHub、分支/worktree、审查/CI、源码启动、开发或运行目录、持久服务、打包或发布，必须先完整阅读并遵循：
 
 [`docs/runbooks/development-lifecycle.md`](docs/runbooks/development-lifecycle.md)
 
@@ -18,7 +18,11 @@
 
 ## 标准收尾快捷授权
 
-当用户明确说“按标准收尾”时，表示授权对当前独立成果连续执行本地验证与提交、push 功能分支、创建 PR、处理当前成果导致的 CI 红灯，并在全部门禁通过后合并、同步和复验正式 `main`，最后进入安全清理。该触发词不授权制包、安装、部署、持久服务、发布、绕过门禁、影响其它任务或删除归属不明的内容；具体动作、停止条件和证据要求以 [`docs/runbooks/development-lifecycle.md`](docs/runbooks/development-lifecycle.md) 第 4、8、9、10 节为准。
+日常开发直接在 `main` 进行；`main` 是最新本地验证的开发版本，不等同于稳定发布版本。一个任务只允许一个写入 Agent，并可并行安排只读审查。用户要求修改、修复或完成仓库任务且未明确限定 `local-only` 时，默认授权并要求在验证及最终 Sol 审核通过后精确暂存、commit、刷新远端并正常 push `main`，无需再次询问。`Main Validation` 是 push 后的异步、非强制补充证据，不能替代本地验证和提交前 Sol 审核。
+
+“按标准收尾”是上述默认流程的明确快捷语义，不是正常 commit/push 的额外授权门槛。精确暂存后、commit 前，Sol 必须重新审核 `git status --short`、未暂存 diff、`git diff --cached --name-status`、`git diff --cached --check` 和完整 cached diff；任何 staged bytes 变化都使旧审核失效并要求重审。该默认流程和快捷语义均不授权创建或移动 Tag、创建 GitHub Release、制包、签名、安装、部署、持久服务、发布、强推、历史改写、影响其它任务或删除归属不明的内容；具体动作、停止条件和证据要求以 [`docs/runbooks/development-lifecycle.md`](docs/runbooks/development-lifecycle.md) 和 [`docs/runbooks/solo-development-workflow.md`](docs/runbooks/solo-development-workflow.md) 为准。
+
+版本身份固定如下：RC 使用不可移动的 `vX.Y.Z-rc.N` 附注标签，稳定版本使用不可移动的 `vX.Y.Z` 附注标签；GitHub Release 只能绑定一个正式稳定标签。Tag、Release 及其后续交付动作均需单独明确授权。
 
 ## Linux/Kylin/UOS 打包规则
 

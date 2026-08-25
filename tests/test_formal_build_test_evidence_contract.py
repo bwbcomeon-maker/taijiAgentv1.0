@@ -1088,6 +1088,9 @@ validate_source_archive_integrity
             fake_python = root / "formal-python"
             fake_python.write_text("#!/bin/sh\nprintf '3.11.15\\n'\n", encoding="utf-8")
             fake_python.chmod(0o755)
+            fake_python_launcher = root / "formal-python-launcher"
+            fake_python_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_python_launcher.chmod(0o755)
             harness = root / "retarget.sh"
             harness.write_text(
                 "\n".join(
@@ -1103,6 +1106,8 @@ validate_source_archive_integrity
                         'FORMAL_NPM_CLI_HELD_PATH="$FORMAL_NPM_CLI_PATH"',
                         'FORMAL_PYTHON_PATH="{}"'.format(fake_python),
                         'FORMAL_PYTHON_HELD_PATH="$FORMAL_PYTHON_PATH"',
+                        'FORMAL_PYTHON_LAUNCHER_PATH="{}"'.format(fake_python_launcher),
+                        'FORMAL_PYTHON_LAUNCHER_HELD_PATH="$FORMAL_PYTHON_LAUNCHER_PATH"',
                         'FORMAL_ESLINT_FD=""',
                         'FORMAL_NODE_IDENTITY=node-id',
                         'FORMAL_NODE_SHA256=node-sha',
@@ -1110,6 +1115,8 @@ validate_source_archive_integrity
                         'FORMAL_NPM_CLI_SHA256=npm-sha',
                         'FORMAL_PYTHON_IDENTITY=python-id',
                         'FORMAL_PYTHON_SHA256=python-sha',
+                        'FORMAL_PYTHON_LAUNCHER_IDENTITY=python-launcher-id',
+                        'FORMAL_PYTHON_LAUNCHER_SHA256=python-launcher-sha',
                         'FORMAL_TEST_RUNTIME_SEALED=1',
                         'NODE_VERSION=22.23.1',
                         'NODE_NPM_VERSION_ARCHIVE=10.9.8',
@@ -1123,10 +1130,21 @@ validate_source_archive_integrity
                         '    "$FORMAL_NODE_PATH") printf "node-id\\tnode-sha\\n" ;;',
                         '    "$FORMAL_NPM_CLI_PATH") printf "npm-id\\tnpm-sha\\n" ;;',
                         '    "$FORMAL_PYTHON_PATH") printf "python-id\\tpython-sha\\n" ;;',
+                        '    "$FORMAL_PYTHON_LAUNCHER_PATH") printf "python-launcher-id\\tpython-launcher-sha\\n" ;;',
                         '    *) return 1 ;;',
                         '  esac',
                         '}',
                         'run_held_node_script() { printf "10.9.8\\n"; }',
+                        'run_held_python() {',
+                        '  [ "$#" -eq 6 ] || return 1',
+                        '  [ "$1" = "$FORMAL_PYTHON_PATH" ] || return 1',
+                        '  [ "$2" = "$FORMAL_PYTHON_LAUNCHER_HELD_PATH" ] || return 1',
+                        '  [ "$3" = -I ] || return 1',
+                        '  [ "$4" = -B ] || return 1',
+                        '  [ "$5" = -c ] || return 1',
+                        "  [ \"$6\" = 'import platform, pytest; print(platform.python_version())' ] || return 1",
+                        '  printf "3.11.15\\n"',
+                        '}',
                         'validate_formal_test_runtime_identity',
                         'ln -sfn "{}" "$FORMAL_NODE_CURRENT_PATH"'.format(runtime_b),
                         'if validate_formal_test_runtime_identity; then exit 41; fi',
@@ -1147,6 +1165,7 @@ validate_source_archive_integrity
             "FORMAL_NODE_PATH",
             "FORMAL_NPM_CLI_PATH",
             "FORMAL_PYTHON_PATH",
+            "FORMAL_PYTHON_LAUNCHER_PATH",
             "FORMAL_ESLINT_PATH",
         ):
             self.assertIn(canonical, builder[validate_start:validate_end])

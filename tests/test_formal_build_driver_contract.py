@@ -827,23 +827,7 @@ class FormalBuildDriverContractTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import os,sys; os.write(int(sys.argv[1]), b'{}\\n'); "
-                "sys.stdout.buffer.write(b'01234567890')".format(
-                    json.dumps(
-                        {
-                            "ordinal": 0,
-                            "collected": 1,
-                            "deselected": 0,
-                            "executed": 1,
-                            "passed": 1,
-                            "failed": 0,
-                            "errors": 0,
-                            "skipped": 0,
-                        },
-                        separators=(",", ":"),
-                    ).replace("'", "\\'")
-                ),
-                str(result_write),
+                "import os,time; os.write(1,b'01234567890'); time.sleep(10)",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

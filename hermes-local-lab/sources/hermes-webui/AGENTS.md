@@ -5,6 +5,11 @@ repository. Keep it project-specific and safe to publish. Do not put personal
 machine setup, private network details, credentials, tokens, or local-only
 workflow notes here.
 
+> **Taiji monorepo scope:** This upstream component guidance remains valid for
+> Hermes WebUI engineering. Within the Taiji repository, the root `AGENTS.md`
+> wins for Git workflow, commit/push, review, CI, and release authority;
+> `docs/runbooks/development-lifecycle.md` is the canonical lifecycle.
+
 ## Read first
 
 Before making changes, read:
@@ -44,7 +49,7 @@ Follow that checklist's safety rules:
 
 ## Contribution style
 
-- Keep one logical change per PR; split unrelated refactors or cleanup.
+- Keep one logical change per Taiji commit; split unrelated refactors or cleanup.
 - Read `docs/CONTRACTS.md` and the linked contract/RFC for the touched
   subsystem before editing.
 - Prefer the existing Python + vanilla JavaScript structure. Do not add

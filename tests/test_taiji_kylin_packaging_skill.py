@@ -602,7 +602,7 @@ class SkillPackagerContractTests(unittest.TestCase):
 
     def test_packager_rejects_private_key_and_development_path_leaks(self) -> None:
         mutations = {
-            "private-key": "\n-----BEGIN PRIVATE KEY-----\n",
+            "private-key": "\n-----BEGIN " + "PRIVATE KEY-----\n",
             "development-path": "\n/Users/example/private-worktree\n",
         }
         for name, leaked_text in mutations.items():
@@ -619,15 +619,15 @@ class SkillPackagerContractTests(unittest.TestCase):
                 self.assertFalse((output / "taiji-kylin-packaging.skill").exists())
 
     def test_packager_rejects_output_inside_skill_source(self) -> None:
-        output = SKILL_ROOT / "dist"
-        output.mkdir(exist_ok=True)
-        try:
-            result = run_python(PACKAGER, "--skill-root", str(SKILL_ROOT), "--output-dir", str(output))
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = Path(temporary) / "taiji-kylin-packaging"
+            shutil.copytree(SKILL_ROOT, copied)
+            output = copied / "dist"
+            output.mkdir()
+            result = run_python(PACKAGER, "--skill-root", str(copied), "--output-dir", str(output))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("outside the Skill source tree", result.stderr)
             self.assertFalse((output / "taiji-kylin-packaging.skill").exists())
-        finally:
-            output.rmdir()
 
 
 if __name__ == "__main__":

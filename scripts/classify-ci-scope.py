@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
@@ -38,6 +40,10 @@ HIGH_RISK_PREFIXES = (
     "tools/taiji-license-issuer/",
 )
 HIGH_RISK_ROOT_FILES = {".gitignore", "AGENTS.md", "VERSION"}
+HIGH_RISK_GOVERNANCE_FILES = {
+    "docs/runbooks/development-lifecycle.md",
+    "docs/runbooks/solo-development-workflow.md",
+}
 HIGH_RISK_FILE_NAMES = {
     "package-lock.json",
     "pnpm-lock.yaml",
@@ -56,6 +62,18 @@ HIGH_RISK_TERMS = (
     "release",
     "security",
 )
+GIT_LOCATOR_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+class LocalChangeError(RuntimeError):
+    pass
 
 
 def _normalise(path: str) -> str:
@@ -74,6 +92,7 @@ def _is_high_risk(path: str) -> bool:
     name = PurePosixPath(path).name.lower()
     return (
         path in HIGH_RISK_ROOT_FILES
+        or path in HIGH_RISK_GOVERNANCE_FILES
         or path.startswith(HIGH_RISK_PREFIXES)
         or name in HIGH_RISK_FILE_NAMES
         or name.startswith("requirements") and name.endswith(".txt")
@@ -126,14 +145,56 @@ def classify_paths(paths: Iterable[str], labels: Iterable[str] = ()) -> dict[str
     return result
 
 
+def _git_env() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in GIT_LOCATOR_ENV:
+        environment.pop(name, None)
+    return environment
+
+
+def _git_nul(repo: Path, *arguments: str) -> list[str]:
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=repo,
+            env=_git_env(),
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise LocalChangeError("Git query could not start") from exc
+    if completed.returncode != 0:
+        raise LocalChangeError("Git query failed")
+    return [
+        item.decode("utf-8", "surrogateescape")
+        for item in completed.stdout.split(b"\0")
+        if item
+    ]
+
+
 def changed_paths(base: str, head: str, repo: Path) -> list[str]:
-    completed = subprocess.run(
-        ["git", "diff", "--name-only", "-z", f"{base}...{head}"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
+    return _git_nul(
+        repo,
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        f"{base}...{head}",
     )
-    return [item.decode("utf-8", "surrogateescape") for item in completed.stdout.split(b"\0") if item]
+
+
+def local_changed_paths(repo: Path) -> list[str]:
+    collected: list[str] = []
+    for arguments in (
+        ("diff", "--no-renames", "--cached", "--name-only", "-z"),
+        ("diff", "--no-renames", "--name-only", "-z"),
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+    ):
+        collected.extend(_git_nul(repo, *arguments))
+    unmerged = _git_nul(repo, "ls-files", "-u", "-z")
+    if unmerged:
+        raise LocalChangeError("unmerged index entries")
+    return sorted(set(collected))
 
 
 def write_github_output(path: Path, result: dict[str, object]) -> None:
@@ -150,16 +211,25 @@ def main() -> int:
     parser.add_argument("--base")
     parser.add_argument("--head")
     parser.add_argument("--path", action="append", default=[])
+    parser.add_argument("--local-changes", action="store_true")
     parser.add_argument("--label", action="append", default=[])
     parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
     paths = args.path
-    if not paths:
-        if not args.base or not args.head:
-            parser.error("provide --path or both --base and --head")
-        paths = changed_paths(args.base, args.head, repo)
+    try:
+        if args.local_changes:
+            if paths or args.base or args.head:
+                parser.error("--local-changes cannot be combined with --path/--base/--head")
+            paths = local_changed_paths(repo)
+        elif not paths:
+            if not args.base or not args.head:
+                parser.error("provide --local-changes, --path, or both --base and --head")
+            paths = changed_paths(args.base, args.head, repo)
+    except LocalChangeError as exc:
+        print(f"local change classification failed: {exc}", file=sys.stderr)
+        return 2
 
     result = classify_paths(paths, args.label)
     if args.github_output:

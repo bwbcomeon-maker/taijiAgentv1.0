@@ -353,14 +353,43 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
         self.assertEqual(smoke.returncode, 0, smoke.stdout + smoke.stderr)
 
     def test_dependency_profiles_keep_dev_tools_for_source_but_not_for_production(self) -> None:
-        setup = ROOT / "hermes-local-lab/scripts/setup-local.sh"
+        fixture_root = self.temp_dir / "dependency-profile-repo"
+        lab_dir = fixture_root / "hermes-local-lab"
+        agent_dir = lab_dir / "sources/hermes-agent"
+        webui_dir = lab_dir / "sources/hermes-webui"
+        fixture_files = (
+            (
+                ROOT / "hermes-local-lab/scripts/setup-local.sh",
+                lab_dir / "scripts/setup-local.sh",
+            ),
+            (
+                ROOT / "packaging/linux/verify-python-lock-contract.py",
+                fixture_root / "packaging/linux/verify-python-lock-contract.py",
+            ),
+            (
+                ROOT / "hermes-local-lab/sources/hermes-agent/pyproject.toml",
+                agent_dir / "pyproject.toml",
+            ),
+            (
+                ROOT / "hermes-local-lab/sources/hermes-agent/uv.lock",
+                agent_dir / "uv.lock",
+            ),
+            (
+                ROOT / "hermes-local-lab/sources/hermes-webui/requirements.txt",
+                webui_dir / "requirements.txt",
+            ),
+        )
+        for source, destination in fixture_files:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        setup = lab_dir / "scripts/setup-local.sh"
 
         def run_setup(profile: str | None) -> subprocess.CompletedProcess[str]:
             fake_root = self.temp_dir / f"fake-uv-{profile or 'default'}"
             fake_bin = fake_root / "bin"
             fake_bin.mkdir(parents=True)
-            test_venv = ROOT / "hermes-local-lab/sources/hermes-agent/venv"
-            self.assertFalse(test_venv.exists(), "isolated worktree must not have a real venv")
+            test_venv = agent_dir / "venv"
+            self.assertFalse(test_venv.exists(), "synthetic fixture must start without a venv")
             (test_venv / "bin").mkdir(parents=True)
             fake_python = test_venv / "bin/python"
             fake_python.write_text(
@@ -417,9 +446,7 @@ class LinuxPythonRuntimeStagingTest(unittest.TestCase):
         self.assertIn("TAIJI_DEPENDENCY_PROFILE", invalid.stderr)
 
         project = tomllib.loads(
-            (ROOT / "hermes-local-lab/sources/hermes-agent/pyproject.toml").read_text(
-                encoding="utf-8"
-            )
+            (agent_dir / "pyproject.toml").read_text(encoding="utf-8")
         )
         extras = project["project"]["optional-dependencies"]
         self.assertNotIn("hermes-agent[dev]", extras["all"])

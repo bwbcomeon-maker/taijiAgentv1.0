@@ -32,25 +32,29 @@ Default local addresses:
 
 To configure real model providers, copy `hermes-local-lab/.env.example` to `hermes-local-lab/.env` and fill in only the keys you need. Never commit `.env`.
 
-## GitHub Workflow
+## Development and Release Identity
 
-`main` is the only formal runtime, packaging and release source. Day-to-day
-changes use a short-lived `codex/*` branch in an isolated worktree:
+Daily work uses direct development on `main`. In this repository, `main` is the
+latest locally verified development line; `main` is not equivalent to a stable
+release. One writing Agent owns the working tree while Sol and other Agents may
+audit read-only. Unless the user explicitly limits work to `local-only`, the
+default closeout is local verification, exact staging, final Sol review of the
+complete cached patch, one clear commit, remote refresh/divergence proof, and a
+normal push to `origin/main` without another permission prompt. Any staged-byte
+change invalidates that review and requires a fresh review before commit.
 
-1. Create a worktree/branch from current `main`.
-2. Implement and test locally, then create one clear local commit.
-3. Push the branch and open a pull request; do not push development commits
-   directly to `main`.
-4. GitHub CI selects the smallest safe test scope from changed paths. Add the
-   `full-ci` label to force every automated suite.
-5. Merge only after the required `CI Gate` check passes, then fast-forward the
-   formal local `main` and verify it is clean.
+`Main Validation` runs asynchronously after a push to `main`. It is non-required
+supplemental evidence for daily work, not permission to skip local verification.
+Real Electron, OAuth/provider, WPS/Word, packaging, signing, installation, and
+Kylin/UOS target-machine checks remain separate gates.
 
-Documentation-only changes use the fast lane. Normal code changes run root
-contracts plus affected modules. Workflow, dependency, security, provider,
-license, migration, packaging and release changes run every automated suite.
-Real Electron, OAuth/provider, WPS and Kylin/UOS target-machine checks remain
-release gates because shared GitHub runners cannot reproduce those environments.
+Release identity is immutable and explicit:
 
-See [the solo-development runbook](docs/runbooks/github-pr-ci-workflow.md) for
-the exact commands and recovery procedure.
+- RC: annotated tag `vX.Y.Z-rc.N`.
+- Stable: annotated tag `vX.Y.Z`.
+- GitHub Release: bound to one formal stable tag; it does not redefine `main`.
+
+Creating or moving a tag, creating a GitHub Release, packaging, installing,
+deploying, or publishing requires separate authorization. See the canonical
+[development lifecycle](docs/runbooks/development-lifecycle.md) and the
+[solo-development runbook](docs/runbooks/solo-development-workflow.md).

@@ -2,6 +2,11 @@
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
+> **Taiji monorepo scope:** This upstream component guidance remains valid for
+> Hermes Agent engineering. Within the Taiji repository, the root `AGENTS.md`
+> wins for Git workflow, commit/push, review, CI, and release authority;
+> `docs/runbooks/development-lifecycle.md` is the canonical lifecycle.
+
 ## Development Environment
 
 ```bash
@@ -978,13 +983,14 @@ while the agent is blocked (e.g. approval prompts) MUST bypass BOTH
 guards and be dispatched inline, not via `_process_message_background()`
 (which races session lifecycle).
 
-### Squash merges from stale branches silently revert recent fixes
-Before squash-merging a PR, ensure the branch is up to date with `main`
-(`git fetch origin main && git reset --hard origin/main` in the worktree,
-then re-apply the PR's commits). A stale branch's version of an unrelated
-file will silently overwrite recent fixes on main when squashed. Verify
-with `git diff HEAD~1..HEAD` after merging — unexpected deletions are a
-red flag.
+### Stale changes must not overwrite unrelated fixes
+
+Before integrating a change, fetch the current base and inspect the complete
+diff against it. If the base moved or unrelated paths differ, stop and preserve
+both sides before resolving the change deliberately; never replace whole files
+or discard another writer's work merely to make histories align. After
+integration, inspect the resulting commit diff; unexpected deletions are a red
+flag.
 
 ### Don't wire in dead code without E2E validation
 Unused code that was never shipped was dead for a reason. Before wiring an
