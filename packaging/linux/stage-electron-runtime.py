@@ -555,6 +555,7 @@ def stage_electron_runtime(
                 raise ElectronRuntimeStageError(
                     "private Electron archive snapshot changed during staging"
                 )
+            temporary.chmod(0o755)
             os.rename(temporary, destination)
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)

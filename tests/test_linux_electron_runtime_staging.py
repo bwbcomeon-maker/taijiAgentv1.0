@@ -126,6 +126,14 @@ class LinuxElectronRuntimeStagingTest(unittest.TestCase):
             self.assertFalse(name.endswith(".d.ts"), relative)
             self.assertFalse(name.endswith(".map"), relative)
 
+    def test_staged_runtime_root_is_traversable_by_installed_desktop_user(self) -> None:
+        self.stage()
+
+        self.assertEqual(
+            stat.S_IMODE(self.destination.stat().st_mode),
+            0o755,
+        )
+
     def test_rejects_tampered_non_elf_resource_even_when_elf_is_unchanged(self) -> None:
         (self.source / "dist/resources.pak").write_bytes(b"attacker-controlled-resource")
 
