@@ -479,6 +479,120 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 b"standard",
             )
 
+    def test_stager_includes_complete_nss_runtime_module_set_for_electron(self):
+        module_sonames = {
+            "libfreebl3.so",
+            "libfreeblpriv3.so",
+            "libnssckbi.so",
+            "libnssdbm3.so",
+            "libnsspem.so",
+            "libsoftokn3.so",
+        }
+        integrity_files = {
+            "libfreebl3.chk",
+            "libfreeblpriv3.chk",
+            "libnssdbm3.chk",
+            "libsoftokn3.chk",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "payload"
+            electron = (
+                root
+                / "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
+            )
+            electron.parent.mkdir(parents=True)
+            electron.write_bytes(b"electron")
+            sysroot = Path(temp_dir) / "x86_64-linux-gnu"
+            nss_dir = sysroot / "nss"
+            nss_dir.mkdir(parents=True)
+            for basename in sorted(module_sonames | integrity_files):
+                (nss_dir / basename).write_bytes(basename.encode("ascii"))
+            sqlite = sysroot / "libsqlite3.so.0.8.6"
+            sqlite.write_bytes(b"sqlite")
+
+            def fake_soname(path, *args):
+                path = Path(path)
+                if path == sqlite:
+                    return "libsqlite3.so.0"
+                if path.name in module_sonames:
+                    return path.name
+                return None
+
+            def fake_copy(source_path, destination, *, uid, gid):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source_path.read_bytes())
+                return hashlib.sha256(destination.read_bytes()).hexdigest()
+
+            with mock.patch.object(self.stager, "readelf_soname", side_effect=fake_soname), \
+                    mock.patch.object(
+                        self.stager,
+                        "source_metadata",
+                        return_value=(stat.S_IFREG | 0o644, 0, 1),
+                    ), \
+                    mock.patch.object(self.stager, "_copy_atomically", side_effect=fake_copy), \
+                    mock.patch.object(self.stager, "_ensure_private_directory"):
+                report = self.stager.stage_private_libraries(root, self.policy, sysroot)
+
+            destination = root / "opt/taiji-agent/runtime/lib"
+            for basename in module_sonames | integrity_files | {"libsqlite3.so.0"}:
+                self.assertTrue((destination / basename).is_file(), basename)
+            self.assertTrue(
+                module_sonames | {"libsqlite3.so.0"}
+                <= {entry["soname"] for entry in report["files"]}
+            )
+            self.assertEqual(
+                [entry["basename"] for entry in report["nss_integrity_files"]],
+                sorted(integrity_files),
+            )
+
+    def test_stager_rejects_incomplete_nss_runtime_module_set_for_electron(self):
+        module_sonames = {
+            "libfreebl3.so",
+            "libfreeblpriv3.so",
+            "libnssckbi.so",
+            "libnssdbm3.so",
+            "libnsspem.so",
+            "libsoftokn3.so",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "payload"
+            electron = (
+                root
+                / "opt/taiji-agent/apps/taiji-desktop/node_modules/electron/dist/electron"
+            )
+            electron.parent.mkdir(parents=True)
+            electron.write_bytes(b"electron")
+            sysroot = Path(temp_dir) / "x86_64-linux-gnu"
+            nss_dir = sysroot / "nss"
+            nss_dir.mkdir(parents=True)
+            for basename in sorted(
+                module_sonames
+                | {"libfreebl3.chk", "libfreeblpriv3.chk", "libnssdbm3.chk"}
+            ):
+                (nss_dir / basename).write_bytes(basename.encode("ascii"))
+            sqlite = sysroot / "libsqlite3.so.0.8.6"
+            sqlite.write_bytes(b"sqlite")
+
+            def fake_soname(path, *args):
+                path = Path(path)
+                if path == sqlite:
+                    return "libsqlite3.so.0"
+                if path.name in module_sonames:
+                    return path.name
+                return None
+
+            with mock.patch.object(self.stager, "readelf_soname", side_effect=fake_soname), \
+                    mock.patch.object(
+                        self.stager,
+                        "source_metadata",
+                        return_value=(stat.S_IFREG | 0o644, 0, 1),
+                    ):
+                with self.assertRaisesRegex(
+                    self.stager.StageError,
+                    "libsoftokn3.chk",
+                ):
+                    self.stager.stage_private_libraries(root, self.policy, sysroot)
+
     def test_source_native_verifier_reinjects_private_loader_path_after_runtime_env(self):
         source_verifier = (ROOT / "hermes-local-lab/scripts/taiji-native-verify").read_text(encoding="utf-8")
         runtime_env = (ROOT / "hermes-local-lab/scripts/runtime-env.sh").read_text(encoding="utf-8")

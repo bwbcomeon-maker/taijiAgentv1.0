@@ -60,7 +60,7 @@ CANONICAL_POLICY_ID = "taiji-linux-amd64-deb-v1"
 # Fallback for a validator copied into a target delivery directory.  When the
 # checked-in policy is available, ``canonical_policy_identity`` recomputes the
 # value through compatibility_policy.py instead of trusting this constant.
-CANONICAL_POLICY_SHA256 = "05b6fd042104ad096a8545ddd9fd6607622efcc748bc10102314447fcff2fa4b"
+CANONICAL_POLICY_SHA256 = "5be8cbe413e2e13a22ac8d2911f0be02ae1c1da78b744505a84e28fedd189790"
 CANONICAL_POLICY_PATH = (
     Path(__file__).resolve().parents[1] / "packaging/linux/compatibility-policy.json"
 )

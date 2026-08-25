@@ -31,6 +31,26 @@ _DEBIAN_AMD64_LIBRARY_DIRECTORIES = (
     Path("usr/lib/x86_64-linux-gnu"),
     Path("usr/lib64"),
 )
+_ELECTRON_RELATIVE_PATH = Path(
+    "apps/taiji-desktop/node_modules/electron/dist/electron"
+)
+_NSS_RUNTIME_MODULE_SONAMES = (
+    "libfreebl3.so",
+    "libfreeblpriv3.so",
+    "libnssckbi.so",
+    "libnssdbm3.so",
+    "libnsspem.so",
+    "libsoftokn3.so",
+)
+_NSS_RUNTIME_INTEGRITY_BASENAMES = (
+    "libfreebl3.chk",
+    "libfreeblpriv3.chk",
+    "libnssdbm3.chk",
+    "libsoftokn3.chk",
+)
+_NSS_RUNTIME_SUPPORT_SONAMES = frozenset(
+    (*_NSS_RUNTIME_MODULE_SONAMES, "libsqlite3.so.0")
+)
 _TRUSTED_TOOLS_MODULE = None
 
 
@@ -150,6 +170,15 @@ def _destination(root: Path, policy: dict[str, Any]) -> Path:
     ).relative_to(install_root)
 
 
+def _payload_contains_electron(root: Path, policy: dict[str, Any]) -> bool:
+    install_root = Path(policy["package"]["install_root"])
+    if root.resolve(strict=False).name == install_root.name:
+        electron = root / _ELECTRON_RELATIVE_PATH
+    else:
+        electron = root / install_root.relative_to(Path("/")) / _ELECTRON_RELATIVE_PATH
+    return electron.is_file() and not electron.is_symlink()
+
+
 def _ensure_private_directory(destination: Path, root: Path) -> None:
     try:
         relative_parts = destination.relative_to(root).parts
@@ -232,11 +261,18 @@ def _iter_sources(sysroot: Path, policy: dict[str, Any]):
         # Debian-family amd64 runtime libraries are selected from the standard
         # multiarch directories.  Do not recurse into vendor GPU subdirectories
         # that are not part of the system linker's selected runtime closure.
-        candidates = (
-            candidate
-            for directory in source_directories
-            for candidate in directory.iterdir()
-        )
+        standard_candidates = []
+        for directory in source_directories:
+            standard_candidates.extend(directory.iterdir())
+            nss_directory = directory / "nss"
+            if nss_directory.is_dir() and not nss_directory.is_symlink():
+                # NSS loads these fixed modules with dlopen at runtime, so ELF
+                # DT_NEEDED closure alone cannot discover them.  Keep this
+                # exception exact; other vendor subdirectories remain ignored.
+                standard_candidates.extend(
+                    nss_directory / soname for soname in _NSS_RUNTIME_MODULE_SONAMES
+                )
+        candidates = iter(standard_candidates)
     else:
         # Retain generic sysroot support for isolated fixture/build roots that
         # do not expose the Debian amd64 directory layout.
@@ -254,6 +290,51 @@ def _iter_sources(sysroot: Path, policy: dict[str, Any]):
         except OSError as exc:
             raise StageError(f"cannot inspect private-library source: {candidate}") from exc
         yield candidate
+
+
+def _validate_nss_integrity_source(path: Path) -> None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise StageError(f"NSS integrity source is missing or not a real file: {path}")
+    except OSError as exc:
+        raise StageError(f"cannot inspect NSS integrity source: {path}") from exc
+    mode, uid, nlink = source_metadata(path)
+    if stat.S_ISLNK(mode):
+        raise StageError(f"NSS integrity source must not be a symlink: {path}")
+    if not stat.S_ISREG(mode):
+        raise StageError(f"NSS integrity source must be a regular file: {path}")
+    if uid != 0:
+        raise StageError(f"NSS integrity source must be root-owned: {path} (uid {uid})")
+    if nlink != 1:
+        raise StageError(f"NSS integrity source must have one hard link: {path} (nlink {nlink})")
+
+
+def _electron_nss_integrity_sources(candidates: dict[str, list[Path]]) -> tuple[Path, ...]:
+    missing_sonames = sorted(_NSS_RUNTIME_SUPPORT_SONAMES - set(candidates))
+    if missing_sonames:
+        raise StageError(
+            "Electron NSS runtime closure is missing SONAMEs: " + ", ".join(missing_sonames)
+        )
+
+    module_sources = []
+    for soname in _NSS_RUNTIME_MODULE_SONAMES:
+        matches = candidates[soname]
+        if len(matches) != 1:
+            raise StageError(f"ambiguous private-library source for SONAME {soname}")
+        module_sources.append(matches[0])
+    module_directories = {source.parent for source in module_sources}
+    if len(module_directories) != 1:
+        raise StageError("Electron NSS runtime modules must come from one fixed source directory")
+    module_directory = module_directories.pop()
+    if module_directory.name != "nss":
+        raise StageError(f"Electron NSS runtime module directory is not named nss: {module_directory}")
+
+    integrity_sources = tuple(
+        module_directory / basename for basename in _NSS_RUNTIME_INTEGRITY_BASENAMES
+    )
+    for source in integrity_sources:
+        _validate_nss_integrity_source(source)
+    return integrity_sources
 
 
 def _copy_atomically(source: Path, destination: Path, *, uid: int, gid: int) -> str:
@@ -327,6 +408,10 @@ def stage_private_libraries(root: Path, policy: dict[str, Any], sysroot: Path) -
         validate_source(source, policy)
         candidates.setdefault(soname, []).append(source)
 
+    nss_integrity_sources: tuple[Path, ...] = ()
+    if _payload_contains_electron(root, policy):
+        nss_integrity_sources = _electron_nss_integrity_sources(candidates)
+
     files: list[dict[str, Any]] = []
     for soname in sorted(candidates):
         matches = candidates[soname]
@@ -338,12 +423,26 @@ def stage_private_libraries(root: Path, policy: dict[str, Any], sysroot: Path) -
         digest = _copy_atomically(source, destination, uid=0, gid=0)
         files.append({"soname": soname, "relative_path": destination.relative_to(root).as_posix(), "sha256": digest})
 
+    nss_integrity_files: list[dict[str, Any]] = []
+    for source in nss_integrity_sources:
+        destination = destination_dir / source.name
+        _ensure_private_directory(destination.parent, root)
+        digest = _copy_atomically(source, destination, uid=0, gid=0)
+        nss_integrity_files.append(
+            {
+                "basename": source.name,
+                "relative_path": destination.relative_to(root).as_posix(),
+                "sha256": digest,
+            }
+        )
+
     report = {
         "schema": SCHEMA,
         "policy_id": policy["policy_id"],
         "compatibility_policy_sha256": policy_sha256(policy),
         "private_library_dir": policy["elf"]["private_library_dir"],
         "files": files,
+        "nss_integrity_files": nss_integrity_files,
     }
     return report
 
