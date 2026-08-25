@@ -1247,7 +1247,6 @@ python3 "$RUNTIME_STAGER" --repo-root "$REPO_ROOT" --install-root "$INSTALL_ROOT
 chmod 0755 "$INSTALL_ROOT/resources/license"
 [ "$(sha256sum "$INSTALL_ROOT/runtime/node/bin/node" | awk '{print $1}')" = "$PINNED_NODE_EXECUTABLE_SHA256" ] \
   || fail "Staged Node runtime identity mismatch"
-python3 "$PRIVATE_LIB_STAGER" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$PRIVATE_STAGE_REPORT" >/dev/null
 rsync -a "$LAB_DIR/config"/ "$INSTALL_ROOT/config"/
 install -m 0755 "$LAB_DIR/scripts/runtime-env.sh" "$INSTALL_ROOT/scripts/runtime-env.sh"
 install -m 0755 "$LAB_DIR/scripts/start-agent.sh" "$INSTALL_ROOT/scripts/start-agent.sh"
@@ -1280,6 +1279,7 @@ python3 "$ELECTRON_RUNTIME_STAGER" \
   "${electron_archive_args[@]}" \
   --policy "$POLICY_FILE" \
   --require-linux-x86-64
+python3 "$PRIVATE_LIB_STAGER" --root "$PKG_ROOT" --policy "$POLICY_FILE" --sysroot "$PRIVATE_LIBRARY_SYSROOT" --output "$PRIVATE_STAGE_REPORT" >/dev/null
 validate_staged_toolchain_executables
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji-agent" "$PKG_ROOT/usr/bin/taiji-agent"
 install -m 0755 "$REPO_ROOT/packaging/linux/bin/taiji" "$PKG_ROOT/usr/bin/taiji"

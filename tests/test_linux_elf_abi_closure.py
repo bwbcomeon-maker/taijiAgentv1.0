@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "packaging/linux/compatibility-policy.json"
 AUDIT_PATH = ROOT / "packaging/linux/audit-elf-closure.py"
 STAGER_PATH = ROOT / "packaging/linux/stage-private-libraries.py"
+DEB_BUILDER_PATH = ROOT / "packaging/linux/deb/build-deb.sh"
 FIXTURE_ROOT = ROOT / "tests/fixtures/elf-audit"
 
 
@@ -544,6 +545,15 @@ class LinuxElfAbiClosureTest(unittest.TestCase):
                 [entry["basename"] for entry in report["nss_integrity_files"]],
                 sorted(integrity_files),
             )
+
+    def test_deb_builder_stages_electron_before_private_nss_runtime_closure(self):
+        builder = DEB_BUILDER_PATH.read_text(encoding="utf-8")
+        electron_stage = builder.index('python3 "$ELECTRON_RUNTIME_STAGER"')
+        private_library_stage = builder.index('python3 "$PRIVATE_LIB_STAGER"')
+        elf_audit = builder.index('python3 "$ELF_AUDITOR"', private_library_stage)
+
+        self.assertLess(electron_stage, private_library_stage)
+        self.assertLess(private_library_stage, elf_audit)
 
     def test_stager_rejects_incomplete_nss_runtime_module_set_for_electron(self):
         module_sonames = {
