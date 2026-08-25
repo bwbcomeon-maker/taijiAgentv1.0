@@ -358,6 +358,8 @@ python3 scripts/produce-taiji-offline-rehearsal.py \
 
 `04` 在平台、图形环境和长流程输入检查之前，先以严格 JSON 解析确认 `schema=taiji-package-manifest/v3`；历史 `schema_version=2` 在入口立即拒绝，不得启动桌面验收流程。
 
+银河麒麟 LightDM 会话的 logind leader 可能是 root 所有的 `lightdm --session-child`，普通桌面用户在正常 `/proc` 权限下不能读取该 leader 的 `exe` 链接。观察器只能在 `exe` 精确返回权限拒绝时启用窄兼容路径，并同时证明 leader 的 start time、session cgroup、comm、cmdline 和四组 UID 稳定、属于受信任系统所有者，且同一 session 内另有可核验执行身份的唯一 UKUI manager；PID 消失、任一身份漂移、伪 LightDM 参数或缺少独立桌面 manager 仍须失败。不得以 root 身份运行观察器，也不得修改 `/proc`、ptrace 或 Kysec 设置来制造通过。
+
 单 DEB 路径的命令、人工见证和首次配置顺序见第 10 节。机器观察记录替代旧的事后自报环境变量；`04` 不接受 `TAIJI_TARGET_INSTALL_METHOD`、`TAIJI_TARGET_INSTALL_NETWORK`、`TAIJI_TARGET_DPKG_STATUS_BEFORE` 或 `TAIJI_TARGET_FIRST_LAUNCH`。
 
 系统无法自动识别“鼠标双击”本身。机器记录只证明同机同启动周期、安装前无包记录、唯一同名同 hash DEB、持续断网、无首次用户状态及 dpkg 迁移；操作员必须另附至少 800x600、chunk/CRC/IHDR 有效的系统图形安装器 PNG，并使用严格确认语句出具人工见证。发布负责人复核这些原始材料后，才可对顶层目标证据签名。

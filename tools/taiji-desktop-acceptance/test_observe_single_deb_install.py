@@ -535,6 +535,100 @@ class SingleDebInstallObserverTests(unittest.TestCase):
 
         self.assertEqual(desktop, "UKUI")
 
+    def test_trusted_desktop_probe_accepts_stable_privileged_lightdm_leader_when_proc_exe_is_denied(self):
+        loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
+        desktop_process = proc_root / "2295"
+        desktop_process.rename(proc_root / "2390")
+        (proc_root / "2390/stat").write_text(
+            "2390 (ukui-session) %s\n"
+            % " ".join(["S"] + (["0"] * 18) + ["223344"]),
+            encoding="ascii",
+        )
+
+        lightdm_executable = executable_root / "lightdm"
+        lightdm_executable.write_bytes(b"trusted lightdm executable")
+        lightdm_executable.chmod(0o755)
+        leader = proc_root / "2295"
+        leader.mkdir()
+        (leader / "cgroup").write_text(
+            "0::/user.slice/user-1000.slice/session-4.scope\n",
+            encoding="ascii",
+        )
+        (leader / "stat").write_text(
+            "2295 (lightdm) %s\n"
+            % " ".join(["S"] + (["0"] * 18) + ["112233"]),
+            encoding="ascii",
+        )
+        (leader / "status").write_text(
+            "Name:\tlightdm\nUid:\t{0}\t{0}\t{0}\t{0}\n".format(os.getuid()),
+            encoding="ascii",
+        )
+        (leader / "comm").write_text("lightdm\n", encoding="ascii")
+        (leader / "cmdline").write_bytes(
+            b"lightdm\0--session-child\0" + b"14\0" + b"17\0"
+        )
+        (leader / "exe").symlink_to(lightdm_executable)
+
+        real_readlink = os.readlink
+
+        def deny_privileged_leader_exe(path):
+            if Path(path) == leader / "exe":
+                raise PermissionError("ptrace access denied for privileged session leader")
+            return real_readlink(path)
+
+        with mock.patch.object(os, "readlink", side_effect=deny_privileged_leader_exe):
+            desktop = self.observer._probe_trusted_desktop_session(
+                environment={"XDG_CURRENT_DESKTOP": "UKUI", "XDG_SESSION_TYPE": "x11"},
+                loginctl_path=loginctl,
+                proc_root=proc_root,
+                current_process_cgroup_path=proc_root / "self/cgroup",
+                trusted_executable_roots=(executable_root,),
+                expected_owner_uid=os.getuid(),
+                uid=1000,
+                command_runner=self.loginctl_runner(),
+            )
+
+        self.assertEqual(desktop, "UKUI")
+
+        (leader / "comm").write_text("lightdm-helper\n", encoding="ascii")
+        with mock.patch.object(os, "readlink", side_effect=deny_privileged_leader_exe):
+            with self.assertRaisesRegex(
+                self.observer.ObservationError,
+                "trusted privileged LightDM|session leader",
+            ):
+                self.observer._probe_trusted_desktop_session(
+                    environment={"XDG_CURRENT_DESKTOP": "UKUI", "XDG_SESSION_TYPE": "x11"},
+                    loginctl_path=loginctl,
+                    proc_root=proc_root,
+                    current_process_cgroup_path=proc_root / "self/cgroup",
+                    trusted_executable_roots=(executable_root,),
+                    expected_owner_uid=os.getuid(),
+                    uid=1000,
+                    command_runner=self.loginctl_runner(),
+                )
+
+        (leader / "comm").write_text("lightdm\n", encoding="ascii")
+        untrusted_uid = os.getuid() + 1
+        (leader / "status").write_text(
+            "Name:\tlightdm\nUid:\t{0}\t{0}\t{0}\t{0}\n".format(untrusted_uid),
+            encoding="ascii",
+        )
+        with mock.patch.object(os, "readlink", side_effect=deny_privileged_leader_exe):
+            with self.assertRaisesRegex(
+                self.observer.ObservationError,
+                "trusted privileged LightDM|session leader",
+            ):
+                self.observer._probe_trusted_desktop_session(
+                    environment={"XDG_CURRENT_DESKTOP": "UKUI", "XDG_SESSION_TYPE": "x11"},
+                    loginctl_path=loginctl,
+                    proc_root=proc_root,
+                    current_process_cgroup_path=proc_root / "self/cgroup",
+                    trusted_executable_roots=(executable_root,),
+                    expected_owner_uid=os.getuid(),
+                    uid=1000,
+                    command_runner=self.loginctl_runner(),
+                )
+
     def test_trusted_desktop_probe_rejects_executor_outside_selected_display_scope(self):
         loginctl, proc_root, executable_root, _ = self.make_trusted_desktop_fixture()
         foreign = self.root / "foreign-self-cgroup"

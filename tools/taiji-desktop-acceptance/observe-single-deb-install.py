@@ -586,6 +586,55 @@ def _read_proc_uids(path):
     return tuple(int(value) for value in matches[0])
 
 
+def _read_privileged_lightdm_leader_snapshot(
+    process,
+    scope,
+    expected_owner_uid,
+    start_before,
+    cgroup_before,
+):
+    """Bind a stable LightDM session child when procfs denies its exe link.
+
+    Kylin's logind session leader is a root LightDM child, so the desktop user
+    cannot read ``/proc/<leader>/exe`` under normal ptrace protections.  This
+    narrow fallback accepts only that privileged leader shape; the desktop
+    family still has to come from a separately verified user session manager.
+    """
+
+    comm_before = _read_bounded_proc_text(process / "comm", limit=4096)
+    cmdline_before = _read_bounded_proc_text(process / "cmdline", limit=16 * 1024)
+    uids_before = _read_proc_uids(process / "status")
+    start_after = _read_proc_start_time(process / "stat")
+    cgroup_after = _read_bounded_proc_text(process / "cgroup")
+    comm_after = _read_bounded_proc_text(process / "comm", limit=4096)
+    cmdline_after = _read_bounded_proc_text(process / "cmdline", limit=16 * 1024)
+    uids_after = _read_proc_uids(process / "status")
+    if (
+        start_before != start_after
+        or cgroup_before != cgroup_after
+        or comm_before != comm_after
+        or cmdline_before != cmdline_after
+        or uids_before != uids_after
+        or not _cgroup_contains_scope(cgroup_after, scope)
+    ):
+        raise ObservationError("privileged LightDM session leader changed while it was inspected")
+    arguments = cmdline_after.split("\0")
+    if arguments and arguments[-1] == "":
+        arguments.pop()
+    if (
+        comm_after.strip() != "lightdm"
+        or len(arguments) != 4
+        or Path(arguments[0]).name != "lightdm"
+        or arguments[1] != "--session-child"
+        or any(re.fullmatch(r"[0-9]{1,10}", value) is None for value in arguments[2:])
+        or uids_after != (expected_owner_uid,) * 4
+    ):
+        raise ObservationError(
+            "unreadable desktop session leader is not a trusted privileged LightDM child"
+        )
+    return True
+
+
 def _cgroup_contains_scope(payload, scope):
     for line in payload.splitlines():
         fields = line.split(":", 2)
@@ -671,6 +720,7 @@ def _desktop_family_from_session_processes(
     if len(process_directories) > 1024 * 1024:
         raise ObservationError("desktop session process table is unexpectedly large")
     for process in process_directories:
+        pid = int(process.name)
         cgroup_path = process / "cgroup"
         try:
             cgroup_before = _read_bounded_proc_text(cgroup_path)
@@ -680,14 +730,30 @@ def _desktop_family_from_session_processes(
             continue
         try:
             start_before = _read_proc_start_time(process / "stat")
+        except ObservationError:
+            if pid == leader:
+                raise ObservationError("desktop session leader changed while it was inspected")
+            continue
+        try:
             executable_link = os.readlink(str(process / "exe"))
-        except (OSError, ObservationError):
-            if int(process.name) == leader:
+        except PermissionError:
+            if pid != leader:
+                continue
+            _read_privileged_lightdm_leader_snapshot(
+                process,
+                scope,
+                expected_owner_uid,
+                start_before,
+                cgroup_before,
+            )
+            trusted_leader = True
+            continue
+        except OSError:
+            if pid == leader:
                 raise ObservationError("desktop session leader changed while it was inspected")
             continue
         executable_name = Path(executable_link).name
         family = _desktop_family_from_executable_name(executable_name)
-        pid = int(process.name)
         if family is None and pid != leader:
             continue
         executable_before = _read_proc_executable_snapshot(
