@@ -85,9 +85,12 @@ PRODUCTION_LICENSE_STATE_PATH = (
 PRODUCTION_SECURITY_OVERRIDE_ENVS = frozenset(
     {
         LICENSE_REQUIRED_ENV,
+        LICENSE_FILE_ENV,
+        LICENSE_STATE_FILE_ENV,
         LICENSE_PUBLIC_KEY_ENV,
         LICENSE_PUBLIC_KEY_FILE_ENV,
         LICENSE_MACHINE_BINDING_REQUIRED_ENV,
+        LICENSE_DEVICE_FILE_ENV,
         LICENSE_ALLOW_LEGACY_MACHINE_BINDING_ENV,
     }
 )
@@ -278,9 +281,7 @@ def default_license_path(environ: Optional[Mapping[str, str]] = None) -> Path:
 
 
 def runtime_license_path() -> Path:
-    if taiji_runtime_profile.is_installed_production():
-        return PRODUCTION_LICENSE_PATH
-    return default_license_path()
+    return PRODUCTION_LICENSE_PATH
 
 
 def default_license_state_path(environ: Optional[Mapping[str, str]] = None) -> Path:
@@ -297,9 +298,7 @@ def default_license_state_path(environ: Optional[Mapping[str, str]] = None) -> P
 
 
 def runtime_license_state_path() -> Path:
-    if taiji_runtime_profile.is_installed_production():
-        return PRODUCTION_LICENSE_STATE_PATH
-    return default_license_state_path()
+    return PRODUCTION_LICENSE_STATE_PATH
 
 
 def default_license_device_path(environ: Optional[Mapping[str, str]] = None) -> Path:
@@ -315,9 +314,7 @@ def default_license_device_path(environ: Optional[Mapping[str, str]] = None) -> 
 
 
 def runtime_license_device_path() -> Path:
-    if taiji_runtime_profile.is_installed_production():
-        return PRODUCTION_LICENSE_DEVICE_PATH
-    return default_license_device_path()
+    return PRODUCTION_LICENSE_DEVICE_PATH
 
 
 def _hash_id(value: str) -> str:
@@ -1306,8 +1303,204 @@ def _trusted_production_parent(
     return False
 
 
+_WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x0400
+_WINDOWS_INHERIT_ONLY_ACE = 0x08
+_WINDOWS_TRUSTED_SYSTEM_SIDS = frozenset({"S-1-5-18", "S-1-5-32-544"})
+_WINDOWS_WRITE_ACCESS_MASK = (
+    0x00000002  # FILE_WRITE_DATA / FILE_ADD_FILE
+    | 0x00000004  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+    | 0x00000010  # FILE_WRITE_EA
+    | 0x00000040  # FILE_DELETE_CHILD
+    | 0x00000100  # FILE_WRITE_ATTRIBUTES
+    | 0x00010000  # DELETE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+)
+_WINDOWS_ANCESTOR_REPLACEMENT_ACCESS_MASK = (
+    0x00000040  # FILE_DELETE_CHILD
+    | 0x00010000  # DELETE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+)
+_WINDOWS_ALLOW_ACE_TYPES = frozenset({0, 5, 9, 11})
+_WINDOWS_DENY_ACE_TYPES = frozenset({1, 6, 10, 12})
+_WINDOWS_AUDIT_ACE_TYPES = frozenset({2, 7, 13, 15})
+
+
+def _windows_security_snapshot(
+    path: Path,
+) -> tuple[str, str, list[tuple[int, int, int, str]]]:
+    """Read Windows owner and DACL data using the packaged pywin32 runtime."""
+    try:
+        import win32api
+        import win32con
+        import win32security
+
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(),
+            win32con.TOKEN_QUERY,
+        )
+        try:
+            current_sid = win32security.GetTokenInformation(
+                token,
+                win32security.TokenUser,
+            )[0]
+        finally:
+            win32api.CloseHandle(token)
+        descriptor = win32security.GetFileSecurity(
+            str(path),
+            win32security.OWNER_SECURITY_INFORMATION
+            | win32security.DACL_SECURITY_INFORMATION,
+        )
+        owner_sid = descriptor.GetSecurityDescriptorOwner()
+        dacl = descriptor.GetSecurityDescriptorDacl()
+        if owner_sid is None or dacl is None:
+            raise _LicenseUserResourceError
+        entries: list[tuple[int, int, int, str]] = []
+        for index in range(dacl.GetAceCount()):
+            ace = dacl.GetAce(index)
+            header = ace[0]
+            entries.append(
+                (
+                    int(header[0]),
+                    int(header[1]),
+                    int(ace[1]),
+                    str(win32security.ConvertSidToStringSid(ace[-1])),
+                )
+            )
+        return (
+            str(win32security.ConvertSidToStringSid(owner_sid)),
+            str(win32security.ConvertSidToStringSid(current_sid)),
+            entries,
+        )
+    except _LicenseUserResourceError:
+        raise
+    except Exception:
+        raise _LicenseUserResourceError from None
+
+
+def _windows_acl_is_trusted(
+    *,
+    owner_sid: str,
+    entries: list[tuple[int, int, int, str]],
+    current_user_sid: str,
+    require_current_user_owner: bool,
+    dangerous_access_mask: int = _WINDOWS_WRITE_ACCESS_MASK,
+) -> bool:
+    """Reject ownership or effective write grants outside the trusted principals."""
+    owner = owner_sid.upper()
+    current = current_user_sid.upper()
+    trusted_sids = {current, *_WINDOWS_TRUSTED_SYSTEM_SIDS}
+    if require_current_user_owner:
+        if owner != current:
+            return False
+    elif owner not in trusted_sids:
+        return False
+
+    for ace_type, ace_flags, access_mask, sid in entries:
+        if ace_flags & _WINDOWS_INHERIT_ONLY_ACE:
+            continue
+        if ace_type in _WINDOWS_DENY_ACE_TYPES or ace_type in _WINDOWS_AUDIT_ACE_TYPES:
+            continue
+        if ace_type not in _WINDOWS_ALLOW_ACE_TYPES:
+            return False
+        if access_mask & dangerous_access_mask and sid.upper() not in trusted_sids:
+            return False
+    return True
+
+
+def _windows_path_chain(path: Path, ancestor_stop: Path | None) -> list[Path]:
+    if ancestor_stop is None:
+        return list(path.parents)
+    stop = ancestor_stop.absolute()
+    try:
+        path.absolute().relative_to(stop)
+    except ValueError:
+        raise _LicenseUserResourceError from None
+    parents: list[Path] = []
+    parent = path.parent
+    while True:
+        parents.append(parent)
+        if parent == stop:
+            return parents
+        if parent == parent.parent:
+            raise _LicenseUserResourceError
+        parent = parent.parent
+
+
+def _validate_windows_path_security(
+    path: Path,
+    *,
+    required: bool,
+    require_current_user_owner: bool,
+    ancestor_stop: Path | None = None,
+) -> bool:
+    """Validate Windows file identity, link shape, ownership, ACL, and ancestors."""
+    try:
+        file_stat = path.lstat()
+    except FileNotFoundError:
+        if required:
+            raise _LicenseUserResourceError from None
+        return False
+    except OSError:
+        raise _LicenseUserResourceError from None
+
+    if (
+        stat.S_ISLNK(file_stat.st_mode)
+        or not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_nlink != 1
+        or getattr(file_stat, "st_file_attributes", 0)
+        & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+    ):
+        raise _LicenseUserResourceError
+    try:
+        owner_sid, current_sid, entries = _windows_security_snapshot(path)
+        if not _windows_acl_is_trusted(
+            owner_sid=owner_sid,
+            entries=entries,
+            current_user_sid=current_sid,
+            require_current_user_owner=require_current_user_owner,
+        ):
+            raise _LicenseUserResourceError
+        for parent in _windows_path_chain(path, ancestor_stop):
+            parent_stat = parent.lstat()
+            if (
+                stat.S_ISLNK(parent_stat.st_mode)
+                or not stat.S_ISDIR(parent_stat.st_mode)
+                or getattr(parent_stat, "st_file_attributes", 0)
+                & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+            ):
+                raise _LicenseUserResourceError
+            parent_owner, parent_current, parent_entries = _windows_security_snapshot(
+                parent
+            )
+            if not _windows_acl_is_trusted(
+                owner_sid=parent_owner,
+                entries=parent_entries,
+                current_user_sid=parent_current,
+                require_current_user_owner=False,
+                dangerous_access_mask=_WINDOWS_ANCESTOR_REPLACEMENT_ACCESS_MASK,
+            ):
+                raise _LicenseUserResourceError
+    except _LicenseUserResourceError:
+        raise
+    except Exception:
+        raise _LicenseUserResourceError from None
+    return True
+
+
 def _validate_production_user_file(path: Path, *, required: bool) -> bool:
     """Validate a canonical user-owned resource without following links."""
+    if os.name == "nt":
+        return _validate_windows_path_security(
+            path,
+            required=required,
+            require_current_user_owner=True,
+        )
     try:
         file_stat = path.lstat()
     except FileNotFoundError:
@@ -1398,18 +1591,68 @@ def _source_repo_root() -> Path:
     return root
 
 
+def _validate_source_repo_file(path: Path, *, repo_root: Path) -> None:
+    """Validate a pinned source resource and ancestors only inside its repo."""
+    path = path.absolute()
+    repo_root = repo_root.absolute()
+    try:
+        path.relative_to(repo_root)
+    except ValueError:
+        raise _LicenseUserResourceError from None
+    if os.name == "nt":
+        _validate_windows_path_security(
+            path,
+            required=True,
+            require_current_user_owner=False,
+            ancestor_stop=repo_root,
+        )
+        return
+
+    try:
+        uid = os.getuid()
+        file_stat = path.lstat()
+        if (
+            stat.S_ISLNK(file_stat.st_mode)
+            or not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_nlink != 1
+            or file_stat.st_uid not in {0, uid}
+            or stat.S_IMODE(file_stat.st_mode) & 0o022
+        ):
+            raise _LicenseUserResourceError
+        if path.resolve(strict=True) != path:
+            raise _LicenseUserResourceError
+        parent = path.parent
+        while True:
+            parent_stat = parent.lstat()
+            if (
+                stat.S_ISLNK(parent_stat.st_mode)
+                or not stat.S_ISDIR(parent_stat.st_mode)
+                or parent_stat.st_uid not in {0, uid}
+                or stat.S_IMODE(parent_stat.st_mode) & 0o022
+            ):
+                raise _LicenseUserResourceError
+            if parent == repo_root:
+                break
+            if parent == parent.parent:
+                raise _LicenseUserResourceError
+            parent = parent.parent
+    except _LicenseUserResourceError:
+        raise
+    except OSError:
+        raise _LicenseUserResourceError from None
+
+
 def _load_source_public_key(policy: LicensePolicy) -> str:
     expected = str(policy.public_key_fingerprint or "").lower()
     if not hmac.compare_digest(expected, PRODUCTION_PUBLIC_KEY_FINGERPRINT):
         raise _LicensePublicKeyError
     try:
-        path = _source_repo_root() / INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE
-        file_stat = path.lstat()
-        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
-            raise _LicensePublicKeyError
+        repo_root = _source_repo_root()
+        path = repo_root / INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE
+        _validate_source_repo_file(path, repo_root=repo_root)
         public_key_pem = path.read_text(encoding="utf-8").strip()
         actual = _public_key_fingerprint(public_key_pem)
-    except (OSError, UnicodeError, ValueError, TypeError):
+    except (_LicenseUserResourceError, OSError, UnicodeError, ValueError, TypeError):
         raise _LicensePublicKeyError from None
     if not hmac.compare_digest(actual, PRODUCTION_PUBLIC_KEY_FINGERPRINT):
         raise _LicensePublicKeyError
@@ -1418,12 +1661,11 @@ def _load_source_public_key(policy: LicensePolicy) -> str:
 
 def _load_source_version() -> str:
     try:
-        path = _source_repo_root() / "VERSION"
-        file_stat = path.lstat()
-        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
-            raise _LicenseVersionError
+        repo_root = _source_repo_root()
+        path = repo_root / "VERSION"
+        _validate_source_repo_file(path, repo_root=repo_root)
         version = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
+    except (_LicenseUserResourceError, OSError, UnicodeError):
         raise _LicenseVersionError from None
     if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is None:
         raise _LicenseVersionError

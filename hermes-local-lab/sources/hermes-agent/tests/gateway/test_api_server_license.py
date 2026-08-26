@@ -60,6 +60,7 @@ def required_missing_license(monkeypatch, tmp_path):
 def source_missing_license(monkeypatch, tmp_path):
     license_path = tmp_path / "config/taiji-agent/licenses/active-license.jwt"
     state_path = tmp_path / "state/taiji-agent/license-state.json"
+    device_path = tmp_path / "config/taiji-agent/license-device.json"
     monkeypatch.setattr(
         taiji_license.taiji_runtime_profile,
         "is_installed_production",
@@ -72,14 +73,18 @@ def source_missing_license(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         taiji_license,
-        "runtime_license_path",
-        lambda: license_path,
+        "PRODUCTION_LICENSE_PATH",
+        license_path,
     )
     monkeypatch.setattr(
         taiji_license,
-        "runtime_license_state_path",
-        lambda: state_path,
-        raising=False,
+        "PRODUCTION_LICENSE_STATE_PATH",
+        state_path,
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "PRODUCTION_LICENSE_DEVICE_PATH",
+        device_path,
     )
     for name in taiji_license.PRODUCTION_SECURITY_OVERRIDE_ENVS:
         monkeypatch.delenv(name, raising=False)

@@ -1,7 +1,9 @@
+import builtins
 import json
 import inspect
 import os
 import stat
+import sys
 import types
 import time
 
@@ -153,20 +155,18 @@ def _patch_source_runtime_resources(
     )
     monkeypatch.setattr(
         taiji_license,
-        "runtime_license_path",
-        lambda: license_path,
+        "PRODUCTION_LICENSE_PATH",
+        license_path,
     )
     monkeypatch.setattr(
         taiji_license,
-        "runtime_license_state_path",
-        lambda: state_path,
-        raising=False,
+        "PRODUCTION_LICENSE_STATE_PATH",
+        state_path,
     )
     monkeypatch.setattr(
         taiji_license,
-        "runtime_license_device_path",
-        lambda: device_path,
-        raising=False,
+        "PRODUCTION_LICENSE_DEVICE_PATH",
+        device_path,
     )
     monkeypatch.setattr(
         taiji_license,
@@ -306,6 +306,46 @@ def test_source_runtime_valid_license_uses_same_machine_bound_policy(
     assert blocked is None
 
 
+def test_source_runtime_clock_rollback_cannot_use_empty_redirected_state(
+    monkeypatch, tmp_path, signing_keys
+):
+    private_key, public_key = signing_keys
+    license_path, state_path, _ = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    license_path.parent.mkdir(parents=True, mode=0o700)
+    token = _write_token(license_path, private_key, max_version="1.0.0")
+    license_path.chmod(0o600)
+    state_path.parent.mkdir(parents=True, mode=0o700)
+    future = int(time.time()) + 3600
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "last_successful_validation_at": future,
+                "last_successful_validation_iso": taiji_license._iso_timestamp(future),
+                "license_id": "lic-test",
+                "license_hash": taiji_license._license_hash(token),
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.chmod(0o600)
+    redirected_state = tmp_path / "empty-state/license-state.json"
+    monkeypatch.setenv("TAIJI_LICENSE_STATE_FILE", str(redirected_state))
+
+    redirected = taiji_license.load_license_status()
+    monkeypatch.delenv("TAIJI_LICENSE_STATE_FILE")
+    canonical = taiji_license.load_license_status()
+
+    assert redirected.status == "invalid"
+    assert redirected.code == "license_policy_override_forbidden"
+    assert canonical.status == "invalid"
+    assert canonical.code == "license_clock_rollback"
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -314,6 +354,9 @@ def test_source_runtime_valid_license_uses_same_machine_bound_policy(
         ("TAIJI_LICENSE_ALLOW_LEGACY_MACHINE_BINDING", "1"),
         ("TAIJI_LICENSE_PUBLIC_KEY", "attacker-controlled-key"),
         ("TAIJI_LICENSE_PUBLIC_KEY_FILE", "/tmp/attacker-public.pem"),
+        ("TAIJI_LICENSE_FILE", "/tmp/attacker-license.jwt"),
+        ("TAIJI_LICENSE_STATE_FILE", "/tmp/attacker-state.json"),
+        ("TAIJI_LICENSE_DEVICE_FILE", "/tmp/attacker-device.json"),
     ],
 )
 def test_source_runtime_rejects_every_policy_override(
@@ -411,6 +454,36 @@ def test_runtime_license_path_uses_build_profile(
     assert taiji_license.runtime_license_path() == canonical
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "TAIJI_STATE_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+        "HOME",
+    ],
+)
+def test_source_runtime_paths_ignore_location_environment(
+    monkeypatch, tmp_path, name
+):
+    monkeypatch.setattr(
+        taiji_license.taiji_runtime_profile,
+        "is_installed_production",
+        lambda: False,
+    )
+    license_path = tmp_path / "canonical/config/active-license.jwt"
+    state_path = tmp_path / "canonical/state/license-state.json"
+    device_path = tmp_path / "canonical/config/license-device.json"
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_PATH", license_path)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_STATE_PATH", state_path)
+    monkeypatch.setattr(taiji_license, "PRODUCTION_LICENSE_DEVICE_PATH", device_path)
+    monkeypatch.setenv(name, str(tmp_path / "redirected"))
+
+    assert taiji_license.runtime_license_path() == license_path
+    assert taiji_license.runtime_license_state_path() == state_path
+    assert taiji_license.runtime_license_device_path() == device_path
+
+
 def test_installed_device_identity_ignores_environment_redirect(
     monkeypatch, tmp_path, installed_production_profile
 ):
@@ -425,7 +498,7 @@ def test_installed_device_identity_ignores_environment_redirect(
     assert taiji_license.default_license_device_path(env) == canonical
 
 
-def test_production_ignores_license_path_environment_redirect(
+def test_production_rejects_license_path_environment_redirect(
     monkeypatch, tmp_path, installed_production_profile
 ):
     canonical = tmp_path / "canonical/licenses/active-license.jwt"
@@ -449,8 +522,8 @@ def test_production_ignores_license_path_environment_redirect(
 
     status = taiji_license.load_license_status()
 
-    assert status.status == "missing"
-    assert status.code == "license_missing"
+    assert status.status == "invalid"
+    assert status.code == "license_policy_override_forbidden"
 
 
 @pytest.mark.parametrize("shape", ["wide_mode", "symlink", "hardlink"])
@@ -510,6 +583,220 @@ def test_production_user_file_accepts_root_group_writable_root_parent(
     monkeypatch.setattr(taiji_license.Path, "lstat", kylin_root_lstat)
 
     assert taiji_license._validate_production_user_file(candidate, required=True)
+
+
+def test_windows_user_file_validation_uses_acl_without_posix_uid(
+    monkeypatch, tmp_path
+):
+    candidate = tmp_path / "active-license.jwt"
+    candidate.write_text("signed-token\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(taiji_license, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(
+        taiji_license,
+        "_validate_windows_path_security",
+        lambda path, **kwargs: calls.append((path, kwargs)) or True,
+        raising=False,
+    )
+
+    assert taiji_license._validate_production_user_file(candidate, required=True)
+    assert calls == [
+        (
+            candidate,
+            {"required": True, "require_current_user_owner": True},
+        )
+    ]
+
+
+def test_windows_security_snapshot_uses_pywin32_owner_and_dacl_contract(
+    monkeypatch, tmp_path
+):
+    calls = []
+    token = object()
+
+    class FakeDacl:
+        def GetAceCount(self):
+            return 1
+
+        def GetAce(self, index):
+            assert index == 0
+            return ((0, 0), 0x0002, "current-object")
+
+    class FakeDescriptor:
+        def GetSecurityDescriptorOwner(self):
+            return "owner-object"
+
+        def GetSecurityDescriptorDacl(self):
+            return FakeDacl()
+
+    fake_win32api = types.SimpleNamespace(
+        GetCurrentProcess=lambda: "process",
+        CloseHandle=lambda handle: calls.append(("close", handle)),
+    )
+
+    def open_process_token(process, access):
+        calls.append(("open", process, access))
+        return token
+
+    def get_token_information(handle, information_class):
+        calls.append(("token", handle, information_class))
+        return ("current-object", 0)
+
+    def get_file_security(path, information):
+        calls.append(("security", path, information))
+        return FakeDescriptor()
+
+    fake_win32security = types.SimpleNamespace(
+        TokenUser=3,
+        OWNER_SECURITY_INFORMATION=1,
+        DACL_SECURITY_INFORMATION=2,
+        OpenProcessToken=open_process_token,
+        GetTokenInformation=get_token_information,
+        GetFileSecurity=get_file_security,
+        ConvertSidToStringSid=lambda sid: f"sid:{sid}",
+    )
+    monkeypatch.setitem(sys.modules, "win32api", fake_win32api)
+    monkeypatch.setitem(sys.modules, "win32con", types.SimpleNamespace(TOKEN_QUERY=8))
+    monkeypatch.setitem(sys.modules, "win32security", fake_win32security)
+    candidate = tmp_path / "active-license.jwt"
+
+    assert taiji_license._windows_security_snapshot(candidate) == (
+        "sid:owner-object",
+        "sid:current-object",
+        [(0, 0, 0x0002, "sid:current-object")],
+    )
+    assert calls == [
+        ("open", "process", 8),
+        ("token", token, 3),
+        ("close", token),
+        ("security", str(candidate), 3),
+    ]
+
+
+def test_windows_security_snapshot_fails_closed_without_pywin32(
+    monkeypatch, tmp_path
+):
+    real_import = builtins.__import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name in {"win32api", "win32con", "win32security"}:
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+
+    with pytest.raises(taiji_license._LicenseUserResourceError):
+        taiji_license._windows_security_snapshot(tmp_path / "active-license.jwt")
+
+
+@pytest.mark.parametrize(
+    ("owner_sid", "entries", "require_current_user_owner", "expected"),
+    [
+        (
+            "S-1-5-21-current",
+            [(0, 0, 0x0002, "S-1-5-21-current")],
+            True,
+            True,
+        ),
+        (
+            "S-1-5-21-other",
+            [(0, 0, 0x0002, "S-1-5-21-current")],
+            True,
+            False,
+        ),
+        (
+            "S-1-5-21-current",
+            [(0, 0, 0x0002, "S-1-5-21-other")],
+            True,
+            False,
+        ),
+        (
+            "S-1-5-18",
+            [(0, 0, 0x0002, "S-1-5-32-544")],
+            False,
+            True,
+        ),
+    ],
+)
+def test_windows_acl_trust_rejects_foreign_owner_or_writer(
+    owner_sid, entries, require_current_user_owner, expected
+):
+    assert (
+        taiji_license._windows_acl_is_trusted(
+            owner_sid=owner_sid,
+            entries=entries,
+            current_user_sid="S-1-5-21-current",
+            require_current_user_owner=require_current_user_owner,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("access_mask", "expected"),
+    [
+        (0x0002, True),
+        (0x0004, True),
+        (0x0040, False),
+        (0x40000000, False),
+    ],
+)
+def test_windows_ancestor_acl_distinguishes_creation_from_replacement(
+    access_mask, expected
+):
+    assert (
+        taiji_license._windows_acl_is_trusted(
+            owner_sid="S-1-5-18",
+            entries=[(0, 0, access_mask, "S-1-5-11")],
+            current_user_sid="S-1-5-21-current",
+            require_current_user_owner=False,
+            dangerous_access_mask=(
+                taiji_license._WINDOWS_ANCESTOR_REPLACEMENT_ACCESS_MASK
+            ),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("shape", ["reparse", "hardlink"])
+def test_windows_path_security_rejects_reparse_and_hardlink(
+    monkeypatch, tmp_path, shape
+):
+    candidate = tmp_path / "active-license.jwt"
+    candidate.write_text("signed-token\n", encoding="utf-8")
+    if shape == "hardlink":
+        candidate.with_name("second-link.jwt").hardlink_to(candidate)
+    else:
+        real_lstat = taiji_license.Path.lstat
+
+        def reparse_lstat(path):
+            result = real_lstat(path)
+            if path == candidate:
+                return types.SimpleNamespace(
+                    st_mode=result.st_mode,
+                    st_nlink=result.st_nlink,
+                    st_file_attributes=0x0400,
+                )
+            return result
+
+        monkeypatch.setattr(taiji_license.Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        taiji_license,
+        "_windows_security_snapshot",
+        lambda _path: (
+            "S-1-5-21-current",
+            "S-1-5-21-current",
+            [(0, 0, 0x0002, "S-1-5-21-current")],
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(taiji_license._LicenseUserResourceError):
+        taiji_license._validate_windows_path_security(
+            candidate,
+            required=True,
+            require_current_user_owner=True,
+        )
 
 
 def test_production_public_key_accepts_root_group_writable_root_parent(
@@ -576,6 +863,66 @@ def test_production_version_accepts_root_group_writable_root_parent(
     monkeypatch.setattr(taiji_license, "PRODUCTION_VERSION_PATH", version_path)
 
     assert taiji_license._load_production_version() == "1.0.2"
+
+
+def test_source_runtime_loaders_accept_pinned_repo_resources():
+    policy = taiji_license.runtime_license_policy()
+    repo_root = taiji_license.Path(__file__).resolve().parents[4]
+
+    assert taiji_license._source_repo_root() == repo_root
+    assert taiji_license._load_source_public_key(policy) == (
+        repo_root / taiji_license.INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE
+    ).read_text(encoding="utf-8").strip()
+    assert taiji_license._load_source_version() == (
+        repo_root / "VERSION"
+    ).read_text(encoding="utf-8").strip()
+
+
+@pytest.mark.parametrize("resource", ["public_key", "version"])
+@pytest.mark.parametrize(
+    "shape",
+    ["symlink", "hardlink", "writable_file", "writable_parent"],
+)
+def test_source_runtime_loaders_reject_untrusted_repo_resource_shape(
+    monkeypatch, tmp_path, resource, shape
+):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(mode=0o700)
+    (repo_root / ".git").mkdir()
+    if resource == "public_key":
+        path = repo_root / taiji_license.INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE
+        source = (
+            taiji_license.Path(__file__).resolve().parents[4]
+            / taiji_license.INTERNAL_ISSUER_PUBLIC_KEY_RELATIVE
+        ).read_text(encoding="utf-8")
+        error = taiji_license._LicensePublicKeyError
+    else:
+        path = repo_root / "VERSION"
+        source = "1.0.0\n"
+        error = taiji_license._LicenseVersionError
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if shape == "symlink":
+        outside = tmp_path / f"outside-{resource}"
+        outside.write_text(source, encoding="utf-8")
+        path.symlink_to(outside)
+    else:
+        path.write_text(source, encoding="utf-8")
+        path.chmod(0o644)
+        if shape == "hardlink":
+            path.with_name(path.name + ".second").hardlink_to(path)
+        elif shape == "writable_file":
+            path.chmod(0o666)
+        else:
+            path.parent.chmod(0o777)
+    monkeypatch.setattr(taiji_license, "_source_repo_root", lambda: repo_root)
+
+    with pytest.raises(error):
+        if resource == "public_key":
+            taiji_license._load_source_public_key(
+                taiji_license.runtime_license_policy()
+            )
+        else:
+            taiji_license._load_source_version()
 
 
 @pytest.mark.parametrize(
