@@ -95,6 +95,11 @@ while WebUI still has multiple overlapping state stores.
 8. **Every mutation names its layer.** A PR touching streaming, recovery,
    context reconstruction, compression, replay, or sidebar metadata should state
    which layer it changes and what regression proves the invariant still holds.
+9. **Terminal failures become transcript truth before observation.** A terminal
+   chat failure, including partial assistant output, is atomically saved as one
+   stable assistant error row before SSE exposes it. The row is visible after
+   refresh/reconnect but excluded from future model context. Cancellation and
+   stale stream ownership prevent both the save and the event.
 
 ## Review Checklist
 

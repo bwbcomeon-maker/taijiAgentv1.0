@@ -181,10 +181,18 @@ from api.desktop_access import (
     enforce_desktop_access as _enforce_desktop_access,
 )
 from api.helpers import j, get_profile_cookie, _CLIENT_DISCONNECT_ERRORS
+from api.main_model_routes import handle_main_model_post
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
+
+
+def _handle_post_with_main_model_verification(handler, parsed):
+    result = handle_main_model_post(handler, parsed)
+    if result is not False:
+        return result
+    return handle_post(handler, parsed)
 
 
 def _truthy_env(name: str) -> bool:
@@ -422,7 +430,7 @@ class Handler(BaseHTTPRequestHandler):
             clear_request_profile()
 
     def do_POST(self) -> None:
-        self._handle_write(handle_post)
+        self._handle_write(_handle_post_with_main_model_verification)
 
     def do_PUT(self) -> None:
         self._handle_write(handle_put)

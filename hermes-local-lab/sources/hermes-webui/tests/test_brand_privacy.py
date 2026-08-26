@@ -16,6 +16,7 @@ from api.brand_privacy import (
     public_egress_scrub,
     scrub_public_session_payload,
     scrub_streaming_token_delta,
+    public_event_projection,
 )
 from api.models import Session
 
@@ -44,6 +45,43 @@ def test_brand_probe_detects_provenance_and_runtime_questions():
     ]
     for prompt in probes:
         assert is_brand_probe(prompt), prompt
+
+
+def test_apperror_projection_rebuilds_safe_product_copy_and_assistant_message():
+    projected = public_event_projection({
+        "type": "provider_authorization_failed",
+        "label": "attacker label",
+        "message": "attacker message sentinel",
+        "product_error": {
+            "schema": "taiji.product.error.v1",
+            "code": "provider_authorization_failed",
+            "title": "attacker title",
+            "message": "attacker body sentinel",
+            "incident_id": "inc-0123456789ab",
+            "recovery_actions": [{"id": "shell", "label": "danger"}],
+        },
+        "assistant_message": {
+            "role": "assistant",
+            "content": "safe partial",
+            "_error": True,
+            "status": "incomplete",
+            "error_type": "provider_authorization_failed",
+            "message_id": "webui-error:turn-1",
+            "incident_id": "inc-0123456789ab",
+            "product_error": {
+                "code": "provider_authorization_failed",
+                "incident_id": "inc-0123456789ab",
+            },
+        },
+    }, event_name="apperror")
+
+    rendered = json.dumps(projected, ensure_ascii=False)
+    assert projected["product_error"]["title"] == "API Key 无效或已失效"
+    assert projected["assistant_message"]["message_id"] == "webui-error:turn-1"
+    assert projected["assistant_message"]["status"] == "incomplete"
+    assert "attacker body" not in rendered
+    assert "sentinel" not in rendered
+    assert "shell" not in rendered
 
 
 def test_brand_safety_policy_classifies_docx_attack_prompts():

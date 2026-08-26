@@ -1,6 +1,8 @@
 import json
 import logging
 
+import pytest
+
 
 from api.product_contract import (
     ERROR_SCHEMA,
@@ -118,6 +120,25 @@ def test_error_catalog_covers_product_failure_categories():
         payload = build_product_error(code)
         assert payload["code"] == code
         assert action in {item["id"] for item in payload["recovery_actions"]}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "provider_account_unavailable",
+        "provider_model_unavailable",
+        "provider_network_unavailable",
+        "provider_service_unavailable",
+        "model_input_too_large",
+        "provider_content_blocked",
+        "provider_request_rejected",
+        "gateway_authentication_failed",
+    ],
+)
+def test_product_catalog_covers_structured_chat_failures(code):
+    payload = build_product_error(code, incident_id="inc-0123456789ab")
+    assert payload["code"] == code
+    assert payload["incident_id"] == "inc-0123456789ab"
 
 
 def test_attached_product_error_logs_the_same_safe_incident(caplog):

@@ -54,6 +54,7 @@ from api.streaming import (
     _finalize_public_reasoning,
     _new_turn_context_from_messages,
     _persist_webui_chat_input_error,
+    _persist_webui_terminal_error,
     _sanitize_messages_for_api,
     prepare_webui_chat_input,
 )
@@ -328,7 +329,7 @@ def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str, *, api
             "type": "gateway_auth_error",
             "message": "本地对话服务认证失败（HTTP 401）。",
             "hint": "请重启太极智能体，或导出诊断报告后交给管理员排查。",
-        }, "model_configuration_required")
+        }, "gateway_authentication_failed")
     return attach_product_error({
         "label": "太极本地对话服务请求失败",
         "type": "gateway_http_error",
@@ -402,6 +403,40 @@ def _gateway_sse_error_event(payload: dict) -> dict | None:
     if isinstance(raw_error, dict):
         code = str(raw_error.get("code") or raw_error.get("type") or "").strip().lower()
         message = str(raw_error.get("message") or "").strip()
+    source = str(raw_error.get("source") or "").strip().lower() if isinstance(raw_error, dict) else ""
+    incident_id = raw_error.get("incident_id") if isinstance(raw_error, dict) else None
+    transport_kind = str(raw_error.get("transport_kind") or "").strip().lower() if isinstance(raw_error, dict) else ""
+    structured_provider_map = {
+        "auth": "provider_authorization_failed",
+        "auth_permanent": "provider_authorization_failed",
+        "billing": "provider_account_unavailable",
+        "rate_limit": "provider_rate_limited",
+        "model_not_found": "provider_model_unavailable",
+        "overloaded": "provider_service_unavailable",
+        "server_error": "provider_service_unavailable",
+        "context_overflow": "model_input_too_large",
+        "payload_too_large": "model_input_too_large",
+        "image_too_large": "model_input_too_large",
+        "content_policy_blocked": "provider_content_blocked",
+        "provider_policy_blocked": "provider_request_rejected",
+        "format_error": "provider_request_rejected",
+        "thinking_signature": "provider_request_rejected",
+    }
+    if source == "gateway" and code in {"authentication_failed", "gateway_authentication_failed"}:
+        product_code = "gateway_authentication_failed"
+        envelope = attach_product_error({"type": product_code}, product_code, incident_id=incident_id)
+        envelope["label"] = envelope["product_error"]["title"]
+        envelope["message"] = envelope["product_error"]["message"]
+        return envelope
+    if source == "provider":
+        product_code = structured_provider_map.get(code)
+        if code == "timeout":
+            product_code = "provider_timeout" if transport_kind in {"", "timeout"} else "provider_network_unavailable"
+        product_code = product_code or "unknown_error"
+        envelope = attach_product_error({"type": product_code}, product_code, incident_id=incident_id)
+        envelope["label"] = envelope["product_error"]["title"]
+        envelope["message"] = envelope["product_error"]["message"]
+        return envelope
     lowered = message.lower()
     if (
         code == "model_configuration_error"
@@ -941,6 +976,8 @@ def _stream_gateway_run_events(
     saw_run_completed = False
     reasoning_buffer: list[str] = []
     artifact_candidates: list[dict] = []
+    actual_provider = ""
+    actual_model = ""
 
     def emit_reasoning() -> None:
         safe_text = _finalize_public_reasoning("".join(reasoning_buffer))
@@ -1055,6 +1092,8 @@ def _stream_gateway_run_events(
                 continue
             if event_name == "run.completed":
                 saw_run_completed = True
+                actual_provider = str(payload.get("provider") or "").strip()
+                actual_model = str(payload.get("model") or "").strip()
                 raw_output = str(payload.get("output") or "").strip()
                 if raw_output and not raw_final_text:
                     raw_final_text = raw_output
@@ -1078,6 +1117,8 @@ def _stream_gateway_run_events(
                     "artifact_candidates": artifact_candidates,
                 }
             if event_name == "run.failed":
+                actual_provider = str(payload.get("provider") or "").strip()
+                actual_model = str(payload.get("model") or "").strip()
                 error_event = _gateway_run_error_event(payload, str(payload.get("error") or event_name))
                 break
     if error_event is None and saw_run_completed:
@@ -1105,6 +1146,8 @@ def _stream_gateway_run_events(
         "error_event": error_event,
         "terminal_outcome": "failed" if error_event is not None else "completed",
         "artifact_candidates": artifact_candidates,
+        "actual_provider": actual_provider,
+        "actual_model": actual_model,
     }
 
 
@@ -1312,6 +1355,58 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.warning("Failed to append Gateway interrupted turn journal event", exc_info=True)
 
+    def persist_and_emit_gateway_error(payload: dict, reason: str) -> bool:
+        """Commit one authoritative failure row before exposing the SSE event."""
+
+        try:
+            with _get_session_agent_lock(session_id):
+                current = get_session(session_id)
+                assistant_message = _persist_webui_terminal_error(
+                    current,
+                    stream_id,
+                    payload,
+                    turn_id=str(turn_id or ""),
+                    partial_text=STREAM_PARTIAL_TEXT.get(stream_id, ""),
+                    cancel_check=cancel_event.is_set,
+                )
+        except Exception:
+            logger.exception("Failed to persist Gateway terminal error for session %s", session_id)
+            if cancel_event.is_set():
+                return False
+            from api.product_contract import attach_product_error
+
+            save_failure = attach_product_error(
+                {"type": "session_persistence_failed"},
+                "session_persistence_failed",
+            )
+            save_failure["label"] = save_failure["product_error"]["title"]
+            save_failure["message"] = save_failure["product_error"]["message"]
+            put_gateway_event("apperror", save_failure)
+            return False
+        if assistant_message is None:
+            return False
+        product_error = payload.get("product_error") if isinstance(payload, dict) else None
+        product_code = str(product_error.get("code") or "") if isinstance(product_error, dict) else ""
+        if product_code.startswith("provider_") or product_code == "model_input_too_large":
+            try:
+                from api.model_config import record_main_model_chat_verification
+
+                record_main_model_chat_verification(
+                    actual_provider or model_provider,
+                    actual_model or model,
+                    success=False,
+                    product_code=product_code,
+                    incident_id=(product_error or {}).get("incident_id"),
+                )
+            except Exception:
+                logger.debug("Failed to update main-model failure verification", exc_info=True)
+        record_turn_interrupted(reason)
+        put_gateway_event(
+            "apperror",
+            {**payload, "assistant_message": assistant_message},
+        )
+        return True
+
     s = None
     raw_final_text = ""
     public_final_text = ""
@@ -1319,6 +1414,8 @@ def _run_gateway_chat_streaming(
     raw_reasoning_buffer: list[str] = []
     artifact_candidates: list[dict] = []
     uncommitted_artifact_ids: set[str] = set()
+    actual_provider = ""
+    actual_model = ""
     artifacts_committed = False
     chat_stream_completed = False
     brand_token_tail = [""]
@@ -1404,10 +1501,10 @@ def _run_gateway_chat_streaming(
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
                 return
             except WebUIChatInputError as exc:
-                with _get_session_agent_lock(session_id):
-                    _persist_webui_chat_input_error(s, stream_id, exc.payload)
-                record_turn_interrupted(str(exc.payload.get("type") or "chat_input_error"))
-                put_gateway_event("apperror", exc.payload)
+                persist_and_emit_gateway_error(
+                    exc.payload,
+                    str(exc.payload.get("type") or "chat_input_error"),
+                )
                 return
         if cancel_event.is_set():
             record_turn_interrupted("cancelled")
@@ -1493,6 +1590,8 @@ def _run_gateway_chat_streaming(
             usage.update({k: v for k, v in (run_result.get("usage") or {}).items() if v})
             gateway_error_event = run_result.get("error_event")
             artifact_candidates.extend(run_result.get("artifact_candidates") or [])
+            actual_provider = str(run_result.get("actual_provider") or "").strip()
+            actual_model = str(run_result.get("actual_model") or "").strip()
             if str(run_result.get("terminal_outcome") or "") == "cancelled":
                 record_turn_interrupted("cancelled")
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -1592,8 +1691,10 @@ def _run_gateway_chat_streaming(
             put_gateway_event("token", {"text": tail_delta})
         usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
         if gateway_error_event:
-            record_turn_interrupted(str(gateway_error_event.get("type") or "gateway_error"))
-            put_gateway_event("apperror", gateway_error_event)
+            persist_and_emit_gateway_error(
+                gateway_error_event,
+                str(gateway_error_event.get("type") or "gateway_error"),
+            )
             return
         internal_assistant_text = str(raw_final_text or "").strip()
         public_assistant_text = str(public_final_text or "").strip()
@@ -1601,12 +1702,12 @@ def _run_gateway_chat_streaming(
             record_turn_interrupted("gateway_empty_response")
             from api.product_contract import attach_product_error
 
-            put_gateway_event("apperror", attach_product_error({
+            persist_and_emit_gateway_error(attach_product_error({
                 "label": "太极本地对话服务未返回内容",
                 "type": "gateway_empty_response",
                 "message": "本地对话服务没有返回有效回复。",
                 "hint": "请检查模型配置、网络或账号余额状态，必要时导出诊断报告。",
-            }, "backend_unavailable"))
+            }, "backend_unavailable"), "gateway_empty_response")
             return
         artifacts, artifact_errors, uncommitted_artifact_ids = _ingest_gateway_artifact_candidates(
             session_id,
@@ -1750,32 +1851,42 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.warning("Failed to append Gateway completed turn journal event", exc_info=True)
         gateway_session_payload = scrub_public_session_payload(s.compact() | {"messages": s.messages, "tool_calls": []})
+        try:
+            from api.model_config import record_main_model_chat_verification
+
+            verified_provider = actual_provider or str(model_provider or "")
+            verified_model = actual_model or str(model or "")
+            record_main_model_chat_verification(
+                verified_provider,
+                verified_model,
+                success=True,
+            )
+        except Exception:
+            logger.debug("Failed to update main-model chat verification", exc_info=True)
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
         if cancel_event.is_set():
             record_turn_interrupted("cancelled")
             return
-        record_turn_interrupted("gateway_http_error")
         err_body = _gateway_http_error_body(exc)
-        put_gateway_event(
-            "apperror",
+        persist_and_emit_gateway_error(
             scrub_brand_leaks(_gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))),
+            "gateway_http_error",
         )
     except Exception as exc:
         if cancel_event.is_set():
             record_turn_interrupted("cancelled")
             return
-        record_turn_interrupted("gateway_error")
         safe = scrub_brand_leaks(_redact_text(str(exc))[:500])
         from api.product_contract import attach_product_error
 
-        put_gateway_event("apperror", attach_product_error({
+        persist_and_emit_gateway_error(attach_product_error({
             "label": "太极本地对话服务请求失败",
             "type": "gateway_error",
             "message": safe or "本地对话服务请求失败。",
             "hint": "请检查太极智能体是否已启动，或导出诊断报告。",
-        }, "backend_unavailable"))
+        }, "backend_unavailable"), "gateway_error")
     finally:
         if uncommitted_artifact_ids and not artifacts_committed:
             try:

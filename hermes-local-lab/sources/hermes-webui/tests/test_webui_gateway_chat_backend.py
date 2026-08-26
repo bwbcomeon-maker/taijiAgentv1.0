@@ -19,6 +19,7 @@ import api.streaming as streaming
 from api.turn_journal import append_turn_journal_event, read_turn_journal
 from api.config import STREAMS, STREAM_LIVE_TOOL_CALLS, create_stream_channel
 from api.models import new_session
+from api.streaming import _persist_webui_terminal_error
 from api.gateway_chat import (
     _gateway_run_request_body,
     _gateway_http_error_event,
@@ -253,6 +254,75 @@ def test_gateway_stream_usage_normalizes_token_names():
         "output_tokens": 3,
         "estimated_cost": 0,
     }
+
+
+def test_terminal_gateway_error_persists_one_canonical_incomplete_message(monkeypatch, tmp_path):
+    session = models.Session(
+        session_id="persist-terminal-error",
+        workspace=str(tmp_path),
+        model="deepseek-chat",
+        model_provider="deepseek",
+        messages=[],
+    )
+    session.active_stream_id = "stream-1"
+    session.pending_user_message = "你好"
+    session.pending_attachments = []
+    session.pending_started_at = 100.0
+    session.pending_turn_id = "turn-1"
+    saved = []
+    monkeypatch.setattr(session, "save", lambda: saved.append(json.loads(json.dumps(session.messages))))
+    payload = gateway_chat._gateway_run_error_event({
+        "error": {
+            "schema": "taiji.gateway.run-error.v1",
+            "source": "provider",
+            "code": "auth",
+            "status": 401,
+            "retryable": False,
+            "incident_id": "inc-0123456789ab",
+        }
+    })
+
+    persisted = _persist_webui_terminal_error(
+        session,
+        "stream-1",
+        payload,
+        turn_id="turn-1",
+        partial_text="已生成的安全正文",
+        cancel_check=lambda: False,
+    )
+
+    assert saved
+    assert [message["role"] for message in session.messages] == ["user", "assistant"]
+    assert persisted == session.messages[-1]
+    assert persisted["content"] == "已生成的安全正文"
+    assert persisted["_error"] is True
+    assert persisted["status"] == "incomplete"
+    assert persisted["error_type"] == "provider_authorization_failed"
+    assert persisted["message_id"] == "webui-error:turn-1"
+    assert persisted["incident_id"] == "inc-0123456789ab"
+    assert persisted["product_error"]["code"] == "provider_authorization_failed"
+    assert session.pending_user_message is None
+    assert session.active_stream_id is None
+
+
+def test_terminal_gateway_error_is_not_persisted_by_stale_or_cancelled_stream(monkeypatch, tmp_path):
+    session = models.Session(session_id="stale-error", workspace=str(tmp_path), messages=[])
+    session.active_stream_id = "new-stream"
+    session.pending_user_message = "new turn"
+    monkeypatch.setattr(session, "save", lambda: (_ for _ in ()).throw(AssertionError("must not save")))
+    payload = gateway_chat._gateway_run_error_event({
+        "error": {"schema": "taiji.gateway.run-error.v1", "source": "provider", "code": "auth"}
+    })
+
+    assert _persist_webui_terminal_error(
+        session, "old-stream", payload, turn_id="old-turn", cancel_check=lambda: False
+    ) is None
+    session.active_stream_id = "old-stream"
+    assert _persist_webui_terminal_error(
+        session, "old-stream", payload, turn_id="old-turn", cancel_check=lambda: True
+    ) is None
+    assert session.messages == []
+    assert session.pending_user_message == "new turn"
     assert _gateway_stream_usage({"usage": {"input_tokens": 5, "output_tokens": 2, "estimated_cost_usd": 0.01}}) == {
         "input_tokens": 5,
         "output_tokens": 2,
@@ -1321,8 +1391,8 @@ def test_gateway_chat_worker_maps_sse_error_to_taiji_message(tmp_path, monkeypat
         events.append(subscriber.get_nowait())
     app_errors = [data for event, data in events if event == "apperror"]
     assert app_errors
-    assert app_errors[-1]["type"] == "model_configuration_error"
-    assert "模型服务未配置或不可用" in app_errors[-1]["message"]
+    assert app_errors[-1]["type"] == "model_configuration_required"
+    assert "请先完成模型配置" in app_errors[-1]["message"]
     _assert_no_public_hermes(app_errors[-1])
     terminal = [
         event for event in read_turn_journal(s.session_id, session_dir=session_dir)["events"]
@@ -1899,6 +1969,8 @@ def test_gateway_run_error_preserves_model_configuration_classification():
         (
             {
                 "event": "run.failed",
+                "provider": "deepseek",
+                "model": "deepseek-chat",
                 "error": {
                     "message": "Set DEEPSEEK_API_KEY in the environment",
                     "code": "model_configuration_error",
@@ -1960,6 +2032,9 @@ def test_gateway_runs_terminal_events_keep_cancel_and_error_semantics(
         assert result["error_event"] is None
     if terminal_event["event"] == "run.cancelled":
         assert result["cancelled"] is True
+    else:
+        assert result["actual_provider"] == "deepseek"
+        assert result["actual_model"] == "deepseek-chat"
 
 
 def test_gateway_runs_stops_orphan_when_started_session_id_does_not_match(monkeypatch):

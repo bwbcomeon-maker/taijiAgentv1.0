@@ -38,6 +38,9 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 
 ## Current RFCs
 
+- [`provider-failure-and-model-verification-contract.md`](provider-failure-and-model-verification-contract.md)
+  — implemented structured Provider failures, durable terminal assistant rows,
+  secret-safe projection, and layered main-model verification.
 - [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md) — #1925
   event/control contract, runtime-state ownership matrix, acceptance catalog,
   and reversible migration gates for moving WebUI execution behind an explicit

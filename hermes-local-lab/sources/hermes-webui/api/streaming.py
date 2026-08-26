@@ -4071,6 +4071,82 @@ def _persist_webui_chat_input_error(session, stream_id: str, payload: dict) -> b
     return True
 
 
+def _persist_webui_terminal_error(
+    session,
+    stream_id: str,
+    payload: dict,
+    *,
+    turn_id: str | None = None,
+    partial_text: str = "",
+    cancel_check=None,
+):
+    """Atomically persist the canonical public assistant failure message.
+
+    The caller must hold the per-session agent lock.  Returning ``None`` means
+    cancellation or stream ownership won the race and no event may be emitted.
+    """
+
+    if callable(cancel_check) and cancel_check():
+        return None
+    if not _stream_writeback_is_current(session, stream_id):
+        return None
+    product_error = payload.get("product_error") if isinstance(payload, dict) else None
+    if not isinstance(product_error, dict):
+        from api.product_contract import build_product_error
+
+        product_error = build_product_error("unknown_error")
+    error_code = str(product_error.get("code") or "unknown_error")
+    legacy_type = str(payload.get("type") or "").strip() if isinstance(payload, dict) else ""
+    if error_code == "unknown_error" and legacy_type:
+        error_code = legacy_type
+    incident_id = str(product_error.get("incident_id") or "")
+    stable_turn_id = str(
+        turn_id
+        or getattr(session, "pending_turn_id", None)
+        or stream_id
+    ).strip()
+    message_id = f"webui-error:{stable_turn_id}"
+    for message in list(getattr(session, "messages", None) or []):
+        if isinstance(message, dict) and message.get("message_id") == message_id:
+            return message
+
+    fields = (
+        "messages", "active_stream_id", "pending_user_message",
+        "pending_attachments", "pending_started_at", "updated_at",
+    )
+    snapshot = {field: copy.deepcopy(getattr(session, field, None)) for field in fields}
+    turn_started_at = getattr(session, "pending_started_at", None)
+    try:
+        _materialize_pending_user_turn_before_error(session)
+        if session.messages and session.messages[-1].get("role") == "user":
+            session.messages[-1].setdefault("platform_message_id", f"webui-turn:{stable_turn_id}")
+            session.messages[-1].setdefault("turn_id", stable_turn_id)
+        clean_partial = str(partial_text or "").strip()
+        assistant_message = {
+            "role": "assistant",
+            "content": clean_partial or str(product_error.get("message") or "本次回复未完成。"),
+            "timestamp": time.time(),
+            "_error": True,
+            "status": "incomplete" if clean_partial else "failed",
+            "error_type": error_code,
+            "message_id": message_id,
+            "incident_id": incident_id,
+            "product_error": copy.deepcopy(product_error),
+        }
+        session.messages.append(assistant_message)
+        stamp_turn_duration_on_latest_assistant(session, turn_started_at, time.time())
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.save()
+        return assistant_message
+    except Exception:
+        for field, value in snapshot.items():
+            setattr(session, field, value)
+        raise
+
+
 def _last_resort_sync_from_core(session, stream_id, agent_lock):
     """Final-exit guard: if the stream exits with pending_user_message still set,
     sync messages from the core transcript or add an error marker.

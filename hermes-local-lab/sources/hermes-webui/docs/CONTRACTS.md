@@ -22,6 +22,9 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/rfcs/provider-failure-and-model-verification-contract.md`](rfcs/provider-failure-and-model-verification-contract.md):
+  implemented structured Provider-failure, durable terminal-message, secret
+  projection, and layered main-model verification contract.
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata

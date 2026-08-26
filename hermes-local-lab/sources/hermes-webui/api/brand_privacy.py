@@ -402,6 +402,7 @@ _PUBLIC_MESSAGE_SCALAR_FIELDS = (
     "role", "content", "timestamp", "_ts", "type", "message_id", "id",
     "name", "tool_call_id", "tool_use_id", "duration_seconds", "_error",
     "error_type", "is_error", "reasoning", "reasoning_content", "thinking",
+    "incident_id",
     "provider_details", "provider_details_label", "text", "status", "summary",
     "done", "tid", "assistant_msg_idx", "_turnDuration", "_turnTps",
 )
@@ -1609,6 +1610,10 @@ def public_message_projection(
             projected[key] = _mask_public_sensitive_text(
                 _public_visible_text(message.get(key)), hide_local_paths=True
             )
+        elif key == "incident_id":
+            candidate = str(message.get(key) or "")
+            if re.fullmatch(r"inc-[0-9a-f]{12,32}", candidate):
+                projected[key] = candidate
         else:
             projected[key] = copy.deepcopy(message.get(key))
     if role and "role" not in projected:
@@ -1644,6 +1649,14 @@ def public_message_projection(
             "generated image could not be persisted"
             for _item in message["artifact_errors"][:10]
         ]
+    if message.get("_error") and isinstance(message.get("product_error"), dict):
+        from api.product_contract import build_product_error
+
+        product_source = message["product_error"]
+        projected["product_error"] = build_product_error(
+            product_source.get("code"),
+            incident_id=product_source.get("incident_id") or message.get("incident_id"),
+        )
     if "_statusCard" in message:
         projected["_statusCard"] = _public_status_card_projection(
             message.get("_statusCard"), workspace=workspace
@@ -2424,7 +2437,9 @@ def public_event_projection(payload: Any, *, event_name: str | None = None) -> d
         "stream_end": ("session_id",),
         "cancel": ("message", "type"),
         "warning": ("message", "type"),
-        "apperror": ("message", "type", "hint", "details", "recovery_control"),
+        "apperror": (
+            "message", "type", "label", "hint", "details", "recovery_control",
+        ),
         "title": ("session_id", "title"),
         "title_status": ("session_id", "title", "status", "reason"),
         "compressing": ("session_id", "message"),
@@ -2445,6 +2460,19 @@ def public_event_projection(payload: Any, *, event_name: str | None = None) -> d
     if event == "metering":
         return _public_usage_projection(source)
     cleaned = {}
+    if event == "apperror":
+        from api.product_contract import build_product_error
+
+        product_source = source.get("product_error")
+        if isinstance(product_source, dict):
+            cleaned["product_error"] = build_product_error(
+                product_source.get("code"),
+                incident_id=product_source.get("incident_id"),
+            )
+        if isinstance(source.get("assistant_message"), dict):
+            cleaned["assistant_message"] = public_message_projection(
+                source.get("assistant_message")
+            )
     for key in fields_by_event.get(event, ("session_id", "message", "text", "type", "status")):
         if key not in source:
             continue
@@ -2455,6 +2483,14 @@ def public_event_projection(payload: Any, *, event_name: str | None = None) -> d
             cleaned[key] = _mask_public_sensitive_text(_public_visible_text(value), hide_local_paths=True)
         else:
             cleaned[key] = copy.deepcopy(value)
+    if event == "apperror" and isinstance(cleaned.get("product_error"), dict):
+        product_error = cleaned["product_error"]
+        cleaned["type"] = product_error["code"]
+        cleaned["label"] = product_error["title"]
+        cleaned["message"] = product_error["message"]
+        cleaned.pop("hint", None)
+        cleaned.pop("details", None)
+        cleaned.pop("recovery_control", None)
     if event in {"compressed", "context_status"}:
         for key in ("usage", "details", "prefill"):
             if key not in source:

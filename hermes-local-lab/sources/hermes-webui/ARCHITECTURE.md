@@ -278,6 +278,19 @@ the agent finishes. The frontend never uses it but it can be useful for debuggin
 
 ### 4.4 Agent Invocation (_run_agent_streaming)
 
+Gateway-managed chat terminal failures use the implemented
+`taiji.gateway.run-error.v1` contract documented in
+`docs/rfcs/provider-failure-and-model-verification-contract.md`. Gateway chat
+persists one `_error=true` assistant sidecar row before emitting `apperror`.
+That row is the refresh/reconnect authority, while model-context reconstruction
+deliberately excludes it. Partial public text is retained with
+`status=incomplete`; stale and cancelled streams cannot write it.
+
+Main-model settings expose local configuration, strict non-generating connection
+evidence, and exact-route real-chat evidence as separate levels. Verification
+state is fingerprint-bound and TTL-limited; local refresh never probes a
+Provider.
+
     def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):
 
 1. Fetches session from SESSIONS (not from disk -- session was just updated by /api/chat/start)

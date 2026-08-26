@@ -91,6 +91,7 @@ from api.config import (
     get_auxiliary_models,
     invalidate_models_cache,
     reload_config,
+    STATE_DIR,
 )
 from api.providers import (
     _OAUTH_PROVIDERS,
@@ -6749,6 +6750,114 @@ def get_model_config() -> dict[str, Any]:
         return _get_model_config_unlocked()
 
 
+def _main_model_verification_path() -> Path:
+    return Path(STATE_DIR) / "main-model-verification.json"
+
+
+def _public_main_model_verification(verification: dict[str, Any]) -> dict[str, Any]:
+    result = dict(verification)
+    if result.get("state") == "failed":
+        from api.product_contract import build_product_error
+
+        result["product_error"] = build_product_error(
+            result.get("code"),
+            incident_id=result.get("incident_id"),
+        )
+    return result
+
+
+def _main_model_material(config_data: dict[str, Any]) -> dict[str, Any]:
+    from hermes_cli.auth import PROVIDER_REGISTRY
+
+    model_cfg = _safe_model_cfg(config_data)
+    provider = str(model_cfg.get("provider") or "").strip().lower()
+    model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
+    registry_id = "openai-api" if provider == "openai" else provider
+    registry = PROVIDER_REGISTRY.get(registry_id)
+    base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+    if not base_url and registry is not None:
+        base_url = str(registry.inference_base_url or "").strip().rstrip("/")
+    if not base_url:
+        base_url = {
+            "ollama": "http://127.0.0.1:11434",
+            "lmstudio": "http://127.0.0.1:1234/v1",
+        }.get(provider, "")
+    api_key = ""
+    config_path = _get_config_path()
+    try:
+        if provider == "custom":
+            key_env = str(model_cfg.get("key_env") or _CUSTOM_MODEL_KEY_ENV)
+            api_key = resolve_secret_env_value(
+                key_env,
+                config_path=config_path,
+                allow_process_fallback=False,
+            )
+        elif provider and not _provider_is_oauth(provider):
+            api_key = resolve_api_key(
+                provider,
+                config_data=config_data,
+                config_path=config_path,
+                allow_process_fallback=False,
+            )
+    except (OSError, ValueError, RuntimeError):
+        api_key = ""
+    return {
+        "profile": _active_profile_name(),
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key,
+        "auth_type": getattr(registry, "auth_type", "api_key"),
+    }
+
+
+def check_main_model_connection() -> dict[str, Any]:
+    from api.main_model_verification import check_connection
+
+    config_path = _get_config_path()
+    with credential_transaction(config_path):
+        config_data = load_credential_config(config_path)
+        material = _main_model_material(config_data)
+    verification = check_connection(
+        material,
+        _main_model_verification_path(),
+    )
+    return {
+        "ok": True,
+        "verification": _public_main_model_verification(verification),
+    }
+
+
+def record_main_model_chat_verification(
+    provider: object,
+    model: object,
+    *,
+    success: bool,
+    product_code: str | None = None,
+    incident_id: str | None = None,
+) -> bool:
+    """Update verification only when the actual route still matches main config."""
+
+    from api.main_model_verification import record_chat_result
+
+    config_path = _get_config_path()
+    config_data = load_credential_config(config_path)
+    material = _main_model_material(config_data)
+    if (
+        str(material.get("provider") or "").casefold() != str(provider or "").strip().casefold()
+        or str(material.get("model") or "") != str(model or "").strip()
+    ):
+        return False
+    record_chat_result(
+        material,
+        _main_model_verification_path(),
+        success=success,
+        product_code=product_code,
+        incident_id=incident_id,
+    )
+    return True
+
+
 def _get_model_config_unlocked(
     *,
     refresh_runtime: bool = True,
@@ -6769,6 +6878,14 @@ def _get_model_config_unlocked(
     )
     vision_config = _get_vision_config_unlocked(refresh_runtime=False)
     provider_credentials = get_provider_credentials_config().get("credentials", [])
+    from api.main_model_verification import verification_for_material
+
+    verification = _public_main_model_verification(
+        verification_for_material(
+            _main_model_material(config_data),
+            _main_model_verification_path(),
+        )
+    )
     vision = dict(vision_config.get("vision") or {})
     vision_rows = list(vision_config.get("providers") or [])
     image_rows = list(image_gen_config.get("providers") or [])
@@ -6786,6 +6903,7 @@ def _get_model_config_unlocked(
             "base_url": str(model_cfg.get("base_url") or "").strip(),
             "key_env": key_env,
             "key_status": _key_status_for_env(key_env) if key_env else _provider_key_status(provider),
+            "verification": verification,
         },
         "providers": get_providers().get("providers", []),
         "auxiliary": get_auxiliary_models(),

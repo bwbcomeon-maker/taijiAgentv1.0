@@ -234,6 +234,34 @@ FAIL: New session created, error thrown, or UI breaks.
 
 ## Section 3: Model Selection
 
+### T3.0: Main Model Verification and Durable Provider Failure
+
+SETUP: Use an isolated WebUI state directory and a mock OpenAI-compatible
+Provider. Configure the mock credential, then make the mock return 401.
+
+STEPS:
+  1. Save the main model and confirm the page says `Configured, not verified`.
+  2. Click `Check connection`; confirm the mock receives one GET models request
+     and no completion, conversation, attachment, tool, or memory payload.
+  3. Send a chat turn while the mock returns 401.
+  4. Wait through two automatic refresh intervals, switch away and back, reload
+     the page, then close and reopen the isolated app.
+
+EXPECT:
+  - Saving alone never produces a green available state.
+  - The 401 card says the API key is invalid or expired and offers model
+    configuration plus diagnostics, not a network or local-service explanation.
+  - The user turn and one assistant error card retain the same incident id after
+    every restore; no duplicate row appears.
+  - Any partial assistant text remains above `Response incomplete`.
+  - The failed assistant row is absent from the next mock Provider history.
+  - No test key, bearer value, tokenized URL, local path, stack trace, or raw
+    Provider body appears in logs, run status, journal, sidecar, SSE, or the
+    diagnostic bundle.
+
+FAIL: Local configuration appears green; the failure becomes generic, vanishes,
+duplicates, enters the next request, or exposes sensitive Provider material.
+
 ### T3.1: Model Dropdown Shows All Options
 SETUP: Any active session.
 STEPS:
