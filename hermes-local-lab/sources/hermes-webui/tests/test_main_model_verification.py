@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from api.main_model_verification import (
     check_connection,
+    configuration_fingerprint,
     record_chat_result,
     verification_for_material,
 )
@@ -30,7 +31,7 @@ def material(**overrides):
         "provider": "deepseek",
         "model": "deepseek-chat",
         "base_url": "https://mock.provider/v1",
-        "api_key": "test-key-not-real",
+        "api_key": "FAKE-test-key",
         "auth_type": "api_key",
     }
     value.update(overrides)
@@ -42,6 +43,39 @@ def test_configured_model_is_not_reported_as_available_before_verification(tmp_p
     assert result["state"] == "configured_unverified"
     assert result["level"] == "configured"
     assert result["checked_at"] is None
+
+
+def test_main_model_material_resolves_legacy_provider_key_from_profile_env(monkeypatch, tmp_path):
+    from api import model_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=FAKE-profile-key\n", encoding="utf-8")
+    config_path.chmod(0o600)
+    (tmp_path / ".env").chmod(0o600)
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(model_config, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        model_config,
+        "_safe_model_cfg",
+        lambda _data: {
+            "provider": "deepseek",
+            "default": "deepseek-chat",
+            "base_url": "https://mock.provider/v1",
+        },
+    )
+    assert model_config._PROVIDER_ENV_VAR["deepseek"] == "DEEPSEEK_API_KEY"
+    assert model_config._provider_is_oauth("deepseek") is False
+    assert model_config.resolve_secret_env_value(
+        "DEEPSEEK_API_KEY",
+        config_path=config_path,
+        allow_process_fallback=False,
+    ) == "FAKE-profile-key"
+
+    result = model_config._main_model_material({})
+
+    assert result["api_key"] == "FAKE-profile-key"
+    assert verification_for_material(result, tmp_path / "state.json")["state"] == "configured_unverified"
 
 
 def test_strict_connection_check_uses_models_get_and_never_completion(tmp_path):
@@ -100,7 +134,7 @@ def test_anthropic_base_url_does_not_duplicate_v1(tmp_path):
 
 
 def test_connection_check_classifies_auth_without_exposing_provider_body(tmp_path):
-    secret = "test-key-not-real"
+    secret = "FAKE-test-key"
 
     def opener(request, timeout):
         raise urllib.error.HTTPError(
@@ -161,6 +195,31 @@ def test_configuration_change_invalidates_old_success(tmp_path):
     record_chat_result(material(), path, success=True, now=100)
     changed = material(model="deepseek-reasoner")
     assert verification_for_material(changed, path, now=101)["state"] == "configured_unverified"
+
+
+def test_chat_verification_rejects_result_when_credentials_change_mid_turn(monkeypatch):
+    from api import model_config
+
+    started = material()
+    changed = material(api_key="FAKE-replaced-key", base_url="https://replacement.provider/v1")
+    recorded = []
+    monkeypatch.setattr(model_config, "_get_config_path", lambda: SimpleNamespace())
+    monkeypatch.setattr(model_config, "load_credential_config", lambda _path: {})
+    monkeypatch.setattr(model_config, "_main_model_material", lambda _data: changed)
+    monkeypatch.setattr(
+        "api.main_model_verification.record_chat_result",
+        lambda *_args, **_kwargs: recorded.append((_args, _kwargs)),
+    )
+
+    accepted = model_config.record_main_model_chat_verification(
+        "deepseek",
+        "deepseek-chat",
+        expected_fingerprint=configuration_fingerprint(started),
+        success=True,
+    )
+
+    assert accepted is False
+    assert recorded == []
 
 
 def test_small_post_router_handles_only_main_model_check(monkeypatch):

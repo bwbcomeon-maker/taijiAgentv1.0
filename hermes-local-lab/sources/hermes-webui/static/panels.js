@@ -9669,25 +9669,33 @@ function _renderModelConfigFocusSummary(data){
  const mainProviderDisplay=_modelConfigProviderDisplay(mainProvider,data);
  const mainConfigured=!!(mainProvider&&mainModel&&main.key_status&&main.key_status.configured);
  const mainRefreshing=!!(mainConfigured&&main.runtime_refresh_pending);
- const mainReady=!!(mainConfigured&&!mainRefreshing);
+ const verification=main.verification||{};
+ const verificationError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:{product_error:verification.product_error}}):null;
+ const verificationState=mainConfigured?String(verification.state||'configured_unverified'):'unconfigured';
+ let stateMeta;
+ if(mainRefreshing) stateMeta={effective:'刷新中',badge:'主模型刷新中',tone:'warn',title:'主模型配置已保存，运行时正在刷新',message:'配置已写入本机，运行时状态尚未完成刷新。'};
+ else if(verificationState==='chat_verified') stateMeta={effective:'对话已验证',badge:'最近对话验证成功',tone:'ok',title:'最近一次对话验证成功',message:'当前 Provider、模型和凭据指纹已经通过真实对话。'};
+ else if(verificationState==='connection_verified') stateMeta={effective:'连接正常',badge:'主模型连接正常',tone:'warn',title:'模型服务连接正常',message:'对话能力待实际会话验证。'};
+ else if(verificationState==='failed') stateMeta={effective:'验证失败',badge:'主模型验证失败',tone:'danger',title:verificationError?verificationError.title:'主模型连接检查失败',message:verificationError?verificationError.message:'请检查模型配置、账户或网络。'};
+ else if(verificationState==='unsupported') stateMeta={effective:'暂不支持检查',badge:'已配置，无安全连接检查',tone:'warn',title:'主模型已配置',message:'当前 Provider 暂不支持非生成式连接检查，对话能力需由实际会话验证。'};
+ else if(mainConfigured) stateMeta={effective:'已配置，尚未验证',badge:'主模型尚未验证',tone:'warn',title:'主模型已配置，尚未验证',message:'本机配置完整不代表远端模型可用，可点击“检查连接”。'};
+ else stateMeta={effective:'待配置',badge:'主模型待配置',tone:'warn',title:'主模型尚未配置完整',message:'请先完成主模型和 API 密钥配置，再开始新会话。'};
  _setModelConfigText('modelConfigMainModelName',mainModel||'未配置主模型');
  _setModelConfigText('modelConfigProviderSummary',_formatModelConfigProvider(mainProvider,mainProviderDisplay));
  _setModelConfigText('modelConfigModelSummary',mainModel);
  _setModelConfigText('modelConfigKeySummary',mainKeyLabel);
- _setModelConfigStatusBadge('modelConfigMainEffective',mainReady?'已生效':(mainRefreshing?'刷新中':'待配置'),mainReady?'ok':'warn');
- _setModelConfigStatusBadge('modelConfigMainStatusBadge',mainReady?'主模型可用':(mainRefreshing?'主模型刷新中':'主模型待配置'),mainReady?'ok':'warn');
+ _setModelConfigStatusBadge('modelConfigMainEffective',stateMeta.effective,stateMeta.tone);
+ _setModelConfigStatusBadge('modelConfigMainStatusBadge',stateMeta.badge,stateMeta.tone);
  _renderVisionConfigSummary(data);
 
  const hero=$('modelConfigHero');
  if(hero){
-  hero.dataset.state=mainReady?'ok':'warn';
+  hero.dataset.state=stateMeta.tone;
   const icon=hero.querySelector('.model-config-state-icon');
-  if(icon) icon.textContent=mainReady?'✓':(mainRefreshing?'↻':'!');
+  if(icon) icon.textContent=stateMeta.tone==='ok'?'✓':(mainRefreshing?'↻':'!');
  }
- _setModelConfigText('modelConfigHeroTitle',mainReady?'主模型已生效，可以开始新会话':(mainRefreshing?'主模型配置已保存，运行时正在刷新':'主模型尚未配置完整'));
- _setModelConfigText('modelConfigHeroMessage',mainReady
-  ? ('当前生效模型：'+mainModel+'。页面只突出当前能否使用和需要处理的阻断项。')
-  : (mainRefreshing?'配置已写入本机，运行时状态刷新完成后即可开始新会话。':'请先完成主模型和 API 密钥配置，再开始新会话。'));
+ _setModelConfigText('modelConfigHeroTitle',stateMeta.title);
+ _setModelConfigText('modelConfigHeroMessage',stateMeta.message);
 
  const imageGen=(data&&data.image_gen)||{};
  const imageProvider=String(imageGen.provider||'').trim();
@@ -10469,7 +10477,7 @@ function _syncImageGenConfigControls(){
  if(named) _renderCapabilityCredentialOptions('image',providerId,((_modelConfigData.image_gen||{}).credential_ref||''));
  if(keyRow) keyRow.hidden=!authReadOnly&&(named||fields.length>0);
  if(imageGenConfigApiKey){
-  imageGenConfigApiKey.disabled=oauth||blocked||authReadOnly;
+  imageGenConfigApiKey.disabled = oauth || blocked || authReadOnly;
   imageGenConfigApiKey.placeholder=blocked?'当前配置已被国产策略阻止':(authReadOnly?String(provider&&provider.auth_message||'当前认证方式无需或不支持在此编辑。'):(oauth?'此服务由太极授权托管，无需填写 API 密钥。':'留空保留现有密钥'));
  }
  if(pasteBtn) pasteBtn.disabled=oauth||blocked||authReadOnly;
@@ -10754,46 +10762,46 @@ const _productDiagnosticsLabels={
  not_applicable:'不适用',
  unknown:'待确认'
 };
-const _productErrorCatalog={
- agent_unavailable:{title:'本地服务暂不可用',message:'太极智能体尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics']},
- backend_unavailable:{title:'本地服务暂不可用',message:'太极智能体的本地服务尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics']},
- gateway_unavailable:{title:'本地任务服务暂不可用',message:'本地任务服务尚未准备完成，请稍后重试。',actions:['retry','restart_app','export_diagnostics']},
- model_configuration_required:{title:'模型配置待完成',message:'请先完成模型配置，再重新执行此操作。',actions:['open_model_settings','export_diagnostics']},
- permission_denied:{title:'当前操作未获授权',message:'请检查安全模式或联系管理员确认操作权限。',actions:['open_security_settings','export_diagnostics']},
- license_blocked:{title:'授权状态需要处理',message:'当前授权不可用，请先在授权管理中完成处理。',actions:['open_license','export_diagnostics']},
- artifact_generation_failed:{title:'文档生成未完成',message:'文档成果未能生成，请重试或重新生成。',actions:['retry','regenerate','export_diagnostics']},
- office_review_required:{title:'文档仍待办公软件复核',message:'请在 WPS 或 Word 中检查文档后，再确认交付结果。',actions:['open_office_review','export_diagnostics']},
- diagnostics_unavailable:{title:'安全诊断暂不可用',message:'暂时无法生成安全诊断，请稍后重试。',actions:['retry','restart_app']},
- unknown_error:{title:'操作未能完成',message:'应用遇到暂时性问题，请重试或导出诊断。',actions:['retry','export_diagnostics']}
-};
-const _productRecoveryActionLabels={
- retry:'重试',
- restart_app:'重启桌面 App',
- open_model_settings:'打开模型配置',
- open_security_settings:'打开安全设置',
- open_license:'打开授权管理',
- regenerate:'重新生成',
- open_result:'查看文档成果',
- open_office_review:'打开 Office 验收',
- export_diagnostics:'导出诊断'
-};
+const _productRecoveryActionIds=new Set([
+ 'retry','restart_app','open_model_settings','open_security_settings','open_license',
+ 'regenerate','open_result','open_office_review','export_diagnostics','refresh','start_new'
+]);
 
 function _safeProductErrorEnvelope(error){
  const payload=error&&error.payload;
  const raw=payload&&payload.product_error&&typeof payload.product_error==='object'?payload.product_error:payload;
  if(!raw||raw.schema!=='taiji.product.error.v1') return null;
  const code=String(raw.code||'');
- const spec=_productErrorCatalog[code];
  const incident=String(raw.incident_id||'');
- if(!spec||!/^inc-[0-9a-f]{12,32}$/.test(incident)) return null;
- const offered=new Set(Array.isArray(raw.recovery_actions)?raw.recovery_actions.map(item=>String((item&&item.id)||'')):[]);
+ const title=String(raw.title||'').trim();
+ const message=String(raw.message||'').trim();
+ if(!code||!title||title.length>120||!message||message.length>320||!/^inc-[0-9a-f]{12,32}$/.test(incident)) return null;
+ const offered=Array.isArray(raw.recovery_actions)?raw.recovery_actions:[];
  return {
+  schema:'taiji.product.error.v1',
   code,
-  title:spec.title,
-  message:spec.message,
+  title,
+  message,
   incident_id:incident,
-  recovery_actions:spec.actions.filter(action=>offered.has(action)).map(action=>({id:action,label:_productRecoveryActionLabels[action]}))
+  retryable:raw.retryable===true,
+  recovery_actions:offered.map(item=>({
+   id:String((item&&item.id)||''),
+   label:String((item&&item.label)||'').trim()
+  })).filter(action=>_productRecoveryActionIds.has(action.id)&&action.label&&action.label.length<=40)
  };
+}
+
+function handleProductErrorAction(action,incidentId,trigger){
+ const id=String(action||'');
+ if(id==='open_model_settings') return switchSettingsSection('models');
+ if(id==='open_security_settings') return switchSettingsSection('system');
+ if(id==='open_license') return switchSettingsSection('models');
+ if(id==='export_diagnostics') return exportProductDiagnostics();
+ if(id==='retry'||id==='regenerate') return typeof regenerateResponse==='function'?regenerateResponse(trigger):undefined;
+ if(id==='refresh') return S.session&&typeof loadSession==='function'?loadSession(S.session.session_id):location.reload();
+ if(id==='start_new') return typeof newSession==='function'?newSession():undefined;
+ if(id==='restart_app') return typeof showToast==='function'?showToast('请关闭并重新打开桌面 App。',5000,'warning'):undefined;
+ if(id==='copy_incident'&&navigator.clipboard) return navigator.clipboard.writeText(String(incidentId||''));
 }
 
 function _renderProductDiagnosticsError(error){
@@ -11159,7 +11167,7 @@ function _setMainModelConfigSaveState(state,message){
   saving:'正在保存主模型配置…',
   refreshing:'主模型配置已保存，运行时正在刷新。',
   reconciling:'保存结果待核对，正在读取本机权威状态…',
-  applied:'主模型配置已生效。',
+  applied:'主模型已配置，尚未验证。',
   failed:'主模型配置保存失败。',
  };
  const text=String(message||defaults[normalized]||'');
@@ -11264,11 +11272,11 @@ async function _reconcileMainModelConfigSave(expected){
   }
   _clearPendingMainModelConfigReconciliation(expected);
   const refreshing=!!(main&&main.runtime_refresh_pending);
-  _setMainModelConfigSaveState(refreshing?'refreshing':'applied',refreshing?'主模型配置已核对，运行时仍在刷新。':'主模型配置已核对并生效。');
+  _setMainModelConfigSaveState(refreshing?'refreshing':'applied',refreshing?'主模型配置已核对，运行时仍在刷新。':'主模型已配置，尚未验证。');
   if(typeof populateModelDropdown==='function') populateModelDropdown();
   if(!refreshing){
    toggleModelConfigSection('modelConfigMainEdit',false);
-   if(typeof showToast==='function') showToast('主模型配置已核对并生效。');
+   if(typeof showToast==='function') showToast('主模型已配置，尚未验证。');
   }
   return {state:refreshing?'refreshing':'applied',data};
  }catch(error){
@@ -11344,6 +11352,24 @@ async function loadModelConfigPanel(force,options){
  }
 }
 
+async function checkMainModelConnection(){
+ const btn=$('btnCheckMainModelConnection');
+ if(btn){btn.disabled=true;btn.setAttribute('aria-busy','true');}
+ _setModelConfigDraftStatus('正在检查连接…不会发送对话内容。');
+ try{
+  const data=await api('/api/model-config/main/check',{method:'POST',body:'{}',timeoutToast:false,retryNetworkErrors:false});
+  if(_modelConfigData&&_modelConfigData.main) _modelConfigData.main.verification=data.verification||{};
+  _renderModelConfigFocusSummary(_modelConfigData||{main:{verification:data.verification||{}}});
+  const state=String(data&&data.verification&&data.verification.state||'');
+  const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:{product_error:data&&data.verification&&data.verification.product_error}}):null;
+  _setModelConfigDraftStatus(state==='connection_verified'?'连接正常，对话能力待实际会话验证。':state==='unsupported'?'当前 Provider 暂不支持安全连接检查。':productError?(productError.title+'：'+productError.message):'连接检查未通过，请根据页面提示处理。');
+ }catch(error){
+  _setModelConfigDraftStatus('连接检查请求失败：'+(error&&error.message||error));
+ }finally{
+  if(btn){btn.disabled=false;btn.removeAttribute('aria-busy');}
+ }
+}
+
 async function _readSecretClipboardText(){
  if(window.taijiDesktop&&typeof window.taijiDesktop.readClipboardText==='function'){
   const result=await window.taijiDesktop.readClipboardText();
@@ -11406,7 +11432,7 @@ async function saveMainModelConfig(){
   if(refresh.pending){
    _setMainModelConfigSaveState('refreshing','主模型配置已保存，运行时正在刷新。');
   }else{
-   _setMainModelConfigSaveState('applied','主模型配置已生效。');
+   _setMainModelConfigSaveState('applied','主模型已配置，尚未验证。');
    toggleModelConfigSection('modelConfigMainEdit',false);
    if(typeof showToast==='function') showToast('主模型配置已保存');
   }

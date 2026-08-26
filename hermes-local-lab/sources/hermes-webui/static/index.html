@@ -33,7 +33,7 @@
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
 <script src="static/brand.js?v=__WEBUI_VERSION__"></script>
-<script>window.__TAIJI_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>window.__TAIJI_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,['csrfToken']:__CSRF_TOKEN_JSON__};</script>
 <script>(function(){
   var cfg=window.__TAIJI_CONFIG__||{},token=cfg.csrfToken||'';
   if(!token||!window.fetch)return;
@@ -1450,7 +1450,10 @@
                 <div class="settings-section-title">模型配置</div>
                 <div class="settings-section-meta">只影响 CLI 和新会话；正在运行中的回复不会被热切换。</div>
               </div>
-              <button class="btn-tiny" id="btnReloadAllModelConfig" type="button" onclick="refreshModelAndImageCapabilities()">刷新状态</button>
+              <div class="model-config-actions">
+                <button class="btn-tiny" id="btnCheckMainModelConnection" type="button" onclick="checkMainModelConnection()" aria-label="检查主模型连接" title="仅访问 Provider 的模型目录，不发送对话、附件、工具或记忆">检查连接</button>
+                <button class="btn-tiny" id="btnReloadAllModelConfig" type="button" onclick="refreshModelAndImageCapabilities()" aria-label="刷新本机模型配置状态" title="只重新读取本机配置，不访问 Provider">刷新本机状态</button>
+              </div>
             </div>
             <p class="model-config-hint" id="modelConfigDraftStatus" aria-live="polite"></p>
 

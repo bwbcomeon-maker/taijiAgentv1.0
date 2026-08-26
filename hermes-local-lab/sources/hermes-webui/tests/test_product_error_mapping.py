@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from api.docx_engine_v2 import _known_failure_payload
 from api.gateway_chat import _gateway_run_error_event, _gateway_sse_error_event
 from api.product_contract import ERROR_SCHEMA, attach_product_error
@@ -50,6 +52,59 @@ def test_provider_and_gateway_errors_keep_old_fields_and_add_safe_mapping():
     _assert_safe_envelope(gateway_model, "model_configuration_required")
     assert gateway_backend["type"] == "gateway_error"
     _assert_safe_envelope(gateway_backend, "backend_unavailable")
+
+
+@pytest.mark.parametrize(
+    ("internal_code", "status", "transport_kind", "product_code"),
+    [
+        ("auth", 401, None, "provider_authorization_failed"),
+        ("auth_permanent", 403, None, "provider_authorization_failed"),
+        ("billing", 402, None, "provider_account_unavailable"),
+        ("rate_limit", 429, None, "provider_rate_limited"),
+        ("model_not_found", 404, None, "provider_model_unavailable"),
+        ("timeout", None, "timeout", "provider_timeout"),
+        ("timeout", None, "dns", "provider_network_unavailable"),
+        ("timeout", None, "connect", "provider_network_unavailable"),
+        ("server_error", 500, None, "provider_service_unavailable"),
+        ("overloaded", 503, None, "provider_service_unavailable"),
+        ("context_overflow", 400, None, "model_input_too_large"),
+        ("content_policy_blocked", 400, None, "provider_content_blocked"),
+        ("format_error", 400, None, "provider_request_rejected"),
+    ],
+)
+def test_structured_gateway_provider_error_maps_without_string_guessing(
+    internal_code, status, transport_kind, product_code
+):
+    incident_id = "inc-0123456789ab"
+    mapped = _gateway_run_error_event({
+        "error": {
+            "schema": "taiji.gateway.run-error.v1",
+            "source": "provider",
+            "code": internal_code,
+            "status": status,
+            "transport_kind": transport_kind,
+            "retryable": False,
+            "incident_id": incident_id,
+            "message": "Provider request failed.",
+        }
+    })
+
+    _assert_safe_envelope(mapped, product_code)
+    assert mapped["product_error"]["incident_id"] == incident_id
+
+
+def test_local_gateway_401_is_not_misreported_as_provider_key_failure():
+    mapped = _gateway_run_error_event({
+        "error": {
+            "schema": "taiji.gateway.run-error.v1",
+            "source": "gateway",
+            "code": "authentication_failed",
+            "status": 401,
+            "incident_id": "inc-0123456789ab",
+        }
+    })
+
+    _assert_safe_envelope(mapped, "gateway_authentication_failed")
 
 
 def test_docx_failure_keeps_recovery_evidence_and_adds_artifact_mapping():
@@ -117,6 +172,39 @@ def test_rest_and_sse_clients_prefer_allowlisted_product_copy():
     assert "productError?productError.title" in messages
     assert "productError?productError.message" in messages
     assert "productError?'':" in messages
+
+
+def test_frontend_uses_backend_error_catalog_and_canonical_message_identity():
+    panels = (ROOT / "static/panels.js").read_text(encoding="utf-8")
+    messages = (ROOT / "static/messages.js").read_text(encoding="utf-8")
+    ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
+
+    assert "_productErrorCatalog" not in panels
+    assert "const title=String(raw.title||'').trim()" in panels
+    assert "schema:'taiji.product.error.v1'" in panels
+    assert "d.assistant_message" in messages
+    assert "item.message_id===canonical.message_id" in messages
+    assert "回复未完成" in ui
+    assert "m._announce_error?'alert':'group'" in ui
+    assert "if(m._announce_error) m._announce_error=false" in ui
+    assert "复制事件编号" in ui
+
+
+def test_error_card_retry_uses_its_message_row_and_does_not_duplicate_controls_or_announcements():
+    panels = (ROOT / "static/panels.js").read_text(encoding="utf-8")
+    messages = (ROOT / "static/messages.js").read_text(encoding="utf-8")
+    ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
+
+    assert "function handleProductErrorAction(action,incidentId,trigger)" in panels
+    assert "regenerateResponse(trigger)" in panels
+    assert "handleProductErrorAction('${esc(action.id)}','${esc(envelope.incident_id)}',this)" in ui
+    assert "isLastAssistant && !m._error" in ui
+    assert "canonical._announce_error=existing<0" in messages
+    assert "product_error:productError" in messages
+    assert "_error:true,status:'failed'" in messages
+    assert messages.index("else if(productError){") > messages.index("source.addEventListener('apperror'")
+    assert "const _productRecoveryActionIds=new Set" in panels
+    assert "_productRecoveryActionLabels" not in panels
 
 
 def test_license_blocked_chat_turn_prefers_allowlisted_product_copy():

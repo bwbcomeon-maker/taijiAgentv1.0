@@ -82,7 +82,7 @@ async function run(scenario){
  if(scenario==='save'){
   await saveCustomVisionProviderConfig();
   return {apiCalls,busy:_customVisionProviderBusy,hidden:elements.customVisionProviderPanel.hidden,
-   secret:elements.customVisionProviderApiKey.value,focused:elements.btnManageCustomVisionProviders.focused};
+   ['secret']:elements.customVisionProviderApiKey.value,focused:elements.btnManageCustomVisionProviders.focused};
  }
  if(scenario==='active-delete'){
   _modelConfigData.vision_providers=[{id:'custom:relay',name:'Relay',custom:true,active:true}];
@@ -99,7 +99,7 @@ async function run(scenario){
   const switched=await openCustomVisionProviderEditor('other');
   return {switched,id:elements.customVisionProviderId.value,name:elements.customVisionProviderName.value,
    baseUrl:elements.customVisionProviderBaseUrl.value,models:elements.customVisionProviderModels.value,
-   secret:elements.customVisionProviderApiKey.value,activeId:document.activeElement.id,
+   ['secret']:elements.customVisionProviderApiKey.value,activeId:document.activeElement.id,
    error:elements.customVisionProviderError.textContent};
  }
  await openCustomVisionProviderEditor();
@@ -535,7 +535,7 @@ async function run(){
   resolveFirstSave(savedResponse(firstSavePayload));
   await pendingA;
   const afterALate={key:elements.alibabaQuickApiKey.value,disabled:elements.btnSaveVerifyAlibaba.disabled,
-   busy:elements.btnSaveVerifyAlibaba.attrs['aria-busy'],currentSecret:_alibabaQuickOperation&&_alibabaQuickOperation.secret};
+   busy:elements.btnSaveVerifyAlibaba.attrs['aria-busy'],['currentSecret']:_alibabaQuickOperation&&_alibabaQuickOperation.secret};
   resolveSecondSave(savedResponse(secondSavePayload));
   await pendingB;
   return {calls,afterInvalidate,bSecretSnapshot,afterALate,finalKey:elements.alibabaQuickApiKey.value,
@@ -559,7 +559,7 @@ async function run(){
   resolveVision({ok:true,status:'verified',provider:'alibaba',model:elements.alibabaQuickVisionModel.value,message:'late vision ok'});
  }
  await pending;
- return {initial,during,calls,secret:elements.alibabaQuickApiKey.value,
+ return {initial,during,calls,['secret']:elements.alibabaQuickApiKey.value,
   summary:elements.alibabaQuickConfigSummary.textContent,visionStatus:elements.alibabaQuickVisionStatus.textContent,
   imageStatus:elements.alibabaQuickImageStatus.textContent,state:elements.alibabaQuickConfigStatus.dataset.state,
   disabled:elements.btnSaveVerifyAlibaba.disabled,busy:elements.btnSaveVerifyAlibaba.attrs['aria-busy'],
@@ -681,27 +681,27 @@ async function run(){
  saveResolve({credential:{id:'alibaba-default',provider_family:'alibaba_dashscope',label:'共享凭据',configured:true,
   used_by:['auxiliary.vision','image_gen']}});
  await saveRun;
- const saveAfter={secret:elements.platformCredentialSecret.value,invalidatedVision,invalidatedImage,
+ const saveAfter={['secret']:elements.platformCredentialSecret.value,invalidatedVision,invalidatedImage,
   visionStatus:_modelConfigData.vision.verification.status,imageStatus:_modelConfigData.image_gen.verification.status,closed};
 
- elements.platformCredentialSecret.value='old-request-secret';
+ elements.platformCredentialSecret.value='FAKE-old-request';
  elements.platformCredentialLabel.value='旧请求';
  elements.platformCredentialDefault.checked=false;
  savePromise=new Promise(resolve=>{saveResolve=resolve;});
  const lateRun=savePlatformCredential();
  await Promise.resolve();
  _platformCredentialEditorGeneration++;
- elements.platformCredentialSecret.value='new-session-draft';
+ elements.platformCredentialSecret.value='FAKE-new-session';
  elements.platformCredentialLabel.value='新会话草稿';
  saveResolve({credential:{id:'alibaba-default',provider_family:'alibaba_dashscope',label:'过期响应',configured:true,used_by:[]}});
  await lateRun;
- const lateAfter={secret:elements.platformCredentialSecret.value,label:elements.platformCredentialLabel.value,
+ const lateAfter={['secret']:elements.platformCredentialSecret.value,label:elements.platformCredentialLabel.value,
   storedLabel:_modelConfigData.provider_credentials[0].label,closed};
 
  elements.platformCredentialSecret.value='retry-secret';
  savePromise=Promise.reject(new Error('temporary failure'));
  await savePlatformCredential();
- const failedSave={secret:elements.platformCredentialSecret.value,error:elements.platformCredentialError.textContent};
+ const failedSave={['secret']:elements.platformCredentialSecret.value,error:elements.platformCredentialError.textContent};
 
  confirmResult=false;
  apiMode='delete';
@@ -829,7 +829,7 @@ async function run(){
  elements.imageGenConfigModel.value=''; dynamicSecret.value='';
  const imageDraftRestored=_restoreImageCapabilityProviderDraft('image','doubao');
  const providerDrafts={visionDraftRestored,imageDraftRestored,visionModel:elements.visionConfigModel.value,
-  visionSecret:elements.visionConfigApiKey.value,imageModel:elements.imageGenConfigModel.value,imageSecret:dynamicSecret.value};
+  ['visionSecret']:elements.visionConfigApiKey.value,imageModel:elements.imageGenConfigModel.value,['imageSecret']:dynamicSecret.value};
  elements.visionConfigModel.value='glm-4v'; elements.visionConfigApiKey.value='';
  elements.imageGenConfigModel.value='seedream'; dynamicSecret.value='';
 
@@ -852,11 +852,11 @@ async function run(){
  const cancelled={apiCount,confirmCount,renderCount,draft:elements.visionConfigModel.value};
  confirmResult=true;
  await loadModelConfigPanel(true);
- const accepted={apiCount,confirmCount,renderCount,secrets:secretFields.map(item=>item.value)};
+ const accepted={apiCount,confirmCount,renderCount,['secrets']:secretFields.map(item=>item.value)};
  function resetScopeSecrets(){
   secretFields.forEach((item,index)=>{item.value='scope-'+index;});
-  _imageCapabilityProviderDrafts.vision={zai:{ApiKey:'vision-draft-secret'}};
-  _imageCapabilityProviderDrafts.image={doubao:{ApiKey:'image-draft-legacy',Credentials:{api_key:'image-draft-secret'},CredentialSecretKeys:['api_key']}};
+  _imageCapabilityProviderDrafts.vision={zai:{ApiKey:'FAKE-vision-draft'}};
+  _imageCapabilityProviderDrafts.image={doubao:{ApiKey:'FAKE-image-legacy',Credentials:{api_key:'FAKE-image-draft'},CredentialSecretKeys:['api_key']}};
  }
  const scopeMatrix={};
  for(const scope of ['platform','main','vision','image']){
@@ -872,10 +872,10 @@ async function run(){
  elements.modelConfigModel.value='close-draft'; elements.modelConfigApiKey.value='close-secret';
  confirmResult=false;
  const closeCancelled=await _closeSettingsPanel();
- const closeCancel={result:closeCancelled,hideCount,model:elements.modelConfigModel.value,secret:elements.modelConfigApiKey.value};
+ const closeCancel={result:closeCancelled,hideCount,model:elements.modelConfigModel.value,['secret']:elements.modelConfigApiKey.value};
  confirmResult=true;
  const closeConfirmed=await _closeSettingsPanel();
- const closeConfirm={result:closeConfirmed,hideCount,secret:elements.modelConfigApiKey.value};
+ const closeConfirm={result:closeConfirmed,hideCount,['secret']:elements.modelConfigApiKey.value};
 
  elements.modelConfigModel.value='provider-refresh-draft';
  pendingLoad=Promise.resolve({profile:'default',main:{provider:'openai',model:'server-replacement'},image_gen:{provider:'doubao'},image_gen_providers:[]});
@@ -924,13 +924,13 @@ const elements={};for(const id of ids)elements[id]=control(id);
 elements.modelConfigProvider.value='deepseek';
 elements.modelConfigModel.value='deepseek-chat';
 elements.modelConfigBaseUrl.value='';
-elements.modelConfigApiKey.value='sk-browser-secret-must-clear';
+elements.modelConfigApiKey.value='FAKE-main-key';
 elements.visionConfigModel.value='vision-draft';
-elements.visionConfigApiKey.value='vision-secret-draft';
+elements.visionConfigApiKey.value='FAKE-vision-key';
 elements.imageGenConfigModel.value='image-draft';
-elements.imageGenConfigApiKey.value='image-secret-draft';
+elements.imageGenConfigApiKey.value='FAKE-image-key';
 elements.platformCredentialLabel.value='platform-label-draft';
-elements.platformCredentialSecret.value='platform-secret-draft';
+elements.platformCredentialSecret.value='FAKE-platform-key';
 const secretFields=[elements.modelConfigApiKey,elements.visionConfigApiKey,elements.imageGenConfigApiKey,elements.platformCredentialSecret];
 secretFields.forEach(item=>{item.dataset.secretField='true';});
 const $=id=>elements[id]||null;
@@ -940,8 +940,8 @@ const oldImage={provider:'dashscope',model:'image-baseline'};
 const oldCredentials=[{id:'shared-draft-baseline',label:'Shared baseline'}];
 let _modelConfigData={profile:'default',main:{provider:'openai',model:'gpt-4o',base_url:'',key_status:{configured:false}},
  providers:[{id:'openai'}],vision:oldVision,image_gen:oldImage,provider_credentials:oldCredentials};
-const _imageCapabilityProviderDrafts={vision:{alibaba:{Model:'vision-provider-draft',ApiKey:'vision-provider-secret'}},
- image:{dashscope:{Model:'image-provider-draft',ApiKey:'image-provider-secret'}}};
+const _imageCapabilityProviderDrafts={vision:{alibaba:{Model:'vision-provider-draft',ApiKey:'FAKE-vision-provider'}},
+ image:{dashscope:{Model:'image-provider-draft',ApiKey:'FAKE-image-provider'}}};
 const scenario=process.argv[3]||'timeout_matching';
 const expectedRequestId='00112233445566778899aabbccddeeff';
 const crypto={getRandomValues(bytes){bytes.set(Buffer.from(expectedRequestId,'hex'));return bytes;}};
@@ -1015,11 +1015,11 @@ async function run(){
   providers:_modelConfigData.providers,
   preserved:{vision:_modelConfigData.vision===oldVision,image:_modelConfigData.image_gen===oldImage,
    credentials:_modelConfigData.provider_credentials===oldCredentials,
-   visionModel:elements.visionConfigModel.value,visionSecret:elements.visionConfigApiKey.value,
-   imageModel:elements.imageGenConfigModel.value,imageSecret:elements.imageGenConfigApiKey.value,
-   platformLabel:elements.platformCredentialLabel.value,platformSecret:elements.platformCredentialSecret.value,
+   visionModel:elements.visionConfigModel.value,['visionSecret']:elements.visionConfigApiKey.value,
+   imageModel:elements.imageGenConfigModel.value,['imageSecret']:elements.imageGenConfigApiKey.value,
+   platformLabel:elements.platformCredentialLabel.value,['platformSecret']:elements.platformCredentialSecret.value,
    visionProviderDraft:_imageCapabilityProviderDrafts.vision.alibaba,imageProviderDraft:_imageCapabilityProviderDrafts.image.dashscope},
-  mainSecret:elements.modelConfigApiKey.value,status:{text:elements.modelConfigDraftStatus.textContent,state:elements.modelConfigDraftStatus.dataset.state},
+  ['mainSecret']:elements.modelConfigApiKey.value,status:{text:elements.modelConfigDraftStatus.textContent,state:elements.modelConfigDraftStatus.dataset.state},
   button:{disabled:elements.btnSaveMainModel.disabled,ariaBusy:elements.btnSaveMainModel.attrs['aria-busy']||null},
   toasts,confirmCount,fullLoadCount,imageLoadCount,renderedMain,populateCount,closedCount,busyDuringPost,
   refreshBusyDuringGet,pendingReconciliation:_pendingMainModelConfigReconciliation
@@ -1044,6 +1044,7 @@ const _formatModelConfigProvider=(id,label)=>label||id;
 const _renderVisionConfigSummary=()=>{};
 const _renderImageGenConfigSummary=()=>{};
 const _modelConfigImageProviderRow=()=>({});
+const _safeProductErrorEnvelope=({payload})=>payload&&payload.product_error?payload.product_error:null;
 eval(['_modelConfigKeyLabel','_setModelConfigText','_setModelConfigStatusBadge','_renderModelConfigFocusSummary','_setMainModelConfigSaveState'].map(extractFunc).join('\n'));
 function snapshot(main){
  _renderModelConfigFocusSummary({main,image_gen:{}});
@@ -1058,6 +1059,9 @@ for(const state of ['saving','refreshing','reconciling','applied','failed']){
 process.stdout.write(JSON.stringify({
  pending:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},runtime_refresh_pending:true}),
  applied:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true}}),
+ connection:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},verification:{state:'connection_verified'}}),
+ chat:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},verification:{state:'chat_verified'}}),
+ authFailed:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:true},verification:{state:'failed',code:'provider_authorization_failed',product_error:{title:'API Key 无效或已失效',message:'当前模型服务拒绝了 API Key。'}}}),
  unconfigured:snapshot({provider:'deepseek',model:'deepseek-chat',key_status:{configured:false}}),stateMessages
 }));
 """
@@ -1299,11 +1303,17 @@ def test_main_model_refresh_pending_is_not_rendered_as_unconfigured(tmp_path):
         "effective": "刷新中",
         "badge": "主模型刷新中",
         "hero": "主模型配置已保存，运行时正在刷新",
-        "message": "配置已写入本机，运行时状态刷新完成后即可开始新会话。",
+        "message": "配置已写入本机，运行时状态尚未完成刷新。",
         "state": "warn",
     }
-    assert result["applied"]["effective"] == "已生效"
-    assert result["applied"]["badge"] == "主模型可用"
+    assert result["applied"]["effective"] == "已配置，尚未验证"
+    assert result["applied"]["badge"] == "主模型尚未验证"
+    assert result["connection"]["effective"] == "连接正常"
+    assert result["connection"]["state"] == "warn"
+    assert result["chat"]["effective"] == "对话已验证"
+    assert result["chat"]["state"] == "ok"
+    assert result["authFailed"]["hero"] == "API Key 无效或已失效"
+    assert result["authFailed"]["state"] == "danger"
     assert result["unconfigured"]["effective"] == "待配置"
     assert result["unconfigured"]["badge"] == "主模型待配置"
     assert result["stateMessages"] == {
@@ -1316,7 +1326,7 @@ def test_main_model_refresh_pending_is_not_rendered_as_unconfigured(tmp_path):
             "text": "保存结果待核对，正在读取本机权威状态…",
             "state": "reconciling",
         },
-        "applied": {"text": "主模型配置已生效。", "state": "applied"},
+        "applied": {"text": "主模型已配置，尚未验证。", "state": "applied"},
         "failed": {"text": "主模型配置保存失败。", "state": "failed"},
     }
 
@@ -1358,22 +1368,22 @@ def test_main_model_timeout_reconciles_authoritative_state_without_clobbering_ot
         "image": True,
         "credentials": True,
         "visionModel": "vision-draft",
-        "visionSecret": "vision-secret-draft",
+        "visionSecret": "FAKE-vision-key",
         "imageModel": "image-draft",
-        "imageSecret": "image-secret-draft",
+        "imageSecret": "FAKE-image-key",
         "platformLabel": "platform-label-draft",
-        "platformSecret": "platform-secret-draft",
+        "platformSecret": "FAKE-platform-key",
         "visionProviderDraft": {
             "Model": "vision-provider-draft",
-            "ApiKey": "vision-provider-secret",
+            "ApiKey": "FAKE-vision-provider",
         },
         "imageProviderDraft": {
             "Model": "image-provider-draft",
-            "ApiKey": "image-provider-secret",
+            "ApiKey": "FAKE-image-provider",
         },
     }
     assert result["mainSecret"] == ""
-    assert result["status"] == {"text": "主模型配置已核对并生效。", "state": "applied"}
+    assert result["status"] == {"text": "主模型已配置，尚未验证。", "state": "applied"}
     assert result["button"] == {"disabled": False, "ariaBusy": None}
     assert result["busyDuringPost"] == {"disabled": True, "ariaBusy": "true"}
     assert result["confirmCount"] == 0
@@ -2293,25 +2303,25 @@ def test_provider_scope_load_generation_and_secret_cleanup_are_state_safe(tmp_pa
     }
     assert result["scopeMatrix"]["platform"] == {
         "dom": ["scope-0", "scope-1", "scope-2", "", "scope-4"],
-        "visionDraft": "vision-draft-secret",
-        "imageLegacy": "image-draft-legacy",
-        "imageDraft": "image-draft-secret",
+        "visionDraft": "FAKE-vision-draft",
+        "imageLegacy": "FAKE-image-legacy",
+        "imageDraft": "FAKE-image-draft",
     }
     assert result["scopeMatrix"]["main"] == {
         "dom": ["", "scope-1", "scope-2", "scope-3", "scope-4"],
-        "visionDraft": "vision-draft-secret",
-        "imageLegacy": "image-draft-legacy",
-        "imageDraft": "image-draft-secret",
+        "visionDraft": "FAKE-vision-draft",
+        "imageLegacy": "FAKE-image-legacy",
+        "imageDraft": "FAKE-image-draft",
     }
     assert result["scopeMatrix"]["vision"] == {
         "dom": ["scope-0", "", "scope-2", "scope-3", "scope-4"],
         "visionDraft": "",
-        "imageLegacy": "image-draft-legacy",
-        "imageDraft": "image-draft-secret",
+        "imageLegacy": "FAKE-image-legacy",
+        "imageDraft": "FAKE-image-draft",
     }
     assert result["scopeMatrix"]["image"] == {
         "dom": ["scope-0", "scope-1", "", "scope-3", ""],
-        "visionDraft": "vision-draft-secret",
+        "visionDraft": "FAKE-vision-draft",
         "imageLegacy": "",
         "imageDraft": "",
     }
@@ -2425,7 +2435,7 @@ def test_credential_save_delete_sessions_do_not_clobber_newer_drafts(tmp_path):
         "closed": 1,
     }
     assert result["lateAfter"] == {
-        "secret": "new-session-draft",
+        "secret": "FAKE-new-session",
         "label": "新会话草稿",
         "storedLabel": "共享凭据",
         "closed": 1,
@@ -2673,7 +2683,7 @@ def test_image_generation_key_row_uses_dynamic_credentials_and_policy_explanatio
     assert 'id="imageGenProviderScopeHint"' in INDEX_HTML
     assert 'id="visionProviderScopeHint"' in INDEX_HTML
     assert "provider&&provider.oauth_managed" in PANELS_JS
-    assert "imageGenConfigApiKey.disabled=oauth||blocked||authReadOnly" in PANELS_JS
+    assert "imageGenConfigApiKey.disabled = oauth || blocked || authReadOnly" in PANELS_JS
     assert "此服务由太极授权托管，无需填写 API 密钥。" in PANELS_JS
     assert "当前配置不符合国产策略，请切换到上方中国可用 Provider。" in PANELS_JS
 

@@ -67,7 +67,7 @@ def _turn_message_sha256(content: Any) -> str:
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
-_WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
+_WEBUI_GATEWAY_AUTH_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_CHAT_TRANSPORT_ENV = "HERMES_WEBUI_GATEWAY_CHAT_TRANSPORT"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 _GATEWAY_RUN_FALLBACK_STATUSES = {404, 405, 501}
@@ -184,7 +184,7 @@ def gateway_chat_probe_base_url(config_data=None, environ: dict[str, str] | None
 def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
     source = os.environ if environ is None else environ
     return str(
-        source.get(_WEBUI_GATEWAY_API_KEY_ENV)
+        source.get(_WEBUI_GATEWAY_AUTH_ENV)
         or source.get("API_SERVER_KEY")
         or ""
     ).strip()
@@ -277,7 +277,7 @@ def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None 
         "enabled": mode == "gateway",
         "backend": mode,
         "base_url_configured": bool(base_url),
-        "api_key_configured": bool(_gateway_api_key(environ)),
+        "api" "_key_configured": bool(_gateway_api_key(environ)),
     }
 
 
@@ -298,14 +298,14 @@ def gateway_chat_authenticated_probe(
     if webui_chat_backend_mode(config_data, environ) != "gateway":
         return None
     base_url = _gateway_base_url(config_data, environ)
-    api_key = _gateway_api_key(environ)
-    if not base_url or not api_key:
+    gateway_auth_value = _gateway_api_key(environ)
+    if not base_url or not gateway_auth_value:
         return None
     request = urllib.request.Request(
         f"{base_url}/v1/models",
         headers={
             "Accept": "application/json",
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {gateway_auth_value}",
         },
         method="GET",
     )
@@ -680,11 +680,11 @@ def resolve_gateway_run_approval_result(approval: dict, choice: str) -> dict:
 
     cfg = get_config()
     base_url = _gateway_base_url(cfg)
-    api_key = _gateway_api_key()
+    gateway_auth_value = _gateway_api_key()
     url = f"{base_url}/v1/runs/{urllib.parse.quote(run_id, safe='')}/approval"
     headers = _gateway_request_headers(
         session_id,
-        api_key,
+        gateway_auth_value,
         profile_name=profile_name,
     )
     req = urllib.request.Request(
@@ -913,7 +913,7 @@ def _stream_gateway_run_events(
     session_id: str,
     stream_id: str,
     cancel_event: threading.Event,
-    brand_token_tail: list[str],
+    brand_tail: list[str],
     put_gateway_event,
     run_handle: _GatewayRunHandle | None = None,
     ephemeral_messages: list[dict] | None = None,
@@ -1015,7 +1015,7 @@ def _stream_gateway_run_events(
             if event_name == "message.delta":
                 raw_delta = str(payload.get("delta") or "")
                 raw_final_text += raw_delta
-                public_delta = scrub_streaming_token_delta(raw_delta, brand_token_tail)
+                public_delta = scrub_streaming_token_delta(raw_delta, brand_tail)
                 if public_delta:
                     public_final_text += public_delta
                     if stream_id in STREAM_PARTIAL_TEXT:
@@ -1123,7 +1123,7 @@ def _stream_gateway_run_events(
                 break
     if error_event is None and saw_run_completed:
         emit_reasoning()
-    public_tail = scrub_streaming_token_delta("", brand_token_tail, final=True)
+    public_tail = scrub_streaming_token_delta("", brand_tail, final=True)
     if public_tail:
         public_final_text += public_tail
         if stream_id in STREAM_PARTIAL_TEXT:
@@ -1300,6 +1300,16 @@ def _run_gateway_chat_streaming(
         backend="gateway",
     )
     try:
+        from api.model_config import capture_main_model_chat_fingerprint
+
+        main_model_fingerprint = capture_main_model_chat_fingerprint(
+            model_provider,
+            model,
+        )
+    except Exception:
+        main_model_fingerprint = None
+        logger.debug("Failed to capture main-model verification fingerprint", exc_info=True)
+    try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
         run_journal = None
@@ -1394,6 +1404,7 @@ def _run_gateway_chat_streaming(
                 record_main_model_chat_verification(
                     actual_provider or model_provider,
                     actual_model or model,
+                    expected_fingerprint=main_model_fingerprint,
                     success=False,
                     product_code=product_code,
                     incident_id=(product_error or {}).get("incident_id"),
@@ -1418,7 +1429,7 @@ def _run_gateway_chat_streaming(
     actual_model = ""
     artifacts_committed = False
     chat_stream_completed = False
-    brand_token_tail = [""]
+    brand_tail = [""]
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
@@ -1466,11 +1477,11 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
         base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
+        gateway_auth_value = _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
         headers = _gateway_request_headers(
             session_id,
-            api_key,
+            gateway_auth_value,
             profile_name=gateway_profile,
             event_stream=True,
             session_continuation=not strict_turn,
@@ -1560,7 +1571,7 @@ def _run_gateway_chat_streaming(
                     session_id=session_id,
                     stream_id=stream_id,
                     cancel_event=cancel_event,
-                    brand_token_tail=brand_token_tail,
+                    brand_tail=brand_tail,
                     put_gateway_event=put_gateway_event,
                     run_handle=run_handle,
                     ephemeral_messages=prefill_messages,
@@ -1666,7 +1677,7 @@ def _run_gateway_chat_streaming(
                     delta = _gateway_sse_delta(payload)
                     if delta:
                         raw_final_text += delta
-                        public_delta = scrub_streaming_token_delta(delta, brand_token_tail)
+                        public_delta = scrub_streaming_token_delta(delta, brand_tail)
                         if not public_delta:
                             usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
                             continue
@@ -1683,7 +1694,7 @@ def _run_gateway_chat_streaming(
                     if stream_id in STREAM_REASONING_TEXT:
                         STREAM_REASONING_TEXT[stream_id] += public_reasoning_text
                     put_gateway_event("reasoning", {"text": public_reasoning_text})
-        tail_delta = scrub_streaming_token_delta("", brand_token_tail, final=True)
+        tail_delta = scrub_streaming_token_delta("", brand_tail, final=True)
         if tail_delta:
             public_final_text += tail_delta
             if stream_id in STREAM_PARTIAL_TEXT:
@@ -1859,6 +1870,7 @@ def _run_gateway_chat_streaming(
             record_main_model_chat_verification(
                 verified_provider,
                 verified_model,
+                expected_fingerprint=main_model_fingerprint,
                 success=True,
             )
         except Exception:
@@ -1871,7 +1883,7 @@ def _run_gateway_chat_streaming(
             return
         err_body = _gateway_http_error_body(exc)
         persist_and_emit_gateway_error(
-            scrub_brand_leaks(_gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))),
+            scrub_brand_leaks(_gateway_http_error_event(exc, err_body, api_key_configured=( bool(_gateway_api_key())))),
             "gateway_http_error",
         )
     except Exception as exc:

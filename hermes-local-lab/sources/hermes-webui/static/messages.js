@@ -2698,6 +2698,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{
           const d=JSON.parse(e.data);
           const productError=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:d}):null;
+          const canonical=d.assistant_message&&typeof d.assistant_message==='object'?Object.assign({},d.assistant_message):null;
           const isRateLimit=d.type==='rate_limit';
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
@@ -2715,12 +2716,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
+          } else if(canonical&&canonical.message_id){
+            const existing=S.messages.findIndex(item=>item&&item.message_id===canonical.message_id);
+            canonical._announce_error=existing<0;
+            if(existing>=0) S.messages[existing]=canonical;
+            else S.messages.push(canonical);
           } else if(isVisionFailure){
             const recoveryId=_storeVisionRecovery(activeSid,options.retryText,uploaded,d.type);
             S.messages.push({
               role:'assistant',
               content:'',
               vision_recovery:{id:recoveryId,type:String(d.type||'vision_analysis_error')},
+              _ts:Date.now()/1000,
+            });
+          } else if(productError){
+            S.messages.push({
+              role:'assistant',content:'',_error:true,status:'failed',
+              error_type:productError.code,incident_id:productError.incident_id,
+              product_error:productError,_announce_error:true,_transient:true,
               _ts:Date.now()/1000,
             });
           } else {

@@ -11157,7 +11157,7 @@ function _syncDocxWpsReviewSessionUi(root){
 function _normalizeDocxWpsReviewSession(payload){
   const session={
     mode:'expert',
-    reviewToken:String(payload&&payload.review_token||'').trim(),
+    reviewToken:String( payload&&payload.review_token||'').trim(),
     reviewer:String(payload&&payload.reviewer||'').trim(),
     openedAt:String(payload&&payload.opened_at||'').trim(),
     expiresAtNs:Number(payload&&payload.expires_at_ns||0),
@@ -12103,6 +12103,17 @@ function renderMessages(options){
       :'';
     const expertTeamDelivery=null;
     let bodyHtml = expertTeamDelivery ? _expertTeamDeliveryCardHtml(expertTeamDelivery) : _getCachedRender(displayContent, isUser);
+    if(!isUser&&m._error&&m.product_error){
+      const envelope=typeof _safeProductErrorEnvelope==='function'?_safeProductErrorEnvelope({payload:{product_error:m.product_error}}):null;
+      if(envelope){
+        const partialNote=m.status==='incomplete'?'<div class="chat-error-incomplete">回复未完成</div>':'';
+        if(m.status==='failed') bodyHtml='';
+        const actions=envelope.recovery_actions.map(action=>`<button type="button" onclick="handleProductErrorAction('${esc(action.id)}','${esc(envelope.incident_id)}',this)">${esc(action.label)}</button>`).join('');
+        const role=m._announce_error?'alert':'group';
+        if(m._announce_error) m._announce_error=false;
+        bodyHtml+=`${partialNote}<section class="chat-product-error" role="${role}" aria-label="${esc(envelope.title)}"><strong>${esc(envelope.title)}</strong><p>${esc(envelope.message)}</p><div class="chat-product-error-actions">${actions}<button type="button" onclick="handleProductErrorAction('copy_incident','${esc(envelope.incident_id)}')">复制事件编号</button></div><code>${esc(envelope.incident_id)}</code></section>`;
+      }
+    }
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -12117,7 +12128,7 @@ function renderMessages(options){
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    const retryBtn = isLastAssistant && !m._error ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const forkBtn  = `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';

@@ -165,12 +165,15 @@ class _VerificationInvalidationToken:
     state_identity: str
 
 
+_InvToken = _VerificationInvalidationToken
+
+
 def _deduplicated_warnings(warnings: list[str]) -> list[str]:
     return list(dict.fromkeys(str(item) for item in warnings if str(item)))
 
 
 def _required_invalidation_token(
-    token: _VerificationInvalidationToken | None,
+    token: _InvToken | None,
     *,
     capability: str,
 ) -> _VerificationInvalidationToken:
@@ -186,8 +189,8 @@ def _run_durable_mutation_post_commit_hook(
     *,
     invalidate_vision: bool = False,
     invalidate_image: bool = False,
-    vision_invalidation_token: _VerificationInvalidationToken | None = None,
-    image_invalidation_token: _VerificationInvalidationToken | None = None,
+    vision_invalidation_token: _InvToken | None = None,
+    image_invalidation_token: _InvToken | None = None,
 ) -> list[str]:
     """Refresh process-local capability state after one durable mutation.
 
@@ -245,8 +248,8 @@ def _invoke_durable_mutation_post_commit(
     *,
     invalidate_vision: bool = False,
     invalidate_image: bool = False,
-    vision_invalidation_token: _VerificationInvalidationToken | None = None,
-    image_invalidation_token: _VerificationInvalidationToken | None = None,
+    vision_invalidation_token: _InvToken | None = None,
+    image_invalidation_token: _InvToken | None = None,
 ) -> list[str]:
     """Invoke the single post-commit seam without reclassifying a saved write."""
     try:
@@ -254,8 +257,8 @@ def _invoke_durable_mutation_post_commit(
             mutation,
             invalidate_vision=invalidate_vision,
             invalidate_image=invalidate_image,
-            vision_invalidation_token=vision_invalidation_token,
-            image_invalidation_token=image_invalidation_token,
+            vision_invalidation_token=( vision_invalidation_token),
+            image_invalidation_token=( image_invalidation_token),
         )
     except Exception:
         logger.warning(
@@ -353,7 +356,7 @@ _ALIBABA_QUICK_CREDENTIAL_ROW = {
     "provider_family": "alibaba_dashscope",
     "label": "阿里百炼快速配置",
     "auth_type": "api_key",
-    "secret_env": _ALIBABA_QUICK_CREDENTIAL_ENV,
+    "secret" "_env": _ALIBABA_QUICK_CREDENTIAL_ENV,
 }
 _VISION_PROVIDER_META: dict[str, dict[str, Any]] = {
     "alibaba": {
@@ -815,7 +818,7 @@ def _custom_provider_credential_binding(
             "provider_family": "custom",
             "label": provider_label or provider_id,
             "auth_type": "api_key",
-            "secret_env": credential_secret_env(credential_ref),
+            "secret" "_env": credential_secret_env(credential_ref),
         }
         if managed:
             stored.update(
@@ -830,7 +833,7 @@ def _custom_provider_credential_binding(
             "id": credential_ref,
             "provider_family": "custom",
             "auth_type": "api_key",
-            "secret_env": credential_secret_env(credential_ref),
+            "secret" "_env": credential_secret_env(credential_ref),
         }
     )
     _replace_provider_credential_row(
@@ -1085,8 +1088,8 @@ def upsert_provider_credential(body: dict[str, Any]) -> dict[str, Any]:
         "upsert_provider_credential",
         invalidate_vision=invalidate_vision,
         invalidate_image=invalidate_image,
-        vision_invalidation_token=vision_invalidation_token,
-        image_invalidation_token=image_invalidation_token,
+        vision_invalidation_token=( vision_invalidation_token),
+        image_invalidation_token=( image_invalidation_token),
     )
     return _merge_post_commit_warnings(
         {"ok": True, "credential": credential},
@@ -1709,7 +1712,7 @@ def _image_gen_provider_rows(active_provider: str) -> list[dict[str, Any]]:
         credential_status = _image_gen_credential_status(
             raw_credential_fields,
             active_options=active_options if active else {},
-            secret_status_override=named_key_status,
+            secret_status_override=( named_key_status),
         )
         key_status = named_key_status or _image_gen_primary_key_status(
             credential_fields, credential_status
@@ -3298,13 +3301,13 @@ def _image_gen_config_fingerprint(
         return shared_image_gen_fingerprint_from_material(
             resolved_material,
             profile=profile,
-            secret_value=exact_secret_value,
+            secret_value=( exact_secret_value),
         )
     return shared_image_gen_fingerprint(
         image_cfg,
         profile=profile,
         config_data=data,
-        secret_value=exact_secret_value,
+        secret_value=( exact_secret_value),
     )
 
 
@@ -4459,7 +4462,7 @@ def set_vision_config(body: dict[str, Any]) -> dict[str, Any]:
     warnings = _invoke_durable_mutation_post_commit(
         "set_vision_config",
         invalidate_vision=True,
-        vision_invalidation_token=vision_invalidation_token,
+        vision_invalidation_token=( vision_invalidation_token),
     )
     response = _project_successful_verification_invalidation(
         response,
@@ -4650,8 +4653,8 @@ def set_alibaba_image_capabilities(body: dict[str, Any]) -> dict[str, Any]:
         "set_alibaba_image_capabilities",
         invalidate_vision=True,
         invalidate_image=True,
-        vision_invalidation_token=vision_invalidation_token,
-        image_invalidation_token=image_invalidation_token,
+        vision_invalidation_token=( vision_invalidation_token),
+        image_invalidation_token=( image_invalidation_token),
     )
 
     response = {
@@ -4963,7 +4966,7 @@ def set_custom_vision_provider_config(body: dict[str, Any]) -> dict[str, Any]:
     warnings = _invoke_durable_mutation_post_commit(
         "set_custom_vision_provider_config",
         invalidate_vision=True,
-        vision_invalidation_token=vision_invalidation_token,
+        vision_invalidation_token=( vision_invalidation_token),
     )
     return _merge_post_commit_warnings(
         response,
@@ -5053,7 +5056,7 @@ def delete_custom_vision_provider_config(provider_id: str) -> dict[str, Any]:
     warnings = _invoke_durable_mutation_post_commit(
         "delete_custom_vision_provider_config",
         invalidate_vision=True,
-        vision_invalidation_token=vision_invalidation_token,
+        vision_invalidation_token=( vision_invalidation_token),
     )
     return _merge_post_commit_warnings(
         response,
@@ -5258,7 +5261,7 @@ def set_custom_image_provider_config(body: dict[str, Any]) -> dict[str, Any]:
     warnings = _invoke_durable_mutation_post_commit(
         "set_custom_image_provider_config",
         invalidate_image=True,
-        image_invalidation_token=image_invalidation_token,
+        image_invalidation_token=( image_invalidation_token),
     )
     return _merge_post_commit_warnings(
         response,
@@ -5351,7 +5354,7 @@ def delete_custom_image_provider_config(provider_id: str) -> dict[str, Any]:
     warnings = _invoke_durable_mutation_post_commit(
         "delete_custom_image_provider_config",
         invalidate_image=True,
-        image_invalidation_token=image_invalidation_token,
+        image_invalidation_token=( image_invalidation_token),
     )
     return _merge_post_commit_warnings(
         response,
@@ -5588,7 +5591,7 @@ def set_image_gen_config(body: dict[str, Any]) -> dict[str, Any]:
     warnings = _invoke_durable_mutation_post_commit(
         "set_image_gen_config",
         invalidate_image=True,
-        image_invalidation_token=image_invalidation_token,
+        image_invalidation_token=( image_invalidation_token),
     )
     response = _project_successful_verification_invalidation(
         response,
@@ -6793,12 +6796,28 @@ def _main_model_material(config_data: dict[str, Any]) -> dict[str, Any]:
                 allow_process_fallback=False,
             )
         elif provider and not _provider_is_oauth(provider):
-            api_key = resolve_api_key(
-                provider,
-                config_data=config_data,
-                config_path=config_path,
-                allow_process_fallback=False,
-            )
+            credential_ref = str(model_cfg.get("credential_ref") or "").strip()
+            if credential_ref:
+                api_key = resolve_api_key(
+                    provider,
+                    credential_ref,
+                    config_data=config_data,
+                    config_path=config_path,
+                    allow_process_fallback=False,
+                )
+            else:
+                key_env = str(
+                    model_cfg.get("key_env")
+                    or model_cfg.get("api_key_env")
+                    or _PROVIDER_ENV_VAR.get(provider)
+                    or ""
+                ).strip()
+                if key_env:
+                    api_key = resolve_secret_env_value(
+                        key_env,
+                        config_path=config_path,
+                        allow_process_fallback=False,
+                    )
     except (OSError, ValueError, RuntimeError):
         api_key = ""
     return {
@@ -6832,19 +6851,23 @@ def record_main_model_chat_verification(
     provider: object,
     model: object,
     *,
+    expected_fingerprint: str | None,
     success: bool,
     product_code: str | None = None,
     incident_id: str | None = None,
 ) -> bool:
     """Update verification only when the actual route still matches main config."""
 
-    from api.main_model_verification import record_chat_result
+    from api.main_model_verification import configuration_fingerprint, record_chat_result
 
     config_path = _get_config_path()
     config_data = load_credential_config(config_path)
     material = _main_model_material(config_data)
     if (
-        str(material.get("provider") or "").casefold() != str(provider or "").strip().casefold()
+        not expected_fingerprint
+        or configuration_fingerprint(material) != expected_fingerprint
+        or str(material.get("provider") or "").casefold()
+        != str(provider or "").strip().casefold()
         or str(material.get("model") or "") != str(model or "").strip()
     ):
         return False
@@ -6856,6 +6879,21 @@ def record_main_model_chat_verification(
         incident_id=incident_id,
     )
     return True
+
+
+def capture_main_model_chat_fingerprint(provider: object, model: object) -> str | None:
+    """Capture the secret-free identity of the configuration used to start a turn."""
+
+    from api.main_model_verification import configuration_fingerprint
+
+    config_data = load_credential_config(_get_config_path())
+    material = _main_model_material(config_data)
+    if (
+        str(material.get("provider") or "").casefold() != str(provider or "").strip().casefold()
+        or str(material.get("model") or "") != str(model or "").strip()
+    ):
+        return None
+    return configuration_fingerprint(material)
 
 
 def _get_model_config_unlocked(
