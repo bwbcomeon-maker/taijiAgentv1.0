@@ -1098,8 +1098,13 @@ def test_secure_runtime_write_rejects_windows_reparse_missing_parent(
     assert not target.exists()
 
 
+@pytest.mark.parametrize(
+    "final_identity_matches",
+    [True, False],
+    ids=["final-identity-matched", "final-identity-mismatch-rejected"],
+)
 def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, final_identity_matches
 ):
     profile = tmp_path / "profile"
     profile.mkdir()
@@ -1121,11 +1126,15 @@ def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
     def create_file(path, access, share, _security, creation, flags, _template):
         handle = FakeHandle(path)
         create_calls.append((handle, access, share, creation, flags))
+        events.append(("open", handle.path, access, share))
         return handle
 
     def file_information(handle):
         attributes = 0x0010 if handle.path == profile else 0x0080
-        return (attributes, None, None, None, 1, 0, 0, 1, 0, 0)
+        if handle.path != profile:
+            events.append(("identity", handle.path, handle.closed))
+        file_index_low = 0 if handle.path != target or final_identity_matches else 99
+        return (attributes, None, None, None, 1, 0, 0, 1, 0, file_index_low)
 
     def write_file(handle, data):
         count = min(3, len(data))
@@ -1141,6 +1150,7 @@ def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
     )
     fake_win32con = types.SimpleNamespace(
         DELETE=0x00010000,
+        GENERIC_READ=0x80000000,
         GENERIC_WRITE=0x40000000,
         FILE_SHARE_READ=1,
         FILE_SHARE_WRITE=2,
@@ -1174,11 +1184,11 @@ def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
             [(0, 0, 0x0002, "S-1-5-21-current")],
         ),
     )
-    monkeypatch.setattr(
-        taiji_license,
-        "_validate_windows_path_security",
-        lambda *_args, **_kwargs: True,
-    )
+    def validate_path(path, *_args, **_kwargs):
+        events.append(("path_validate", path))
+        return True
+
+    monkeypatch.setattr(taiji_license, "_validate_windows_path_security", validate_path)
 
     def rename_handle(handle, final_path):
         assert not handle.closed
@@ -1191,22 +1201,67 @@ def test_windows_runtime_write_keeps_identity_through_short_writes_and_rename(
         raising=False,
     )
 
-    taiji_license._secure_atomic_write_runtime_resource(
-        path=target,
-        text=payload,
-        profile_root=profile,
-    )
+    def write_resource():
+        taiji_license._secure_atomic_write_runtime_resource(
+            path=target,
+            text=payload,
+            profile_root=profile,
+        )
 
-    temp_call = next(call for call in create_calls if call[0].path != profile)
+    if final_identity_matches:
+        write_resource()
+    else:
+        with pytest.raises(taiji_license._LicenseUserResourceError):
+            write_resource()
+
+    temp_call = next(
+        call for call in create_calls if call[3] == fake_win32con.CREATE_NEW
+    )
+    verification_call = next(call for call in create_calls if call[0].path == target)
     temp_handle, access, share, _, _ = temp_call
+    verification_handle, verification_access, verification_share, _, _ = verification_call
     assert access & fake_win32con.DELETE
-    assert share & fake_win32con.FILE_SHARE_DELETE
+    assert not share & fake_win32con.FILE_SHARE_DELETE
+    assert verification_access == fake_win32con.GENERIC_READ
+    assert verification_share == (
+        fake_win32con.FILE_SHARE_READ
+        | fake_win32con.FILE_SHARE_WRITE
+        | fake_win32con.FILE_SHARE_DELETE
+    )
     assert b"".join(written_chunks) == payload.encode("utf-8")
-    assert next(index for index, event in enumerate(events) if event[0] == "rename") < next(
+    rename_index = next(index for index, event in enumerate(events) if event[0] == "rename")
+    verification_open_index = next(
+        index
+        for index, event in enumerate(events)
+        if event[:2] == ("open", target)
+    )
+    verification_close_index = next(
+        index
+        for index, event in enumerate(events)
+        if event == ("close", verification_handle.path)
+    )
+    temp_close_index = next(
         index
         for index, event in enumerate(events)
         if event == ("close", temp_handle.path)
     )
+    assert rename_index < verification_open_index < verification_close_index
+    assert verification_close_index < temp_close_index
+    assert any(
+        verification_open_index < index < verification_close_index
+        for index, event in enumerate(events)
+        if event == ("identity", target, False)
+    )
+    path_validation_indices = [
+        index
+        for index, event in enumerate(events)
+        if event == ("path_validate", target)
+    ]
+    if final_identity_matches:
+        assert path_validation_indices
+        assert path_validation_indices[-1] < verification_close_index
+    else:
+        assert not path_validation_indices
 
 
 def test_production_public_key_accepts_root_group_writable_root_parent(

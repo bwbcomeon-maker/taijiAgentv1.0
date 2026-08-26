@@ -878,6 +878,7 @@ def _secure_windows_atomic_write_runtime_resource(
     directory_handles: list[Any] = []
     tmp_path: Path | None = None
     file_handle: Any = None
+    verification_handle: Any = None
     try:
         import win32con
         import win32file
@@ -911,7 +912,7 @@ def _secure_windows_atomic_write_runtime_resource(
         file_handle = win32file.CreateFile(
             str(tmp_path),
             win32con.GENERIC_WRITE | win32con.DELETE,
-            win32con.FILE_SHARE_READ | win32con.FILE_SHARE_DELETE,
+            win32con.FILE_SHARE_READ,
             None,
             win32con.CREATE_NEW,
             win32con.FILE_ATTRIBUTE_NORMAL
@@ -945,6 +946,33 @@ def _secure_windows_atomic_write_runtime_resource(
         )
         if renamed_identity != original_identity:
             raise _LicenseUserResourceError
+        verification_handle = win32file.CreateFile(
+            str(final_path),
+            win32con.GENERIC_READ,
+            win32con.FILE_SHARE_READ
+            | win32con.FILE_SHARE_WRITE
+            | win32con.FILE_SHARE_DELETE,
+            None,
+            win32con.OPEN_EXISTING,
+            win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        verification_information = win32file.GetFileInformationByHandle(
+            verification_handle
+        )
+        verification_attributes = int(verification_information[0])
+        verification_identity = (
+            int(verification_information[4]),
+            int(verification_information[8]),
+            int(verification_information[9]),
+        )
+        if (
+            verification_attributes & win32con.FILE_ATTRIBUTE_DIRECTORY
+            or verification_attributes & win32con.FILE_ATTRIBUTE_REPARSE_POINT
+            or int(verification_information[7]) != 1
+            or verification_identity != original_identity
+        ):
+            raise _LicenseUserResourceError
         _validate_windows_path_security(
             final_path,
             required=True,
@@ -957,6 +985,11 @@ def _secure_windows_atomic_write_runtime_resource(
         raise _LicenseUserResourceError from None
     finally:
         close_failed = False
+        if verification_handle is not None:
+            try:
+                _close_windows_handle(verification_handle)
+            except Exception:
+                close_failed = True
         if file_handle is not None:
             try:
                 _close_windows_handle(file_handle)
