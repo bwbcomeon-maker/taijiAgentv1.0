@@ -158,6 +158,7 @@ def _patch_source_runtime_resources(
         "PRODUCTION_LICENSE_PATH",
         license_path,
     )
+    monkeypatch.setattr(taiji_license, "PRODUCTION_USER_HOME", tmp_path)
     monkeypatch.setattr(
         taiji_license,
         "PRODUCTION_LICENSE_STATE_PATH",
@@ -205,6 +206,95 @@ def test_system_account_home_fails_closed_when_pwd_lookup_fails(
 
     with pytest.raises(RuntimeError, match="system account database"):
         taiji_license._system_account_home()
+
+
+def test_windows_system_account_home_ignores_environment_and_closes_token(
+    monkeypatch, tmp_path
+):
+    profile = tmp_path / "trusted-profile"
+    profile.mkdir()
+    token = object()
+    calls = []
+    monkeypatch.setattr(taiji_license, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(
+        taiji_license.Path,
+        "home",
+        classmethod(lambda _cls: pytest.fail("Path.home must not be used")),
+    )
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "poisoned-userprofile"))
+    monkeypatch.setenv("HOMEDRIVE", "Z:")
+    monkeypatch.setenv("HOMEPATH", "\\poisoned")
+    monkeypatch.setitem(
+        sys.modules,
+        "win32api",
+        types.SimpleNamespace(
+            GetCurrentProcess=lambda: "process",
+            CloseHandle=lambda handle: calls.append(("close", handle)),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "win32con", types.SimpleNamespace(TOKEN_QUERY=8))
+    monkeypatch.setitem(
+        sys.modules,
+        "win32security",
+        types.SimpleNamespace(
+            OpenProcessToken=lambda process, access: calls.append(
+                ("open", process, access)
+            )
+            or token,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "win32profile",
+        types.SimpleNamespace(
+            GetUserProfileDirectory=lambda handle: calls.append(
+                ("profile", handle)
+            )
+            or str(profile),
+        ),
+    )
+
+    assert taiji_license._system_account_home() == profile.resolve()
+    assert calls == [
+        ("open", "process", 8),
+        ("profile", token),
+        ("close", token),
+    ]
+
+
+def test_windows_system_account_home_api_failure_closes_token_and_rejects(
+    monkeypatch,
+):
+    token = object()
+    closed = []
+    monkeypatch.setattr(taiji_license, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setitem(
+        sys.modules,
+        "win32api",
+        types.SimpleNamespace(
+            GetCurrentProcess=lambda: "process",
+            CloseHandle=lambda handle: closed.append(handle),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "win32con", types.SimpleNamespace(TOKEN_QUERY=8))
+    monkeypatch.setitem(
+        sys.modules,
+        "win32security",
+        types.SimpleNamespace(OpenProcessToken=lambda _process, _access: token),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "win32profile",
+        types.SimpleNamespace(
+            GetUserProfileDirectory=lambda _handle: (_ for _ in ()).throw(
+                OSError("profile unavailable")
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="current account home"):
+        taiji_license._system_account_home()
+    assert closed == [token]
 
 
 def test_valid_license_returns_public_status(tmp_path, signing_keys):
@@ -592,6 +682,7 @@ def test_windows_user_file_validation_uses_acl_without_posix_uid(
     candidate.write_text("signed-token\n", encoding="utf-8")
     calls = []
     monkeypatch.setattr(taiji_license, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(taiji_license, "PRODUCTION_USER_HOME", tmp_path)
     monkeypatch.setattr(
         taiji_license,
         "_validate_windows_path_security",
@@ -603,9 +694,60 @@ def test_windows_user_file_validation_uses_acl_without_posix_uid(
     assert calls == [
         (
             candidate,
-            {"required": True, "require_current_user_owner": True},
+            {
+                "required": True,
+                "require_current_user_owner": True,
+                "ancestor_stop": tmp_path,
+            },
         )
     ]
+
+
+@pytest.mark.parametrize("profile_shape", ["reparse", "untrusted_acl"])
+def test_windows_path_security_rejects_untrusted_profile_root_without_drive_scan(
+    monkeypatch, tmp_path, profile_shape
+):
+    drive_root = tmp_path / "drive"
+    profile = drive_root / "Users/current"
+    candidate = profile / ".config/taiji-agent/license-device.json"
+    profile.mkdir(parents=True)
+    real_lstat = taiji_license.Path.lstat
+    snapshots = []
+
+    def profile_lstat(path):
+        result = real_lstat(path)
+        if path == profile and profile_shape == "reparse":
+            return types.SimpleNamespace(
+                st_mode=result.st_mode,
+                st_nlink=result.st_nlink,
+                st_file_attributes=0x0400,
+            )
+        return result
+
+    def security_snapshot(path):
+        snapshots.append(path)
+        entries = (
+            [(0, 0, 0x0040, "S-1-5-21-other")]
+            if path == profile and profile_shape == "untrusted_acl"
+            else [(0, 0, 0x0002, "S-1-5-21-current")]
+        )
+        return "S-1-5-21-current", "S-1-5-21-current", entries
+
+    monkeypatch.setattr(taiji_license.Path, "lstat", profile_lstat)
+    monkeypatch.setattr(
+        taiji_license,
+        "_windows_security_snapshot",
+        security_snapshot,
+    )
+
+    with pytest.raises(taiji_license._LicenseUserResourceError):
+        taiji_license._validate_windows_path_security(
+            candidate,
+            required=False,
+            require_current_user_owner=True,
+            ancestor_stop=profile,
+        )
+    assert drive_root not in snapshots
 
 
 def test_windows_security_snapshot_uses_pywin32_owner_and_dacl_contract(
@@ -797,6 +939,86 @@ def test_windows_path_security_rejects_reparse_and_hardlink(
             required=True,
             require_current_user_owner=True,
         )
+
+
+def test_secure_runtime_write_rejects_windows_reparse_missing_parent(
+    monkeypatch, tmp_path
+):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    missing_parent = profile / "missing"
+    target = missing_parent / "license-device.json"
+    closed = []
+    writes = []
+
+    class FakeHandle:
+        def __init__(self, path):
+            self.path = taiji_license.Path(path)
+
+        def Close(self):
+            closed.append(self.path)
+
+    def create_file(path, *_args):
+        return FakeHandle(path)
+
+    def create_directory(path, _security):
+        taiji_license.Path(path).mkdir()
+
+    def file_information(handle):
+        attributes = 0x0010
+        if handle.path == missing_parent:
+            attributes |= 0x0400
+        return (attributes, None, None, None, 1, 0, 0, 1, 0, 0)
+
+    fake_win32file = types.SimpleNamespace(
+        CreateFile=create_file,
+        CreateDirectory=create_directory,
+        GetFileInformationByHandle=file_information,
+        WriteFile=lambda *_args: writes.append("write"),
+        FlushFileBuffers=lambda *_args: None,
+    )
+    fake_win32con = types.SimpleNamespace(
+        GENERIC_WRITE=0x40000000,
+        FILE_SHARE_READ=1,
+        FILE_SHARE_WRITE=2,
+        OPEN_EXISTING=3,
+        CREATE_NEW=1,
+        FILE_ATTRIBUTE_NORMAL=0x0080,
+        FILE_ATTRIBUTE_DIRECTORY=0x0010,
+        FILE_ATTRIBUTE_REPARSE_POINT=0x0400,
+        FILE_FLAG_BACKUP_SEMANTICS=0x02000000,
+        FILE_FLAG_OPEN_REPARSE_POINT=0x00200000,
+        MOVEFILE_REPLACE_EXISTING=1,
+        MOVEFILE_WRITE_THROUGH=8,
+    )
+    monkeypatch.setattr(taiji_license, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setitem(sys.modules, "win32file", fake_win32file)
+    monkeypatch.setitem(sys.modules, "win32con", fake_win32con)
+    monkeypatch.setitem(
+        sys.modules,
+        "win32api",
+        types.SimpleNamespace(MoveFileEx=lambda *_args: writes.append("move")),
+    )
+    monkeypatch.setattr(
+        taiji_license,
+        "_windows_security_snapshot",
+        lambda _path: (
+            "S-1-5-21-current",
+            "S-1-5-21-current",
+            [(0, 0, 0x0002, "S-1-5-21-current")],
+        ),
+    )
+
+    with pytest.raises(taiji_license._LicenseUserResourceError):
+        taiji_license._secure_atomic_write_runtime_resource(
+            path=target,
+            text="device-secret\n",
+            profile_root=profile,
+        )
+    assert writes == []
+    assert target not in closed
+    assert set(closed) == {profile, missing_parent}
+    assert not target.exists()
 
 
 def test_production_public_key_accepts_root_group_writable_root_parent(
@@ -1621,7 +1843,9 @@ def test_machine_request_is_redacted_and_contains_short_fingerprint():
 def test_machine_request_noarg_uses_canonical_runtime_device_identity(
     monkeypatch, tmp_path
 ):
-    canonical = tmp_path / "canonical/license-device.json"
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    canonical = profile / ".config/taiji-agent/license-device.json"
     redirected = tmp_path / "redirected/license-device.json"
     xdg_config_home = tmp_path / "xdg-config"
     environment_home = tmp_path / "environment-home"
@@ -1630,6 +1854,7 @@ def test_machine_request_noarg_uses_canonical_runtime_device_identity(
         "runtime_license_device_path",
         lambda: canonical,
     )
+    monkeypatch.setattr(taiji_license, "PRODUCTION_USER_HOME", profile)
     monkeypatch.setenv("TAIJI_LICENSE_DEVICE_FILE", str(redirected))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config_home))
     monkeypatch.setenv("HOME", str(environment_home))
@@ -1651,6 +1876,84 @@ def test_machine_request_noarg_uses_canonical_runtime_device_identity(
         / taiji_license.PRODUCT
         / taiji_license.DEFAULT_LICENSE_DEVICE_FILENAME
     ).exists()
+
+
+def test_runtime_device_creation_rejects_posix_symlink_parent(
+    monkeypatch, tmp_path
+):
+    if os.name != "posix":
+        pytest.skip("POSIX no-follow behavior")
+    profile = tmp_path / "profile"
+    outside = tmp_path / "outside"
+    profile.mkdir(mode=0o700)
+    outside.mkdir(mode=0o700)
+    (profile / ".config").symlink_to(outside, target_is_directory=True)
+    canonical = profile / ".config/taiji-agent/license-device.json"
+    monkeypatch.setattr(taiji_license, "PRODUCTION_USER_HOME", profile)
+    monkeypatch.setattr(
+        taiji_license,
+        "runtime_license_device_path",
+        lambda: canonical,
+    )
+
+    request = taiji_license.build_machine_request(now=1_000_000)
+
+    assert request["device_id"] == ""
+    assert "no_device_secret" in request["risk_flags"]
+    assert not (outside / "taiji-agent/license-device.json").exists()
+
+
+def test_runtime_state_creation_rejects_posix_symlink_parent(
+    monkeypatch, tmp_path, signing_keys
+):
+    if os.name != "posix":
+        pytest.skip("POSIX no-follow behavior")
+    private_key, public_key = signing_keys
+    license_path, state_path, _ = _patch_source_runtime_resources(
+        monkeypatch,
+        tmp_path,
+        public_key,
+    )
+    license_path.parent.mkdir(parents=True, mode=0o700)
+    _write_token(license_path, private_key, max_version="1.0.0")
+    license_path.chmod(0o600)
+    outside = tmp_path / "outside-state"
+    outside.mkdir(mode=0o700)
+    (tmp_path / "state").symlink_to(outside, target_is_directory=True)
+
+    blocked = taiji_license.require_valid_license()
+
+    assert blocked is not None
+    assert blocked.code == "license_state_invalid"
+    assert not (outside / "taiji-agent/license-state.json").exists()
+
+
+def test_secure_runtime_first_device_and_state_creation_succeeds(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    device_path = profile / ".config/taiji-agent/license-device.json"
+    state_path = profile / ".local/state/taiji-agent/license-state.json"
+
+    device = taiji_license._write_license_device(
+        device_path,
+        now_ts=1_000_000,
+        secure_root=profile,
+    )
+    taiji_license._write_license_state(
+        path=state_path,
+        now_ts=1_000_000,
+        license_id="lic-secure-create",
+        token="signed-token",
+        secure_root=profile,
+    )
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert device["device_id"] == json.loads(
+        device_path.read_text(encoding="utf-8")
+    )["device_id"]
+    assert state["license_id"] == "lic-secure-create"
+    assert stat.S_IMODE(device_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
 
 
 def test_legacy_v2_machine_bound_license_requires_explicit_compatibility(tmp_path, signing_keys):

@@ -33,10 +33,31 @@ SYSTEM_ACCOUNT_HOME_ERROR = (
 
 
 def _system_account_home() -> Path:
+    if os.name == "nt":
+        try:
+            import win32api
+            import win32con
+            import win32profile
+            import win32security
+
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(),
+                win32con.TOKEN_QUERY,
+            )
+            try:
+                raw_home = str(win32profile.GetUserProfileDirectory(token) or "").strip()
+            finally:
+                win32api.CloseHandle(token)
+        except Exception as exc:
+            raise RuntimeError(SYSTEM_ACCOUNT_HOME_ERROR) from exc
+
+        account_home = Path(raw_home)
+        if not raw_home or not account_home.is_absolute() or not account_home.is_dir():
+            raise RuntimeError(SYSTEM_ACCOUNT_HOME_ERROR)
+        return account_home.absolute()
+
     if os.name != "posix":
-        # The POSIX account database is unavailable on non-POSIX platforms.
-        # This compatibility path is intentionally not used on Linux or macOS.
-        return Path.home().resolve()
+        raise RuntimeError(SYSTEM_ACCOUNT_HOME_ERROR)
 
     try:
         import pwd
@@ -371,7 +392,280 @@ def _read_license_device(path: Path) -> Optional[dict[str, Any]]:
     }
 
 
-def _write_license_device(path: Path, *, now_ts: float) -> dict[str, Any]:
+def _runtime_resource_parts(path: Path, profile_root: Path) -> tuple[Path, tuple[str, ...]]:
+    root = profile_root.absolute()
+    target = path.absolute()
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        raise _LicenseUserResourceError from None
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise _LicenseUserResourceError
+    return root, relative.parts
+
+
+def _validate_posix_runtime_file_stat(file_stat: os.stat_result, *, uid: int) -> None:
+    if (
+        stat.S_ISLNK(file_stat.st_mode)
+        or not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_uid != uid
+        or stat.S_IMODE(file_stat.st_mode) != 0o600
+        or file_stat.st_nlink != 1
+    ):
+        raise _LicenseUserResourceError
+
+
+def _secure_posix_atomic_write_runtime_resource(
+    *,
+    path: Path,
+    text: str,
+    profile_root: Path,
+) -> None:
+    root, parts = _runtime_resource_parts(path, profile_root)
+    uid = os.getuid()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    directory_fds: list[int] = []
+    tmp_name: str | None = None
+    try:
+        current_fd = os.open(root, directory_flags)
+        directory_fds.append(current_fd)
+        if not _trusted_production_parent(os.fstat(current_fd), user_uid=uid):
+            raise _LicenseUserResourceError
+
+        for part in parts[:-1]:
+            try:
+                child_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                child_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            directory_fds.append(child_fd)
+            current_fd = child_fd
+            if not _trusted_production_parent(os.fstat(current_fd), user_uid=uid):
+                raise _LicenseUserResourceError
+
+        final_name = parts[-1]
+        try:
+            existing_stat = os.stat(final_name, dir_fd=current_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_posix_runtime_file_stat(existing_stat, uid=uid)
+
+        tmp_name = f".{final_name}.{secrets.token_hex(16)}.tmp"
+        file_fd = os.open(tmp_name, file_flags, 0o600, dir_fd=current_fd)
+        try:
+            os.fchmod(file_fd, 0o600)
+            payload = text.encode("utf-8")
+            offset = 0
+            while offset < len(payload):
+                written = os.write(file_fd, payload[offset:])
+                if written <= 0:
+                    raise OSError("short write")
+                offset += written
+            os.fsync(file_fd)
+        finally:
+            os.close(file_fd)
+
+        os.replace(
+            tmp_name,
+            final_name,
+            src_dir_fd=current_fd,
+            dst_dir_fd=current_fd,
+        )
+        tmp_name = None
+        os.fsync(current_fd)
+        verified_fd = os.open(final_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current_fd)
+        try:
+            _validate_posix_runtime_file_stat(os.fstat(verified_fd), uid=uid)
+        finally:
+            os.close(verified_fd)
+    except _LicenseUserResourceError:
+        raise
+    except OSError:
+        raise _LicenseUserResourceError from None
+    finally:
+        if tmp_name is not None and directory_fds:
+            try:
+                os.unlink(tmp_name, dir_fd=directory_fds[-1])
+            except OSError:
+                pass
+        for directory_fd in reversed(directory_fds):
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+
+def _close_windows_handle(handle: Any) -> None:
+    close = getattr(handle, "Close", None)
+    if close is not None:
+        close()
+        return
+    import win32api
+
+    win32api.CloseHandle(handle)
+
+
+def _open_trusted_windows_directory(path: Path) -> Any:
+    import win32con
+    import win32file
+
+    handle = win32file.CreateFile(
+        str(path),
+        0,
+        win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE,
+        None,
+        win32con.OPEN_EXISTING,
+        win32con.FILE_FLAG_BACKUP_SEMANTICS
+        | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    try:
+        attributes = int(win32file.GetFileInformationByHandle(handle)[0])
+        if not attributes & win32con.FILE_ATTRIBUTE_DIRECTORY or (
+            attributes & win32con.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise _LicenseUserResourceError
+        owner_sid, current_sid, entries = _windows_security_snapshot(path)
+        if not _windows_acl_is_trusted(
+            owner_sid=owner_sid,
+            entries=entries,
+            current_user_sid=current_sid,
+            require_current_user_owner=False,
+        ):
+            raise _LicenseUserResourceError
+    except Exception:
+        _close_windows_handle(handle)
+        raise
+    return handle
+
+
+def _secure_windows_atomic_write_runtime_resource(
+    *,
+    path: Path,
+    text: str,
+    profile_root: Path,
+) -> None:
+    root, parts = _runtime_resource_parts(path, profile_root)
+    directory_handles: list[Any] = []
+    tmp_path: Path | None = None
+    try:
+        import win32api
+        import win32con
+        import win32file
+
+        current = root
+        directory_handles.append(_open_trusted_windows_directory(current))
+        for part in parts[:-1]:
+            current = current / part
+            try:
+                current.lstat()
+            except FileNotFoundError:
+                win32file.CreateDirectory(str(current), None)
+            directory_handles.append(_open_trusted_windows_directory(current))
+
+        final_path = current / parts[-1]
+        try:
+            final_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_windows_path_security(
+                final_path,
+                required=True,
+                require_current_user_owner=True,
+                ancestor_stop=root,
+            )
+
+        tmp_path = final_path.with_name(
+            f".{final_path.name}.{secrets.token_hex(16)}.tmp"
+        )
+        file_handle = win32file.CreateFile(
+            str(tmp_path),
+            win32con.GENERIC_WRITE,
+            0,
+            None,
+            win32con.CREATE_NEW,
+            win32con.FILE_ATTRIBUTE_NORMAL
+            | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        try:
+            information = win32file.GetFileInformationByHandle(file_handle)
+            attributes = int(information[0])
+            if (
+                attributes & win32con.FILE_ATTRIBUTE_DIRECTORY
+                or attributes & win32con.FILE_ATTRIBUTE_REPARSE_POINT
+                or int(information[7]) != 1
+            ):
+                raise _LicenseUserResourceError
+            win32file.WriteFile(file_handle, text.encode("utf-8"))
+            win32file.FlushFileBuffers(file_handle)
+        finally:
+            _close_windows_handle(file_handle)
+
+        win32api.MoveFileEx(
+            str(tmp_path),
+            str(final_path),
+            win32con.MOVEFILE_REPLACE_EXISTING | win32con.MOVEFILE_WRITE_THROUGH,
+        )
+        tmp_path = None
+        _validate_windows_path_security(
+            final_path,
+            required=True,
+            require_current_user_owner=True,
+            ancestor_stop=root,
+        )
+    except _LicenseUserResourceError:
+        raise
+    except Exception:
+        raise _LicenseUserResourceError from None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        close_failed = False
+        for directory_handle in reversed(directory_handles):
+            try:
+                _close_windows_handle(directory_handle)
+            except Exception:
+                close_failed = True
+        if close_failed:
+            raise _LicenseUserResourceError from None
+
+
+def _secure_atomic_write_runtime_resource(
+    *,
+    path: Path,
+    text: str,
+    profile_root: Path,
+) -> None:
+    if os.name == "posix":
+        _secure_posix_atomic_write_runtime_resource(
+            path=path,
+            text=text,
+            profile_root=profile_root,
+        )
+        return
+    if os.name == "nt":
+        _secure_windows_atomic_write_runtime_resource(
+            path=path,
+            text=text,
+            profile_root=profile_root,
+        )
+        return
+    raise _LicenseUserResourceError
+
+
+def _write_license_device(
+    path: Path,
+    *,
+    now_ts: float,
+    secure_root: Path | None = None,
+) -> dict[str, Any]:
     secret = secrets.token_hex(32)
     device_id = _hash_id(f"{PRODUCT}:device:{secret}")
     data = {
@@ -382,22 +676,32 @@ def _write_license_device(path: Path, *, now_ts: float) -> dict[str, Any]:
         "device_instance_id": f"dev-{uuid.uuid4().hex}",
         "created_at": _iso_timestamp(now_ts),
     }
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{int(time.time() * 1000000)}.tmp")
-    tmp_path.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    try:
-        tmp_path.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(tmp_path, path)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    serialized = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+    if secure_root is not None:
+        _secure_atomic_write_runtime_resource(
+            path=path,
+            text=serialized,
+            profile_root=secure_root,
+        )
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
+        tmp_path = path.with_name(
+            f".{path.name}.{os.getpid()}.{int(time.time() * 1000000)}.tmp"
+        )
+        tmp_path.write_text(serialized, encoding="utf-8")
+        try:
+            tmp_path.chmod(0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
     return _read_license_device(path) or {
         "device_secret": secret,
         "device_id": device_id,
@@ -413,6 +717,7 @@ def _load_or_create_license_device(
     device_path: Optional[os.PathLike[str] | str],
     now_ts: float,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    canonical = device_path is None and environ is None
     if device_path is not None:
         path = Path(device_path).expanduser()
     elif environ is None:
@@ -423,8 +728,12 @@ def _load_or_create_license_device(
     if existing:
         return existing, None
     try:
-        return _write_license_device(path, now_ts=now_ts), None
-    except OSError as exc:
+        return _write_license_device(
+            path,
+            now_ts=now_ts,
+            secure_root=PRODUCTION_USER_HOME if canonical else None,
+        ), None
+    except (OSError, _LicenseUserResourceError) as exc:
         return None, str(exc)
 
 
@@ -1237,6 +1546,7 @@ def _write_license_state(
     now_ts: float,
     license_id: Optional[str],
     token: str,
+    secure_root: Path | None = None,
 ) -> None:
     try:
         state = _read_license_state(path)
@@ -1258,6 +1568,18 @@ def _write_license_state(
         "license_id": license_id,
         "license_hash": _license_hash(token),
     }
+    serialized = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+    if secure_root is not None:
+        try:
+            _secure_atomic_write_runtime_resource(
+                path=path,
+                text=serialized,
+                profile_root=secure_root,
+            )
+        except _LicenseUserResourceError:
+            raise _LicenseStateError from None
+        return
+
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         path.parent.chmod(0o700)
@@ -1265,7 +1587,7 @@ def _write_license_state(
         pass
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{int(time.time() * 1000000)}.tmp")
     try:
-        tmp_path.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        tmp_path.write_text(serialized, encoding="utf-8")
         try:
             tmp_path.chmod(0o600)
         except OSError:
@@ -1452,34 +1774,20 @@ def _validate_windows_path_security(
     ancestor_stop: Path | None = None,
 ) -> bool:
     """Validate Windows file identity, link shape, ownership, ACL, and ancestors."""
+    file_stat: os.stat_result | None
     try:
         file_stat = path.lstat()
     except FileNotFoundError:
-        if required:
-            raise _LicenseUserResourceError from None
-        return False
+        file_stat = None
     except OSError:
         raise _LicenseUserResourceError from None
 
-    if (
-        stat.S_ISLNK(file_stat.st_mode)
-        or not stat.S_ISREG(file_stat.st_mode)
-        or file_stat.st_nlink != 1
-        or getattr(file_stat, "st_file_attributes", 0)
-        & _WINDOWS_REPARSE_POINT_ATTRIBUTE
-    ):
-        raise _LicenseUserResourceError
     try:
-        owner_sid, current_sid, entries = _windows_security_snapshot(path)
-        if not _windows_acl_is_trusted(
-            owner_sid=owner_sid,
-            entries=entries,
-            current_user_sid=current_sid,
-            require_current_user_owner=require_current_user_owner,
-        ):
-            raise _LicenseUserResourceError
         for parent in _windows_path_chain(path, ancestor_stop):
-            parent_stat = parent.lstat()
+            try:
+                parent_stat = parent.lstat()
+            except FileNotFoundError:
+                continue
             if (
                 stat.S_ISLNK(parent_stat.st_mode)
                 or not stat.S_ISDIR(parent_stat.st_mode)
@@ -1498,6 +1806,27 @@ def _validate_windows_path_security(
                 dangerous_access_mask=_WINDOWS_ANCESTOR_REPLACEMENT_ACCESS_MASK,
             ):
                 raise _LicenseUserResourceError
+
+        if file_stat is None:
+            if required:
+                raise _LicenseUserResourceError
+            return False
+        if (
+            stat.S_ISLNK(file_stat.st_mode)
+            or not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_nlink != 1
+            or getattr(file_stat, "st_file_attributes", 0)
+            & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+        ):
+            raise _LicenseUserResourceError
+        owner_sid, current_sid, entries = _windows_security_snapshot(path)
+        if not _windows_acl_is_trusted(
+            owner_sid=owner_sid,
+            entries=entries,
+            current_user_sid=current_sid,
+            require_current_user_owner=require_current_user_owner,
+        ):
+            raise _LicenseUserResourceError
     except _LicenseUserResourceError:
         raise
     except Exception:
@@ -1512,6 +1841,7 @@ def _validate_production_user_file(path: Path, *, required: bool) -> bool:
             path,
             required=required,
             require_current_user_owner=True,
+            ancestor_stop=PRODUCTION_USER_HOME,
         )
     try:
         file_stat = path.lstat()
@@ -2182,9 +2512,11 @@ def require_license_for_validation(
         if status.policy == RUNTIME_LICENSE_POLICY_NAME:
             license_path = runtime_license_path()
             license_state_path = runtime_license_state_path()
+            secure_root = PRODUCTION_USER_HOME
         else:
             license_path = Path(path).expanduser() if path is not None else default_license_path(env)
             license_state_path = Path(state_path).expanduser() if state_path is not None else default_license_state_path(env)
+            secure_root = None
         try:
             token = license_path.read_text(encoding="utf-8").strip()
             _write_license_state(
@@ -2192,6 +2524,7 @@ def require_license_for_validation(
                 now_ts=time.time() if now is None else float(now),
                 license_id=status.license_id,
                 token=token,
+                secure_root=secure_root,
             )
         except (OSError, _LicenseStateError):
             return replace(
